@@ -32,6 +32,7 @@ from .governance_migration_checkpoint import (
     migration_binding,
 )
 from .governance_migration_job import (
+    MIGRATION_JOB_DEADLINE_SECONDS,
     KubernetesGovernanceMigrationAdapter,
     MigrationJobRequest,
     parse_migration_terminal,
@@ -40,6 +41,7 @@ from .governance_migration_membership import (
     complete_governance_migration_membership,
     repair_governance_schema_claim,
 )
+from .governance_provision_membership import refresh_drained_source_bundle
 from .governance_target_recovery import recover_expired_serving_bundle
 from .lifecycle import MetadataConflict, OpaqueProviderMetadata
 from .repository import ClaimConflict, StaleFence
@@ -51,6 +53,12 @@ def _refuse() -> MetadataConflict:
         "governance migration state is unavailable",
         reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_TRANSITION_IS_INVALID,
     )
+
+
+# Reissue a never-enrolled source window with less than this left: one migration
+# Job plus margin. The prepared plan binds the window, so an enrollment that finds
+# it short returns to prepare rather than reissuing under the plan.
+_SOURCE_WINDOW_FLOOR_SECONDS = MIGRATION_JOB_DEADLINE_SECONDS + 300
 
 
 class HostedGovernanceMigrationCoordinator:
@@ -325,6 +333,8 @@ class HostedGovernanceMigrationCoordinator:
         # recovery slower than one attestation lifetime strand its cell forever.
         # The signing keyring, the MAC, the issue time and the fence below are all
         # still proven; a closed window on a fenced generation authorizes nothing.
+        # The migration Job itself still refuses to inspect or prepare under a
+        # closed window, so a pre-plan source is reissued below before its Job.
         source = inspect_hosted_authorization_bundle(
             files,
             **identity,
@@ -357,6 +367,51 @@ class HostedGovernanceMigrationCoordinator:
             source_store_digest=checkpoint.source_store_digest,
             plan_digest=checkpoint.plan_digest if phase == "commit" else None,
         )
+        if (
+            checkpoint.phase in {"inspect", "prepare", "enroll"}
+            and not source.governance_enrolled
+            and source.expires_at - current < _SOURCE_WINDOW_FLOOR_SECONDS
+            # A Job still in the fixed slot is bound to this revision. Reissuing
+            # under it would make the slot foreign to every later pass, so let
+            # that Job finish or fail and reissue once the slot is empty.
+            and not await self._jobs.occupied(request)
+        ):
+            if checkpoint.phase == "enroll":
+                # Enrollment re-runs the prepare Job, which refuses this window,
+                # and the prepared plan binds it. Nothing is enrolled yet, so go
+                # back to prepare: the window is reissued there and a fresh plan
+                # derived. Commit refuses the abandoned plan's backup, which binds
+                # the old window.
+                return DriverPending(
+                    replace(checkpoint, phase="prepare", plan_digest=None).encode(), 1
+                )
+            refreshed = refresh_drained_source_bundle(files, **identity, now=current)
+            if refreshed.expires_at - current <= MIGRATION_JOB_DEADLINE_SECONDS:
+                # The signing key ends before a Job could finish inside any window.
+                raise _refuse()
+            if refreshed.expires_at > source.expires_at:
+                try:
+                    await self._cell.write_authorization_session_bundle(
+                        owner,
+                        refreshed.files,
+                        recovery_envelope=custody_recovery_envelope,
+                        membership_epoch=refreshed.epoch,
+                        membership_digest=refreshed.membership_digest,
+                        revision=refreshed.revision,
+                        expected_revision=source.revision,
+                        effect_guard=context.assert_effect_authority,
+                    )
+                except MetadataConflict as error:
+                    if (
+                        error.reason
+                        != ConflictReason.AUTHORIZATION_SESSION_BUNDLE_PREDECESSOR_DIFFERS
+                    ):
+                        raise
+                    # Another publication landed first; decide again on what is stored.
+                    return DriverPending(context.checkpoint, 30)
+                await context.assert_effect_authority()
+                # Start the Job on the next pass, against the custody actually stored.
+                return DriverPending(context.checkpoint, 1)
         evidence = await self._jobs.run(
             request,
             recovery_envelope=job_recovery_envelope,
