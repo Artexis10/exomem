@@ -938,9 +938,23 @@ def encode_batch_size(model) -> int:
     return embedding_backend.batch_size_for(device)
 
 
-@call_spans.timed("embeddings.encode")
 def embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
-    """Batch-encode texts → float32 `(N, 768)`, L2-normalized for cosine."""
+    """Batch-encode texts → float32 `(N, 768)`, L2-normalized for cosine.
+
+    The span carries what was encoded, not just how long it took. On the 0.84.1
+    personal service one write recorded `embeddings.encode` at 15.6 s with a
+    single text: a duration alone cannot separate a cold model from a caller
+    that handed the encoder a whole note body, and those are different defects
+    with different fixes.
+    """
+    with call_spans.span(
+        "embeddings.encode",
+        {"texts": len(texts), "chars": sum(len(text) for text in texts)},
+    ):
+        return _embed_texts(texts, is_query=is_query)
+
+
+def _embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     if not texts:
         return np.zeros((0, VECTOR_DIM), dtype=np.float32)
     model = get_model()
