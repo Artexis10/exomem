@@ -71,6 +71,7 @@ from exomem_provisioner.capacity import (  # noqa: E402
 from exomem_provisioner.config import ProviderWorkerSettings, ProvisionerSettings  # noqa: E402
 from exomem_provisioner.crypto import AesGcmEnvelopeCodec  # noqa: E402
 from exomem_provisioner.database import ProvisionerDatabase  # noqa: E402
+from exomem_provisioner.driver import DriverTerminal  # noqa: E402
 from exomem_provisioner.governance_migration_checkpoint import (  # noqa: E402
     CHECKPOINT_VERSION,
     MigrationCheckpoint,
@@ -489,6 +490,38 @@ class _TerminationWitness:
             )
 
 
+class _ObservedDriver:
+    """Delegate to a shipped driver; keep the cause of every terminal refusal it raises.
+
+    The worker logs only a code and a closed-set reason. The chained cause is
+    what names the refusing call, so the drill records it before re-raising.
+    """
+
+    def __init__(self, delegate: Any, failures: list[dict[str, Any]], *, lane: str) -> None:
+        self._delegate = delegate
+        self._failures = failures
+        self._lane = lane
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._delegate, name)
+
+    async def execute(self, action: str, request: dict[str, Any], context: Any) -> Any:
+        try:
+            return await self._delegate.execute(action, request, context)
+        except DriverTerminal as error:
+            reason = error.reason
+            self._failures.append(
+                {
+                    "lane": self._lane,
+                    "checkpoint": _checkpoint_label(context.checkpoint),
+                    "code": error.code,
+                    "reason": None if reason is None else str(getattr(reason, "value", reason)),
+                    "traceback": "".join(traceback.format_exception(error)),
+                }
+            )
+            raise
+
+
 def _pod_purpose(labels: dict[str, str]) -> str:
     if labels.get("exomem.io/governance-migration") == "true":
         return "governance-migration"
@@ -832,6 +865,7 @@ class _Drill:
     request: dict[str, Any]
     trace: FirstProvisionTrace
     operation_id: str = ""
+    failures: list[dict[str, Any]] = field(default_factory=list)
 
     def cell(self, pvc_uid: str) -> DrillCell:
         core_v1, apps_v1, batch_v1, _api = self.clients
@@ -866,6 +900,10 @@ class _Drill:
             "progress": stored.progress,
         }
         detail["receipts"] = self.collector.published[-3:]
+        detail["driverRefusals"] = [
+            {key: value for key, value in item.items() if key != "traceback"}
+            for item in self.failures
+        ]
         if observe_store:
             # A content-free refusal is not a diagnosis. Observe the store
             # through the runner's own reader in both Job mounts, as the
@@ -890,6 +928,9 @@ class _Drill:
             f"first provision stopped at {_checkpoint_label(stored.checkpoint)}: {reason}\n"
             + json.dumps(detail, indent=2, sort_keys=True, default=str)
             + "\n"
+            + "".join(
+                "--- driver refusal traceback ---\n" + item["traceback"] for item in self.failures
+            )
             + await asyncio.to_thread(_namespace_evidence, self.kubeconfig, OWNER.resource_name)
         )
 
@@ -1003,6 +1044,7 @@ async def _compose(scratch: Path, kubeconfig: Path, images: DrillImages) -> tupl
         external_probe=external_probe,
     )
     hcloud = _RecordingHCloudVolumes()
+    failures: list[dict[str, Any]] = []
     drill = _Drill(
         scratch=scratch,
         kubeconfig=kubeconfig,
@@ -1010,14 +1052,16 @@ async def _compose(scratch: Path, kubeconfig: Path, images: DrillImages) -> tupl
         repository=repository,
         routine=build_routine_operation_worker(
             repository=repository,
-            driver=components.driver,
+            driver=_ObservedDriver(components.driver, failures, lane="routine"),
             worker_id=settings.worker_id,
             capacity_admission=components.capacity,
         ),
         volume=build_volume_registration_worker(
             repository=repository,
-            driver=_volume_registration_driver(
-                core_v1, runtime_image=images.runtime, hcloud=hcloud
+            driver=_ObservedDriver(
+                _volume_registration_driver(core_v1, runtime_image=images.runtime, hcloud=hcloud),
+                failures,
+                lane="volume",
             ),
             worker_id="drill-volume-worker",
             capacity_admission=components.capacity,
@@ -1031,6 +1075,7 @@ async def _compose(scratch: Path, kubeconfig: Path, images: DrillImages) -> tupl
         clients=clients,
         request=_first_provision_request(settings),
         trace=FirstProvisionTrace(scratch),
+        failures=failures,
     )
     return drill, database
 
