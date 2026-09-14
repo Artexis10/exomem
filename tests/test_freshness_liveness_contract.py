@@ -1459,6 +1459,7 @@ def test_publication_hold_is_platform_gated(contract_vault: Path) -> None:
     root = contract_vault
     index = epistemic_graph.EpistemicGraphIndex(root)
     epistemic_graph.reset_publication_holds()
+    epistemic_graph.reset_republish_backoff()
 
     hold = index._before_publish_replacement(index.path, index.path)
     try:

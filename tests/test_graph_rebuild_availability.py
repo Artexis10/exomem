@@ -3440,6 +3440,7 @@ def test_live_sidecar_readers_are_registered_and_drained_for_a_publication_hold(
     index.rebuild_all()
     key = epistemic_graph._sidecar_registry_key(index.path)
     epistemic_graph.reset_publication_holds()
+    epistemic_graph.reset_republish_backoff()
 
     snapshot = index._open_read_snapshot()
     assert snapshot is not None
