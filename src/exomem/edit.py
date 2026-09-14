@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import (
+    call_spans,
     corpus_aware,
     indexes,
     reserved_paths,
@@ -974,17 +975,27 @@ def commit_edit(
                 body=match.group(2) if match is not None else new_text,
                 self_path=rel_path,
             )
-            warnings.extend(
-                corpus_aware.emit_write_advisory_groups(
-                    vault_root,
-                    self_path=rel_path,
-                    groups=corpus_aware.detected_overlap_advisory_groups(candidates),
+            # The grouping and emission half of the advisory: a ref batch and a
+            # review-state read per candidate. Timed separately from the cosine
+            # sweep because they fail for different reasons and are fixed in
+            # different places.
+            with call_spans.span(
+                "advisory.overlap_groups", {"candidates": len(candidates)}
+            ):
+                warnings.extend(
+                    corpus_aware.emit_write_advisory_groups(
+                        vault_root,
+                        self_path=rel_path,
+                        groups=corpus_aware.detected_overlap_advisory_groups(candidates),
+                    )
                 )
-            )
         except Exception as error:  # noqa: BLE001 — nudges never break an edit
             log.debug(
                 "corpus-aware contradiction check failed (non-fatal): %s", error
             )
+    # The ledger gets the stages whatever the envelope flag says; see
+    # `MutationTimings.emit_call_spans`.
+    timings.emit_call_spans()
     return CommitEditResult(
         warnings,
         committed.as_dict(),

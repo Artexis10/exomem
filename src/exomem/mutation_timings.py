@@ -53,6 +53,38 @@ class MutationTimings:
     def error(self, name: str, exc: BaseException) -> None:
         self.stages.setdefault(name, {})["error"] = type(exc).__name__
 
+    def emit_call_spans(self) -> None:
+        """Attribute the collected stages to the in-flight MCP call.
+
+        Unconditional, and that is the whole point. `EXOMEM_WRITE_TIMINGS`
+        decides whether a *caller* sees a timing envelope on its response --
+        a governed surface that must not grow a key nobody asked for. It was
+        never meant to decide whether the operator can see the same numbers,
+        but it did: these stages existed for a year and never reached a ledger
+        row, so a 78 s write on the 0.84.1 personal service had 46 s inside
+        `derived.canonical_to_committed` with no span and no log line, while
+        `commit.stamp_check` and its siblings had measured pieces of it all
+        along.
+
+        A stage with no `ms` is one that was skipped or raised before it was
+        timed. It is left out rather than recorded as zero, which is the same
+        contract every other span here keeps: a missing span means that path
+        did not run, not that it was instant.
+
+        Never raises: `call_spans` is a leaf that swallows its own failures,
+        and a collector is a measuring instrument.
+        """
+        from . import call_spans
+
+        for name, entry in self.stages.items():
+            elapsed = entry.get("ms")
+            if elapsed is None:
+                continue
+            try:
+                call_spans.record_span(str(name), float(elapsed))
+            except (TypeError, ValueError):
+                continue
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "total_ms": round((time.perf_counter() - self._t0) * 1000.0, 3),
