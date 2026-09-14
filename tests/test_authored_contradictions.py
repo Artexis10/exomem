@@ -1049,16 +1049,17 @@ def test_pack_proximity_pairs_are_labelled_and_follow_asserted(
 
     cosines = {frozenset((c, d)): 0.85, frozenset((a, b)): 0.9}
 
-    def fake_bcpf(vault_root, *, title, body, k: int = 15):
-        # `_seed` writes `# {rel}`, so a packed page's title is its KB-relative path.
-        del vault_root, body, k
-        for key, score in cosines.items():
-            for member in key:
-                if title and member.endswith(title):
-                    return {other: score for other in key if other != member}
-        return {}
+    def fake_pairwise(vault_root, pages):
+        # The pack reads the packed pages' stored vectors; the fake stands in for
+        # the sidecar and reports the same pairwise cosines it would have found.
+        del vault_root
+        packed = {rel for rel, _chunks in pages}
+        assert packed == {a, b, c, d}
+        return dict(cosines), packed
 
-    monkeypatch.setattr(corpus_aware_module, "_best_cosine_per_file", fake_bcpf)
+    monkeypatch.setattr(
+        corpus_aware_module, "pairwise_best_cosine_from_sidecar", fake_pairwise
+    )
     pack = context_pack_module.assemble_pack(
         vault, [_hit(a), _hit(b), _hit(c), _hit(d)]
     )

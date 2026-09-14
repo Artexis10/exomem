@@ -3,7 +3,7 @@
 Torch-free: builds its own tiny inter-linked vault per test (so it never perturbs
 the shared fixture vault), and exercises `context_pack.assemble_pack` directly. The
 embedding-dependent `tension` path is tested by monkeypatching
-`corpus_aware._best_cosine_per_file` with injected cosines — no model load.
+`corpus_aware.pairwise_best_cosine_from_sidecar` with injected cosines — no model load.
 """
 
 from __future__ import annotations
@@ -300,15 +300,16 @@ def test_embeddings_off_degrades_gracefully(cluster: Path) -> None:
 
 
 def test_tension_pairs_only_in_band(cluster: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_bcpf(vault_root, *, title, body, k: int = 15):
-        if title.startswith("Alpha"):
-            # Beta in band [0.82,0.90); Charlie above (a near-dup, excluded).
-            return {BETA_P: 0.85, CHARLIE_P: 0.95}
-        if title.startswith("Beta"):
-            return {ALPHA_P: 0.85}
-        return {}
+    def fake_pairwise(vault_root, pages):
+        packed = {rel for rel, _chunks in pages}
+        assert packed == {ALPHA_P, BETA_P}
+        # Beta in band [0.82,0.90); Charlie above (a near-dup, excluded) and not packed.
+        return (
+            {frozenset((ALPHA_P, BETA_P)): 0.85, frozenset((ALPHA_P, CHARLIE_P)): 0.95},
+            {ALPHA_P, BETA_P},
+        )
 
-    monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", fake_bcpf)
+    monkeypatch.setattr(corpus_aware, "pairwise_best_cosine_from_sidecar", fake_pairwise)
     pack = context_pack.assemble_pack(cluster, [_hit(ALPHA_P), _hit(BETA_P)])
 
     tension = pack["contradictions"]["tension"]
@@ -318,6 +319,60 @@ def test_tension_pairs_only_in_band(cluster: Path, monkeypatch: pytest.MonkeyPat
     assert {pair["a"], pair["b"]} == {ALPHA_P, BETA_P}
     assert pair["cosine"] == 0.85
     assert "polarity" in pair["note"]
+    assert not [t for t in pack["truncation"] if "embedding rows" in t]
+
+
+def test_pack_tension_never_encodes_the_packed_pages(
+    cluster: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The proximity half reads stored vectors; a recall must not pay an encode.
+
+    Measured 2026-09-14 on the personal service: re-encoding every packed page's
+    body was 32 to 50 s of each `ask_memory`. Any route back into the encoder
+    from pack assembly is the regression this pins.
+    """
+    from exomem import embeddings
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("pack assembly reached the encoder")
+
+    monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", refuse)
+    monkeypatch.setattr(embeddings, "embed_texts", refuse)
+    monkeypatch.setattr(embeddings, "_embed_live_chunks", refuse)
+    monkeypatch.setattr(
+        corpus_aware,
+        "pairwise_best_cosine_from_sidecar",
+        lambda vault_root, pages: ({frozenset((ALPHA_P, BETA_P)): 0.85}, {ALPHA_P, BETA_P}),
+    )
+    pack = context_pack.assemble_pack(cluster, [_hit(ALPHA_P), _hit(BETA_P)])
+    assert [t["cosine"] for t in pack["contradictions"]["tension"]] == [0.85]
+
+
+def test_pack_tension_reports_no_embeddings_when_no_packed_page_has_rows(
+    cluster: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        corpus_aware, "pairwise_best_cosine_from_sidecar", lambda vault_root, pages: ({}, set())
+    )
+    pack = context_pack.assemble_pack(cluster, [_hit(ALPHA_P), _hit(BETA_P)])
+    assert pack["embeddings_available"] is False
+    assert pack["contradictions"]["tension"] == []
+    assert not [t for t in pack["truncation"] if "embedding rows" in t]
+
+
+def test_a_packed_page_without_current_rows_is_reported_not_silent(
+    cluster: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Alpha has exact rows; Beta's embedding has not landed yet. The pack must say
+    # so in `truncation` rather than present an empty tension list as complete.
+    monkeypatch.setattr(
+        corpus_aware, "pairwise_best_cosine_from_sidecar", lambda vault_root, pages: ({}, {ALPHA_P})
+    )
+    pack = context_pack.assemble_pack(cluster, [_hit(ALPHA_P), _hit(BETA_P)])
+    assert pack["embeddings_available"] is True
+    assert pack["contradictions"]["tension"] == []
+    notes = [t for t in pack["truncation"] if "embedding rows" in t]
+    assert notes and notes[0].startswith("1 packed page(s)")
 
 
 # ------------------------------ bounds / determinism ------------------------------

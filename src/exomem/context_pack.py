@@ -13,8 +13,9 @@ It is PURE ASSEMBLY (measurement), mirroring `attention.py`:
   grouped under bounded provenance/lifecycle context. Selected unit hits are packed first.
 - The neighbourhood reuses `find`'s outbound-link resolution + `vault`'s inbound search.
 - Contradictions are recorded supersession edges (frontmatter) plus proximity "tension"
-  pairs whose cosine sits in the existing `[floor, dup)` band (reusing
-  `corpus_aware._best_cosine_per_file`) — proximity, not polarity; the reader decides.
+  pairs whose cosine sits in the existing `[floor, dup)` band, computed from the packed
+  pages' stored sidecar vectors (`corpus_aware.pairwise_best_cosine_from_sidecar`), never
+  by re-encoding them — proximity, not polarity; the reader decides.
 
 Nothing is mutated, no generative/reasoning model runs, and `find` ordering is untouched.
 The tension part soft-fails to empty (`embeddings_available: false`) when the embedding
@@ -590,15 +591,20 @@ def _asserted_tension(
 
 def _tension_pairs(
     vault_root: Path, packed_pages: list[ParsedPage], max_tension: int
-) -> tuple[list[dict], int, bool]:
+) -> tuple[list[dict], int, bool, int]:
     """Tension pairs AMONG the packed notes: authored `contradicts` edges first, then
-    proximity pairs whose pairwise cosine lands in the contradiction band. Reuses the
-    embedding sidecar for the proximity half only; soft-fails to empty when off.
+    proximity pairs whose pairwise cosine lands in the contradiction band. The proximity
+    half reads the packed pages' stored vectors from the embedding sidecar and encodes
+    nothing; soft-fails to empty when off.
 
-    `embeddings_available` is True iff a cosine pass returned scores AND the band is
-    active; an inverted/disabled band (floor >= ceiling) reports it False — the band is
-    off, so no proximity tension can be measured regardless of the sidecar. Asserted
-    pairs are independent of it and are surfaced either way.
+    `embeddings_available` is True iff at least one packed page had exact stored rows AND
+    the band is active; an inverted/disabled band (floor >= ceiling) reports it False — the
+    band is off, so no proximity tension can be measured regardless of the sidecar.
+    Asserted pairs are independent of it and are surfaced either way.
+
+    The fourth value counts packed pages that had no exact rows while others did (their
+    embedding not yet landed, or the page moved since): they contributed no proximity
+    pair this time, and the caller reports that rather than leaving it silent.
 
     A pair that is both authored and in band appears once, as asserted."""
     floor = corpus_aware._contradiction_floor()
@@ -608,23 +614,39 @@ def _tension_pairs(
     pair_best: dict[frozenset[str], float] = {}
     embeddings_available = False
 
+    uncovered = 0
     if floor < ceiling:
+        # Proximity among the packed pages comes from the vectors the embedding
+        # pass already published for them, never from re-encoding their bodies:
+        # on a large vault that encode was most of a recall's wall time. A page
+        # whose rows are not yet exact (embedding deferred, or moved since) just
+        # contributes no pairs this time, and the caller says so in `truncation`.
+        from . import embeddings as embeddings_module
+
+        chunked: list[tuple[str, list[str]]] = []
         for page in packed_pages:
-            cmap = corpus_aware._best_cosine_per_file(vault_root, title=page.title, body=page.body)
-            if cmap:
-                embeddings_available = True
-            self_canon = corpus_aware._canon(page.rel_path)
-            for fp, score in cmap.items():
-                canon = corpus_aware._canon(fp)
-                if canon == self_canon or canon not in by_canon:
-                    continue
-                if not (floor <= score < ceiling):
-                    continue
-                key = frozenset((self_canon, canon))
-                if key in asserted_keys:
-                    continue  # the authored edge owns this pair
-                if key not in pair_best or score > pair_best[key]:
-                    pair_best[key] = score
+            try:
+                chunks = embeddings_module._chunks_for_page(vault_root, page)
+            except Exception:  # noqa: BLE001 -- chunking is best-effort here
+                chunks = []
+            chunked.append((page.rel_path, chunks))
+        scores, covered = corpus_aware.pairwise_best_cosine_from_sidecar(vault_root, chunked)
+        embeddings_available = bool(covered)
+        if covered:
+            uncovered = sum(1 for rel, _chunks in chunked if rel not in covered)
+        for pair, score in scores.items():
+            first, second = tuple(pair)
+            canon_a = corpus_aware._canon(first)
+            canon_b = corpus_aware._canon(second)
+            if canon_a == canon_b or canon_a not in by_canon or canon_b not in by_canon:
+                continue
+            if not (floor <= score < ceiling):
+                continue
+            key = frozenset((canon_a, canon_b))
+            if key in asserted_keys:
+                continue  # the authored edge owns this pair
+            if key not in pair_best or score > pair_best[key]:
+                pair_best[key] = score
 
     proximity: list[dict] = []
     for key, score in pair_best.items():
@@ -642,7 +664,7 @@ def _tension_pairs(
     pairs = asserted + proximity
     shown = pairs[:max_tension] if max_tension > 0 else pairs
     dropped = len(pairs) - len(shown)
-    return shown, dropped, embeddings_available
+    return shown, dropped, embeddings_available, uncovered
 
 
 # ----------------------------- assembly -----------------------------
@@ -894,7 +916,14 @@ def assemble_pack(
         )
 
     superseded = _supersession_edges(packed_pages)
-    tension, t_dropped, embeddings_available = _tension_pairs(vault_root, packed_pages, max_tension)
+    tension, t_dropped, embeddings_available, uncovered = _tension_pairs(
+        vault_root, packed_pages, max_tension
+    )
+    if uncovered > 0:
+        truncation.append(
+            f"{uncovered} packed page(s) had no current embedding rows; "
+            "no proximity pair computed for them"
+        )
     if t_dropped > 0:
         truncation.append(
             f"tension pairs capped at {max_tension} "

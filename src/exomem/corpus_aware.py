@@ -32,6 +32,7 @@ import logging
 import math
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -759,6 +760,78 @@ def _best_cosine_per_file(
     except Exception as e:  # noqa: BLE001 — best-effort
         log.debug("_best_cosine_per_file failed: %s", e)
         return {}
+
+
+def pairwise_best_cosine_from_sidecar(
+    vault_root: Path, pages: Iterable[tuple[str, list[str]]]
+) -> tuple[dict[frozenset[str], float], set[str]]:
+    """Best cosine between each pair of `pages`, from the sidecar's own rows -- no encode.
+
+    The context pack only ever needs proximity AMONG the pages it packed, and
+    every one of those pages was embedded when it was written. Re-encoding
+    their bodies to get the same vectors back was the whole cost of a recall
+    on a large vault (measured 2026-09-14: 32 to 50 s of `embeddings.encode`
+    over 110 to 174 chunks per `ask_memory`, on 4,281 pages). So this reads the
+    rows the embedding pass published and does one small pairwise product.
+
+    `pages` are `(rel_path, chunks)` with the exact chunking the index stores
+    (`embeddings._chunks_for_page`). Exactness is decided on stored chunk TEXT,
+    as `published_generation_vectors` does: a page whose rows do not match its
+    current chunks -- its embedding still deferred, or the page moved since --
+    contributes no pairs and is absent from the returned covered set, and is
+    never encoded here. Returns `({}, set())` when embeddings are disabled or
+    the sidecar is unavailable, the same no-op contract as the encoding sweep.
+    """
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return {}, set()
+    wanted = {rel: list(chunks) for rel, chunks in pages if chunks}
+    if not wanted:
+        return {}, set()
+    try:
+        import numpy as np
+
+        from . import embeddings
+
+        # Same span as the encoding sweep on purpose (see
+        # `best_cosine_per_file_for_vectors`): `texts=0` is what says it
+        # encoded nothing, and `pages` how many packed pages had exact rows.
+        with call_spans.span("advisory.best_cosine", {}) as measured:
+            idx = embeddings.get_embedding_index(vault_root)
+            metadata, matrix = idx.all_vectors()
+            rows_by_page: dict[str, list[tuple[int, int]]] = {}
+            for row, (file_path, chunk_index) in enumerate(metadata):
+                if file_path in wanted:
+                    rows_by_page.setdefault(file_path, []).append((chunk_index, row))
+            texts = idx._texts_for(
+                [(fp, ci) for fp, rows in rows_by_page.items() for ci, _row in rows]
+            )
+            vectors: dict[str, np.ndarray] = {}
+            for file_path, rows in rows_by_page.items():
+                rows.sort()
+                chunks = wanted[file_path]
+                if [ci for ci, _row in rows] != list(range(len(chunks))):
+                    continue
+                if [texts.get((file_path, ci)) for ci, _row in rows] != chunks:
+                    continue
+                stacked = np.asarray([matrix[row] for _ci, row in rows], dtype=np.float32)
+                norms = np.linalg.norm(stacked, axis=1, keepdims=True)
+                vectors[file_path] = stacked / np.maximum(norms, 1e-12)
+            if measured is not None:
+                measured["texts"] = 0
+                measured["pages"] = len(vectors)
+                measured["vectors"] = sum(len(v) for v in vectors.values())
+            best: dict[frozenset[str], float] = {}
+            names = sorted(vectors)
+            for i, a in enumerate(names):
+                for b in names[i + 1 :]:
+                    best[frozenset((a, b))] = float((vectors[a] @ vectors[b].T).max())
+            return best, set(names)
+    except ImportError as e:
+        log.debug("pairwise_best_cosine_from_sidecar unavailable (%s)", e)
+        return {}, set()
+    except Exception as e:  # noqa: BLE001 -- best-effort, the pack degrades to no tension
+        log.debug("pairwise_best_cosine_from_sidecar failed: %s", e)
+        return {}, set()
 
 
 def best_cosine_per_file_for_vectors(
