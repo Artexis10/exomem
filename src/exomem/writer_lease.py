@@ -4124,7 +4124,20 @@ class LeaseManager:
         )
         from . import readiness
 
-        if readiness.should_defer("semantic_corpus"):
+        # The graph handoff joins this gate for the reason the corpus is on it:
+        # a write admitted before its delta origin exists does not merely run
+        # slower, it registers a whole-vault rebuild for a lineage it could
+        # have adopted in the first seconds of the warm. Both refusals are the
+        # same retryable shape, and reads are untouched either way.
+        warming = next(
+            (
+                component
+                for component in ("graph_handoff", "semantic_corpus")
+                if readiness.should_defer(component)
+            ),
+            None,
+        )
+        if warming is not None:
             details: dict[str, Any] = {
                 "status": "retryable",
                 "committed": False,
@@ -4142,9 +4155,14 @@ class LeaseManager:
                 receipt=receipt or "none",
                 error="MUTATION_WARMING",
             )
+            details["warming_component"] = warming
             raise OpError(
                 "MUTATION_WARMING",
-                "semantic corpus warm-up is still in progress",
+                (
+                    "graph handoff warm-up is still in progress"
+                    if warming == "graph_handoff"
+                    else "semantic corpus warm-up is still in progress"
+                ),
                 "Retry the same mutation after warm-up completes.",
                 details=details,
             )
