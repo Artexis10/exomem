@@ -81,6 +81,11 @@ def worker(root, socket_path, standby=False):
         readiness.mark_ready("lexical")
         if not (root / "standby-stalls").exists():
             service_standby.prove_graph_snapshot(root)
+            # The corpus build is real here -- it is a read over this root and
+            # needs no vault -- because the gate that admits governed writes
+            # waits on it, and a standby that reaches cutover-ready without it
+            # promotes into a worker that refuses writes.
+            service_standby.build_semantic_corpus(root)
     else:
         (root / "worker.pid").write_text(str(os.getpid()))
         event(root, "worker-start")

@@ -15,7 +15,7 @@ The system SHALL keep the public HTTP listener and existing accepted connections
 
 #### Scenario: Standby warms while the old worker serves
 - **WHEN** a managed upgrade starts against a serving worker
-- **THEN** the candidate warms its lexical catalog, models when preload is allowed, and the proven graph snapshot before ingress is paused
+- **THEN** the candidate warms its lexical catalog, models when preload is allowed, the proven graph snapshot and the semantic corpus context before ingress is paused
 - **AND** the unavailable window of the cutover is the drain plus promotion, not a cold start
 
 #### Scenario: The service environment changed after the supervisor started
@@ -49,3 +49,27 @@ A standby worker SHALL take no writer lease, publish no index or graph state, sc
 #### Scenario: State changed under the standby
 - **WHEN** the offline migrator changes state after the standby proved its snapshot
 - **THEN** the standby re-proves before promotion and, if the proof fails, rebuilds after promotion through the coalesced path with the handoff record naming the reason
+
+### Requirement: A promoted standby does not repeat the warm it already ran
+
+A promoted worker SHALL NOT repeat warm-up work its own standby completed and promotion either re-verified or cannot invalidate, and SHALL record which components were carried forward. A component SHALL be carried only where the standby completed it; the adopted graph snapshot SHALL be carried only where promotion re-verified that the proved checkpoint is still current. Carried components SHALL be marked ready before the promoted worker's warm begins serving requests, so a governed write arriving immediately after promotion is admitted rather than refused as warming. A worker that starts cold SHALL carry nothing and SHALL run its whole warm unchanged.
+
+#### Scenario: A governed write arrives immediately after promotion
+- **WHEN** a governed write reaches a worker that was promoted from a standby whose warm completed
+- **THEN** it is admitted rather than refused as warming, and it is served incrementally
+
+#### Scenario: The promoted worker's warm subtracts what it carried
+- **WHEN** a promoted worker runs its own warm-up after a promotion that re-verified the snapshot as current
+- **THEN** it neither adopts the snapshot again nor rebuilds the semantic corpus context, and its completion record names the carried components
+
+#### Scenario: The snapshot moved under the standby
+- **WHEN** promotion finds the checkpoint the standby proved is no longer current
+- **THEN** the graph handoff is not carried forward and the promoted worker's warm runs it in full
+
+#### Scenario: A cold start carries nothing
+- **WHEN** a worker starts without having been a standby
+- **THEN** it carries no components and runs every warm-up step
+
+#### Scenario: A warm step failed rather than not running
+- **WHEN** a standby's semantic corpus build runs and fails
+- **THEN** the component is reported settled so the upgrade is not held, and it is not carried forward, so the promoted worker runs that step itself

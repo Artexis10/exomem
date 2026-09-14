@@ -35,7 +35,17 @@ STANDBY_ENV = "EXOMEM_MANAGED_STANDBY"
 
 #: Cutover components in the order a standby warms them.  ``embeddings`` is
 #: reported only when this process's mode and overrides allow a model preload.
-CUTOVER_COMPONENTS = ("lexical", "embeddings", "graph_snapshot")
+#: ``semantic_corpus`` joins them because the write admission gate waits on it
+#: (task 1.14) and it is a read-only, process-local build -- so a standby that
+#: has not built it is a standby whose promotion cannot admit a write, however
+#: short the cutover was.
+CUTOVER_COMPONENTS = ("lexical", "embeddings", "graph_snapshot", "semantic_corpus")
+
+#: Readiness components this standby completed AND promotion either re-verified
+#: or cannot invalidate. Written at promotion, read by the promoted worker's own
+#: `warm_all`, and deliberately still readable after `promote()` returns: it is
+#: the whole point.
+_carried: frozenset[str] = frozenset()
 
 _lock = threading.Lock()
 _standby = False
@@ -43,6 +53,9 @@ _promoted = False
 _proved_token: str | None = None
 _adoption: Any = None
 _activation: Any = None
+_corpus_built = False
+#: Whether the corpus build RAN, however it ended. See `cutover_components`.
+_corpus_attempted = False
 
 
 def standby_requested() -> bool:
@@ -89,10 +102,25 @@ def cutover_components() -> dict[str, str]:
 
     with _lock:
         snapshot_ready = _proved_token is not None
+        corpus_settled = _corpus_attempted
     components: dict[str, str] = {}
     for component in CUTOVER_COMPONENTS:
         if component == "graph_snapshot":
             components[component] = "ready" if snapshot_ready else "waiting"
+        elif component == "semantic_corpus":
+            # Settled, not built -- the same distinction `warm_all` draws when
+            # it marks `graph_handoff` on every exit. A build that RAN and
+            # failed is as good as this standby will get, and the promoted
+            # worker pays the same failing build whether it cut over or cold
+            # started; holding every release for a defect the standby cannot
+            # fix would cost more than it prevents. A build that never ran
+            # still leaves the component waiting, so a stalled standby is
+            # still discarded when its budget expires.
+            #
+            # Read from this module rather than `readiness`, which
+            # `finish_warm` does not clear but `begin_warm` would: the
+            # supervisor polls this after the standby warm has finished.
+            components[component] = "ready" if corpus_settled else "waiting"
         elif component == "embeddings":
             if _preload_allowed():
                 components[component] = "ready" if readiness.is_ready("embeddings") else "waiting"
@@ -124,6 +152,11 @@ def readiness_payload() -> dict[str, Any]:
         # An adoption that succeeded but owes a bounded drain is not the same
         # event as a clean one, and the operator needs to see which happened.
         "adoption": adoption_record(),
+        # What the promoted worker's own warm skipped because this process had
+        # already done it. Empty everywhere except after a promotion, and the
+        # first thing to look at if a cutover is fast but the writes after it
+        # are not.
+        "carried_from_standby": sorted(carried_warm_components()),
     }
 
 
@@ -273,6 +306,90 @@ def _preload_models() -> None:
     readiness.mark_ready("embeddings")
 
 
+def build_semantic_corpus(vault_root: Path) -> bool:
+    """Build this process's semantic corpus context. Reads only; publishes nothing.
+
+    On the 0.85.0 upgrade the cutover itself was 1.6 s and governed writes
+    stayed refused for ~30 s after it, because the admission gate waits on
+    `semantic_corpus` (task 1.14) and the standby had never built one: the
+    promoted worker paid 9.9 s of corpus build on 4271 pages while every write
+    got `MUTATION_WARMING`. A short unavailable window that hands back a
+    process which refuses writes has moved the outage, not removed it.
+
+    Safe for a standby, which is the bar every step here has to clear. Checked
+    both ways: statically, `build_corpus_context` walks and parses Markdown,
+    resolves in memory, and caches under a module-level `threading.RLock` --
+    there is no `batch_atomic_write`, no mutation-lock hold, no sidecar write
+    and no publication anywhere in it, and its `freshness.consumer_checkpoint`
+    and registry loads are in-memory reads. Empirically, a build over a fixture
+    vault changed zero bytes under the vault and zero under the state root.
+    `tests/test_standby_promotion.py` pins that as a census either side of the
+    call, so a future build that starts publishing fails here rather than on a
+    live cutover.
+
+    A serving worker may write while this runs, which makes the built context
+    stale for those pages and is not a problem: the cache is captioned by a stat
+    census, so the first use after promotion reparses only the changed parents.
+    What the gate needs is that nobody pays the COLD build, and that survives.
+    """
+    global _corpus_built, _corpus_attempted
+    from . import readiness, semantic_contract
+
+    with _lock:
+        _corpus_attempted = True
+    try:
+        semantic_contract.build_corpus_context(Path(vault_root))
+    except Exception:  # noqa: BLE001 - an unbuilt corpus is a waiting component
+        log.warning("standby semantic corpus build failed", exc_info=True)
+        return False
+    with _lock:
+        _corpus_built = True
+    readiness.mark_ready("semantic_corpus")
+    return True
+
+
+def carried_warm_components() -> frozenset[str]:
+    """Readiness components the promoted worker may treat as already satisfied.
+
+    Empty on a cold start, so `warm_all` runs in full exactly as it always has.
+    """
+    with _lock:
+        return _carried
+
+
+def _carried_at_promotion(record: dict[str, Any]) -> frozenset[str]:
+    """Name the warm this promotion inherits rather than repeats.
+
+    `lexical` and `embeddings` are read from `readiness`, which still holds the
+    standby warm's marks at this point: `promote()` computes this BEFORE
+    `release()`, and `release()` is what eventually reaches
+    `readiness.begin_warm()` and clears them. The corpus is read from this
+    module's own record instead, for the same reason `cutover_components` does:
+    one fact, one place to read it.
+
+    `graph_snapshot` is carried only on a `current` verdict. That is the one
+    where promotion re-proved that the checkpoint the standby adopted is still
+    the checkpoint on disk, so re-adopting would buy nothing -- 19.5 s of it on
+    the 0.85.0 cutover. `advanced`, `unproven` and `rebuild-after-promotion` all
+    mean the opposite, and each leaves the component out so `warm_all` runs the
+    handoff in full. (A residue failure rewrites the verdict to
+    `rebuild-after-promotion`, so it is covered by the same test.)
+    """
+    from . import readiness
+
+    carried = {
+        component
+        for component in ("lexical", "embeddings")
+        if readiness.is_ready(component)
+    }
+    with _lock:
+        if _corpus_built:
+            carried.add("semantic_corpus")
+    if record.get("snapshot") == "current":
+        carried.add("graph_handoff")
+    return frozenset(carried)
+
+
 def warm(vault_root: Path) -> None:
     """Warm a standby to cutover readiness without owning any state.
 
@@ -323,6 +440,10 @@ def warm(vault_root: Path) -> None:
         except Exception:  # noqa: BLE001 - an unprimed resolver only costs adoption
             log.warning("standby recall resolver prime failed", exc_info=True)
         prove_graph_snapshot(vault_root)
+        # After the graph step, for the same reason `warm_all` puts the handoff
+        # first: adoption is what the first governed write depends on, and the
+        # corpus is what the gate that admits it waits for.
+        build_semantic_corpus(vault_root)
         _preload_models()
     except Exception:  # noqa: BLE001 - a standby warm must never die loudly
         log.warning("standby warm-up crashed", exc_info=True)
@@ -395,14 +516,24 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
     advanced is recorded as such; a proof that now fails is recorded and
     promotion proceeds anyway, leaving the repair to the coalesced rebuild path.
     """
-    global _promoted, _standby, _adoption
+    global _promoted, _standby, _adoption, _carried
     with _lock:
         if _promoted:
             return {"ok": True, "already_promoted": True}
         if not _standby:
             raise RuntimeError("only a standby worker can be promoted")
         proved = _proved_token
-    record: dict[str, Any] = {"ok": True, "migrated": bool(migrated), "reproved": False}
+    # `revalidated` says promotion re-checked the snapshot at all; `reproved`
+    # says it re-ran the whole SOURCE proof, which only the migrated branch
+    # does. The other branch compares the checkpoint pair -- a real
+    # re-validation, and deliberately cheaper, but not a proof, and calling it
+    # one overstated what the handoff record was attesting to.
+    record: dict[str, Any] = {
+        "ok": True,
+        "migrated": bool(migrated),
+        "revalidated": False,
+        "reproved": False,
+    }
     started = time.monotonic()
     adoption = _adoption
     if proved is None:
@@ -416,11 +547,13 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
             # The re-proof supersedes the warm's: `adoption_record()` must
             # report the residue this process actually owes.
             _adoption = adoption
+        record["revalidated"] = True
         record["reproved"] = True
         record["snapshot"] = "current" if adoption.adopted else "rebuild-after-promotion"
     else:
         current = snapshot_token(Path(vault_root))
-        record["reproved"] = True
+        # A checkpoint-pair comparison, not a source proof: see `record` above.
+        record["revalidated"] = True
         if current is None:
             record["snapshot"] = "rebuild-after-promotion"
         elif current != proved:
@@ -438,10 +571,16 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
         # coalesced rebuild is what will fix the projection. Say so.
         record["snapshot"] = "rebuild-after-promotion"
         record["reason"] = residue_failure
+    carried = _carried_at_promotion(record)
+    record["carried_from_standby"] = sorted(carried)
     with _lock:
         _promoted = True
         _standby = False
+        _carried = carried
         activation = _activation
+    # Everything this process owes the handoff is settled above. `release()`
+    # starts the promoted worker's own warm, which reads `_carried` on its way
+    # through `begin_warm`, so nothing below may still be deciding what it holds.
     release = getattr(activation, "release", None)
     if callable(release):
         release()
@@ -453,9 +592,13 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
 def reset_for_tests() -> None:
     """Clear process-local standby state; intentionally public for tests."""
     global _standby, _promoted, _proved_token, _adoption, _activation
+    global _carried, _corpus_built, _corpus_attempted
     with _lock:
         _standby = False
         _promoted = False
         _proved_token = None
         _adoption = None
+        _carried = frozenset()
+        _corpus_built = False
+        _corpus_attempted = False
         _activation = None

@@ -279,9 +279,25 @@ def _observe_and_settle(
     return (observed, False)
 
 
+#: Fewest acknowledgements a median may be taken over. A median of one sample
+#: is that sample, so applying this helper to a single write turns a latency
+#: BUDGET into a per-request timing assertion -- exactly the premise class that
+#: has produced flakes here all along, and it produced one more: the first
+#: write after a promotion at 1.14 s on a loaded CI runner, failing a 1.0 s
+#: median bound it was never meant to be measured against. The guarantee this
+#: helper encodes is about a SERIES of writes staying incremental; a single
+#: write that legitimately pays first-request costs belongs under a structural
+#: assertion, or under a budget wide enough to be a budget.
+_MIN_LATENCY_SAMPLES = 3
+
+
 def _assert_incremental_latency(
     acknowledgements: list[float], *, bound: float = ACK_BOUND_SECONDS
 ) -> None:
+    assert len(acknowledgements) >= _MIN_LATENCY_SAMPLES, (
+        f"this asserts the shape of a series, not one request: "
+        f"{len(acknowledgements)} sample(s) given, {_MIN_LATENCY_SAMPLES} needed"
+    )
     rendered = [round(seconds, 2) for seconds in acknowledgements]
     slowest = max(acknowledgements)
     assert slowest < bound, (
@@ -2390,3 +2406,198 @@ def test_a_rebuild_retarget_keeps_the_recall_resolver(
         "the retarget evicted the recall resolver, which sends the next governed "
         f"write down the whole-vault path (survived={survived})"
     )
+
+
+# --- The promoted standby does not repeat its own warm (task 2.8) ------------
+
+
+def _trace_warm(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str]]:
+    """Record which warm steps ran and which readiness components were marked."""
+    from exomem import readiness, semantic_contract, warmup
+
+    order: list[str] = []
+    marked: list[str] = []
+    real_mark = readiness.mark_ready
+
+    def traced_corpus(*_args: object, **_kwargs: object) -> None:
+        order.append("semantic_corpus")
+
+    def traced_caches(*_args: object, **_kwargs: object) -> dict:
+        order.append("lexical")
+        return {}
+
+    def traced_mark(component: str) -> list:
+        marked.append(component)
+        return real_mark(component)
+
+    monkeypatch.setattr(warmup, "warmup_enabled", lambda: True, raising=True)
+    monkeypatch.setattr(warmup, "warm_retrieval_catalog", lambda _root: True, raising=True)
+    monkeypatch.setattr(warmup, "model_preload_allowed", lambda *_a: False, raising=True)
+    monkeypatch.setattr(warmup, "warm_caches", traced_caches, raising=True)
+    monkeypatch.setattr(mode, "preload_cpu_caches", lambda: False, raising=True)
+    monkeypatch.setattr(
+        warmup,
+        "warm_graph_handoff",
+        lambda _root: (order.append("graph_snapshot"), {})[1],
+        raising=True,
+    )
+    monkeypatch.setattr(semantic_contract, "build_corpus_context", traced_corpus, raising=True)
+    monkeypatch.setattr(readiness, "mark_ready", traced_mark, raising=True)
+    return order, marked
+
+
+def test_the_incremental_latency_oracle_refuses_a_single_sample() -> None:
+    """The helper must not be usable as a per-request timing assertion.
+
+    A median over one sample is that sample, so calling this with one write
+    silently converts a series-shaped budget into the flakiest thing a test can
+    assert. It reached CI that way once: the first write after a promotion at
+    1.14 s against a 1.0 s median bound, on a write that was admitted and
+    incremental exactly as designed. Refusing the call is cheaper than noticing
+    the next one in a failing run.
+    """
+    with pytest.raises(AssertionError, match="shape of a series"):
+        _assert_incremental_latency([0.01])
+
+
+def test_a_cold_warm_carries_nothing_and_runs_every_step(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control. Subtracting a carried warm must not change a cold start."""
+    from exomem import service_standby, warmup
+
+    service_standby.reset_for_tests()
+    order, marked = _trace_warm(monkeypatch)
+
+    durations = warmup.warm_all(handoff_vault)
+
+    assert order == ["graph_snapshot", "semantic_corpus", "lexical"]
+    assert durations["carried_from_standby"] == 0.0
+    for component in ("graph_handoff", "semantic_corpus", "lexical"):
+        assert component in marked
+
+
+def test_a_promoted_warm_repeats_neither_the_adoption_nor_the_corpus_build(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 0.85.0 defect, as a test.
+
+    A cutover measured at 1672.9 ms by the supervisor handed back a worker that
+    then spent ~30 s refusing governed writes `MUTATION_WARMING
+    warming_component=semantic_corpus`, because its own `warm_all` repeated in
+    full the warm its standby had already finished in the same process: a second
+    `graph snapshot adoption adopted=True residue=0` at 10:23:03 after the
+    standby's at 10:22:13, and a 9935.2 ms corpus build after the standby's
+    8516.1 ms one. Promotion re-validated the snapshot (`snapshot: 'current'`)
+    46.8 ms before that, so nothing about the second adoption could have
+    returned a different answer.
+    """
+    from exomem import service_standby, warmup
+
+    monkeypatch.setattr(
+        service_standby,
+        "carried_warm_components",
+        lambda: frozenset({"graph_handoff", "semantic_corpus", "lexical"}),
+        raising=True,
+    )
+    order, marked = _trace_warm(monkeypatch)
+
+    durations = warmup.warm_all(handoff_vault)
+
+    assert order == [], f"the promoted worker repeated a step it already ran: {order}"
+    assert durations["carried_from_standby"] == 3.0
+    # Carried is not the same as skipped: every component a writer waits on is
+    # still marked, or the gate would never open at all.
+    for component in ("graph_handoff", "semantic_corpus", "lexical"):
+        assert component in marked
+
+
+def test_an_uncarried_component_is_still_warmed_after_promotion(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A partial carry subtracts exactly what it names and nothing else."""
+    from exomem import service_standby, warmup
+
+    monkeypatch.setattr(
+        service_standby,
+        "carried_warm_components",
+        lambda: frozenset({"semantic_corpus"}),
+        raising=True,
+    )
+    order, _marked = _trace_warm(monkeypatch)
+
+    warmup.warm_all(handoff_vault)
+
+    assert order == ["graph_snapshot", "lexical"], (
+        "a promotion whose snapshot verdict was not `current` has to adopt "
+        f"again, and only the corpus is carried: {order}"
+    )
+
+
+def test_the_carried_components_are_ready_before_the_warm_thread_starts(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`begin_warm` clears every event, which is what refused the 10:23 writes.
+
+    The admission gate waits on `graph_handoff` and `semantic_corpus`. Marking
+    them on the warm thread would reopen the same window the carry exists to
+    close, so `start_background` marks them synchronously and this pins that: by
+    the time it returns -- before any request can be served -- the gate is open.
+    """
+    from exomem import readiness, service_standby, warmup
+
+    monkeypatch.setattr(
+        service_standby,
+        "carried_warm_components",
+        lambda: frozenset({"graph_handoff", "semantic_corpus"}),
+        raising=True,
+    )
+    # A warm body that never finishes, so the only thing that can have marked
+    # the components is the synchronous carry-forward.
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocked(_root: Path) -> dict:
+        started.set()
+        release.wait(timeout=30)
+        return {}
+
+    monkeypatch.setattr(warmup, "warm_all", _blocked, raising=True)
+    readiness.reset()
+    try:
+        thread = warmup.start_background(handoff_vault)
+        assert readiness.is_ready("graph_handoff") is True
+        assert readiness.is_ready("semantic_corpus") is True
+        assert started.wait(timeout=30) is True
+    finally:
+        release.set()
+        thread.join(timeout=30)
+        readiness.reset()
+
+
+def test_a_cold_start_marks_nothing_ready_before_its_warm_runs(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control for the above: carrying nothing must not open the gate early."""
+    from exomem import readiness, service_standby, warmup
+
+    service_standby.reset_for_tests()
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocked(_root: Path) -> dict:
+        started.set()
+        release.wait(timeout=30)
+        return {}
+
+    monkeypatch.setattr(warmup, "warm_all", _blocked, raising=True)
+    readiness.reset()
+    try:
+        thread = warmup.start_background(handoff_vault)
+        assert readiness.is_ready("graph_handoff") is False
+        assert readiness.is_ready("semantic_corpus") is False
+        assert started.wait(timeout=30) is True
+    finally:
+        release.set()
+        thread.join(timeout=30)
+        readiness.reset()

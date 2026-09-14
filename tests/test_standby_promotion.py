@@ -29,7 +29,11 @@ def test_standby_reports_the_cutover_component_it_waits_on(monkeypatch) -> None:
     readiness.mark_ready("lexical")
     payload = service_standby.readiness_payload()
     assert payload["standby"] is True
-    assert payload["components"] == {"lexical": "ready", "graph_snapshot": "waiting"}
+    assert payload["components"] == {
+        "lexical": "ready",
+        "graph_snapshot": "waiting",
+        "semantic_corpus": "waiting",
+    }
     assert payload["cutover_ready"] is False
     assert service_standby.waiting_component() == "graph_snapshot"
 
@@ -42,6 +46,7 @@ def test_embeddings_join_the_cutover_set_only_when_preload_is_allowed(monkeypatc
         "lexical": "waiting",
         "embeddings": "waiting",
         "graph_snapshot": "waiting",
+        "semantic_corpus": "waiting",
     }
     assert service_standby.waiting_component() == "lexical"
 
@@ -50,11 +55,18 @@ def test_cutover_becomes_ready_once_every_component_lands(monkeypatch, tmp_path:
     monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
     monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
     _stub_adoption(monkeypatch)
+    _stub_corpus(monkeypatch)
     service_standby.enter_standby()
     readiness.mark_ready("lexical")
     assert service_standby.prove_graph_snapshot(tmp_path) is True
+    # The write admission gate waits on the corpus (task 1.14), so a standby
+    # that has not built one is a standby whose promotion cannot admit a write.
+    assert service_standby.readiness_payload()["cutover_ready"] is False
+    assert service_standby.waiting_component() == "semantic_corpus"
+    assert service_standby.build_semantic_corpus(tmp_path) is True
     payload = service_standby.readiness_payload()
     assert payload["components"]["graph_snapshot"] == "ready"
+    assert payload["components"]["semantic_corpus"] == "ready"
     assert payload["cutover_ready"] is True
     assert service_standby.waiting_component() is None
 
@@ -67,6 +79,18 @@ def test_an_unprovable_snapshot_leaves_the_component_waiting(monkeypatch, tmp_pa
     readiness.mark_ready("lexical")
     assert service_standby.prove_graph_snapshot(tmp_path) is False
     assert service_standby.readiness_payload()["cutover_ready"] is False
+
+
+def _stub_corpus(monkeypatch, *, ok=True):
+    """Stand in for the semantic corpus build; its read-only-ness is pinned separately."""
+    from exomem import semantic_contract
+
+    def _build(_root, *_a, **_kw):
+        if not ok:
+            raise RuntimeError("corpus build failed")
+        return None
+
+    monkeypatch.setattr(semantic_contract, "build_corpus_context", _build, raising=True)
 
 
 def _stub_adoption(monkeypatch, *, adopted=True, residue=(), reason="adopted"):
@@ -111,7 +135,10 @@ def test_a_standby_takes_no_lease_and_starts_no_scheduler_until_promotion(
     assert activation.released is True
     assert service_standby.promoted() is True
     assert record["snapshot"] == "current"
-    assert record["reproved"] is True
+    # No migration ran, so promotion compared the checkpoint pair rather than
+    # re-running the source proof. The record says which happened.
+    assert record["revalidated"] is True
+    assert record["reproved"] is False
 
 
 def test_promotion_records_a_checkpoint_that_moved_under_the_standby(
@@ -128,7 +155,8 @@ def test_promotion_records_a_checkpoint_that_moved_under_the_standby(
     service_standby.prove_graph_snapshot(tmp_path)
     record = service_standby.promote(tmp_path, migrated=False)
     assert record["snapshot"] == "advanced"
-    assert record["reproved"] is True
+    assert record["revalidated"] is True
+    assert record["reproved"] is False
 
 
 def test_a_declared_migration_re_runs_the_whole_source_proof(
@@ -158,6 +186,9 @@ def test_a_declared_migration_re_runs_the_whole_source_proof(
     assert reproofs == ["reprove"]
     assert record["snapshot"] == "current"
     assert record["migrated"] is True
+    # The migrator ran, so this branch really did re-run the whole source proof.
+    assert record["reproved"] is True
+    assert record["revalidated"] is True
 
 
 def test_a_failed_reproof_promotes_anyway_and_records_the_rebuild(
@@ -218,15 +249,20 @@ def test_readiness_payload_is_absent_outside_standby_and_present_after_promotion
     monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
     monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
     _stub_adoption(monkeypatch)
+    _stub_corpus(monkeypatch)
     assert service_standby.readiness_payload()["standby"] is False
     service_standby.enter_standby()
     readiness.mark_ready("lexical")
     service_standby.register_activation(_Activation())
     service_standby.prove_graph_snapshot(tmp_path)
+    service_standby.build_semantic_corpus(tmp_path)
     service_standby.promote(tmp_path, migrated=False)
     payload = service_standby.readiness_payload()
     assert payload["standby"] is False
     assert payload["cutover_ready"] is True
+    # The operator's first look when a cutover is fast but the writes after it
+    # are not: what the promoted worker's warm is entitled to skip.
+    assert payload["carried_from_standby"] == ["graph_handoff", "lexical", "semantic_corpus"]
 
 
 def test_the_real_standby_warm_never_publishes_index_state(monkeypatch, tmp_path: Path) -> None:
@@ -523,3 +559,185 @@ def test_a_clean_promotion_names_no_residue_failure(monkeypatch, tmp_path: Path)
     assert record["residue_applied"] == 0
     assert record["snapshot"] == "current"
     assert "reason" not in record
+
+
+# --- Carrying the standby's warm forward (D7/D9, task 2.8) --------------------
+#
+# The 0.85.0 cutover took 1672.9 ms by the supervisor's clock and one 1.635 s
+# request by the client's, and then the promoted worker refused every governed
+# write for about thirty seconds with `MUTATION_WARMING warming_component=
+# semantic_corpus` while it repeated, in the same process, the warm its own
+# standby had already finished: a second `graph snapshot adoption` at 10:23:03
+# and a 9935.2 ms corpus build whose predecessor cost 8516.1 ms at 10:23:16.
+# A short unavailable window that hands back a process which refuses writes has
+# moved the outage, not removed it. These tests pin the subtraction.
+
+
+def _promote_from_a_complete_standby_warm(monkeypatch, tmp_path: Path):
+    """Reach promotion the way a real standby does: warm, prove, build, promote."""
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch)
+    _stub_corpus(monkeypatch)
+    service_standby.enter_standby()
+    readiness.mark_ready("lexical")
+    readiness.mark_ready("embeddings")
+    service_standby.register_activation(_Activation())
+    service_standby.prove_graph_snapshot(tmp_path)
+    service_standby.build_semantic_corpus(tmp_path)
+    return service_standby.promote(tmp_path, migrated=False)
+
+
+def test_a_promotion_carries_the_standbys_finished_warm_forward(monkeypatch, tmp_path) -> None:
+    record = _promote_from_a_complete_standby_warm(monkeypatch, tmp_path)
+    assert record["snapshot"] == "current"
+    carried = service_standby.carried_warm_components()
+    assert carried == frozenset({"lexical", "embeddings", "semantic_corpus", "graph_handoff"})
+    # Readable after `promote()` returns, which is the whole point: the promoted
+    # worker's own `warm_all` is what reads it, and it starts inside `release()`.
+    assert record["carried_from_standby"] == sorted(carried)
+
+
+def test_a_component_the_standby_never_finished_is_not_carried(monkeypatch, tmp_path) -> None:
+    """Carrying is a claim about work this process did, never about work it skipped."""
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch)
+    _stub_corpus(monkeypatch, ok=False)
+    service_standby.enter_standby()
+    readiness.mark_ready("lexical")
+    service_standby.register_activation(_Activation())
+    service_standby.prove_graph_snapshot(tmp_path)
+    assert service_standby.build_semantic_corpus(tmp_path) is False
+    service_standby.promote(tmp_path, migrated=False)
+    carried = service_standby.carried_warm_components()
+    assert "semantic_corpus" not in carried
+    assert "embeddings" not in carried
+    assert carried == frozenset({"lexical", "graph_handoff"})
+
+
+@pytest.mark.parametrize(
+    ("tokens", "verdict"),
+    [
+        (["checkpoint-1", "checkpoint-2"], "advanced"),
+        (["checkpoint-1", None], "rebuild-after-promotion"),
+    ],
+)
+def test_a_snapshot_that_moved_under_the_standby_carries_no_graph_handoff(
+    monkeypatch, tmp_path: Path, tokens, verdict
+) -> None:
+    """Only a `current` verdict means re-adopting would buy nothing."""
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
+    issued = iter(tokens)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: next(issued))
+    _stub_adoption(monkeypatch)
+    _stub_corpus(monkeypatch)
+    service_standby.enter_standby()
+    readiness.mark_ready("lexical")
+    service_standby.register_activation(_Activation())
+    service_standby.prove_graph_snapshot(tmp_path)
+    service_standby.build_semantic_corpus(tmp_path)
+    record = service_standby.promote(tmp_path, migrated=False)
+    assert record["snapshot"] == verdict
+    carried = service_standby.carried_warm_components()
+    assert "graph_handoff" not in carried
+    # The corpus is still carried: a moved checkpoint says nothing about a
+    # process-local, stat-captioned corpus context.
+    assert "semantic_corpus" in carried
+
+
+def test_a_failed_corpus_build_still_lets_the_upgrade_happen(monkeypatch, tmp_path) -> None:
+    """A control that cannot fix anything must not block everything.
+
+    A corpus build that RAN and failed settles the component. The promoted
+    worker pays the same failing build whether it cut over or cold started, so
+    holding the standby -- and with it every release -- for a defect the
+    standby cannot fix would cost more than it prevents. What it must NOT do is
+    claim the work: a failed build is not carried, so the promoted worker's own
+    warm runs it.
+    """
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch)
+    _stub_corpus(monkeypatch, ok=False)
+    service_standby.enter_standby()
+    readiness.mark_ready("lexical")
+    service_standby.register_activation(_Activation())
+    service_standby.prove_graph_snapshot(tmp_path)
+    assert service_standby.build_semantic_corpus(tmp_path) is False
+
+    assert service_standby.readiness_payload()["cutover_ready"] is True
+    service_standby.promote(tmp_path, migrated=False)
+    assert "semantic_corpus" not in service_standby.carried_warm_components()
+
+
+def test_a_standby_that_never_reached_the_corpus_is_still_discarded(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The other half: unattempted is not settled, so the budget still bites."""
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch)
+    service_standby.enter_standby()
+    readiness.mark_ready("lexical")
+    service_standby.prove_graph_snapshot(tmp_path)
+    assert service_standby.readiness_payload()["cutover_ready"] is False
+    assert service_standby.waiting_component() == "semantic_corpus"
+
+
+def test_an_unpromoted_process_carries_nothing(monkeypatch, tmp_path: Path) -> None:
+    """A cold start reads an empty set, so `warm_all` runs in full as it always has."""
+    assert service_standby.carried_warm_components() == frozenset()
+    _stub_adoption(monkeypatch)
+    _stub_corpus(monkeypatch)
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    service_standby.enter_standby()
+    readiness.mark_ready("lexical")
+    service_standby.prove_graph_snapshot(tmp_path)
+    service_standby.build_semantic_corpus(tmp_path)
+    # Warmed to cutover readiness, but never promoted.
+    assert service_standby.carried_warm_components() == frozenset()
+
+
+def test_the_standbys_corpus_build_writes_nothing_under_the_vault_or_the_state_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A standby owns no state, so every step of its warm must be a read.
+
+    The corpus build is the one this task added, and it is the one most likely
+    to grow a publication later: `build_corpus_context` caches, and a cache is
+    a short walk from a sidecar. This census fails here, on a fixture, rather
+    than on a live cutover where the standby would be writing under a worker
+    that still owns the vault.
+    """
+    import os
+
+    vault = tmp_path / "vault"
+    (vault / "Notes").mkdir(parents=True)
+    (vault / "Notes" / "one.md").write_text("# One\n\nA note.\n", encoding="utf-8")
+    (vault / "Notes" / "two.md").write_text("# Two\n\nAnother, see [[One]].\n", encoding="utf-8")
+    state = tmp_path / "state"
+    state.mkdir()
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+
+    def census(root: Path) -> dict[str, tuple[int, int]]:
+        out: dict[str, tuple[int, int]] = {}
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for name in filenames:
+                path = Path(dirpath) / name
+                try:
+                    st = path.stat()
+                except OSError:
+                    continue
+                out[str(path.relative_to(root))] = (st.st_size, st.st_mtime_ns)
+        return out
+
+    before_vault, before_state = census(vault), census(state)
+    assert service_standby.build_semantic_corpus(vault) is True
+    assert census(vault) == before_vault
+    assert census(state) == before_state

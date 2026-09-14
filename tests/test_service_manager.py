@@ -844,7 +844,9 @@ class _PromotingClient:
     async def post(self, path, json=None):
         self.posted.append((path, json))
         await asyncio.sleep(self.delay)
-        return _FakeResponse(200, {"ok": True, "snapshot": "current", "reproved": True})
+        return _FakeResponse(
+            200, {"ok": True, "snapshot": "current", "revalidated": True, "reproved": False}
+        )
 
     async def get(self, path):
         if path == "/health":

@@ -147,7 +147,8 @@ A worker release is no longer replaced cold. The supervisor first spawns the
 candidate as a **standby** beside the worker that is still serving. The standby
 binds its own private socket, **proves** the maintained lexical catalog current
 read-only, warms the rebuildable in-memory caches, **adopts** the published graph
-snapshot, and loads models when preload is allowed. It takes no writer
+snapshot, builds the semantic corpus context, and loads models when preload is
+allowed. It takes no writer
 lease, publishes nothing, schedules no drain, media or watcher work, and owns no
 descendants. In particular it never reconciles or requests repair of the lexical
 catalog: that is a publication, and the worker still serving is this vault's
@@ -167,9 +168,14 @@ drain plus the promotion, not a cold start.
 {
   "status": "ready",
   "cutover": {
-    "components": {"lexical": "ready", "graph_snapshot": "waiting"},
+    "components": {
+      "lexical": "ready",
+      "graph_snapshot": "waiting",
+      "semantic_corpus": "waiting"
+    },
     "cutover_ready": false,
-    "standby": true
+    "standby": true,
+    "carried_from_standby": []
   }
 }
 ```
@@ -193,6 +199,33 @@ a model preload (`EXOMEM_PRELOAD_MODELS=1`). A standby answers its own probe as
 serving-ready while it warms; `cutover_ready` is what the supervisor polls, and
 `components` is what an operator reads to see which component a candidate is
 waiting on.
+
+`semantic_corpus` is in the set because the gate that admits governed writes
+waits on it. Building it is a read — it walks and parses Markdown and caches in
+memory, takes no lock and publishes nothing — so a standby may do it beside the
+worker that still owns the vault. On the 0.85.0 upgrade it was not in the set:
+the cutover itself took 1.6 s and the promoted worker then refused every
+governed write for about thirty seconds with
+`MUTATION_WARMING warming_component=semantic_corpus` while it built a corpus its
+own standby could have built. A cutover that hands back a worker which refuses
+writes has moved the outage, not removed it.
+
+### What a promoted worker does not repeat
+
+A promoted worker runs its own warm-up, and subtracts from it whatever its
+standby already finished in the same process and promotion either re-verified or
+cannot invalidate. `carried_from_standby` on the `cutover` block and on the
+promotion record names what was subtracted, and the worker's `warm complete` log
+line repeats it. The graph handoff is carried only when promotion re-proved the
+snapshot as `current`; an `advanced`, `unproven` or `rebuild-after-promotion`
+verdict leaves it out and the adoption runs again in full. What remains after a
+carried promotion is the retrieval catalog check and any model the standby's
+preload policy did not load.
+
+A worker that starts cold — no standby, no promotion — carries nothing and runs
+every warm-up step, unchanged. If a cutover is fast but the writes after it are
+slow or refused, `carried_from_standby` is the first field to read: an empty
+list after a promotion means the worker is paying the whole warm again.
 
 ### Budgets
 
@@ -230,7 +263,8 @@ match and the manifest is complete, the step is recorded as skipped:
 ```json
 {"handoff": {"standby": "ready",
              "migration": {"state": "skipped", "reason": "declared_none"},
-             "promotion": {"snapshot": "current", "reproved": true}}}
+             "promotion": {"snapshot": "current",
+                           "revalidated": true, "reproved": false}}}
 ```
 
 `handoff.unavailable_ms` is the window nobody was served in — pause to resume —
@@ -240,6 +274,13 @@ manifest state that was not complete) when it runs. `promotion.snapshot` is
 `advanced` when it moved, and `rebuild-after-promotion` when the re-proof failed
 — in that last case promotion still proceeds and the coalesced rebuild path owns
 the repair.
+
+`promotion.revalidated` says promotion re-checked the snapshot at all;
+`promotion.reproved` says it re-ran the whole source proof, which happens only
+when the migrator ran. Without a migration, promotion compares the checkpoint
+pair instead — a real re-validation against the one writer the sequence has not
+already excluded, and deliberately cheaper, because a full source proof would
+add seconds to the one window this whole sequence exists to shorten.
 
 ### The service environment file
 
