@@ -331,7 +331,10 @@ jobs:
           go install helm.sh/helm/v3/cmd/helm@v${HELM_VERSION}
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Build the platform chart dependencies
-        run: helm dependency build infra/helm/platform
+        run: |
+          helm repo add hcloud https://charts.hetzner.cloud
+          helm repo add traefik https://traefik.github.io/charts
+          helm dependency build infra/helm/platform
       - name: Replay the governance migration and recovery drill on exact K3s
         env:
           RUN_K3S_GOVERNANCE_DRILL_TEST: "1"
