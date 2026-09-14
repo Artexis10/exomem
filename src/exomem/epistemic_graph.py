@@ -2011,6 +2011,79 @@ class EpistemicGraphIndex:
         graph_drain.note_graph_debt()
         return True
 
+    def republish_availability_if_current(self) -> bool:
+        """Restore a withdrawn availability marker once nothing is queued against it.
+
+        Every route that withdraws -- the path-scoped fence, the cold-resolver
+        defer, an adopted residue -- pairs the withdrawal with durable repair,
+        and the drain republishes when it repairs those paths. What nothing
+        covered was the *last* withdrawal: a write that defers after the final
+        drain leaves the marker withdrawn with an empty queue, and no later
+        drain has work to republish it with. Reads then refuse forever, and
+        `graph_drift` reads through a public snapshot the marker gates, so it
+        reports a sidecar that is actually intact as missing or drifted:
+        `graph_state=current queue_remaining=0 drift=1` on the 0.84.1 evidence
+        run, and `available` False with an empty queue in the 1c review probe.
+
+        The proof is adoption's, and it has to be: nothing was re-derived here,
+        so the only honest basis for republishing is that the stored rows still
+        match the Markdown they derive from, with **no** residue at all. A
+        residue means real repair is owed and the marker stays withdrawn for the
+        queue to earn back. Cheap in the ordinary case -- a present marker
+        returns on one metadata read -- and the O(corpus) proof is paid only in
+        the state that is otherwise stuck.
+
+        It never advances the graph_sync acknowledgement. This restores
+        readability of what was already projected; it does not claim a
+        generation was projected that was not.
+        """
+        if not graph_enabled() or not self.path.exists():
+            return False
+        try:
+            conn = self._connect_existing(readonly=True)
+        except sqlite3.Error:
+            return False
+        try:
+            if (
+                conn.execute(
+                    "SELECT 1 FROM graph_meta WHERE key = ?",
+                    (_AVAILABILITY_FRESHNESS_KEY,),
+                ).fetchone()
+                is not None
+            ):
+                return False
+        except sqlite3.Error:
+            return False
+        finally:
+            conn.close()
+        with self._mutation_coordinator.hold(
+            operation="epistemic_graph_republish_availability", holder_kind="graph"
+        ):
+            snapshot = self._open_read_snapshot(require_current_projection=False)
+            if snapshot is None:
+                return False
+            residue: set[str] = set()
+            try:
+                stored_checkpoint = self._stored_recall_checkpoint(snapshot)
+                row = snapshot.execute(
+                    "SELECT value FROM graph_meta WHERE key = ?", (_RESOLVER_TOPOLOGY_KEY,)
+                ).fetchone()
+                proven = self._snapshot_sources_match_disk(
+                    snapshot,
+                    resolver_fingerprint=str(row[0]) if row is not None else None,
+                    residue_out=residue,
+                )
+            finally:
+                snapshot.close()
+            if not proven or residue or stored_checkpoint is None:
+                return False
+            self._publish_available_marker(
+                _incremental_projection_identity(self.vault_root),
+                checkpoint=stored_checkpoint,
+            )
+        log.info("graph availability republished; the repair queue owes nothing")
+        return True
+
     def adopt_published_snapshot(self, *, apply_residue: bool = True) -> SnapshotAdoption:
         """Prove an inherited sidecar and make its checkpoint live for this process.
 

@@ -427,6 +427,137 @@ def test_writes_after_a_worker_replacement_stay_incremental(
     assert _drain_repair_queue(root, live_watcher) == 0, "the graph repair queue never drained"
 
 
+def test_a_governed_write_attributes_time_to_the_graph_incremental_pass(
+    handoff_vault: Path,
+) -> None:
+    """`graph.refresh_paths` has to be on `refresh_paths`, not merely in the file.
+
+    Both existing pins grep the module for the decorator literal, so a decorator
+    that had drifted onto the function inserted beneath it still passed them
+    while the span measured the wrong thing -- an enqueue on the deferral path,
+    and nothing at all on the ordinary one. A span is a measurement, so the pin
+    has to be a measurement.
+    """
+    from exomem import call_spans
+
+    root = handoff_vault
+    call_spans.reset()
+    handle = call_spans.MCP_CALL_TOKEN.set("graph-span-token")
+    try:
+        _governed_write(root, root / GENERATED / "generated-note-0011.md", "span probe")
+        spans = {row["name"]: row for row in call_spans.pop_call_spans("graph-span-token")}
+    finally:
+        call_spans.MCP_CALL_TOKEN.reset(handle)
+        call_spans.reset()
+
+    assert "graph.refresh_paths" in spans, (
+        f"a governed write recorded no graph pass at all: {sorted(spans)}"
+    )
+    assert spans["graph.refresh_paths"]["ms"] > 0, (
+        f"the graph pass measured no time: {spans['graph.refresh_paths']}"
+    )
+
+
+def test_the_graph_converges_readable_under_a_concurrent_writer(
+    handoff_vault: Path,
+) -> None:
+    """`scripts/graph_concurrent_convergence.py` in miniature, for its drift check.
+
+    The harness failed the 0.84.1 evidence run with `graph_state=current
+    queue_remaining=0 drift=1` -- everything converged except the availability
+    marker, and `graph_drift` reads through a public snapshot the marker gates,
+    so an intact sidecar audited as missing or drifted. It reproduced once in
+    eleven local harness runs, which is why the oracle here is the state rather
+    than the harness: a writer running against periodic drains, then convergence,
+    then the three properties that must hold together.
+
+    A pending majority is NOT part of the oracle. The green baseline
+    (`f1212e6f`) reports more pending than completed too: deferral to the queue
+    is the design, and convergence is what makes it honest.
+
+    This shape did not reproduce the race in three runs with the republication
+    disabled, so it is a shape check, not the guard:
+    `test_a_withdrawn_marker_is_republished_when_the_queue_drains_to_zero` is
+    the deterministic one and fails every time without it.
+    """
+    root = handoff_vault
+    generated = root / GENERATED
+    stop = threading.Event()
+    failures: list[BaseException] = []
+
+    def write_forever() -> None:
+        index = 0
+        while not stop.is_set():
+            try:
+                _governed_write(
+                    root, generated / f"generated-note-{index % 20:04d}.md", f"concurrent {index}"
+                )
+            except BaseException as error:  # noqa: BLE001 - reported, never swallowed
+                failures.append(error)
+                return
+            index += 1
+
+    writer = threading.Thread(target=write_forever, daemon=True)
+    writer.start()
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            index_sync.drain_graph_work(root, limit=64)
+            time.sleep(0.3)
+    finally:
+        stop.set()
+        writer.join(30)
+
+    assert not failures, f"the concurrent writer failed: {failures[0]!r}"
+    assert _drain_graph_queue(root) == 0, "the graph repair queue never converged"
+
+    assert EpistemicGraphIndex(root).available() is True, (
+        "the graph converged with an empty queue and stayed fenced, so every "
+        "read refuses and the drift audit reports a sidecar that is intact"
+    )
+    assert epistemic_graph.graph_drift(root) == [], (
+        "a converged graph whose rows match disk must audit as clean"
+    )
+
+
+def test_a_withdrawn_marker_is_republished_when_the_queue_drains_to_zero(
+    handoff_vault: Path,
+) -> None:
+    """A withdrawal with nothing queued against it has nobody left to earn it back.
+
+    Every route that withdraws pairs the withdrawal with durable repair, and the
+    drain republishes when it repairs those paths. What nothing covered is the
+    last withdrawal: a write that defers *after* the final drain leaves the
+    marker withdrawn with an empty queue, and no later drain has work to
+    republish it with. `graph_drift` reads through a public snapshot, which the
+    marker gates, so it then reports the sidecar as missing or drifted -- which
+    is what the convergence harness saw on the 0.84.1 evidence run:
+    `graph_state=current queue_remaining=0 drift=1`.
+    """
+    root = handoff_vault
+    index = EpistemicGraphIndex(root)
+    assert index.available() is True
+    assert epistemic_graph.graph_drift(root) == []
+
+    index._mark_unavailable()
+    assert EpistemicGraphIndex(root).available() is False
+    assert deferred_index.list_graph_paths(root) == [], (
+        "the stuck state is a withdrawal with NOTHING queued; a queued path "
+        "would be repaired by the ordinary drain and prove nothing here"
+    )
+
+    index_sync.drain_graph_work(root, limit=64)
+
+    assert EpistemicGraphIndex(root).available() is True, (
+        "the drain left the graph fenced with an empty queue, so nothing will "
+        "ever republish it: reads refuse and the drift audit reports a sidecar "
+        "that is actually intact"
+    )
+    assert epistemic_graph.graph_drift(root) == [], (
+        "a graph whose rows match disk must not read as drifted"
+    )
+
+
 def test_a_write_under_a_mark_on_its_own_paths_is_queued_repair(
     live_handoff_vault: Path,
     live_watcher: file_watcher.FileWatcher,
@@ -479,8 +610,20 @@ def test_a_write_under_a_mark_on_its_own_paths_is_queued_repair(
 
     monkeypatch.setattr(epistemic_graph, "upsert_after_write", recorded, raising=True)
 
+    # One warm-up write, for the reason the convergence harness runs two: this
+    # fixture publishes its graph through `rebuild_all`, which leaves no
+    # `graph_sync` lineage, so the first write to take the predecessor probe
+    # answers `graph_sync_predecessor_present_at_genesis` -- a proven verdict
+    # about a fixture, not about the door under test. Consuming it here keeps
+    # the per-write oracle below exact instead of carrying an exception.
+    _governed_write(root, generated / "generated-note-0050.md", "warm-up")
+    index_sync.drain_graph_work(root, limit=64)
+    outcomes.clear()  # the warm-up's own outcome is fixture setup, not evidence
+
     acknowledgements: list[float] = []
     queued_after_write: list[bool] = []
+    per_write_rebuilds: list[int] = []
+    captured: list[str] = []
     for i in range(LIVE_WRITE_COUNT):
         target = generated / f"generated-note-{i:04d}.md"
         # An unattributed edit to the path this write is about to touch, and
@@ -490,18 +633,36 @@ def test_a_write_under_a_mark_on_its_own_paths_is_queued_repair(
         assert freshness.external_pending_for(root, [target]), (
             "the probe's premise is a mark on the write's own path at dispatch"
         )
+        # Cleared per write so the rebuild count below is attributable to this
+        # write's own dispatch rather than to the whole run. A running watcher
+        # dispatches too, so the window is the honest bound rather than a proof
+        # of authorship -- which is why the aggregate assertions below still
+        # read the whole log.
+        caplog.clear()
         acknowledgements.append(_governed_write(root, target, f"governed {i}"))
+        per_write_rebuilds.append(
+            caplog.text.count("graph dispatch registered a whole-vault rebuild")
+        )
         queued_after_write.append(bool(deferred_index.list_graph_paths(root)))
         # What the graph drain daemon does in production, on the same cadence.
         index_sync.drain_graph_work(root, limit=64)
+        captured.append(caplog.text)
 
+    log_text = "".join(captured)
     rendered = [round(seconds, 2) for seconds in acknowledgements]
-    fenced = caplog.text.count("reason=external_event_covers_these_paths")
+    # The structural oracle for "a rebuild per write", which is what the median
+    # latency bound below can only infer. Timing says a write was cheap; this
+    # says no whole-vault pass was scheduled on its account at all.
+    assert per_write_rebuilds == [0] * LIVE_WRITE_COUNT, (
+        f"whole-vault rebuilds registered per write: {per_write_rebuilds}, "
+        f"acknowledgements {rendered}"
+    )
+    fenced = log_text.count("reason=external_event_covers_these_paths")
     assert fenced >= 1, (
         "the probe's premise never held: no write dispatched under a mark on "
         "its own paths, so this proves nothing"
     )
-    uncovered = caplog.text.count("incremental_refresh_deferred_without_queue_coverage")
+    uncovered = log_text.count("incremental_refresh_deferred_without_queue_coverage")
     assert uncovered == 0, (
         f"{uncovered} governed writes deferred without queue coverage and "
         f"registered a whole-vault rebuild: {rendered}. The fence describes this "
@@ -509,7 +670,7 @@ def test_a_write_under_a_mark_on_its_own_paths_is_queued_repair(
     )
     registered = [
         line.split("reason=", 1)[1].split(" ", 1)[0]
-        for line in caplog.text.splitlines()
+        for line in log_text.splitlines()
         if "graph dispatch registered a whole-vault rebuild" in line
     ]
     assert set(registered) <= {"graph_sync_predecessor_present_at_genesis"}, (
