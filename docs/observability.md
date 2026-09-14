@@ -71,7 +71,7 @@ the durable queue and a drain will converge them, `GRAPH_SYNC_REBUILD_IN_PROGRES
 when a whole-vault pass is running. Both are healthy. Neither requires rereading
 the written note or running maintenance.
 
-Behind that terminal the dispatch chose one of four repairs, and the log says
+Behind that terminal the dispatch chose one of five repairs, and the log says
 which:
 
 - `graph dispatch routed an unreadable predecessor to incremental repair` — the
@@ -96,6 +96,14 @@ which:
   same line with `unscoped=True` is the watcher's fail-closed default, which
   names no affected set at all; that one still rebuilds, and the rebuild line
   below says so.
+- `graph dispatch routed a receipt-covered lineage gap to incremental repair` —
+  the sidecar's acknowledgement is behind this write's checkpoint, and every
+  generation it skipped is already on the durable repair queue (the preceding
+  `graph lineage gap is covered by durable receipts` line says how many). The
+  gap is real; the claim that nothing is converging it is not. The write takes
+  the incremental path and queues its own paths; the dispatch outcome is
+  `graph_repair_covered_gap`, and the acknowledgement is never advanced on a
+  promise. No whole-vault pass runs.
 - `graph dispatch registered a whole-vault rebuild reason=…` — a proven verdict:
   `graph_sync_predecessor_mismatch` or `…_absent` (the sidecar's acknowledgement
   is genuinely not this checkpoint's predecessor) or `graph_sync_snapshot_unusable`

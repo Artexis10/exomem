@@ -1084,6 +1084,17 @@ def reset_publication_holds() -> None:
         _SIDECAR_READERS_CHANGED.notify_all()
 
 
+def reset_republish_backoff() -> None:
+    """Test seam: forget every refused availability proof's backoff window.
+
+    Process-wide and keyed by canonical vault path, like the publication holds
+    above, so a test that leaves a refusal behind does not silently skip the
+    proof in the next one.
+    """
+    with _REPUBLISH_BACKOFF_LOCK:
+        _REPUBLISH_BACKOFF.clear()
+
+
 # --- Preserved-temporary reaping (contract R3) -----------------------------
 
 PRESERVED_TEMPORARY_LIMIT = 1
@@ -2088,7 +2099,10 @@ class EpistemicGraphIndex:
         if freshness.external_pending(self.vault_root):
             # The watcher owns that repair and republishes through its own
             # route when it lands. Proving here would spend the whole corpus to
-            # reach a refusal that is already known.
+            # reach a refusal that is already known. A watcher that is dead or
+            # exhausted does not strand the graph on this: the drain daemon's
+            # availability arm falls through to `_request_full_rebuild`, so an
+            # unreadable graph nobody is repairing still gets its repair.
             return False
         if not self._republish_attempt_due():
             return False
@@ -2122,10 +2136,19 @@ class EpistemicGraphIndex:
         log.info("graph availability republished; the repair queue owes nothing")
         return True
 
+    def _republish_backoff_key(self) -> str:
+        """The canonical vault path, so two spellings are one entry.
+
+        `EpistemicGraphIndex` does not resolve its root, so `/tmp/x` and a
+        symlinked `/private/tmp/x` would otherwise keep separate backoff windows
+        for the same sidecar and each pay the proof.
+        """
+        return freshness._canon(self.vault_root)
+
     def _republish_attempt_due(self) -> bool:
         """Whether a refused proof's backoff window has expired."""
         with _REPUBLISH_BACKOFF_LOCK:
-            entry = _REPUBLISH_BACKOFF.get(str(self.vault_root))
+            entry = _REPUBLISH_BACKOFF.get(self._republish_backoff_key())
             return entry is None or time.monotonic() >= entry[0]
 
     def _note_republish_refused(self) -> None:
@@ -2133,17 +2156,18 @@ class EpistemicGraphIndex:
         from . import graph_drain
 
         with _REPUBLISH_BACKOFF_LOCK:
-            entry = _REPUBLISH_BACKOFF.get(str(self.vault_root))
+            key = self._republish_backoff_key()
+            entry = _REPUBLISH_BACKOFF.get(key)
             interval = (
                 graph_drain.RETRY_SECONDS
                 if entry is None
                 else min(graph_drain.MAX_RETRY_SECONDS, entry[1] * 2)
             )
-            _REPUBLISH_BACKOFF[str(self.vault_root)] = (time.monotonic() + interval, interval)
+            _REPUBLISH_BACKOFF[key] = (time.monotonic() + interval, interval)
 
     def _clear_republish_backoff(self) -> None:
         with _REPUBLISH_BACKOFF_LOCK:
-            _REPUBLISH_BACKOFF.pop(str(self.vault_root), None)
+            _REPUBLISH_BACKOFF.pop(self._republish_backoff_key(), None)
 
     def adopt_published_snapshot(self, *, apply_residue: bool = True) -> SnapshotAdoption:
         """Prove an inherited sidecar and make its checkpoint live for this process.
@@ -3913,6 +3937,12 @@ class EpistemicGraphIndex:
         * `graph_sync_predecessor_mismatch` / `..._absent` -- the sidecar was
           read and its acknowledgement genuinely is not this checkpoint's
           predecessor. That is a real lineage gap and a rebuild is the repair.
+        * `graph_sync_gap_covered_by_receipts` -- the acknowledgement is behind,
+          and every generation it skipped is already queued as durable repair
+          (task 1.13). The gap is real; what is not real is the claim that
+          nothing is converging it. Routed to the incremental path, which
+          defers and queues without publishing over the gap -- the
+          acknowledgement is never advanced on a promise.
         """
         snapshot = self._open_read_snapshot(require_current_projection=False)
         if snapshot is None:
@@ -3938,8 +3968,64 @@ class EpistemicGraphIndex:
         if acknowledged is None:
             return "graph_sync_acknowledgement_absent"
         if acknowledged.generation != predecessor:
+            if self._lineage_gap_is_receipt_covered(
+                int(acknowledged.generation), int(checkpoint.generation)
+            ):
+                return "graph_sync_gap_covered_by_receipts"
             return "graph_sync_predecessor_mismatch"
         return "available"
+
+    def _lineage_gap_is_receipt_covered(self, acknowledged: int, required: int) -> bool:
+        """Whether every generation the sidecar skipped is queued as durable repair.
+
+        The alternative to a whole-vault rebuild that does not require lying
+        about lineage (`seamless-managed-worker-handoff` D2, task 1.13). A
+        deferral publishes nothing, so the acknowledgement stays where it was
+        and the next write's probe sees a gap -- real, and self-inflicted. The
+        honest way to close it is to *prove* the gap is covered from the durable
+        artifact, not to advance an acknowledgement nothing projected.
+
+        The proof is per generation, because that is what the queue records: a
+        canonical batch enqueues its own changed and created paths under the
+        generation it commits, and every deferral route enqueues under the
+        generation it was owed for. A generation present in the queue therefore
+        has its whole path set queued -- the same coverage claim the enqueue
+        already had to make to report `queued` at all.
+
+        Fail-closed on everything it cannot see. A skipped generation with no
+        receipts is a real divergence. A single receipt that cannot say what it
+        owes -- a row written before the column existed, or by a caller with no
+        checkpoint -- makes the whole queue unusable as evidence rather than
+        something to reason around. And an unscoped external mark states that
+        the affected set is unknown, which no path-keyed queue can cover.
+        """
+        if required - 1 <= acknowledged:
+            # Not a gap this can close: the acknowledgement is level or ahead.
+            return False
+        if freshness.external_pending_unscoped(self.vault_root):
+            return False
+        try:
+            known, unknown = deferred_index.graph_receipt_generations(self.vault_root)
+        except Exception:  # noqa: BLE001 - an unreadable queue proves nothing
+            log.warning("graph receipt generations unreadable", exc_info=True)
+            return False
+        if unknown:
+            return False
+        missing = [
+            generation
+            for generation in range(acknowledged + 1, required)
+            if generation not in known
+        ]
+        if missing:
+            return False
+        log.info(
+            "graph lineage gap is covered by durable receipts acknowledged=%d "
+            "required=%d generations=%d",
+            acknowledged,
+            required,
+            required - 1 - acknowledged,
+        )
+        return True
 
     def _graph_sync_predecessor_available(
         self, checkpoint: graph_sync.GraphSyncCheckpoint
@@ -7696,6 +7782,18 @@ def upsert_after_write(
         if required is not None and not index.available():
             predecessor_state = index._graph_sync_predecessor_state(required)
             unreadable = predecessor_state == "graph_sync_predecessor_unreadable"
+            covered_gap = predecessor_state == "graph_sync_gap_covered_by_receipts"
+            if covered_gap:
+                # Task 1.13. The gap is real and the rebuild is not the repair:
+                # the queue already holds every generation it skipped, and the
+                # incremental path below defers and queues this write's own
+                # paths without publishing over the gap.
+                log.info(
+                    "graph dispatch routed a receipt-covered lineage gap to incremental "
+                    "repair external_pending=%s generation=%s",
+                    freshness.external_pending(vault_root),
+                    required.generation,
+                )
             if unreadable:
                 # `seamless-managed-worker-handoff` D2. A declined read of a
                 # structurally intact sidecar says nothing about lineage, so it
@@ -7711,7 +7809,7 @@ def upsert_after_write(
                     freshness.external_pending(vault_root),
                     required.generation,
                 )
-            if predecessor_state != "available" and not unreadable:
+            if predecessor_state != "available" and not unreadable and not covered_gap:
                 # #576 F3, applied to the gate the incremental table does not
                 # cover. `fallback()` logs which of the nine bail-out reasons
                 # fired; this door precedes `refresh_paths` entirely, so
@@ -7755,6 +7853,15 @@ def upsert_after_write(
                     # this decision exists to remove.
                     return GraphDispatchResult(
                         "deferred", "graph_repair_unreadable_predecessor", required
+                    )
+                if covered_gap and report.get("queued"):
+                    # D2's contract bend again, for the same reason and with its
+                    # own code: the queue is proven to hold every generation
+                    # this sidecar skipped as well as this write's own paths, so
+                    # a standalone caller is told pending rather than made to
+                    # pay the whole-vault pass task 1.13 exists to remove.
+                    return GraphDispatchResult(
+                        "deferred", "graph_repair_covered_gap", required
                     )
                 if report.get("external_pending") and report.get("queued"):
                     # The fence door, with its own code for D2's reason: the

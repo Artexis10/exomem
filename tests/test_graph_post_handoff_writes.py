@@ -522,6 +522,7 @@ def test_a_refused_availability_proof_backs_off_instead_of_running_every_tick(
     drain.
     """
     root = handoff_vault
+    epistemic_graph.reset_republish_backoff()
     _strand_the_marker(root)
     # Residue: bytes on disk the sidecar has not indexed, so the proof refuses.
     stale = root / GENERATED / "generated-note-0009.md"
@@ -810,6 +811,146 @@ def test_a_write_under_a_mark_on_its_own_paths_is_queued_repair(
     )
     _assert_incremental_latency(acknowledgements, bound=LIVE_ACK_BOUND_SECONDS)
     assert _drain_repair_queue(root, live_watcher) == 0, "the graph repair queue never drained"
+
+
+def test_writes_faster_than_the_drain_stay_incremental_on_a_covered_gap(
+    live_handoff_vault: Path,
+    live_watcher: file_watcher.FileWatcher,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The rate the drain mitigation could not cover, which task 1.13 closes.
+
+    A deferral publishes nothing, so the acknowledgement stays where it was and
+    the next write's predecessor probe sees a gap. With a drain between writes
+    the gap is closed before the next one dispatches; at a batch-ingest rate it
+    is not, and the gap returned per write -- measured at six whole-vault
+    rebuilds across six writes when nothing drained between them.
+
+    The gap is real. What was not real is the claim that nothing is converging
+    it: the canonical batch enqueued its own paths under the generation it
+    committed, so the queue holds every generation the sidecar skipped. The
+    probe proves that from the durable artifact and routes to the incremental
+    path, which defers and queues without ever advancing the acknowledgement.
+    """
+    root = live_handoff_vault
+    generated = root / GENERATED
+    caplog.set_level("INFO", logger="exomem.epistemic_graph")
+
+    # The fixture publishes through `rebuild_all` and leaves no graph_sync
+    # lineage, so the first write to take the probe answers at genesis. Consume
+    # it here, as the convergence harness consumes its own warm-up writes.
+    _governed_write(root, generated / "generated-note-0050.md", "warm-up")
+    index_sync.drain_graph_work(root, limit=64)
+
+    outcomes: list[epistemic_graph.GraphDispatchResult] = []
+    real_dispatch = epistemic_graph.upsert_after_write
+
+    def recorded(vault_root: Path, paths: list[Path], **kwargs: object):
+        result = real_dispatch(vault_root, paths, **kwargs)
+        outcomes.append(result)
+        return result
+
+    monkeypatch.setattr(epistemic_graph, "upsert_after_write", recorded, raising=True)
+
+    acknowledgements: list[float] = []
+    per_write_rebuilds: list[int] = []
+    captured: list[str] = []
+    for i in range(LIVE_WRITE_COUNT):
+        target = generated / f"generated-note-{i:04d}.md"
+        _external_edit(live_watcher, target, f"external editor touch {i}")
+        caplog.clear()
+        acknowledgements.append(_governed_write(root, target, f"governed {i}"))
+        per_write_rebuilds.append(
+            caplog.text.count("graph dispatch registered a whole-vault rebuild")
+        )
+        captured.append(caplog.text)
+        # Deliberately no drain: this is the rate the mitigation does not reach.
+
+    log_text = "".join(captured)
+    rendered = [round(seconds, 2) for seconds in acknowledgements]
+    assert per_write_rebuilds == [0] * LIVE_WRITE_COUNT, (
+        f"whole-vault rebuilds registered per write: {per_write_rebuilds}, "
+        f"acknowledgements {rendered}"
+    )
+    assert "graph lineage gap is covered by durable receipts" in log_text, (
+        "no write proved its gap covered, so this shape never reached the door "
+        f"it is about: {[result.code for result in outcomes]}"
+    )
+    codes = [result.code for result in outcomes]
+    assert set(codes) <= {
+        "graph_repair_covered_gap",
+        "graph_repair_external_pending",
+        "graph_repair_queued",
+        "incremental_completed",
+    }, f"a write reported something other than queued coverage: {codes}"
+    _assert_incremental_latency(acknowledgements, bound=LIVE_ACK_BOUND_SECONDS)
+    assert _drain_repair_queue(root, live_watcher) == 0, "the graph repair queue never drained"
+    # The graph stays fenced here, and owes nothing else: six unattributed
+    # edits went unrepaired because nothing drained between the writes, and
+    # D1/D3 is that reads refuse while any external path is unrepaired. The
+    # republication proof defers to the watcher for exactly that reason rather
+    # than spending the corpus to reach a refusal it can already name. What
+    # this shape is about is the write path, and the marker's own recovery is
+    # pinned by `test_a_withdrawn_marker_is_republished_when_the_queue_drains_to_zero`
+    # and by the drain-between-writes test above, both of which settle first.
+    assert freshness.external_pending_paths(root), (
+        "no unattributed edit was left outstanding, so this is not the rate "
+        "shape it claims to be"
+    )
+
+
+def test_a_stale_receipt_does_not_bless_a_real_divergence(handoff_vault: Path) -> None:
+    """Coverage is per generation, and an older one is repair for older bytes."""
+    root = handoff_vault
+    index = EpistemicGraphIndex(root)
+    deferred_index.clear_graph(root)
+    deferred_index.add_graph_receipts(
+        root, [f"{GENERATED}/generated-note-0001.md"], generation=4
+    )
+
+    assert index._lineage_gap_is_receipt_covered(4, 8) is False, (
+        "a receipt at generation 4 cannot vouch for generations 5, 6 and 7"
+    )
+    for generation in (5, 6, 7):
+        deferred_index.add_graph_receipts(
+            root, [f"{GENERATED}/generated-note-{generation:04d}.md"], generation=generation
+        )
+    assert index._lineage_gap_is_receipt_covered(4, 8) is True
+
+
+def test_an_unknown_generation_receipt_does_not_bless_a_gap(handoff_vault: Path) -> None:
+    """A receipt that cannot say what it owes is not evidence about anything."""
+    root = handoff_vault
+    index = EpistemicGraphIndex(root)
+    deferred_index.clear_graph(root)
+    for generation in (5, 6):
+        deferred_index.add_graph_receipts(
+            root, [f"{GENERATED}/generated-note-{generation:04d}.md"], generation=generation
+        )
+    assert index._lineage_gap_is_receipt_covered(4, 7) is True
+
+    deferred_index.add_graph_receipts(root, [f"{GENERATED}/generated-note-0030.md"])
+    assert index._lineage_gap_is_receipt_covered(4, 7) is False, (
+        "one row with no generation makes the whole queue unusable as evidence"
+    )
+
+
+def test_an_unscoped_external_mark_is_not_coverable_by_a_path_queue(
+    handoff_vault: Path,
+) -> None:
+    """An unknown affected set is the one thing a path-keyed queue cannot cover."""
+    root = handoff_vault
+    index = EpistemicGraphIndex(root)
+    deferred_index.clear_graph(root)
+    for generation in (5, 6):
+        deferred_index.add_graph_receipts(
+            root, [f"{GENERATED}/generated-note-{generation:04d}.md"], generation=generation
+        )
+    assert index._lineage_gap_is_receipt_covered(4, 7) is True
+
+    freshness.mark_external_pending(root)
+    assert index._lineage_gap_is_receipt_covered(4, 7) is False
 
 
 def test_a_write_dispatched_behind_an_unrepaired_mark_stays_incremental(
