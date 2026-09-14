@@ -129,7 +129,7 @@ if exomem_service_is_managed "$UNIT_FILE"; then
     fi
     # The handoff record is how the operator sees whether the replacement warmed
     # as a standby and whether the offline migrator ran.
-    printf '%s' "$RESULT" | "$VENV_PYTHON" -c 'import json,sys; s=json.load(sys.stdin); h=(s.get("handoff") or (s.get("last_transition") or {}).get("handoff")) or {}; m=h.get("migration") or {}; p=h.get("promotion") or {}; print("Handoff: standby={} migration={}({}) snapshot={} unavailable_ms={}{}".format(h.get("standby","unknown"), m.get("state","unknown"), m.get("reason",""), p.get("snapshot","n/a"), h.get("unavailable_ms","n/a"), "" if h.get("standby") != "discarded" else "; waited on " + str(h.get("waiting")))) if h else None' \
+    printf '%s' "$RESULT" | "$VENV_PYTHON" -c 'import json,sys; s=json.load(sys.stdin); h=(s.get("handoff") or (s.get("last_transition") or {}).get("handoff")) or {}; m=h.get("migration") or {}; p=h.get("promotion") or {}; print("Handoff: standby={} migration={}({}) snapshot={} unavailable_ms={}{}".format(h.get("standby","unknown"), m.get("state","unknown"), m.get("reason",""), p.get("snapshot","n/a") + ("(" + p["reason"] + ")" if p.get("reason") else ""), h.get("unavailable_ms","n/a"), "" if h.get("standby") != "discarded" else "; waited on " + str(h.get("waiting")))) if h else None' \
         || echo "Handoff: this supervisor predates the standby sequence"
     echo "Managed serving version: $SERVED"
     exit 0

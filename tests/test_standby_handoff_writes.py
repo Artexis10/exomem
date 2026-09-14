@@ -206,11 +206,13 @@ def checkpoint_wals():
         except sqlite3.Error:
             continue
         try:
-            connection.execute("PRAGMA wal_checkpoint(FULL)")
-        except sqlite3.Error:
-            pass
+            row = connection.execute("PRAGMA wal_checkpoint(FULL)").fetchone()
         finally:
             connection.close()
+        # (busy, log, checkpointed): a busy checkpoint leaves the log unmerged,
+        # which is exactly the blind spot this function exists to close. Fail
+        # loudly rather than let the probe pass for the wrong reason.
+        assert row is not None and row[0] == 0, f"wal checkpoint busy for {{path.name}}: {{row}}"
 
 
 def fingerprint():

@@ -376,7 +376,7 @@ def test_the_lease_is_acquired_before_the_residue_is_enqueued(
     monkeypatch.setattr(
         service_standby,
         "_apply_residue",
-        lambda root, adoption: order.append("residue") or 1,
+        lambda root, adoption: (order.append("residue") or 1, ""),
     )
     _stub_adoption(monkeypatch, residue=("Knowledge Base/Notes/a.md",))
     service_standby.enter_standby()
@@ -401,7 +401,7 @@ def test_a_migrated_promotion_reports_the_residue_the_reproof_found(
     monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
     monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
     monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
-    monkeypatch.setattr(service_standby, "_apply_residue", lambda root, adoption: 2)
+    monkeypatch.setattr(service_standby, "_apply_residue", lambda root, adoption: (2, ""))
     _stub_adoption(monkeypatch)
     service_standby.enter_standby()
     service_standby.register_activation(_Activation())
@@ -417,3 +417,66 @@ def test_a_migrated_promotion_reports_the_residue_the_reproof_found(
     )
     service_standby.promote(tmp_path, migrated=True)
     assert service_standby.adoption_record() == {"residue": 2, "reason": "adopted"}
+
+
+def test_a_residue_that_could_not_be_enqueued_is_named_not_silently_dropped(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Three outcomes, three records.
+
+    "Nothing owed", "repair queued" and "repair we failed to queue" produced the
+    same `residue_applied: 0` / `snapshot: current`, so an upgrade that silently
+    lost its repair looked exactly like a clean one. The cold path keeps that
+    distinction as `residue_enqueue_failed`; this path has to as well.
+    """
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+
+    for failure in ("refused", "raised"):
+        service_standby.reset_for_tests()
+        readiness.reset()
+        _stub_adoption(monkeypatch, residue=("Knowledge Base/Notes/a.md",))
+
+        def _enqueue(self, residue, mode=failure):
+            if mode == "raised":
+                raise RuntimeError("deferred index unavailable")
+            return False
+
+        from exomem import epistemic_graph
+
+        monkeypatch.setattr(
+            epistemic_graph.EpistemicGraphIndex,
+            "apply_adopted_residue",
+            _enqueue,
+            raising=True,
+        )
+        activation = _Activation()
+        service_standby.enter_standby()
+        service_standby.register_activation(activation)
+        service_standby.prove_graph_snapshot(tmp_path)
+
+        record = service_standby.promote(tmp_path, migrated=False)
+
+        assert record["residue_applied"] == 0, failure
+        assert record["snapshot"] == "rebuild-after-promotion", failure
+        assert record["reason"] == "residue_enqueue_failed", failure
+        # The worker still serves: the coalesced rebuild owns the repair.
+        assert service_standby.promoted() is True, failure
+        assert activation.released is True, failure
+
+
+def test_a_clean_promotion_names_no_residue_failure(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch)
+    service_standby.enter_standby()
+    service_standby.register_activation(_Activation())
+    service_standby.prove_graph_snapshot(tmp_path)
+
+    record = service_standby.promote(tmp_path, migrated=False)
+
+    assert record["residue_applied"] == 0
+    assert record["snapshot"] == "current"
+    assert "reason" not in record

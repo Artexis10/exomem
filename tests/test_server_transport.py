@@ -247,7 +247,13 @@ def test_managed_worker_socket_preserves_public_auth_intent(fake_mcp, monkeypatc
     )
     socket_path = tmp_path / "worker.sock"
     server.run(transport="streamable-http", host="0.0.0.0", worker_socket=socket_path)
-    assert requested == [{"require_auth": True}]
+    assert len(requested) == 1
+    # The point of this test: binding a private UDS must not turn a public bind
+    # into unauthenticated local MCP.
+    assert requested[0]["require_auth"] is True
+    # The socket reaches `build_server` because the promotion control route is
+    # registered only for a worker bound to the supervisor's private socket.
+    assert requested[0]["worker_socket"] == socket_path
     call = fake_mcp.calls[0]
     assert call["stateless_http"] is True
     assert call["host"] == "0.0.0.0"

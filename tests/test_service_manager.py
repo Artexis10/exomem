@@ -899,3 +899,56 @@ def test_a_migrated_promotion_gets_the_cutover_budget_not_a_ten_second_cap(
     # Without a migration the call only acquires ownership, so it keeps the
     # tight cap that surfaces an unresponsive candidate quickly.
     assert plain_budget <= 10
+
+
+class _NeverReadyClient(_PromotingClient):
+    """Promotion is accepted; readiness never arrives inside the budget."""
+
+    async def get(self, path):
+        if path == "/health":
+            return _FakeResponse(200, {"version": "1.2.3"})
+        return _FakeResponse(503, {"status": "not_ready"})
+
+
+def test_a_promotion_accepted_before_a_readiness_timeout_is_not_thrown_away(
+    tmp_path, monkeypatch
+):
+    """A promoted worker that has not answered yet is not a spare candidate.
+
+    On the migrated path the promote POST can consume most of the cutover
+    budget, leaving the readiness wait almost none. The process on the other end
+    already holds the writer lease by then, so the failure has to say the
+    handover happened and the runtime has to track it as the serving worker --
+    otherwise recovery stops the wrong tree and the record loses the one fact
+    that distinguishes a restart from a rollback.
+    """
+    module = _manager()
+    monkeypatch.setattr(module, "_descendants", lambda **kwargs: {})
+
+    async def scenario():
+        runtime = module.WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1)
+        runtime.standby = _FakeChild()
+        runtime.standby_client = _NeverReadyClient()
+        original_socket = runtime.socket_path
+        with pytest.raises(RuntimeError, match="readiness"):
+            await runtime.promote_standby(migrated=True, timeout=0.3)
+        # Promotion was accepted, and is retained for the handoff record.
+        assert runtime.promotion_record["snapshot"] == "current"
+        # Ownership moved: this is the serving worker now, not a standby.
+        assert runtime.standby is None
+        assert runtime.child is not None
+        assert runtime.socket_path != original_socket
+
+    asyncio.run(scenario())
+
+
+def test_a_failed_transition_reports_a_promotion_that_had_already_been_accepted(tmp_path):
+    async def scenario():
+        manager, ingress, runtime, target = _standby_supervisor(tmp_path)
+        runtime.standby_failure = "promote"
+        runtime.promotion_record = {"ok": True, "snapshot": "current"}
+        result = await manager.upgrade(target)
+        assert result["ok"] is False
+        assert result["handoff"]["promotion"] == {"ok": True, "snapshot": "current"}
+
+    asyncio.run(scenario())

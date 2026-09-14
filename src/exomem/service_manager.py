@@ -505,6 +505,12 @@ class Supervisor:
                 self.phase = "recovery-required"
                 self.ingress.unavailable()
                 await self._discard_standby(standby)
+                # A promotion that was accepted before the failure is the single
+                # most useful fact for whoever resumes: it says the state was
+                # handed over, so the next start is a restart, not a rollback.
+                promotion = getattr(self.runtime, "promotion_record", None)
+                if promotion is not None:
+                    handoff["promotion"] = promotion
                 # Error text from subprocesses can contain configuration or
                 # vault content. Retain phase and identity, not arbitrary text.
                 self.records.phase("failed", worker_pid=self.runtime.pid)
@@ -514,11 +520,13 @@ class Supervisor:
                     return {
                         "ok": False,
                         "error": "upgrade failed; owned process exit is unproven; resume required",
+                        "handoff": handoff,
                     }
                 self.records.phase("failed", worker_pid=0)
                 return {
                     "ok": False,
                     "error": "upgrade failed after shutdown; worker is stopped; resume required",
+                    "handoff": handoff,
                 }
 
 
@@ -1025,6 +1033,18 @@ class WorkerRuntime:
             self.standby_client = None
         remove_stale_socket(self.standby_socket)
 
+    def _assume_promoted(self) -> None:
+        """One owner at a time: the promoted tree becomes the serving one.
+
+        Idempotent, because the readiness-timeout path calls it before raising.
+        """
+        if self.standby is None:
+            return
+        self.child, self.standby = self.standby, None
+        self.client, self.standby_client = self.standby_client, None
+        self.socket_path, self.standby_socket = self.standby_socket, self.socket_path
+        self.standby_waiting = None
+
     async def promote_standby(self, *, migrated: bool, timeout: float):
         """Hand state ownership to the warmed candidate and serve from it.
 
@@ -1056,28 +1076,35 @@ class WorkerRuntime:
         # readiness so an exhausted wait cannot lose the fact that it happened.
         record = response.json()
         self.promotion_record = record
-        while True:
-            if self.standby.returncode is not None:
-                raise RuntimeError("promoted worker exited before readiness")
-            try:
-                async with asyncio.timeout(deadline.remaining(2)):
-                    health = await self.standby_client.get("/health")
-                    ready = await self.standby_client.get("/health/ready")
-                if (
-                    health.status_code == 200
-                    and ready.status_code == 200
-                    and ready.json().get("status") == "ready"
-                ):
-                    break
-            except (httpx.HTTPError, TimeoutError, ValueError):
-                pass
-            await asyncio.sleep(min(0.1, deadline.remaining(0.1)))
-        # One owner at a time: the promoted tree becomes the serving one and the
-        # standby slot empties in the same step.
-        self.child, self.standby = self.standby, None
-        self.client, self.standby_client = self.standby_client, None
-        self.socket_path, self.standby_socket = self.standby_socket, self.socket_path
-        self.standby_waiting = None
+        try:
+            while True:
+                if self.standby.returncode is not None:
+                    raise RuntimeError("promoted worker exited before readiness")
+                try:
+                    async with asyncio.timeout(deadline.remaining(2)):
+                        health = await self.standby_client.get("/health")
+                        ready = await self.standby_client.get("/health/ready")
+                    if (
+                        health.status_code == 200
+                        and ready.status_code == 200
+                        and ready.json().get("status") == "ready"
+                    ):
+                        break
+                except (httpx.HTTPError, TimeoutError, ValueError):
+                    pass
+                await asyncio.sleep(min(0.1, deadline.remaining(0.1)))
+        except TimeoutError:
+            # The promotion itself was accepted, so this process already holds
+            # the writer lease: it is the serving worker that has not answered
+            # yet, not a candidate to throw away. Track it as such so the
+            # failure path stops the right tree, and say which of the two
+            # happened rather than reporting a generic cutover failure.
+            self._assume_promoted()
+            raise RuntimeError(
+                "promotion was accepted but the worker did not report readiness "
+                "inside the cutover budget"
+            ) from None
+        self._assume_promoted()
         return self.client, record
 
 

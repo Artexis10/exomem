@@ -349,21 +349,30 @@ def _reprove(vault_root: Path) -> Any:
         return epistemic_graph.SnapshotAdoption(False, reason="reproof_raised")
 
 
-def _apply_residue(vault_root: Path, adoption: Any) -> int:
-    """Enqueue the repair this adoption owes, now that this process owns it."""
+def _apply_residue(vault_root: Path, adoption: Any) -> tuple[int, str]:
+    """Enqueue the repair this adoption owes, now that this process owns it.
+
+    Returns how many paths were queued and, when something was owed and could
+    not be, the reason the cold path uses for the same failure. Owing nothing
+    and failing to record what you owe are different events: collapsing them
+    made an upgrade that silently lost its repair look like a clean one.
+    """
     from . import epistemic_graph
 
     residue = getattr(adoption, "residue", ()) if adoption is not None else ()
     if not residue or not getattr(adoption, "adopted", False):
-        return 0
+        return 0, ""
     try:
         applied = epistemic_graph.EpistemicGraphIndex(vault_root).apply_adopted_residue(
             residue
         )
     except Exception:  # noqa: BLE001 - the coalesced rebuild owns an unenqueued residue
         log.warning("promoted worker could not enqueue its adopted residue", exc_info=True)
-        return 0
-    return len(residue) if applied else 0
+        return 0, "residue_enqueue_failed"
+    if not applied:
+        log.warning("promoted worker could not enqueue its adopted residue")
+        return 0, "residue_enqueue_failed"
+    return len(residue), ""
 
 
 def _acquire_ownership() -> None:
@@ -416,7 +425,13 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
     # enqueueing the repair the adoption owes is a write, and this process has
     # no standing to make it until the lease says the vault is its own.
     _acquire_ownership()
-    record["residue_applied"] = _apply_residue(Path(vault_root), adoption)
+    applied, residue_failure = _apply_residue(Path(vault_root), adoption)
+    record["residue_applied"] = applied
+    if residue_failure:
+        # The repair this process owes is not recorded anywhere durable, so the
+        # coalesced rebuild is what will fix the projection. Say so.
+        record["snapshot"] = "rebuild-after-promotion"
+        record["reason"] = residue_failure
     with _lock:
         _promoted = True
         _standby = False
