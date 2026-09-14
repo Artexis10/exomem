@@ -12,7 +12,15 @@
 - [x] 2.3 Author-independent review of the relaxation: no path lets a serving or unauthenticated generation through. Forged bundles, serving and partially-drained generations, double enrollment and activation-target substitution were all constructed and all refused. Its three requested changes are delivered: the coordinator's issue-time guard and the custody-revision binding are now pinned by tests that fail when each guard is deleted, and enrollment bounds the issue time itself rather than trusting its caller.
 - [ ] 2.4 Full applicable suite run at the delivery boundary.
 
-## 3. Delivery
+## 3. Runtime Job window
 
-- [ ] 3.1 Publish the repaired provisioner through the governed release workflow and select it in the deployment lock pair.
-- [ ] 3.2 Recover the stranded 2026-09-13 cell through the existing same-operation governance requeue and record the evidence.
+- [x] 3.1 Reproduce the requeued failure: the target-image migration Job refuses inspect and prepare under a closed window, which the coordinator suite's Job double did not model.
+- [x] 3.2 Make the Job double refuse a closed window the way the runtime Job does, and restate the tests that passed only against the double.
+- [x] 3.3 Reissue a drained, never-enrolled source window before any inspect or prepare Job, never once a plan exists, refusing a signing key that ends before a Job could finish.
+- [x] 3.4 Run the reissued bytes through the real runtime Job custody reader for inspect and prepare.
+- [ ] 3.5 Replay the closed-window case in the K3s governance drill.
+
+## 4. Delivery
+
+- [ ] 4.1 Publish the repaired provisioner through the governed release workflow and select it in the deployment lock pair.
+- [ ] 4.2 Recover the stranded 2026-09-13 cell through the existing same-operation governance requeue and record the evidence.

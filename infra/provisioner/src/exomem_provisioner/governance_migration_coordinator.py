@@ -32,6 +32,7 @@ from .governance_migration_checkpoint import (
     migration_binding,
 )
 from .governance_migration_job import (
+    MIGRATION_JOB_DEADLINE_SECONDS,
     KubernetesGovernanceMigrationAdapter,
     MigrationJobRequest,
     parse_migration_terminal,
@@ -40,6 +41,7 @@ from .governance_migration_membership import (
     complete_governance_migration_membership,
     repair_governance_schema_claim,
 )
+from .governance_provision_membership import refresh_drained_source_bundle
 from .governance_target_recovery import recover_expired_serving_bundle
 from .lifecycle import MetadataConflict, OpaqueProviderMetadata
 from .repository import ClaimConflict, StaleFence
@@ -51,6 +53,12 @@ def _refuse() -> MetadataConflict:
         "governance migration state is unavailable",
         reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_TRANSITION_IS_INVALID,
     )
+
+
+# Reissue a pre-plan source window with less than this left, so prepare and the
+# enrollment right after it run inside one window. The prepared plan binds the
+# window, so nothing after prepare may reissue it.
+_SOURCE_WINDOW_FLOOR_SECONDS = 3000
 
 
 class HostedGovernanceMigrationCoordinator:
@@ -325,6 +333,8 @@ class HostedGovernanceMigrationCoordinator:
         # recovery slower than one attestation lifetime strand its cell forever.
         # The signing keyring, the MAC, the issue time and the fence below are all
         # still proven; a closed window on a fenced generation authorizes nothing.
+        # The migration Job itself still refuses to inspect or prepare under a
+        # closed window, so a pre-plan source is reissued below before its Job.
         source = inspect_hosted_authorization_bundle(
             files,
             **identity,
@@ -347,6 +357,28 @@ class HostedGovernanceMigrationCoordinator:
             phase = "commit" if source.governance_enrolled else "prepare"
         if phase == "prepare" and source.membership_schema_version != 3:
             raise _refuse()
+        if (
+            checkpoint.phase in {"inspect", "prepare"}
+            and source.expires_at - current < _SOURCE_WINDOW_FLOOR_SECONDS
+        ):
+            refreshed = refresh_drained_source_bundle(files, **identity, now=current)
+            if refreshed.expires_at - current <= MIGRATION_JOB_DEADLINE_SECONDS:
+                # The signing key ends before a Job could finish inside any window.
+                raise _refuse()
+            if refreshed.expires_at > source.expires_at:
+                await self._cell.write_authorization_session_bundle(
+                    owner,
+                    refreshed.files,
+                    recovery_envelope=custody_recovery_envelope,
+                    membership_epoch=refreshed.epoch,
+                    membership_digest=refreshed.membership_digest,
+                    revision=refreshed.revision,
+                    expected_revision=source.revision,
+                    effect_guard=context.assert_effect_authority,
+                )
+                await context.assert_effect_authority()
+                # Start the Job on the next pass, against the custody actually stored.
+                return DriverPending(context.checkpoint, 1)
         request = MigrationJobRequest(
             metadata=metadata,
             vault_id=metadata.tenant_id,

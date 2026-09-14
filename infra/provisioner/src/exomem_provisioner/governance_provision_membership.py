@@ -1,4 +1,4 @@
-"""Never-served bootstrap drain; not ordinary renewal or migration-plan recovery."""
+"""Never-served drain and pre-plan window reissue; not ordinary renewal or plan recovery."""
 
 from __future__ import annotations
 
@@ -59,6 +59,54 @@ def drain_fresh_bootstrap_bundle(
     ):
         raise MetadataConflict(
             "authorization bootstrap drain is unavailable",
+            reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_TRANSITION_IS_INVALID,
+        )
+    return membership.inspect_hosted_authorization_bundle(
+        _draining_successor_files(source, issued_at=current), **identity
+    )
+
+
+def refresh_drained_source_bundle(
+    files: Mapping[str, bytes],
+    *,
+    expected_cell_id: str,
+    expected_logical_vault_id: str,
+    expected_replica_id: str,
+    expected_software_version: str | None,
+    expected_schema_version: int | None,
+    expected_recovery_envelope: str,
+    now: int,
+) -> membership.HostedAuthorizationBundle:
+    """Reissue the window of a drained, unenrolled source before any plan exists.
+
+    The migration Job refuses to inspect or prepare under a closed window, and a
+    drained generation has no serving replica left to renew it, so without this
+    a migration starting more than one window after the drain strands its cell.
+    The successor stays DRAINING with issuance stopped, so it authorizes nothing,
+    and keys still authenticate at real current time. The caller must never
+    reissue once a plan exists: the prepared plan binds the source window.
+    """
+    current = membership._required_time(now)
+    identity = {
+        "expected_cell_id": expected_cell_id,
+        "expected_logical_vault_id": expected_logical_vault_id,
+        "expected_replica_id": expected_replica_id,
+        "expected_software_version": expected_software_version,
+        "expected_schema_version": expected_schema_version,
+        "expected_recovery_envelope": expected_recovery_envelope,
+        "now": current,
+    }
+    source = membership.inspect_hosted_authorization_bundle(files, **identity, _require_fresh=False)
+    if (
+        source.governance_enrolled
+        or source.replica_state != "DRAINING"
+        or not source.issuance_stopped
+        or not source.no_in_flight
+        or json.loads(source.control)["issued_at"] > current
+        or source.epoch >= membership._MAX_INTEGER
+    ):
+        raise MetadataConflict(
+            "authorization source refresh is unavailable",
             reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_TRANSITION_IS_INVALID,
         )
     return membership.inspect_hosted_authorization_bundle(

@@ -828,6 +828,57 @@ import test_hosted_governance_job
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize("cell", ["provider"], indirect=True)
+def test_provider_reissued_source_window_lets_the_job_inspect_and_prepare(cell, monkeypatch):
+    # The Job refuses to inspect or prepare under a closed window, and a drained
+    # generation has no replica left to renew it. The provisioner's reissued
+    # window is the only way such a cell migrates, so the bytes it signs must
+    # satisfy this runner's own custody reader, not a double of it.
+    from exomem_provisioner.governance_provision_membership import (
+        refresh_drained_source_bundle,
+    )
+
+    binding, now, request = cell
+    job = _job(monkeypatch, binding)
+    later = now + 3601
+    with pytest.raises(job.HostedGovernanceJobError):
+        job.execute(_canonical(request), now=later)
+
+    refreshed = refresh_drained_source_bundle(
+        dict(
+            zip(
+                ("keyring.json", "control.json", "serving-membership.json"),
+                _custody_bytes(),
+                strict=True,
+            )
+        ),
+        expected_cell_id=request["cellId"],
+        expected_logical_vault_id=request["vaultId"],
+        expected_replica_id=request["replicaId"],
+        expected_software_version=None,
+        expected_schema_version=None,
+        expected_recovery_envelope="signed-envelope",
+        now=later,
+    )
+    for variable, payload in (
+        (authorization_custody.KEYRING_FILE_ENV, refreshed.keyring),
+        (authorization_custody.CONTROL_FILE_ENV, refreshed.control),
+        (authorization_custody.MEMBERSHIP_FILE_ENV, refreshed.membership),
+    ):
+        Path(os.environ[variable]).write_bytes(payload)
+    request["custodyRevision"] = _revision()
+    assert request["custodyRevision"] == refreshed.revision
+
+    inspected = job.execute(_canonical(request), now=later)
+    prepared = job.execute(
+        _canonical(
+            {**request, "phase": "prepare", "sourceStoreDigest": inspected["sourceStoreDigest"]}
+        ),
+        now=later,
+    )
+    assert prepared["phase"] == "prepare" and prepared["actualSchema"] == 3
+
+
 def _remove_sidecar(vault: Path) -> Path:
     database = store.sidecar_path(vault)
     for path in database.parent.glob(database.name + "*"):

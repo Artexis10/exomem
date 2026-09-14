@@ -55,6 +55,7 @@ _HELM_VERSION = next(
 
 from exomem_provisioner.adapters import KubernetesCellAdapter  # noqa: E402
 from exomem_provisioner.authorization_membership import (  # noqa: E402
+    DEFAULT_ATTESTATION_TTL_SECONDS,
     build_initial_hosted_authorization_bundle,
     inspect_hosted_authorization_bundle,
     transition_hosted_authorization_bundle,
@@ -266,6 +267,7 @@ def _seed_cell(
     fence: int,
     volume: str,
     claimed_schema: int = 3,
+    issued_at: int | None = None,
 ) -> tuple[DrillCell, Any]:
     """Install the shipped cell chart, run its initializer, then stop the cell."""
 
@@ -293,7 +295,7 @@ def _seed_cell(
     source_bundle = _schema_three_draining_bundle(
         owner,
         envelopes["authorizationSessionSecret"],
-        now=int(time.time()),
+        now=int(time.time()) if issued_at is None else issued_at,
         claimed_schema=claimed_schema,
     )
     values["authorizationSessionRevision"] = source_bundle.revision
@@ -921,6 +923,44 @@ def test_governance_drill_migrates_a_seeded_schema_three_cell(
     final = _assert_migrated(cell, source, trace)
     assert trace.faults == []
     assert final.revision != source.revision
+    trace.write()
+
+
+@pytest.mark.timeout(2700)
+def test_governance_drill_reissues_a_source_window_that_closed_before_migration(
+    k3s: str, runtime_image: tuple[str, str], tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """A migration that starts after the drained window closed must still finish.
+
+    Every other case seeds custody seconds before migrating, so none of them
+    reached the target-image Job's own window check. A requeued production
+    provision failed every migration Job there once its window had closed.
+    """
+
+    scratch = tmp_path_factory.mktemp("governance-drill-closed-window")
+    # Leave the initializer ten minutes of window, then let it close.
+    cell, source = _seed_cell(
+        k3s,
+        scratch=scratch,
+        runtime=runtime_image,
+        cell_id="drill-closed-window",
+        operation_id="provision-closed-window",
+        fence=3,
+        volume="exomem-drill-closed-window-pv",
+        issued_at=int(time.time()) - DEFAULT_ATTESTATION_TTL_SECONDS + 600,
+    )
+    time.sleep(max(0.0, source.expires_at - time.time() + 5))
+    assert source.expires_at < time.time()
+    current = OpaqueProviderMetadata(
+        cell.owner.tenant_id, cell.owner.subject_id, "rollforward-closed-window", 4
+    )
+    trace = DrillTrace("closed-window", scratch, time.monotonic(), [], [])
+    _drive_migration(
+        cell, current, trace=trace, checkpoint="vault-fingerprinted-" + "0" * 64
+    )
+    final = _assert_migrated(cell, source, trace)
+    # The reissued window, not the closed one, carried the migration.
+    assert final.expires_at > source.expires_at
     trace.write()
 
 

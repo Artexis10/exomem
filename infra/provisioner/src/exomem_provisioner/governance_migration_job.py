@@ -32,6 +32,8 @@ _BACKUP_PREFIX = "exomem-governance-v3-backup://sha256/"
 _ROOT = "/var/lib/exomem"
 _CUSTODY = "/run/exomem/authorization-session"
 _PREFIX = "exomem.io/governance-migration-"
+# Kubernetes stops the migration Job after this long; custody must stay valid for it.
+MIGRATION_JOB_DEADLINE_SECONDS = 600
 
 
 def _refuse() -> MetadataConflict:
@@ -335,7 +337,7 @@ def build_governance_migration_job(
             "spec": {
                 "backoffLimit": 0,
                 "podReplacementPolicy": "Failed",
-                "activeDeadlineSeconds": 600,
+                "activeDeadlineSeconds": MIGRATION_JOB_DEADLINE_SECONDS,
                 "parallelism": 1,
                 "completions": 1,
                 "template": {
