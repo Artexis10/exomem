@@ -177,6 +177,57 @@ def _adopt_graph_snapshot(vault_root: Path, durations: dict[str, float]) -> bool
     return adoption.adopted
 
 
+def _run_step(durations: dict[str, float], name: str, fn) -> None:
+    """Run one warm-up step and record its duration; warm-up must never raise."""
+    t0 = time.perf_counter()
+    try:
+        fn()
+    except Exception:  # noqa: BLE001 — warm-up must never break startup
+        log.warning("warm-up step %s failed", name, exc_info=True)
+    finally:
+        durations[name] = round((time.perf_counter() - t0) * 1000.0, 1)
+
+
+def warm_graph_handoff(vault_root: Path) -> dict[str, float]:
+    """Adopt the inherited graph snapshot and prime the resolver the first write needs.
+
+    Deliberately NOT inside `warm_caches`. Everything in there is a disposable
+    CPU cache that a resource mode is entitled to skip, and skipping one costs
+    only latency on a later request. This is not that. A replacement worker that
+    never adopts its predecessor's published snapshot has no lineage it is
+    allowed to advance, so its first governed write falls back to a whole-vault
+    rebuild -- measured on the 0.83.1 deploy, where `mode=normal` leaves
+    `preload_cpu_caches` False, `warm_caches` returned at its first gate, and
+    the adoption step it used to contain never ran at all.
+
+    The resolver primer belongs on the same unconditional path and for the same
+    reason: `recall_resolver_snapshot_at_checkpoint` refuses to build on a miss
+    by design, so a process that never built one leaves every incremental pass
+    bailing on `resolver_snapshot_unavailable`.
+
+    Ordering is load-bearing and pinned by test: this runs after the watcher's
+    registry seed and after the retrieval catalog is admitted, because
+    `adopt_recall_origin` refuses a cold scope and a seed replaces the registry
+    maps wholesale. Each step soft-fails like every other warm step.
+    """
+    durations: dict[str, float] = {}
+    if not warmup_enabled():
+        return durations
+    from . import find
+
+    # Ordinary recall resolves links through the policy-projected view. Keep the
+    # broad writer resolver lazy so warm-up never reads raw Records titles.
+    _run_step(durations, "resolver", lambda: find.recall_resolver_snapshot(vault_root))
+    # A replacement worker inherits a derived graph it did not publish, and
+    # `recall_delta_since` refuses a foreign origin by construction, so its first
+    # governed write used to rebuild the whole vault purely to obtain a lineage
+    # it could advance. Proving the inherited snapshot here -- against the disk
+    # this registry is already projecting -- makes that checkpoint the delta
+    # origin instead (`seamless-managed-worker-handoff`).
+    _run_step(durations, "graph_snapshot", lambda: _adopt_graph_snapshot(vault_root, durations))
+    return durations
+
+
 def warm_caches(
     vault_root: Path,
     *,
@@ -205,13 +256,7 @@ def warm_caches(
     durations: dict[str, float] = {}
 
     def _step(name: str, fn) -> None:
-        t0 = time.perf_counter()
-        try:
-            fn()
-        except Exception:  # noqa: BLE001 — warm-up must never break startup
-            log.warning("warm-up step %s failed", name, exc_info=True)
-        finally:
-            durations[name] = round((time.perf_counter() - t0) * 1000.0, 1)
+        _run_step(durations, name, fn)
 
     def _warm_pages() -> None:
         kb = vault_root / kb_dirname()
@@ -225,17 +270,9 @@ def warm_caches(
     _step("pages", _warm_pages)
     _step("bm25_kb", lambda: bm25.warm(vault_root, "kb"))
     _step("bm25_vault", lambda: bm25.warm(vault_root, "vault"))
-    # Ordinary recall resolves links through the policy-projected view.  Keep
-    # the broad writer resolver lazy so warm-up never reads raw Records titles.
-    _step("resolver", lambda: find.recall_resolver_snapshot(vault_root))
-    # A replacement worker inherits a derived graph it did not publish, and
-    # `recall_delta_since` refuses a foreign origin by construction, so its first
-    # governed write used to rebuild the whole vault purely to obtain a lineage
-    # it could advance. Proving the inherited snapshot here -- against the disk
-    # this registry is already projecting -- makes that checkpoint the delta
-    # origin instead (`seamless-managed-worker-handoff`). Soft-fails like every
-    # other step: an unprovable snapshot simply leaves the old behaviour.
-    _step("graph_snapshot", lambda: _adopt_graph_snapshot(vault_root, durations))
+    # The resolver primer and the graph-snapshot adoption used to sit here. They
+    # are not caches, so `warm_graph_handoff` now runs them on the unconditional
+    # start-up path instead; this gate is only allowed to skip disposable work.
     if preload_models and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         # One tiny search warms WHICHEVER backend serves vector search: the vec0
         # backend (sync check + first KNN faults in the vec tables; the numpy
@@ -317,6 +354,11 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             1,
         )
     if catalog_ready:
+        # Unconditional, and ahead of the optional caches: adoption is what lets
+        # a replacement worker's first governed write stay incremental, so the
+        # resource mode that skips CPU caches must not also skip it. Still
+        # inside `catalog_ready`, because adoption needs the admitted catalogue.
+        durations.update(warm_graph_handoff(vault_root))
         durations.update(
             warm_caches(
                 vault_root,

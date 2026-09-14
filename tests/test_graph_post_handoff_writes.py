@@ -34,6 +34,7 @@ from exomem import (
     freshness,
     graph_sync,
     index_sync,
+    mode,
     mutation_lock,
 )
 from exomem import find as find_module
@@ -1081,7 +1082,9 @@ def test_the_warm_up_adopts_after_the_seed_and_the_resolver(
     `adopt_recall_origin` refuses a cold scope, and the watcher's seed replaces
     the registry maps wholesale -- an adoption recorded before that seed is
     dropped with the map it described. The graph step therefore has to run after
-    the seed, and after the resolver step whose cache it reuses.
+    the seed, and after the resolver step whose cache it reuses. Both now live
+    on the unconditional start-up path rather than inside `warm_caches`, so this
+    pins the order in `warm_graph_handoff`.
     """
     from exomem import warmup
 
@@ -1108,7 +1111,7 @@ def test_the_warm_up_adopts_after_the_seed_and_the_resolver(
         EpistemicGraphIndex, "adopt_published_snapshot", traced_adopt, raising=True
     )
 
-    durations = warmup.warm_caches(root, preload_models=False, preload_cpu_caches=True)
+    durations = warmup.warm_graph_handoff(root)
 
     assert "graph_snapshot" in durations, "the warm-up must adopt the inherited snapshot"
     steps = list(durations)
@@ -1120,6 +1123,57 @@ def test_the_warm_up_adopts_after_the_seed_and_the_resolver(
         "the graph step must run against a seeded registry, or the origin it "
         "adopts is refused"
     )
+
+
+def test_start_up_adopts_the_snapshot_when_the_resource_mode_skips_cpu_caches(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Adoption is not a cache, so the cache-preload policy must not decide it.
+
+    Measured on the 0.83.1 deploy: the personal service runs `mode=normal`,
+    which leaves `preload_cpu_caches` False, so `warm_caches` returned at its
+    first gate and the adoption step inside it never ran. Warm complete listed
+    only `retrieval_catalog` and `semantic_corpus`, there was no adoption line,
+    and the replacement worker's first governed writes rebuilt the whole vault
+    (164.8 s, then 46.7 s and 46.7 s).
+    """
+    from exomem import warmup
+
+    root = handoff_vault
+    caplog.set_level("INFO", logger="exomem.warmup")
+
+    monkeypatch.setattr(warmup, "warmup_enabled", lambda: True, raising=True)
+    monkeypatch.setattr(warmup, "warm_retrieval_catalog", lambda _root: True, raising=True)
+    monkeypatch.setattr(warmup, "model_preload_allowed", lambda *_a: False, raising=True)
+    monkeypatch.setattr(mode, "preload_cpu_caches", lambda: False, raising=True)
+
+    durations = warmup.warm_all(root)
+
+    assert "graph_snapshot" in durations, (
+        "start-up must adopt the inherited snapshot even when the resource mode "
+        f"skips CPU cache preloading: {sorted(durations)}"
+    )
+    assert "graph_snapshot_residue" in durations, (
+        f"the adoption's residue must be recorded for the operator: {sorted(durations)}"
+    )
+    assert "graph snapshot adoption adopted=" in caplog.text, (
+        "the adoption line is how a deploy is read back; without it the 0.83.1 "
+        "diagnosis needed a source read instead of a log read"
+    )
+    assert root in find_module._RECALL_RESOLVER_CACHE, (
+        "the resolver primer must run beside adoption: a process that never "
+        "built one leaves every write bailing on resolver_snapshot_unavailable"
+    )
+
+
+def test_the_cache_preload_gate_still_skips_the_disposable_caches(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hoisting adoption out of the gate must not drag the caches out with it."""
+    from exomem import warmup
+
+    monkeypatch.setattr(warmup, "warmup_enabled", lambda: True, raising=True)
+    assert warmup.warm_caches(handoff_vault, preload_cpu_caches=False) == {}
 
 
 def test_a_rebuild_retarget_keeps_the_recall_resolver(

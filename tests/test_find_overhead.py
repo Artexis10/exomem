@@ -228,6 +228,10 @@ def test_warm_caches_populates(vault: Path, monkeypatch) -> None:
     else:
         assert (vault, "kb") in bm25._INDEX._cache
         assert (vault, "vault") in bm25._INDEX._cache
+    # The recall resolver primer moved out of `warm_caches` to the unconditional
+    # start-up path: it is not a disposable cache, it is what keeps a
+    # replacement worker's first governed write off the whole-vault path.
+    warmup.warm_graph_handoff(vault)
     assert vault in find_module._RECALL_RESOLVER_CACHE
     # Warmed state means the first query pays no corpus build.
     bm25._INDEX.last_tokenized = 0
