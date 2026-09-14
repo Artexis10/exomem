@@ -277,6 +277,49 @@ def test_the_real_standby_warm_never_publishes_index_state(monkeypatch, tmp_path
     assert _fingerprint() == before, "a standby must not publish index state"
 
 
+def test_the_standby_primes_the_resolver_even_when_caches_are_not_preloaded(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The adoption's ordering must not depend on a policy that can skip it.
+
+    `adopt_recall_origin` needs a seeded scope and the bounded repair needs a
+    resolver at this exact checkpoint. The resolver used to come from
+    `warm_caches`, which returns at its first gate in every resource mode that
+    does not preload CPU caches -- the personal service's `mode=normal` among
+    them -- so on that path the standby proved its snapshot with no resolver.
+    """
+    from exomem import find as find_module
+    from exomem import mode
+
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base" / "Notes").mkdir(parents=True)
+    (vault / "Knowledge Base" / "Notes" / "one.md").write_text(
+        "---\ntype: note\n---\n\n# One\n\nBody.\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setattr(mode, "preload_cpu_caches", lambda: False, raising=True)
+
+    primed_before_proof: list[bool] = []
+    real_prove = service_standby.prove_graph_snapshot
+
+    def observed_prove(root):
+        primed_before_proof.append(Path(root) in find_module._RECALL_RESOLVER_CACHE)
+        return real_prove(root)
+
+    monkeypatch.setattr(
+        service_standby, "prove_graph_snapshot", observed_prove, raising=True
+    )
+
+    find_module.evict_resolver_caches(vault)
+    service_standby.enter_standby()
+    service_standby.warm(vault)
+
+    assert primed_before_proof == [True], (
+        "the standby proved its snapshot with no resident resolver, which is "
+        "what leaves the promoted worker's first write without one"
+    )
+
+
 def test_an_uncurrent_catalog_leaves_lexical_as_the_waiting_component(
     monkeypatch, tmp_path: Path
 ) -> None:

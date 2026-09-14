@@ -188,6 +188,24 @@ def _run_step(durations: dict[str, float], name: str, fn) -> None:
         durations[name] = round((time.perf_counter() - t0) * 1000.0, 1)
 
 
+def prime_recall_resolver(vault_root: Path) -> None:
+    """Build this process's recall resolver snapshot.
+
+    Ordinary recall resolves links through the policy-projected view; the broad
+    writer resolver stays lazy so warm-up never reads raw Records titles.
+
+    Its own function because two unconditional callers need it and neither may
+    have the other's side effects: start-up adopts the inherited snapshot after
+    it, and a standby proves one without adopting anything the serving worker
+    still owns. `recall_resolver_snapshot_at_checkpoint` refuses to build on a
+    miss by design, so a process that never built one leaves every incremental
+    pass bailing on `resolver_snapshot_unavailable`.
+    """
+    from . import find
+
+    find.recall_resolver_snapshot(vault_root)
+
+
 def warm_graph_handoff(vault_root: Path) -> dict[str, float]:
     """Adopt the inherited graph snapshot and prime the resolver the first write needs.
 
@@ -213,11 +231,7 @@ def warm_graph_handoff(vault_root: Path) -> dict[str, float]:
     durations: dict[str, float] = {}
     if not warmup_enabled():
         return durations
-    from . import find
-
-    # Ordinary recall resolves links through the policy-projected view. Keep the
-    # broad writer resolver lazy so warm-up never reads raw Records titles.
-    _run_step(durations, "resolver", lambda: find.recall_resolver_snapshot(vault_root))
+    _run_step(durations, "resolver", lambda: prime_recall_resolver(vault_root))
     # A replacement worker inherits a derived graph it did not publish, and
     # `recall_delta_since` refuses a foreign origin by construction, so its first
     # governed write used to rebuild the whole vault purely to obtain a lineage
