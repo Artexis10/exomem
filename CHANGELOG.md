@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.83.1](https://github.com/Artexis10/exomem/compare/v0.83.0...v0.83.1) (2026-09-13)
+
+
+### Bug Fixes
+
+* **graph:** keep governed writes off the whole-vault rebuild path after a worker replacement ([#1257](https://github.com/Artexis10/exomem/issues/1257)) ([6c6b322](https://github.com/Artexis10/exomem/commit/6c6b32286583f836ad8dc8aee00903590dab07a0))
+
 ## [0.83.0](https://github.com/Artexis10/exomem/compare/v0.82.0...v0.83.0) (2026-09-13)
 
 
