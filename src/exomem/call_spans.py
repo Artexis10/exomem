@@ -26,6 +26,7 @@ import functools
 import logging
 import threading
 import time
+from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
@@ -50,6 +51,13 @@ MAX_NAMES_PER_CALL = 64
 #: paths that never reach it, such as a direct test harness.
 MAX_CALLS = 256
 NAME_MAX_CHARS = 64
+#: Named integer measurements a span may carry beside its duration -- how many
+#: texts an encode took, how many characters they held, how many items a loop
+#: covered. Bounded like everything else here: a ledger row is hash-chained and
+#: no single call may grow it without limit. Values are summed across a span's
+#: calls, exactly as `ms` and `count` are, so an aggregated span still reports
+#: one honest total.
+MAX_FIELDS_PER_SPAN = 4
 
 
 #: Eviction is a *loss* of measurement, so it warns rather than informs -- but a
@@ -105,11 +113,19 @@ def _sweep_locked(now: float) -> None:
         _SPANS.pop(token, None)
 
 
-def record_span(name: str, elapsed_ms: float) -> None:
+def record_span(
+    name: str, elapsed_ms: float, fields: Mapping[str, Any] | None = None
+) -> None:
     """Attribute `elapsed_ms` to phase `name` on the in-flight MCP call.
 
     A no-op outside an MCP call, so the same instrumentation is safe on CLI,
     watcher, and test paths that never mint a token.
+
+    `fields` carries named integer measurements beside the duration, summed
+    across the span's calls the way `ms` is. A duration alone cannot say
+    whether an encode was slow because the model was cold or because it was
+    handed the whole note body: 15.6 s with `texts=1` and 15.6 s with
+    `texts=400` are different defects and read identically without this.
     """
     try:
         token = MCP_CALL_TOKEN.get()
@@ -134,24 +150,54 @@ def record_span(name: str, elapsed_ms: float) -> None:
             else:
                 slot[0] += 1.0
                 slot[1] += float(elapsed_ms)
+            if fields:
+                _merge_fields_locked(entry, clean, fields)
     except Exception:  # noqa: BLE001 - instrumentation must never break a call
         pass
 
 
+def _merge_fields_locked(
+    entry: dict[str, Any], name: str, fields: Mapping[str, Any]
+) -> None:
+    """Sum `fields` into this span's running totals. Called under `_LOCK`."""
+    store: dict[str, dict[str, int]] = entry.setdefault("fields", {})
+    totals = store.get(name)
+    if totals is None:
+        if len(store) >= MAX_NAMES_PER_CALL:
+            return
+        totals = {}
+        store[name] = totals
+    for key, value in fields.items():
+        clean_key = str(key)[:NAME_MAX_CHARS]
+        if clean_key not in totals and len(totals) >= MAX_FIELDS_PER_SPAN:
+            continue
+        try:
+            totals[clean_key] = totals.get(clean_key, 0) + int(value)
+        except (TypeError, ValueError):
+            # A field that is not a count is not a measurement; drop it rather
+            # than put an uninterpretable value in a hash-chained row.
+            continue
+
+
 @contextmanager
-def span(name: str):
+def span(name: str, fields: dict[str, Any] | None = None):
     """Time one named phase of the current MCP call.
 
     Records on the way out whatever happened, the exception path included: a
     phase that raised after eighteen seconds is exactly the one worth seeing.
     Aggregated by name, so a phase entered once per changed path reports
     `count` and a total instead of hundreds of rows.
+
+    The `fields` dict is yielded so the body can fill it with what it learned
+    -- how many items it covered, how many characters it encoded -- and it is
+    read on the way out. A caller that measures nothing but time passes
+    nothing and the span is shaped exactly as it always was.
     """
     started = time.perf_counter()
     try:
-        yield
+        yield fields
     finally:
-        record_span(name, (time.perf_counter() - started) * 1000.0)
+        record_span(name, (time.perf_counter() - started) * 1000.0, fields)
 
 
 def timed(name: str):
@@ -242,10 +288,21 @@ def pop_call_spans(token: str | None) -> list[dict[str, Any]]:
             entry = _SPANS.pop(token, None)
         if not entry:
             return []
-        spans = [
-            {"name": name, "count": int(slot[0]), "ms": round(slot[1], 2)}
-            for name, slot in entry["names"].items()
-        ]
+        measured: dict[str, dict[str, int]] = entry.get("fields", {})
+        spans = []
+        for name, slot in entry["names"].items():
+            shaped: dict[str, Any] = {
+                "name": name,
+                "count": int(slot[0]),
+                "ms": round(slot[1], 2),
+            }
+            # Omitted entirely when a span measured only time, so the shape of
+            # every existing span -- and every ledger row already written -- is
+            # exactly what it was.
+            totals = measured.get(name)
+            if totals:
+                shaped["fields"] = dict(totals)
+            spans.append(shaped)
         spans.sort(key=lambda item: float(item["ms"]), reverse=True)
         return spans
     except Exception:  # noqa: BLE001 - instrumentation must never break a call

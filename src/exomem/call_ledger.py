@@ -352,9 +352,37 @@ def _clip_spans(spans: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
             count = int(entry.get("count", 1))
         except (TypeError, ValueError):
             continue
-        shaped.append({"name": _clip(name), "count": count, "ms": ms})
+        row: dict[str, Any] = {"name": _clip(name), "count": count, "ms": ms}
+        fields = _clip_span_fields(entry.get("fields"))
+        if fields:
+            # Only when something was measured. A span that carried no fields
+            # keeps the exact shape it has always had, so no row already
+            # written -- and `verify` re-hashes rows as stored -- changes.
+            row["fields"] = fields
+        shaped.append(row)
     shaped.sort(key=lambda item: item["ms"], reverse=True)
     return shaped[:_MAX_SPANS]
+
+
+#: Named integer measurements one span may carry beside its duration. Bounded
+#: like `_MAX_SPANS`, and integers only: a hash-chained row must not grow a key
+#: whose meaning a later reader has to guess.
+_MAX_SPAN_FIELDS = 4
+
+
+def _clip_span_fields(fields: object) -> dict[str, int]:
+    """Normalize a span's named counts into a bounded, canonical shape."""
+    if not isinstance(fields, Mapping):
+        return {}
+    shaped: dict[str, int] = {}
+    for key in sorted(str(name) for name in fields):
+        if len(shaped) >= _MAX_SPAN_FIELDS:
+            break
+        try:
+            shaped[_clip(key)] = int(fields[key])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return shaped
 
 
 #: Stage names kept in one row's budget block. Bounded for the same reason
