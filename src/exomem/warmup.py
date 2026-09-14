@@ -595,6 +595,11 @@ def start_background(vault_root: Path) -> threading.Thread:
     `readiness.begin_warm()` fires BEFORE the thread starts so request paths
     already defer when this returns; `finish_warm()` runs in a finally so a
     crashed warm can never leave the process deferring forever.
+
+    A promoted standby's carried components are re-marked in the same
+    synchronous stretch, between the clear and the thread, because that clear is
+    what made a promoted worker refuse writes for thirty seconds after a 1.6 s
+    cutover.
     """
     global _WARM_THREAD
     from . import readiness

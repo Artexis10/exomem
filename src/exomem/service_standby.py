@@ -100,9 +100,8 @@ def cutover_components() -> dict[str, str]:
 
     with _lock:
         snapshot_ready = _proved_token is not None
-    components: dict[str, str] = {}
-    with _lock:
         corpus_ready = _corpus_built
+    components: dict[str, str] = {}
     for component in CUTOVER_COMPONENTS:
         if component == "graph_snapshot":
             components[component] = "ready" if snapshot_ready else "waiting"
