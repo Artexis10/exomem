@@ -345,3 +345,60 @@ def test_eviction_warns_once_per_window_rather_than_per_drop(caplog) -> None:
     assert lines, "an eviction that reports nothing is indistinguishable from no instrumentation"
     assert len(lines) == 1, f"one line per window, not per drop: {len(lines)}"
     assert lines[0].levelname == "WARNING"
+
+
+def test_a_path_shaped_field_key_never_reaches_a_row(token, caplog) -> None:
+    """Field keys are measurement names, so a key cannot smuggle content.
+
+    The values were bounded from the start -- coerced to int, so a string
+    cannot land -- but the KEYS were only clipped to 64 characters, which a
+    vault path fits inside comfortably. A ledger row is hash-chained and
+    operator-readable outside the vault, so a key like
+    `Knowledge Base/Notes/<title>` would put a note's identity in it.
+    """
+    caplog.set_level("WARNING", logger="exomem.call_spans")
+
+    call_spans.record_span(
+        "index.memory_refs",
+        1.0,
+        {
+            "paths": 3,
+            "Knowledge Base/Notes/Insights/secret-title.md": 1,
+            "Title With Spaces": 1,
+            "camelCase": 1,
+            "has.dot": 1,
+            "has-dash": 1,
+            "digits9": 1,
+        },
+    )
+
+    spans = {span["name"]: span for span in call_spans.pop_call_spans(token)}
+    fields = spans["index.memory_refs"].get("fields") or {}
+    assert fields == {"paths": 3}, (
+        f"a key that is not a bare measurement name reached the row: {fields}"
+    )
+    assert "secret-title" not in caplog.text, (
+        "the warning must report the rejected key's shape, never its text"
+    )
+    assert "span field key rejected" in caplog.text
+
+
+def test_the_ledger_refuses_a_path_shaped_field_key_too(token) -> None:
+    """The last seam before the hash chain enforces it independently."""
+    shaped = call_ledger._clip_spans(
+        [
+            {
+                "name": "index.memory_refs",
+                "count": 1,
+                "ms": 1.0,
+                "fields": {
+                    "paths": 2,
+                    "Knowledge Base/Notes/Insights/secret-title.md": 1,
+                },
+            }
+        ]
+    )
+
+    assert shaped == [
+        {"name": "index.memory_refs", "count": 1, "ms": 1.0, "fields": {"paths": 2}}
+    ], shaped

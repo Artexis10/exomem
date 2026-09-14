@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import re
 import threading
 import time
 from collections.abc import Mapping
@@ -58,6 +59,13 @@ NAME_MAX_CHARS = 64
 #: calls, exactly as `ms` and `count` are, so an aggregated span still reports
 #: one honest total.
 MAX_FIELDS_PER_SPAN = 4
+#: A field key is a measurement name, never a value. Structural rather than a
+#: declared list, so a new count needs no registry edit, but a key carrying
+#: content cannot pass: no slashes, dots, spaces, digits or capitals, which is
+#: every shape a path, title or identifier takes. Without this,
+#: `measured["Knowledge Base/Notes/<title>"] = 1` would reach a hash-chained
+#: ledger row -- the same hole the closed phase vocabulary exists to prevent.
+FIELD_KEY_PATTERN = re.compile(r"^[a-z_]{1,32}$")
 
 
 #: Eviction is a *loss* of measurement, so it warns rather than informs -- but a
@@ -168,7 +176,10 @@ def _merge_fields_locked(
         totals = {}
         store[name] = totals
     for key, value in fields.items():
-        clean_key = str(key)[:NAME_MAX_CHARS]
+        clean_key = str(key)
+        if not FIELD_KEY_PATTERN.match(clean_key):
+            _warn_rejected_field_key(clean_key)
+            continue
         if clean_key not in totals and len(totals) >= MAX_FIELDS_PER_SPAN:
             continue
         try:
@@ -177,6 +188,18 @@ def _merge_fields_locked(
             # A field that is not a count is not a measurement; drop it rather
             # than put an uninterpretable value in a hash-chained row.
             continue
+
+
+def _warn_rejected_field_key(key: str) -> None:
+    """Say that a field key was dropped, without repeating the key itself.
+
+    The key is the thing suspected of carrying content, so the warning reports
+    its shape and length rather than its text -- a log line is operator-readable
+    and lives outside the vault, exactly like the ledger row this refused.
+    """
+    log.warning(
+        "span field key rejected: %d chars, not [a-z_]{1,32}", len(key)
+    )
 
 
 @contextmanager

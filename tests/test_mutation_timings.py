@@ -815,6 +815,12 @@ _UMBRELLA_LEAF_SPANS = frozenset(
 #: write unattributed on 0.84.1. The names below are pinned individually for
 #: that, and the ratio is the backstop that catches a newly-added unnamed step
 #: large enough to matter.
+#:
+#: Read the backstop for exactly what it is: at 0.5 it only catches an unnamed
+#: step worth more than half the window. It is sized to this fixture's variance,
+#: not to the guarantee, and should be raised on a larger fixture -- one whose
+#: window is seconds rather than tens of milliseconds -- where the fixed costs
+#: stop dominating and a real ratio becomes a stable assertion.
 _LEAF_COVERAGE_FLOOR = 0.5
 
 

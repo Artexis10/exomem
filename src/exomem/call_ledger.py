@@ -51,6 +51,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 from collections.abc import Iterable, Mapping, Sequence
@@ -370,6 +371,14 @@ def _clip_spans(spans: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
 _MAX_SPAN_FIELDS = 4
 
 
+#: A field key is a measurement name, never a value. Enforced here as well as at
+#: the producer (`call_spans.FIELD_KEY_PATTERN`), because this is the last seam
+#: before a hash-chained row: a key shaped like a path, title or identifier
+#: cannot pass either gate, and a producer that bypassed the first still cannot
+#: write content into a row through the second.
+_SPAN_FIELD_KEY = re.compile(r"^[a-z_]{1,32}$")
+
+
 def _clip_span_fields(fields: object) -> dict[str, int]:
     """Normalize a span's named counts into a bounded, canonical shape."""
     if not isinstance(fields, Mapping):
@@ -378,8 +387,10 @@ def _clip_span_fields(fields: object) -> dict[str, int]:
     for key in sorted(str(name) for name in fields):
         if len(shaped) >= _MAX_SPAN_FIELDS:
             break
+        if not _SPAN_FIELD_KEY.match(key):
+            continue
         try:
-            shaped[_clip(key)] = int(fields[key])
+            shaped[key] = int(fields[key])
         except (KeyError, TypeError, ValueError):
             continue
     return shaped
