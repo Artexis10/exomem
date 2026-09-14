@@ -1349,22 +1349,67 @@ def graph_debt_generations_recorded(
         return frozenset(), False
     conn = _connect(vault_root, create=False)
     try:
-        available = bool(
-            conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-                ("graph_debt_generations",),
-            ).fetchone()
-        )
-        if not available:
-            return frozenset(), False
-        rows = conn.execute(
-            "SELECT generation FROM graph_debt_generations WHERE generation IN "
-            f"({','.join('?' for _ in wanted)})",
-            tuple(wanted),
-        ).fetchall()
+        return _graph_debt_generations_locked(conn, wanted)
     finally:
         conn.close()
+
+
+def _graph_debt_generations_locked(
+    conn: Any, wanted: list[int]
+) -> tuple[frozenset[int], bool]:
+    """The debt lookup on a connection the caller already has open."""
+    available = bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("graph_debt_generations",),
+        ).fetchone()
+    )
+    if not available:
+        return frozenset(), False
+    rows = conn.execute(
+        "SELECT generation FROM graph_debt_generations WHERE generation IN "
+        f"({','.join('?' for _ in wanted)})",
+        tuple(wanted),
+    ).fetchall()
     return frozenset(int(row[0]) for row in rows), True
+
+
+def graph_gap_coverage(
+    vault_root: Path, generations: Iterable[int]
+) -> tuple[frozenset[int], bool, frozenset[int], bool]:
+    """Everything the predecessor probe needs about a gap, on ONE connection.
+
+    The probe runs on the write path, and every `_connect` here takes a
+    reserved-identity boundary entry -- the per-item re-entry that already
+    dominates the mutation-lock log. Asking two questions of the same store
+    through two connections doubled that for no reading anyone needs
+    separately, so they are asked together.
+
+    Returns the receipt generations in range, whether any queued receipt cannot
+    say what it owes, the generations with a durable debt record, and whether
+    that record exists in this store at all.
+    """
+    wanted = sorted({int(generation) for generation in generations})
+    if not wanted:
+        return frozenset(), False, frozenset(), True
+    path = store_path(vault_root)
+    if not path.exists():
+        return frozenset(), False, frozenset(), False
+    conn = _connect(vault_root, create=False)
+    try:
+        receipts = _snapshot_plain(
+            vault_root, table="graph_upserts", generations=wanted, connection=conn
+        )
+        known = frozenset(
+            receipt.graph_generation
+            for receipt in receipts
+            if receipt.graph_generation is not None
+        )
+        unknown = any(receipt.graph_generation is None for receipt in receipts)
+        recorded, has_record = _graph_debt_generations_locked(conn, wanted)
+    finally:
+        conn.close()
+    return known, unknown, recorded, has_record
 
 
 def clear_graph_debt_generations(vault_root: Path) -> int:
@@ -1478,11 +1523,15 @@ def _snapshot_plain(
     limit: int | None = None,
     paths: set[str] | None = None,
     generations: list[int] | None = None,
+    connection: Any | None = None,
 ) -> list[DeferredReceipt]:
     path = store_path(vault_root)
     if not path.exists():
         return []
-    conn = _connect(vault_root, create=False)
+    # A caller with a connection already open lends it rather than paying a
+    # second reserved-identity boundary entry for the same store.
+    borrowed = connection is not None
+    conn = connection if borrowed else _connect(vault_root, create=False)
     try:
         columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
         if not columns:
@@ -1538,7 +1587,8 @@ def _snapshot_plain(
             for row in conn.execute(sql, tuple(params)).fetchall()
         ]
     finally:
-        conn.close()
+        if not borrowed:
+            conn.close()
     valid = [
         DeferredReceipt(rel, receipt.revision, receipt.graph_generation)
         for receipt in receipts

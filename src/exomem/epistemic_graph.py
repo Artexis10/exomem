@@ -4028,10 +4028,9 @@ class EpistemicGraphIndex:
             return False
         gap = range(acknowledged + 1, required)
         try:
-            known, unknown = deferred_index.graph_receipt_generations(
-                self.vault_root, generations=gap
-            )
-            recorded, has_debt_record = deferred_index.graph_debt_generations_recorded(
+            # One read, one connection: this runs on the write path, and every
+            # open here costs a reserved-identity boundary entry.
+            known, unknown, recorded, has_debt_record = deferred_index.graph_gap_coverage(
                 self.vault_root, gap
             )
         except Exception:  # noqa: BLE001 - an unreadable queue proves nothing
