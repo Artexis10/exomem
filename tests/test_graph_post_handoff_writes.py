@@ -295,6 +295,19 @@ def _assert_incremental_latency(
     )
 
 
+#: Every dispatch outcome that claims durable per-path coverage, taken from the
+#: module that declares it rather than hand-listed here. A hand list drifts: it
+#: omitted `graph_repair_cold_resolver`, which is one of the five, and a run
+#: whose resolver went cold at dispatch then failed on an outcome that is
+#: exactly as covered as the three the list happened to name. Deriving it keeps
+#: the test asserting the contract -- "this write's repair is durably queued" --
+#: instead of asserting which doors happened to fire the day it was written.
+_QUEUED_COVERAGE_CODES = frozenset(index_sync._GRAPH_COVERAGE_CODES) | {
+    # Not a coverage claim: nothing was deferred, so there is nothing to cover.
+    "incremental_completed",
+}
+
+
 _REBUILD_LINE = "graph dispatch registered a whole-vault rebuild"
 _UNCOVERED_LINE = "graph lineage gap is not covered by durable receipts"
 
@@ -892,11 +905,9 @@ def test_a_write_under_a_mark_on_its_own_paths_is_queued_repair(
     assert "graph_repair_external_pending" in codes, (
         f"no fenced write reported the fence's own pending outcome: {codes}"
     )
-    assert set(codes) <= {
-        "graph_repair_external_pending",
-        "graph_repair_queued",
-        "incremental_completed",
-    }, f"a fenced write reported something other than queued coverage: {codes}"
+    assert set(codes) <= _QUEUED_COVERAGE_CODES, (
+        f"a fenced write reported something other than queued coverage: {codes}"
+    )
     assert any(queued_after_write), (
         "the fence must leave its own paths on the durable queue, or the "
         "pending outcome is a claim nothing backs"
@@ -990,12 +1001,9 @@ def test_writes_faster_than_the_drain_stay_incremental_on_a_covered_gap(
     )
     codes = [result.code for result in outcomes]
     covered_gap_writes = codes.count("graph_repair_covered_gap")
-    assert set(codes) <= {
-        "graph_repair_covered_gap",
-        "graph_repair_external_pending",
-        "graph_repair_queued",
-        "incremental_completed",
-    }, f"a write reported something other than queued coverage: {codes}"
+    assert set(codes) <= _QUEUED_COVERAGE_CODES, (
+        f"a write reported something other than queued coverage: {codes}"
+    )
     _assert_incremental_latency(acknowledgements, bound=LIVE_ACK_BOUND_SECONDS)
     assert _drain_repair_queue(root, live_watcher) == 0, "the graph repair queue never drained"
     # The premise -- that the writes outran repair -- is asserted above, from
