@@ -395,9 +395,12 @@ class _StandbyRuntime(_Runtime):
         assert self.pid == 0, "promotion overlapped the previous worker"
         self.promoted = migrated
         self.pid = 200
+        # As the real runtime does: the record is retained as soon as the
+        # promotion is accepted, before readiness is awaited.
+        self.promotion_record = {"ok": True, "snapshot": "current", "migrated": migrated}
         if self.standby_failure == "promote":
             raise RuntimeError("standby refused promotion")
-        return "new-upstream", {"ok": True, "snapshot": "current", "migrated": migrated}
+        return "new-upstream", self.promotion_record
 
 
 def _standby_supervisor(tmp_path, **kwargs):
@@ -946,9 +949,39 @@ def test_a_failed_transition_reports_a_promotion_that_had_already_been_accepted(
     async def scenario():
         manager, ingress, runtime, target = _standby_supervisor(tmp_path)
         runtime.standby_failure = "promote"
-        runtime.promotion_record = {"ok": True, "snapshot": "current"}
         result = await manager.upgrade(target)
         assert result["ok"] is False
-        assert result["handoff"]["promotion"] == {"ok": True, "snapshot": "current"}
+        # Accepted during this transition, so the record belongs to it.
+        assert result["handoff"]["promotion"] == {
+            "ok": True,
+            "snapshot": "current",
+            "migrated": False,
+        }
+
+    asyncio.run(scenario())
+
+
+def test_a_later_failure_does_not_inherit_an_earlier_promotion_record(tmp_path):
+    """A promotion record belongs to the transition that produced it.
+
+    Carried forward, it tells whoever resumes that state was handed over when
+    this attempt never reached promotion at all -- which is the difference
+    between a restart and a rollback.
+    """
+
+    async def scenario():
+        manager, ingress, runtime, target = _standby_supervisor(tmp_path)
+        # A previous upgrade promoted successfully and left its record behind.
+        runtime.promotion_record = {"ok": True, "snapshot": "current"}
+        # This one never gets as far as the promote call.
+        runtime.standby_capable = False
+        runtime.failure = "migrate"
+        runtime.migration = (True, "descriptors_changed")
+
+        result = await manager.upgrade(target)
+
+        assert result["ok"] is False
+        assert "promote" not in runtime.events
+        assert "promotion" not in result["handoff"], result["handoff"]
 
     asyncio.run(scenario())

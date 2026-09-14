@@ -410,6 +410,13 @@ class Supervisor:
         if self.lock.locked():
             return {"ok": False, "error": "an upgrade is already in progress"}
         async with self.lock:
+            # A promotion record belongs to the transition that produced it.
+            # Carried into a later attempt's handoff it would tell whoever
+            # resumes that state was handed over when this attempt never
+            # reached promotion -- the difference between a restart and a
+            # rollback.
+            if getattr(self.runtime, "promotion_record", None) is not None:
+                self.runtime.promotion_record = None
             pending = self.records.pending()
             if bool(pending) != resume:
                 return {
