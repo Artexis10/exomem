@@ -352,8 +352,14 @@ def build_runtime_readiness(
     observability: Mapping[str, Any] | None = None,
     traffic: Mapping[str, Any] | None = None,
     retrieval: Mapping[str, Any] | None = None,
+    cutover: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build the public readiness payload from already-measured coordination state."""
+    """Build the public readiness payload from already-measured coordination state.
+
+    ``cutover`` is the standby/promotion component set (`seamless-managed-worker-handoff`
+    D9).  It never gates the serving ``status``: a standby answers its own probe
+    while it warms, and only the supervisor reads ``cutover_ready``.
+    """
     enabled = bool(coordination.get("enabled"))
     healthy = bool(coordination.get("coordinator_healthy"))
     role = str(coordination.get("role") or "unknown")
@@ -437,6 +443,8 @@ def build_runtime_readiness(
     }
     if retrieval_payload is not None:
         payload["retrieval"] = retrieval_payload
+    if cutover is not None:
+        payload["cutover"] = dict(cutover)
     if traffic is not None:
         payload["traffic"] = dict(traffic)
     return payload
@@ -581,7 +589,7 @@ def runtime_readiness(
     traffic: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Measure this process's eligibility without exposing vault or credential state."""
-    from . import readiness
+    from . import readiness, service_standby
     from .session_validation_cache import session_store_readiness
     from .writer_lease import coordination_status
 
@@ -634,4 +642,5 @@ def runtime_readiness(
             else get_silent_traffic_monitor().snapshot()
         ),
         retrieval=retrieval,
+        cutover=service_standby.readiness_payload(),
     )

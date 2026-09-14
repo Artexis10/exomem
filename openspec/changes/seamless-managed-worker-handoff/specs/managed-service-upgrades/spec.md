@@ -2,7 +2,7 @@
 
 ### Requirement: Managed upgrades preserve the public endpoint
 
-The system SHALL keep the public HTTP listener and existing accepted connections alive throughout a managed worker upgrade. Release download and installation SHALL finish before the existing worker stops accepting requests. The replacement SHALL warm as a standby beside the serving worker, reaching cutover readiness under a warm budget distinct from the cutover budget, before the existing worker stops; a standby that does not reach cutover readiness inside its budget SHALL be discarded with a recorded reason while the existing worker keeps serving. Detached client streams SHALL be reattached with bounded retries through promotion rather than closed on the first non-success.
+The system SHALL keep the public HTTP listener and existing accepted connections alive throughout a managed worker upgrade. Release download and installation SHALL finish before the existing worker stops accepting requests. The replacement SHALL warm as a standby beside the serving worker, reaching cutover readiness under a warm budget distinct from the cutover budget, before the existing worker stops; a standby that does not reach cutover readiness inside its budget SHALL be discarded with a recorded reason while the existing worker keeps serving. A worker SHALL be spawned with the unit's environment file as it stands at spawn time, so a changed service environment reaches the next worker without restarting the supervisor. Detached client streams SHALL be reattached with bounded retries through promotion rather than closed on the first non-success.
 
 #### Scenario: Calls arrive during replacement
 - **WHEN** calls arrive while a managed worker is being replaced within the configured handoff budget
@@ -17,6 +17,11 @@ The system SHALL keep the public HTTP listener and existing accepted connections
 - **WHEN** a managed upgrade starts against a serving worker
 - **THEN** the candidate warms its lexical catalog, models when preload is allowed, and the proven graph snapshot before ingress is paused
 - **AND** the unavailable window of the cutover is the drain plus promotion, not a cold start
+
+#### Scenario: The service environment changed after the supervisor started
+- **WHEN** the unit's environment file changed after the supervisor read it through systemd
+- **THEN** the standby is spawned with the current file's values
+- **AND** the supervisor's own environment is unchanged
 
 #### Scenario: Standby misses its warm budget
 - **WHEN** the candidate does not report cutover readiness inside the warm budget

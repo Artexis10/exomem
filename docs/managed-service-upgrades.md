@@ -141,6 +141,128 @@ clients to authorize again. If startup fails, leave the unit stopped and
 inspect the journal and retained state before another change; do not silently
 start an older release over migrated state.
 
+## The standby sequence
+
+A worker release is no longer replaced cold. The supervisor first spawns the
+candidate as a **standby** beside the worker that is still serving. The standby
+binds its own private socket, **proves** the maintained lexical catalog current
+read-only, warms the rebuildable in-memory caches, **adopts** the published graph
+snapshot, and loads models when preload is allowed. It takes no writer
+lease, publishes nothing, schedules no drain, media or watcher work, and owns no
+descendants. In particular it never reconciles or requests repair of the lexical
+catalog: that is a publication, and the worker still serving is this vault's
+single repair owner. A catalog that is not current leaves `lexical` waiting until
+that owner publishes one — which the warm budget covers and its expiry records.
+The old worker serves throughout.
+
+Only when the standby reports cutover readiness does the supervisor pause
+ingress, drain, stop the old worker and prove its descendants exited, run the
+offline migrator if the target declares a state migration, promote the standby
+over its private control surface, and resume. The unavailable window is the
+drain plus the promotion, not a cold start.
+
+`/health/ready` reports this as a `cutover` block beside the serving `status`:
+
+```json
+{
+  "status": "ready",
+  "cutover": {
+    "components": {"lexical": "ready", "graph_snapshot": "waiting"},
+    "cutover_ready": false,
+    "standby": true
+  }
+}
+```
+
+Adoption is what makes the promoted worker's first governed write incremental:
+it proves the inherited sidecar against disk and makes that checkpoint this
+process's delta origin, instead of the whole-vault pass a replacement used to
+pay for a lineage it could advance. The `cutover` block reports it as
+`adoption: {"residue": N, "reason": "adopted"}`. A non-zero `residue` is an
+adoption that succeeded *and* owes the drain that many pages — the deferred
+writes the outgoing worker left behind. The standby only *records* that debt:
+queueing the repair and withdrawing the availability marker are writes to state
+the serving worker still owns, so they happen at promotion, and the handoff
+record reports `residue_applied`. From then on, reads that require a current
+projection refuse until that repair lands. A refused adoption names its
+reason instead (for example `residue_exceeds_drain_limit`), leaves
+`graph_snapshot` waiting, and the candidate is discarded on budget expiry.
+
+`embeddings` joins `components` only when the process's mode and overrides allow
+a model preload (`EXOMEM_PRELOAD_MODELS=1`). A standby answers its own probe as
+serving-ready while it warms; `cutover_ready` is what the supervisor polls, and
+`components` is what an operator reads to see which component a candidate is
+waiting on.
+
+### Budgets
+
+| Budget | Default | Override |
+| --- | --- | --- |
+| Standby warm | 300 s | `EXOMEM_STANDBY_WARM_SECONDS` in the unit's environment file |
+| Cutover (pause to resume) | 40 s | supervisor `transition_timeout` |
+| Drain of active finite requests | 30 s | within the cutover budget |
+| Detached stream reattachment | 40 s | ingress `reattach_budget` |
+
+A candidate that does not reach cutover readiness inside the warm budget is
+stopped, the handoff record names the component it was waiting on, and the
+existing worker keeps serving. The upgrade then falls back to the one-worker
+sequence — reported in the handoff record, never silent. A release that predates
+standby mode reports `"standby": "unsupported"` and takes the same path.
+
+### Polling a transition
+
+`upgrade` is acknowledged, not awaited: the supervisor answers immediately with
+`{"ok": true, "accepted": true, "transition": "<id>"}` and runs the sequence in
+the background, because a standby warm is minutes long and holding the control
+connection open for it would turn any client read timeout into a false failure
+while promotion proceeded regardless. Poll `--status` for the outcome: it
+carries `transition` (in flight) and `last_transition` (the finished record,
+including the handoff). `scripts/upgrade.sh` does this for you, with a deadline
+covering the warm plus the cutover budgets.
+
+### The migration record
+
+The offline state migrator runs only when the staged target declares a state
+migration: the supervisor compares the descriptor set the candidate package
+requires with the set the vault's state manifest was published with. When they
+match and the manifest is complete, the step is recorded as skipped:
+
+```json
+{"handoff": {"standby": "ready",
+             "migration": {"state": "skipped", "reason": "declared_none"},
+             "promotion": {"snapshot": "current", "reproved": true}}}
+```
+
+`handoff.unavailable_ms` is the window nobody was served in — pause to resume —
+and is the number to compare across releases. `migration.state` is `ran` with the reason (`descriptors_changed`, or the
+manifest state that was not complete) when it runs. `promotion.snapshot` is
+`current` when the checkpoint the standby proved is still the one on disk,
+`advanced` when it moved, and `rebuild-after-promotion` when the re-proof failed
+— in that last case promotion still proceeds and the coalesced rebuild path owns
+the repair.
+
+### The service environment file
+
+A worker child is spawned with every `EnvironmentFile=` the unit declares,
+re-read at spawn time and overlaid in order on the inherited environment. systemd reads that file once,
+when the supervisor starts, so without this an edited service environment would
+reach a worker only after a full supervisor restart — which is exactly what a
+seamless upgrade avoids. The supervisor's own environment is never changed.
+This is how `EXOMEM_PRELOAD_MODELS=1` and `EXOMEM_STANDBY_WARM_SECONDS` reach
+the next worker: edit `service.env`, then run the ordinary
+`scripts/upgrade.sh`. A file that cannot be read is reported in the handoff
+record as `environment: ["unreadable: <name>"]`, not just logged.
+
+### Streams through promotion
+
+A long-lived client `GET` stream detached for cutover is reattached with
+backoff inside the reattachment budget while the standby is being promoted,
+instead of being closed on the first non-success. A replacement that refuses the
+original credential (401 or 403) is a definitive answer and still closes the
+stream.
+
+## Admission budgets
+
 Admission during handoff allows at most 64 queued requests, 64 MiB total and
 32 MiB per request. A queued request has 45 seconds from reservation, including
 body intake. The worker handoff has a 40-second deadline, with up to 30 seconds

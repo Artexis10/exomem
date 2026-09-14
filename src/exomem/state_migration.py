@@ -182,6 +182,34 @@ def _descriptor_ids() -> tuple[str, ...]:
     )
 
 
+def declared_descriptor_ids() -> tuple[str, ...]:
+    """The external-state descriptor ids this installed release requires.
+
+    A managed upgrade compares this, read from the candidate interpreter, with
+    the set the vault's state manifest was published with, so the supervisor can
+    tell whether the target declares a state migration without running the
+    migrator (`seamless-managed-worker-handoff` D8).
+    """
+
+    return _descriptor_ids()
+
+
+def recorded_descriptor_ids(vault_root: Path) -> tuple[str, ...] | None:
+    """The descriptor ids the published state manifest was completed with."""
+
+    state_dir = state_paths.vault_state_dir(vault_root)
+    try:
+        manifest = _load_manifest(state_dir, vault_root=vault_root)
+    except StateMigrationManifestError:
+        return None
+    if manifest is None:
+        return None
+    descriptors = manifest.get("descriptors")
+    if not isinstance(descriptors, (list, tuple)):
+        return None
+    return tuple(str(entry) for entry in descriptors)
+
+
 def scan_vault_state(vault_root: Path) -> dict[str, tuple[Path, ...]]:
     """Return top-level legacy members for every external-state descriptor."""
 

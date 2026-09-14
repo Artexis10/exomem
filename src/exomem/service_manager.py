@@ -8,16 +8,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import os
 import signal
 import stat
 import tempfile
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 def private_directory(path: Path) -> Path:
@@ -141,16 +145,29 @@ class Deadline:
         return remaining
 
 
-def _descendants() -> dict[int, tuple[int, str]]:
-    """Read the current descendant tree, including subreaper-adopted children."""
+def _descendants(
+    *, ignore_sessions: frozenset[int] = frozenset()
+) -> dict[int, tuple[int, str]]:
+    """Read the current descendant tree, including subreaper-adopted children.
+
+    ``ignore_sessions`` excludes the session of a deliberately co-owned tree so
+    one worker's exit can be proven while another is still running. Every worker
+    and migrator is spawned with ``start_new_session=True``, so a session id is
+    exactly one spawned tree and nothing in it calls ``setsid`` again. A standby
+    is the only tree this supervisor ever runs beside the serving worker, and
+    each one's stop proof is still exhaustive within its own session.
+    """
     processes: dict[int, tuple[int, str]] = {}
+    sessions: dict[int, int] = {}
     for path in Path("/proc").iterdir():
         if not path.name.isdigit():
             continue
         try:
             fields = (path / "stat").read_text().rsplit(")", 1)[1].split()
-            processes[int(path.name)] = (int(fields[1]), fields[0])
-        except (FileNotFoundError, ProcessLookupError):
+            pid = int(path.name)
+            processes[pid] = (int(fields[1]), fields[0])
+            sessions[pid] = int(fields[3])
+        except (FileNotFoundError, ProcessLookupError, IndexError, ValueError):
             continue
     owned: dict[int, tuple[int, str]] = {}
     parents = {os.getpid()}
@@ -159,9 +176,16 @@ def _descendants() -> dict[int, tuple[int, str]]:
             pid for pid, (parent, _) in processes.items() if parent in parents and pid not in owned
         }
         if not new:
-            return owned
+            break
         owned.update({pid: processes[pid] for pid in new})
         parents = new
+    if ignore_sessions:
+        owned = {
+            pid: value
+            for pid, value in owned.items()
+            if sessions.get(pid) not in ignore_sessions
+        }
+    return owned
 
 
 async def stop_owned_process(
@@ -169,6 +193,7 @@ async def stop_owned_process(
     *,
     timeout: float,
     include_adopted: bool = False,
+    ignore_sessions: frozenset[int] = frozenset(),
 ) -> None:
     """Stop an owned process tree and require observed exit before returning.
 
@@ -183,7 +208,7 @@ async def stop_owned_process(
         except ProcessLookupError:
             pass
     while True:
-        owned = _descendants() if include_adopted else {}
+        owned = _descendants(ignore_sessions=ignore_sessions) if include_adopted else {}
         for pid, (_, state) in owned.items():
             if pid == child.pid:
                 continue  # asyncio owns reaping this direct child
@@ -207,14 +232,35 @@ async def stop_owned_process(
         if (
             child.returncode is not None
             and not group_alive
-            and not _live_descendants(include_adopted)
+            and not _live_descendants(include_adopted, ignore_sessions)
         ):
             return
         await asyncio.sleep(min(0.025, deadline.remaining(0.025)))
 
 
-def _live_descendants(include_adopted: bool) -> bool:
-    return bool(_descendants()) if include_adopted else False
+def _live_descendants(
+    include_adopted: bool, ignore_sessions: frozenset[int] = frozenset()
+) -> bool:
+    return bool(_descendants(ignore_sessions=ignore_sessions)) if include_adopted else False
+
+
+#: A standby warms while the previous worker still serves, so its budget is
+#: separate from the cutover budget and is measured in minutes, not seconds.
+STANDBY_WARM_ENV = "EXOMEM_STANDBY_WARM_SECONDS"
+DEFAULT_STANDBY_WARM_SECONDS = 300.0
+
+
+def standby_warm_budget() -> float:
+    """How long a candidate may warm beside the serving worker."""
+    raw = os.environ.get(STANDBY_WARM_ENV, "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 0.0
+        if math.isfinite(value) and value > 0:
+            return value
+    return DEFAULT_STANDBY_WARM_SECONDS
 
 
 class Supervisor:
@@ -229,6 +275,7 @@ class Supervisor:
         runtime: Any,
         identity: dict[str, Any],
         transition_timeout: float = 40,
+        standby_warm_timeout: float | None = None,
     ):
         self.records = ReleaseRecords(directory)
         self.initial_target = initial_target
@@ -236,9 +283,17 @@ class Supervisor:
         self.runtime = runtime
         self.identity = identity
         self.transition_timeout = transition_timeout
+        self.standby_warm_timeout = (
+            standby_warm_budget() if standby_warm_timeout is None else standby_warm_timeout
+        )
         self.lock = asyncio.Lock()
         self.phase = "unavailable"
         self.transition_task: asyncio.Task | None = None
+        #: Identifies the in-flight transition an operator is polling, and
+        #: retains the finished one's outcome so a client that acknowledged and
+        #: went away can still read what happened.
+        self.transition_id: str | None = None
+        self.last_transition: dict[str, Any] | None = None
 
     async def start(self) -> None:
         if self.records.pending() is not None:
@@ -265,7 +320,89 @@ class Supervisor:
             "unit": self.identity.get("unit"),
             "ingress": self.ingress.stats,
             "port": getattr(self.runtime, "port", None),
+            "transition": self.transition_id,
+            "last_transition": self.last_transition,
         }
+
+    def _environment_notes(self, handoff: dict[str, Any]) -> dict[str, Any]:
+        """Carry an unreadable environment file into every handoff record.
+
+        A child that silently inherited a stale environment is the failure this
+        read exists to prevent, so the note belongs on the discarded and
+        unsupported paths as much as on the one that promoted.
+        """
+        warnings = getattr(self.runtime, "environment_warnings", None)
+        if warnings:
+            handoff["environment"] = list(warnings)
+        return handoff
+
+    async def _warm_standby(
+        self, target: dict[str, Any], *, resume: bool
+    ) -> tuple[dict[str, Any], Any]:
+        """Warm the candidate beside the serving worker under its own budget.
+
+        Nothing here pauses, drains or signals the worker that is serving. A
+        candidate that cannot reach cutover readiness inside the warm budget is
+        discarded with the component it waited on recorded, and the upgrade
+        continues through the one-worker sequence — reported, never silent
+        (`seamless-managed-worker-handoff` D7).
+        """
+        if resume:
+            # A recorded transition has already stopped its worker; there is
+            # nothing left to warm beside.
+            return self._environment_notes(
+                {"standby": "unsupported", "reason": "resuming a recorded transition"}
+            ), None
+        if not getattr(self.runtime, "standby_capable", False):
+            return self._environment_notes(
+                {"standby": "unsupported", "reason": "target release has no standby mode"}
+            ), None
+        try:
+            standby = await self.runtime.start_standby(
+                target, timeout=self.standby_warm_timeout
+            )
+        except TimeoutError:
+            await self._discard_standby("pending")
+            return self._environment_notes(
+                {
+                    "standby": "discarded",
+                    "reason": "warm budget expired",
+                    "waiting": getattr(self.runtime, "standby_waiting", None),
+                }
+            ), None
+        except Exception:  # noqa: BLE001 - a candidate failure never touches the serving worker
+            await self._discard_standby("pending")
+            return self._environment_notes(
+                {
+                    "standby": "discarded",
+                    "reason": "candidate could not warm",
+                    "waiting": getattr(self.runtime, "standby_waiting", None),
+                }
+            ), None
+        return self._environment_notes({"standby": "ready"}), standby
+
+    async def _discard_standby(self, candidate: Any) -> None:
+        """Stop a candidate without ever signalling the worker that is serving.
+
+        Any truthy ``candidate`` means one may exist; discarding when none does
+        is a no-op in the runtime.
+        """
+        if not candidate:
+            return
+        discard = getattr(self.runtime, "discard_standby", None)
+        if discard is None:
+            return
+        try:
+            await discard(timeout=10)
+        except Exception:  # noqa: BLE001 - a stuck candidate must not mask the outcome
+            pass
+
+    def _migration_declared(self, target: dict[str, Any]) -> tuple[bool, str]:
+        """Whether the staged target declares a state migration."""
+        declared = getattr(self.runtime, "migration_required", None)
+        if declared is None:
+            return True, "target declaration unavailable"
+        return declared(target)
 
     async def upgrade(
         self, target: dict[str, Any] | None, *, resume: bool = False
@@ -273,6 +410,13 @@ class Supervisor:
         if self.lock.locked():
             return {"ok": False, "error": "an upgrade is already in progress"}
         async with self.lock:
+            # A promotion record belongs to the transition that produced it.
+            # Carried into a later attempt's handoff it would tell whoever
+            # resumes that state was handed over when this attempt never
+            # reached promotion -- the difference between a restart and a
+            # rollback.
+            if getattr(self.runtime, "promotion_record", None) is not None:
+                self.runtime.promotion_record = None
             pending = self.records.pending()
             if bool(pending) != resume:
                 return {
@@ -290,8 +434,15 @@ class Supervisor:
                     "ok": False,
                     "error": "target interpreter verification failed; current admission unchanged",
                 }
-            deadline = Deadline(self.transition_timeout)
+            # A standby warm is minutes long and runs while the old worker is
+            # still serving. The transition is in progress from here, which is
+            # what a polling operator has to be able to see.
             self.phase = "upgrading"
+            handoff, standby = await self._warm_standby(target, resume=resume)
+            deadline = Deadline(self.transition_timeout)
+            # The window operators care about: nobody is served between here and
+            # the resume below.
+            paused_at = time.monotonic()
             self.ingress.pause()
             if not resume:
                 try:
@@ -299,6 +450,7 @@ class Supervisor:
                 except TimeoutError:
                     drained = False
                 if not drained:
+                    await self._discard_standby(standby)
                     self.ingress.resume()
                     self.phase = "ready"
                     return {
@@ -308,6 +460,7 @@ class Supervisor:
                 try:
                     self.records.begin(target, worker_pid=self.runtime.pid, identity=self.identity)
                 except OSError:
+                    await self._discard_standby(standby)
                     self.ingress.resume()
                     self.phase = "ready"
                     return {
@@ -321,23 +474,50 @@ class Supervisor:
                     # migrator or failed candidate retained by this supervisor.
                     self.records.phase("stopping")
                     await self.runtime.stop(timeout=deadline.remaining(10))
-                    self.records.phase("migrating", worker_pid=0)
-                    await self.runtime.migrate(target, timeout=deadline.remaining(15))
-                    self.records.phase("starting", worker_pid=0)
-                    client = await self.runtime.start(target, timeout=deadline.remaining(30))
+                    # The migrator is the only writer between the two workers,
+                    # and it runs only when the target declares a state
+                    # migration. A skipped step is recorded, never silent.
+                    migrate, reason = self._migration_declared(target)
+                    handoff["migration"] = {
+                        "state": "ran" if migrate else "skipped",
+                        "reason": reason,
+                    }
+                    if migrate:
+                        self.records.phase("migrating", worker_pid=0)
+                        await self.runtime.migrate(target, timeout=deadline.remaining(15))
+                    if standby is not None:
+                        self.records.phase("promoting", worker_pid=0)
+                        client, promotion = await self.runtime.promote_standby(
+                            migrated=migrate, timeout=deadline.remaining(30)
+                        )
+                        handoff["promotion"] = promotion
+                    else:
+                        self.records.phase("starting", worker_pid=0)
+                        client = await self.runtime.start(target, timeout=deadline.remaining(30))
                     self.records.phase("ready", worker_pid=self.runtime.pid)
                     self.records.accept(target)
                     self.ingress.resume(client)
                     self.phase = "ready"
+                    handoff["unavailable_ms"] = round(
+                        (time.monotonic() - paused_at) * 1000.0, 1
+                    )
                     return {
                         "ok": True,
                         "phase": "ready",
                         "active": target,
                         "worker_pid": self.runtime.pid,
+                        "handoff": handoff,
                     }
             except Exception:  # noqa: BLE001 - every post-stop failure must retain recovery state
                 self.phase = "recovery-required"
                 self.ingress.unavailable()
+                await self._discard_standby(standby)
+                # A promotion that was accepted before the failure is the single
+                # most useful fact for whoever resumes: it says the state was
+                # handed over, so the next start is a restart, not a rollback.
+                promotion = getattr(self.runtime, "promotion_record", None)
+                if promotion is not None:
+                    handoff["promotion"] = promotion
                 # Error text from subprocesses can contain configuration or
                 # vault content. Retain phase and identity, not arbitrary text.
                 self.records.phase("failed", worker_pid=self.runtime.pid)
@@ -347,11 +527,13 @@ class Supervisor:
                     return {
                         "ok": False,
                         "error": "upgrade failed; owned process exit is unproven; resume required",
+                        "handoff": handoff,
                     }
                 self.records.phase("failed", worker_pid=0)
                 return {
                     "ok": False,
                     "error": "upgrade failed after shutdown; worker is stopped; resume required",
+                    "handoff": handoff,
                 }
 
 
@@ -375,7 +557,8 @@ def verify_systemd_identity(
                 "--user",
                 "show",
                 unit,
-                "--property=MainPID,ControlGroup,InvocationID,KillMode,SendSIGKILL,TimeoutStopUSec",
+                "--property=MainPID,ControlGroup,InvocationID,KillMode,SendSIGKILL,"
+                "TimeoutStopUSec,EnvironmentFiles",
             ],
             capture_output=True,
             text=True,
@@ -412,12 +595,28 @@ def verify_systemd_identity(
         members.update(int(pid) for pid in path.read_text().split())
     if members != {os.getpid()}:
         raise RuntimeError("service cgroup has residual processes; prior cleanup is unproven")
-    return {
+    identity = {
         "unit": unit,
         "invocation": invocation,
         "cgroup": group,
         "boot": (proc_root / "sys/kernel/random/boot_id").read_text().strip(),
     }
+    # systemd renders this as `path (ignore_errors=...)` per file, and a unit may
+    # declare several. Match every entry rather than anchoring on one, or two
+    # files collapse into a single unusable path. Only paths are retained; the
+    # files' values never enter this process.
+    rendered = [
+        path.lstrip("-")
+        for path in re.findall(
+            r"(\S+)\s*\(ignore_errors=[^)]*\)", properties.get("EnvironmentFiles", "")
+        )
+    ]
+    files = [path for path in rendered if path and Path(path).is_absolute()]
+    if files:
+        identity["environment_files"] = files
+        # Retained for the single-file case every managed unit renders today.
+        identity["environment_file"] = files[0]
+    return identity
 
 
 def enable_subreaper() -> None:
@@ -442,22 +641,106 @@ def remove_stale_socket(path: Path) -> None:
 
 
 class WorkerRuntime:
-    """Own every state-touching child through stop, migration and readiness."""
+    """Own every state-touching child through stop, migration and readiness.
 
-    def __init__(self, socket_path: Path, *, host: str, port: int):
+    At most two owned worker trees exist at once: the one serving and, during an
+    upgrade, the standby warming beside it. Each is its own session, so each
+    one's exit proof stays exhaustive inside its session while the other runs.
+    Only one of them ever owns state, and promotion is the single moment that
+    changes.
+    """
+
+    def __init__(
+        self,
+        socket_path: Path,
+        *,
+        host: str,
+        port: int,
+        environment_file: Path | str | None = None,
+        environment_files: Any = None,
+    ):
         self.socket_path = socket_path
         self.host = host
         self.port = port
         self.child: asyncio.subprocess.Process | None = None
         self.client: Any = None
+        self.standby: asyncio.subprocess.Process | None = None
+        self.standby_client: Any = None
+        self.standby_socket = socket_path.with_name(
+            f"{socket_path.stem}-standby{socket_path.suffix}"
+        )
+        self.standby_capable = False
+        self.standby_waiting: str | None = None
+        self.promotion_record: dict[str, Any] | None = None
+        declared = environment_files if environment_files else (
+            [environment_file] if environment_file else []
+        )
+        self.environment_files = tuple(Path(entry) for entry in declared)
+        self.environment_warnings: list[str] = []
 
     @property
     def pid(self) -> int:
         return self.child.pid if self.child is not None and self.child.returncode is None else 0
 
-    async def inspect(self, target: dict[str, Any]) -> dict[str, str]:
-        if not isinstance(target, dict) or set(target) != {"python", "version"}:
+    def _other_sessions(self, *, standby: bool) -> frozenset[int]:
+        """The co-owned session a stop or spawn proof must leave alone."""
+        other = self.standby if not standby else self.child
+        # ``start_new_session=True`` makes the session id the spawned pid, and it
+        # stays valid for members that outlive the direct child.
+        return frozenset({other.pid}) if other is not None else frozenset()
+
+    def _child_environment(self) -> dict[str, str] | None:
+        """Overlay the unit's current environment file for the child only.
+
+        systemd read ``EnvironmentFile=`` once, when this supervisor started, so
+        an edited service environment would otherwise reach a worker only after
+        a full restart — which is exactly what a seamless upgrade avoids. The
+        file is re-read at spawn time and applied to the child's environment;
+        this process's own environment is never changed and no value is logged.
+        """
+        if not self.environment_files:
+            return None
+        self.environment_warnings = []
+        values: dict[str, str] = {}
+        for path in self.environment_files:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                # An operator has to see this: the child silently inheriting a
+                # stale environment is what this read exists to prevent.
+                self.environment_warnings.append(f"unreadable: {path.name}")
+                log.warning("managed service environment file could not be read")
+                continue
+            values.update(self._parse_environment(text))
+        if not values:
+            return None
+        return {**os.environ, **values}
+
+    @staticmethod
+    def _parse_environment(text: str) -> dict[str, str]:
+        """Read systemd `KEY=value` assignments; never log a value."""
+        values: dict[str, str] = {}
+        for line in text.splitlines():
+            entry = line.strip()
+            if not entry or entry.startswith("#") or "=" not in entry:
+                continue
+            name, _, value = entry.partition("=")
+            name = name.strip()
+            if not name or not (name[0].isalpha() or name[0] == "_"):
+                continue
+            if not all(character.isalnum() or character == "_" for character in name):
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+            values[name] = value
+        return values
+
+    async def inspect(self, target: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(target, dict) or not {"python", "version"} <= set(target):
             raise ValueError("target must identify an interpreter and exact release")
+        if set(target) - {"python", "version", "state_descriptors"}:
+            raise ValueError("target carries fields the managed protocol does not define")
         interpreter, version = target["python"], target["version"]
         if (
             not isinstance(interpreter, str)
@@ -468,10 +751,24 @@ class WorkerRuntime:
             or len(version) > 80
         ):
             raise ValueError("invalid target interpreter or version")
+        # The probe also reports what this release can do and what its state
+        # descriptors are, so the supervisor never has to run the migrator to
+        # learn whether the target declares a migration.
         code = (
             "import json; from importlib.metadata import version; "
-            "from exomem.service_manager import WORKER_PROTOCOL; "
-            'print(json.dumps({"version":version("exomem"),"protocol":WORKER_PROTOCOL}))'
+            "from exomem.service_manager import WORKER_PROTOCOL\n"
+            "try:\n"
+            "    from exomem.service_standby import STANDBY_ENV as _s\n"
+            "    standby = True\n"
+            "except Exception:\n"
+            "    standby = False\n"
+            "try:\n"
+            "    from exomem.state_migration import declared_descriptor_ids\n"
+            "    descriptors = list(declared_descriptor_ids())\n"
+            "except Exception:\n"
+            "    descriptors = []\n"
+            'print(json.dumps({"version":version("exomem"),"protocol":WORKER_PROTOCOL,'
+            '"standby":standby,"state_descriptors":descriptors}))'
         )
         probe = await asyncio.create_subprocess_exec(
             interpreter,
@@ -492,39 +789,68 @@ class WorkerRuntime:
         if probe.returncode != 0 or len(output) > 4096:
             raise ValueError("target cannot run the managed worker protocol")
         actual = json.loads(output)
-        if actual != {"version": version, "protocol": WORKER_PROTOCOL}:
-            raise ValueError("target version or managed worker protocol differs")
-        return {"python": interpreter, "version": version}
+        if not isinstance(actual, dict) or actual.get("version") != version:
+            raise ValueError("target version differs")
+        if actual.get("protocol") != WORKER_PROTOCOL:
+            raise ValueError("target managed worker protocol differs")
+        descriptors = actual.get("state_descriptors")
+        if not isinstance(descriptors, list) or not all(
+            isinstance(entry, str) and entry for entry in descriptors
+        ):
+            raise ValueError("target did not declare its state descriptors")
+        declared = target.get("state_descriptors")
+        if declared is not None and list(declared) != descriptors:
+            raise ValueError("staged state-migration declaration does not match the target")
+        self.standby_capable = actual.get("standby") is True
+        return {
+            "python": interpreter,
+            "version": version,
+            "state_descriptors": descriptors,
+        }
 
-    async def _spawn(self, command: list[str]) -> None:
-        if self.child is not None or _descendants():
+    async def _spawn(self, command: list[str], *, standby: bool = False) -> None:
+        ignore = self._other_sessions(standby=standby)
+        occupied = self.standby if standby else self.child
+        if occupied is not None or _descendants(ignore_sessions=ignore):
             raise RuntimeError("previous owned process exit has not been proven")
         pending = asyncio.create_task(
             asyncio.create_subprocess_exec(
                 *command,
                 start_new_session=True,
+                env=self._child_environment(),
             )
         )
         try:
-            self.child = await asyncio.shield(pending)
+            spawned = await asyncio.shield(pending)
         except asyncio.CancelledError:
             # Retain ownership even if cancellation arrives between fork and
             # subprocess construction. The failure path must stop this tree.
-            self.child = await asyncio.shield(pending)
+            spawned = await asyncio.shield(pending)
+            if standby:
+                self.standby = spawned
+            else:
+                self.child = spawned
             raise
+        if standby:
+            self.standby = spawned
+        else:
+            self.child = spawned
 
     async def stop(self, timeout: float) -> None:
+        ignore = self._other_sessions(standby=False)
         if self.child is not None:
-            await stop_owned_process(self.child, timeout=timeout, include_adopted=True)
+            await stop_owned_process(
+                self.child, timeout=timeout, include_adopted=True, ignore_sessions=ignore
+            )
             self.child = None
-        elif _descendants():
+        elif _descendants(ignore_sessions=ignore):
             raise RuntimeError("untracked owned children require a service-manager cleanup")
         if self.client is not None:
             await self.client.aclose()
             self.client = None
         remove_stale_socket(self.socket_path)
 
-    async def migrate(self, target: dict[str, str], timeout: float) -> None:
+    async def migrate(self, target: dict[str, Any], timeout: float) -> None:
         vault = os.environ.get("EXOMEM_VAULT_PATH", "")
         if not vault or not Path(vault).is_absolute():
             raise ValueError("managed service requires its installed absolute vault binding")
@@ -549,7 +875,7 @@ class WorkerRuntime:
         # A completed migrator is not proof its children have stopped.
         await self.stop(timeout=deadline.remaining(timeout))
 
-    async def start(self, target: dict[str, str], timeout: float):
+    async def start(self, target: dict[str, Any], timeout: float):
         import httpx
 
         deadline = Deadline(timeout)
@@ -596,6 +922,199 @@ class WorkerRuntime:
             await asyncio.sleep(min(0.1, deadline.remaining(0.1)))
 
 
+    def _worker_command(self, target: dict[str, Any], socket_path: Path, *, standby: bool):
+        command = [
+            target["python"],
+            "-I",
+            "-m",
+            "exomem.service_manager",
+            "worker",
+            "--socket",
+            str(socket_path),
+            "--host",
+            self.host,
+            "--port",
+            str(self.port),
+        ]
+        if standby:
+            command.append("--standby")
+        return command
+
+    async def _probe(self, client: Any, target: dict[str, Any]) -> dict[str, Any]:
+        """Read one worker's liveness and readiness pair."""
+        health = await client.get("/health")
+        ready = await client.get("/health/ready")
+        if health.status_code == 200 and health.json().get("version") != target["version"]:
+            raise RuntimeError("candidate is serving a different release")
+        if health.status_code != 200 or ready.status_code not in {200, 503}:
+            return {}
+        payload = ready.json()
+        return payload if isinstance(payload, dict) else {}
+
+    def migration_required(self, target: dict[str, Any]) -> tuple[bool, str]:
+        """Whether the staged target declares a state migration for this vault.
+
+        Derived entirely from the state manifest the running system already
+        maintains: a manifest that is not complete needs one, and so does a
+        target whose descriptor set differs from the one the manifest was
+        published with. Nothing here runs the migrator to find out
+        (`seamless-managed-worker-handoff` D8).
+        """
+        vault = os.environ.get("EXOMEM_VAULT_PATH", "")
+        if not vault or not Path(vault).is_absolute():
+            return True, "vault binding unavailable"
+        declared = target.get("state_descriptors")
+        if not declared:
+            return True, "target declares no descriptor set"
+        from . import state_migration
+
+        try:
+            status = state_migration.migration_status(Path(vault))
+        except Exception:  # noqa: BLE001 - an unreadable manifest is the migrator's problem
+            return True, "state manifest unreadable"
+        if status != "complete":
+            return True, f"state manifest {status}"
+        recorded = state_migration.recorded_descriptor_ids(Path(vault))
+        if recorded is None:
+            return True, "state manifest records no descriptor set"
+        if tuple(declared) != tuple(recorded):
+            return True, "descriptors_changed"
+        return False, "declared_none"
+
+    async def start_standby(self, target: dict[str, Any], timeout: float):
+        """Warm a candidate beside the serving worker until it is cutover-ready.
+
+        The standby binds its own socket and owns nothing: it takes no writer
+        lease, publishes nothing and schedules no work until promotion. This
+        never signals, pauses or inspects the worker that is serving.
+        """
+        import httpx
+
+        if not self.standby_capable:
+            raise RuntimeError("target release cannot run as a standby")
+        deadline = Deadline(timeout)
+        # The record always names something: a candidate that never answered its
+        # readiness probe is a fact an operator needs, not an absent field.
+        self.standby_waiting = "unreachable"
+        remove_stale_socket(self.standby_socket)
+        await self._spawn(
+            self._worker_command(target, self.standby_socket, standby=True), standby=True
+        )
+        self.standby_client = httpx.AsyncClient(
+            transport=httpx.AsyncHTTPTransport(uds=str(self.standby_socket), retries=0),
+            base_url="http://localhost",
+            trust_env=False,
+            follow_redirects=False,
+            timeout=None,
+        )
+        while True:
+            if self.standby.returncode is not None:
+                raise RuntimeError("standby worker exited before cutover readiness")
+            try:
+                async with asyncio.timeout(deadline.remaining(2)):
+                    payload = await self._probe(self.standby_client, target)
+                cutover = payload.get("cutover") or {}
+                components = cutover.get("components") or {}
+                waiting = [name for name, state in components.items() if state != "ready"]
+                if waiting:
+                    self.standby_waiting = waiting[0]
+                if cutover.get("cutover_ready") is True:
+                    self.standby_waiting = None
+                    return self.standby_client
+            except (httpx.HTTPError, TimeoutError, ValueError):
+                pass
+            await asyncio.sleep(min(0.1, deadline.remaining(0.1)))
+
+    async def discard_standby(self, timeout: float = 10) -> None:
+        """Stop the candidate's tree without touching the serving worker's."""
+        if self.standby is not None:
+            await stop_owned_process(
+                self.standby,
+                timeout=timeout,
+                include_adopted=True,
+                ignore_sessions=self._other_sessions(standby=True),
+            )
+            self.standby = None
+        if self.standby_client is not None:
+            await self.standby_client.aclose()
+            self.standby_client = None
+        remove_stale_socket(self.standby_socket)
+
+    def _assume_promoted(self) -> None:
+        """One owner at a time: the promoted tree becomes the serving one.
+
+        Idempotent, because the readiness-timeout path calls it before raising.
+        """
+        if self.standby is None:
+            return
+        self.child, self.standby = self.standby, None
+        self.client, self.standby_client = self.standby_client, None
+        self.socket_path, self.standby_socket = self.standby_socket, self.socket_path
+        self.standby_waiting = None
+
+    async def promote_standby(self, *, migrated: bool, timeout: float):
+        """Hand state ownership to the warmed candidate and serve from it.
+
+        Called only after the previous worker and its descendants have provably
+        exited and after the migrator has run or been recorded as skipped.
+        """
+        import httpx
+
+        if self.standby is None or self.standby_client is None:
+            raise RuntimeError("no standby worker to promote")
+        if self.child is not None or _descendants(
+            ignore_sessions=frozenset({self.standby.pid})
+        ):
+            raise RuntimeError("previous owned process exit has not been proven")
+        deadline = Deadline(timeout)
+        # A migrated promotion re-runs the whole source proof inside this POST
+        # -- seconds on a large vault, and it grows with the corpus -- so the
+        # call gets the cutover budget rather than a fixed ten seconds. Capping
+        # it lower would time out the request while the promotion it asked for
+        # was still running, and discard a standby that was about to succeed.
+        promote_budget = deadline.remaining(timeout if migrated else 10)
+        async with asyncio.timeout(promote_budget):
+            response = await self.standby_client.post(
+                "/control/promote", json={"migrated": bool(migrated)}
+            )
+        if response.status_code != 200:
+            raise RuntimeError("standby refused promotion")
+        # Ownership has already changed hands. Record that before waiting on
+        # readiness so an exhausted wait cannot lose the fact that it happened.
+        record = response.json()
+        self.promotion_record = record
+        try:
+            while True:
+                if self.standby.returncode is not None:
+                    raise RuntimeError("promoted worker exited before readiness")
+                try:
+                    async with asyncio.timeout(deadline.remaining(2)):
+                        health = await self.standby_client.get("/health")
+                        ready = await self.standby_client.get("/health/ready")
+                    if (
+                        health.status_code == 200
+                        and ready.status_code == 200
+                        and ready.json().get("status") == "ready"
+                    ):
+                        break
+                except (httpx.HTTPError, TimeoutError, ValueError):
+                    pass
+                await asyncio.sleep(min(0.1, deadline.remaining(0.1)))
+        except TimeoutError:
+            # The promotion itself was accepted, so this process already holds
+            # the writer lease: it is the serving worker that has not answered
+            # yet, not a candidate to throw away. Track it as such so the
+            # failure path stops the right tree, and say which of the two
+            # happened rather than reporting a generic cutover failure.
+            self._assume_promoted()
+            raise RuntimeError(
+                "promotion was accepted but the worker did not report readiness "
+                "inside the cutover budget"
+            ) from None
+        self._assume_promoted()
+        return self.client, record
+
+
 async def control_server(path: Path, supervisor: Supervisor) -> asyncio.Server:
     """Serve a bounded local-only JSON protocol; no public ASGI control route."""
     import socket
@@ -622,13 +1141,43 @@ async def control_server(path: Path, supervisor: Supervisor) -> asyncio.Server:
                 if supervisor.transition_task is not None and not supervisor.transition_task.done():
                     result = {"ok": False, "error": "an upgrade is already in progress"}
                 else:
-                    supervisor.transition_task = asyncio.create_task(
+                    # A standby warm is minutes long, so the transition is
+                    # acknowledged rather than awaited: holding the control
+                    # connection open for it turns any client read timeout into
+                    # a false failure while promotion proceeds regardless. The
+                    # client polls `status` for the outcome.
+                    transition = uuid.uuid4().hex
+                    supervisor.transition_id = transition
+                    supervisor.last_transition = None
+                    task = asyncio.create_task(
                         supervisor.upgrade(
                             request.get("target"),
                             resume=command == "resume",
                         )
                     )
-                    result = await asyncio.shield(supervisor.transition_task)
+
+                    def _record(finished: asyncio.Task, identifier: str = transition) -> None:
+                        if finished.cancelled():
+                            outcome: dict[str, Any] = {
+                                "ok": False,
+                                "error": "the transition was cancelled",
+                            }
+                        elif finished.exception() is not None:
+                            # Error text from a transition can carry
+                            # configuration or vault content; keep the shape.
+                            outcome = {"ok": False, "error": "the transition failed"}
+                        else:
+                            outcome = finished.result()
+                        supervisor.last_transition = {"transition": identifier, **outcome}
+
+                    task.add_done_callback(_record)
+                    supervisor.transition_task = task
+                    result = {
+                        "ok": True,
+                        "accepted": True,
+                        "transition": transition,
+                        "phase": supervisor.phase,
+                    }
             else:
                 result = {"ok": False, "error": "unknown control command"}
         except (ValueError, TimeoutError, ConnectionError):
@@ -687,6 +1236,12 @@ async def serve(supervisor: Supervisor, *, host: str, port: int) -> None:
                 await asyncio.wait_for(supervisor.ingress.aclose(), 10)
             except TimeoutError:
                 pass
+            discard = getattr(supervisor.runtime, "discard_standby", None)
+            if discard is not None:
+                try:
+                    await discard(timeout=5)
+                except Exception:  # noqa: BLE001 - shutdown still has to stop the worker
+                    pass
             await supervisor.runtime.stop(timeout=5)
 
 
@@ -707,6 +1262,11 @@ def main(argv: list[str] | None = None) -> int:
     worker.add_argument("--socket", type=Path, required=True)
     worker.add_argument("--host", required=True)
     worker.add_argument("--port", type=int, required=True)
+    worker.add_argument(
+        "--standby",
+        action="store_true",
+        help="warm beside the serving worker and own no state until promoted",
+    )
     args = parser.parse_args(argv)
     if sys.platform != "linux":
         parser.error("managed services currently require Linux systemd user units")
@@ -715,12 +1275,17 @@ def main(argv: list[str] | None = None) -> int:
 
         private_directory(args.socket.parent)
         server.run(
-            transport="streamable-http", host=args.host, port=args.port, worker_socket=args.socket
+            transport="streamable-http",
+            host=args.host,
+            port=args.port,
+            worker_socket=args.socket,
+            standby=args.standby,
         )
         return 0
     try:
         directory = private_directory(args.runtime_dir)
-        if len(os.fsencode(directory / "control.sock")) >= 104:
+        # The standby socket is the longest name this directory has to hold.
+        if len(os.fsencode(directory / "worker-standby.sock")) >= 104:
             raise ValueError("managed runtime directory is too long for Unix sockets")
         if not 0 < args.port < 65536:
             raise ValueError("port must be between 1 and 65535")
@@ -730,7 +1295,12 @@ def main(argv: list[str] | None = None) -> int:
             from .service_ingress import ServiceIngress
 
             host = os.environ.get("EXOMEM_HOST") or args.host
-            runtime = WorkerRuntime(directory / "worker.sock", host=host, port=args.port)
+            runtime = WorkerRuntime(
+                directory / "worker.sock",
+                host=host,
+                port=args.port,
+                environment_files=identity.get("environment_files"),
+            )
             supervisor = Supervisor(
                 directory,
                 initial_target={"python": args.worker_python, "version": version("exomem")},

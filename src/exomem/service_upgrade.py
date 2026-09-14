@@ -40,7 +40,9 @@ def control(runtime_dir: Path, command: dict[str, Any]) -> dict[str, Any]:
     if len(os.fsencode(socket_path)) >= 108:
         raise RuntimeError("managed control socket path is too long")
     with socket.socket(socket.AF_UNIX) as client:
-        client.settimeout(60 if command["command"] in {"upgrade", "resume"} else 5)
+        # Every command is answered promptly now: a transition is acknowledged
+        # and polled through `status`, never awaited on this connection.
+        client.settimeout(15 if command["command"] in {"upgrade", "resume"} else 5)
         client.connect(str(socket_path))
         _, peer_uid, _ = struct.unpack("3i", client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
         if peer_uid != os.getuid():
@@ -58,9 +60,31 @@ def control(runtime_dir: Path, command: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
-def _installed_version(python: Path) -> str:
+# A target that predates the state-migration declaration has no
+# `declared_descriptor_ids`. Staging it must still work -- that is the rollback
+# path -- so the probe degrades to an empty set exactly as `WorkerRuntime.inspect`
+# does, and an empty declaration makes the supervisor run the migrator.
+_TARGET_PROBE = (
+    "import json; import importlib.metadata as m\n"
+    "try:\n"
+    "    from exomem.state_migration import declared_descriptor_ids\n"
+    "    descriptors = list(declared_descriptor_ids())\n"
+    "except Exception:\n"
+    "    descriptors = []\n"
+    'print(json.dumps({"version": m.version("exomem"), '
+    '"state_descriptors": descriptors}))'
+)
+
+
+def _staged_identity(python: Path) -> dict[str, object]:
+    """Read the staged release's version and the state descriptors it requires.
+
+    The descriptor set is the target's migration declaration: the supervisor
+    compares it with the vault's state manifest at cutover and runs the offline
+    migrator only when they differ (`seamless-managed-worker-handoff` D8).
+    """
     result = subprocess.run(
-        [str(python), "-I", "-c", "import importlib.metadata as m; print(m.version('exomem'))"],
+        [str(python), "-I", "-c", _TARGET_PROBE],
         check=True,
         capture_output=True,
         text=True,
@@ -68,7 +92,18 @@ def _installed_version(python: Path) -> str:
         errors="strict",
         timeout=10,
     )
-    return result.stdout.strip()
+    identity = json.loads(result.stdout)
+    if not isinstance(identity, dict) or not isinstance(identity.get("version"), str):
+        raise RuntimeError("staged release did not report a usable identity")
+    descriptors = identity.get("state_descriptors")
+    if not isinstance(descriptors, list) or not all(
+        isinstance(entry, str) and entry for entry in descriptors
+    ):
+        raise RuntimeError("staged release did not declare its state descriptors")
+    # An empty list is a legitimate declaration from a release that predates the
+    # descriptor probe; the supervisor treats it as "declares nothing" and runs
+    # the offline migrator.
+    return {"version": identity["version"].strip(), "state_descriptors": descriptors}
 
 
 def _uv() -> str:
@@ -79,7 +114,7 @@ def _uv() -> str:
     return executable
 
 
-def stage(runtime_dir: Path, launcher_python: str, profile: str, package_version: str) -> dict[str, str]:
+def stage(runtime_dir: Path, launcher_python: str, profile: str, package_version: str) -> dict[str, Any]:
     launcher = Path(launcher_python)
     if not launcher.is_absolute() or not launcher.is_file() or not os.access(launcher, os.X_OK):
         raise RuntimeError("manager reported an invalid launcher interpreter")
@@ -102,17 +137,61 @@ def stage(runtime_dir: Path, launcher_python: str, profile: str, package_version
         result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=900)
         if result.returncode:
             raise RuntimeError(f"release staging failed (uv exit {result.returncode})")
-    version = _installed_version(target_python)
+    identity = _staged_identity(target_python)
+    version = identity["version"]
     if not version or (package_version and version != package_version):
         raise RuntimeError("staged release version does not match requested version")
-    return {"python": str(target_python), "version": version}
+    return {
+        "python": str(target_python),
+        "version": version,
+        "state_descriptors": identity["state_descriptors"],
+    }
 
 
-def _wait_for_target(runtime_dir: Path, target: dict[str, str], initial: dict[str, Any]) -> dict[str, Any]:
-    result = initial
-    deadline = time.monotonic() + 180
-    while result.get("phase") == "upgrading" and time.monotonic() < deadline:
-        time.sleep(1)
+def _transition_budget() -> float:
+    """How long an accepted transition may take: standby warm plus cutover.
+
+    The supervisor warms the candidate beside the serving worker before it
+    pauses anything, so the operator's patience has to cover that warm budget as
+    well as the cutover budget, with room for a busy host.
+    """
+    from .service_manager import standby_warm_budget
+
+    return standby_warm_budget() + 120.0
+
+
+def _wait_for_target(
+    runtime_dir: Path,
+    target: dict[str, Any],
+    initial: dict[str, Any],
+    *,
+    budget: float | None = None,
+    interval: float = 1.0,
+) -> dict[str, Any]:
+    """Poll an accepted transition to its outcome.
+
+    The supervisor acknowledges `upgrade` immediately and runs the transition in
+    the background, so this is where the operator waits. It ends on the recorded
+    outcome for this transition, on a ready supervisor serving the staged
+    target, or on the budget.
+    """
+    transition = initial.get("transition") if initial.get("accepted") else None
+    result = initial if not transition else control(runtime_dir, {"command": "status"})
+    deadline = time.monotonic() + (_transition_budget() if budget is None else budget)
+    while time.monotonic() < deadline:
+        recorded = result.get("last_transition")
+        if isinstance(recorded, dict) and (
+            transition is None or recorded.get("transition") == transition
+        ):
+            if not recorded.get("ok"):
+                raise RuntimeError(
+                    str(recorded.get("error", "managed upgrade failed; inspect --status"))
+                )
+            if result.get("phase") == "ready" and result.get("active") == target:
+                return result
+        elif result.get("phase") not in {"upgrading", "unavailable"} and not transition:
+            break
+        time.sleep(interval)
         result = control(runtime_dir, {"command": "status"})
     if result.get("phase") != "ready" or result.get("active") != target:
         raise RuntimeError("managed upgrade did not reach the staged release; inspect --status")

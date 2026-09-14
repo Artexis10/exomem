@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -43,6 +44,12 @@ class IngressLimits:
     queue_timeout: float = 45.0
     heartbeat_interval: float = 5.0
     stream_requests: int = 64
+    #: How long a detached stream keeps retrying its upstream GET while the
+    #: replacement is being promoted, and the first delay between attempts
+    #: (`seamless-managed-worker-handoff` D11). The budget matches the
+    #: supervisor's cutover budget: past it the stream is closed.
+    reattach_budget: float = 40.0
+    reattach_backoff: float = 0.25
 
     def __post_init__(self) -> None:
         for name in ("queue_requests", "queue_bytes", "body_bytes", "stream_requests"):
@@ -445,6 +452,8 @@ class ServiceIngress:
                         return
                     await send({"type": "http.response.body", "body": chunk, "more_body": True})
 
+                deadline: float | None = None
+                backoff = self.limits.reattach_backoff
                 while not self._closed and not self._unavailable:
                     ready = asyncio.create_task(self._ready.wait())
                     done, _ = await asyncio.wait(
@@ -478,30 +487,65 @@ class ServiceIngress:
                     assert stream.task is not None
                     self._active.add(stream.task)
                     self._idle.clear()
+                    if deadline is None:
+                        deadline = time.monotonic() + self.limits.reattach_budget
+                    retry = False
                     try:
                         try:
                             candidate = await client.send(
                                 request, stream=True, follow_redirects=False
                             )
-                        except Exception:  # noqa: BLE001 - new worker may disappear
-                            return
-                        if candidate.status_code != 200 or not _is_sse(candidate):
-                            await candidate.aclose()
-                            return
-                        response = candidate
-                        stream.detach.clear()
-                        stream.detached.clear()
+                        except Exception:  # noqa: BLE001 - the replacement may not answer yet
+                            retry = True
+                        else:
+                            if candidate.status_code in _DEFINITIVE_DENIALS:
+                                # A refused credential is an answer, not a
+                                # transition; retrying cannot change it.
+                                await candidate.aclose()
+                                return
+                            if candidate.status_code != 200 or not _is_sse(candidate):
+                                await candidate.aclose()
+                                retry = True
+                            else:
+                                response = candidate
+                                stream.detach.clear()
+                                stream.detached.clear()
                     finally:
                         self._active.discard(stream.task)
                         if not self._active:
                             self._idle.set()
-                    break
+                    if not retry:
+                        break
+                    # The replacement is being promoted. Keep the client's
+                    # stream alive inside the cutover budget instead of closing
+                    # it on the first non-success (D11).
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return
+                    await send(
+                        {
+                            "type": "http.response.body",
+                            "body": b": keepalive\n\n",
+                            "more_body": True,
+                        }
+                    )
+                    done, _ = await asyncio.wait(
+                        {disconnect}, timeout=min(backoff, remaining)
+                    )
+                    if disconnect in done:
+                        return
+                    backoff = min(backoff * 2, self.limits.heartbeat_interval)
                 else:
                     return
         finally:
             disconnect.cancel()
             await asyncio.gather(disconnect, return_exceptions=True)
             await response.aclose()
+
+
+#: A credential the replacement refuses is a definitive answer; every other
+#: non-success is treated as "not promoted yet" and retried.
+_DEFINITIVE_DENIALS = frozenset({401, 403})
 
 
 def _is_sse(response: httpx.Response) -> bool:

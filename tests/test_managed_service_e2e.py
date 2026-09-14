@@ -35,6 +35,26 @@ async def control(root: Path, command: str):
         await writer.wait_closed()
 
 
+async def transition(root, *, command="upgrade", timeout=60):
+    """Acknowledge an upgrade, then poll the supervisor for its outcome.
+
+    The supervisor answers `upgrade` immediately and runs the transition in the
+    background, because a standby warm is minutes long and holding the control
+    connection open for it turns any client read timeout into a false failure.
+    """
+    accepted = await control(root, command)
+    assert accepted["accepted"] is True, accepted
+    async with asyncio.timeout(timeout):
+        while True:
+            status = await control(root, "status")
+            recorded = status.get("last_transition")
+            if isinstance(recorded, dict) and recorded.get("transition") == accepted[
+                "transition"
+            ]:
+                return recorded
+            await asyncio.sleep(0.05)
+
+
 def events(root):
     return [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
 
@@ -46,7 +66,7 @@ async def eventually(predicate, timeout=10):
 
 
 @asynccontextmanager
-async def live_fixture(tmp_path):
+async def live_fixture(tmp_path, *, env_file=None, warm_seconds="30"):
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
         port = reservation.getsockname()[1]
@@ -62,11 +82,17 @@ async def live_fixture(tmp_path):
             "KB_MCP_DISABLE_MEDIA_EXTRACTION": "1",
             "EXOMEM_DISABLE_CLIP": "1",
             "PYTHONDONTWRITEBYTECODE": "1",
+            # Keep the standby warm budget inside the suite's own patience; the
+            # production default is minutes.
+            "EXOMEM_STANDBY_WARM_SECONDS": warm_seconds,
         }
     )
     log = (tmp_path / "service.log").open("w")
+    command = [sys.executable, str(FIXTURE), "daemon", str(tmp_path), "--port", str(port)]
+    if env_file is not None:
+        command += ["--env-file", str(env_file)]
     child = subprocess.Popen(
-        [sys.executable, str(FIXTURE), "daemon", str(tmp_path), "--port", str(port)],
+        command,
         env=env,
         stdout=log,
         stderr=log,
@@ -95,7 +121,7 @@ async def live_fixture(tmp_path):
                 os.killpg(child.pid, signal.SIGKILL)
                 await asyncio.to_thread(child.wait)
         # A failed fixture must not leave a separately-sessioned worker behind.
-        for name in ("worker.pid", "escaped.pid"):
+        for name in ("worker.pid", "standby.pid", "escaped.pid"):
             path = tmp_path / name
             if path.exists():
                 try:
@@ -123,8 +149,8 @@ def test_same_authenticated_context_survives_real_worker_handoff(tmp_path, mode)
                         for e in events(tmp_path)
                     )
                 )
-                handoff = asyncio.create_task(control(tmp_path, "upgrade"))
-                async with asyncio.timeout(5):
+                handoff = asyncio.create_task(transition(tmp_path))
+                async with asyncio.timeout(10):
                     while (await control(tmp_path, "status"))["phase"] != "upgrading":
                         await asyncio.sleep(0.01)
                 during = asyncio.create_task(client.call_tool("counted", {"marker": "during"}))
@@ -156,14 +182,14 @@ def test_same_client_recovers_after_failed_candidate_without_reauthorizing(tmp_p
             async with Client(url, auth=token, timeout=20) as client:
                 await client.call_tool("counted", {"marker": "before-failure"})
                 (tmp_path / "fail-start").touch()
-                result = await control(tmp_path, "upgrade")
+                result = await transition(tmp_path)
                 assert not result["ok"]
                 assert (await control(tmp_path, "status"))["phase"] == "recovery-required"
                 with pytest.raises(MCPError):
                     await client.call_tool("counted", {"marker": "refused"})
                 assert not any(e.get("marker") == "refused" for e in events(tmp_path))
                 (tmp_path / "fail-start").unlink()
-                assert (await control(tmp_path, "resume"))["ok"]
+                assert (await transition(tmp_path, command="resume"))["ok"]
                 after = await client.call_tool("counted", {"marker": "after-recovery"})
                 assert after.data["marker"] == "after-recovery"
 
@@ -186,7 +212,7 @@ def test_standalone_authenticated_stream_survives_and_disconnect_releases_it(tmp
                     assert stream.status_code == 200
                     chunks = stream.aiter_raw()
                     assert (await anext(chunks)).startswith(b":")
-                    upgrade = asyncio.create_task(control(tmp_path, "upgrade"))
+                    upgrade = asyncio.create_task(transition(tmp_path))
                     received = []
                     while not upgrade.done():
                         received.append(await anext(chunks))
@@ -389,3 +415,106 @@ def test_shipped_private_worker_runs_full_server_with_existing_auth(vault, tmp_p
                 os.killpg(worker.pid, signal.SIGKILL)
                 worker.wait()
         log.close()
+
+
+def test_a_standby_warms_beside_the_serving_worker_and_is_promoted(tmp_path):
+    """The real supervisor sequence: warm, then cut over (D7, D8)."""
+    from fastmcp import Client
+
+    async def scenario():
+        async with live_fixture(tmp_path) as (url, token, _):
+            async with Client(url, auth=token, mode="auto", timeout=20) as client:
+                before = await client.call_tool("counted", {"marker": "before"})
+                serving = before.data["pid"]
+                result = await transition(tmp_path)
+                assert result["ok"] is True, result
+                handoff = result["handoff"]
+                assert handoff["standby"] == "ready", handoff
+                assert handoff["migration"] == {"state": "skipped", "reason": "declared_none"}
+                assert handoff["promotion"]["snapshot"] == "current"
+                after = await client.call_tool("counted", {"marker": "after"})
+                assert after.data["pid"] != serving
+
+            kinds = [entry["kind"] for entry in events(tmp_path)]
+            # The candidate warms while the old worker is still the one serving,
+            # and the migrator never runs because the target declares none.
+            assert kinds.index("standby-start") < kinds.index("promoted")
+            assert "migrate" not in kinds
+            # The record carries the window nobody was served in, which is what
+            # an operator compares across releases.
+            assert 0 < handoff["unavailable_ms"] < 20_000, handoff
+
+    asyncio.run(scenario())
+
+
+def test_a_declared_migration_still_runs_between_the_two_workers(tmp_path):
+    from fastmcp import Client
+
+    async def scenario():
+        (tmp_path / "declare-migration").write_text("1")
+        async with live_fixture(tmp_path) as (url, token, _):
+            async with Client(url, auth=token, mode="auto", timeout=20) as client:
+                await client.call_tool("counted", {"marker": "before"})
+                result = await transition(tmp_path)
+                assert result["ok"] is True, result
+                assert result["handoff"]["migration"] == {
+                    "state": "ran",
+                    "reason": "descriptors_changed",
+                }
+                await client.call_tool("counted", {"marker": "after"})
+            kinds = [entry["kind"] for entry in events(tmp_path)]
+            # The migrator owns state alone: it runs after the old worker has
+            # stopped and before the standby is promoted.
+            assert kinds.index("standby-start") < kinds.index("migrate")
+            assert kinds.index("migrate") < kinds.index("promoted")
+
+    asyncio.run(scenario())
+
+
+def test_a_stalled_standby_is_discarded_and_the_old_worker_keeps_serving(tmp_path):
+    from fastmcp import Client
+
+    async def scenario():
+        (tmp_path / "standby-stalls").write_text("1")
+        async with live_fixture(tmp_path, warm_seconds="8") as (url, token, _):
+            async with Client(url, auth=token, mode="auto", timeout=20) as client:
+                before = await client.call_tool("counted", {"marker": "before"})
+                serving = before.data["pid"]
+                result = await transition(tmp_path)
+                # The candidate never reaches cutover readiness, so the upgrade
+                # falls back to the one-worker sequence with the waiting
+                # component recorded; the endpoint is never left unserved.
+                assert result["ok"] is True, result
+                assert result["handoff"]["standby"] == "discarded"
+                assert result["handoff"]["waiting"] == "graph_snapshot"
+                assert result["handoff"]["unavailable_ms"] > 0
+                after = await client.call_tool("counted", {"marker": "after"})
+                assert after.data["pid"] != serving
+
+    asyncio.run(scenario())
+
+
+def test_a_standby_is_spawned_with_the_current_service_environment_file(tmp_path):
+    """An edited service environment reaches the next worker without a restart."""
+    from fastmcp import Client
+
+    async def scenario():
+        env_file = tmp_path / "service.env"
+        env_file.write_text("EXOMEM_FIXTURE_MARK=before\n")
+        async with live_fixture(tmp_path, env_file=env_file) as (url, token, _):
+            async with Client(url, auth=token, mode="auto", timeout=20) as client:
+                await client.call_tool("counted", {"marker": "before"})
+                # The operator edits the unit's environment file after the
+                # supervisor has already read it through systemd.
+                env_file.write_text("EXOMEM_FIXTURE_MARK=after\n")
+                result = await transition(tmp_path)
+                assert result["ok"] is True, result
+                await client.call_tool("counted", {"marker": "after"})
+            entries = events(tmp_path)
+            supervisor = next(e for e in entries if e["kind"] == "supervisor-start")
+            standby = next(e for e in entries if e["kind"] == "standby-start")
+            assert standby["mark"] == "after"
+            # The supervisor's own environment is unchanged by the child's read.
+            assert supervisor["mark"] == ""
+
+    asyncio.run(scenario())

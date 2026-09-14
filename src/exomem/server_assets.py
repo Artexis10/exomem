@@ -94,6 +94,7 @@ def register_asset_routes(
     *,
     traffic_monitor=None,
     on_liveness: Callable[[], None] | None = None,
+    vault_root: Path | None = None,
 ) -> None:
     """Serve inert public assets outside MCP auth; vault data stays behind REST."""
     asset_dir = Path(__file__).parent
@@ -170,6 +171,43 @@ def register_asset_routes(
             status_code=status_code,
             headers={"Cache-Control": "no-store"},
         )
+
+    if vault_root is not None:
+
+        @mcp_app.custom_route("/control/promote", methods=["POST"])
+        async def _promote(request: Request) -> JSONResponse:
+            """Take state ownership once the previous worker has provably exited.
+
+            Reachable only over the supervisor-owned private worker socket, which
+            is the same boundary `/health` already has. A process that never
+            entered standby refuses; a promoted one answers idempotently
+            (`seamless-managed-worker-handoff` D8).
+            """
+            from . import service_standby
+
+            migrated = False
+            try:
+                raw = await request.body()
+                if len(raw) > 1024:
+                    raise ValueError("oversized control request")
+                if raw:
+                    body = json.loads(raw)
+                    migrated = bool(body.get("migrated")) if isinstance(body, dict) else False
+            except (ValueError, UnicodeDecodeError):
+                return JSONResponse(
+                    {"ok": False, "error": "invalid control request"},
+                    status_code=400,
+                    headers={"Cache-Control": "no-store"},
+                )
+            try:
+                record = service_standby.promote(vault_root, migrated=migrated)
+            except RuntimeError:
+                return JSONResponse(
+                    {"ok": False, "error": "this worker is not a standby"},
+                    status_code=409,
+                    headers={"Cache-Control": "no-store"},
+                )
+            return JSONResponse(record, headers={"Cache-Control": "no-store"})
 
     @mcp_app.custom_route("/metrics.json", methods=["GET"])
     async def _metrics_json(request: Request) -> JSONResponse:  # noqa: ARG001

@@ -1978,7 +1978,29 @@ class EpistemicGraphIndex:
             return None
         return conn
 
-    def adopt_published_snapshot(self) -> SnapshotAdoption:
+    def apply_adopted_residue(self, residue: Iterable[str]) -> bool:
+        """Enqueue an adopted residue and withdraw the marker it invalidates.
+
+        Separated from the proof because these are the two *durable, shared*
+        writes adoption makes: the graph repair demand is scheduled work and the
+        withdrawn marker is graph state. A standby proving a snapshot beside the
+        worker still serving must own neither until it is promoted
+        (`seamless-managed-worker-handoff` D7), so it carries the residue and
+        calls this once promotion is accepted.
+        """
+        from . import graph_drain
+
+        paths = [self.vault_root / rel for rel in sorted(residue)]
+        if not paths:
+            return True
+        if not _record_graph_repair_demand(self.vault_root, paths):
+            return False
+        # Reads must keep refusing until that repair lands.
+        self.withdraw_availability()
+        graph_drain.note_graph_debt()
+        return True
+
+    def adopt_published_snapshot(self, *, apply_residue: bool = True) -> SnapshotAdoption:
         """Prove an inherited sidecar and make its checkpoint live for this process.
 
         The entry point a standby calls before promotion, and the one a cold
@@ -2010,6 +2032,13 @@ class EpistemicGraphIndex:
         Needs the recall registry seeded for the vault scope, which the warm-up
         does before any of this; it does not need a running watcher, so a
         standby can prove and adopt while the old worker still serves.
+
+        ``apply_residue=False`` returns the residue without enqueueing it or
+        withdrawing the marker. Those are the only durable, shared writes this
+        makes, and a standby must own neither before promotion; it passes False
+        and calls :meth:`apply_adopted_residue` once it is promoted. Making the
+        checkpoint the delta origin is process-local either way, so nothing the
+        adoption establishes is lost by deferring them.
         """
         from . import graph_drain
 
@@ -2051,15 +2080,11 @@ class EpistemicGraphIndex:
             sampled_generation=sampled_generation,
         ):
             return SnapshotAdoption(False, reason="registry_refused_origin")
-        if residue:
-            paths = [self.vault_root / rel for rel in sorted(residue)]
-            if not _record_graph_repair_demand(self.vault_root, paths):
+        if residue and apply_residue:
+            if not self.apply_adopted_residue(residue):
                 return SnapshotAdoption(
                     False, reason="residue_enqueue_failed", residue=tuple(sorted(residue))
                 )
-            # Reads must keep refusing until that repair lands.
-            self.withdraw_availability()
-            graph_drain.note_graph_debt()
         # Adoption is not finished until the *bounded repair* can run, and that
         # also needs the recall resolver at this exact checkpoint.
         # `recall_resolver_snapshot_at_checkpoint` refuses a cache miss on

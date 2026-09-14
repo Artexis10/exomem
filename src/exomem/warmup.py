@@ -157,9 +157,14 @@ def _adopt_graph_snapshot(vault_root: Path, durations: dict[str, float]) -> bool
     drain that many pages, which is what the operator needs to see rather than a
     bare success.
     """
-    from . import epistemic_graph
+    from . import epistemic_graph, service_standby
 
     if not epistemic_graph.graph_enabled():
+        return False
+    if service_standby.in_standby():
+        # A standby runs this step itself, after the same seed and resolver, so
+        # that it can report the residue and reason in its cutover readiness.
+        # Adopting twice would pay the source proof twice for one handoff.
         return False
     adoption = epistemic_graph.EpistemicGraphIndex(vault_root).adopt_published_snapshot()
     durations["graph_snapshot_residue"] = float(len(adoption.residue))
