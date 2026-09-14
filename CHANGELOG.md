@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.84.1](https://github.com/Artexis10/exomem/compare/v0.84.0...v0.84.1) (2026-09-14)
+
+
+### Bug Fixes
+
+* **graph:** adopt the inherited snapshot unconditionally and defer a cold resolver to the queue ([#1263](https://github.com/Artexis10/exomem/issues/1263)) ([99207f5](https://github.com/Artexis10/exomem/commit/99207f5b9e0f3d0ddff89b313e5317210bbe0b19))
+* **graph:** queue a fenced write's own paths instead of rebuilding the vault ([#1265](https://github.com/Artexis10/exomem/issues/1265)) ([e2538c7](https://github.com/Artexis10/exomem/commit/e2538c77f37082c13bf4cf12d9af0b3e42e9aeb4))
+
 ## [0.84.0](https://github.com/Artexis10/exomem/compare/v0.83.1...v0.84.0) (2026-09-14)
 
 
