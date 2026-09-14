@@ -13,8 +13,9 @@ It is PURE ASSEMBLY (measurement), mirroring `attention.py`:
   grouped under bounded provenance/lifecycle context. Selected unit hits are packed first.
 - The neighbourhood reuses `find`'s outbound-link resolution + `vault`'s inbound search.
 - Contradictions are recorded supersession edges (frontmatter) plus proximity "tension"
-  pairs whose cosine sits in the existing `[floor, dup)` band (reusing
-  `corpus_aware._best_cosine_per_file`) — proximity, not polarity; the reader decides.
+  pairs whose cosine sits in the existing `[floor, dup)` band, computed from the packed
+  pages' stored sidecar vectors (`corpus_aware.pairwise_best_cosine_from_sidecar`), never
+  by re-encoding them — proximity, not polarity; the reader decides.
 
 Nothing is mutated, no generative/reasoning model runs, and `find` ordering is untouched.
 The tension part soft-fails to empty (`embeddings_available: false`) when the embedding
@@ -248,7 +249,11 @@ def _hit_parent_path(hit: Hit | SemanticUnitHit) -> str:
 def _selected_unit_refs(hit: Hit | SemanticUnitHit) -> list[str]:
     if isinstance(hit, SemanticUnitHit):
         return [hit.unit_ref]
-    return [str(item["unit_ref"]) for item in (hit.matched_units or []) if item.get("unit_ref")]
+    return [
+        str(item["unit_ref"])
+        for item in (hit.matched_units or [])
+        if item.get("unit_ref")
+    ]
 
 
 def _load_parent_snapshot(
@@ -354,7 +359,9 @@ def _pack_unit(
     tags = [_cap(tag, _MAX_UNIT_TAG_CHARS) for tag in unit.tags[:_MAX_UNIT_TAGS]]
     clipped_fields = int(len(unit.content.strip()) > max(0, unit_chars))
     if unit.context:
-        clipped_fields += int(len(unit.context.strip()) > _MAX_UNIT_CONTEXT_CHARS)
+        clipped_fields += int(
+            len(unit.context.strip()) > _MAX_UNIT_CONTEXT_CHARS
+        )
     clipped_fields += sum(
         len(str(tag).strip()) > _MAX_UNIT_TAG_CHARS for tag in unit.tags[:_MAX_UNIT_TAGS]
     )
@@ -373,7 +380,9 @@ def _pack_unit(
             "kind": unit.kind,
             "excerpt": _cap(unit.content, max(0, unit_chars)),
             "tags": tags,
-            "context": _cap(unit.context, _MAX_UNIT_CONTEXT_CHARS) if unit.context else None,
+            "context": _cap(unit.context, _MAX_UNIT_CONTEXT_CHARS)
+            if unit.context
+            else None,
             "source_anchor": unit.anchor,
             "source_span": {
                 "start_line": unit.span.start_line,
@@ -582,15 +591,20 @@ def _asserted_tension(
 
 def _tension_pairs(
     vault_root: Path, packed_pages: list[ParsedPage], max_tension: int
-) -> tuple[list[dict], int, bool]:
+) -> tuple[list[dict], int, bool, int]:
     """Tension pairs AMONG the packed notes: authored `contradicts` edges first, then
-    proximity pairs whose pairwise cosine lands in the contradiction band. Reuses the
-    embedding sidecar for the proximity half only; soft-fails to empty when off.
+    proximity pairs whose pairwise cosine lands in the contradiction band. The proximity
+    half reads the packed pages' stored vectors from the embedding sidecar and encodes
+    nothing; soft-fails to empty when off.
 
-    `embeddings_available` is True iff a cosine pass returned scores AND the band is
-    active; an inverted/disabled band (floor >= ceiling) reports it False — the band is
-    off, so no proximity tension can be measured regardless of the sidecar. Asserted
-    pairs are independent of it and are surfaced either way.
+    `embeddings_available` is True iff at least one packed page had exact stored rows AND
+    the band is active; an inverted/disabled band (floor >= ceiling) reports it False — the
+    band is off, so no proximity tension can be measured regardless of the sidecar.
+    Asserted pairs are independent of it and are surfaced either way.
+
+    The fourth value counts packed pages that had no exact rows while others did (their
+    embedding not yet landed, or the page moved since): they contributed no proximity
+    pair this time, and the caller reports that rather than leaving it silent.
 
     A pair that is both authored and in band appears once, as asserted."""
     floor = corpus_aware._contradiction_floor()
@@ -600,12 +614,13 @@ def _tension_pairs(
     pair_best: dict[frozenset[str], float] = {}
     embeddings_available = False
 
+    uncovered = 0
     if floor < ceiling:
         # Proximity among the packed pages comes from the vectors the embedding
         # pass already published for them, never from re-encoding their bodies:
         # on a large vault that encode was most of a recall's wall time. A page
         # whose rows are not yet exact (embedding deferred, or moved since) just
-        # contributes no pairs this time.
+        # contributes no pairs this time, and the caller says so in `truncation`.
         from . import embeddings as embeddings_module
 
         chunked: list[tuple[str, list[str]]] = []
@@ -617,6 +632,8 @@ def _tension_pairs(
             chunked.append((page.rel_path, chunks))
         scores, covered = corpus_aware.pairwise_best_cosine_from_sidecar(vault_root, chunked)
         embeddings_available = bool(covered)
+        if covered:
+            uncovered = sum(1 for rel, _chunks in chunked if rel not in covered)
         for pair, score in scores.items():
             first, second = tuple(pair)
             canon_a = corpus_aware._canon(first)
@@ -647,7 +664,7 @@ def _tension_pairs(
     pairs = asserted + proximity
     shown = pairs[:max_tension] if max_tension > 0 else pairs
     dropped = len(pairs) - len(shown)
-    return shown, dropped, embeddings_available
+    return shown, dropped, embeddings_available, uncovered
 
 
 # ----------------------------- assembly -----------------------------
@@ -763,7 +780,9 @@ def assemble_pack(
     plans: list[_UnitPackPlan] = []
     for page in packed_pages:
         document = semantic_states[page.rel_path].document
-        by_ref = {unit.unit_ref: unit for unit in document.units if unit.unit_ref is not None}
+        by_ref = {
+            unit.unit_ref: unit for unit in document.units if unit.unit_ref is not None
+        }
         selected: list[tuple[int, int, semantic_units.SemanticUnit]] = []
         unresolved = 0
         for hit_rank, unit_order, unit_ref in selected_by_path.get(page.rel_path, []):
@@ -786,7 +805,9 @@ def assemble_pack(
                 page=page,
                 parent=parent,
                 selected=selected,
-                fillers=[unit for unit in document.units if id(unit) not in selected_ids],
+                fillers=[
+                    unit for unit in document.units if id(unit) not in selected_ids
+                ],
                 dropped_provenance=dropped_provenance,
             )
         )
@@ -861,9 +882,13 @@ def assemble_pack(
         omitted = total_units - len(plan.packed_units)
         if omitted:
             reason = ", ".join(sorted(plan.omitted_reasons)) or "configured bounds"
-            truncation.append(f"{plan.page.rel_path}: {omitted} semantic units omitted by {reason}")
+            truncation.append(
+                f"{plan.page.rel_path}: {omitted} semantic units omitted by {reason}"
+            )
         selected_included = {
-            packed["unit_ref"] for _unit, packed in plan.chosen_units if packed["unit_ref"]
+            packed["unit_ref"]
+            for _unit, packed in plan.chosen_units
+            if packed["unit_ref"]
         }
         selected_omitted = sum(
             1
@@ -891,7 +916,14 @@ def assemble_pack(
         )
 
     superseded = _supersession_edges(packed_pages)
-    tension, t_dropped, embeddings_available = _tension_pairs(vault_root, packed_pages, max_tension)
+    tension, t_dropped, embeddings_available, uncovered = _tension_pairs(
+        vault_root, packed_pages, max_tension
+    )
+    if uncovered > 0:
+        truncation.append(
+            f"{uncovered} packed page(s) had no current embedding rows; "
+            "no proximity pair computed for them"
+        )
     if t_dropped > 0:
         truncation.append(
             f"tension pairs capped at {max_tension} "
