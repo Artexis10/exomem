@@ -255,6 +255,19 @@ def _recover_once(vault_root: Path) -> bool:
         return False
 
 
+def _republish_once(vault_root: Path) -> bool:
+    """Restore a stranded availability marker. Never raises; True when restored."""
+    from . import epistemic_graph
+
+    try:
+        return bool(
+            epistemic_graph.EpistemicGraphIndex(vault_root).republish_availability_if_current()
+        )
+    except Exception:  # noqa: BLE001 - the graph stays unavailable, so the signal stays
+        log.warning("graph drain: availability republication failed", exc_info=True)
+        return False
+
+
 def _work_once(vault_root: Path) -> int:
     """Drain what is queued, then repair a barrier if one is still standing.
 
@@ -265,12 +278,20 @@ def _work_once(vault_root: Path) -> int:
     if _barrier_pending(vault_root):
         if _recover_once(vault_root):
             processed += 1
-    elif _availability_pending(vault_root) and _request_full_rebuild(vault_root):
+    elif _availability_pending(vault_root):
         # Only where there is no barrier: with one standing, repair is the
         # cheaper and more specific answer, and it is the one that knows how to
         # decline. Reaching here means the graph is unreadable and nothing in
         # the system is holding a signal that says so.
-        processed += 1
+        #
+        # The stranded state lands here rather than in the drain above: a
+        # withdrawn marker with an empty queue is not queued work, so
+        # `_drain_once` -- and the republication inside it -- never runs, and a
+        # whole-vault rebuild would be spent on a sidecar whose rows may already
+        # match disk. Try that proof first; it declines on its own when repair
+        # is genuinely owed, and the rebuild is still there when it does.
+        if _republish_once(vault_root) or _request_full_rebuild(vault_root):
+            processed += 1
     return processed
 
 

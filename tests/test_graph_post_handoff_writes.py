@@ -458,6 +458,124 @@ def test_a_governed_write_attributes_time_to_the_graph_incremental_pass(
     )
 
 
+def _strand_the_marker(root: Path) -> None:
+    """Withdraw availability and leave no barrier behind.
+
+    The state `_availability_pending` exists for and documents: a rebuild that
+    exhausts its publication attempts leaves the graph unreadable with no
+    barrier at all. Constructed here rather than raced for, because the drain's
+    `elif` branch is only reachable without a barrier -- with one standing, the
+    recovery arm takes the pass.
+    """
+    import sqlite3
+
+    index = EpistemicGraphIndex(root)
+    index.withdraw_availability()
+    connection = sqlite3.connect(index.path)
+    try:
+        with connection:
+            connection.execute("DELETE FROM graph_meta WHERE key = 'read_barrier'")
+    finally:
+        connection.close()
+
+
+def test_the_drain_daemon_republishes_a_stranded_marker_before_asking_for_a_rebuild(
+    handoff_vault: Path,
+) -> None:
+    """The daemon's own route to the stranded state, which the drain never reaches.
+
+    `_work_once` only drains when the durable queue owes work, so a withdrawn
+    marker with an empty queue skips the drain -- and the republication inside
+    it -- entirely, and falls to the branch that requests a whole-vault rebuild.
+    Spending a full pass on a sidecar whose rows may already match disk is the
+    expensive answer to a question the cheap proof can settle.
+    """
+    from exomem import graph_drain
+
+    root = handoff_vault
+    assert EpistemicGraphIndex(root).available() is True
+    _strand_the_marker(root)
+
+    assert graph_drain._queue_pending(root) is False
+    assert graph_drain._barrier_pending(root) is False
+    assert graph_drain._availability_pending(root) is True
+
+    processed = graph_drain._work_once(root)
+
+    assert EpistemicGraphIndex(root).available() is True, (
+        "the daemon left the marker stranded and answered with a rebuild request"
+    )
+    assert deferred_index.graph_full_rebuild_pending(root) is None, (
+        "a whole-vault rebuild was requested for a graph whose rows match disk"
+    )
+    assert processed == 1
+
+
+def test_a_refused_availability_proof_backs_off_instead_of_running_every_tick(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The proof is O(corpus); the release gate drains twice a second.
+
+    Measured by the reviewer at 599-673 ms a tick on 400 pages, paid on every
+    one of six ticks. A refusal is the ordinary case while repair is genuinely
+    owed, so it has to cost one proof per backoff window rather than one per
+    drain.
+    """
+    root = handoff_vault
+    _strand_the_marker(root)
+    # Residue: bytes on disk the sidecar has not indexed, so the proof refuses.
+    stale = root / GENERATED / "generated-note-0009.md"
+    stale.write_text(stale.read_text(encoding="utf-8") + "\n- unindexed\n", encoding="utf-8")
+
+    proofs: list[int] = []
+    real_proof = EpistemicGraphIndex._snapshot_sources_match_disk
+
+    def counted(inner_self: EpistemicGraphIndex, conn: object, **kwargs: object):
+        proofs.append(1)
+        return real_proof(inner_self, conn, **kwargs)
+
+    monkeypatch.setattr(
+        EpistemicGraphIndex, "_snapshot_sources_match_disk", counted, raising=True
+    )
+
+    for _ in range(6):
+        index_sync.drain_graph_work(root, limit=64)
+
+    assert len(proofs) == 1, (
+        f"the refused proof ran {len(proofs)} times across six drain ticks; the "
+        "backoff exists so a residue that cannot clear costs one proof a window"
+    )
+    assert EpistemicGraphIndex(root).available() is False
+
+
+def test_the_availability_proof_defers_to_the_watcher_while_a_mark_is_unrepaired(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unrepaired external mark is the watcher's repair, and it republishes."""
+    root = handoff_vault
+    _strand_the_marker(root)
+    freshness.mark_external_pending(root, paths=(root / GENERATED / "generated-note-0008.md",))
+
+    proofs: list[int] = []
+    real_proof = EpistemicGraphIndex._snapshot_sources_match_disk
+
+    def counted(inner_self: EpistemicGraphIndex, conn: object, **kwargs: object):
+        proofs.append(1)
+        return real_proof(inner_self, conn, **kwargs)
+
+    monkeypatch.setattr(
+        EpistemicGraphIndex, "_snapshot_sources_match_disk", counted, raising=True
+    )
+
+    for _ in range(4):
+        index_sync.drain_graph_work(root, limit=64)
+
+    assert proofs == [], (
+        "the corpus proof ran while an external mark was unrepaired; the watcher "
+        "owns that repair and republishes through its own route"
+    )
+
+
 def test_the_graph_converges_readable_under_a_concurrent_writer(
     handoff_vault: Path,
 ) -> None:

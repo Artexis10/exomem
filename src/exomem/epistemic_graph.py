@@ -175,6 +175,17 @@ _FALLBACK_DISPOSITIONS = {
 #: `mark_external_pending` in the `finally` below is untouched.
 REBUILD_STABILIZATION_DEADLINE_SECONDS = 120.0
 REBUILD_STABILIZATION_MAX_ATTEMPTS = 8
+#: Per-vault backoff for a *refused* availability proof, keyed by vault root and
+#: holding `(next_attempt_monotonic, interval)`. The proof is O(corpus) and the
+#: release gate (`scripts/graph_concurrent_convergence.py --drain-interval 0.5`)
+#: drains twice a second under a concurrent writer, so a refusal that repeats --
+#: the ordinary case while a residue is outstanding -- must not be paid on every
+#: tick. Measured at 599-673 ms per tick on 400 pages. The schedule is the
+#: drain's own: first retry at `graph_drain.RETRY_SECONDS`, doubling to
+#: `graph_drain.MAX_RETRY_SECONDS`, cleared by a proof that succeeds.
+_REPUBLISH_BACKOFF: dict[str, tuple[float, float]] = {}
+_REPUBLISH_BACKOFF_LOCK = threading.Lock()
+
 _AVAILABILITY_FRESHNESS_KEY = "recall_projection_identity"
 _RECALL_CHECKPOINT_KEY = "recall_projection_checkpoint"
 _RESOLVER_TOPOLOGY_KEY = "recall_resolver_topology"
@@ -2033,6 +2044,15 @@ class EpistemicGraphIndex:
         returns on one metadata read -- and the O(corpus) proof is paid only in
         the state that is otherwise stuck.
 
+        **Safety rests on that residue proof, not on the queue.** The queue is
+        deliberately not re-consulted inside the hold: a queued path is queued
+        *because* its disk bytes differ from the rows the sidecar holds, so it
+        shows up as residue and the proof refuses. A future change that queues a
+        path without changing its rows -- a policy or topology reason, say --
+        would break that equivalence silently, and this republication would
+        publish over work the queue still owes. Anything queued for a reason the
+        source-bytes comparison cannot see has to be checked here explicitly.
+
         It never advances the graph_sync acknowledgement. This restores
         readability of what was already projected; it does not claim a
         generation was projected that was not.
@@ -2056,6 +2076,13 @@ class EpistemicGraphIndex:
             return False
         finally:
             conn.close()
+        if freshness.external_pending(self.vault_root):
+            # The watcher owns that repair and republishes through its own
+            # route when it lands. Proving here would spend the whole corpus to
+            # reach a refusal that is already known.
+            return False
+        if not self._republish_attempt_due():
+            return False
         with self._mutation_coordinator.hold(
             operation="epistemic_graph_republish_availability", holder_kind="graph"
         ):
@@ -2076,13 +2103,38 @@ class EpistemicGraphIndex:
             finally:
                 snapshot.close()
             if not proven or residue or stored_checkpoint is None:
+                self._note_republish_refused()
                 return False
             self._publish_available_marker(
                 _incremental_projection_identity(self.vault_root),
                 checkpoint=stored_checkpoint,
             )
+        self._clear_republish_backoff()
         log.info("graph availability republished; the repair queue owes nothing")
         return True
+
+    def _republish_attempt_due(self) -> bool:
+        """Whether a refused proof's backoff window has expired."""
+        with _REPUBLISH_BACKOFF_LOCK:
+            entry = _REPUBLISH_BACKOFF.get(str(self.vault_root))
+            return entry is None or time.monotonic() >= entry[0]
+
+    def _note_republish_refused(self) -> None:
+        """Push the next proof out, on the drain's own retry schedule."""
+        from . import graph_drain
+
+        with _REPUBLISH_BACKOFF_LOCK:
+            entry = _REPUBLISH_BACKOFF.get(str(self.vault_root))
+            interval = (
+                graph_drain.RETRY_SECONDS
+                if entry is None
+                else min(graph_drain.MAX_RETRY_SECONDS, entry[1] * 2)
+            )
+            _REPUBLISH_BACKOFF[str(self.vault_root)] = (time.monotonic() + interval, interval)
+
+    def _clear_republish_backoff(self) -> None:
+        with _REPUBLISH_BACKOFF_LOCK:
+            _REPUBLISH_BACKOFF.pop(str(self.vault_root), None)
 
     def adopt_published_snapshot(self, *, apply_residue: bool = True) -> SnapshotAdoption:
         """Prove an inherited sidecar and make its checkpoint live for this process.
