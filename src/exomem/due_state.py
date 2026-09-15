@@ -404,7 +404,9 @@ def _entries_from_findings(
     return out
 
 
-def _refs_resolver(vault_root: Path, payload: dict[str, Any]) -> Callable[[list[str]], dict[str, str]]:
+def _refs_resolver(
+    vault_root: Path, payload: dict[str, Any], keep: Any = None
+) -> Callable[[list[str]], dict[str, str]]:
     """Resolve review refs for a whole serve with one sidecar lookup, not one per entry.
 
     Every path a recomposed entry can name is already in the projection: the
@@ -413,6 +415,12 @@ def _refs_resolver(vault_root: Path, payload: dict[str, Any]) -> Callable[[list[
     path outside it (there should be none) falls through to a direct lookup.
     Measured on the personal vault, the per-entry lookups were 590 sidecar
     connections and 5 s of a 25 s recall.
+
+    The universe is filtered by `keep` first: a path this audience may not see
+    never reaches the sidecar, exactly as before, when only survivors were
+    looked up. That matters beyond disclosure -- a lookup for a path the refs
+    sidecar has not indexed heals it, so an unfiltered batch would also widen
+    the write trigger and the cold-sidecar worst case of the call it speeds up.
     """
     cache: dict[str, str] | None = None
 
@@ -420,7 +428,7 @@ def _refs_resolver(vault_root: Path, payload: dict[str, Any]) -> Callable[[list[
         paths: set[str] = set()
 
         def add(value: Any) -> None:
-            if type(value) is str and value:
+            if type(value) is str and value and (keep is None or keep(value)):
                 paths.add(value)
 
         categories = payload.get("categories")
@@ -2282,7 +2290,7 @@ def served_entries(
     excluded = _excluded_families(state_payload)
 
     routing = _routing_snapshot(vault_root, payload, keep)
-    refs = _refs_resolver(vault_root, payload)
+    refs = _refs_resolver(vault_root, payload, keep)
 
     order = {category: rank for rank, category in enumerate(PROJECTION_CATEGORIES)}
     rows: list[dict[str, Any]] = []

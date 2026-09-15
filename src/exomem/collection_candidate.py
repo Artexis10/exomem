@@ -199,9 +199,9 @@ def detect(
     excluded_memo: dict[str, bool] = {}
 
     def is_state(unit: _Unit) -> bool:
-        cached = state_memo.get(unit.unit_ref)
+        cached = state_memo.get(unit.text)
         if cached is None:
-            cached = state_memo[unit.unit_ref] = _state_unit(unit)
+            cached = state_memo[unit.text] = _state_unit(unit)
         return cached
 
     def is_excluded(term: str) -> bool:

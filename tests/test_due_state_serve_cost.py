@@ -148,6 +148,50 @@ def test_refs_are_resolved_once_per_serve_from_the_projections_paths(
     assert calls[1] == ["Knowledge Base/Notes/outside.md"]
 
 
+def test_the_batched_refs_lookup_never_names_a_path_the_audience_may_not_see(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Resolving a ref is not a pure read for a path the sidecar has not indexed,
+    # so a withheld page must not reach the lookup at all -- as before, when only
+    # the surviving entries were resolved one by one.
+    calls: list[list[str]] = []
+
+    def fake_refs(vault_root, paths):
+        calls.append(list(paths))
+        return {path: f"ref:{path}" for path in paths}
+
+    monkeypatch.setattr(review_state, "refs_for_paths", fake_refs)
+    withheld = "Knowledge Base/Notes/Secret.md"
+    payload = {
+        "categories": {
+            "collection_candidate": {
+                "Knowledge Base/Notes/A.md": {
+                    "open": [
+                        {
+                            "path": "Knowledge Base/Notes/A.md",
+                            "component": {
+                                "family": "collection_candidate",
+                                "units": [
+                                    {"page": withheld},
+                                    {"page": "Knowledge Base/Notes/B.md"},
+                                ],
+                            },
+                        }
+                    ]
+                },
+                withheld: {"open": [{"path": withheld}]},
+            }
+        }
+    }
+    resolve = due_state._refs_resolver(tmp_path, payload, lambda path: path != withheld)
+    assert resolve(["Knowledge Base/Notes/A.md"]) == {
+        "Knowledge Base/Notes/A.md": "ref:Knowledge Base/Notes/A.md"
+    }
+    assert len(calls) == 1
+    assert withheld not in calls[0]
+    assert set(calls[0]) == {"Knowledge Base/Notes/A.md", "Knowledge Base/Notes/B.md"}
+
+
 def test_a_manifest_is_parsed_once_per_content_digest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
