@@ -80,6 +80,8 @@ jobs:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    outputs:
+      migration_paths_changed: ${{ steps.migration-paths.outputs.changed }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -206,6 +208,21 @@ jobs:
           require_output_version trivy "$TRIVY_VERSION" --version
           require_output_version shellcheck "$SHELLCHECK_VERSION" --version
           require_output_version oras "$ORAS_VERSION" version
+      - name: Did this push touch the code the migration drill exercises
+        id: migration-paths
+        run: |
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=false
+          while IFS= read -r path; do
+            case "$path" in
+              infra/provisioner/*|infra/helm/*) changed=true ;;
+            esac
+          done < <(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}")
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "migration drill applies: $changed"
       - name: Terraform, TFLint, Checkov, Ansible, Helm, policy, SOPS, types, tests, and secret scan
         run: |
           EXOMEM_RUN_REAL_SOPS_TESTS=1 \
@@ -277,7 +294,16 @@ jobs:
 
   governance-migration-drill:
     name: Disposable governance migration and recovery drill
-    if: github.event_name == 'workflow_dispatch' && inputs.governance_migration_drill
+    # Dispatch-only meant it never ran on its own, and two defects that only this
+    # drill could have caught reached production instead. Run it whenever the
+    # provisioner that performs the migration changes on main, which is before any
+    # image built from that commit can be selected into a deployment lock. The
+    # workflow's own paths are deliberately broad, so scope this ninety-minute job
+    # to the code it exercises rather than to runbook or proposal edits.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.governance_migration_drill)
+      || (github.event_name == 'push' && github.ref == 'refs/heads/main'
+          && needs.static.outputs.migration_paths_changed == 'true')
     needs: static
     runs-on: ubuntu-24.04
     # The drill builds the runtime image, imports it into exact K3s, and replays
@@ -299,13 +325,25 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - name: Install the exact pinned Helm
+      - name: Install the pinned Helm release binary
+        # The shipped Helm adapter refuses any CLI whose version is not exactly
+        # the pin, and a `go install` build reports only major.minor. Install
+        # the checksum-verified release archive the provisioner image uses.
         run: |
           source infra/tool-versions.env
-          go install helm.sh/helm/v3/cmd/helm@v${HELM_VERSION}
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          HELM_SHA256="$(sed -n 's/^ARG HELM_SHA256=//p' infra/provisioner/Dockerfile)"
+          curl --fail --silent --show-error --location \
+            --output /tmp/helm.tar.gz \
+            "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  /tmp/helm.tar.gz" | sha256sum --check
+          tar --extract --gzip --file /tmp/helm.tar.gz --directory /tmp linux-amd64/helm
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          test "$(helm version --template '{{.Version}}')" = "v${HELM_VERSION}"
       - name: Build the platform chart dependencies
-        run: helm dependency build infra/helm/platform
+        run: |
+          helm repo add hcloud https://charts.hetzner.cloud
+          helm repo add traefik https://traefik.github.io/charts
+          helm dependency build infra/helm/platform
       - name: Replay the governance migration and recovery drill on exact K3s
         env:
           RUN_K3S_GOVERNANCE_DRILL_TEST: "1"

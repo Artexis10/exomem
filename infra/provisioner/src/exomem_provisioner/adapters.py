@@ -33,7 +33,7 @@ from .conflict_reason import ConflictReason
 from .credentials import validate_machine_credential
 from .driver import DriverRetryable, LostAcknowledgement
 from .governance_readiness import verify_governance_readiness
-from .job_execution import metadata_matches, pod_spec_matches
+from .job_execution import JOB_SPEC_SERVER_DEFAULTS, metadata_matches, pod_spec_matches
 from .lifecycle import (
     HealthObservation,
     LifecycleConfig,
@@ -1352,12 +1352,7 @@ class KubernetesVaultFingerprintAdapter:
         template_metadata = template.get("metadata") if isinstance(template, dict) else None
         template_spec = template.get("spec") if isinstance(template, dict) else None
         controls = {key: value for key, value in spec.items() if key != "template"}
-        defaults = {
-            "completionMode": "NonIndexed",
-            "suspend": False,
-            "manualSelector": False,
-            "podReplacementPolicy": "TerminatingOrFailed",
-        }
+        defaults = JOB_SPEC_SERVER_DEFAULTS
         if (
             identity.get("name") != body["metadata"]["name"]
             or identity.get("namespace") != body["metadata"]["namespace"]

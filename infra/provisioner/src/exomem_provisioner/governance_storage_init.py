@@ -14,7 +14,7 @@ from kubernetes.client import ApiClient
 from .adapters import _retryable_kubernetes_error
 from .conflict_reason import ConflictReason
 from .driver import DriverRetryable, LostAcknowledgement
-from .job_execution import metadata_matches, pod_spec_matches
+from .job_execution import JOB_SPEC_SERVER_DEFAULTS, metadata_matches, pod_spec_matches
 from .lifecycle import MetadataConflict, OpaqueProviderMetadata
 from .provider_identity import ProviderIdentityConflict, ProviderReference
 from .repository import ClaimConflict, StaleFence
@@ -25,6 +25,13 @@ _OPAQUE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 _OPERATION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}\Z")
 _PROTOCOL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}\Z")
 _CREDENTIAL_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+# The initializer Job renders neither count, so the API server's value for both
+# is part of what its proof accepts.
+STORAGE_INIT_JOB_SPEC_DEFAULTS: dict[str, Any] = {
+    **JOB_SPEC_SERVER_DEFAULTS,
+    "completions": 1,
+    "parallelism": 1,
+}
 _INIT_REQUEST_KEYS = {
     "request_id",
     "operation_id",
@@ -491,14 +498,7 @@ class KubernetesGovernanceStorageInitAdapter:
                 type(spec.get(key)) is not type(expected) or spec[key] != expected
             ):
                 raise _refuse()
-        defaults = {
-            "completionMode": "NonIndexed",
-            "completions": 1,
-            "parallelism": 1,
-            "suspend": False,
-            "manualSelector": False,
-            "podReplacementPolicy": "TerminatingOrFailed",
-        }
+        defaults = STORAGE_INIT_JOB_SPEC_DEFAULTS
         if set(spec) - set(body["spec"]) - set(defaults) - {"selector"}:
             raise _refuse()
         if any(key in spec and spec[key] != expected for key, expected in defaults.items()):

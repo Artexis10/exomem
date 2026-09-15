@@ -283,6 +283,43 @@ def test_manifest_is_exact_nonroot_custody_read_only_job(phase):
     assert "exomem-cell-credentials" not in json.dumps(body)
 
 
+def test_job_proof_tolerates_server_defaults_but_holds_the_rendered_policy():
+    # The sibling proofs each pin this; the migration proof is the one whose
+    # defaults handling changed, and it renders podReplacementPolicy itself, so a
+    # server value other than the rendered one must still refuse.
+    request = _request()
+    body = _module().build_governance_migration_job(request, recovery_envelope="signed-envelope")
+    stored = copy.deepcopy(body)
+    stored["metadata"].update({"uid": "migration-job-uid", "resourceVersion": "2"})
+    stored["spec"].update(
+        {"completionMode": "NonIndexed", "suspend": False, "manualSelector": False}
+    )
+    stored["spec"]["selector"] = {
+        "matchLabels": {"batch.kubernetes.io/controller-uid": "migration-job-uid"}
+    }
+    adapter = _adapter(Cluster(request))
+    assert adapter._job(stored, body, "migration-job-uid") == "migration-job-uid"
+
+    for policy in ("TerminatingOrFailed", "Unknown"):
+        wrong = copy.deepcopy(stored)
+        wrong["spec"]["podReplacementPolicy"] = policy
+        with pytest.raises(MetadataConflict):
+            adapter._job(wrong, body, "migration-job-uid")
+
+    # A wrong value on a field the manifest omits is only reachable through the
+    # defaults check, so this is what pins that branch rather than the exact loop.
+    for field, wrong in (("completionMode", "Indexed"), ("suspend", True)):
+        drifted = copy.deepcopy(stored)
+        drifted["spec"][field] = wrong
+        with pytest.raises(MetadataConflict):
+            adapter._job(drifted, body, "migration-job-uid")
+
+    unexpected = copy.deepcopy(stored)
+    unexpected["spec"]["backoffLimitPerIndex"] = 1
+    with pytest.raises(MetadataConflict):
+        adapter._job(unexpected, body, "migration-job-uid")
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
