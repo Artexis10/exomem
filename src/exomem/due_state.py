@@ -83,6 +83,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -404,6 +405,53 @@ def _entries_from_findings(
     return out
 
 
+def _projection_paths(payload: Mapping[str, Any]) -> list[str]:
+    """Every vault path the projection names, sorted: pages, units, joined records, manifests.
+
+    The universe the refs batch resolves and the universe the served memo
+    fingerprints governance over -- one collector so they cannot drift.
+    """
+    paths: set[str] = set()
+
+    def add(value: Any) -> None:
+        if type(value) is str and value:
+            paths.add(value)
+
+    categories = payload.get("categories")
+    if not isinstance(categories, Mapping):
+        return []
+    for pages in categories.values():
+        if not isinstance(pages, Mapping):
+            continue
+        for page_path, entries in pages.items():
+            add(page_path)
+            if not isinstance(entries, Mapping):
+                continue
+            for bucket in entries.values():
+                for entry in bucket if isinstance(bucket, list) else ():
+                    if not isinstance(entry, Mapping):
+                        continue
+                    add(entry.get("path"))
+                    for item in entry.get("paths") or ():
+                        add(item)
+                    component = entry.get("component")
+                    if not isinstance(component, Mapping):
+                        continue
+                    add(component.get("path"))
+                    add(component.get("page_path"))
+                    add(component.get("collection"))
+                    for row in component.get("units") or ():
+                        if isinstance(row, Mapping):
+                            add(row.get("page"))
+                    for record in component.get("reflecting_records") or ():
+                        if isinstance(record, Mapping):
+                            add(record.get("path"))
+                    for pair in component.get("joined") or ():
+                        if isinstance(pair, (list, tuple)) and pair:
+                            add(pair[0])
+    return sorted(paths)
+
+
 def _refs_resolver(
     vault_root: Path, payload: dict[str, Any], keep: Any = None
 ) -> Callable[[list[str]], dict[str, str]]:
@@ -425,45 +473,9 @@ def _refs_resolver(
     cache: dict[str, str] | None = None
 
     def universe() -> list[str]:
-        paths: set[str] = set()
-
-        def add(value: Any) -> None:
-            if type(value) is str and value and (keep is None or keep(value)):
-                paths.add(value)
-
-        categories = payload.get("categories")
-        if not isinstance(categories, Mapping):
-            return []
-        for pages in categories.values():
-            if not isinstance(pages, Mapping):
-                continue
-            for page_path, entries in pages.items():
-                add(page_path)
-                if not isinstance(entries, Mapping):
-                    continue
-                for bucket in entries.values():
-                    for entry in bucket if isinstance(bucket, list) else ():
-                        if not isinstance(entry, Mapping):
-                            continue
-                        add(entry.get("path"))
-                        for item in entry.get("paths") or ():
-                            add(item)
-                        component = entry.get("component")
-                        if not isinstance(component, Mapping):
-                            continue
-                        add(component.get("path"))
-                        add(component.get("page_path"))
-                        add(component.get("collection"))
-                        for row in component.get("units") or ():
-                            if isinstance(row, Mapping):
-                                add(row.get("page"))
-                        for record in component.get("reflecting_records") or ():
-                            if isinstance(record, Mapping):
-                                add(record.get("path"))
-                        for pair in component.get("joined") or ():
-                            if isinstance(pair, (list, tuple)) and pair:
-                                add(pair[0])
-        return sorted(paths)
+        return [
+            path for path in _projection_paths(payload) if keep is None or keep(path)
+        ]
 
     def resolve(paths: list[str]) -> dict[str, str]:
         nonlocal cache
@@ -2224,7 +2236,184 @@ def served_entries(
     principal: Any = None,
     purpose: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Every open item this audience may see, most-overdue first.
+    """Every open item this audience may see, most-overdue first -- memoised.
+
+    The rows are a function of the persisted projection, the review state,
+    the audience, the purpose, the day, the clock (an entry with a future
+    `due_at` joins when the clock passes it), the release plane's verdict on
+    every path the projection names, and whether each served page still
+    exists. Rebuilding them on every recall was the whole cost of a read on
+    the personal vault -- 25 s before PR #1279 and still 0.6 s idle to 4 s
+    under host load after it, on every call, when nothing had changed; the
+    cost is the recomposition of every collection candidate under the
+    audience's filter.
+
+    So one build is kept per (vault, audience, session, purpose, day) and
+    reused while the projection file and the review-state file are the same
+    objects on disk, the clock has not reached the earliest future `due_at`
+    the build skipped, and the build is younger than `_SERVE_CACHE_TTL_SECONDS`.
+    Governance is not keyed by a file: it is re-asked on every call, over the
+    same paths the build asked about, and a single changed verdict rebuilds.
+    That keeps a revocation immediate at the cost the profile showed to be
+    small (milliseconds for the memoised per-path decisions, against the
+    build's seconds). A page deleted out of band is dropped from a hit the
+    way the build drops it, so the counter never insists on a note the user
+    just removed. Every write replaces the projection file, so the next read
+    after a write rebuilds once. A projection that could not be persisted is
+    never cached, because a write then updates it in memory with no file to
+    notice.
+    """
+    from .governance import egress as egress_module
+    from .governance import principal as principal_module
+
+    if now is not None:
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=dt.UTC)
+        now = now.astimezone(dt.UTC)
+    effective_now = now or dt.datetime.now(dt.UTC)
+    today = today or effective_now.date()
+    projection_token = _file_token(state_path(vault_root))
+    if projection_token is None:
+        rows, _horizon = _served_entries_uncached(
+            vault_root, today=today, now=effective_now, principal=principal, purpose=purpose
+        )
+        return rows
+    who = principal if principal is not None else principal_module.effective_principal()
+    key = (
+        str(vault_root),
+        getattr(who, "audience_id", None),
+        getattr(who, "authorization_session_id", None),
+        bool(getattr(who, "resolved", True)),
+        purpose,
+        today.isoformat(),
+        projection_token,
+        _file_token(review_state_module.state_path(vault_root)),
+    )
+    monotonic = time.monotonic()
+    with _SERVE_LOCK:
+        hit = _SERVE_CACHE.get(key)
+    if (
+        hit is not None
+        and monotonic - hit["built"] < _SERVE_CACHE_TTL_SECONDS
+        and (hit["horizon"] is None or effective_now < hit["horizon"])
+    ):
+        try:
+            verdicts = _release_verdicts(
+                egress_module, vault_root, hit["paths"], principal=who, purpose=purpose
+            )
+        except Exception:  # noqa: BLE001
+            # The same rule as the build: a release plane that cannot decide
+            # serves nothing, and never a memo built when it could.
+            log.debug("release filter unavailable; serving no due state", exc_info=True)
+            return []
+        if verdicts == hit["verdicts"]:
+            return [
+                dict(row)
+                for row in hit["rows"]
+                if not row.get("path") or _page_exists(vault_root, row["path"])
+            ]
+    payload = load(vault_root)
+    if payload is None or _owes_nothing(payload):
+        # Unreadable: the build recomputes or recovers, and nothing is filed.
+        # Owes nothing: the empty list under any filter, and -- as in the
+        # build -- no release filter to pay for.
+        rows, _horizon = _served_entries_uncached(
+            vault_root, today=today, now=effective_now, principal=who, purpose=purpose
+        )
+        return rows
+    # Fingerprint governance BEFORE the build: rows are then never older than
+    # the verdicts they are filed under, so a change during the build shows up
+    # as a mismatch on the next call instead of a hit.
+    paths = _projection_paths(payload)
+    try:
+        verdicts = _release_verdicts(
+            egress_module, vault_root, paths, principal=who, purpose=purpose
+        )
+    except Exception:  # noqa: BLE001
+        verdicts = _UNDECIDED
+    rows, horizon = _served_entries_uncached(
+        vault_root,
+        today=today,
+        now=effective_now,
+        principal=who,
+        purpose=purpose,
+        payload=payload,
+    )
+    if verdicts is not _UNDECIDED:
+        with _SERVE_LOCK:
+            if len(_SERVE_CACHE) >= _SERVE_CACHE_CAP:
+                _SERVE_CACHE.pop(next(iter(_SERVE_CACHE)), None)
+            _SERVE_CACHE[key] = {
+                "rows": [dict(row) for row in rows],
+                "horizon": horizon,
+                "built": monotonic,
+                "paths": paths,
+                "verdicts": verdicts,
+            }
+    return rows
+
+
+#: One served build per (vault, audience, session, purpose, day, projection
+#: file, review-state file); see `served_entries`.
+_SERVE_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
+_SERVE_LOCK = threading.Lock()
+_SERVE_CACHE_CAP = 64
+_SERVE_CACHE_TTL_SECONDS = 300.0
+#: Verdicts the release plane could not give: the build served nothing, and
+#: nothing is filed under it.
+_UNDECIDED = object()
+
+
+def reset_serve_cache() -> None:
+    """Drop every memoised served build: tests, and anything editing state files by hand."""
+    with _SERVE_LOCK:
+        _SERVE_CACHE.clear()
+
+
+def _owes_nothing(payload: Mapping[str, Any]) -> bool:
+    """A projection with no entry and no origin: the served view is empty under any filter."""
+    return not _has_entries(payload) and not (payload.get("role_state") or {}).get("has_origins")
+
+
+def _release_verdicts(
+    egress_module: Any, vault_root: Path, paths: list[str], *, principal: Any, purpose: str | None
+) -> bytes | None:
+    """The release plane's answer for every projection path, as one comparable value.
+
+    None on the empty-policy fast path (every path visible), else one byte per
+    path in `paths` order. Raises what the filter raises: the caller decides
+    what a plane that cannot answer means for its read.
+    """
+    keep = egress_module.release_walk_filter(Path(vault_root), principal=principal, purpose=purpose)
+    if keep is None:
+        return None
+    return bytes(1 if keep(path) else 0 for path in paths)
+
+
+def _file_token(path: Path) -> tuple[int, int, int] | None:
+    """Identity of a file's current bytes for a cache key, or None when it is absent.
+
+    Inode, mtime and size together: every writer here replaces the file
+    (mkstemp + rename), so a rewrite always changes the inode even when it
+    lands inside the same coarse-clock tick with the same byte count.
+    """
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return (info.st_ino, info.st_mtime_ns, info.st_size)
+
+
+def _served_entries_uncached(
+    vault_root: Path,
+    *,
+    today: dt.date,
+    now: dt.datetime,
+    principal: Any = None,
+    purpose: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dt.datetime | None]:
+    """The build behind `served_entries`, plus the earliest future `due_at` it skipped.
 
     The order of operations is the contract, not an implementation detail:
     re-bucket against today, drop what this audience may not see, drop what the
@@ -2234,28 +2423,25 @@ def served_entries(
     """
     from .governance import egress as egress_module
 
-    if now is not None:
-        if now.tzinfo is None:
-            now = now.replace(tzinfo=dt.UTC)
-        now = now.astimezone(dt.UTC)
-    today = today or (now.date() if now is not None else dt.date.today())
-    payload = load(vault_root)
+    horizon: dt.datetime | None = None
+    if payload is None:
+        payload = load(vault_root)
     if payload is None:
         # An unpersistable vault recomputes ONCE per process, not once per read.
         payload = _UNPERSISTED.get(str(vault_root))
     if payload is None:
         payload = _schedule_reconcile(vault_root, today=today)
         if payload is None:
-            return []
+            return [], None
 
-    if not _has_entries(payload) and not (payload.get("role_state") or {}).get("has_origins"):
+    if _owes_nothing(payload):
         # Nothing stored, so nothing to filter, count or order — and no disclosure
         # decision to make, because the answer is the empty list either way. This
         # is not an optimisation of the egress rule; it is the case where the rule
         # has no input. It matters because building the release filter is
         # governance-proportional work, and a vault that owes nothing is the
         # common case on every recall and every bootstrap.
-        return []
+        return [], None
 
     keep = None
     try:
@@ -2267,7 +2453,7 @@ def served_entries(
         # everything". Fail closed: serve nothing rather than count something
         # this audience may not be allowed to know exists.
         log.debug("release filter unavailable; serving no due state", exc_info=True)
-        return []
+        return [], None
     if keep is None:
         def keep(_path: str) -> bool:
             return True
@@ -2286,7 +2472,7 @@ def served_entries(
         # dismissing works. The write itself is untouched: this is the advisory
         # attached to the response, not the mutation.
         log.debug("review state unreadable; serving no due state", exc_info=True)
-        return []
+        return [], None
     excluded = _excluded_families(state_payload)
 
     routing = _routing_snapshot(vault_root, payload, keep)
@@ -2329,7 +2515,9 @@ def served_entries(
                         continue
                     due = _date(entry.get(date_key))
                     due_at = _datetime(entry.get("due_at"))
-                    if due_at is not None and due_at > (now or dt.datetime.now(dt.UTC)):
+                    if due_at is not None and due_at > now:
+                        if horizon is None or due_at < horizon:
+                            horizon = due_at
                         continue
                     if due is None or due > today:
                         continue  # not yet due — the day-boundary re-bucket
@@ -2382,7 +2570,7 @@ def served_entries(
             row["ref"],
         )
     )
-    return rows
+    return rows, horizon
 
 
 def _excluded_families(state_payload: dict[str, Any]) -> frozenset[str]:
