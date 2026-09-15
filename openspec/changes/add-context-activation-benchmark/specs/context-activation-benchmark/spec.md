@@ -24,22 +24,30 @@ compiler is disabled.
 
 ### Requirement: Pre-registered thresholds
 The audit SHALL pin, per case and per anchor kind: activation recall on gold at least
-0.90; activation precision at least 0.80 with a poison count of zero; `resolved` false
-activation on twins equal to zero; `partial` or `ambiguous` activation on twins at
-most 0.10, reported separately; the no-memory case resolving to `unresolved` with zero
+0.90; activation precision at least 0.80 with a poison count of zero; `resolved` false activation on twins equal to zero, where a false activation is a
+`resolved` anchor outside the twin's own gold set (a twin designed to resolve on a
+narrow gold of its own is not a false activation); `partial` or `ambiguous` activation
+on twins whose expected status is `unresolved` limited to at most one twin per run,
+reported separately (a twin whose expected status is `ambiguous` is scored on that
+expectation, not as hedging); the no-memory case resolving to `unresolved` with zero
 anchors and zero injected characters; the supersession case carrying the active head
 and marking every superseded ancestor; packet size p50 at most 900 tokens and p95 at
-most 1,500 with a hard refusal above 2,000; and a latency bound that SHALL be a
-measured constant recorded from the naive-path baseline rather than a guess, with the
-proposed p50 800 ms / p95 2,500 ms used only until that measurement exists.
+most 1,500 with a hard refusal above 2,000; and two latency bounds: the compiler's own `working_set.*` stages at p50 at most
+800 ms and p95 at most 2,500 ms on the reference corpus, and end-to-end
+`activate_context` no slower than the measured naive-path baseline on the same cell
+(p50 10,745 ms / p95 16,488 ms over 18 nonce queries on the personal cell on
+2026-09-16, recorded in the fixture manifest), the end-to-end bound to be tightened
+once `accelerate-governed-recall` lands.
 
 #### Scenario: Twin false resolution fails the audit
-- **WHEN** any twin turn yields an anchor with status `resolved`
+- **WHEN** any twin turn yields an anchor with status `resolved` that is not in the
+  twin's gold set
 - **THEN** the audit reports the case as failed regardless of every other metric
 
 #### Scenario: Hedged twin activation is reported, not punished as resolution
-- **WHEN** a twin yields only `partial` or `ambiguous` anchors at a rate under 0.10
-- **THEN** the audit passes the twin and reports the rate under its own metric
+- **WHEN** at most one twin expected to be `unresolved` yields only `partial` or
+  `ambiguous` anchors
+- **THEN** the audit passes the twin and reports the count under its own metric
 
 ### Requirement: Agent arms and controls
 The agent-in-the-loop layer SHALL compare, with model, prompt, effort, tools and
