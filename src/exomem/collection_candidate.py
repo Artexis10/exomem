@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import hashlib
 import json
 import re
@@ -92,6 +93,15 @@ def _day(value: Any) -> dt.date | None:
 
 
 def _canonical_term(value: Any) -> str:
+    if type(value) is str:
+        return _canonical_str(value)
+    return re.sub(r"\s+", "-", collection_claims.normalize_text(value))
+
+
+@functools.lru_cache(maxsize=65536)
+def _canonical_str(value: str) -> str:
+    # Pure in its argument; the same handful of vocabulary terms recur across
+    # every unit of every entry a serve recomposes.
     return re.sub(r"\s+", "-", collection_claims.normalize_text(value))
 
 
@@ -121,10 +131,19 @@ def _units(rows: Iterable[Mapping[str, Any]]) -> list[_Unit]:
 
 
 def _state_unit(unit: _Unit) -> bool:
-    lowered = unit.text.casefold()
+    return _state_text(unit.text)
+
+
+@functools.lru_cache(maxsize=65536)
+def _state_text(text: str) -> bool:
+    # A function of the unit's text alone, so it is decided once per distinct
+    # text in the process rather than once per (entry, term, unit): the same
+    # page's units sit under many candidate entries and are re-examined on
+    # every serve.
+    lowered = text.casefold()
     return bool(
-        _ISO_DATE.search(unit.text)
-        or _CURRENCY.search(unit.text)
+        _ISO_DATE.search(text)
+        or _CURRENCY.search(text)
         or any(re.search(rf"\b{re.escape(word)}\b", lowered) for word in STATE_LEXEMES)
     )
 
@@ -153,26 +172,57 @@ def detect(
     covered_terms: Iterable[str] = (),
     project_terms: Iterable[str] = (),
     core_categories: Iterable[str] = CORE_CATEGORIES,
+    terms: Iterable[str] | None = None,
 ) -> list[Candidate]:
-    """Return deterministic candidates from a bounded authored-units table."""
+    """Return deterministic candidates from a bounded authored-units table.
+
+    `terms` restricts detection to those candidate terms (canonicalised), and
+    is exact: a term's candidacy depends only on the units that carry it, so
+    the candidate returned for one term is the same whether or not the other
+    terms were examined. The due-state carrier recomposes one stored candidate
+    per served entry and needs exactly that one term; measured on the personal
+    vault (355 candidate entries), letting each recomposition re-detect every
+    term over its units cost 18 s of a 25 s recall.
+    """
     units = _units(rows)
     covered = {_canonical_term(term) for term in covered_terms}
     projects = {_canonical_term(term) for term in project_terms}
     core = {_canonical_term(term) for term in core_categories}
     all_terms = sorted({term for unit in units for term in unit.terms})
+    if terms is not None:
+        wanted = {_canonical_term(term) for term in terms}
+        all_terms = [term for term in all_terms if term in wanted]
+    # A unit is a state unit or not regardless of which term is being examined,
+    # so the three regex passes over its text are paid once per unit, not once
+    # per (term, unit) pair. Same for a term's exclusion verdict.
+    state_memo: dict[str, bool] = {}
+    excluded_memo: dict[str, bool] = {}
+
+    def is_state(unit: _Unit) -> bool:
+        cached = state_memo.get(unit.text)
+        if cached is None:
+            cached = state_memo[unit.text] = _state_unit(unit)
+        return cached
+
+    def is_excluded(term: str) -> bool:
+        cached = excluded_memo.get(term)
+        if cached is None:
+            cached = excluded_memo[term] = _excluded(
+                term,
+                covered_terms=covered,
+                project_terms=projects,
+                core_categories=core,
+            )
+        return cached
+
     candidates: list[Candidate] = []
     for term in all_terms:
-        if _excluded(
-            term,
-            covered_terms=covered,
-            project_terms=projects,
-            core_categories=core,
-        ):
+        if is_excluded(term):
             continue
         supporting = [unit for unit in units if term in unit.terms]
         pages = {unit.page for unit in supporting}
         dates = {unit.date for unit in supporting}
-        state_units = [unit for unit in supporting if _state_unit(unit)]
+        state_units = [unit for unit in supporting if is_state(unit)]
         if (
             len(pages) < SPREAD_MIN_PAGES
             or len(dates) < DATES_MIN
@@ -183,12 +233,7 @@ def detect(
         identity_counts: dict[str, set[str]] = {}
         for unit in supporting:
             for other in unit.terms - {term}:
-                if _excluded(
-                    other,
-                    covered_terms=covered,
-                    project_terms=projects,
-                    core_categories=core,
-                ):
+                if is_excluded(other):
                     continue
                 identity_counts.setdefault(other, set()).add(unit.page)
         identities = sorted(

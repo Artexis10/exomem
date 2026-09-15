@@ -991,6 +991,17 @@ def load_manifest(vault_root: Path, path: Path | str) -> CollectionManifest:
         raise CollectionError(
             "INVALID_COLLECTION_MANIFEST", "collection manifest is not UTF-8"
         ) from error
+    digest = hashlib.sha256(data).hexdigest()
+    # The parse is a pure function of (vault, path, bytes) and the manifest it
+    # returns is immutable, so the same bytes parse once per process. The
+    # guarded read above still runs every time: it is the placement and size
+    # check, and it is what proves the bytes are current. Measured on the
+    # personal vault, re-parsing fifteen manifests' YAML on every due-state
+    # serve was 0.6 s of every recall.
+    key = (str(root), rel, digest)
+    cached = _MANIFEST_PARSE_CACHE.get(key)
+    if cached is not None:
+        return cached
     audit_name = _profile_owned_audit_name(text)
     if audit_name is not None:
         _validate_audit_source(text, audit_name)
@@ -1000,13 +1011,23 @@ def load_manifest(vault_root: Path, path: Path | str) -> CollectionManifest:
         raise CollectionError(error.code, error.reason) from error
     if marker is None:
         raise CollectionError("INVALID_COLLECTION_MANIFEST", "manifest requires YAML frontmatter")
-    return _manifest_from_frontmatter(
+    manifest = _manifest_from_frontmatter(
         root,
         rel,
         frontmatter,
-        SourceVersion(path=rel, hash=hashlib.sha256(data).hexdigest()),
+        SourceVersion(path=rel, hash=digest),
         manifest_stable_hash=_manifest_stable_hash(text),
     )
+    if len(_MANIFEST_PARSE_CACHE) >= _MANIFEST_PARSE_CACHE_CAP:
+        _MANIFEST_PARSE_CACHE.pop(next(iter(_MANIFEST_PARSE_CACHE)), None)
+    _MANIFEST_PARSE_CACHE[key] = manifest
+    return manifest
+
+
+#: Parsed manifests by (vault, path, content digest); bounded, never invalidated
+#: by anything but the bytes changing, because the key IS the bytes.
+_MANIFEST_PARSE_CACHE: dict[tuple[str, str, str], CollectionManifest] = {}
+_MANIFEST_PARSE_CACHE_CAP = 256
 
 
 def parse_manifest_bytes(

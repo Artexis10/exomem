@@ -404,11 +404,86 @@ def _entries_from_findings(
     return out
 
 
+def _refs_resolver(
+    vault_root: Path, payload: dict[str, Any], keep: Any = None
+) -> Callable[[list[str]], dict[str, str]]:
+    """Resolve review refs for a whole serve with one sidecar lookup, not one per entry.
+
+    Every path a recomposed entry can name is already in the projection: the
+    entry's own path, the pages of its units, its joined records. So the first
+    call resolves that universe in one batch and later calls answer from it; a
+    path outside it (there should be none) falls through to a direct lookup.
+    Measured on the personal vault, the per-entry lookups were 590 sidecar
+    connections and 5 s of a 25 s recall.
+
+    The universe is filtered by `keep` first: a path this audience may not see
+    never reaches the sidecar, exactly as before, when only survivors were
+    looked up. That matters beyond disclosure -- a lookup for a path the refs
+    sidecar has not indexed heals it, so an unfiltered batch would also widen
+    the write trigger and the cold-sidecar worst case of the call it speeds up.
+    """
+    cache: dict[str, str] | None = None
+
+    def universe() -> list[str]:
+        paths: set[str] = set()
+
+        def add(value: Any) -> None:
+            if type(value) is str and value and (keep is None or keep(value)):
+                paths.add(value)
+
+        categories = payload.get("categories")
+        if not isinstance(categories, Mapping):
+            return []
+        for pages in categories.values():
+            if not isinstance(pages, Mapping):
+                continue
+            for page_path, entries in pages.items():
+                add(page_path)
+                if not isinstance(entries, Mapping):
+                    continue
+                for bucket in entries.values():
+                    for entry in bucket if isinstance(bucket, list) else ():
+                        if not isinstance(entry, Mapping):
+                            continue
+                        add(entry.get("path"))
+                        for item in entry.get("paths") or ():
+                            add(item)
+                        component = entry.get("component")
+                        if not isinstance(component, Mapping):
+                            continue
+                        add(component.get("path"))
+                        add(component.get("page_path"))
+                        add(component.get("collection"))
+                        for row in component.get("units") or ():
+                            if isinstance(row, Mapping):
+                                add(row.get("page"))
+                        for record in component.get("reflecting_records") or ():
+                            if isinstance(record, Mapping):
+                                add(record.get("path"))
+                        for pair in component.get("joined") or ():
+                            if isinstance(pair, (list, tuple)) and pair:
+                                add(pair[0])
+        return sorted(paths)
+
+    def resolve(paths: list[str]) -> dict[str, str]:
+        nonlocal cache
+        if cache is None:
+            known = universe()
+            cache = dict(review_state_module.refs_for_paths(vault_root, known)) if known else {}
+        missing = [path for path in paths if path not in cache]
+        if missing:
+            cache.update(review_state_module.refs_for_paths(vault_root, missing))
+        return {path: cache[path] for path in paths if path in cache}
+
+    return resolve
+
+
 def _survivors_only(
     vault_root: Path,
     entry: dict[str, Any],
     keep: Any,
     routing: Callable[[], list[Any]],
+    refs: Callable[[list[str]], dict[str, str]] | None = None,
 ) -> dict[str, Any] | None:
     """Re-derive one entry from the joined pages THIS audience may see.
 
@@ -427,10 +502,18 @@ def _survivors_only(
     still matches. Composing it any other way is how dismissal silently breaks.
 
     Entries with no component (every other category) are returned unchanged.
+
+    `refs` resolves review refs for the recomposed finding's paths; a serve
+    passes one `_refs_resolver` so every entry shares a single sidecar lookup.
     """
     component = entry.get("component")
     if not isinstance(component, dict):
         return entry
+    if refs is None:
+        direct = review_state_module.refs_for_paths
+
+        def refs(paths: list[str]) -> dict[str, str]:
+            return direct(vault_root, paths)
     if component.get("family") in {"artifact_role_promotion", "transient_state_review"}:
         return entry
     if component.get("family") == "collection_candidate":
@@ -450,8 +533,14 @@ def _survivors_only(
             for term in target.claims
         }
         projects = component.get("project_terms") or ()
+        # Only this entry's own term is recomposed: a term's candidacy depends
+        # on nothing but the units that carry it, so restricting the detector
+        # is exact, and it is what turns O(terms x units) per entry into O(units).
         candidates = collection_candidate.detect(
-            visible_rows, covered_terms=covered, project_terms=projects
+            visible_rows,
+            covered_terms=covered,
+            project_terms=projects,
+            terms=(str(component.get("term") or ""),),
         )
         candidate = next(
             (item for item in candidates if item.term == component.get("term")), None
@@ -467,7 +556,7 @@ def _survivors_only(
             return None
         paths = sorted({finding.path, *(finding.paths or [])})
         return _entry(
-            vault_root, finding, review_state_module.refs_for_paths(vault_root, paths)
+            vault_root, finding, refs(paths)
         )
     if component.get("family") == "unreflected_observations":
         collection = str(component.get("collection") or "")
@@ -509,7 +598,7 @@ def _survivors_only(
             return None
         paths = sorted({finding.path, *(finding.paths or [])})
         rebuilt = _entry(
-            vault_root, finding, review_state_module.refs_for_paths(vault_root, paths)
+            vault_root, finding, refs(paths)
         )
         return rebuilt
     stored = [
@@ -531,7 +620,7 @@ def _survivors_only(
         return None
     paths = sorted({finding.path, *(finding.paths or [])})
     rebuilt = _entry(
-        vault_root, finding, review_state_module.refs_for_paths(vault_root, paths)
+        vault_root, finding, refs(paths)
     )
     if rebuilt is None:
         return None
@@ -2201,6 +2290,7 @@ def served_entries(
     excluded = _excluded_families(state_payload)
 
     routing = _routing_snapshot(vault_root, payload, keep)
+    refs = _refs_resolver(vault_root, payload, keep)
 
     order = {category: rank for rank, category in enumerate(PROJECTION_CATEGORIES)}
     rows: list[dict[str, Any]] = []
@@ -2251,7 +2341,7 @@ def served_entries(
                     if keep is not None and path and not candidate_component and not keep(path):
                         continue  # withheld: contributes to nothing, anywhere
                     if keep is not None:
-                        entry = _survivors_only(vault_root, entry, keep, routing)
+                        entry = _survivors_only(vault_root, entry, keep, routing, refs)
                         if entry is None:
                             # Every page this finding was ABOUT is withheld from
                             # this audience, so under that audience there is no
