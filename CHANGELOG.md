@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.85.3](https://github.com/Artexis10/exomem/compare/v0.85.2...v0.85.3) (2026-09-15)
+
+
+### Bug Fixes
+
+* **hosted:** select the provisioner that reissues a drained source window ([#1272](https://github.com/Artexis10/exomem/issues/1272)) ([a52b553](https://github.com/Artexis10/exomem/commit/a52b55383eb5366b72da75b56d02a9491626f895))
+
+
+### Performance
+
+* **due-state:** build the recall's due-state block in bounded work ([#1279](https://github.com/Artexis10/exomem/issues/1279)) ([d7c47f6](https://github.com/Artexis10/exomem/commit/d7c47f6d20ce503365217a41eaa68fb0cd829ea5))
+
 ## [0.85.2](https://github.com/Artexis10/exomem/compare/v0.85.1...v0.85.2) (2026-09-14)
 
 
