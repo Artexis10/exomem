@@ -60,15 +60,18 @@ never be read by ordinary recall lanes, and SHALL never be treated as canonical 
   make it a candidate of `ask_memory`
 
 ### Requirement: Categorical anchor evidence and resolution
-Anchor candidates SHALL carry only categorical evidence kinds drawn from
-`exact_alias`, `lexical_overlap`, `vector_band`, `category_match`, `claims_match`,
-`retrieval`, `graph_corroboration` and `usage_prior`; no float score SHALL appear in
-the packet. An anchor SHALL resolve as `resolved` when it carries `exact_alias` or at
-least two independent evidence kinds other than `usage_prior`; as `partial` when it
-carries exactly one strong kind while competing candidates of the same anchor kind
-exist; the turn SHALL be `ambiguous` when two or more resolved anchors have disjoint
-typed-link neighbourhoods; otherwise the turn SHALL be `unresolved` and the operation
-SHALL abstain with an empty packet. `usage_prior` SHALL only break ties between
+Anchor candidates SHALL carry only categorical evidence kinds. Contact kinds —
+`exact_alias`, `lexical_overlap`, `vector_band`, `claims_match` and `retrieval` —
+establish that the turn reached the anchor; qualifier kinds — `category_match`,
+`graph_corroboration` and `usage_prior` — strengthen an anchor the turn already reached
+and SHALL never create a candidate on their own. No float score SHALL appear in the
+packet. An anchor SHALL resolve as `resolved` when it carries `exact_alias` or at least
+two independent kinds other than `usage_prior`, at least one of them a contact kind; as
+`partial` when it carries exactly one kind other than `usage_prior`; the turn SHALL be
+`ambiguous` when two or more resolved anchors of the same anchor kind have disjoint
+typed-link neighbourhoods (resolved anchors of different kinds are complementary);
+otherwise, when no anchor is `resolved`, the turn SHALL be `unresolved` and the
+operation SHALL abstain with an empty packet. Lexical overlap SHALL ignore stopwords. `usage_prior` SHALL only break ties between
 otherwise equal candidates and SHALL never contribute to the two-kinds rule.
 `claims_match` SHALL be computed with the existing collection-claims routing and
 `graph_corroboration` SHALL count a typed edge between two candidates even when both

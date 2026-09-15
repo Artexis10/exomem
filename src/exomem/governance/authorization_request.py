@@ -57,6 +57,7 @@ _SESSION_ACTION_RULES: Mapping[str, CredentialRule] = {
 }
 _OPTIONAL_COMMANDS = frozenset(
     {
+        "activate_context",
         "add",
         "adopt",
         "adopt_vault",

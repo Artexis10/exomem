@@ -45,8 +45,9 @@ canonical page type.
 - **D2 — Index mirrors `embedding_index.py`.** `.working-set.sqlite` with a meta-version
   row, a write-generation token read back inside the write transaction, a copy-on-write
   in-process cache, scoped wipe on schema mismatch. Tables: `anchors`, `anchor_aliases`,
-  `anchor_terms` (FTS5), `anchor_vectors`, `anchor_links`, `anchor_categories`,
-  `anchor_roles`, `meta`. Sources are governed structure only; signatures are structural
+  `anchor_terms` (FTS5), `anchor_vectors`, `anchor_links`, `anchor_categories`, `meta`
+  (no `anchor_roles` table: role selection is per request and keying the index on the
+  roles hash would force a rebuild on every registry edit). Sources are governed structure only; signatures are structural
   (title, lede, headline sections, unit categories, manifest field names) — never
   generated. Signature embeddings reuse the configured embedding backend and are
   optional (absent under `EXOMEM_DISABLE_EMBEDDINGS`, in which case `vector_band` is
@@ -59,10 +60,13 @@ canonical page type.
   a small-limit `find()` that is or links to the anchor), `graph_corroboration` (typed
   edge between candidates from `anchor_links`, counted even when both are in the primary
   set — the compiler does not inherit the find lane's discard), `usage_prior` (tie-break
-  only, from `usage.usage_multiplier`). Resolution: `exact_alias` or ≥2 independent
-  non-usage kinds → `resolved`; one strong kind with competitors → `partial`; ≥2
-  resolved anchors with disjoint `anchor_links` neighbourhoods → `ambiguous`; else
-  `unresolved` → abstain. The ambiguity is returned with both anchors; the active agent
+  only, from `usage.usage_multiplier`). Contact kinds (`exact_alias`, `lexical_overlap`, `vector_band`, `claims_match`,
+  `retrieval`) make a candidate; `category_match`, `graph_corroboration` and
+  `usage_prior` only qualify one (a `fact` category alone would make the whole vault a
+  candidate). Resolution: `exact_alias` or ≥2 independent non-usage kinds → `resolved`;
+  exactly one non-usage kind → `partial` (depth-1 expansion only); ≥2 resolved anchors
+  of the same kind with disjoint `anchor_links` neighbourhoods → `ambiguous`; no
+  resolved anchor → `unresolved` → abstain. The ambiguity is returned with both anchors; the active agent
   chooses (the `anchor=` override lands with the host change).
 - **D4 — Roles are a versioned registry, not code.** `context-roles.yaml` (scaffold +
   plugin copy, byte-identical, no-leak gated) declares role id, lane, category set,

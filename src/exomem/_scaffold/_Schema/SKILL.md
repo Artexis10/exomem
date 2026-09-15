@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 2115308da4a18e3587a6aea951abedb0e87dd49ff7434f1e87cc1c7cc9c58449
+  skill_contract: 3a9748ba262a65a0b1e9ed41e88298955300e5063db148b097467d4bef9c1d72
   version: "0.32.0"
 ---
 
@@ -52,7 +52,7 @@ bootstrap; do not improvise a mutation whose rules remain unavailable.
 
 | Current intent | Tools to discover as needed | Required procedure |
 |---|---|---|
-| Ordinary recall | `ask_memory`, then `read_memory`; `browse_memory` for structure | The short recall loop below suffices |
+| Ordinary recall | `activate_context` for a turn with no prior context, then `ask_memory` and `read_memory`; `browse_memory` for structure | The short recall loop below suffices |
 | Filtered/unit/media recall, unresolved identities, or retrieval diagnostics | `ask_memory`, `read_memory`, `connect_memory`, `query_dataset`, `read_media` | [recall](references/recall.md) |
 | Capture/compile/edit a conclusion or entity, connect or supersede knowledge | `remember`, `observe_memory`, `edit_memory`, `replace_memory`, `capture_source`, `compile_source`, `connect_memory` | [writing](references/writing.md); [mutation results](references/mutation-results.md) before any mutation |
 | Preserve or retrieve original files, process media | `capture_source`, `preserve_evidence`, `preserve_artifacts`, `transfer_artifact`, `process_media`, `read_media` | [operation routing and transport](references/operation-routing.md); [mutation results](references/mutation-results.md) before any mutation |
@@ -109,7 +109,11 @@ required by the envelope. Raw capture is not automatic compilation.
 
 ## Recall loop
 
-Start with `ask_memory(detail="compact", rerank=false)`, then `read_memory` for
+At `balanced` or `maximal`, for a substantive turn with no prior context, call
+`activate_context` with the user's turn verbatim before deciding what to search
+for; it returns a bounded working-memory packet or abstains with a reason, and an
+`ambiguous` result is yours to disambiguate, not to guess. Then start with
+`ask_memory(detail="compact", rerank=false)`, then `read_memory` for
 selected hits. Use `ask_memory(deep=true)` for a bounded synthesis context, and
 request graph enrichment or full diagnostics only when needed. Keep retrieval
 quiet; cite useful hits. A miss means "not found in what I searched", never proof

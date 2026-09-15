@@ -103,6 +103,34 @@ GRAPH_RATIO_SLACK_MS = 25.0  # noise floor for ms-scale medians on shared CI
 CEIL_REFERENTS_RATIO = 1.5
 REFERENTS_RATIO_SLACK_MS = 25.0
 
+# --- Context-compiler ceilings (add-context-activation, design D9).
+# The metric is the COMPILER's own stages — anchor resolution over the activation
+# index, role selection, the bounded role lanes and the budget pass — and
+# deliberately NOT `working_set.retrieval`, which is one small-limit `find()` and
+# is already bounded by CEIL_TOTAL_MS above. Attributing them together would hide
+# a compiler regression behind recall's cost, which is the exact mistake the
+# per-lane gate exists to prevent.
+#
+# The compiler's stages are index-backed and seed-capped, so they must be FLAT in
+# corpus size: resolution reads a bounded candidate window out of the anchor
+# catalogue, and each lane is capped before the budget pass. A linear-in-N cost
+# reappearing here means a lane started walking the corpus, which is the
+# regression class this gate names. The absolute ceiling is a
+# catastrophic-blowup backstop sized like CEIL_REFERENTS_MS, not a tuned bound;
+# re-measure rather than hand-tuning it.
+CEIL_WORKING_SET_MS = 1500.0
+CEIL_WORKING_SET_RATIO = 1.5
+WORKING_SET_RATIO_SLACK_MS = 50.0
+#: The compiler's root spans. `working_set.lanes.<role>` is matched by prefix
+#: because the selected role set is a function of the turn, not of this gate.
+WORKING_SET_STAGE_PREFIX = "working_set."
+WORKING_SET_EXCLUDED_STAGES = frozenset({"working_set.retrieval"})
+#: A turn that names one synthetic entity exactly, so an anchor resolves and the
+#: lanes actually run. A turn that abstained would measure nothing.
+WORKING_SET_TURN = (
+    "I'm planning to meet Synthetic Person 00007 — what are the constraints?"
+)
+
 
 def _seed_freshness_live(vault: Path) -> None:
     """Seed the event-maintained freshness registry the way the watcher does, so
@@ -599,3 +627,93 @@ def test_entity_type_registry_load_is_bounded_at_scale(
         rerank=False,
     )
     assert len(parse_ms) == 1, "warm registry load reparsed instead of costing 0 ms"
+
+
+# --------------------------------------------------------------------------- #
+# Context compiler (add-context-activation task 5.4)
+# --------------------------------------------------------------------------- #
+
+
+def _compiler_ms(timings: dict) -> float:
+    """Sum the compiler's own root stages from one `activate_context` call."""
+    return sum(
+        entry["ms"]
+        for name, entry in timings["stages"].items()
+        if name.startswith(WORKING_SET_STAGE_PREFIX)
+        and name not in WORKING_SET_EXCLUDED_STAGES
+        and "parent" not in entry
+        and "ms" in entry
+    )
+
+
+def _measure_working_set(vault: Path) -> tuple[float, dict]:
+    """Return (warm median compiler ms, one packet) over repeated activations.
+
+    The index is built explicitly first, for the same reason `lexstore.ensure_fresh`
+    is: startup owns a potentially unbounded derived build, and an interactive call
+    must never become that build.
+    """
+    from exomem import commands, working_set_index, working_set_runtime
+
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+
+    def call() -> dict:
+        # The packet cache is keyed on the turn, so vary it to measure the
+        # compiler rather than a cache hit.
+        working_set_runtime.reset_caches_for_tests()
+        return commands.op_activate_context(
+            vault, turn=WORKING_SET_TURN, include_timings=True
+        )
+
+    packet = call()
+    samples = [_compiler_ms(call()["timings"]) for _ in range(3)]
+    return statistics.median(samples), packet
+
+
+@pytest.mark.timeout(300)
+def test_working_set_compiler_stays_bounded_at_scale(tmp_path: Path, model_free) -> None:
+    from synth_vault import gen_entity_overlay
+
+    vault = _build_dense_vault(tmp_path, N_NOTES)
+    gen_entity_overlay(vault, 500, seed=19)
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
+
+    compiler_ms, packet = _measure_working_set(vault)
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert compiler_ms < CEIL_WORKING_SET_MS, (
+        f"context compiler took {compiler_ms:.1f}ms @ {N_NOTES} notes "
+        f"(ceiling {CEIL_WORKING_SET_MS:.1f}ms)"
+    )
+    # The packet is bounded by construction; assert it, so a budget regression
+    # shows up as a gate failure rather than as a context-window surprise.
+    assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
+    assert len(json.dumps(packet)) < 24_000
+
+
+@pytest.mark.timeout(600)
+def test_working_set_compiler_does_not_scale_linearly(tmp_path: Path, model_free) -> None:
+    from synth_vault import gen_entity_overlay
+
+    small = _build_dense_vault(tmp_path, N_NOTES)
+    gen_entity_overlay(small, 125, seed=23)
+    _seed_freshness_live(small)
+    lexstore.ensure_fresh(small)
+    small_ms, _ = _measure_working_set(small)
+
+    large = _build_dense_vault(tmp_path, N_NOTES_LARGE)
+    gen_entity_overlay(large, 500, seed=23)
+    _seed_freshness_live(large)
+    lexstore.ensure_fresh(large)
+    large_ms, _ = _measure_working_set(large)
+
+    bound = max(
+        small_ms * CEIL_WORKING_SET_RATIO,
+        small_ms + WORKING_SET_RATIO_SLACK_MS,
+    )
+    assert large_ms < bound, (
+        f"context compiler scaled {small_ms:.1f}ms @ {N_NOTES} to "
+        f"{large_ms:.1f}ms @ {N_NOTES_LARGE} (bound {bound:.1f}ms)"
+    )
