@@ -18,8 +18,49 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 #: The three variants this slice implements. Order is fixed and deterministic
-#: (used to derive each variant's independent child seed).
+#: (used to derive each variant's independent child seed). Unchanged by the
+#: context-activation extension below (openspec/changes/
+#: add-context-activation-benchmark, "Existing variants are unchanged").
 VARIANTS: tuple[str, ...] = ("helpful_history", "self_contained", "stale_distractor")
+
+#: Context-activation variants (task 3, add-context-activation-benchmark):
+#: one per pre-registered cold-start case (C1-C9) and negative twin (T1-T9).
+#: An *additive sibling* tuple, deliberately not concatenated into
+#: :data:`VARIANTS`: ``runner.py`` and its tests key their default execution
+#: scope, cost reservation and cost cap directly off ``len(VARIANTS)`` /
+#: ``VARIANTS`` for the *existing*, cost-metered, real-agent project-config
+#: pipeline (``scenarios.generate_episode`` + ``action_world.ActionWorld``),
+#: which has no way to generate or grade a conversational cold-start episode.
+#: Concatenating would silently make that pipeline's default scope 21
+#: variants instead of 3, 18 of them guaranteed to raise ``ScenarioError``.
+#: The family's variant *tuple* is still genuinely extended -- this is the
+#: extension -- just not by mutating the one Python identifier ``runner.py``
+#: treats as its own operative default. Registration, receipt and the
+#: original three variants' seeds/oracles/outcomes are unaffected either way.
+#: Literal here, not derived from ``epistemic.corpora.context_activation``,
+#: so this module gains no new import-direction dependency on the epistemic
+#: package; ``membench.utility.context_activation_arms`` asserts the two
+#: stay in step.
+CONTEXT_ACTIVATION_VARIANTS: tuple[str, ...] = (
+    "context_activation_c1",
+    "context_activation_c2",
+    "context_activation_c3",
+    "context_activation_c4",
+    "context_activation_c5",
+    "context_activation_c6",
+    "context_activation_c7",
+    "context_activation_c8",
+    "context_activation_c9",
+    "context_activation_t1",
+    "context_activation_t2",
+    "context_activation_t3",
+    "context_activation_t4",
+    "context_activation_t5",
+    "context_activation_t6",
+    "context_activation_t7",
+    "context_activation_t8",
+    "context_activation_t9",
+)
 
 #: Ordered session phases every episode runs.
 PHASES: tuple[str, ...] = ("experience", "change", "action")
