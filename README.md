@@ -374,6 +374,7 @@ exomem exposes typed MCP tools for common knowledge-base work:
 
 | Tool | Purpose |
 | --- | --- |
+| `activate_context` | Compile durable context for a raw turn, with no query: resolves which anchors the turn is about and returns a bounded working-memory packet, or abstains. |
 | `find` | Search notes, sources, entities, and evidence with type/project/tag filters. |
 | `get` | Read a full page or frontmatter. |
 | `add` | Capture a raw source page. |

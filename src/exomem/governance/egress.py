@@ -2125,6 +2125,201 @@ def guard_referents(
     return guarded
 
 
+def guard_working_set(
+    vault_root: Path,
+    packet: dict[str, Any],
+    release: AnnotatedHits,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> dict[str, Any] | None:
+    """Apply release decisions to a working-memory packet (design D7).
+
+    Sits beside `guard_referents` and takes the SAME release object hit
+    projection gets, because the packet is assembled from the same pages and
+    walks further: a typed neighbourhood, a Records collection's newest item, a
+    supersession pointer. Each of those is a way for a permitted page to
+    enumerate a withheld one, which is the disclosure the release ceiling exists
+    to prevent.
+
+    Three states, the same three every other consumer has: `empty` policy and no
+    tombstones -> untouched; `blocked` or an unresolved-but-expected principal ->
+    no packet at all; otherwise every named path is decided and every field that
+    names a withheld one is dropped.
+
+    `neighbourhood` is removed from every anchor unconditionally. It is private
+    resolution state that exists so the compiler can bound its lanes and detect
+    ambiguity; publishing it would hand an audience a page list it never asked
+    for, and filtering it entry-by-entry would still disclose its SIZE.
+    """
+    if release.blocked:
+        return None
+    vault_root = Path(vault_root)
+    guarded = copy.deepcopy(packet)
+    policy, release_gate_active = gate_state(vault_root)
+    who = principal if principal is not None else effective_principal()
+    if policy.blocked or (not policy.empty and not who.resolved):
+        _record_blocked_outcome(who.audience_id)
+        return None
+
+    named_paths = _working_set_paths(guarded)
+    tombstoned = {
+        path for path in named_paths if path and lifecycle.is_tombstoned(vault_root, path)
+    }
+    withheld = set(release.withheld_paths) | tombstoned
+    if not release_gate_active and policy.empty and not withheld:
+        return guarded
+
+    decisions: dict[str, Decision | None] = {}
+    if not policy.empty:
+        grants_hash = _grants_hash(policy)
+        declared_purpose = _declared_purpose(vault_root, who, purpose)
+        for rel_path in sorted(path for path in named_paths if path):
+            decision = _decide_path(
+                vault_root,
+                rel_path,
+                policy=policy,
+                audience=who.audience_id,
+                purpose=declared_purpose,
+                grants_hash=grants_hash,
+                authorization_session=who.authorization_session_id,
+                authorization_context=who.verified_authorization_session,
+            )
+            decisions[rel_path] = decision
+            if decision is None or decision.level < RELEASE_FLOOR:
+                withheld.add(rel_path)
+            _outcome_for_decision(
+                vault_root,
+                rel_path,
+                decision=decision,
+                policy=policy,
+                audience=who.audience_id,
+                outcome="withheld" if rel_path in withheld else "released",
+                purpose=declared_purpose,
+            )
+
+    frozen = frozenset(withheld)
+    guarded["anchors"] = [
+        anchor
+        for anchor in (
+            _guarded_anchor(item, frozen, decisions)
+            for item in guarded.get("anchors") or ()
+            if isinstance(item, Mapping)
+        )
+        if anchor is not None
+    ]
+    guarded["units"] = [
+        unit
+        for unit in (
+            _guarded_unit(item, frozen, decisions)
+            for item in guarded.get("units") or ()
+            if isinstance(item, Mapping)
+        )
+        if unit is not None
+    ]
+    for section in ("pointers", "ambiguity", "current_state", "missing"):
+        values = guarded.get(section)
+        if isinstance(values, list):
+            guarded[section] = [
+                dict(item)
+                for item in values
+                if not _names_withheld(item, frozen, reference_field=True)
+            ]
+    return guarded
+
+
+#: Packet fields whose values are, or contain, vault paths.
+_WORKING_SET_PATH_FIELDS = ("ref", "path", "anchor")
+
+
+def _working_set_paths(packet: Mapping[str, Any]) -> set[str]:
+    """Every vault-relative path the packet names, from its path-bearing fields."""
+    out: set[str] = set()
+
+    def _collect(value: Any) -> None:
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                if key in _WORKING_SET_PATH_FIELDS and isinstance(item, str):
+                    if item.endswith(".md"):
+                        out.add(item)
+                    elif "#" in item and item.split("#", 1)[0].endswith(".md"):
+                        out.add(item.split("#", 1)[0])
+                else:
+                    _collect(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                _collect(item)
+        elif isinstance(value, str) and value.endswith(".md"):
+            out.add(value)
+
+    for section in ("anchors", "units", "pointers", "current_state", "ambiguity"):
+        _collect(packet.get(section))
+    return out
+
+
+def _guarded_anchor(
+    anchor: Mapping[str, Any],
+    withheld: frozenset[str],
+    decisions: Mapping[str, Decision | None],
+) -> dict[str, Any] | None:
+    if _names_withheld(anchor.get("path"), withheld) or _names_withheld(
+        anchor.get("ref"), withheld, reference_field=True
+    ):
+        return None
+    out = dict(anchor)
+    # Private resolution state: never published, at any release level.
+    neighbourhood = out.pop("neighbourhood", None)
+    if neighbourhood is not None and _names_withheld(
+        neighbourhood, withheld, reference_field=True
+    ):
+        # Corroboration that leaned on a withheld neighbour is not evidence this
+        # audience may be shown to have.
+        out["evidence"] = [
+            kind for kind in out.get("evidence") or () if kind != "graph_corroboration"
+        ]
+    decision = decisions.get(str(out.get("path") or ""))
+    if decision is not None and decision.release_strip:
+        protected = {key: out[key] for key in ("ref", "path", "title", "kind") if key in out}
+        detail = {key: value for key, value in out.items() if key not in protected}
+        stripped = bridges.strip_provenance(detail, decision.release_strip)
+        out = dict(protected)
+        if isinstance(stripped, Mapping):
+            out.update(stripped)
+    return out
+
+
+def _guarded_unit(
+    unit: Mapping[str, Any],
+    withheld: frozenset[str],
+    decisions: Mapping[str, Decision | None],
+) -> dict[str, Any] | None:
+    provenance = unit.get("provenance")
+    path = str(provenance.get("path") or "") if isinstance(provenance, Mapping) else ""
+    anchor = str(provenance.get("anchor") or "") if isinstance(provenance, Mapping) else ""
+    if _names_withheld(unit.get("ref"), withheld, reference_field=True):
+        return None
+    if path and _names_withheld(path, withheld):
+        return None
+    # A unit whose ANCHOR is withheld is dropped rather than kept with the anchor
+    # filtered out of its provenance: an unattributable claim in working memory is
+    # worse than a missing one, and the audience cannot see the anchor anyway.
+    if anchor and _names_withheld(anchor, withheld, reference_field=True):
+        return None
+    out = dict(unit)
+    if isinstance(provenance, Mapping):
+        out["provenance"] = {
+            key: value
+            for key, value in provenance.items()
+            if not _names_withheld(value, withheld, reference_field=True)
+        }
+    decision = decisions.get(path)
+    if decision is not None and decision.release_strip:
+        stripped = bridges.strip_provenance(out.get("provenance") or {}, decision.release_strip)
+        if isinstance(stripped, Mapping):
+            out["provenance"] = dict(stripped)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Direct reads (get / read_memory) — D3 applied to a whole page
 # ---------------------------------------------------------------------------
@@ -2977,6 +3172,11 @@ _COMMAND_PROJECTOR_KIND: dict[str, str] = {
     # inspection/query/mutation projectors before it returns.
     "record_memory": "structure",
     "plan_memory": "structure",
+    # The context packet has its own guard (`guard_working_set`, design D7) and
+    # the dispatcher cross-check behind it. It is declared `structure` because
+    # what it emits is refs and short provenance-bearing excerpts naming vault
+    # items, which is exactly what the structure backstop filters.
+    "activate_context": "structure",
 }
 
 # Receipt adapters follow the same default-deny registry as serializers.  A
@@ -3005,6 +3205,7 @@ _COMMAND_OUTCOME_ADAPTER: dict[str, str] = {
     "record_memory": "structure",
     "plan_memory": "structure",
     "schema_memory": "structure",
+    "activate_context": "structure",
 }
 
 # Every content selector declares both evidence collection and tombstone
