@@ -25,7 +25,7 @@
 - [x] 2.2 Implement the scorer over packets (`activate_context` output or an oracle
       packet file) and the report writer (per case, per class, duals, no aggregate).
 
-- [ ] 2.3 Credit a superseded ancestor that the packet carries with `lifecycle:
+- [x] 2.3 Credit a superseded ancestor that the packet carries with `lifecycle:
       superseded` and its successor named as non-poison in the C8 scorer (the compiler
       contract allows marking or omission; the v0 scorer credits omission only).
 

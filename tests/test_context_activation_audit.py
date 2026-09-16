@@ -155,6 +155,70 @@ def test_poison_hit_fails_the_case_even_with_full_gold_recall() -> None:
     assert any("poison" in reason for reason in score.failure_reasons)
 
 
+# -- task 2.3: a superseded ancestor marked (not omitted) is not poison ---
+
+
+def test_c8_ancestor_marked_superseded_with_named_successor_is_not_poison() -> None:
+    c8 = fixture_by_id("C8")
+    ancestor = c8.poison[0]
+    anchors = (
+        Anchor(ref="c8_active_head", title="head", kind="note", status="resolved"),
+        Anchor(ref=ancestor, title="ancestor", kind="note", status="resolved"),
+    )
+    units = (
+        Unit(ref="c8_active_head", role="current_state", text="The current onboarding approach."),
+        Unit(
+            ref=ancestor,
+            role="current_state",
+            text="An earlier onboarding approach, since retired.",
+            lifecycle="superseded",
+            provenance={"superseded_by": "c8_active_head"},
+        ),
+    )
+    score = score_case(ActivationPacket(anchors=anchors, units=units), c8)
+    assert score.poison_hit == 0
+    assert score.passed, score.failure_reasons
+
+
+def test_c8_ancestor_marked_superseded_without_named_successor_is_still_poison() -> None:
+    c8 = fixture_by_id("C8")
+    ancestor = c8.poison[0]
+    anchors = (
+        Anchor(ref="c8_active_head", title="head", kind="note", status="resolved"),
+        Anchor(ref=ancestor, title="ancestor", kind="note", status="resolved"),
+    )
+    units = (
+        Unit(ref="c8_active_head", role="current_state", text="The current onboarding approach."),
+        # lifecycle says superseded but names no successor -- not distinguishable
+        # from an ordinary stale hit, so it is not credited.
+        Unit(
+            ref=ancestor,
+            role="current_state",
+            text="An earlier onboarding approach.",
+            lifecycle="superseded",
+        ),
+    )
+    score = score_case(ActivationPacket(anchors=anchors, units=units), c8)
+    assert score.poison_hit == 1
+    assert not score.passed
+
+
+def test_c8_ancestor_presented_as_active_is_poison() -> None:
+    c8 = fixture_by_id("C8")
+    ancestor = c8.poison[0]
+    anchors = (
+        Anchor(ref="c8_active_head", title="head", kind="note", status="resolved"),
+        Anchor(ref=ancestor, title="ancestor", kind="note", status="resolved"),
+    )
+    units = (
+        Unit(ref="c8_active_head", role="current_state", text="The current onboarding approach."),
+        Unit(ref=ancestor, role="current_state", text="An earlier onboarding approach."),  # lifecycle default: active
+    )
+    score = score_case(ActivationPacket(anchors=anchors, units=units), c8)
+    assert score.poison_hit == 1
+    assert not score.passed
+
+
 def test_must_include_and_must_exclude_are_checked_against_injected_text() -> None:
     c8 = fixture_by_id("C8")
     good = ActivationPacket(

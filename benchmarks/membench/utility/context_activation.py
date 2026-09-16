@@ -9,21 +9,20 @@ pure function of a packet and a fixture, matching this package's sibling
 ``scoring.py`` ("Pure paired scorer over observed action outcomes. No model
 judge, no I/O.").
 
-Two documented simplifications relative to the full activation-packet
+One documented simplification relative to the full activation-packet
 contract (``openspec/changes/add-context-activation/specs/context-activation/
-spec.md`` in the sibling ``add-context-activation`` change), both because this
+spec.md`` in the sibling ``add-context-activation`` change), because this
 scorer only has to be *correct*, not *complete*, before the compiler exists:
 
-1. **Poison is "never surfaced", not "never surfaced as current".** The real
-   contract allows a superseded ancestor to be surfaced either omitted or
-   marked ``lifecycle: superseded``. This scorer only credits the omission
-   path: a poison ref appearing anywhere counts against precision, whether
-   or not it carries a superseded marking. Stricter than the product
-   contract, never looser.
-2. **Twin false activation is "resolved outside the twin's own gold", not
-   "any resolved anchor".** See ``context_activation`` fixtures module's
-   docstring for why the maximally literal reading of the benchmark spec's
-   own scenario text is unsatisfiable for T3/T7/T8's explicit design intent.
+- **Twin false activation is "resolved outside the twin's own gold", not
+  "any resolved anchor".** See ``context_activation`` fixtures module's
+  docstring for why the maximally literal reading of the benchmark spec's
+  own scenario text is unsatisfiable for T3/T7/T8's explicit design intent.
+
+The real contract allows a superseded ancestor to be surfaced either omitted
+or marked ``lifecycle: superseded`` with its successor named
+(``provenance.superseded_by``); both paths are credited as non-poison (see
+:func:`_credited_superseded_refs`), which is task 2.3.
 """
 
 from __future__ import annotations
@@ -264,6 +263,24 @@ def _mentioned_refs(packet: ActivationPacket) -> set[str]:
     return refs
 
 
+def _credited_superseded_refs(packet: ActivationPacket) -> set[str]:
+    """Refs honestly presented as superseded, with a successor named (task 2.3).
+
+    A poison ref that is a superseded ancestor is not a false activation when
+    the packet marks it ``lifecycle: superseded`` and names its successor via
+    ``provenance.superseded_by`` -- that is the compiler contract's marking
+    path (the alternative to omission), never presenting the ancestor as
+    current. A superseded unit with no successor named is not credited: an
+    unnamed supersession is not distinguishable from an ordinary stale hit.
+    """
+
+    return {
+        unit.ref
+        for unit in packet.units
+        if unit.lifecycle == "superseded" and unit.provenance.get("superseded_by")
+    }
+
+
 def score_case(
     packet: ActivationPacket,
     fixture: FixtureCase,
@@ -284,11 +301,12 @@ def score_case(
 
     resolved = _resolved_refs(packet)
     mentioned = _mentioned_refs(packet)
+    credited = _credited_superseded_refs(packet)
 
     gold_refs = tuple(ref_for(key) for key in fixture.gold)
     poison_refs = tuple(ref_for(key) for key in fixture.poison)
     gold_hit = sum(1 for ref in gold_refs if ref in mentioned)
-    poison_hit = sum(1 for ref in poison_refs if ref in mentioned)
+    poison_hit = sum(1 for ref in poison_refs if ref in mentioned and ref not in credited)
 
     tallies: dict[str, list[int]] = {}
     for key, ref in zip(fixture.gold, gold_refs, strict=True):
@@ -298,7 +316,7 @@ def score_case(
     for key, ref in zip(fixture.poison, poison_refs, strict=True):
         tally = tallies.setdefault(anchor_kind_for(key), [0, 0, 0, 0])
         tally[2] += 1
-        tally[3] += int(ref in mentioned)
+        tally[3] += int(ref in mentioned and ref not in credited)
     by_anchor_kind = tuple(
         AnchorKindTally(kind=kind, gold_total=g_t, gold_hit=g_h, poison_total=p_t, poison_hit=p_h)
         for kind, (g_t, g_h, p_t, p_h) in sorted(tallies.items())
