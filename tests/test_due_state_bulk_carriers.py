@@ -45,7 +45,7 @@ def _projection(vault: Path) -> dict:
 
 
 def _ledger(vault: Path) -> dict:
-    return _projection(vault)["emission"]
+    return due_state_module.emission_ledger(vault)
 
 
 def _seed(vault: Path) -> None:

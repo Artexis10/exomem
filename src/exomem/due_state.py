@@ -289,6 +289,125 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
         log.debug("could not persist the due-state projection", exc_info=True)
 
 
+#: The emission ledger lives beside the projection, not inside it. It changes
+#: on every delivered advisory; the projection changes on every governed
+#: write. Keeping them in one file made each delivery rewrite the whole
+#: projection (20 MB, ~600 ms on the personal vault) and, worse, made every
+#: read look like a state change to anything keyed on the projection file.
+EMISSION_FILENAME = ".due-state-emission.json"
+
+
+def emission_path(vault_root: Path) -> Path:
+    from . import state_paths
+
+    return state_paths.vault_state_dir(vault_root) / EMISSION_FILENAME
+
+
+def _read_emission_file(vault_root: Path) -> dict[str, Any] | None:
+    """The sidecar ledger, or None when it is absent or unreadable."""
+    path = emission_path(vault_root)
+    if not path.exists():
+        return None
+    try:
+        from . import vault
+
+        raw = json.loads(vault.read_bytes_without_pinning(path).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        log.debug("due-state emission ledger unreadable at %s", path)
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _write_emission_file(vault_root: Path, section: dict[str, Any]) -> bool:
+    """Atomically replace the sidecar ledger. Best effort: False when it could not be written."""
+    path = emission_path(vault_root)
+    try:
+        from . import state_paths, vault
+
+        state_paths.ensure_vault_state_dir(vault_root)
+        handle_fd, temp_name = tempfile.mkstemp(
+            prefix=f".{EMISSION_FILENAME}.", suffix=".tmp", dir=path.parent
+        )
+        try:
+            with os.fdopen(handle_fd, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(section, handle, sort_keys=True, separators=(",", ":"))
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            vault.replace_tolerating_transient_sharing(lambda: os.replace(temp_name, path))
+        except BaseException:
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
+            raise
+    except Exception:  # noqa: BLE001 — a ledger write never breaks a caller
+        log.debug("could not persist the due-state emission ledger", exc_info=True)
+        return False
+    return True
+
+
+def _ledger_section(vault_root: Path, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The current ledger: the sidecar when it exists, else the section a projection carries.
+
+    A projection written before the sidecar existed is the ledger's seed; the
+    first bump copies it out. `payload` spares a second load when the caller
+    already holds the projection.
+    """
+    section = _read_emission_file(vault_root)
+    if section is not None:
+        return _emission_section({"emission": section})
+    if payload is None:
+        payload = load(vault_root) or _UNPERSISTED.get(str(vault_root))
+    return _emission_section(payload)
+
+
+#: Read-modify-write on the sidecar is serialised within a process; two
+#: deliveries or a delivery racing a governed write must not lose a count.
+_LEDGER_LOCK = threading.Lock()
+_LEDGER_WRITE_FAILED: set[str] = set()
+
+
+def _bump_ledger(
+    vault_root: Path,
+    payload: dict[str, Any] | None,
+    *,
+    writes: int = 0,
+    emissions: int = 0,
+    last_digest: str | None = None,
+    due_total: int | None = None,
+) -> dict[str, Any]:
+    """Apply a delta to the ledger, persist the sidecar, and return what the sidecar now holds.
+
+    The sidecar is the ledger of record and the projection carries a copy of
+    it, so the copy must never run ahead: when the sidecar cannot be written
+    the bump is lost -- exactly what a failed projection save lost before --
+    and the caller gets the unbumped section to copy. A copy that was ahead
+    would be silently outvoted by the stale sidecar on every later read, and
+    nothing would heal it.
+    """
+    with _LEDGER_LOCK:
+        before = _ledger_section(vault_root, payload)
+        section = _emission_delta(
+            {"emission": before},
+            writes=writes,
+            emissions=emissions,
+            last_digest=last_digest,
+            due_total=due_total,
+        )
+        if _write_emission_file(vault_root, section):
+            return section
+    key = str(vault_root)
+    if key not in _LEDGER_WRITE_FAILED:
+        _LEDGER_WRITE_FAILED.add(key)
+        log.warning(
+            "due-state emission ledger could not be written at %s; counts from "
+            "this process are lost until it can be",
+            emission_path(vault_root),
+        )
+    return before
+
+
 # --------------------------------------------------------------------------
 # computation
 # --------------------------------------------------------------------------
@@ -1093,7 +1212,7 @@ def reconcile(
     # unfiltered count under the same name, which gave the field two meanings
     # and let an anti-vacuity gate read a pre-dismissal number as evidence that
     # a later batch had something to say. One writer, one meaning.
-    payload["emission"] = _emission_delta(existing)
+    payload["emission"] = _ledger_section(vault_root, existing)
     save(vault_root, payload)
     _remember_unpersisted(vault_root, payload)
     return payload
@@ -1277,7 +1396,7 @@ def apply_write_delta(
             # denominator the "more automatic" claim is measured against, and
             # it has to be persisted because the emission governor above it is
             # per-process memory no projector can read.
-            "emission": _emission_delta(current, writes=1),
+            "emission": _bump_ledger(vault_root, current, writes=1),
             # Carried, not rebuilt. A page write learns nothing about bindings
             # and must not drop the index the structured deltas depend on --
             # losing it here would silently send every later plan write back to
@@ -1674,7 +1793,7 @@ def _persist_delta(
         # Bumped once per governed write, including one into a collection nobody
         # bound. Observation maintenance shares the page-write carrier's tick, so
         # its preceding family delta explicitly leaves this counter unchanged.
-        "emission": _emission_delta(current, writes=1 if count_write else 0),
+        "emission": _bump_ledger(vault_root, current, writes=1 if count_write else 0),
         **(
             {"bindings": bindings}
             if bindings is not None
@@ -2140,17 +2259,15 @@ def _record_emission(
     if not vault_root:
         return
     try:
-        payload = load(vault_root) or _UNPERSISTED.get(str(vault_root))
-        if payload is None:
-            return
-        payload = {
-            **payload,
-            "emission": _emission_delta(
-                payload, emissions=1, last_digest=digest, due_total=due_total
-            ),
-        }
-        save(vault_root, payload)
-        _remember_unpersisted(vault_root, payload)
+        section = _bump_ledger(
+            vault_root, None, emissions=1, last_digest=digest, due_total=due_total
+        )
+        if not emission_path(vault_root).exists():
+            # A state dir that refuses the write: keep the in-process copy
+            # honest, exactly as the projection itself is kept.
+            payload = _UNPERSISTED.get(str(vault_root))
+            if payload is not None:
+                _remember_unpersisted(vault_root, {**payload, "emission": section})
     except Exception:  # noqa: BLE001 — a ledger write never breaks a response
         log.debug("could not record the due-state emission", exc_info=True)
 
@@ -2163,7 +2280,7 @@ def emission_ledger(vault_root: Path) -> dict[str, Any]:
     carrier that authors no projected category can therefore add one emission
     while leaving `writes` unchanged.
     """
-    return _emission_section(load(vault_root) or _UNPERSISTED.get(str(vault_root)))
+    return _ledger_section(vault_root)
 
 
 # --------------------------------------------------------------------------
@@ -2347,6 +2464,9 @@ def reset_serve_cache() -> None:
     """Drop every memoised served build: tests, and anything editing state files by hand."""
     with _SERVE_LOCK:
         _SERVE_CACHE.clear()
+    with _FINGERPRINTS_LOCK:
+        _FINGERPRINTS.clear()
+    _LEDGER_WRITE_FAILED.clear()
 
 
 def _owes_nothing(payload: Mapping[str, Any]) -> bool:
@@ -2609,10 +2729,9 @@ def _record_delivered(vault_root: Path | None, block: dict[str, Any] | None) -> 
     if not rows:
         return
     try:
-        projection = load(vault_root) or _UNPERSISTED.get(str(vault_root))
-        if projection is None:
+        fingerprints = _fingerprints_for(vault_root)
+        if not fingerprints:
             return
-        fingerprints = _fingerprints_by_ref(projection)
         entries = []
         for row in rows:
             ref = str(row.get("ref") or "")
@@ -2624,6 +2743,39 @@ def _record_delivered(vault_root: Path | None, block: dict[str, Any] | None) -> 
         review_state_module.record_surfaced(vault_root, entries, surface="carrier")
     except Exception:  # noqa: BLE001 — a ledger write never breaks a carrier
         log.debug("first-surfaced ledger not recorded for the carrier", exc_info=True)
+
+
+#: `ref -> fingerprint` per vault, valid for one projection file identity.
+_FINGERPRINTS: dict[str, tuple[tuple[int, int, int], dict[str, str]]] = {}
+_FINGERPRINTS_LOCK = threading.Lock()
+_FINGERPRINTS_CAP = 8
+
+
+def _fingerprints_for(vault_root: Path) -> dict[str, str]:
+    """`_fingerprints_by_ref` over the current projection, computed once per projection file.
+
+    Loading the projection to stamp a delivery cost as much as the recall it
+    followed (240 ms on the personal vault) and happened on every response
+    that carried a block. The index only changes when the projection file
+    does, so it is kept beside the file's identity.
+    """
+    token = _file_token(state_path(vault_root))
+    key = str(vault_root)
+    if token is not None:
+        with _FINGERPRINTS_LOCK:
+            hit = _FINGERPRINTS.get(key)
+        if hit is not None and hit[0] == token:
+            return hit[1]
+    projection = load(vault_root) or _UNPERSISTED.get(key)
+    if projection is None:
+        return {}
+    fingerprints = _fingerprints_by_ref(projection)
+    if token is not None:
+        with _FINGERPRINTS_LOCK:
+            if len(_FINGERPRINTS) >= _FINGERPRINTS_CAP:
+                _FINGERPRINTS.pop(next(iter(_FINGERPRINTS)), None)
+            _FINGERPRINTS[key] = (token, fingerprints)
+    return fingerprints
 
 
 def _fingerprints_by_ref(payload: dict[str, Any]) -> dict[str, str]:
