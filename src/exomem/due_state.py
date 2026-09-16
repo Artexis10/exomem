@@ -78,6 +78,7 @@ projection state.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import logging
 import os
@@ -87,7 +88,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -405,53 +406,6 @@ def _entries_from_findings(
     return out
 
 
-def _projection_paths(payload: Mapping[str, Any]) -> list[str]:
-    """Every vault path the projection names, sorted: pages, units, joined records, manifests.
-
-    The universe the refs batch resolves and the universe the served memo
-    fingerprints governance over -- one collector so they cannot drift.
-    """
-    paths: set[str] = set()
-
-    def add(value: Any) -> None:
-        if type(value) is str and value:
-            paths.add(value)
-
-    categories = payload.get("categories")
-    if not isinstance(categories, Mapping):
-        return []
-    for pages in categories.values():
-        if not isinstance(pages, Mapping):
-            continue
-        for page_path, entries in pages.items():
-            add(page_path)
-            if not isinstance(entries, Mapping):
-                continue
-            for bucket in entries.values():
-                for entry in bucket if isinstance(bucket, list) else ():
-                    if not isinstance(entry, Mapping):
-                        continue
-                    add(entry.get("path"))
-                    for item in entry.get("paths") or ():
-                        add(item)
-                    component = entry.get("component")
-                    if not isinstance(component, Mapping):
-                        continue
-                    add(component.get("path"))
-                    add(component.get("page_path"))
-                    add(component.get("collection"))
-                    for row in component.get("units") or ():
-                        if isinstance(row, Mapping):
-                            add(row.get("page"))
-                    for record in component.get("reflecting_records") or ():
-                        if isinstance(record, Mapping):
-                            add(record.get("path"))
-                    for pair in component.get("joined") or ():
-                        if isinstance(pair, (list, tuple)) and pair:
-                            add(pair[0])
-    return sorted(paths)
-
-
 def _refs_resolver(
     vault_root: Path, payload: dict[str, Any], keep: Any = None
 ) -> Callable[[list[str]], dict[str, str]]:
@@ -473,9 +427,45 @@ def _refs_resolver(
     cache: dict[str, str] | None = None
 
     def universe() -> list[str]:
-        return [
-            path for path in _projection_paths(payload) if keep is None or keep(path)
-        ]
+        paths: set[str] = set()
+
+        def add(value: Any) -> None:
+            if type(value) is str and value and (keep is None or keep(value)):
+                paths.add(value)
+
+        categories = payload.get("categories")
+        if not isinstance(categories, Mapping):
+            return []
+        for pages in categories.values():
+            if not isinstance(pages, Mapping):
+                continue
+            for page_path, entries in pages.items():
+                add(page_path)
+                if not isinstance(entries, Mapping):
+                    continue
+                for bucket in entries.values():
+                    for entry in bucket if isinstance(bucket, list) else ():
+                        if not isinstance(entry, Mapping):
+                            continue
+                        add(entry.get("path"))
+                        for item in entry.get("paths") or ():
+                            add(item)
+                        component = entry.get("component")
+                        if not isinstance(component, Mapping):
+                            continue
+                        add(component.get("path"))
+                        add(component.get("page_path"))
+                        add(component.get("collection"))
+                        for row in component.get("units") or ():
+                            if isinstance(row, Mapping):
+                                add(row.get("page"))
+                        for record in component.get("reflecting_records") or ():
+                            if isinstance(record, Mapping):
+                                add(record.get("path"))
+                        for pair in component.get("joined") or ():
+                            if isinstance(pair, (list, tuple)) and pair:
+                                add(pair[0])
+        return sorted(paths)
 
     def resolve(paths: list[str]) -> dict[str, str]:
         nonlocal cache
@@ -2238,30 +2228,26 @@ def served_entries(
 ) -> list[dict[str, Any]]:
     """Every open item this audience may see, most-overdue first -- memoised.
 
-    The rows are a function of the persisted projection, the review state,
-    the audience, the purpose, the day, the clock (an entry with a future
-    `due_at` joins when the clock passes it), the release plane's verdict on
-    every path the projection names, and whether each served page still
-    exists. Rebuilding them on every recall was the whole cost of a read on
-    the personal vault -- 25 s before PR #1279 and still 0.6 s idle to 4 s
-    under host load after it, on every call, when nothing had changed; the
-    cost is the recomposition of every collection candidate under the
-    audience's filter.
+    Rebuilding the rows on every recall was the whole cost of a read on the
+    personal vault -- 25 s before PR #1279 and still 0.6 s idle to 4 s under
+    host load after it, on every call, when nothing had changed; the cost is
+    the recomposition of every collection candidate under the audience's
+    filter. So one build is kept per (vault, audience, session, purpose, day)
+    and reused while the projection file and the review-state file are the
+    same objects on disk, the clock has not reached the earliest future
+    `due_at` the build skipped, and the build is younger than
+    `_SERVE_CACHE_TTL_SECONDS`.
 
-    So one build is kept per (vault, audience, session, purpose, day) and
-    reused while the projection file and the review-state file are the same
-    objects on disk, the clock has not reached the earliest future `due_at`
-    the build skipped, and the build is younger than `_SERVE_CACHE_TTL_SECONDS`.
-    Governance is not keyed by a file: it is re-asked on every call, over the
-    same paths the build asked about, and a single changed verdict rebuilds.
-    That keeps a revocation immediate at the cost the profile showed to be
-    small (milliseconds for the memoised per-path decisions, against the
-    build's seconds). A page deleted out of band is dropped from a hit the
-    way the build drops it, so the counter never insists on a note the user
-    just removed. Every write replaces the projection file, so the next read
-    after a write rebuilds once. A projection that could not be persisted is
-    never cached, because a write then updates it in memory with no file to
-    notice.
+    What the build reads live, a hit re-checks live, at the cost the profile
+    showed to be milliseconds against the build's seconds: the release plane
+    is asked again for every verdict the build asked for, and one changed
+    answer rebuilds, so a revocation stays immediate; the artifact-role
+    findings are served again and compared, so advice whose source changed
+    out of band is omitted until reconcile exactly as before; a page deleted
+    out of band is dropped from the hit the way the build drops it. Every
+    write replaces the projection file, so the next read after a write
+    rebuilds once. A projection that could not be persisted is never cached,
+    because a write then updates it in memory with no file to notice.
     """
     from .governance import egress as egress_module
     from .governance import principal as principal_module
@@ -2274,7 +2260,7 @@ def served_entries(
     today = today or effective_now.date()
     projection_token = _file_token(state_path(vault_root))
     if projection_token is None:
-        rows, _horizon = _served_entries_uncached(
+        rows, *_ = _served_entries_uncached(
             vault_root, today=today, now=effective_now, principal=principal, purpose=purpose
         )
         return rows
@@ -2298,15 +2284,22 @@ def served_entries(
         and (hit["horizon"] is None or effective_now < hit["horizon"])
     ):
         try:
-            verdicts = _release_verdicts(
-                egress_module, vault_root, hit["paths"], principal=who, purpose=purpose
+            keep = egress_module.release_walk_filter(
+                Path(vault_root), principal=who, purpose=purpose
             )
         except Exception:  # noqa: BLE001
-            # The same rule as the build: a release plane that cannot decide
-            # serves nothing, and never a memo built when it could.
+            # The build's rule: a release plane that cannot decide serves
+            # nothing -- never a memo built while it could.
             log.debug("release filter unavailable; serving no due state", exc_info=True)
             return []
-        if verdicts == hit["verdicts"]:
+        if keep is None:
+
+            def keep(_path: str) -> bool:
+                return True
+
+        if all(keep(path) == verdict for path, verdict in hit["asked"].items()) and (
+            hit["role_token"] is None or _role_token(vault_root, keep) == hit["role_token"]
+        ):
             return [
                 dict(row)
                 for row in hit["rows"]
@@ -2317,21 +2310,11 @@ def served_entries(
         # Unreadable: the build recomputes or recovers, and nothing is filed.
         # Owes nothing: the empty list under any filter, and -- as in the
         # build -- no release filter to pay for.
-        rows, _horizon = _served_entries_uncached(
+        rows, *_ = _served_entries_uncached(
             vault_root, today=today, now=effective_now, principal=who, purpose=purpose
         )
         return rows
-    # Fingerprint governance BEFORE the build: rows are then never older than
-    # the verdicts they are filed under, so a change during the build shows up
-    # as a mismatch on the next call instead of a hit.
-    paths = _projection_paths(payload)
-    try:
-        verdicts = _release_verdicts(
-            egress_module, vault_root, paths, principal=who, purpose=purpose
-        )
-    except Exception:  # noqa: BLE001
-        verdicts = _UNDECIDED
-    rows, horizon = _served_entries_uncached(
+    rows, horizon, asked, role_token = _served_entries_uncached(
         vault_root,
         today=today,
         now=effective_now,
@@ -2339,17 +2322,16 @@ def served_entries(
         purpose=purpose,
         payload=payload,
     )
-    if verdicts is not _UNDECIDED:
-        with _SERVE_LOCK:
-            if len(_SERVE_CACHE) >= _SERVE_CACHE_CAP:
-                _SERVE_CACHE.pop(next(iter(_SERVE_CACHE)), None)
-            _SERVE_CACHE[key] = {
-                "rows": [dict(row) for row in rows],
-                "horizon": horizon,
-                "built": monotonic,
-                "paths": paths,
-                "verdicts": verdicts,
-            }
+    with _SERVE_LOCK:
+        if len(_SERVE_CACHE) >= _SERVE_CACHE_CAP:
+            _SERVE_CACHE.pop(next(iter(_SERVE_CACHE)), None)
+        _SERVE_CACHE[key] = {
+            "rows": [dict(row) for row in rows],
+            "horizon": horizon,
+            "built": monotonic,
+            "asked": asked,
+            "role_token": role_token,
+        }
     return rows
 
 
@@ -2359,9 +2341,6 @@ _SERVE_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 _SERVE_LOCK = threading.Lock()
 _SERVE_CACHE_CAP = 64
 _SERVE_CACHE_TTL_SECONDS = 300.0
-#: Verdicts the release plane could not give: the build served nothing, and
-#: nothing is filed under it.
-_UNDECIDED = object()
 
 
 def reset_serve_cache() -> None:
@@ -2375,19 +2354,22 @@ def _owes_nothing(payload: Mapping[str, Any]) -> bool:
     return not _has_entries(payload) and not (payload.get("role_state") or {}).get("has_origins")
 
 
-def _release_verdicts(
-    egress_module: Any, vault_root: Path, paths: list[str], *, principal: Any, purpose: str | None
-) -> bytes | None:
-    """The release plane's answer for every projection path, as one comparable value.
+def _role_token(vault_root: Path, keep: Callable[[str], bool]) -> str:
+    """Fingerprint of the artifact-role findings this audience would be served right now."""
+    from . import artifact_role_state
 
-    None on the empty-policy fast path (every path visible), else one byte per
-    path in `paths` order. Raises what the filter raises: the caller decides
-    what a plane that cannot answer means for its read.
-    """
-    keep = egress_module.release_walk_filter(Path(vault_root), principal=principal, purpose=purpose)
-    if keep is None:
-        return None
-    return bytes(1 if keep(path) else 0 for path in paths)
+    try:
+        findings, _ = artifact_role_state.served(vault_root, keep)
+    except Exception:  # noqa: BLE001 - the build omits advice whose evidence is unavailable
+        return "unavailable"
+    return _findings_token(findings)
+
+
+def _findings_token(findings: list[Any]) -> str:
+    """One comparable value for a list of findings, whatever their concrete type."""
+    parts = [asdict(f) if is_dataclass(f) else repr(f) for f in findings]
+    encoded = json.dumps(parts, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _file_token(path: Path) -> tuple[int, int, int] | None:
@@ -2412,8 +2394,13 @@ def _served_entries_uncached(
     principal: Any = None,
     purpose: str | None = None,
     payload: dict[str, Any] | None = None,
-) -> tuple[list[dict[str, Any]], dt.datetime | None]:
-    """The build behind `served_entries`, plus the earliest future `due_at` it skipped.
+) -> tuple[list[dict[str, Any]], dt.datetime | None, dict[str, bool], str | None]:
+    """The build behind `served_entries`, and what a memo of it must re-check.
+
+    Returns the rows, the earliest future `due_at` it skipped, every release
+    verdict it asked for (path -> allowed), and a fingerprint of the artifact
+    role findings it served (None when the projection has no role index,
+    "unavailable" when their evidence could not be read).
 
     The order of operations is the contract, not an implementation detail:
     re-bucket against today, drop what this audience may not see, drop what the
@@ -2432,7 +2419,7 @@ def _served_entries_uncached(
     if payload is None:
         payload = _schedule_reconcile(vault_root, today=today)
         if payload is None:
-            return [], None
+            return [], None, {}, None
 
     if _owes_nothing(payload):
         # Nothing stored, so nothing to filter, count or order — and no disclosure
@@ -2441,7 +2428,7 @@ def _served_entries_uncached(
         # has no input. It matters because building the release filter is
         # governance-proportional work, and a vault that owes nothing is the
         # common case on every recall and every bootstrap.
-        return [], None
+        return [], None, {}, None
 
     keep = None
     try:
@@ -2453,11 +2440,20 @@ def _served_entries_uncached(
         # everything". Fail closed: serve nothing rather than count something
         # this audience may not be allowed to know exists.
         log.debug("release filter unavailable; serving no due state", exc_info=True)
-        return [], None
-    if keep is None:
-        def keep(_path: str) -> bool:
-            return True
+        return [], None, {}, None
+    # Every verdict this build relies on, recorded so a memo of the build can
+    # ask the plane the same questions again. An empty policy is recorded too:
+    # its answers are the ones a policy arriving later must be checked against.
+    asked: dict[str, bool] = {}
+    decide = keep
 
+    def keep(path: str) -> bool:
+        verdict = asked.get(path)
+        if verdict is None:
+            verdict = asked[path] = True if decide is None else bool(decide(path))
+        return verdict
+
+    role_token: str | None = None
     store = review_state_module.ReviewStateStore(vault_root)
     try:
         state_payload = store.load()
@@ -2472,7 +2468,7 @@ def _served_entries_uncached(
         # dismissing works. The write itself is untouched: this is the advisory
         # attached to the response, not the mutation.
         log.debug("review state unreadable; serving no due state", exc_info=True)
-        return [], None
+        return [], None, {}, None
     excluded = _excluded_families(state_payload)
 
     routing = _routing_snapshot(vault_root, payload, keep)
@@ -2486,6 +2482,7 @@ def _served_entries_uncached(
         from . import artifact_role_review, artifact_role_state
         try:
             findings, _ = artifact_role_state.served(vault_root, keep)
+            role_token = _findings_token(findings)
             role_grouped = _entries_from_findings(vault_root, findings)
             for family in artifact_role_review.FAMILIES:
                 categories[family] = {
@@ -2493,6 +2490,7 @@ def _served_entries_uncached(
                     for path, entries in (role_grouped.get(family) or {}).items()
                 }
         except Exception:  # noqa: BLE001 - omit advice when its evidence is unavailable
+            role_token = "unavailable"
             for family in artifact_role_review.FAMILIES:
                 categories[family] = {}
     for category in PROJECTION_CATEGORIES:
@@ -2570,7 +2568,7 @@ def _served_entries_uncached(
             row["ref"],
         )
     )
-    return rows, horizon
+    return rows, horizon, asked, role_token
 
 
 def _excluded_families(state_payload: dict[str, Any]) -> frozenset[str]:
