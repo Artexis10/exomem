@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.85.5](https://github.com/Artexis10/exomem/compare/v0.85.4...v0.85.5) (2026-09-16)
+
+
+### Performance
+
+* **due-state:** keep the emission ledger beside the projection ([#1285](https://github.com/Artexis10/exomem/issues/1285)) ([0f81030](https://github.com/Artexis10/exomem/commit/0f810303ed29f748e524784196bad165d408dc6e))
+
 ## [0.85.4](https://github.com/Artexis10/exomem/compare/v0.85.3...v0.85.4) (2026-09-16)
 
 
