@@ -362,6 +362,12 @@ def _ledger_section(vault_root: Path, payload: dict[str, Any] | None = None) -> 
     return _emission_section(payload)
 
 
+#: Read-modify-write on the sidecar is serialised within a process; two
+#: deliveries or a delivery racing a governed write must not lose a count.
+_LEDGER_LOCK = threading.Lock()
+_LEDGER_WRITE_FAILED: set[str] = set()
+
+
 def _bump_ledger(
     vault_root: Path,
     payload: dict[str, Any] | None,
@@ -371,16 +377,35 @@ def _bump_ledger(
     last_digest: str | None = None,
     due_total: int | None = None,
 ) -> dict[str, Any]:
-    """Apply a delta to the ledger, persist the sidecar, and return the new section."""
-    section = _emission_delta(
-        {"emission": _ledger_section(vault_root, payload)},
-        writes=writes,
-        emissions=emissions,
-        last_digest=last_digest,
-        due_total=due_total,
-    )
-    _write_emission_file(vault_root, section)
-    return section
+    """Apply a delta to the ledger, persist the sidecar, and return what the sidecar now holds.
+
+    The sidecar is the ledger of record and the projection carries a copy of
+    it, so the copy must never run ahead: when the sidecar cannot be written
+    the bump is lost -- exactly what a failed projection save lost before --
+    and the caller gets the unbumped section to copy. A copy that was ahead
+    would be silently outvoted by the stale sidecar on every later read, and
+    nothing would heal it.
+    """
+    with _LEDGER_LOCK:
+        before = _ledger_section(vault_root, payload)
+        section = _emission_delta(
+            {"emission": before},
+            writes=writes,
+            emissions=emissions,
+            last_digest=last_digest,
+            due_total=due_total,
+        )
+        if _write_emission_file(vault_root, section):
+            return section
+    key = str(vault_root)
+    if key not in _LEDGER_WRITE_FAILED:
+        _LEDGER_WRITE_FAILED.add(key)
+        log.warning(
+            "due-state emission ledger could not be written at %s; counts from "
+            "this process are lost until it can be",
+            emission_path(vault_root),
+        )
+    return before
 
 
 # --------------------------------------------------------------------------
@@ -2441,6 +2466,7 @@ def reset_serve_cache() -> None:
         _SERVE_CACHE.clear()
     with _FINGERPRINTS_LOCK:
         _FINGERPRINTS.clear()
+    _LEDGER_WRITE_FAILED.clear()
 
 
 def _owes_nothing(payload: Mapping[str, Any]) -> bool:
@@ -2722,6 +2748,7 @@ def _record_delivered(vault_root: Path | None, block: dict[str, Any] | None) -> 
 #: `ref -> fingerprint` per vault, valid for one projection file identity.
 _FINGERPRINTS: dict[str, tuple[tuple[int, int, int], dict[str, str]]] = {}
 _FINGERPRINTS_LOCK = threading.Lock()
+_FINGERPRINTS_CAP = 8
 
 
 def _fingerprints_for(vault_root: Path) -> dict[str, str]:
@@ -2745,6 +2772,8 @@ def _fingerprints_for(vault_root: Path) -> dict[str, str]:
     fingerprints = _fingerprints_by_ref(projection)
     if token is not None:
         with _FINGERPRINTS_LOCK:
+            if len(_FINGERPRINTS) >= _FINGERPRINTS_CAP:
+                _FINGERPRINTS.pop(next(iter(_FINGERPRINTS)), None)
             _FINGERPRINTS[key] = (token, fingerprints)
     return fingerprints
 

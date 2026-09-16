@@ -95,3 +95,38 @@ def test_a_governed_write_carries_the_ledger_into_the_projection_copy(tmp_path: 
     section = due_state._bump_ledger(tmp_path, None, writes=1)
     assert (section["writes"], section["emissions"]) == (1, 1)
     assert due_state.emission_ledger(tmp_path) == section
+
+
+def test_a_failed_sidecar_write_never_lets_the_projection_copy_run_ahead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _persist(tmp_path)
+    assert due_state._bump_ledger(tmp_path, None, writes=1)["writes"] == 1
+    monkeypatch.setattr(due_state, "_write_emission_file", lambda *_a, **_k: False)
+    # The bump is lost, as a failed projection save lost it before; what the
+    # caller copies into the projection is what the sidecar still says.
+    assert due_state._bump_ledger(tmp_path, None, writes=1)["writes"] == 1
+    monkeypatch.undo()
+    assert due_state._bump_ledger(tmp_path, None, writes=1)["writes"] == 2
+    assert due_state.emission_ledger(tmp_path)["writes"] == 2
+
+
+def test_the_ledger_is_read_fresh_from_disk_by_another_process(tmp_path: Path) -> None:
+    import json
+    import subprocess
+    import sys
+
+    _persist(tmp_path)
+    due_state.mark_emitted({"total": 2, "top": []}, vault_root=tmp_path)
+    code = (
+        "import json, sys; from pathlib import Path; from exomem import due_state; "
+        "print(json.dumps(due_state.emission_ledger(Path(sys.argv[1]))))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    ).stdout
+    assert json.loads(out.strip().splitlines()[-1])["emissions"] == 1

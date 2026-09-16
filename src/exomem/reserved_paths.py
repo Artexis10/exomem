@@ -26,7 +26,7 @@ REGISTRY_VERSION = 1
 
 _SQLITE_SUFFIXES = ("", "-wal", "-shm", "-journal")
 _REVIEW_TEMP_RE = re.compile(r"^\.\.review-state\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII)
-_DUE_TEMP_RE = re.compile(r"^\.\.due-state\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII)
+_DUE_TEMP_RE = re.compile(r"^\.\.due-state(?:-emission)?\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII)
 _LEXICAL_REBUILD_RE = re.compile(
     r"^\.lexical\.sqlite\.rebuild-[0-9a-f]{32}\.tmp(?:-(?:wal|shm|journal))?$",
     re.ASCII,
@@ -116,9 +116,7 @@ class InternalStateDescriptor:
         if any(pattern.fullmatch(parts[-1]) for pattern in self.leaf_patterns):
             return True
         return any(
-            pattern.fullmatch(part)
-            for part in parts
-            for pattern in self.component_tree_patterns
+            pattern.fullmatch(part) for part in parts for pattern in self.component_tree_patterns
         )
 
 
@@ -208,9 +206,7 @@ class _OwnerAuthority:
 _ACTIVE_OWNER_AUTHORITY: ContextVar[_OwnerAuthority | None] = ContextVar(
     "exomem_reserved_owner_authority", default=None
 )
-_ACTIVE_IDENTITY_COORDINATION: ContextVar[
-    tuple[tuple[str, frozenset[str]], ...]
-] = ContextVar(
+_ACTIVE_IDENTITY_COORDINATION: ContextVar[tuple[tuple[str, frozenset[str]], ...]] = ContextVar(
     "exomem_reserved_identity_coordination", default=()
 )
 
@@ -256,8 +252,7 @@ def _identity_coordination_active(
 
     key = _vault_identity_key(vault_root)
     return any(
-        active_key == key
-        and (descriptor_id is None or descriptor_id in active_domains)
+        active_key == key and (descriptor_id is None or descriptor_id in active_domains)
         for active_key, active_domains in _ACTIVE_IDENTITY_COORDINATION.get()
     )
 
@@ -277,10 +272,7 @@ def _identity_coordination_scope(
         raise RuntimeError("private identity coordination has no registered domain")
     active = _ACTIVE_IDENTITY_COORDINATION.get()
     held_domains = frozenset(
-        domain
-        for active_key, active_set in active
-        if active_key == key
-        for domain in active_set
+        domain for active_key, active_set in active if active_key == key for domain in active_set
     )
     if domains <= held_domains:
         yield None
@@ -459,7 +451,7 @@ _REGISTRY = (
         "due-state",
         "due_state",
         StatePlacement.EXTERNAL_STATE,
-        exact=(".due-state.json",),
+        exact=(".due-state.json", ".due-state-emission.json"),
         patterns=(_DUE_TEMP_RE,),
     ),
     InternalStateDescriptor(
@@ -810,8 +802,7 @@ def _require_owner_placement(relative: Path, *, external: bool, operation: str) 
     expected_external = descriptor.placement is StatePlacement.EXTERNAL_STATE
     if external != expected_external:
         raise RuntimeError(
-            f"private {operation} target violates descriptor placement "
-            f"{descriptor.placement.value}"
+            f"private {operation} target violates descriptor placement {descriptor.placement.value}"
         )
 
 
@@ -982,9 +973,7 @@ def read_generic_bytes(
     identities published by owners are refused independently of link count.
     """
 
-    with _generic_identity_catalogue_scope(
-        vault_root, value, identities=identities
-    ) as current:
+    with _generic_identity_catalogue_scope(vault_root, value, identities=identities) as current:
         return _read_generic_bytes_held(vault_root, value, identities=current)
 
 
@@ -1038,9 +1027,7 @@ def inspect_generic_file(
 ) -> held_fs.StableIdentity:
     """Acquire and classify one generic regular file without reading its bytes."""
 
-    with _generic_identity_catalogue_scope(
-        vault_root, value, identities=identities
-    ) as current:
+    with _generic_identity_catalogue_scope(vault_root, value, identities=identities) as current:
         return _inspect_generic_file_held(vault_root, value, identities=current)
 
 
@@ -1052,9 +1039,7 @@ def inspect_generic_path(
 ) -> held_fs.StableIdentity:
     """Acquire and classify one generic file or directory without following aliases."""
 
-    with _generic_identity_catalogue_scope(
-        vault_root, value, identities=identities
-    ) as current:
+    with _generic_identity_catalogue_scope(vault_root, value, identities=identities) as current:
         parent_path, leaf = _leaf_spelling(value)
         acquired = held_fs.acquire(Path(vault_root))
         if not acquired.ok:
@@ -1062,11 +1047,7 @@ def inspect_generic_path(
         with acquired.require() as filesystem:
             parent_result = filesystem.parent(parent_path)
             if not parent_result.ok:
-                code = (
-                    parent_result.error.code
-                    if parent_result.error is not None
-                    else "IO_REFUSED"
-                )
+                code = parent_result.error.code if parent_result.error is not None else "IO_REFUSED"
                 raise ReservedPathLeafError(code)
             with parent_result.require() as parent:
                 _refuse_private_identity(parent.identity, current)
@@ -1079,9 +1060,7 @@ def inspect_generic_path(
                         return file.identity
 
                 assert isinstance(value, (str, os.PathLike))
-                relative = unicodedata.normalize(
-                    "NFKC", os.fspath(value)
-                ).replace("\\", "/")
+                relative = unicodedata.normalize("NFKC", os.fspath(value)).replace("\\", "/")
                 directory_result = filesystem.parent(relative)
                 if directory_result.ok:
                     with directory_result.require() as directory:
@@ -1090,9 +1069,7 @@ def inspect_generic_path(
                         return directory.identity
 
                 file_code = (
-                    file_result.error.code
-                    if file_result.error is not None
-                    else "IO_REFUSED"
+                    file_result.error.code if file_result.error is not None else "IO_REFUSED"
                 )
                 directory_code = (
                     directory_result.error.code
@@ -1102,9 +1079,7 @@ def inspect_generic_path(
                 if file_code == directory_code == "MISSING":
                     raise ReservedPathLeafError("MISSING")
                 raise ReservedPathLeafError(
-                    "UNSAFE_PATH"
-                    if "UNSAFE_PATH" in {file_code, directory_code}
-                    else "IO_REFUSED"
+                    "UNSAFE_PATH" if "UNSAFE_PATH" in {file_code, directory_code} else "IO_REFUSED"
                 )
 
 
@@ -1127,9 +1102,7 @@ def publish_generic_bytes(
 
     if not isinstance(data, bytes):
         raise TypeError("generic byte publication requires bytes")
-    with _generic_identity_catalogue_scope(
-        vault_root, value, identities=identities
-    ) as current:
+    with _generic_identity_catalogue_scope(vault_root, value, identities=identities) as current:
         parent_path, leaf = _leaf_spelling(value)
         acquired = held_fs.acquire(Path(vault_root))
         if not acquired.ok:
@@ -1140,11 +1113,7 @@ def publish_generic_bytes(
                 create=True,
             )
             if not parent_result.ok:
-                code = (
-                    parent_result.error.code
-                    if parent_result.error is not None
-                    else "IO_REFUSED"
-                )
+                code = parent_result.error.code if parent_result.error is not None else "IO_REFUSED"
                 raise ReservedPathLeafError(code)
             with parent_result.require() as parent:
                 _refuse_private_identity(parent.identity, current)
@@ -1153,17 +1122,10 @@ def publish_generic_bytes(
                 if existing.ok:
                     with existing.require() as file:
                         _refuse_private_identity(file.identity, current)
-                        if (
-                            expected_identity is None
-                            or file.identity != expected_identity
-                        ):
+                        if expected_identity is None or file.identity != expected_identity:
                             raise ReservedPathLeafError("IDENTITY_CHANGED")
                 elif existing.error is None or existing.error.code != "MISSING":
-                    code = (
-                        existing.error.code
-                        if existing.error is not None
-                        else "IO_REFUSED"
-                    )
+                    code = existing.error.code if existing.error is not None else "IO_REFUSED"
                     raise ReservedPathLeafError(code)
                 elif expected_identity is not None:
                     raise ReservedPathLeafError("IDENTITY_CHANGED")
@@ -1178,11 +1140,7 @@ def publish_generic_bytes(
                     expected_sha256=expected_sha256,
                 )
                 if not published.ok:
-                    code = (
-                        published.error.code
-                        if published.error is not None
-                        else "IO_REFUSED"
-                    )
+                    code = published.error.code if published.error is not None else "IO_REFUSED"
                     raise ReservedPathLeafError(code)
                 identity = published.require()
                 _refuse_private_identity(identity, current)
@@ -1227,9 +1185,7 @@ def unlink_generic_file(
 ) -> None:
     """Remove one exact ordinary file through its retained parent and leaf."""
 
-    with _generic_identity_catalogue_scope(
-        vault_root, value, identities=identities
-    ) as current:
+    with _generic_identity_catalogue_scope(vault_root, value, identities=identities) as current:
         _unlink_generic_file_held(
             vault_root,
             value,
@@ -1253,21 +1209,13 @@ def _unlink_generic_file_held(
     with acquired.require() as filesystem:
         parent_result = filesystem.parent(parent_path)
         if not parent_result.ok:
-            code = (
-                parent_result.error.code
-                if parent_result.error is not None
-                else "IO_REFUSED"
-            )
+            code = parent_result.error.code if parent_result.error is not None else "IO_REFUSED"
             raise ReservedPathLeafError(code)
         with parent_result.require() as parent:
             _refuse_private_identity(parent.identity, identities)
             file_result = filesystem.file(parent, leaf, access="mutate")
             if not file_result.ok:
-                code = (
-                    file_result.error.code
-                    if file_result.error is not None
-                    else "IO_REFUSED"
-                )
+                code = file_result.error.code if file_result.error is not None else "IO_REFUSED"
                 raise ReservedPathLeafError(code)
             with file_result.require() as file:
                 _require_current_generic_directory(filesystem, parent)
@@ -1276,11 +1224,7 @@ def _unlink_generic_file_held(
                     raise ReservedPathLeafError("IDENTITY_CHANGED")
                 removed = filesystem.unlink(file)
                 if not removed.ok:
-                    code = (
-                        removed.error.code
-                        if removed.error is not None
-                        else "IO_REFUSED"
-                    )
+                    code = removed.error.code if removed.error is not None else "IO_REFUSED"
                     raise ReservedPathLeafError(code)
             missing = filesystem.file(parent, leaf)
             if missing.ok:
@@ -1296,9 +1240,7 @@ def _refuse_private_identity(
     identities: IdentityCatalogue | None,
 ) -> None:
     descriptor_id = identities.descriptor_for(identity) if identities else None
-    if descriptor_id is not None or (
-        identity.kind == "file" and identity.link_count != 1
-    ):
+    if descriptor_id is not None or (identity.kind == "file" and identity.link_count != 1):
         raise ReservedPathLeafError("RESERVED_PATH")
 
 
@@ -1372,7 +1314,11 @@ def _move_generic_path_held(
                 _refuse_private_identity(source_parent.identity, identities)
                 source_result = filesystem.file(source_parent, source_leaf, access="mutate")
                 if not source_result.ok:
-                    code = source_result.error.code if source_result.error is not None else "IO_REFUSED"
+                    code = (
+                        source_result.error.code
+                        if source_result.error is not None
+                        else "IO_REFUSED"
+                    )
                     raise ReservedPathLeafError(code)
                 with source_result.require() as source_file:
                     _refuse_private_identity(source_file.identity, identities)
@@ -1389,20 +1335,12 @@ def _move_generic_path_held(
                         raise ReservedPathLeafError(code)
                     with destination_parent_result.require() as destination_parent:
                         _refuse_private_identity(destination_parent.identity, identities)
-                        _require_current_generic_directory(
-                            filesystem, destination_parent
-                        )
-                        destination_result = filesystem.file(
-                            destination_parent, destination_leaf
-                        )
+                        _require_current_generic_directory(filesystem, destination_parent)
+                        destination_result = filesystem.file(destination_parent, destination_leaf)
                         if destination_result.ok:
                             with destination_result.require() as destination_file:
-                                _require_current_generic_directory(
-                                    filesystem, destination_parent
-                                )
-                                _refuse_private_identity(
-                                    destination_file.identity, identities
-                                )
+                                _require_current_generic_directory(filesystem, destination_parent)
+                                _refuse_private_identity(destination_file.identity, identities)
                             raise ReservedPathLeafError("DESTINATION_EXISTS")
                         if (
                             destination_result.error is None
@@ -1414,16 +1352,12 @@ def _move_generic_path_held(
                                 else "IO_REFUSED"
                             )
                             raise ReservedPathLeafError(code)
-                        moved = filesystem.rename(
-                            source_file, destination_parent, destination_leaf
-                        )
+                        moved = filesystem.rename(source_file, destination_parent, destination_leaf)
                         if not moved.ok:
                             code = moved.error.code if moved.error is not None else "IO_REFUSED"
                             raise ReservedPathLeafError(code)
                         _require_current_generic_directory(filesystem, source_parent)
-                        _require_current_generic_directory(
-                            filesystem, destination_parent
-                        )
+                        _require_current_generic_directory(filesystem, destination_parent)
             return
 
         source_result = filesystem.parent(source_relative, access="mutate")
@@ -1442,9 +1376,7 @@ def _move_generic_path_held(
                 if classify_logical(child).blocked:
                     raise ReservedPathLeafError("RESERVED_PATH")
                 _refuse_private_identity(record.identity, identities)
-            destination_parent_result = filesystem.parent(
-                destination_parent_path, create=True
-            )
+            destination_parent_result = filesystem.parent(destination_parent_path, create=True)
             if not destination_parent_result.ok:
                 code = (
                     destination_parent_result.error.code
@@ -1473,9 +1405,7 @@ def read_generic_tree(
 ) -> tuple[GenericTreeFile, ...]:
     """Enumerate and read an ordinary directory under one retained root anchor."""
 
-    with _generic_identity_catalogue_scope(
-        vault_root, value, identities=identities
-    ) as current:
+    with _generic_identity_catalogue_scope(vault_root, value, identities=identities) as current:
         return _read_generic_tree_held(vault_root, value, identities=current)
 
 
@@ -1557,9 +1487,7 @@ def _read_generic_tree_held(
                         snapshots.append(
                             GenericTreeFile(
                                 record.relative_path,
-                                GenericFileSnapshot(
-                                    read_result.require(), file.identity, mtime
-                                ),
+                                GenericFileSnapshot(read_result.require(), file.identity, mtime),
                             )
                         )
                         _require_current_generic_directory(filesystem, parent)
@@ -1585,16 +1513,10 @@ def _list_candidate_records(
             code = children.error.code if children.error is not None else "IO_REFUSED"
             raise ReservedPathLeafError(code)
         for record in children.require():
-            relative = (
-                f"{prefix}/{record.relative_path}"
-                if prefix
-                else record.relative_path
-            )
+            relative = f"{prefix}/{record.relative_path}" if prefix else record.relative_path
             records.append(held_fs.SagaRecord(relative, record.identity))
             child = (
-                relative
-                if source_relative == "."
-                else f"{source_relative.rstrip('/')}/{relative}"
+                relative if source_relative == "." else f"{source_relative.rstrip('/')}/{relative}"
             )
             classification = classify_logical(child)
             descriptor_id = identities.descriptor_for(record.identity) if identities else None
@@ -1629,9 +1551,7 @@ def list_generic_tree(
 ) -> tuple[GenericTreeEntry, ...]:
     """Enumerate an ordinary tree while structurally removing private state."""
 
-    with _generic_identity_catalogue_scope(
-        vault_root, value, identities=identities
-    ) as current:
+    with _generic_identity_catalogue_scope(vault_root, value, identities=identities) as current:
         return _list_generic_tree_held(
             vault_root,
             value,
@@ -1681,17 +1601,12 @@ def _list_generic_tree_held(
             else:
                 enumerated = filesystem.children(source_directory)
                 if not enumerated.ok:
-                    code = (
-                        enumerated.error.code
-                        if enumerated.error is not None
-                        else "IO_REFUSED"
-                    )
+                    code = enumerated.error.code if enumerated.error is not None else "IO_REFUSED"
                     raise ReservedPathLeafError(code)
                 records = enumerated.require()
             for record in records:
                 if any(
-                    record.relative_path == prefix
-                    or record.relative_path.startswith(f"{prefix}/")
+                    record.relative_path == prefix or record.relative_path.startswith(f"{prefix}/")
                     for prefix in hidden_prefixes
                 ):
                     continue
@@ -1702,8 +1617,10 @@ def _list_generic_tree_held(
                 )
                 child_classification = classify_logical(child)
                 descriptor_id = identities.descriptor_for(record.identity) if identities else None
-                if child_classification.blocked or descriptor_id is not None or (
-                    record.identity.kind == "file" and record.identity.link_count != 1
+                if (
+                    child_classification.blocked
+                    or descriptor_id is not None
+                    or (record.identity.kind == "file" and record.identity.link_count != 1)
                 ):
                     if record.identity.kind == "directory":
                         hidden_prefixes.append(record.relative_path)
@@ -1855,9 +1772,7 @@ class IdentityCatalogue:
     """Stable identities published for currently reachable private state."""
 
     identities: Mapping[_IdentityKey, str]
-    published_paths: Mapping[
-        _IdentityKey, tuple[tuple[str, str], ...]
-    ] | None = None
+    published_paths: Mapping[_IdentityKey, tuple[tuple[str, str], ...]] | None = None
     vault_root: Path | None = None
 
     @classmethod
@@ -1885,9 +1800,7 @@ class IdentityCatalogue:
             if prior is not None and prior != descriptor_id:
                 raise RuntimeError("one private filesystem identity maps to multiple owners")
             published[key] = descriptor_id
-            published_paths.setdefault(key, []).append(
-                (descriptor_id, logical_name)
-            )
+            published_paths.setdefault(key, []).append((descriptor_id, logical_name))
 
         def walk(
             filesystem: held_fs.HeldFilesystem,
@@ -1897,15 +1810,9 @@ class IdentityCatalogue:
         ) -> None:
             children = filesystem.children(directory)
             if not children.ok:
-                raise RuntimeError(
-                    "reserved identity catalogue could not enumerate the KB"
-                )
+                raise RuntimeError("reserved identity catalogue could not enumerate the KB")
             for record in children.require():
-                relative = (
-                    f"{prefix}/{record.relative_path}"
-                    if prefix
-                    else record.relative_path
-                )
+                relative = f"{prefix}/{record.relative_path}" if prefix else record.relative_path
                 logical = classify_logical(relative)
                 if logical.disposition is PathDisposition.RESERVED:
                     descriptor_id = logical.descriptor_id
@@ -1919,9 +1826,7 @@ class IdentityCatalogue:
                     continue
                 key = _identity_key(record.identity)
                 if key in seen_directories:
-                    raise RuntimeError(
-                        "reserved identity catalogue encountered a directory cycle"
-                    )
+                    raise RuntimeError("reserved identity catalogue encountered a directory cycle")
                 child = filesystem.parent(f"{kb_dirname()}/{relative}")
                 if not child.ok:
                     raise RuntimeError(
@@ -1929,9 +1834,7 @@ class IdentityCatalogue:
                     )
                 with child.require() as retained:
                     if retained.identity != record.identity:
-                        raise RuntimeError(
-                            "reserved identity catalogue observed directory drift"
-                        )
+                        raise RuntimeError("reserved identity catalogue observed directory drift")
                     seen_directories.add(key)
                     try:
                         walk(filesystem, retained, relative, seen_directories)
@@ -1957,9 +1860,7 @@ class IdentityCatalogue:
                 )
         return cls(
             MappingProxyType(published),
-            MappingProxyType(
-                {key: tuple(values) for key, values in published_paths.items()}
-            ),
+            MappingProxyType({key: tuple(values) for key, values in published_paths.items()}),
             Path(os.path.abspath(root)),
         )
 
@@ -1982,9 +1883,7 @@ class IdentityCatalogue:
 
 
 _PUBLISHED_IDENTITY_LOCK = threading.RLock()
-_PUBLISHED_OWNER_IDENTITIES: dict[
-    str, dict[str, dict[str, held_fs.StableIdentity]]
-] = {}
+_PUBLISHED_OWNER_IDENTITIES: dict[str, dict[str, dict[str, held_fs.StableIdentity]]] = {}
 _BASELINE_IDENTITY_CATALOGUES: dict[str, IdentityCatalogue] = {}
 
 
@@ -2086,9 +1985,7 @@ def _published_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
     with _PUBLISHED_IDENTITY_LOCK:
         by_descriptor = {
             descriptor_id: dict(identities)
-            for descriptor_id, identities in _PUBLISHED_OWNER_IDENTITIES.get(
-                vault_key, {}
-            ).items()
+            for descriptor_id, identities in _PUBLISHED_OWNER_IDENTITIES.get(vault_key, {}).items()
         }
 
     root = Path(os.path.abspath(vault_root))
@@ -2105,14 +2002,10 @@ def _published_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
                 pass
             else:
                 merged[key] = descriptor_id
-            published_paths.setdefault(key, []).append(
-                (descriptor_id, logical_name)
-            )
+            published_paths.setdefault(key, []).append((descriptor_id, logical_name))
     return IdentityCatalogue(
         MappingProxyType(merged),
-        MappingProxyType(
-            {key: tuple(values) for key, values in published_paths.items()}
-        ),
+        MappingProxyType({key: tuple(values) for key, values in published_paths.items()}),
         root,
     )
 
@@ -2165,18 +2058,14 @@ def _merge_identity_catalogues(
     for catalogue in catalogues:
         for key, descriptor_id in catalogue.identities.items():
             if catalogue.published_paths is not None:
-                candidate = held_fs.StableIdentity(
-                    key[0], key[1], key[2], 1
-                )
+                candidate = held_fs.StableIdentity(key[0], key[1], key[2], 1)
                 current_descriptor = catalogue.descriptor_for(candidate)
                 if current_descriptor is None:
                     continue
                 descriptor_id = current_descriptor
             prior = merged.get(key)
             if prior is not None and prior != descriptor_id:
-                raise RuntimeError(
-                    "one private filesystem identity maps to multiple owners"
-                )
+                raise RuntimeError("one private filesystem identity maps to multiple owners")
             merged[key] = descriptor_id
     return IdentityCatalogue(MappingProxyType(merged))
 
@@ -2237,9 +2126,7 @@ def _publish_sqlite_owner_family(
     if not _identity_coordination_active(vault_root, descriptor_id):
         raise RuntimeError("SQLite identity publication lacks coordination")
 
-    route = _owner_anchor(
-        vault_root, database, operation="SQLite identity publication"
-    )
+    route = _owner_anchor(vault_root, database, operation="SQLite identity publication")
     classification = classify_logical(route.logical_relative.as_posix())
     if (
         classification.disposition is not PathDisposition.RESERVED
@@ -2263,9 +2150,7 @@ def _publish_sqlite_owner_family(
         raise RuntimeError("SQLite identity publication cannot acquire the vault")
     with acquired.require() as filesystem:
         parent_relative = route.held_relative.parent.as_posix()
-        parent_result = filesystem.parent(
-            parent_relative if parent_relative != "." else "."
-        )
+        parent_result = filesystem.parent(parent_relative if parent_relative != "." else ".")
         if not parent_result.ok:
             raise RuntimeError("SQLite identity publication cannot retain its parent")
         with parent_result.require() as parent:
@@ -2290,9 +2175,7 @@ def _publish_sqlite_owner_family(
             for attempt in range(3):
                 wal_or_shm_reachable = False
                 for suffix in ("-wal", "-shm"):
-                    probe = filesystem.file(
-                        parent, f"{route.logical_relative.name}{suffix}"
-                    )
+                    probe = filesystem.file(parent, f"{route.logical_relative.name}{suffix}")
                     if probe.ok:
                         probe.require().close()
                         wal_or_shm_reachable = True
@@ -2302,9 +2185,7 @@ def _publish_sqlite_owner_family(
                 if not wal_or_shm_reachable:
                     break
                 if not _owner_directory_is_current(filesystem, parent):
-                    raise RuntimeError(
-                        "SQLite identity publication parent changed"
-                    )
+                    raise RuntimeError("SQLite identity publication parent changed")
                 result = held_fs.publish_sqlite_identities(
                     filesystem,
                     parent,
@@ -2313,36 +2194,32 @@ def _publish_sqlite_owner_family(
                 )
                 if result.ok:
                     if not _owner_directory_is_current(filesystem, parent):
-                        raise RuntimeError(
-                            "SQLite identity publication parent changed"
-                        )
+                        raise RuntimeError("SQLite identity publication parent changed")
                     return
                 if result.error is None or result.error.code not in {
                     "MISSING",
                     "IDENTITY_CHANGED",
                 }:
-                    raise RuntimeError(
-                        "SQLite WAL identity family is not completely reachable"
-                    )
+                    raise RuntimeError("SQLite WAL identity family is not completely reachable")
                 if not _owner_directory_is_current(filesystem, parent):
-                    raise RuntimeError(
-                        "SQLite identity publication parent changed"
-                    )
+                    raise RuntimeError("SQLite identity publication parent changed")
                 if attempt == 2:
                     if result.error.code == "IDENTITY_CHANGED":
                         raise SqliteIdentityBusyError(
                             "SQLite WAL identity family changed during publication"
                         )
-                    raise RuntimeError(
-                        "SQLite WAL identity family is not completely reachable"
-                    )
+                    raise RuntimeError("SQLite WAL identity family is not completely reachable")
 
             family: dict[str, held_fs.StableIdentity] = {}
             for suffix in ("", "-journal", "-wal", "-shm"):
                 name = f"{route.logical_relative.name}{suffix}"
                 file_result = filesystem.file(parent, name)
                 if not file_result.ok:
-                    if suffix and file_result.error is not None and file_result.error.code == "MISSING":
+                    if (
+                        suffix
+                        and file_result.error is not None
+                        and file_result.error.code == "MISSING"
+                    ):
                         continue
                     raise RuntimeError("SQLite identity family is unavailable")
                 with file_result.require() as file:
@@ -2366,9 +2243,7 @@ def _publish_owner_bytes(
         raise TypeError("private byte publication requires bytes")
 
     root = Path(os.path.abspath(vault_root))
-    route = _owner_anchor(
-        vault_root, path, operation="byte publication"
-    )
+    route = _owner_anchor(vault_root, path, operation="byte publication")
     classification = classify_logical(route.logical_relative.as_posix())
     if (
         classification.disposition is not PathDisposition.RESERVED
@@ -2413,9 +2288,7 @@ def _publish_owner_bytes(
                 if current.ok:
                     with current.require() as existing:
                         if existing.identity.link_count != 1:
-                            raise RuntimeError(
-                                "private byte publication target is ambiguous"
-                            )
+                            raise RuntimeError("private byte publication target is ambiguous")
                         expected = existing.identity
                 elif current.error is None or current.error.code != "MISSING":
                     raise RuntimeError("private byte publication target is unsafe")
@@ -2459,9 +2332,7 @@ def _read_owner_bytes(
 
     root = Path(os.path.abspath(vault_root))
     target = Path(os.path.abspath(path))
-    route = _owner_anchor(
-        vault_root, path, operation="byte read"
-    )
+    route = _owner_anchor(vault_root, path, operation="byte read")
     classification = classify_logical(route.logical_relative.as_posix())
     if (
         classification.disposition is not PathDisposition.RESERVED
@@ -2486,9 +2357,7 @@ def _read_owner_bytes(
             raise OSError("private byte read cannot acquire the vault")
         with acquired.require() as filesystem:
             parent_text = route.held_relative.parent.as_posix()
-            parent_result = filesystem.parent(
-                parent_text if parent_text != "." else "."
-            )
+            parent_result = filesystem.parent(parent_text if parent_text != "." else ".")
             if not parent_result.ok:
                 if parent_result.error is not None and parent_result.error.code == "MISSING":
                     raise FileNotFoundError(target)
@@ -2545,9 +2414,7 @@ def _owner_relative_path(
 ) -> _OwnerRoute:
     if not owner_authorized(descriptor_id):
         raise RuntimeError(f"private {operation} lacks exact owner authority")
-    route = _owner_anchor(
-        vault_root, path, operation=operation
-    )
+    route = _owner_anchor(vault_root, path, operation=operation)
     classification = classify_logical(route.logical_relative.as_posix())
     if (
         classification.disposition is not PathDisposition.RESERVED
@@ -2678,9 +2545,9 @@ def _sqlite_owner_target_scope(
                     with current_result.require() as current:
                         if current.identity.kind != "file" or current.identity.link_count != 1:
                             raise RuntimeError("private SQLite target is ambiguous")
-                        if expected is not None and _identity_key(current.identity) != _identity_key(
-                            expected
-                        ):
+                        if expected is not None and _identity_key(
+                            current.identity
+                        ) != _identity_key(expected):
                             raise RuntimeError("private SQLite target changed during open")
             finally:
                 if existing is not None:
@@ -2753,9 +2620,7 @@ def _move_owner_file(
                 raise OSError("private move source parent is unsafe")
             with source_parent_result.require() as source_parent:
                 destination_parent_result = filesystem.parent(
-                    destination_parent_text
-                    if destination_parent_text != "."
-                    else ".",
+                    destination_parent_text if destination_parent_text != "." else ".",
                     create=True,
                 )
                 if not destination_parent_result.ok:
@@ -2783,9 +2648,7 @@ def _move_owner_file(
                         if destination_result.ok:
                             with destination_result.require() as destination_file:
                                 if destination_file.identity.link_count != 1:
-                                    raise OSError(
-                                        "private move destination is ambiguous"
-                                    )
+                                    raise OSError("private move destination is ambiguous")
                             if not replace:
                                 raise FileExistsError(destination)
                         elif (
@@ -2796,9 +2659,7 @@ def _move_owner_file(
 
                         if not _owner_directory_is_current(
                             filesystem, source_parent
-                        ) or not _owner_directory_is_current(
-                            filesystem, destination_parent
-                        ):
+                        ) or not _owner_directory_is_current(filesystem, destination_parent):
                             raise OSError("private move parent changed")
 
                         moved = filesystem.rename(
@@ -2813,9 +2674,7 @@ def _move_owner_file(
 
                     if not _owner_directory_is_current(
                         filesystem, source_parent
-                    ) or not _owner_directory_is_current(
-                        filesystem, destination_parent
-                    ):
+                    ) or not _owner_directory_is_current(filesystem, destination_parent):
                         raise OSError("private move parent changed")
 
                     installed = filesystem.file(
@@ -2894,14 +2753,9 @@ def _remove_owner_file(
                     return False
                 raise OSError("private remove parent is unsafe")
             with parent_result.require() as parent:
-                file_result = filesystem.file(
-                    parent, route.held_relative.name, access="mutate"
-                )
+                file_result = filesystem.file(parent, route.held_relative.name, access="mutate")
                 if not file_result.ok:
-                    if (
-                        file_result.error is not None
-                        and file_result.error.code == "MISSING"
-                    ):
+                    if file_result.error is not None and file_result.error.code == "MISSING":
                         if not missing_ok:
                             raise FileNotFoundError(path)
                         if not route.external:
@@ -2932,9 +2786,7 @@ def _remove_owner_file(
                     raise OSError("private remove parent changed")
 
         if not route.external:
-            _replace_published_owner_path(
-                root, descriptor_id, route.logical_relative, None
-            )
+            _replace_published_owner_path(root, descriptor_id, route.logical_relative, None)
         return True
 
 
