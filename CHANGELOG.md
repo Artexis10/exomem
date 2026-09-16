@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.85.4](https://github.com/Artexis10/exomem/compare/v0.85.3...v0.85.4) (2026-09-16)
+
+
+### Performance
+
+* **due-state:** serve the memoised block and re-ask governance per call ([#1281](https://github.com/Artexis10/exomem/issues/1281)) ([eec62c9](https://github.com/Artexis10/exomem/commit/eec62c955df309365cf956333771827fdf3d7c66))
+
 ## [0.85.3](https://github.com/Artexis10/exomem/compare/v0.85.2...v0.85.3) (2026-09-15)
 
 
