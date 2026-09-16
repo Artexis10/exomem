@@ -190,7 +190,7 @@ def test_purpose_never_enters_the_packet_cache_key() -> None:
     from exomem import working_set_runtime
 
     first = working_set_runtime.cache_key(
-        freshness_key="k", index_generation=3, roles_hash="abc", turn="t", budget_chars=4000
+        freshness_key="k", index_generation=3, roles_hash="abc", turn="t", max_chars=4000
     )
     assert "audit" not in str(first)
     assert working_set_runtime.cache_key.__doc__

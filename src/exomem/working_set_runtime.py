@@ -55,7 +55,7 @@ def cache_key(
     index_generation: int,
     roles_hash: str,
     turn: str,
-    budget_chars: int,
+    max_chars: int,
 ) -> tuple:
     """The packet identity. `purpose` is deliberately not a parameter (design D7)."""
     return (
@@ -63,7 +63,7 @@ def cache_key(
         int(index_generation),
         str(roles_hash),
         str(turn),
-        int(budget_chars),
+        int(max_chars),
     )
 
 
@@ -166,7 +166,7 @@ def serve(
     vault_root: Path,
     *,
     turn: str,
-    budget_chars: int,
+    max_chars: int,
     purpose: str | None = None,
     timings: Any = None,
     retrieval_paths: frozenset[str] = frozenset(),
@@ -175,7 +175,7 @@ def serve(
 ) -> dict[str, Any]:
     """Compile (or reuse) one unguarded packet. Never raises: it abstains instead."""
     root = Path(vault_root)
-    limit = working_set.clamp_budget(budget_chars)
+    limit = working_set.clamp_budget(max_chars)
     registry = context_roles.load_roles(root)
     stamp = _key_text(freshness_key)
     with working_set._span(timings, "working_set.index"):
@@ -184,7 +184,7 @@ def serve(
     if state != READY or index is None:
         return working_set.abstained_packet(
             reason=state,
-            budget_chars=limit,
+            max_chars=limit,
             generation={
                 "freshness_key": _key_text(freshness_key),
                 "index_generation": 0,
@@ -197,7 +197,7 @@ def serve(
         index_generation=index.generation(),
         roles_hash=registry.roles_hash,
         turn=turn,
-        budget_chars=limit,
+        max_chars=limit,
     )
     identity = (str(root.absolute()), key)
     with _CACHE_LOCK:
@@ -211,7 +211,7 @@ def serve(
         packet = working_set.compile_packet(
             root,
             turn=turn,
-            budget_chars=limit,
+            max_chars=limit,
             purpose=purpose,
             timings=timings,
             retrieval_paths=retrieval_paths,
@@ -222,7 +222,7 @@ def serve(
         log.warning("activation compilation failed; abstaining", exc_info=True)
         return working_set.abstained_packet(
             reason="unavailable",
-            budget_chars=limit,
+            max_chars=limit,
             generation={
                 "freshness_key": _key_text(freshness_key),
                 "index_generation": index.generation(),

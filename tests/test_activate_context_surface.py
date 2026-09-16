@@ -85,7 +85,7 @@ def test_the_tool_is_registered_on_all_three_surfaces() -> None:
     assert command.leaf is commands.op_activate_context
     assert [param.name for param in command.params][:4] == [
         "turn",
-        "budget_chars",
+        "max_chars",
         "purpose",
         "include_timings",
     ]
@@ -128,10 +128,10 @@ def test_three_doors_return_the_same_packet(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    direct = commands.op_activate_context(activation_vault, turn=TURN, budget_chars=2000)
+    direct = commands.op_activate_context(activation_vault, turn=TURN, max_chars=2000)
 
     code, out = _run_cli(
-        ["activate", TURN, "--budget-chars", "2000", "--json"], capsys
+        ["activate", TURN, "--max-chars", "2000", "--json"], capsys
     )
     assert code == 0, out
     envelope = json.loads(out)
@@ -141,7 +141,7 @@ def test_three_doors_return_the_same_packet(
     client = _rest_client(monkeypatch)
     response = client.post(
         "/api/activate_context",
-        json={"turn": TURN, "budget_chars": 2000},
+        json={"turn": TURN, "max_chars": 2000},
         headers={"Authorization": "Bearer sekret"},
     )
     assert response.status_code == 200, response.text

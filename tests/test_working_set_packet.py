@@ -69,7 +69,7 @@ def test_packet_carries_exactly_the_declared_blocks() -> None:
         current_state=(),
         ambiguity=(),
         missing=(),
-        budget_chars=4000,
+        max_chars=4000,
         generation=_generation(),
         status="resolved",
     )
@@ -90,7 +90,7 @@ def test_unit_text_is_capped() -> None:
         current_state=(),
         ambiguity=(),
         missing=(),
-        budget_chars=4000,
+        max_chars=4000,
         generation=_generation(),
         status="resolved",
     )
@@ -106,7 +106,7 @@ def test_packet_never_carries_the_due_state_carrier() -> None:
         current_state=(),
         ambiguity=(),
         missing=(),
-        budget_chars=4000,
+        max_chars=4000,
         generation=_generation(),
         status="resolved",
     )
@@ -129,7 +129,7 @@ def test_per_role_cap_holds() -> None:
         current_state=(),
         ambiguity=(),
         missing=(),
-        budget_chars=8000,
+        max_chars=8000,
         generation=_generation(),
         status="resolved",
     )
@@ -152,7 +152,7 @@ def test_budget_is_never_exceeded_and_overflow_becomes_pointers() -> None:
         current_state=(),
         ambiguity=(),
         missing=(),
-        budget_chars=700,
+        max_chars=700,
         generation=_generation(),
         status="resolved",
     )
@@ -178,7 +178,7 @@ def test_units_precede_pages() -> None:
         current_state=(),
         ambiguity=(),
         missing=(),
-        budget_chars=4000,
+        max_chars=4000,
         generation=_generation(),
         status="resolved",
     )
@@ -201,7 +201,7 @@ def test_role_priority_order_survives_the_budget() -> None:
         current_state=(),
         ambiguity=(),
         missing=(),
-        budget_chars=320,
+        max_chars=320,
         generation=_generation(),
         status="resolved",
     )
@@ -229,7 +229,7 @@ def test_superseded_unit_is_marked_with_its_successor() -> None:
         current_state=(),
         ambiguity=(),
         missing=(),
-        budget_chars=4000,
+        max_chars=4000,
         generation=_generation(),
         status="resolved",
     )
@@ -254,7 +254,7 @@ def test_a_superseded_unit_is_dropped_when_its_successor_is_present() -> None:
         current_state=(),
         ambiguity=(),
         missing=(),
-        budget_chars=4000,
+        max_chars=4000,
         generation=_generation(),
         status="resolved",
     )
@@ -272,7 +272,7 @@ def test_a_superseded_unit_is_dropped_when_its_successor_is_present() -> None:
 def test_abstained_packet_injects_nothing() -> None:
     packet = working_set.abstained_packet(
         reason="unresolved",
-        budget_chars=4000,
+        max_chars=4000,
         generation=_generation(),
     )
 
@@ -287,7 +287,7 @@ def test_abstained_packet_injects_nothing() -> None:
 def test_ambiguous_turn_runs_no_lane() -> None:
     packet = working_set.abstained_packet(
         reason="ambiguous",
-        budget_chars=4000,
+        max_chars=4000,
         generation=_generation(),
         ambiguity=({"ref": "north", "title": "North", "kind": "hub", "neighbourhood_size": 2},),
     )
@@ -402,7 +402,7 @@ def test_compile_abstains_on_a_turn_that_reaches_nothing(stateful_vault: Path) -
     packet = working_set.compile_packet(
         stateful_vault,
         turn="zzz qqq unrelated gibberish",
-        budget_chars=4000,
+        max_chars=4000,
     )
 
     assert packet["abstained"] is True
@@ -416,7 +416,7 @@ def test_compile_returns_a_bounded_packet_for_a_resolved_turn(stateful_vault: Pa
     packet = working_set.compile_packet(
         stateful_vault,
         turn="I'm planning to tow the Cargo Sled north — how much depot stock is left?",
-        budget_chars=2000,
+        max_chars=2000,
     )
 
     assert packet["abstained"] is False

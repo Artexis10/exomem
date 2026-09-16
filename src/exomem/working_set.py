@@ -10,7 +10,7 @@ model.
 
 Three properties are load-bearing and each is tested directly:
 
-* **Bounded.** Per-role caps and one global `budget_chars`. Text that does not
+* **Bounded.** Per-role caps and one global `max_chars`. Text that does not
   fit becomes a POINTER, never a truncated half-claim, so an agent that needs it
   can fetch it and one that does not pays a ref.
 * **Ordered.** Units before pages, roles in registry priority order. A packet
@@ -113,12 +113,12 @@ def build_packet(
     current_state: Sequence[Mapping[str, Any]],
     ambiguity: Sequence[Mapping[str, Any]],
     missing: Sequence[Mapping[str, Any]],
-    budget_chars: int,
+    max_chars: int,
     generation: Mapping[str, Any],
     status: str,
 ) -> dict[str, Any]:
     """Order, cap and budget the lane output into the packet the caller sees."""
-    limit = clamp_budget(budget_chars)
+    limit = clamp_budget(max_chars)
     order = _role_order(roles)
     present_paths = {item.path for item in items if item.path}
 
@@ -180,7 +180,7 @@ def build_packet(
 def abstained_packet(
     *,
     reason: str,
-    budget_chars: int,
+    max_chars: int,
     generation: Mapping[str, Any],
     anchors: Sequence[Mapping[str, Any]] = (),
     ambiguity: Sequence[Mapping[str, Any]] = (),
@@ -195,7 +195,7 @@ def abstained_packet(
         "current_state": [],
         "missing": [dict(entry) for entry in missing],
         "ambiguity": [dict(entry) for entry in ambiguity],
-        "budget": {"limit_chars": clamp_budget(budget_chars), "used_chars": 0},
+        "budget": {"limit_chars": clamp_budget(max_chars), "used_chars": 0},
         "generation": dict(generation),
         "abstained": True,
         "abstention": {"reason": reason},
@@ -580,7 +580,7 @@ def compile_packet(
     vault_root: Path,
     *,
     turn: str,
-    budget_chars: int | None = None,
+    max_chars: int | None = None,
     purpose: str | None = None,
     timings: Any = None,
     retrieval_paths: frozenset[str] = frozenset(),
@@ -589,7 +589,7 @@ def compile_packet(
 ) -> dict[str, Any]:
     """Resolve, select, retrieve and budget — the whole compiler in one call."""
     root = Path(vault_root)
-    limit = clamp_budget(budget_chars)
+    limit = clamp_budget(max_chars)
     index = index or working_set_index.WorkingSetIndex(root)
     registry = context_roles.load_roles(root)
     generation: dict[str, Any] = {
@@ -616,7 +616,7 @@ def compile_packet(
     if resolution.status != "resolved":
         return abstained_packet(
             reason=resolution.status,
-            budget_chars=limit,
+            max_chars=limit,
             generation=generation,
             anchors=tuple(anchor.as_dict() for anchor in resolution.anchors),
             ambiguity=resolution.ambiguity,
@@ -651,7 +651,7 @@ def compile_packet(
             current_state=current_state,
             ambiguity=resolution.ambiguity,
             missing=missing,
-            budget_chars=limit,
+            max_chars=limit,
             generation=generation,
             status=resolution.status,
         )

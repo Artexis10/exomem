@@ -80,7 +80,7 @@ canonical page type.
   route to the anchor; Planning via `planning.query(lifecycle="active")` filtered by
   anchor tags/refs; entity facets from the entity registry snapshot; graph via
   `graph_context(traversal_profile=…)` at depth ≤2 from `resolved` anchors (depth 1 from
-  `partial`); evidence as pointers only. Per-role caps and a global `budget_chars`
+  `partial`); evidence as pointers only. Per-role caps and a global `max_chars`
   (default 4,000, hard 8,000) enforce abstinence; units precede pages; overflow becomes
   pointers.
 - **D6 — Current-state resolver is small and source-marked.** For a resource or

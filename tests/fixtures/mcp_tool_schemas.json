@@ -30,7 +30,7 @@
           "description": "The user's turn, verbatim. Empty abstains.",
           "type": "string"
         },
-        "budget_chars": {
+        "max_chars": {
           "default": 4000,
           "description": "Character ceiling for the packet's text. Default 4,000, clamped to 500..8,000. Overflow becomes pointers, never truncated claims.",
           "type": "integer"

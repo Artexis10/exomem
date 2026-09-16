@@ -2418,7 +2418,7 @@ def _activate_main(argv: list[str]) -> int:
     )
     parser.add_argument("turn", help="the user's turn, verbatim")
     parser.add_argument(
-        "--budget-chars",
+        "--max-chars",
         type=int,
         default=None,
         help="character ceiling for the packet (default 4000, clamped to 500..8000)",
@@ -2431,8 +2431,8 @@ def _activate_main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     core = ["activate_context", args.turn]
-    if args.budget_chars is not None:
-        core += ["--budget-chars", str(args.budget_chars)]
+    if args.max_chars is not None:
+        core += ["--max-chars", str(args.max_chars)]
     if args.purpose:
         core += ["--purpose", args.purpose]
     if args.timings:

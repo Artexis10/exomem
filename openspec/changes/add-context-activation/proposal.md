@@ -16,7 +16,7 @@ no longer a required reasoning step for the primary agent.
 
 ## What Changes
 
-- A new read-only Tier-1 operation `activate_context(turn, budget_chars, purpose,
+- A new read-only Tier-1 operation `activate_context(turn, max_chars, purpose,
   include_timings)` exposed identically on MCP, CLI (`exomem activate`) and REST
   (`/api/activate_context`) over one leaf function, returning a working-memory packet
   rather than ranked hits.

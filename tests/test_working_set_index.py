@@ -441,7 +441,7 @@ def test_a_governed_write_invalidates_the_packet_and_moves_the_generation(
     turn = "what do I know about M. Solheim"
 
     first = working_set_runtime.serve(
-        seeded, turn=turn, budget_chars=2000, freshness_key="k1"
+        seeded, turn=turn, max_chars=2000, freshness_key="k1"
     )
     first_generation = first["generation"]["index_generation"]
     assert first_generation >= 1
@@ -456,7 +456,7 @@ def test_a_governed_write_invalidates_the_packet_and_moves_the_generation(
     )
 
     second = working_set_runtime.serve(
-        seeded, turn="what do I know about Solheim", budget_chars=2000, freshness_key="k2"
+        seeded, turn="what do I know about Solheim", max_chars=2000, freshness_key="k2"
     )
 
     assert second["generation"]["index_generation"] > first_generation
@@ -477,7 +477,7 @@ def test_a_managed_runtime_abstains_with_index_warming_and_warms_once(
         working_set_runtime, "_schedule_build", lambda root: scheduled.append(root)
     )
 
-    packet = working_set_runtime.serve(seeded, turn="the cargo sled", budget_chars=2000)
+    packet = working_set_runtime.serve(seeded, turn="the cargo sled", max_chars=2000)
 
     assert packet["abstained"] is True
     assert packet["abstention"] == {"reason": "index_warming"}
@@ -504,7 +504,7 @@ def test_a_managed_runtime_reports_a_stale_index_rather_than_walking(
     )
 
     packet = working_set_runtime.serve(
-        seeded, turn="the cargo sled", budget_chars=2000, freshness_key="new"
+        seeded, turn="the cargo sled", max_chars=2000, freshness_key="new"
     )
 
     assert packet["generation"]["index_stale"] is True

@@ -5804,7 +5804,7 @@ ACTIVATE_RETRIEVAL_LIMIT = 8
 def op_activate_context(
     vault_root: Path,
     turn: str = "",
-    budget_chars: int = working_set_module.DEFAULT_BUDGET_CHARS,
+    max_chars: int = working_set_module.DEFAULT_BUDGET_CHARS,
     purpose: str | None = None,
     include_timings: bool = False,
 ) -> dict:
@@ -5832,7 +5832,7 @@ def op_activate_context(
 
     Args:
         turn: The user's turn, verbatim. Empty abstains.
-        budget_chars: Character ceiling for the packet's text. Default 4,000,
+        max_chars: Character ceiling for the packet's text. Default 4,000,
             clamped to 500..8,000. Overflow becomes pointers, never truncated
             claims.
         purpose: Optional declared purpose for this request, e.g. "audit" or
@@ -5846,19 +5846,19 @@ def op_activate_context(
              ambiguity, budget, generation, abstained, abstention?}.
     """
     timings = find_types.FindTimings() if include_timings else None
-    budget = working_set_module.clamp_budget(budget_chars)
+    budget = working_set_module.clamp_budget(max_chars)
     turn = str(turn or "")
 
     generation_stub = {"freshness_key": "", "index_generation": 0, "roles_hash": ""}
     if not turn.strip():
         return working_set_module.abstained_packet(
-            reason="unresolved", budget_chars=budget, generation=generation_stub
+            reason="unresolved", max_chars=budget, generation=generation_stub
         )
     if working_set_index_module.disabled():
         # The tool stays on the surface under the kill switch so the published
         # tool-surface digest is independent of the environment; it just abstains.
         return working_set_module.abstained_packet(
-            reason="disabled", budget_chars=budget, generation=generation_stub
+            reason="disabled", max_chars=budget, generation=generation_stub
         )
 
     # Release gate first, in `op_find`'s shape: the pool is widened only when a
@@ -5900,7 +5900,7 @@ def op_activate_context(
     packet = working_set_runtime_module.serve(
         vault_root,
         turn=turn,
-        budget_chars=budget,
+        max_chars=budget,
         purpose=purpose,
         timings=timings,
         retrieval_paths=retrieval_paths,
@@ -5913,7 +5913,7 @@ def op_activate_context(
         if guarded is None:
             return working_set_module.abstained_packet(
                 reason="withheld",
-                budget_chars=budget,
+                max_chars=budget,
                 generation=packet.get("generation") or generation_stub,
             )
         packet = guarded
@@ -10453,7 +10453,11 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
             "args": {"detail": "compact", "rerank": False, "deep": True},
         },
         "safety": "read-only; deep mode assembles context and graph enrichment stays explicit",
-        "advanced": ["read_memory", "query_dataset", "read_media"],
+        # `activate_context` leads because it is the call for a turn that does
+        # not yet have a query: it resolves what the turn is about and returns a
+        # bounded packet, or abstains. The rest of the family assumes the agent
+        # already knows what it is looking for.
+        "advanced": ["activate_context", "read_memory", "query_dataset", "read_media"],
     },
     "remember": {
         "intent": "Save a durable conclusion as compiled governed knowledge.",

@@ -4,7 +4,7 @@
 
 ### Requirement: Read-only activation operation
 The product SHALL expose a read-only operation `activate_context` that accepts a raw
-user turn (`turn`, non-empty text), an optional `budget_chars` (default 4000, clamped
+user turn (`turn`, non-empty text), an optional `max_chars` (default 4000, clamped
 to 500..8000), an optional declared `purpose`, and an optional `include_timings`
 flag, and returns a working-memory packet. The operation SHALL be reachable over the
 same leaf function on MCP, the CLI (`exomem activate "<turn>"`) and the personal REST
@@ -111,13 +111,13 @@ characters, lifecycle, updated, provenance), `pointers[]`, `current_state[]` (an
 source, as_of), `missing[]`, `ambiguity[]`, `budget {limit_chars, used_chars}`,
 `generation {freshness_key, index_generation, roles_hash}` and `abstained`. Units
 SHALL be emitted before pages, pages beyond the budget SHALL become pointers, the
-packet SHALL never exceed `budget_chars`, and a superseded unit SHALL be marked
+packet SHALL never exceed `max_chars`, and a superseded unit SHALL be marked
 `superseded` with its active successor named rather than presented as current. The
 packet SHALL NOT duplicate the `due_state` carrier.
 
 #### Scenario: Budget holds under a large neighbourhood
-- **WHEN** the selected lanes yield more candidate text than `budget_chars`
-- **THEN** the packet's `used_chars` is at most `budget_chars`, units are kept in role
+- **WHEN** the selected lanes yield more candidate text than `max_chars`
+- **THEN** the packet's `used_chars` is at most `max_chars`, units are kept in role
   priority order, and the overflow is represented only as pointers
 
 #### Scenario: Superseded knowledge is marked
