@@ -78,15 +78,17 @@ projection state.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import logging
 import os
 import tempfile
 import threading
+import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -2224,7 +2226,181 @@ def served_entries(
     principal: Any = None,
     purpose: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Every open item this audience may see, most-overdue first.
+    """Every open item this audience may see, most-overdue first -- memoised.
+
+    Rebuilding the rows on every recall was the whole cost of a read on the
+    personal vault -- 25 s before PR #1279 and still 0.6 s idle to 4 s under
+    host load after it, on every call, when nothing had changed; the cost is
+    the recomposition of every collection candidate under the audience's
+    filter. So one build is kept per (vault, audience, session, purpose, day)
+    and reused while the projection file and the review-state file are the
+    same objects on disk, the clock has not reached the earliest future
+    `due_at` the build skipped, and the build is younger than
+    `_SERVE_CACHE_TTL_SECONDS`.
+
+    What the build reads live, a hit re-checks live, at the cost the profile
+    showed to be milliseconds against the build's seconds: the release plane
+    is asked again for every verdict the build asked for, and one changed
+    answer rebuilds, so a revocation stays immediate; the artifact-role
+    findings are served again and compared, so advice whose source changed
+    out of band is omitted until reconcile exactly as before; a page deleted
+    out of band is dropped from the hit the way the build drops it. Every
+    write replaces the projection file, so the next read after a write
+    rebuilds once. A projection that could not be persisted is never cached,
+    because a write then updates it in memory with no file to notice.
+    """
+    from .governance import egress as egress_module
+    from .governance import principal as principal_module
+
+    if now is not None:
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=dt.UTC)
+        now = now.astimezone(dt.UTC)
+    effective_now = now or dt.datetime.now(dt.UTC)
+    today = today or effective_now.date()
+    projection_token = _file_token(state_path(vault_root))
+    if projection_token is None:
+        rows, *_ = _served_entries_uncached(
+            vault_root, today=today, now=effective_now, principal=principal, purpose=purpose
+        )
+        return rows
+    who = principal if principal is not None else principal_module.effective_principal()
+    key = (
+        str(vault_root),
+        getattr(who, "audience_id", None),
+        getattr(who, "authorization_session_id", None),
+        bool(getattr(who, "resolved", True)),
+        purpose,
+        today.isoformat(),
+        projection_token,
+        _file_token(review_state_module.state_path(vault_root)),
+    )
+    monotonic = time.monotonic()
+    with _SERVE_LOCK:
+        hit = _SERVE_CACHE.get(key)
+    if (
+        hit is not None
+        and monotonic - hit["built"] < _SERVE_CACHE_TTL_SECONDS
+        and (hit["horizon"] is None or effective_now < hit["horizon"])
+    ):
+        try:
+            keep = egress_module.release_walk_filter(
+                Path(vault_root), principal=who, purpose=purpose
+            )
+        except Exception:  # noqa: BLE001
+            # The build's rule: a release plane that cannot decide serves
+            # nothing -- never a memo built while it could.
+            log.debug("release filter unavailable; serving no due state", exc_info=True)
+            return []
+        if keep is None:
+
+            def keep(_path: str) -> bool:
+                return True
+
+        if all(keep(path) == verdict for path, verdict in hit["asked"].items()) and (
+            hit["role_token"] is None or _role_token(vault_root, keep) == hit["role_token"]
+        ):
+            return [
+                dict(row)
+                for row in hit["rows"]
+                if not row.get("path") or _page_exists(vault_root, row["path"])
+            ]
+    payload = load(vault_root)
+    if payload is None or _owes_nothing(payload):
+        # Unreadable: the build recomputes or recovers, and nothing is filed.
+        # Owes nothing: the empty list under any filter, and -- as in the
+        # build -- no release filter to pay for.
+        rows, *_ = _served_entries_uncached(
+            vault_root, today=today, now=effective_now, principal=who, purpose=purpose
+        )
+        return rows
+    rows, horizon, asked, role_token = _served_entries_uncached(
+        vault_root,
+        today=today,
+        now=effective_now,
+        principal=who,
+        purpose=purpose,
+        payload=payload,
+    )
+    with _SERVE_LOCK:
+        if len(_SERVE_CACHE) >= _SERVE_CACHE_CAP:
+            _SERVE_CACHE.pop(next(iter(_SERVE_CACHE)), None)
+        _SERVE_CACHE[key] = {
+            "rows": [dict(row) for row in rows],
+            "horizon": horizon,
+            "built": monotonic,
+            "asked": asked,
+            "role_token": role_token,
+        }
+    return rows
+
+
+#: One served build per (vault, audience, session, purpose, day, projection
+#: file, review-state file); see `served_entries`.
+_SERVE_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
+_SERVE_LOCK = threading.Lock()
+_SERVE_CACHE_CAP = 64
+_SERVE_CACHE_TTL_SECONDS = 300.0
+
+
+def reset_serve_cache() -> None:
+    """Drop every memoised served build: tests, and anything editing state files by hand."""
+    with _SERVE_LOCK:
+        _SERVE_CACHE.clear()
+
+
+def _owes_nothing(payload: Mapping[str, Any]) -> bool:
+    """A projection with no entry and no origin: the served view is empty under any filter."""
+    return not _has_entries(payload) and not (payload.get("role_state") or {}).get("has_origins")
+
+
+def _role_token(vault_root: Path, keep: Callable[[str], bool]) -> str:
+    """Fingerprint of the artifact-role findings this audience would be served right now."""
+    from . import artifact_role_state
+
+    try:
+        findings, _ = artifact_role_state.served(vault_root, keep)
+    except Exception:  # noqa: BLE001 - the build omits advice whose evidence is unavailable
+        return "unavailable"
+    return _findings_token(findings)
+
+
+def _findings_token(findings: list[Any]) -> str:
+    """One comparable value for a list of findings, whatever their concrete type."""
+    parts = [asdict(f) if is_dataclass(f) else repr(f) for f in findings]
+    encoded = json.dumps(parts, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _file_token(path: Path) -> tuple[int, int, int] | None:
+    """Identity of a file's current bytes for a cache key, or None when it is absent.
+
+    Inode, mtime and size together: every writer here replaces the file
+    (mkstemp + rename), so a rewrite always changes the inode even when it
+    lands inside the same coarse-clock tick with the same byte count.
+    """
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return (info.st_ino, info.st_mtime_ns, info.st_size)
+
+
+def _served_entries_uncached(
+    vault_root: Path,
+    *,
+    today: dt.date,
+    now: dt.datetime,
+    principal: Any = None,
+    purpose: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dt.datetime | None, dict[str, bool], str | None]:
+    """The build behind `served_entries`, and what a memo of it must re-check.
+
+    Returns the rows, the earliest future `due_at` it skipped, every release
+    verdict it asked for (path -> allowed), and a fingerprint of the artifact
+    role findings it served (None when the projection has no role index,
+    "unavailable" when their evidence could not be read).
 
     The order of operations is the contract, not an implementation detail:
     re-bucket against today, drop what this audience may not see, drop what the
@@ -2234,28 +2410,25 @@ def served_entries(
     """
     from .governance import egress as egress_module
 
-    if now is not None:
-        if now.tzinfo is None:
-            now = now.replace(tzinfo=dt.UTC)
-        now = now.astimezone(dt.UTC)
-    today = today or (now.date() if now is not None else dt.date.today())
-    payload = load(vault_root)
+    horizon: dt.datetime | None = None
+    if payload is None:
+        payload = load(vault_root)
     if payload is None:
         # An unpersistable vault recomputes ONCE per process, not once per read.
         payload = _UNPERSISTED.get(str(vault_root))
     if payload is None:
         payload = _schedule_reconcile(vault_root, today=today)
         if payload is None:
-            return []
+            return [], None, {}, None
 
-    if not _has_entries(payload) and not (payload.get("role_state") or {}).get("has_origins"):
+    if _owes_nothing(payload):
         # Nothing stored, so nothing to filter, count or order — and no disclosure
         # decision to make, because the answer is the empty list either way. This
         # is not an optimisation of the egress rule; it is the case where the rule
         # has no input. It matters because building the release filter is
         # governance-proportional work, and a vault that owes nothing is the
         # common case on every recall and every bootstrap.
-        return []
+        return [], None, {}, None
 
     keep = None
     try:
@@ -2267,11 +2440,20 @@ def served_entries(
         # everything". Fail closed: serve nothing rather than count something
         # this audience may not be allowed to know exists.
         log.debug("release filter unavailable; serving no due state", exc_info=True)
-        return []
-    if keep is None:
-        def keep(_path: str) -> bool:
-            return True
+        return [], None, {}, None
+    # Every verdict this build relies on, recorded so a memo of the build can
+    # ask the plane the same questions again. An empty policy is recorded too:
+    # its answers are the ones a policy arriving later must be checked against.
+    asked: dict[str, bool] = {}
+    decide = keep
 
+    def keep(path: str) -> bool:
+        verdict = asked.get(path)
+        if verdict is None:
+            verdict = asked[path] = True if decide is None else bool(decide(path))
+        return verdict
+
+    role_token: str | None = None
     store = review_state_module.ReviewStateStore(vault_root)
     try:
         state_payload = store.load()
@@ -2286,7 +2468,7 @@ def served_entries(
         # dismissing works. The write itself is untouched: this is the advisory
         # attached to the response, not the mutation.
         log.debug("review state unreadable; serving no due state", exc_info=True)
-        return []
+        return [], None, {}, None
     excluded = _excluded_families(state_payload)
 
     routing = _routing_snapshot(vault_root, payload, keep)
@@ -2300,6 +2482,7 @@ def served_entries(
         from . import artifact_role_review, artifact_role_state
         try:
             findings, _ = artifact_role_state.served(vault_root, keep)
+            role_token = _findings_token(findings)
             role_grouped = _entries_from_findings(vault_root, findings)
             for family in artifact_role_review.FAMILIES:
                 categories[family] = {
@@ -2307,6 +2490,7 @@ def served_entries(
                     for path, entries in (role_grouped.get(family) or {}).items()
                 }
         except Exception:  # noqa: BLE001 - omit advice when its evidence is unavailable
+            role_token = "unavailable"
             for family in artifact_role_review.FAMILIES:
                 categories[family] = {}
     for category in PROJECTION_CATEGORIES:
@@ -2329,7 +2513,9 @@ def served_entries(
                         continue
                     due = _date(entry.get(date_key))
                     due_at = _datetime(entry.get("due_at"))
-                    if due_at is not None and due_at > (now or dt.datetime.now(dt.UTC)):
+                    if due_at is not None and due_at > now:
+                        if horizon is None or due_at < horizon:
+                            horizon = due_at
                         continue
                     if due is None or due > today:
                         continue  # not yet due — the day-boundary re-bucket
@@ -2382,7 +2568,7 @@ def served_entries(
             row["ref"],
         )
     )
-    return rows
+    return rows, horizon, asked, role_token
 
 
 def _excluded_families(state_payload: dict[str, Any]) -> frozenset[str]:
