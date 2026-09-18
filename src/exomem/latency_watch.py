@@ -60,20 +60,26 @@ class Sample:
     spans: tuple[tuple[str, float], ...]
 
 
+#: Every value of `deep` that means "yes". The live path reads it from the real
+#: arguments; the doctor recovers it from the ledger's digest of the same value,
+#: so the two must agree on exactly this set (`_deep_argument_digests`).
+DEEP_TRUE_VALUES: tuple[Any, ...] = (True, "1", "true", "True", "TRUE", "yes", "Yes", "YES")
+
+
 def deep_flag(arguments: Any) -> bool:
     """Whether a call's real arguments asked for a deep recall.
 
     Read from the arguments while the call still has them: the ledger reduces
     every value to a length and a hash, so this is the one point where `deep`
-    is a boolean and not a digest. A string spelling of true counts, since a
-    connector may send it that way; anything else is not deep.
+    is a boolean and not a digest. The string spellings in `DEEP_TRUE_VALUES`
+    count, since a connector may send one; anything else is not deep.
     """
     if not isinstance(arguments, dict):
         return False
     value = arguments.get("deep")
     if value is True:
         return True
-    return isinstance(value, str) and value.strip().lower() in {"1", "true", "yes"}
+    return isinstance(value, str) and value in DEEP_TRUE_VALUES
 
 
 def ceiling_for(tool: str, deep: bool) -> float:
@@ -190,6 +196,7 @@ class Watch:
         self._ring: collections.deque[Sample] = collections.deque(maxlen=RING_SIZE)
         self._lock = threading.Lock()
         self._reported: dict[tuple[str, str, bool], float] = {}
+        self._seen: dict[tuple[str, str, bool], int] = {}
         self.failures = 0
 
     @property
@@ -217,9 +224,17 @@ class Watch:
             return
         now = float(self._clock() if at is None else at)
         sample = make_sample(at=now, tool=tool, client=client, deep=deep, total_ms=total_ms, spans=spans)
+        key = (sample.tool, sample.client, sample.deep)
         with self._lock:
             self._ring.append(sample)
-        self._maybe_report(sample, now)
+            seen = self._seen[key] = self._seen.get(key, 0) + 1
+        # A call under its ceiling cannot raise the p90, so it cannot create a
+        # breach; the one exception is the call that completes the minimum
+        # sample count, which can make an existing breach reportable. Every
+        # other fast call skips the ring scan entirely, so a healthy service
+        # pays a dict update per call, not a summary.
+        if sample.total_ms > ceiling_for(sample.tool, sample.deep) or seen == MIN_SAMPLES:
+            self._maybe_report(sample, now)
 
     def _eligible(self, now: float) -> list[Sample]:
         grace_until = self._started_at + STARTUP_GRACE_SECONDS
@@ -243,13 +258,20 @@ class Watch:
 
     def _maybe_report(self, sample: Sample, now: float) -> None:
         key = (sample.tool, sample.client, sample.deep)
-        last = self._reported.get(key)
+        with self._lock:
+            last = self._reported.get(key)
         if last is not None and now - last < REPORT_INTERVAL_SECONDS:
             return
         for row in self.verdicts(now=now, client=sample.client):
             if row["tool"] != sample.tool or row["deep"] != sample.deep or not row["breach"]:
                 continue
-            self._reported[key] = now
+            with self._lock:
+                # Check-and-set under the lock: two request threads crossing
+                # the ceiling together must produce one event, not two.
+                last = self._reported.get(key)
+                if last is not None and now - last < REPORT_INTERVAL_SECONDS:
+                    return
+                self._reported[key] = now
             from .log_events import log_event
 
             log_event(
@@ -270,17 +292,20 @@ class Watch:
             return
 
 
-def _true_argument_sha() -> str:
-    """The digest the ledger writes for a `deep: true` argument, so a row's deep
-    flag is recoverable from its shape without any value ever being stored."""
+def _deep_argument_digests() -> frozenset[str]:
+    """The digests the ledger writes for every `deep` value that means yes, so a
+    row's deep flag is recoverable from its shape without any value ever being
+    stored, and classified exactly as the live path classified the call."""
     import hashlib
 
     from .call_ledger import canonical_json
 
-    return hashlib.sha256(canonical_json({"v": True})).hexdigest()
+    return frozenset(
+        hashlib.sha256(canonical_json({"v": value})).hexdigest() for value in DEEP_TRUE_VALUES
+    )
 
 
-def _row_sample(row: Any, *, true_sha: str) -> Sample | None:
+def _row_sample(row: Any, *, deep_digests: frozenset[str]) -> Sample | None:
     if not isinstance(row, dict):
         return None
     tool = row.get("tool")
@@ -295,7 +320,7 @@ def _row_sample(row: Any, *, true_sha: str) -> Sample | None:
         return None
     args = row.get("args")
     deep_shape = args.get("deep") if isinstance(args, dict) else None
-    deep = isinstance(deep_shape, dict) and deep_shape.get("sha256") == true_sha
+    deep = isinstance(deep_shape, dict) and deep_shape.get("sha256") in deep_digests
     return make_sample(
         at=at,
         tool=tool,
@@ -322,7 +347,7 @@ def samples_from_ledger(
     """
     import json
 
-    true_sha = _true_argument_sha()
+    deep_digests = _deep_argument_digests()
     floor = now - window_seconds
     out: list[Sample] = []
 
@@ -340,7 +365,7 @@ def samples_from_ledger(
                 row = json.loads(line)
             except ValueError:
                 continue
-            sample = _row_sample(row, true_sha=true_sha)
+            sample = _row_sample(row, deep_digests=deep_digests)
             if sample is None:
                 continue
             if sample.at >= floor:
@@ -349,15 +374,41 @@ def samples_from_ledger(
         return inside
 
     read(path)
-    if archive_dir is not None and archive_dir.is_dir():
-        try:
-            generations = sorted(archive_dir.glob("ledger-*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
-        except OSError:
-            generations = []
-        for generation in generations:
-            if not read(generation):
-                break
+    for generation in _archive_generations_newest_first(archive_dir):
+        if not read(generation):
+            break
     return out
+
+
+def _archive_generations_newest_first(archive_dir: Path | None) -> list[Path]:
+    """Archived ledger segments, newest first, placed by the `sequence` their
+    first row carries.
+
+    The archive is content-addressed, so neither the filename nor the file
+    mtime says anything about age (a restore, a copy without `-p`, or a
+    container rebuild rewrites every mtime). The rows carry the order, and
+    the first row of a segment is enough to place it: the same rule
+    `obs_cli._ledger_archive_generations` applies for `exomem logs`.
+    """
+    import json
+
+    if archive_dir is None:
+        return []
+    try:
+        if not archive_dir.is_dir():
+            return []
+        placed: list[tuple[int, Path]] = []
+        for candidate in archive_dir.glob("ledger-*.jsonl"):
+            try:
+                with candidate.open("r", encoding="utf-8", errors="replace") as handle:
+                    first = handle.readline().strip()
+                sequence = int(json.loads(first)["sequence"]) if first else 0
+            except (OSError, ValueError, KeyError, TypeError):
+                sequence = 0
+            placed.append((sequence, candidate))
+    except OSError:
+        return []
+    return [path for _sequence, path in sorted(placed, key=lambda item: -item[0])]
 
 
 _WATCH = Watch()

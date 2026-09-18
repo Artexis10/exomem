@@ -75,19 +75,48 @@ def test_the_window_reaches_into_the_archive_and_stops_at_old_generations(ledger
     _write(ledger / "ledger.jsonl", active)
     archive = ledger / "ledger-archive"
     archive.mkdir()
-    recent = [_row(age_s=3600 + 10 * i, total_ms=3000) for i in range(15)]
-    stale = [_row(age_s=latency_watch.WINDOW_SECONDS + 3600 + i, total_ms=1) for i in range(50)]
+    recent = [dict(_row(age_s=3600 + 10 * i, total_ms=3000), sequence=500 + i) for i in range(15)]
+    stale = [dict(_row(age_s=latency_watch.WINDOW_SECONDS + 3600 + i, total_ms=1), sequence=1 + i) for i in range(50)]
     _write(archive / "ledger-000001.jsonl", stale)
     _write(archive / "ledger-000002.jsonl", recent)
-    # the newer generation must sort first by mtime
-    import os
-    now = time.time()
-    os.utime(archive / "ledger-000001.jsonl", (now - 100, now - 100))
-    os.utime(archive / "ledger-000002.jsonl", (now - 10, now - 10))
     check = doctor._check_latency()
     [row] = check.details["rows"]
     assert row["samples"] == 25  # 10 active + 15 recent archive, none of the 50 stale
     assert check.status == "warn"
+
+
+def test_archive_generations_are_placed_by_sequence_not_mtime(ledger: Path) -> None:
+    """The archive is content-addressed; a restore or a copy rewrites every
+    mtime. Reading newest-by-mtime first and stopping at the first generation
+    with nothing in the window would skip the generation that holds the breach."""
+    import os
+
+    _write(ledger / "ledger.jsonl", [_row(age_s=10, total_ms=100)])
+    archive = ledger / "ledger-archive"
+    archive.mkdir()
+    stale = [dict(_row(age_s=latency_watch.WINDOW_SECONDS + 3600 + i, total_ms=1), sequence=100 + i) for i in range(5)]
+    recent = [dict(_row(age_s=3600 + i, total_ms=3000), sequence=900 + i) for i in range(20)]
+    _write(archive / "ledger-aaaa.jsonl", recent)
+    _write(archive / "ledger-bbbb.jsonl", stale)
+    now = time.time()
+    os.utime(archive / "ledger-aaaa.jsonl", (now - 500, now - 500))  # newest rows, oldest mtime
+    os.utime(archive / "ledger-bbbb.jsonl", (now - 1, now - 1))
+    check = doctor._check_latency()
+    [row] = check.details["rows"]
+    assert row["samples"] == 21 and row["breach"] is True
+    assert check.status == "warn"
+
+
+def test_a_string_deep_is_classified_the_same_from_disk_as_live(ledger: Path) -> None:
+    """A connector may send `deep` as a string; the live path counts it as deep,
+    so the row read back must land in the same bucket, or the two surfaces
+    disagree about which ceiling applies."""
+    rows = [_row(age_s=10 * i, total_ms=4200, deep="true") for i in range(25)]
+    _write(ledger / "ledger.jsonl", rows)
+    assert latency_watch.deep_flag({"deep": "true"}) is True
+    check = doctor._check_latency()
+    [row] = check.details["rows"]
+    assert row["deep"] is True and row["ceiling_ms"] == 5000 and row["breach"] is False
 
 
 def test_too_few_calls_passes_with_a_note(ledger: Path) -> None:

@@ -102,6 +102,54 @@ def test_unwatched_tools_are_ignored() -> None:
     assert watch.verdicts() == []
 
 
+def test_a_fast_call_never_pays_for_the_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A call under its ceiling cannot raise the p90, so it must not scan the
+    ring; only a slow call or the one completing the minimum sample count does."""
+    watch, _clock = _watch()
+    scans: list[int] = []
+    real = watch.verdicts
+
+    def counted(**kwargs):
+        scans.append(1)
+        return real(**kwargs)
+
+    monkeypatch.setattr(watch, "verdicts", counted)
+    _fill(watch, n=latency_watch.MIN_SAMPLES - 1, total_ms=120)
+    assert scans == []
+    _fill(watch, n=1, total_ms=120)  # completes MIN_SAMPLES: may make a breach reportable
+    assert len(scans) == 1
+    _fill(watch, n=50, total_ms=120)
+    assert len(scans) == 1
+    _fill(watch, n=1, total_ms=5000)
+    assert len(scans) == 2
+
+
+def test_a_breach_reports_once_under_concurrent_crossings(monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    from exomem import log_events
+
+    events: list[str] = []
+    monkeypatch.setattr(
+        log_events, "log_event",
+        lambda logger, level, event, **_k: events.append(event),
+    )
+    watch, _clock = _watch()
+    _fill(watch, n=19, total_ms=150)
+    barrier = threading.Barrier(8)
+
+    def cross():
+        barrier.wait()
+        watch.observe(tool="ask_memory", client="openai-mcp/1.0.0", deep=False, total_ms=9000)
+
+    threads = [threading.Thread(target=cross) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert events == ["latency_ceiling_exceeded"]
+
+
 def test_a_failing_watch_is_counted_not_raised(monkeypatch: pytest.MonkeyPatch) -> None:
     watch, _clock = _watch()
 
@@ -153,6 +201,8 @@ def test_bootstrap_block_reports_only_the_calling_client() -> None:
 def test_deep_flag_reads_the_real_arguments() -> None:
     assert latency_watch.deep_flag({"deep": True}) is True
     assert latency_watch.deep_flag({"deep": "true"}) is True
+    assert latency_watch.deep_flag({"deep": "yes"}) is True
+    assert latency_watch.deep_flag({"deep": "1"}) is True
     assert latency_watch.deep_flag({"deep": False}) is False
     assert latency_watch.deep_flag({"deep": "false"}) is False
     assert latency_watch.deep_flag({}) is False

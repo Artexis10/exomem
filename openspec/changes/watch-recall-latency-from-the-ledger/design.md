@@ -72,6 +72,26 @@ as the bootstrap block, at most once per `REPORT_INTERVAL_SECONDS` per key.
 It is emitted from the observe call's own thread, after the row is recorded,
 inside the same failure guard.
 
+### D6. Wall-clock time, on purpose
+
+Samples and the startup instant use `time.time()`, not a monotonic clock,
+because the ring and the doctor's file reader must mean the same thing by a
+timestamp: the ledger rows carry `ts_utc`, and a verdict computed live must
+equal the one computed from the file for the same calls. A clock step after
+process start therefore moves the grace window and the trailing window with
+it; the future-row guard in `summarize` drops rows stamped after `now`, and a
+backward step shortens the visible window for one window length at most. The
+watch is a diagnosis surface, not a safety control, so that is accepted rather
+than paid for with two clocks that can disagree.
+
+### D7. A fast call never pays for the verdict
+
+A call under its ceiling cannot raise a p90, so `observe` computes the verdict
+only for a call over its ceiling, or for the call that completes the minimum
+sample count for its key (which can make an existing breach reportable). A
+healthy service pays one dictionary update per call; the ring scan is reserved
+for calls that could be part of a breach.
+
 ## Alternatives considered
 
 - Gate in CI only: cannot see live state; both motivating regressions were

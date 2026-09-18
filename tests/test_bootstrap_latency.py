@@ -33,7 +33,7 @@ def _breach(watch, client: str) -> None:
                       spans=[{"name": "embeddings.matrix_load", "ms": 2500}])
 
 
-@pytest.mark.parametrize("profile", ["compact", "full", "diagnostics"])
+@pytest.mark.parametrize("profile", ["compact", "full", "diagnostics", "session"])
 def test_a_healthy_service_leaves_every_profile_unchanged(
     vault: Path, monkeypatch: pytest.MonkeyPatch, watch, profile: str
 ) -> None:
