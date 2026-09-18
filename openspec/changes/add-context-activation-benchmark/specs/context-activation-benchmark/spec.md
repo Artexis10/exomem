@@ -15,9 +15,16 @@ record the corpus tree (its distractor count) it belongs to, and a padding compa
 whose two packets share a tree SHALL fail. Gold and poison facts SHALL be
 pre-registered phrases; the model-free intersection SHALL match on content words after
 stopword removal and light stemming, SHALL require at least one discriminating content
-word not shared with any other fact of the same case, and the fixture suite SHALL prove
-that the confusable fact sets (the same-first-name persons, the three AI-search hubs
-and the supersession ancestors) are pairwise non-matching. The audit SHALL score each case and each anchor kind separately,
+word not shared with any other fact of the same case and at least two overlapping
+content words, where a negation word never counts and a word counts only when both
+sides agree on whether it is negated (a word is negated when the content word before
+it is a negation word), so that a denial of a fact is not credited as asserting it, and the fixture suite SHALL prove that the confusable fact
+sets (the same-first-name persons, the three AI-search hubs and the supersession
+ancestors) are pairwise non-matching. A fact MAY carry several pre-registered
+phrasings; the phrasing set, like the gold and poison lists, is frozen by the fixture
+digest at the first run and a later edit voids that run. Polarity beyond the negation
+rule is not modelled, and the blind intersection is a secondary metric that never
+gates falsification. The audit SHALL score each case and each anchor kind separately,
 SHALL publish every metric with its dual from the same run, SHALL publish no weighted
 aggregate at any level, SHALL carry no epistemic-bench registry row and no comparative
 claim, and SHALL include a mechanism-removal test that turns the audit red when the

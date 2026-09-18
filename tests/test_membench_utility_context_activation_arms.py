@@ -449,6 +449,53 @@ def test_negation_contraction_is_tokenised_as_a_standalone_not() -> None:
     assert "not" in _content_words("the bench won't be available")
 
 
+# -- final micro-round MAJOR: negation must be signed, not just present ----
+
+
+@pytest.mark.parametrize(
+    "denial",
+    [
+        # Reviewer's two denials: both share {bench, not} with C5's own
+        # negated phrasing, and "the bench is not unavailable" additionally
+        # shares {bench, unavailable} word-for-word with the *positive*
+        # phrasing ("...was marked unavailable for repair") -- a bare
+        # unsigned overlap count credits either path as gold. Denying the
+        # fact must never count as asserting it.
+        "the bench is not unavailable",
+        "the bench is not being repaired",
+    ],
+)
+def test_a_denial_of_c5s_fact_is_not_credited_as_its_gold(denial: str) -> None:
+    from membench.utility.context_activation_arms import _fact_phrase_matches
+
+    c5 = fixture_by_id("C5")
+    facts_by_key = {k: GOLD_POISON_FACTS[k] for k in (*c5.gold, *c5.poison) if k in GOLD_POISON_FACTS}
+    assert not _fact_phrase_matches(denial, "c5_records_latest_unavailable", facts_by_key), (
+        f"{denial!r} was credited as C5's gold despite denying it"
+    )
+    extraction = ExtractedFacts(asserted=(denial,), requested=())
+    intersection = intersect_with_gold_poison(extraction, c5)
+    assert denial not in intersection.asserted_gold
+
+
+@pytest.mark.parametrize(
+    "assertion",
+    [
+        # The genuinely negated *true* phrasing, and its contraction, must
+        # keep matching: signing polarity must not also silence the case
+        # the negation rule exists to handle.
+        "the bench is not available for tomorrow",
+        "the bench isn't available",
+    ],
+)
+def test_a_true_negated_paraphrase_of_c5s_fact_still_matches_gold_not_poison(assertion: str) -> None:
+    c5 = fixture_by_id("C5")
+    extraction = ExtractedFacts(asserted=(assertion,), requested=())
+    intersection = intersect_with_gold_poison(extraction, c5)
+    assert assertion in intersection.asserted_gold
+    assert assertion not in intersection.asserted_poison
+
+
 def test_a_single_bare_shared_token_never_matches_any_fact() -> None:
     # MAJOR-1 (micro round): the ratio alone let 1/5 = 0.20 clear the 0.2
     # floor, so a single bare shared content word carried a match on 9 of

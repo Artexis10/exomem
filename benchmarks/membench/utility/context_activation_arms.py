@@ -18,6 +18,16 @@ Nothing in this module executes an agent. Building an argv and printing it
 replay is a separate, explicitly authorized, opt-in paid probe per the
 existing paid-probe rule (``epistemic-utility-regression``, "Paid probes are
 bounded and opt-in").
+
+Spec (final micro-round): "A fact MAY carry several pre-registered phrasings;
+the phrasing set, like the gold and poison lists, is frozen by the fixture
+digest at the first run and a later edit voids that run. Polarity beyond the
+negation rule is not modelled, and the blind intersection is a secondary
+metric that never gates falsification." The fact-matching machinery below
+(``_fact_phrase_matches`` and friends) implements exactly the negation rule
+that sentence carves out -- a content word immediately negated in one phrase
+must not silently count as agreeing with the same word asserted positively
+elsewhere -- and nothing more general than that.
 """
 
 from __future__ import annotations
@@ -528,6 +538,12 @@ _NEGATION_CONTRACTIONS: tuple[tuple[str, str], ...] = (
     ("n't", " not"),
 )
 
+#: The exact three words deliberately kept out of ``_STOPWORDS`` above --
+#: repeated here as their own set because the final micro-round's fix needs
+#: to find *where* a negation word sits in a phrase, not just that one is
+#: present.
+_NEGATION_WORDS: frozenset[str] = frozenset({"not", "no", "never"})
+
 
 def _normalize_fact_phrase(text: str) -> str:
     """Casefold, expand negation contractions, and replace punctuation with
@@ -575,6 +591,42 @@ _CONTENT_OVERLAP_FLOOR = 0.2
 _CONTENT_OVERLAP_MIN_WORDS = 2
 
 
+def _positive_and_negated_words(text: str) -> tuple[set[str], set[str]]:
+    """Split ``text``'s content words into a plain (positive) set and a
+    negated set: a word lands in the negated set when the *content* word
+    immediately before it (after stopword removal, so "not *being*
+    repaired" negates "repair" even though "being" sits between them in the
+    raw sentence) is one of ``_NEGATION_WORDS``. A bare negation word itself
+    never lands in either set (spec: negation tokens do not count toward
+    the two-word overlap floor).
+
+    Final micro-round finding: excluding *only* the negation token itself
+    from the overlap count is not enough. "the bench is not unavailable"
+    still shared {bench, unavailable} with the fact's own positive phrasing
+    ("the bench was marked unavailable for repair") even after "not" was
+    dropped from that count, because "unavailable" is a real word of that
+    positive phrasing and the token-bag overlap does not know "not"
+    negates it rather than "bench". Tagging *which* word a negation applies
+    to -- one word of local scope, never general sentiment/polarity
+    inference -- is what the spec's "negation rule" actually needs to mean
+    for "so that a denial of a fact is not credited as asserting it" to
+    hold for both of the fact's phrasings, not just the one that itself
+    contains "not".
+    """
+
+    ordered = [_stem(word) for word in _normalize_fact_phrase(text).split() if word and word not in _STOPWORDS]
+    positive: set[str] = set()
+    negated: set[str] = set()
+    previous_is_negation = False
+    for word in ordered:
+        if word in _NEGATION_WORDS:
+            previous_is_negation = True
+            continue
+        (negated if previous_is_negation else positive).add(word)
+        previous_is_negation = False
+    return positive, negated
+
+
 def _phrases_content_words(phrases: tuple[str, ...]) -> set[str]:
     words: set[str] = set()
     for phrase in phrases:
@@ -604,23 +656,36 @@ def _fact_phrase_matches(extracted_item: str, key: str, facts_by_key: dict[str, 
     least one of the fact's *discriminating* words (a word the fact does not
     share with any sibling fact in ``facts_by_key`` -- this is what keeps
     the same-first-name persons, the AI-search hubs and the supersession
-    ancestors pairwise non-matching), and only once that gate passes does
-    the residual content-word overlap ratio and absolute-count floor apply,
-    checked against *each* of the key's pre-registered phrasings (most keys
-    carry one; a key whose negated shape needs an alternate phrasing, e.g.
-    ``c5_records_latest_unavailable``, carries more).
+    ancestors pairwise non-matching, and negation tokens still count here
+    unchanged, per spec), and only once that gate passes does the residual
+    content-word overlap apply, checked against *each* of the key's
+    pre-registered phrasings (most keys carry one; a key whose negated shape
+    needs an alternate phrasing, e.g. ``c5_records_latest_unavailable``,
+    carries more).
+
+    The two-word/ratio floor itself (final micro-round) counts a shared word
+    only when both sides agree on its polarity: a word negated in
+    ``extracted_item`` but asserted positively in ``phrase`` (or vice versa)
+    does not count, and a bare negation word never counts either way -- see
+    :func:`_positive_and_negated_words`. The ratio denominator still uses the
+    unrestricted overlap (spec only excludes negation words from the
+    absolute-count floor), which is always the same size or larger, so it
+    never re-admits a phrase the polarity-aware count has already refused.
     """
 
     extracted_words = _content_words(extracted_item)
     discriminating = _discriminating_words(key, facts_by_key)
     if not (extracted_words & discriminating):
         return False
+    extracted_positive, extracted_negated = _positive_and_negated_words(extracted_item)
     for phrase in facts_by_key[key]:
         fact_words = _content_words(phrase)
         if not fact_words:
             continue
         overlap = extracted_words & fact_words
-        if len(overlap) >= _CONTENT_OVERLAP_MIN_WORDS and len(overlap) / len(fact_words) >= _CONTENT_OVERLAP_FLOOR:
+        fact_positive, fact_negated = _positive_and_negated_words(phrase)
+        counted = (extracted_positive & fact_positive) | (extracted_negated & fact_negated)
+        if len(counted) >= _CONTENT_OVERLAP_MIN_WORDS and len(overlap) / len(fact_words) >= _CONTENT_OVERLAP_FLOOR:
             return True
     return False
 
