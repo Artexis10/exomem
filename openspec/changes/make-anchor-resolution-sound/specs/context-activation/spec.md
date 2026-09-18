@@ -34,13 +34,19 @@ resolved project anchors are therefore trivially competing); otherwise,
 when no anchor is `resolved`, the turn SHALL be `unresolved` and the operation SHALL
 abstain with an empty packet that still lists its `partial` candidates and their
 evidence. Lexical comparison SHALL ignore stopwords and SHALL compare terms with
-regular plural and singular forms folded together (`-s`; `-es` after a sibilant stem;
+regular plural and singular forms folded together (`-s`; `-es` when the word ends `-ses`, `-xes`, `-zes`, `-ches` or `-shes`;
 `-ies` to `-y`), never folding a word of three characters or fewer and never a word
-ending in `ss`, `us` or `is`. The fold is a suffix rule, not a dictionary: a plural whose
-singular ends in `-se` (such as "releases") is read as a sibilant stem and does not meet
-its singular, and that residue SHALL be documented beside the rule rather than patched
-with word lists. `lexical_overlap` SHALL be granted
-for two or more shared terms. `rare_term` SHALL be granted for exactly one term shared
+ending in `ss`, `us` or `is`. The fold is a suffix rule, not a dictionary: plurals whose
+singular ends in `-se` ("releases", "cases", "uses", "databases") and Greek plurals in
+`-es` of singulars in `-is` ("analyses", "bases" of "basis") do not meet their singulars,
+and both residual classes SHALL be documented beside the rule rather than patched with
+word lists. `lexical_overlap` SHALL be granted
+for two or more shared terms of which at least one is among the anchor's own authored
+title and alias terms; terms an anchor carries only through tags or section headings MAY
+complete an overlap and SHALL never constitute one. `rare_term` and `lexical_overlap`
+SHALL be mutually exclusive on one anchor, since both are read from the same
+intersection of the turn's words with the anchor's: `rare_term` SHALL be granted only
+when `lexical_overlap` is not. `rare_term` SHALL be granted for exactly one term shared
 between the turn and the anchor's own authored title and alias terms (never a term the
 anchor carries only through a tag, a section heading or a derived name) when that term
 occurs among the authored title and alias terms of no more anchors held in the
@@ -55,8 +61,8 @@ treat it as an alias only while no other anchor's names include it and every ter
 is within the rare-term threshold, measured before derived names are added and over
 every anchor kind. A derived name SHALL be the title's leading words as the resolver
 tokenises them, joined by single spaces; none SHALL be derived when that leaves nothing,
-more than three words, only stopwords, only digits, fewer than three characters, or a
-filename-like lead. `usage_prior` SHALL
+more than three words, a word shorter than two characters, only stopwords, only digits,
+fewer than three characters, or a filename-like lead. `usage_prior` SHALL
 only break ties between otherwise equal candidates and SHALL never contribute to the
 two-kinds rule. `claims_match` SHALL be computed with the existing collection-claims
 routing.
@@ -252,3 +258,14 @@ remains the only `due_state` carrier.
   only
 - **THEN** the second anchor appears in `anchors[]` as `partial`, and no unit, pointer
   or current-state entry in the packet comes from its page or its neighbourhood
+
+#### Scenario: One authored word and one tag word do not resolve
+- **WHEN** a turn shares one word with an anchor's title and one word with the anchor's
+  tag or section heading, and nothing else reaches the anchor
+- **THEN** the anchor carries `lexical_overlap` only, not `rare_term`, and is `partial`
+
+#### Scenario: A turn made only of structural words reaches nothing
+- **WHEN** a turn shares two words with an anchor's tags and section headings and none
+  with its title or aliases, and the anchor's own page is a recall hit
+- **THEN** the anchor does not carry `lexical_overlap` and is at most `partial`
+

@@ -179,6 +179,53 @@ def _by_title(rows, title: str):
     raise AssertionError(f"no anchor titled {title!r} in {[r.title for r in rows]}")
 
 
+def test_collect_caps_to_distinct_anchor_ids_not_list_positions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 4, MINOR: `_collect`'s cap must keep `MAX_ANCHORS`
+    DISTINCT anchor ids, never merely the first `MAX_ANCHORS` LIST
+    POSITIONS. Anchor ids are always distinct in practice (built from each
+    page's own path), so a real duplicate id never occurs -- this test
+    forces one to make the invariant explicit rather than assumed. Without a
+    dedupe before the slice, a duplicate id consumes two "positions" while
+    contributing only one distinct anchor, silently starving a genuinely
+    different anchor that had room under the cap.
+    """
+    vault = tmp_path / "vault"
+    kb = vault / "Knowledge Base" / "Products"
+    kb.mkdir(parents=True)
+    (kb / "r0.md").write_text(
+        "---\ntitle: R Zero\nstatus: active\nupdated: 2026-09-01\n---\n\n# R Zero\n\nBody.\n",
+        encoding="utf-8",
+    )
+    (kb / "r1.md").write_text(
+        "---\ntitle: R One\nstatus: active\nupdated: 2026-09-01\n---\n\n# R One\n\nBody.\n",
+        encoding="utf-8",
+    )
+    real_raw, outbound, names = working_set_index._walk_page_entries(vault)
+    r0, r1 = real_raw
+    # A copy of r0 whose id collides with r1's -- the forced duplicate.
+    r0_dup = dict(r0)
+    r0_dup["anchor_id"] = r1["anchor_id"]
+    r2 = dict(r0)
+    r2["anchor_id"] = "Knowledge Base/Products/r2.md"
+    r2["path"] = r2["anchor_id"]
+    r2["title"] = "R Two"
+
+    monkeypatch.setattr(
+        working_set_index, "_walk_page_entries", lambda vault_root: ([r0_dup, r1, r2], outbound, names)
+    )
+    monkeypatch.setattr(working_set_index, "_collection_candidates", lambda vault_root: ([], []))
+    monkeypatch.setattr(working_set_index, "_project_candidates", lambda vault_root: [])
+    monkeypatch.setattr(working_set_index, "MAX_ANCHORS", 2)
+
+    index = working_set_index.WorkingSetIndex(vault)
+    candidates, _edges, _names, _term_counts = index._collect()
+
+    # Two DISTINCT ids kept under a cap of 2, not one id counted twice.
+    assert {c.anchor_id for c in candidates} == {r1["anchor_id"], r2["anchor_id"]}
+
+
 def test_build_derives_anchor_rows_from_governed_structure(seeded: Path) -> None:
     index = working_set_index.WorkingSetIndex(seeded)
     report = index.rebuild()
@@ -830,6 +877,45 @@ def test_fold_plural_documents_the_release_releases_residual_collision() -> None
     assert working_set_index.fold_plural("lens") == working_set_index.fold_plural("len")
 
 
+def test_fold_plural_documents_both_residual_collision_classes() -> None:
+    """Review round 4, MINOR: both residual classes named with examples, not
+    just "release"/"releases". Class 1 -- a singular ending in a silent
+    `-se` (no trailing `s` alone, so neither rule ever touches it) whose
+    plural's word-final `-ses` is folded as an `s`-final singular's `-es`
+    plural instead, colliding with the singular rather than matching it.
+    Class 2 -- a Greek-derived singular ending in `-is` (excluded from the
+    trailing-`s` strip on purpose, so it stays whole) whose irregular plural
+    ends in `-es` and gets stripped as if it were that same `s`-final
+    singular's `-es` plural, again colliding rather than matching.
+    """
+    for singular in (
+        "release",
+        "case",
+        "base",
+        "use",
+        "phase",
+        "response",
+        "database",
+        "license",
+        "increase",
+        "purchase",
+        "house",
+    ):
+        assert working_set_index.fold_plural(singular) != working_set_index.fold_plural(
+            singular + "s"
+        ), singular
+
+    for singular, plural in (
+        ("analysis", "analyses"),
+        ("basis", "bases"),
+        ("crisis", "crises"),
+        ("thesis", "theses"),
+    ):
+        assert working_set_index.fold_plural(singular) != working_set_index.fold_plural(
+            plural
+        ), (singular, plural)
+
+
 def test_derived_short_name_reads_a_trailing_parenthetical_or_dash() -> None:
     # The resolver's own tokeniser normalises and casefolds (review round 3,
     # BLOCKER 3): the derived name is the lead's TOKENS joined by single
@@ -855,6 +941,21 @@ def test_derived_short_name_rejects_invalid_leads() -> None:
     assert working_set_index.derived_short_name("A (b)") is None
     # More than three words.
     assert working_set_index.derived_short_name("One two three four (qualifier)") is None
+
+
+def test_derived_short_name_rejects_a_lead_with_any_under_length_token() -> None:
+    """Review round 4, MINOR: each TOKEN needs at least two letters, not just
+    the joined name overall. "A (b) — c" joined to "a b" (3 characters, past
+    the whole-name floor) even though neither "a" nor "b" is a name
+    fragment; "2026 Q3 — tail" joined to "2026 q3" even though "q3" is barely
+    a letter with a digit stapled on; "élève (note)" joined to "l ve" once
+    the accented letters -- outside this tokeniser's `[a-z0-9]` alphabet --
+    fragment the word into unmatchable pieces. None of the three is a name a
+    turn could ever say.
+    """
+    assert working_set_index.derived_short_name("A (b) — c") is None
+    assert working_set_index.derived_short_name("2026 Q3 — tail") is None
+    assert working_set_index.derived_short_name("élève (note)") is None
 
 
 def test_derived_short_name_collapses_multiple_spaces_and_drops_unmatchable_glyphs() -> None:

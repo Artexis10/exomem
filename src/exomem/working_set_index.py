@@ -217,26 +217,37 @@ def fold_plural(term: str) -> str:
 
     Rules, applied for up to two passes so "aliases" and "alias" meet: never
     fold a word of three characters or fewer; fold `-ies` (longer than four
-    characters) to `-y`; strip `-es` only when the WHOLE word ends in `-ses`,
-    `-xes`, `-zes`, `-ches` or `-shes` (a sibilant-stem plural: class, box,
-    alias, bus, process); otherwise strip one trailing `s` unless the word
-    ends in `ss`, `us` or `is` (status, analysis, class, gas, bus, its, has
-    are none of these three characters or fewer, or excluded, and so never
-    change).
+    characters) to `-y`; strip `-es` only when the word ends `-ses`, `-xes`,
+    `-zes`, `-ches` or `-shes` (class, box, alias, bus, process); otherwise
+    strip one trailing `s` unless the word ends in `ss`, `us` or `is` (status,
+    analysis, class, gas, bus, its, has are none of these three characters or
+    fewer, or excluded, and so never change).
 
     Known residual collisions, accepted rather than hidden: "news"/"new",
     "means"/"mean", "lens"/"len" each fold to a shorter word that is not
-    their singular. A further one, found while implementing this rule:
-    "release"/"releases" does NOT fold together. "release" ends in a silent
-    `e` (no trailing `s` at all, so neither rule ever touches it) while
-    "releases" ends in literal `-ses` (release + s), which is indistinguishable
-    BY SUFFIX ALONE from a genuine sibilant-stem plural — "alias" + "es" =
-    "aliases" ends in the identical `-ses` shape. Folding "releases" as a
-    sibilant-stem plural (this function's choice, so "alias"/"aliases" and
-    "class"/"classes" fold correctly, which the shipped requirement names
-    explicitly) makes it collide with "release" rather than match it; no
-    suffix rule can satisfy both pairs, because both wordforms produce the
-    same trailing letters once pluralised.
+    their singular. Two further CLASSES, found while implementing this rule:
+
+    1. A singular ending in a silent `-se` never triggers either rule (no
+       trailing `s` alone), while its plural ends in the word-final letters
+       `-ses` — indistinguishable BY SUFFIX ALONE from a genuine `-ses`-ending
+       plural of an `s`-final singular ("alias" + "es" = "aliases" ends in the
+       identical `-ses` shape as "release" + "s" = "releases"). Folding
+       `-ses` as that latter, `s`-final-singular shape (this function's
+       choice, so "alias"/"aliases" and "class"/"classes" fold correctly,
+       which the shipped requirement names explicitly) makes every `-se`
+       singular collide with its own plural instead of matching it: release,
+       case, base, use, phase, response, database, license, increase,
+       purchase, house — none folds together with its plural. No suffix rule
+       can satisfy both shapes, because both wordforms produce the same
+       trailing letters once pluralised.
+    2. A Greek-derived singular ending in `-is` is excluded from the
+       trailing-`s`-strip rule on purpose (so "analysis", "basis", "crisis",
+       "thesis" stay whole), but its irregular plural ends in `-es` and often
+       lands on the `-ses` suffix rule instead: analysis/analyses,
+       basis/bases, crisis/crises, thesis/theses — none of these four pairs
+       folds together either. A different, unrelated irregularity from (1):
+       here the singular is untouched and the PLURAL is stripped as if it
+       were an `s`-final singular's `-es` plural.
     """
     folded = term
     for _ in range(2):
@@ -310,6 +321,15 @@ def derived_short_name(title: str) -> str | None:
     if all(token in STOPWORDS for token in tokens):
         return None
     if all(token.isdigit() for token in tokens):
+        return None
+    # Per-token, not just the joined whole (review round 4, MINOR): "a" + "b"
+    # joins to "a b", three characters, past the whole-name floor below, even
+    # though neither token is a name fragment; "2026" + "q3" joins to "2026
+    # q3" even though "q3" is one letter with a digit stapled on; an accented
+    # word this tokeniser's `[a-z0-9]` alphabet cannot see fragments into
+    # single letters ("élève" -> "l", "ve"). A token needs at least two
+    # LETTERS to be a name fragment at all.
+    if any(sum(1 for ch in token if ch.isalpha()) < 2 for token in tokens):
         return None
     name = " ".join(tokens)
     return name if len(name) >= 3 else None
@@ -1419,11 +1439,20 @@ class WorkingSetIndex:
 
         # Cap in the SAME order `anchors()` has always reported (pages first),
         # over anchor identities only — page entries are not `_Candidate`s yet.
-        ordered_ids = (
-            [entry["anchor_id"] for entry in raw_pages]
-            + [c.anchor_id for c in records]
-            + [c.anchor_id for c in plans]
-            + [c.anchor_id for c in projects]
+        # Deduped with `dict.fromkeys` BEFORE the slice (review round 4,
+        # MINOR): every anchor id here is built from a distinct page path,
+        # collection path, `plan:<rel>#<title>` key or project key, so a
+        # collision is not expected — but the slice below assumes it, and an
+        # undeduped list would let a duplicate id consume two cap "positions"
+        # while contributing only one distinct anchor, silently starving a
+        # genuinely different anchor that had room under the cap.
+        ordered_ids = list(
+            dict.fromkeys(
+                [entry["anchor_id"] for entry in raw_pages]
+                + [c.anchor_id for c in records]
+                + [c.anchor_id for c in plans]
+                + [c.anchor_id for c in projects]
+            )
         )
         kept_ids = frozenset(ordered_ids[:MAX_ANCHORS])
         raw_pages = [entry for entry in raw_pages if entry["anchor_id"] in kept_ids]

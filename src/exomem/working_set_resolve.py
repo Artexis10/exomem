@@ -302,24 +302,29 @@ def candidates_for(
         names = {normalize(row.title), *row.aliases} - {""}
         if names & phrases:
             evidence.add("exact_alias")
-        # `lexical_overlap` stays over the BROAD terms (title, aliases,
-        # sections, tags): two shared content words anywhere in that vocabulary
-        # is a real reference. `rare_term` does NOT: it is granted for the
-        # anchor's OWN AUTHORED title/alias terms only, the exact vocabulary
-        # `term_anchor_counts` measures rarity against. Sharing it over the
-        # broad terms would let a common TAG word (every hub carries `hub`)
-        # look "rare" because only one anchor's TITLE says it — the count is
-        # honest, but the anchor claiming the count's rarity by way of its tag
-        # never earned it. See the canonical spec's "A tag is not a name".
+        # `lexical_overlap` and `rare_term` are mutually exclusive on one
+        # anchor (review round 4, BLOCKER): both were being read off the SAME
+        # intersection of the turn's words with the anchor's, so one fact —
+        # the turn shares words with this anchor — was counted twice and
+        # `_status_for` resolved the pair. `lexical_overlap` needs at least
+        # `min_terms` shared words over the BROAD vocabulary (title, aliases,
+        # sections, tags) AND at least one of them among the anchor's OWN
+        # AUTHORED title/alias terms — a tag or section word may COMPLETE an
+        # overlap, never CONSTITUTE one alone, or two anchors sharing nothing
+        # but a tag and a section heading (e.g. two `hub`-tagged pages each
+        # with a `## Notes` section) would "overlap" on words neither one
+        # authored. `rare_term` is granted only when `lexical_overlap` was
+        # NOT: it is the single-authored-rare-word case, a genuinely weaker,
+        # different fact, never a second vote for the same one.
         row_terms_folded = frozenset(fold_plural(term) for term in row.terms)
-        shared = turn_terms_folded & row_terms_folded
-        if len(shared) >= min_terms:
-            evidence.add("lexical_overlap")
         name_terms_folded = frozenset(
             fold_plural(term) for term in tokens_of(" ".join((row.title, *row.aliases)))
         )
+        shared_broad = turn_terms_folded & row_terms_folded
         shared_name = turn_terms_folded & name_terms_folded
-        if len(shared_name) == 1:
+        if len(shared_broad) >= min_terms and shared_name:
+            evidence.add("lexical_overlap")
+        elif len(shared_name) == 1:
             (term,) = shared_name
             count = term_counts.get(term)
             if count is not None and count <= RARE_TERM_MAX_ANCHORS:

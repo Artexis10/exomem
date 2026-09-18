@@ -454,6 +454,97 @@ def test_rare_term_with_another_contact_kind_resolves() -> None:
     assert resolution.anchors[0].evidence == ("rare_term", "retrieval")
 
 
+# --------------------------------------------------------------------------- #
+# Independent review, round 4: `lexical_overlap` and `rare_term` are
+# mutually exclusive, and `lexical_overlap` needs at least one AUTHORED word.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_tag_completed_overlap_grants_lexical_overlap_alone_not_also_rare_term() -> None:
+    """The reviewer's "wardrobe hub" repro (round 4, BLOCKER): title "Wardrobe
+    inventory" (authored terms wardrobe/inventory), a `## Notes` section and a
+    `hub` tag. Turn "wardrobe hub" shares two BROAD terms (wardrobe, hub) --
+    enough for `lexical_overlap`, since "wardrobe" is authored and the tag
+    word "hub" completes the count -- but that is ONE fact, not two: no
+    anchor may ALSO carry `rare_term` from the very same authored word.
+    """
+    row = _term_row(
+        "wardrobe.md", "Wardrobe inventory", terms=("wardrobe", "inventory", "notes", "hub")
+    )
+    analysis = resolve_module.analyze_turn("wardrobe hub")
+    candidates = resolve_module.candidates_for(
+        analysis, (row,), term_anchor_counts={"wardrobe": 1}
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].evidence == frozenset({"lexical_overlap"})
+    resolution = resolve_module.resolve(candidates)
+    assert resolution.status == "unresolved"
+    assert resolution.anchors[0].status == "partial"
+
+
+def test_tag_and_section_words_alone_never_constitute_an_overlap() -> None:
+    """The reviewer's MAJOR (round 4): "hub notes" against two anchors tagged
+    `hub` with a `## Notes` section, whose TITLES name neither word, both own
+    pages in `retrieval_paths`. Tag/section words may COMPLETE an overlap,
+    never CONSTITUTE one: neither anchor's authored title/alias terms share
+    anything with the turn, so neither may carry `lexical_overlap` (nor
+    `rare_term`, for the same reason) -- retrieval alone, and the packet
+    abstains `unresolved`, never `ambiguous` (ambiguity is only ever computed
+    over RESOLVED anchors, and neither resolves here).
+    """
+    row1 = _term_row(
+        "h1.md", "Northern Circuit", terms=("northern", "circuit", "notes", "hub")
+    )
+    row2 = _term_row(
+        "h2.md", "Southern Circuit", terms=("southern", "circuit", "notes", "hub")
+    )
+    analysis = resolve_module.analyze_turn("hub notes")
+    candidates = resolve_module.candidates_for(
+        analysis, (row1, row2), retrieval_paths=frozenset({"h1.md", "h2.md"})
+    )
+
+    for candidate in candidates:
+        assert "lexical_overlap" not in candidate.evidence
+        assert "rare_term" not in candidate.evidence
+        assert candidate.evidence == frozenset({"retrieval"})
+
+    resolution = resolve_module.resolve(candidates)
+    assert resolution.status == "unresolved"
+
+
+def test_one_authored_word_plus_one_section_word_plus_retrieval_still_resolves() -> None:
+    """A LEGITIMATE overlap survives the fix: one authored word ("wardrobe")
+    plus one section word ("notes", never authored) is a real two-term
+    overlap that includes an authored term, so `lexical_overlap` is granted
+    as before, and with `retrieval` alongside it the anchor still resolves.
+    """
+    row = _term_row(
+        "wardrobe2.md", "Wardrobe inventory", terms=("wardrobe", "inventory", "notes")
+    )
+    analysis = resolve_module.analyze_turn("wardrobe notes")
+    candidates = resolve_module.candidates_for(
+        analysis, (row,), retrieval_paths=frozenset({"wardrobe2.md"})
+    )
+
+    assert candidates[0].evidence == frozenset({"lexical_overlap", "retrieval"})
+    resolution = resolve_module.resolve(candidates)
+    assert resolution.anchors[0].status == "resolved"
+
+
+def test_two_authored_words_still_give_lexical_overlap_as_before() -> None:
+    """Unchanged case: two shared AUTHORED words grant `lexical_overlap`
+    exactly as they did before this fix.
+    """
+    row = _term_row("x.md", "Alpha Beta", terms=("alpha", "beta"))
+    # Reordered so the turn never forms the "alpha beta" bigram itself --
+    # this is testing `lexical_overlap`, not a second route to `exact_alias`.
+    analysis = resolve_module.analyze_turn("beta versus alpha today")
+    candidates = resolve_module.candidates_for(analysis, (row,))
+
+    assert candidates[0].evidence == frozenset({"lexical_overlap"})
+
+
 def test_lexical_comparison_folds_regular_plurals() -> None:
     """Canonical spec: "Plural and singular agree"."""
     row = _term_row(
