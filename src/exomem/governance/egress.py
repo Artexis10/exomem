@@ -2219,7 +2219,9 @@ def guard_working_set(
     # page's TITLE — `[[Kill switch for risky releases]]` — canonicalises to
     # something that is no filename stem and matched nothing, even though the path
     # it resolves to was decided and withheld. Every name that resolved to a
-    # withheld path is therefore added as its own match key.
+    # withheld path is therefore added as its own match key, in BOTH the spelling
+    # the prose contained and its normalised form: the matcher casefolds without
+    # normalising, so a normalised key alone misses an NBSP or full-width spelling.
     #
     # Deliberately local to this guard. The same gap exists in the shared
     # `_withheld_keys` that `guard_referents` and hit projection use, and fixing it
@@ -2232,32 +2234,63 @@ def guard_working_set(
             if any(path in withheld for path in paths)
         }
     )
+    #: Sections whose removals are reported. `ambiguity` and `missing` are
+    #: excluded: the first is a diagnostic about resolution rather than material,
+    #: and the second is where the markers themselves live.
+    removed: dict[str, int] = {}
+
+    def _note_removal(section: str, before: int, after: int) -> None:
+        if after < before:
+            removed[section] = before - after
+
+    original_anchors = [
+        item for item in guarded.get("anchors") or () if isinstance(item, Mapping)
+    ]
     guarded["anchors"] = [
         anchor
         for anchor in (
-            _guarded_anchor(item, frozen, decisions)
-            for item in guarded.get("anchors") or ()
-            if isinstance(item, Mapping)
+            _guarded_anchor(item, frozen, decisions) for item in original_anchors
         )
         if anchor is not None
     ]
+    _note_removal("anchors", len(original_anchors), len(guarded["anchors"]))
+
+    original_units = [
+        item for item in guarded.get("units") or () if isinstance(item, Mapping)
+    ]
     guarded["units"] = [
         unit
-        for unit in (
-            _guarded_unit(item, frozen, decisions)
-            for item in guarded.get("units") or ()
-            if isinstance(item, Mapping)
-        )
+        for unit in (_guarded_unit(item, frozen, decisions) for item in original_units)
         if unit is not None
     ]
+    _note_removal("units", len(original_units), len(guarded["units"]))
+
     for section in ("pointers", "ambiguity", "current_state", "missing"):
         values = guarded.get(section)
         if isinstance(values, list):
-            guarded[section] = [
+            kept = [
                 dict(item)
                 for item in values
                 if not _names_withheld(item, frozen, reference_field=True)
             ]
+            if section in ("pointers", "current_state"):
+                _note_removal(section, len(values), len(kept))
+            guarded[section] = kept
+
+    # Appended AFTER the `missing` filter runs, never before: `missing[]` entries
+    # are compared as reference fields, so a bare word matches a withheld page's
+    # filename stem, and a vault holding `anchors.md` would otherwise delete the
+    # very marker explaining why its anchors vanished.
+    #
+    # Fail-closed is right here — a title a withheld page also bears cannot be told
+    # apart at this layer — but a silent removal reads exactly like a vault with
+    # nothing to say, which is what `lane_truncated` and `budget` already refuse to
+    # do. The marker names no path and no name: it says a section lost something,
+    # which is what the caller needs to know and the most it may be told.
+    if removed and isinstance(guarded.get("missing"), list):
+        guarded["missing"].extend(
+            {"role": section, "reason": "withheld"} for section in sorted(removed)
+        )
     # A packet whose every anchor was withheld is not a resolved packet with a
     # short answer — it is an abstention. Serving it with `abstained: false` and
     # empty blocks would state that the turn resolved and the vault had nothing,
@@ -2268,6 +2301,9 @@ def guard_working_set(
         guarded["abstention"] = {"reason": "withheld"}
         for section in ("units", "pointers", "current_state", "roles"):
             guarded[section] = []
+        # `missing` is deliberately NOT cleared: its markers are the only thing
+        # left saying the packet is empty because the guard emptied it, rather
+        # than because the compiler found nothing.
         budget = guarded.get("budget")
         if isinstance(budget, Mapping):
             guarded["budget"] = {**dict(budget), "used_chars": 0}
@@ -2363,6 +2399,13 @@ def _resolved_prose_names(vault_root: Path, names: set[str]) -> dict[str, tuple[
     that resolved to a withheld path are added as extra match keys for this
     guard's own comparisons.
 
+    Every resolved path is keyed under BOTH the spelling the prose contained and
+    its normalised form. The resolver normalises NFKC + casefold; the matcher
+    casefolds only. Keying on the normalised form alone therefore missed a title
+    carrying a non-breaking space or a full-width letter — resolved, decided,
+    withheld, and still matched nothing. The match has to be available on the text
+    that is actually written, not only on a canonical form of it.
+
     An unknown name is absent from the result and decides nothing. A resolver that
     cannot run raises: the packet reaching this guard was COMPILED from that index,
     so an index that is now unavailable is a contradiction about the release plane,
@@ -2378,13 +2421,22 @@ def _resolved_prose_names(vault_root: Path, names: set[str]) -> dict[str, tuple[
             "the activation index is unavailable while guarding a packet built from it"
         )
     try:
-        return index.resolve_names(names)
+        resolved = index.resolve_names(names)
     except working_set_index.WorkingSetIndexUnavailable as error:
         raise WorkingSetResolutionUnavailable(str(error)) from error
     except sqlite3.Error as error:
         raise WorkingSetResolutionUnavailable(
             "the activation index could not resolve prose references"
         ) from error
+    out: dict[str, tuple[str, ...]] = {}
+    for raw in names:
+        key = working_set_index.normalize(raw)
+        paths = resolved.get(key)
+        if not paths:
+            continue
+        out[raw] = paths
+        out[key] = paths
+    return out
 
 
 def _guarded_anchor(

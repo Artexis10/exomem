@@ -121,7 +121,9 @@ with its active successor named rather than presented as current. A lane that
 reaches its read limit before exhausting the anchor neighbourhood SHALL report
 `missing[] {role, reason: "lane_truncated"}`, and a lane whose items fit neither as
 units nor as pointers within `max_chars` SHALL report `missing[] {role, reason:
-"budget"}`; the packet never drops material silently. The packet SHALL NOT carry the
+"budget"}`; an item the egress guard removes SHALL be reported as `missing[] {role,
+reason: "withheld"}` once per affected section without naming the item; the packet
+never drops material silently. The packet SHALL NOT carry the
 `due_state` block and SHALL NOT read or advance the due-state emission ledger; recall
 remains the only `due_state` carrier.
 
@@ -183,8 +185,11 @@ exactly as it is for recall and SHALL never enter ranking or a cache key.
 #### Scenario: Withheld page never leaks through unit prose
 - **WHEN** a permitted unit's text contains a wikilink to a page withheld from the
   caller's audience, spelled by filename stem, by page title, with a display alias
-  (`[[page|label]]`) or with a heading (`[[page#section]]`)
-- **THEN** the served packet contains no reference to that page in any unit's text
+  (`[[page|label]]`) or with a heading (`[[page#section]]`), in any Unicode form of
+  that spelling the page-name map resolves
+- **THEN** the served packet contains no reference to that page in any unit's text,
+  and the match is made on the spelling the prose actually contains, never only on
+  a normalised form of it
 
 #### Scenario: An ungoverned vault never depends on the activation sidecar for release
 - **WHEN** no governance policy is active, no page is withheld and the packet carries

@@ -460,7 +460,12 @@ def test_missing_entries_are_scanned_too(vault: Path) -> None:
         guarded = egress.guard_working_set(vault, packet, _release())
 
     assert guarded is not None
-    assert [entry["role"] for entry in guarded["missing"]] == ["methods"]
+    roles = [entry["role"] for entry in guarded["missing"]]
+    # The entry naming a withheld path is gone; the clean one stays. The guard's
+    # own per-section markers ride alongside it.
+    assert "resources" not in roles
+    assert "methods" in roles
+    assert RESTRICTED_PATH not in str(guarded["missing"])
 
 
 def test_retrieval_refs_enter_the_cache_key_but_purpose_never_does() -> None:
@@ -909,3 +914,199 @@ def test_a_governed_vault_still_fails_closed_on_a_sidecar_error(
     with pytest.raises(egress.WorkingSetResolutionUnavailable):
         with request_scope(_external()):
             egress.guard_working_set(vault, packet, _prose_release())
+
+
+# --------------------------------------------------------------------------- #
+# Round four: match the spelling the prose contains, and say when we removed
+# --------------------------------------------------------------------------- #
+
+NBSP = " "
+FULLWIDTH_P = "Ｐ"
+
+
+def _titled_page(vault: Path, rel: str, title: str) -> None:
+    path = vault / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\ntype: pattern\ntitle: {title}\nstatus: active\nupdated: 2026-09-01\n---\n\n"
+        f"# {title}\n\nBody.\n",
+        encoding="utf-8",
+    )
+
+
+#: `(title as authored, the spelling prose uses)`. Each pair differs from its own
+#: NFKC normalisation, which is the whole point: the match set was rebuilt from a
+#: canonical form instead of from the text the prose actually contains.
+_DIVERGENT_SPELLINGS = [
+    (f"Nbsp{NBSP}Titled Page", f"Nbsp{NBSP}Titled Page"),
+    (f"Fullwidth {FULLWIDTH_P}age", f"Fullwidth {FULLWIDTH_P}age"),
+]
+
+
+@pytest.mark.parametrize(("title", "spelling"), _DIVERGENT_SPELLINGS)
+def test_a_unicode_divergent_spelling_of_a_withheld_title_drops_the_unit(
+    vault: Path, title: str, spelling: str
+) -> None:
+    """The match must be made on the spelling the prose contains.
+
+    The resolver's key is NFKC + casefold; `_canonical_reference` casefolds only.
+    A title carrying a non-breaking space therefore resolved and was decided
+    withheld, and the prose spelled with the NBSP still matched nothing.
+    """
+    _titled_page(vault, "Knowledge Base/Notes/Patterns/divergent.md", title)
+    write_scope(vault)  # Notes/Patterns/** -> withheld from this audience
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(
+            vault, _prose_only_packet(spelling), _prose_release()
+        )
+
+    assert guarded is not None
+    assert guarded["units"] == []
+
+
+@pytest.mark.parametrize(("title", "spelling"), _DIVERGENT_SPELLINGS)
+def test_a_unicode_divergent_spelling_of_a_permitted_title_keeps_the_unit(
+    vault: Path, title: str, spelling: str
+) -> None:
+    _titled_page(vault, "Knowledge Base/Notes/Insights/divergent.md", title)
+    write_scope(vault)  # only Notes/Patterns/** is governed
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    packet = _prose_only_packet(spelling)
+    expected = list(packet["units"])
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _prose_release())
+
+    assert guarded is not None
+    assert guarded["units"] == expected
+
+
+@pytest.mark.parametrize(("title", "spelling"), _DIVERGENT_SPELLINGS)
+def test_the_plain_normalised_spelling_still_matches(
+    vault: Path, title: str, spelling: str
+) -> None:
+    """Adding the raw key must not cost the normalised one."""
+    import unicodedata
+
+    _titled_page(vault, "Knowledge Base/Notes/Patterns/divergent.md", title)
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    normalised = unicodedata.normalize("NFKC", spelling)
+    assert normalised != spelling, "this row must diverge under NFKC to be a test"
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(
+            vault, _prose_only_packet(normalised), _prose_release()
+        )
+
+    assert guarded is not None
+    assert guarded["units"] == []
+
+
+def test_a_guard_removal_is_reported_per_section(vault: Path) -> None:
+    """The reviewer's shared-title case: the permitted twin loses its own anchor.
+
+    Fail-closed is right for v0 — a title that a withheld page also bears cannot
+    be told apart here — but a silent removal reads exactly like a vault with
+    nothing to say, which is what `lane_truncated` and `budget` already refuse to
+    do.
+    """
+    shared = "Shared Title"
+    _titled_page(vault, "Knowledge Base/Notes/Patterns/withheld-twin.md", shared)
+    _titled_page(vault, "Knowledge Base/Notes/Insights/permitted-twin.md", shared)
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    permitted = "Knowledge Base/Notes/Insights/permitted-twin.md"
+    # The prose links the SHARED title, so it resolves to both twins, one of them
+    # withheld — which is what promotes the title to a match key and then takes
+    # the permitted twin's own anchor row with it.
+    packet = _prose_only_packet(shared)
+    packet["anchors"] = [
+        {
+            "ref": permitted,
+            "path": permitted,
+            "title": shared,
+            "kind": "hub",
+            "status": "resolved",
+            "evidence": ["exact_alias"],
+        },
+        {
+            "ref": OPEN_PATH,
+            "path": OPEN_PATH,
+            "title": "Open anchor",
+            "kind": "resource",
+            "status": "resolved",
+            "evidence": ["lexical_overlap"],
+        },
+    ]
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _prose_release())
+
+    assert guarded is not None
+    assert [anchor["ref"] for anchor in guarded["anchors"]] == [OPEN_PATH]
+    assert {"role": "anchors", "reason": "withheld"} in guarded["missing"]
+    # The marker names nothing.
+    for marker in guarded["missing"]:
+        assert set(marker) == {"role", "reason"}
+
+
+def test_a_packet_with_nothing_withheld_carries_no_withheld_marker(vault: Path) -> None:
+    write_scope(vault)
+    write_rule(vault, ceiling=6)
+    _indexed(vault)
+
+    packet = _prose_only_packet("no-such-page")
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _prose_release())
+
+    assert guarded is not None
+    assert guarded["units"]
+    assert [m for m in guarded["missing"] if m.get("reason") == "withheld"] == []
+
+
+def test_withheld_markers_survive_the_guards_own_scan(vault: Path) -> None:
+    """A marker must not be filtered by the scan that produced it.
+
+    `missing[]` entries are compared as reference fields, so a bare word matches a
+    withheld page's stem. A vault holding `anchors.md` or `withheld.md` would
+    otherwise delete the very marker explaining the removal.
+    """
+    _titled_page(vault, "Knowledge Base/Notes/Patterns/anchors.md", "Anchors")
+    _titled_page(vault, "Knowledge Base/Notes/Patterns/withheld.md", "Withheld")
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    packet = _prose_only_packet(_stem_of(RESTRICTED_PATH))
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _prose_release())
+
+    assert guarded is not None
+    assert guarded["units"] == []
+    assert {"role": "units", "reason": "withheld"} in guarded["missing"]
+
+
+def test_the_fully_withheld_flip_keeps_its_markers(vault: Path) -> None:
+    write_scope(vault, paths="**")
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, _packet(), _prose_release())
+
+    assert guarded is not None
+    assert guarded["abstained"] is True
+    assert guarded["abstention"] == {"reason": "withheld"}
+    assert {"role": "anchors", "reason": "withheld"} in guarded["missing"]
