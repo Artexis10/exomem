@@ -116,6 +116,9 @@ from . import vocabulary_evidence as vocabulary_evidence_module
 from . import vocabulary_workflow as vocabulary_workflow_module
 from . import workflow_contracts as workflow_contracts_module
 from . import workflow_skills as workflow_skills_module
+from . import working_set as working_set_module
+from . import working_set_index as working_set_index_module
+from . import working_set_runtime as working_set_runtime_module
 from .command_surface import (
     DESTRUCTIVE_OPS,  # noqa: F401 - re-exported for server.py
     GUARDED_WRITE_FIELDS,  # noqa: F401 - re-exported for server.py
@@ -5797,6 +5800,157 @@ def _with_due_state(
     return {"hits": result, "due_state": block}
 
 
+#: Hits the `retrieval` evidence kind reads. Small on purpose: this is ONE of
+#: eight evidence kinds, and the compiler's own lanes are index-backed, so the
+#: operation must not inherit a whole-vault recall's cost to learn one signal.
+ACTIVATE_RETRIEVAL_LIMIT = 8
+
+
+def op_activate_context(
+    vault_root: Path,
+    turn: str = "",
+    max_chars: int = working_set_module.DEFAULT_BUDGET_CHARS,
+    purpose: str | None = None,
+    include_timings: bool = False,
+) -> dict:
+    """Compile durable context for a raw conversational turn, without a query.
+
+    Call this ONCE at the start of a substantive turn, before deciding what to
+    search for. Pass the user's words verbatim — this is not a search query and
+    must not be rewritten into one. It returns a bounded working-memory packet:
+    which durable anchors the turn is about (entities, resources, hubs, Records
+    collections, active plans, projects), the context roles it filled, short
+    provenance-bearing units, pointers to what did not fit the budget, and the
+    current state of any resource whose collection records one.
+
+    Read-only and abstaining by construction. It writes nothing, changes no
+    `ask_memory`/`find` result, runs no model beyond the retrieval scorers recall
+    already runs, and returns `abstained: true` with a reason rather than guessing
+    when the turn resolves nothing (`unresolved`), names two competing senses
+    (`ambiguous`), is served while the derived index is still warming
+    (`index_warming`), or is switched off (`disabled`). An ambiguous turn lists
+    both anchors under `ambiguity` and runs no role lane — you pick the sense.
+
+    Use `ask_memory` instead when you already know what you are looking for; use
+    this when you do not, and follow it with `read_memory` on whatever ref the
+    packet points at.
+
+    Args:
+        turn: The user's turn, verbatim. Empty abstains.
+        max_chars: Character ceiling for the packet's text. Default 4,000,
+            clamped to 500..8,000. Overflow becomes pointers, never truncated
+            claims.
+        purpose: Optional declared purpose for this request, e.g. "audit" or
+            "due-diligence". Governance rules may widen or narrow what a given
+            audience may see for a stated purpose; leaving it unset is
+            deterministic, not a wildcard. Never affects ranking, and never
+            enters the packet cache key.
+        include_timings: Include per-stage timings for diagnostics.
+
+    Returns: {anchors, roles, units, pointers, current_state, missing,
+             ambiguity, budget, generation, abstained, abstention?}.
+    """
+    timings = find_types.FindTimings() if include_timings else None
+    budget = working_set_module.clamp_budget(max_chars)
+    turn = str(turn or "")
+
+    generation_stub = {"freshness_key": "", "index_generation": 0, "roles_hash": ""}
+    if not turn.strip():
+        return working_set_module.abstained_packet(
+            reason="unresolved", max_chars=budget, generation=generation_stub
+        )
+    if working_set_index_module.disabled():
+        # The tool stays on the surface under the kill switch so the published
+        # tool-surface digest is independent of the environment; it just abstains.
+        return working_set_module.abstained_packet(
+            reason="disabled", max_chars=budget, generation=generation_stub
+        )
+
+    # Release gate first, in `op_find`'s shape (see the release-gate comment in
+    # `op_find`): the pool is widened only when a policy is active, and decisions
+    # are computed strictly after `find()` has returned.
+    #
+    # The try wraps `find()` and NOTHING else. `retrieval` is one evidence kind of
+    # eight, so losing it degrades resolution; losing the release object would
+    # turn a governance-blocked read into a full disclosure, because the guard
+    # below would have no decisions to apply. `annotate_hits` therefore runs on
+    # every path, over an empty hit list when recall failed.
+    try:
+        _policy, release_active = egress_module.gate_state(vault_root)
+        retrieval_limit = (
+            egress_module.pool_limit(ACTIVATE_RETRIEVAL_LIMIT)
+            if release_active
+            else ACTIVATE_RETRIEVAL_LIMIT
+        )
+        with find_types.timing_span(timings, "working_set.retrieval"):
+            try:
+                hits = find_module.find(
+                    vault_root,
+                    query=turn,
+                    limit=retrieval_limit,
+                    mode="hybrid",
+                    rerank=False,
+                    graph=True,
+                )
+            except Exception:  # noqa: BLE001 - one degraded evidence kind, not a bypass
+                log.debug("activation retrieval evidence unavailable", exc_info=True)
+                hits = []
+            release = egress_module.annotate_hits(
+                vault_root, hits, limit=ACTIVATE_RETRIEVAL_LIMIT, purpose=purpose
+            )
+    except Exception:  # noqa: BLE001 - the release plane failing means abstain, not serve
+        log.warning("activation release plane unavailable; abstaining", exc_info=True)
+        return working_set_module.abstained_packet(
+            reason="unavailable", max_chars=budget, generation=generation_stub
+        )
+    retrieval_paths = frozenset(
+        str(getattr(hit, "path", "") or "") for hit in release.hits
+    ) - {""}
+
+    freshness_key: Any = ""
+    try:
+        freshness_key = find_module.FreshnessSnapshot(vault_root).projection_key("kb")
+    except Exception:  # noqa: BLE001 - an unkeyed packet is uncached, never wrong
+        freshness_key = ""
+
+    packet = working_set_runtime_module.serve(
+        vault_root,
+        turn=turn,
+        max_chars=budget,
+        purpose=purpose,
+        timings=timings,
+        retrieval_paths=retrieval_paths,
+        freshness_key=freshness_key,
+    )
+    # Unconditional: every served packet crosses the guard. A guard that only ran
+    # when the retrieval lane happened to succeed is not a guard.
+    try:
+        guarded = egress_module.guard_working_set(
+            vault_root, packet, release, purpose=purpose
+        )
+    except Exception:  # noqa: BLE001 - a guard that cannot decide must not disclose
+        log.warning("activation egress guard failed; abstaining", exc_info=True)
+        return working_set_module.abstained_packet(
+            reason="unavailable",
+            max_chars=budget,
+            generation=packet.get("generation") or generation_stub,
+        )
+    if guarded is None:
+        return working_set_module.abstained_packet(
+            reason="withheld",
+            max_chars=budget,
+            generation=packet.get("generation") or generation_stub,
+        )
+    packet = guarded
+    if timings is not None:
+        packet["timings"] = timings.as_dict()
+    # Deliberately NOT `_with_due_state`. That helper consults the emission
+    # ledger and marks it emitted, so an activation carrying the block would eat
+    # the next recall's delta — a read-only operation changing what a later read
+    # returns. Recall is the only `due_state` carrier.
+    return packet
+
+
 def op_read_memory(
     vault_root: Path,
     path: str,
@@ -10328,7 +10482,11 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
             "args": {"detail": "compact", "rerank": False, "deep": True},
         },
         "safety": "read-only; deep mode assembles context and graph enrichment stays explicit",
-        "advanced": ["read_memory", "query_dataset", "read_media"],
+        # `activate_context` leads because it is the call for a turn that does
+        # not yet have a query: it resolves what the turn is about and returns a
+        # bounded packet, or abstains. The rest of the family assumes the agent
+        # already knows what it is looking for.
+        "advanced": ["activate_context", "read_memory", "query_dataset", "read_media"],
     },
     "remember": {
         "intent": "Save a durable conclusion as compiled governed knowledge.",
@@ -10461,6 +10619,7 @@ _PRODUCT_METADATA: dict[str, dict] = {
         "actions": ("ask", "review", "save", "update"),
         "first_run_safe": False,
     },
+    "activate_context": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
 }
 _MCRC = frozenset({"mcp", "rest", "cli"})
 _RC = frozenset({"rest", "cli"})
@@ -10510,6 +10669,7 @@ _SPEC: tuple[tuple, ...] = (
     ("record_memory", op_record_memory, 1, True, False, None, _MCRC),
     ("plan_memory", plan_memory_module.plan_memory, 1, True, False, None, _MCRC),
     ("get_video_frames", op_get_video_frames, 2, False, False, None, _M),
+    ("activate_context", op_activate_context, 1, False, False, "turn", _MCRC),
 )
 
 
@@ -10592,6 +10752,17 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "query",
         _MCRC,
         ("search", "find"),
+        {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
+    ),
+    (
+        "activate_context",
+        op_activate_context,
+        1,
+        False,
+        False,
+        "turn",
+        _MCRC,
+        ("activate_context",),
         {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
     ),
     (
@@ -11078,6 +11249,22 @@ HOSTED_SURFACE_EXCLUSIONS = MappingProxyType(
                 lifted_when=(
                     "a new hosted profile admits identity-scoped preference mutations, "
                     "verifies principal and cell isolation, and carries its own candidate digest"
+                ),
+            ),
+            HostedSurfaceExclusion(
+                command="activate_context",
+                reason=(
+                    "The hosted profiles pin their ordered command membership, and v5 "
+                    "retains v4's. Publishing this tool on hosted would move both "
+                    "profiles' command_surface_sha256 under an unchanged profile ID, "
+                    "invalidating the promotion records taken off those bytes. The "
+                    "capability is complete and reachable on the self-hosted MCP, CLI "
+                    "and REST surfaces; hosted adoption is a profile decision, not a "
+                    "side effect of adding a tool."
+                ),
+                lifted_when=(
+                    "a new hosted profile admits the context compiler and carries its "
+                    "own command-surface digest and candidate definition"
                 ),
             ),
             HostedSurfaceExclusion(

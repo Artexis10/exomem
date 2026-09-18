@@ -275,6 +275,11 @@ def _dispatch_main(raw: list[str]) -> int:
         return _lease_main(raw[1:])
     if raw and raw[0] == "governance-schema":
         return _governance_schema_main(raw[1:])
+    # `exomem activate "<turn>"` — the spelled-out contract for the context
+    # compiler. A thin alias over the registry command so there is exactly one
+    # leaf; the long form `exomem activate_context` keeps working.
+    if raw and raw[0] == "activate":
+        return _activate_main(raw[1:])
     # Registry-driven product operations (reads + writes): `exomem ask_memory "..."`,
     # `exomem remember ...`, etc. Product commands take precedence over old
     # short aliases when a name overlaps.
@@ -2403,6 +2408,38 @@ def _install_hook_main(argv: list[str]) -> int:
 # --------------------------------------------------------------------------- #
 # Simple product actions (friendly CLI aliases over canonical registry commands)
 # --------------------------------------------------------------------------- #
+def _activate_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem activate",
+        description=(
+            "Compile durable context for a raw turn. Thin alias over "
+            "activate_context; pass the user's words verbatim, not a query."
+        ),
+    )
+    parser.add_argument("turn", help="the user's turn, verbatim")
+    parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=None,
+        help="character ceiling for the packet (default 4000, clamped to 500..8000)",
+    )
+    parser.add_argument("--purpose", default=None, help="declared purpose for this request")
+    parser.add_argument(
+        "--timings", action="store_true", help="include per-stage timings"
+    )
+    parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
+    args = parser.parse_args(argv)
+
+    core = ["activate_context", args.turn]
+    if args.max_chars is not None:
+        core += ["--max-chars", str(args.max_chars)]
+    if args.purpose:
+        core += ["--purpose", args.purpose]
+    if args.timings:
+        core.append("--include-timings")
+    return _core_op_main(_with_json(core, args.json))
+
+
 def _simple_cli_action_names() -> frozenset[str]:
     from . import commands as commands_module
 
