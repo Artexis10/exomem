@@ -6,6 +6,7 @@ tests/test_benchmark_capabilities.py
 tests/test_capture_sweep_journey.py
 tests/test_context_activation_audit.py
 tests/test_context_activation_fixtures.py
+tests/test_context_activation_resolver_soundness.py
 tests/test_continuation_checkpoint.py
 tests/test_database_bootstrap_rotation_gate.py
 tests/test_dataset_identity_case_count.py
