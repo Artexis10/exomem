@@ -32,7 +32,8 @@ other than the retrieval scorers ordinary recall already runs.
 ### Requirement: Derived activation index
 The product SHALL maintain an activation index as a disposable derived sidecar under
 the machine-local state root, built only from governed structure: entity pages (title,
-`aliases`, entity type, attributes), hub pages, `Products/` and `Systems/` pages,
+`aliases`, entity type, attributes), hub pages outside the immutable raw-material
+folders (`Sources/`, `Evidence/`), `Products/` and `Systems/` pages,
 active Planning items (title, kind, tags, execution pointer), Records collection
 manifests (title, item schema field names, `claims`), and project keys. Each anchor
 row SHALL carry a canonical ref, an anchor kind, a lifecycle, a structural signature
@@ -107,13 +108,20 @@ linked to the anchor, entity or profile page facets, `graph_context` under a
 traversal profile from resolved anchors at depth at most 2 (depth 1 from `partial`
 anchors), and evidence pointers. The packet SHALL contain `anchors[]` (ref, title,
 kind, status, evidence), `roles[]`, `units[]` (ref, role, text of at most 360
-characters, lifecycle, updated, provenance), `pointers[]`, `current_state[]` (anchor,
-source, as_of), `missing[]`, `ambiguity[]`, `budget {limit_chars, used_chars}`,
-`generation {freshness_key, index_generation, roles_hash}` and `abstained`. Units
-SHALL be emitted before pages, pages beyond the budget SHALL become pointers, the
-packet SHALL never exceed `max_chars`, and a superseded unit SHALL be marked
-`superseded` with its active successor named rather than presented as current. The
-packet SHALL NOT duplicate the `due_state` carrier.
+characters cut only at a boundary that leaves no unclosed wikilink, lifecycle,
+updated, provenance), `pointers[]` (ref, title, why), `current_state[]` (anchor,
+source, as_of, `statement` of at most 200 characters stating the observed status in
+the source's own words), `missing[]` (role, reason), `ambiguity[]`,
+`budget {limit_chars, used_chars}`, `generation {freshness_key, index_generation,
+roles_hash}` and `abstained`. `used_chars` SHALL count every prose field of the
+packet (unit text, `current_state[].statement`, pointer title and why) and SHALL
+never exceed `max_chars`. Units SHALL be emitted before pages, pages beyond the
+budget SHALL become pointers, and a superseded unit SHALL be marked `superseded`
+with its active successor named rather than presented as current. A lane that
+reaches its read limit before exhausting the anchor neighbourhood SHALL report
+`missing[] {role, reason: "lane_truncated"}`. The packet SHALL NOT carry the
+`due_state` block and SHALL NOT read or advance the due-state emission ledger; recall
+remains the only `due_state` carrier.
 
 #### Scenario: Budget holds under a large neighbourhood
 - **WHEN** the selected lanes yield more candidate text than `max_chars`
@@ -130,9 +138,19 @@ packet SHALL NOT duplicate the `due_state` carrier.
 #### Scenario: Current state comes from Records first
 - **WHEN** a resolved resource anchor is claimed by a Records collection whose latest
   item states the resource's status
-- **THEN** `current_state[]` carries that status with `source: records` and the item's
-  `observed_on`, and the `current_state` role lane does not substitute an older prose
-  note for it
+- **THEN** `current_state[]` carries that status as `statement` with `source: records`
+  and the item's `observed_on`, and the `current_state` role lane does not substitute
+  an older prose note for it
+
+#### Scenario: A truncated lane is reported, not hidden
+- **WHEN** a role lane's read limit is reached while in-neighbourhood units remain
+- **THEN** `missing[]` carries `{role, reason: "lane_truncated"}` for that lane
+
+#### Scenario: Activation never consumes the due-state emission
+- **WHEN** `activate_context` is called and `ask_memory` is then called on the same
+  vault in the same process with a due-state block pending
+- **THEN** the `ask_memory` response carries the same `due_state` block it would have
+  carried had `activate_context` not been called
 
 #### Scenario: Abstained packet injects nothing
 - **WHEN** the turn is `unresolved`
@@ -140,12 +158,25 @@ packet SHALL NOT duplicate the `due_state` carrier.
   is 0
 
 ### Requirement: Governance and egress
-Every lane SHALL run under the governance release plane that `find` uses, and the
-packet SHALL be passed through an egress guard that receives the same release object
-as hit projection, so that no anchor, unit, pointer, provenance string or
-`current_state` entry names a withheld page, including inside wikilink syntax. The
-declared `purpose` SHALL be honoured exactly as it is for recall and SHALL never enter
-ranking or a cache key.
+Every lane SHALL run under the governance release plane that `find` uses, and every
+served packet SHALL be passed through an egress guard that receives the same release
+object as hit projection, so that no anchor, unit, pointer, provenance string,
+`missing[]` entry or `current_state` entry names a withheld page, including inside
+wikilink syntax in `units[].text` and `current_state[].statement`. The guard SHALL
+run whether or not the `retrieval` evidence was available: a recall failure degrades
+one evidence kind and never bypasses the guard, and a failure of the release plane
+itself SHALL abstain rather than serve. The declared `purpose` SHALL be honoured
+exactly as it is for recall and SHALL never enter ranking or a cache key.
+
+#### Scenario: Recall failure does not bypass the guard
+- **WHEN** an active policy withholds a page from the caller's audience and the
+  internal recall call raises
+- **THEN** the packet is still guarded and names nothing from the withheld page
+
+#### Scenario: Withheld page never leaks through unit prose
+- **WHEN** a permitted unit's text contains a wikilink to a page withheld from the
+  caller's audience
+- **THEN** the served packet contains no reference to that page in any unit's text
 
 #### Scenario: Withheld page never leaks through provenance
 - **WHEN** a governed audience withholds a page that is a typed neighbour of a resolved
@@ -154,11 +185,19 @@ ranking or a cache key.
   `graph_corroboration` evidence, if it depended on that page, is dropped
 
 ### Requirement: Freshness and caching
-Packets SHALL be keyed on the recall freshness key, the activation index generation
-and the role-registry hash. When the index generation is behind the freshness
+Packets SHALL be keyed on the recall freshness key, the activation index generation,
+the role-registry hash and a digest of the retrieval refs the release plane admitted
+for the request, so that a packet compiled with one audience's retrieval evidence is
+never served to another. When the index generation is behind the freshness
 checkpoint, the operation SHALL either refresh the index within the request budget or
 mark the packet `generation.index_stale: true`; it SHALL never serve a packet whose
 generation block misreports the index generation it was built from.
+
+#### Scenario: One audience's packet is never served to another
+- **WHEN** two requests share turn, `max_chars`, freshness key, index generation and
+  roles hash but the release plane admitted different retrieval refs for them
+- **THEN** the second request is compiled from its own retrieval refs, not served the
+  first request's cached packet
 
 #### Scenario: Write invalidates a cached packet
 - **WHEN** a packet was served and a governed write then adds an alias to an entity

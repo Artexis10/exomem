@@ -24,6 +24,7 @@ release plane.
 from __future__ import annotations
 
 import copy
+import hashlib
 import logging
 import threading
 from collections import OrderedDict
@@ -47,6 +48,28 @@ DISABLED = "disabled"
 _CACHE_LOCK = threading.Lock()
 _PACKET_CACHE: OrderedDict[tuple, dict[str, Any]] = OrderedDict()
 _BUILDS: set[Path] = set()
+#: One inline-build lock per vault root. The managed path single-flights through
+#: `_BUILDS` and a background thread; the unmanaged path has no thread to join,
+#: so two concurrent cold reads would otherwise both walk the vault and the
+#: loser's write would find the rows already there.
+_INLINE_LOCKS: dict[Path, threading.Lock] = {}
+
+
+def _inline_lock(root: Path) -> threading.Lock:
+    with _CACHE_LOCK:
+        lock = _INLINE_LOCKS.get(root)
+        if lock is None:
+            lock = threading.Lock()
+            _INLINE_LOCKS[root] = lock
+        return lock
+
+
+def retrieval_digest(retrieval_paths: frozenset[str] | set[str] | None) -> str:
+    """A stable digest of the retrieval refs the release plane admitted."""
+    if not retrieval_paths:
+        return "none"
+    joined = "\n".join(sorted(str(path) for path in retrieval_paths))
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
 
 
 def cache_key(
@@ -56,14 +79,27 @@ def cache_key(
     roles_hash: str,
     turn: str,
     max_chars: int,
+    retrieval_paths: frozenset[str] | set[str] | None = None,
 ) -> tuple:
-    """The packet identity. `purpose` is deliberately not a parameter (design D7)."""
+    """The packet identity.
+
+    `retrieval_paths` is part of it because `retrieval` is a CONTACT evidence
+    kind — it can resolve an anchor on its own half of the two-kinds rule — and
+    the release plane filters those refs per audience. Keying without them served
+    one audience's compiled packet to another, which is the same class of defect
+    the recall cache avoids by computing decisions after `find()` returns.
+
+    `purpose` is deliberately not a parameter: it may widen or narrow what an
+    audience sees, so a purpose-keyed cache would be a second, weaker copy of
+    the release plane (design D7).
+    """
     return (
         tuple(freshness_key) if isinstance(freshness_key, (list, tuple)) else str(freshness_key),
         int(index_generation),
         str(roles_hash),
         str(turn),
         int(max_chars),
+        retrieval_digest(retrieval_paths),
     )
 
 
@@ -72,6 +108,7 @@ def reset_caches_for_tests() -> None:
     with _CACHE_LOCK:
         _PACKET_CACHE.clear()
         _BUILDS.clear()
+        _INLINE_LOCKS.clear()
 
 
 def ensure_index(
@@ -94,11 +131,16 @@ def ensure_index(
         if _managed():
             _schedule_build(root)
             return WARMING, None, False
-        try:
-            index.rebuild(freshness_stamp=freshness_stamp)
-        except Exception:  # noqa: BLE001 - a failed build abstains, never breaks a read
-            log.warning("activation index inline build failed", exc_info=True)
-            return UNAVAILABLE, None, False
+        with _inline_lock(root.absolute()):
+            # Re-check under the lock: the thread that held it may have built the
+            # catalogue while this one waited, and rebuilding on top of that would
+            # pay for the walk twice and bump the generation for nothing.
+            if not index.anchors():
+                try:
+                    index.rebuild(freshness_stamp=freshness_stamp)
+                except Exception:  # noqa: BLE001 - a failed build abstains, never breaks a read
+                    log.warning("activation index inline build failed", exc_info=True)
+                    return UNAVAILABLE, None, False
         return READY, index, False
     if freshness_stamp and index.freshness_stamp() != freshness_stamp:
         refreshed = refresh_index(index, freshness_stamp=freshness_stamp)
@@ -198,6 +240,7 @@ def serve(
         roles_hash=registry.roles_hash,
         turn=turn,
         max_chars=limit,
+        retrieval_paths=retrieval_paths,
     )
     identity = (str(root.absolute()), key)
     with _CACHE_LOCK:

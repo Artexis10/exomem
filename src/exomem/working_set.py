@@ -27,7 +27,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import context_roles, working_set_index, working_set_resolve, working_set_state
 
@@ -74,6 +74,22 @@ class LaneItem:
     updated: str
     anchor: str
     provenance: dict[str, Any] = field(default_factory=dict)
+    #: Why this lane admitted the item, in words. Carried onto a pointer so a
+    #: ref the budget could not afford still says what it would have answered.
+    why: str = ""
+
+
+class LaneResult(NamedTuple):
+    """What one lane produced, and whether it stopped short of the neighbourhood.
+
+    `truncated` is the honest half. A lane that hits its read limit with
+    in-neighbourhood units still unread has NOT answered its role, and a packet
+    that says nothing about it reads identically to one where the material did
+    not exist.
+    """
+
+    items: tuple[LaneItem, ...]
+    truncated: bool = False
 
 
 def clamp_budget(value: object) -> int:
@@ -85,6 +101,25 @@ def clamp_budget(value: object) -> int:
     except (TypeError, ValueError):
         return DEFAULT_BUDGET_CHARS
     return max(MIN_BUDGET_CHARS, min(MAX_BUDGET_CHARS, requested))
+
+
+def bounded_text(text: str, limit: int = MAX_UNIT_CHARS) -> str:
+    """Cut authored prose at a boundary that leaves no unclosed wikilink.
+
+    A naive `text[:360]` produced `... [[norther`, which is unreadable AND
+    unscannable: the egress guard recognises a reference by matching `[[…]]`, so
+    a cut that orphans the opening brackets hides a withheld page from the scan
+    as well as from the reader. Cutting before the orphaned `[[` costs a few
+    characters and keeps both properties.
+    """
+    compact = text.strip()
+    if len(compact) <= limit:
+        return compact
+    cut = compact[:limit]
+    opened = cut.rfind("[[")
+    if opened != -1 and cut.find("]]", opened) == -1:
+        return cut[:opened].rstrip()
+    return cut
 
 
 def graph_depth_for(status: str) -> int:
@@ -133,19 +168,32 @@ def build_packet(
 
     ordered = sorted(items, key=_sort_key)
     units: list[dict[str, Any]] = []
-    pointers: list[dict[str, Any]] = []
+    deferred: list[tuple[LaneItem, str]] = []
     per_role: dict[str, int] = {}
+
+    # Current state is the highest-value prose in the packet — it is the answer
+    # to "what is true right now" — so it is budgeted FIRST and the rest of the
+    # packet spends what is left. An entry that cannot fit is dropped whole: a
+    # half-sentence about an observed status is worse than silence.
+    state_entries: list[dict[str, Any]] = []
     used = 0
+    for entry in current_state:
+        statement = str(entry.get("statement") or "")
+        if used + len(statement) > limit:
+            continue
+        state_entries.append(dict(entry))
+        used += len(statement)
+
     for item in ordered:
         if _redundant_superseded(item, present_paths):
             continue
-        text = item.text.strip()[:MAX_UNIT_CHARS]
+        text = bounded_text(item.text)
         role_count = per_role.get(item.role, 0)
         if role_count >= MAX_ITEMS_PER_ROLE:
-            pointers.append(_pointer(item, "role_cap"))
+            deferred.append((item, "role_cap"))
             continue
         if used + len(text) > limit or not text:
-            pointers.append(_pointer(item, "budget"))
+            deferred.append((item, "budget"))
             continue
         units.append(
             {
@@ -160,12 +208,26 @@ def build_packet(
         used += len(text)
         per_role[item.role] = role_count + 1
 
+    # A pointer is cheap but not free: its title and `why` are prose the caller
+    # pays for, so the same ceiling bounds them. Once the budget is spent the
+    # overflow is not reported at all rather than silently breaking the bound.
+    pointers: list[dict[str, Any]] = []
+    for item, reason in deferred:
+        if len(pointers) >= MAX_POINTERS:
+            break
+        pointer = _pointer(item, reason)
+        cost = len(pointer["title"]) + len(pointer["why"])
+        if used + cost > limit:
+            continue
+        pointers.append(pointer)
+        used += cost
+
     packet: dict[str, Any] = {
         "anchors": [dict(anchor) for anchor in anchors],
         "roles": [dict(role) for role in roles],
         "units": units,
-        "pointers": pointers[:MAX_POINTERS],
-        "current_state": [dict(entry) for entry in current_state],
+        "pointers": pointers,
+        "current_state": state_entries,
         "missing": [dict(entry) for entry in missing],
         "ambiguity": [dict(entry) for entry in ambiguity],
         "budget": {"limit_chars": limit, "used_chars": used},
@@ -203,7 +265,18 @@ def abstained_packet(
 
 
 def _pointer(item: LaneItem, reason: str) -> dict[str, Any]:
-    return {"ref": item.ref, "role": item.role, "title": item.title, "reason": reason}
+    """A ref the budget could not afford, still saying what it would answer.
+
+    `why` is the lane's own words for what admitted it; `reason` is the
+    mechanical cause it is a pointer rather than a unit (`budget`, `role_cap`).
+    """
+    return {
+        "ref": item.ref,
+        "role": item.role,
+        "title": item.title,
+        "why": item.why or f"{item.role} lane",
+        "reason": reason,
+    }
 
 
 def _provenance(item: LaneItem) -> dict[str, Any]:
@@ -245,13 +318,18 @@ def _date_rank(updated: str) -> int:
 def run_lanes(
     vault_root: Path,
     *,
-    analysis: Any,
     anchors: Sequence[Any],
     roles: Sequence[Mapping[str, Any]],
     registry: context_roles.RoleRegistry,
+    current_state: Sequence[Mapping[str, Any]] = (),
     timings: Any = None,
 ) -> tuple[tuple[LaneItem, ...], tuple[dict[str, Any], ...]]:
-    """Run one bounded lane per selected role. Every lane soft-fails alone."""
+    """Run one bounded lane per selected role. Every lane soft-fails alone.
+
+    `current_state` is resolved ONCE by the caller and handed in, because the
+    Records lane and the packet's own `current_state[]` block are two views of
+    the same reads and resolving them twice doubled the collection queries.
+    """
     root = Path(vault_root)
     items: list[LaneItem] = []
     missing: list[dict[str, Any]] = []
@@ -262,23 +340,26 @@ def run_lanes(
         if definition is None:
             continue
         failed = False
+        result = LaneResult(())
         with _span(timings, f"working_set.lanes.{role_id}"):
             try:
-                produced = _lane(
+                result = _lane(
                     root,
                     definition,
                     anchors=anchors,
                     neighbourhood=neighbourhood,
+                    current_state=current_state,
                 )
             except Exception:  # noqa: BLE001 - one lane's failure is not the packet's
                 log.debug("activation lane %s failed", role_id, exc_info=True)
-                produced = ()
                 failed = True
         if failed:
             missing.append({"role": role_id, "reason": "lane_failed"})
-        elif not produced:
+        elif not result.items:
             missing.append({"role": role_id, "reason": "no_material"})
-        items.extend(produced)
+        if result.truncated:
+            missing.append({"role": role_id, "reason": "lane_truncated"})
+        items.extend(result.items)
     return tuple(items), tuple(dict(entry) for entry in missing)
 
 
@@ -332,7 +413,8 @@ def _lane(
     *,
     anchors: Sequence[Any],
     neighbourhood: frozenset[str],
-) -> tuple[LaneItem, ...]:
+    current_state: Sequence[Mapping[str, Any]] = (),
+) -> LaneResult:
     """Dispatch one role to its lane.
 
     No lane consumes the turn TEXT. Selection already happened — the anchors and
@@ -344,16 +426,16 @@ def _lane(
     if role.lane == "units":
         return _units_lane(vault_root, role, neighbourhood=neighbourhood)
     if role.lane == "records":
-        return _records_lane(vault_root, role, anchors=anchors)
+        return LaneResult(_records_lane(role, current_state=current_state))
     if role.lane == "planning":
-        return _planning_lane(vault_root, role, anchors=anchors)
+        return LaneResult(_planning_lane(role, anchors=anchors))
     if role.lane == "entity":
-        return _entity_lane(vault_root, role, anchors=anchors)
+        return LaneResult(_entity_lane(vault_root, role, anchors=anchors))
     if role.lane == "graph":
-        return _graph_lane(role, anchors=anchors)
+        return LaneResult(_graph_lane(role, anchors=anchors))
     if role.lane == "evidence":
-        return _evidence_lane(vault_root, role, neighbourhood=neighbourhood)
-    return ()
+        return LaneResult(_evidence_lane(role, neighbourhood=neighbourhood))
+    return LaneResult(())
 
 
 def _units_lane(
@@ -361,16 +443,21 @@ def _units_lane(
     role: context_roles.ContextRole,
     *,
     neighbourhood: frozenset[str],
-) -> tuple[LaneItem, ...]:
+) -> LaneResult:
     """Semantic units by category, restricted to the anchor neighbourhood.
 
     The category set is pushed down into the existing unit catalogue query; the
     neighbourhood restriction is applied to what comes back, because the unit
     lane's filter vocabulary has no page-path axis and inventing one would move a
     retrieval primitive for a composition concern.
+
+    That ordering has a cost worth naming: the read limit applies BEFORE the path
+    filter, so a vault with more than `UNIT_LANE_LIMIT` units in this role's
+    categories can leave in-neighbourhood units unread. The lane reports that as
+    `lane_truncated` rather than letting the packet imply it read everything.
     """
     if not role.categories or not neighbourhood:
-        return ()
+        return LaneResult(())
     from . import find as find_module
     from . import ranking_config, structured_filters
 
@@ -391,6 +478,7 @@ def _units_lane(
         degraded_out=None,
         failed_out=None,
     )
+    truncated = len(hits) >= UNIT_LANE_LIMIT
     out: list[LaneItem] = []
     for hit in hits:
         parent = str(getattr(hit, "parent_path", "") or "")
@@ -414,24 +502,28 @@ def _units_lane(
                     "kind": str(getattr(hit, "kind", "") or ""),
                     "superseded_by": superseded_by,
                 },
+                why=role.description or f"{role.id} lane",
             )
         )
-    return tuple(out)
+    return LaneResult(tuple(out), truncated)
 
 
 def _records_lane(
-    vault_root: Path,
     role: context_roles.ContextRole,
     *,
-    anchors: Sequence[Any],
+    current_state: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[LaneItem, ...]:
-    """Newest observed items for a claiming collection, as page-level material."""
-    entries = working_set_state.current_state_for(Path(vault_root), anchors=anchors)
+    """The already-resolved current state, as page-level material.
+
+    Reuses the caller's single resolution rather than querying the collections a
+    second time: the packet's `current_state[]` block and this lane are two views
+    of the same reads.
+    """
     return tuple(
         LaneItem(
             role=role.id,
             level="page",
-            ref=f"{entry['anchor']}#current",
+            ref=f"{entry.get('anchor')}#current",
             path="",
             title=str(entry.get("statement") or "")[:80],
             text=str(entry.get("statement") or ""),
@@ -439,19 +531,18 @@ def _records_lane(
             updated=str(entry.get("as_of") or ""),
             anchor=str(entry.get("anchor") or ""),
             provenance={"source": str(entry.get("source") or ""), "as_of": entry.get("as_of")},
+            why=f"observed state per {entry.get('source') or 'the record'}",
         )
-        for entry in entries
+        for entry in current_state
     )
 
 
 def _planning_lane(
-    vault_root: Path,
     role: context_roles.ContextRole,
     *,
     anchors: Sequence[Any],
 ) -> tuple[LaneItem, ...]:
     """Active Planning items already recorded for a resolved plan/project anchor."""
-    del vault_root
     out: list[LaneItem] = []
     for anchor in anchors:
         if getattr(anchor, "kind", "") != "plan":
@@ -468,6 +559,7 @@ def _planning_lane(
                 updated="",
                 anchor=str(getattr(anchor, "ref", None) or getattr(anchor, "path", "")),
                 provenance={"source": "planning"},
+                why="already planned for this anchor",
             )
         )
     return tuple(out)
@@ -506,6 +598,7 @@ def _entity_lane(
                 updated=str(frontmatter.get("updated") or ""),
                 anchor=str(getattr(anchor, "ref", None) or rel),
                 provenance={"source": "profile"},
+                why=role.description or "the anchor page in its own words",
             )
         )
     return tuple(out)
@@ -530,19 +623,18 @@ def _graph_lane(
                     updated="",
                     anchor=str(getattr(anchor, "ref", None) or getattr(anchor, "path", "")),
                     provenance={"source": "graph"},
+                    why="typed neighbour of a resolved anchor",
                 )
             )
     return tuple(out)
 
 
 def _evidence_lane(
-    vault_root: Path,
     role: context_roles.ContextRole,
     *,
     neighbourhood: frozenset[str],
 ) -> tuple[LaneItem, ...]:
     """Evidence as POINTERS only: a proof's body never enters working memory."""
-    del vault_root
     out: list[LaneItem] = []
     for rel in sorted(neighbourhood):
         if "/Evidence/" not in rel and not rel.startswith("Evidence/"):
@@ -559,6 +651,7 @@ def _evidence_lane(
                 updated="",
                 anchor=rel,
                 provenance={"source": "evidence"},
+                why="preserved evidence in the anchor neighbourhood",
             )
         )
     return tuple(out)
@@ -631,16 +724,18 @@ def compile_packet(
         )
 
     lane_anchors = (*resolution.resolved_anchors, *resolution.partial_anchors)
+    # Resolved ONCE: the Records lane and the packet's `current_state[]` block are
+    # two views of the same collection reads.
+    current_state = working_set_state.current_state_for(
+        root, anchors=resolution.resolved_anchors, purpose=purpose
+    )
     items, missing = run_lanes(
         root,
-        analysis=analysis,
         anchors=lane_anchors,
         roles=roles,
         registry=registry,
+        current_state=current_state,
         timings=timings,
-    )
-    current_state = working_set_state.current_state_for(
-        root, anchors=resolution.resolved_anchors, purpose=purpose
     )
 
     with _span(timings, "working_set.budget"):

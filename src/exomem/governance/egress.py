@@ -2225,25 +2225,49 @@ def guard_working_set(
                 for item in values
                 if not _names_withheld(item, frozen, reference_field=True)
             ]
+    # A packet whose every anchor was withheld is not a resolved packet with a
+    # short answer — it is an abstention. Serving it with `abstained: false` and
+    # empty blocks would state that the turn resolved and the vault had nothing,
+    # which is a different and false claim. Everything downstream of an anchor
+    # goes with it, since a unit's only warrant was the anchor it hung from.
+    if packet.get("anchors") and not guarded["anchors"] and not guarded.get("abstained"):
+        guarded["abstained"] = True
+        guarded["abstention"] = {"reason": "withheld"}
+        for section in ("units", "pointers", "current_state", "roles"):
+            guarded[section] = []
+        budget = guarded.get("budget")
+        if isinstance(budget, Mapping):
+            guarded["budget"] = {**dict(budget), "used_chars": 0}
     return guarded
 
 
 #: Packet fields whose values are, or contain, vault paths.
 _WORKING_SET_PATH_FIELDS = ("ref", "path", "anchor")
+#: Packet fields carrying authored PROSE that may name a page in wikilink syntax.
+#: Harvested so a page mentioned only inside a sentence still gets a release
+#: decision: `release.withheld_paths` carries what hit projection happened to
+#: touch, and a unit's text can name a page recall never surfaced.
+_WORKING_SET_PROSE_FIELDS = ("text", "statement", "why", "title")
 
 
 def _working_set_paths(packet: Mapping[str, Any]) -> set[str]:
-    """Every vault-relative path the packet names, from its path-bearing fields."""
+    """Every vault item the packet names — through a path field or inside prose."""
     out: set[str] = set()
+
+    def _add(candidate: str) -> None:
+        if candidate.endswith(".md"):
+            out.add(candidate)
+        elif "#" in candidate and candidate.split("#", 1)[0].endswith(".md"):
+            out.add(candidate.split("#", 1)[0])
 
     def _collect(value: Any) -> None:
         if isinstance(value, Mapping):
             for key, item in value.items():
                 if key in _WORKING_SET_PATH_FIELDS and isinstance(item, str):
-                    if item.endswith(".md"):
-                        out.add(item)
-                    elif "#" in item and item.split("#", 1)[0].endswith(".md"):
-                        out.add(item.split("#", 1)[0])
+                    _add(item)
+                elif key in _WORKING_SET_PROSE_FIELDS and isinstance(item, str):
+                    for target in _WIKILINK_ANYWHERE.findall(item):
+                        out.add(str(target).strip())
                 else:
                     _collect(item)
         elif isinstance(value, (list, tuple)):
@@ -2252,7 +2276,7 @@ def _working_set_paths(packet: Mapping[str, Any]) -> set[str]:
         elif isinstance(value, str) and value.endswith(".md"):
             out.add(value)
 
-    for section in ("anchors", "units", "pointers", "current_state", "ambiguity"):
+    for section in ("anchors", "units", "pointers", "current_state", "ambiguity", "missing"):
         _collect(packet.get(section))
     return out
 
@@ -2299,6 +2323,17 @@ def _guarded_unit(
     if _names_withheld(unit.get("ref"), withheld, reference_field=True):
         return None
     if path and _names_withheld(path, withheld):
+        return None
+    # The unit's own PROSE. A wikilink inside authored text is an unambiguous
+    # reference wherever it appears, so a permitted unit that quotes a withheld
+    # page's link names it just as plainly as a provenance field would — and
+    # truncating the sentence around it would leave a claim nobody can audit.
+    #
+    # `reference_field=True` because a wikilink TARGET is a bare stem by
+    # construction (`[[kill-switch-for-risky-releases]]`), and the stem
+    # comparison is what recognises it. On a prose string the bare-word branch
+    # can only fire when the whole text IS the stem, which is itself a reference.
+    if _names_withheld(unit.get("text"), withheld, reference_field=True):
         return None
     # A unit whose ANCHOR is withheld is dropped rather than kept with the anchor
     # filtered out of its provenance: an unattributable claim in working memory is

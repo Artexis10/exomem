@@ -70,6 +70,8 @@ SIGNATURE_MAX_CHARS = 600
 LEDE_MAX_CHARS = 240
 
 _NAVIGATION_BASENAMES = frozenset({"index.md", "log.md", "readme.md"})
+#: Knowledge-base folders holding immutable raw material rather than anchors.
+_RAW_MATERIAL_FOLDERS = frozenset({"Sources", "Evidence"})
 _SKIP_DIR_NAMES = frozenset({"_trash", "_attachments", "_Staging", "Templates"})
 _WIKILINK = re.compile(r"\[\[([^\]|\n]+)(?:\|[^\]\n]*)?\]\]")
 _HEADING = re.compile(r"^#{2,3}\s+(.+?)\s*$", re.MULTILINE)
@@ -358,6 +360,13 @@ def _page_anchor_kind(rel: str, frontmatter: Mapping[str, Any], *, kb: str) -> s
         return "entity" if normalize(frontmatter.get("type")) == "entity" else None
     if head in {"Products", "Systems"}:
         return "resource"
+    if head in _RAW_MATERIAL_FOLDERS:
+        # `Sources/` and `Evidence/` are immutable raw material. A captured
+        # article or a preserved receipt that happens to carry `tags: [hub]` is
+        # evidence ABOUT the world, not a durable anchor of the user's own
+        # structure, and admitting it would let raw material name itself as the
+        # subject of a turn.
+        return None
     if "hub" in {normalize(tag) for tag in _strings(frontmatter.get("tags"))}:
         return "hub"
     return None

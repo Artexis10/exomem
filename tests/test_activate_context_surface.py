@@ -234,3 +234,60 @@ def test_the_operation_writes_nothing_to_the_vault(activation_vault: Path) -> No
         if path.is_file()
     }
     assert after == before
+
+
+# --------------------------------------------------------------------------- #
+# Review round: the packet is not a due_state carrier
+# --------------------------------------------------------------------------- #
+
+
+def test_activation_never_consumes_the_due_state_emission(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recall stays the only `due_state` carrier.
+
+    `_with_due_state` consults the emission ledger and MARKS it emitted, so an
+    activation that carried the block would silently eat the next recall's
+    delta — a read-only operation changing what a later read returns.
+    """
+    from exomem import due_state as due_state_module
+
+    block = {"totals": {"due": 2, "overdue": 1}, "items": []}
+    monkeypatch.setattr(due_state_module, "served", lambda *_a, **_k: block)
+
+    emitted: list[object] = []
+    real_should_emit = due_state_module.should_emit
+
+    def counting_should_emit(candidate, **kwargs):
+        emitted.append(candidate)
+        return real_should_emit(candidate, **kwargs)
+
+    monkeypatch.setattr(due_state_module, "should_emit", counting_should_emit)
+
+    packet = commands.op_activate_context(activation_vault, turn=TURN)
+
+    assert "due_state" not in packet
+    assert emitted == [], "activation must not consult or advance the emission ledger"
+
+
+def test_ask_memory_keeps_its_due_state_block_after_an_activation(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import due_state as due_state_module
+    from exomem import find as find_module
+
+    block = {"totals": {"due": 2, "overdue": 1}, "items": []}
+    monkeypatch.setattr(due_state_module, "served", lambda *_a, **_k: block)
+    monkeypatch.setattr(due_state_module, "should_emit", lambda *_a, **_k: True)
+
+    find_module.clear_cache()
+    baseline = commands.op_ask_memory(activation_vault, query="depot sled", limit=5)
+    assert isinstance(baseline, dict) and baseline["due_state"] == block
+
+    find_module.clear_cache()
+    commands.op_activate_context(activation_vault, turn=TURN)
+    find_module.clear_cache()
+    after = commands.op_ask_memory(activation_vault, query="depot sled", limit=5)
+
+    assert isinstance(after, dict)
+    assert after["due_state"] == baseline["due_state"]

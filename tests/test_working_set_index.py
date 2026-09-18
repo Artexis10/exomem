@@ -510,3 +510,99 @@ def test_a_managed_runtime_reports_a_stale_index_rather_than_walking(
     assert packet["generation"]["index_stale"] is True
     assert packet["generation"]["index_generation"] >= 1
     assert len(scheduled) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Review round: hub scope and single-flight cold build
+# --------------------------------------------------------------------------- #
+
+
+def test_hub_tagged_raw_material_is_not_an_anchor(seeded: Path) -> None:
+    """`Sources/` and `Evidence/` are immutable raw material, not anchors.
+
+    A captured article that happens to carry `tags: [hub]` is evidence about the
+    world, not a durable anchor of the user's own structure, and admitting it
+    would let raw material name itself as the subject of a turn.
+    """
+    _write(
+        seeded / "Knowledge Base" / "Evidence" / "receipt-hub.md",
+        """---
+type: evidence
+status: active
+tags: [hub]
+---
+
+# Receipt hub
+
+A preserved receipt that happens to be tagged as a hub.
+""",
+    )
+    _write(
+        seeded / "Knowledge Base" / "Sources" / "Articles" / "2026-09-01-corridor.md",
+        """---
+type: source
+status: active
+tags: [hub]
+---
+
+# Corridor article
+
+A captured article that happens to be tagged as a hub.
+""",
+    )
+
+    index = working_set_index.WorkingSetIndex(seeded)
+    index.rebuild()
+
+    paths = {row.path for row in index.anchors()}
+    assert not any("/Evidence/" in path for path in paths)
+    assert not any("/Sources/" in path for path in paths)
+    # The genuine hub outside raw material is still indexed.
+    assert _by_title(index.anchors(), "Northern corridor").kind == "hub"
+
+
+def test_a_cold_unmanaged_build_is_single_flight(
+    seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two concurrent cold reads must not both walk the vault."""
+    import threading
+
+    from exomem import working_set_runtime
+
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(seeded).reset()
+
+    rebuilds: list[int] = []
+    real_rebuild = working_set_index.WorkingSetIndex.rebuild
+    started = threading.Barrier(2, timeout=30)
+
+    def counting_rebuild(self, **kwargs):
+        rebuilds.append(1)
+        return real_rebuild(self, **kwargs)
+
+    monkeypatch.setattr(working_set_index.WorkingSetIndex, "rebuild", counting_rebuild)
+
+    results: list[dict] = []
+    errors: list[BaseException] = []
+
+    def serve_once() -> None:
+        try:
+            started.wait()
+            results.append(
+                working_set_runtime.serve(seeded, turn="the cargo sled", max_chars=2000)
+            )
+        except BaseException as error:  # noqa: BLE001 - reported, not swallowed
+            errors.append(error)
+
+    threads = [threading.Thread(target=serve_once) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    assert not errors, errors
+    assert len(results) == 2
+    assert len(rebuilds) == 1, f"the cold build ran {len(rebuilds)} times"
+    for packet in results:
+        reason = (packet.get("abstention") or {}).get("reason")
+        assert reason != "unavailable", packet.get("abstention")

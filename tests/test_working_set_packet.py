@@ -160,9 +160,11 @@ def test_budget_is_never_exceeded_and_overflow_becomes_pointers() -> None:
     assert packet["budget"]["used_chars"] <= 700
     assert packet["units"]
     assert packet["pointers"]
-    assert len(packet["units"]) + len(packet["pointers"]) == len(items)
+    # Pointers are prose too, so the ceiling bounds them: overflow past the
+    # budget is not reported at all rather than breaking the bound.
+    assert len(packet["units"]) + len(packet["pointers"]) <= len(items)
     for pointer in packet["pointers"]:
-        assert set(pointer) == {"ref", "role", "title", "reason"}
+        assert set(pointer) == {"ref", "role", "title", "why", "reason"}
         assert "text" not in pointer
 
 
@@ -428,3 +430,225 @@ def test_compile_returns_a_bounded_packet_for_a_resolved_turn(stateful_vault: Pa
     assert packet["generation"]["roles_hash"]
     for anchor in packet["anchors"]:
         assert all(kind in working_set_resolve.EVIDENCE_KINDS for kind in anchor["evidence"])
+
+
+# --------------------------------------------------------------------------- #
+# Review round: honest budget accounting, wikilink-safe cuts, truncation markers
+# --------------------------------------------------------------------------- #
+
+
+def _prose_chars(packet: dict) -> int:
+    """Every prose field the amended spec counts against the budget."""
+    return (
+        sum(len(unit["text"]) for unit in packet["units"])
+        + sum(len(entry.get("statement") or "") for entry in packet["current_state"])
+        + sum(
+            len(pointer.get("title") or "") + len(pointer.get("why") or "")
+            for pointer in packet["pointers"]
+        )
+    )
+
+
+def test_used_chars_counts_every_prose_field() -> None:
+    packet = working_set.build_packet(
+        items=tuple(
+            _item(role, ref=f"{role}-{i}", text="z" * 200)
+            for role in ("resources", "constraints", "methods")
+            for i in range(4)
+        ),
+        anchors=(),
+        roles=(),
+        current_state=(
+            {
+                "anchor": "a",
+                "source": "records",
+                "as_of": "2026-09-10",
+                "statement": "state: " + "s" * 120,
+            },
+        ),
+        ambiguity=(),
+        missing=(),
+        max_chars=900,
+        generation=_generation(),
+        status="resolved",
+    )
+
+    assert packet["budget"]["used_chars"] == _prose_chars(packet)
+    assert packet["budget"]["used_chars"] <= 900
+
+
+def test_the_budget_bounds_pointer_prose_too() -> None:
+    """Overflow becomes pointers, and pointers are not free."""
+    packet = working_set.build_packet(
+        items=tuple(
+            _item("resources", ref=f"r-{i}", text="z" * 300) for i in range(30)
+        ),
+        anchors=(),
+        roles=({"id": "resources", "source": "anchor_default", "lane": "units"},),
+        current_state=(),
+        ambiguity=(),
+        missing=(),
+        max_chars=500,
+        generation=_generation(),
+        status="resolved",
+    )
+
+    assert packet["budget"]["used_chars"] <= 500
+    assert packet["budget"]["used_chars"] == _prose_chars(packet)
+
+
+def test_pointers_carry_a_why() -> None:
+    packet = working_set.build_packet(
+        items=tuple(_item("resources", ref=f"r-{i}") for i in range(6)),
+        anchors=(),
+        roles=({"id": "resources", "source": "anchor_default", "lane": "units"},),
+        current_state=(),
+        ambiguity=(),
+        missing=(),
+        max_chars=8000,
+        generation=_generation(),
+        status="resolved",
+    )
+
+    assert packet["pointers"]
+    for pointer in packet["pointers"]:
+        assert set(pointer) == {"ref", "role", "title", "why", "reason"}
+        assert pointer["why"], "a pointer must say what admitted it"
+        assert "text" not in pointer
+
+
+def test_unit_text_is_never_cut_inside_a_wikilink() -> None:
+    """A half-written wikilink is both unreadable and unscannable.
+
+    The egress guard finds a withheld page by matching `[[…]]`, so a cut that
+    leaves `[[norther` hides the reference from the scan as well as from the
+    reader.
+    """
+    head = "x" * (working_set.MAX_UNIT_CHARS - 12)
+    packet = working_set.build_packet(
+        items=(_item("resources", text=f"{head}[[northern-corridor-hub]] tail"),),
+        anchors=(),
+        roles=(),
+        current_state=(),
+        ambiguity=(),
+        missing=(),
+        max_chars=8000,
+        generation=_generation(),
+        status="resolved",
+    )
+
+    text = packet["units"][0]["text"]
+    assert len(text) <= working_set.MAX_UNIT_CHARS
+    assert text.count("[[") == text.count("]]")
+    assert "[[norther" not in text or "]]" in text
+
+
+def test_a_closed_wikilink_inside_the_cap_survives() -> None:
+    packet = working_set.build_packet(
+        items=(_item("resources", text="see [[northern-corridor-hub]] for context"),),
+        anchors=(),
+        roles=(),
+        current_state=(),
+        ambiguity=(),
+        missing=(),
+        max_chars=8000,
+        generation=_generation(),
+        status="resolved",
+    )
+
+    assert "[[northern-corridor-hub]]" in packet["units"][0]["text"]
+
+
+def test_a_truncated_lane_is_reported(stateful_vault: Path) -> None:
+    """A lane that hits its read limit says so instead of silently dropping units."""
+    notes = stateful_vault / "Knowledge Base" / "Notes" / "Patterns"
+    notes.mkdir(parents=True, exist_ok=True)
+    for index in range(working_set.UNIT_LANE_LIMIT + 30):
+        (notes / f"bulk-constraint-{index:04d}.md").write_text(
+            f"""---
+type: pattern
+status: active
+updated: 2026-09-01
+---
+
+# Bulk constraint {index:04d}
+
+## Constraints
+
+Never exceed {index} kilograms when towing the Cargo Sled.
+""",
+            encoding="utf-8",
+        )
+
+    # Startup owns the catalogue build; an interactive unit lane refuses to
+    # become it, so warm it explicitly before measuring the lane's own limit.
+    from exomem import lexstore
+
+    lexstore.ensure_fresh(stateful_vault)
+    working_set_index.WorkingSetIndex(stateful_vault).reset()
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    packet = working_set.compile_packet(
+        stateful_vault,
+        turn="what are the constraints on the Cargo Sled",
+        max_chars=2000,
+    )
+
+    reasons = {(entry["role"], entry["reason"]) for entry in packet["missing"]}
+    assert any(reason == "lane_truncated" for _role, reason in reasons), reasons
+
+
+def test_current_state_is_resolved_once_per_compile(
+    stateful_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import working_set_state
+
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    calls: list[int] = []
+    real = working_set_state.current_state_for
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(working_set_state, "current_state_for", counting)
+
+    packet = working_set.compile_packet(
+        stateful_vault,
+        turn="I'm planning to tow the Cargo Sled north — how much depot stock is left?",
+        max_chars=2000,
+    )
+
+    assert packet["abstained"] is False
+    assert len(calls) == 1, f"current state resolved {len(calls)} times"
+
+
+def test_every_current_state_source_fills_a_statement(stateful_vault: Path) -> None:
+    from exomem import working_set_resolve, working_set_state
+
+    index = working_set_index.WorkingSetIndex(stateful_vault)
+    index.rebuild()
+    rows = working_set_resolve.facts_from_rows(index.anchors())
+    anchors = tuple(
+        working_set_resolve.ResolvedAnchor(
+            anchor_id=row.anchor_id,
+            path=row.path,
+            ref=row.ref,
+            title=row.title,
+            kind=row.kind,
+            lifecycle=row.lifecycle,
+            status="resolved",
+            evidence=("exact_alias",),
+            categories=row.categories,
+            neighbourhood=row.neighbourhood,
+        )
+        for row in rows
+        if row.kind in working_set_state.STATEFUL_KINDS
+    )
+
+    entries = working_set_state.current_state_for(stateful_vault, anchors=anchors)
+
+    assert entries
+    for entry in entries:
+        assert entry["source"] in {"records", "profile", "note"}
+        assert entry["statement"], f"{entry['source']} produced no statement"
+        assert len(entry["statement"]) <= working_set_state.STATEMENT_MAX_CHARS

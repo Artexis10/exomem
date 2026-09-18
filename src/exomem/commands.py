@@ -5861,10 +5861,15 @@ def op_activate_context(
             reason="disabled", max_chars=budget, generation=generation_stub
         )
 
-    # Release gate first, in `op_find`'s shape: the pool is widened only when a
-    # policy is active, and decisions are computed after `find()` has returned.
-    retrieval_paths: frozenset[str] = frozenset()
-    release: Any = None
+    # Release gate first, in `op_find`'s shape (see the release-gate comment in
+    # `op_find`): the pool is widened only when a policy is active, and decisions
+    # are computed strictly after `find()` has returned.
+    #
+    # The try wraps `find()` and NOTHING else. `retrieval` is one evidence kind of
+    # eight, so losing it degrades resolution; losing the release object would
+    # turn a governance-blocked read into a full disclosure, because the guard
+    # below would have no decisions to apply. `annotate_hits` therefore runs on
+    # every path, over an empty hit list when recall failed.
     try:
         _policy, release_active = egress_module.gate_state(vault_root)
         retrieval_limit = (
@@ -5873,23 +5878,29 @@ def op_activate_context(
             else ACTIVATE_RETRIEVAL_LIMIT
         )
         with find_types.timing_span(timings, "working_set.retrieval"):
-            hits = find_module.find(
-                vault_root,
-                query=turn,
-                limit=retrieval_limit,
-                mode="hybrid",
-                rerank=False,
-                graph=True,
-            )
+            try:
+                hits = find_module.find(
+                    vault_root,
+                    query=turn,
+                    limit=retrieval_limit,
+                    mode="hybrid",
+                    rerank=False,
+                    graph=True,
+                )
+            except Exception:  # noqa: BLE001 - one degraded evidence kind, not a bypass
+                log.debug("activation retrieval evidence unavailable", exc_info=True)
+                hits = []
             release = egress_module.annotate_hits(
                 vault_root, hits, limit=ACTIVATE_RETRIEVAL_LIMIT, purpose=purpose
             )
-        retrieval_paths = frozenset(
-            str(getattr(hit, "path", "") or "") for hit in release.hits
-        ) - {""}
-    except Exception:  # noqa: BLE001 - `retrieval` is one evidence kind of eight
-        log.debug("activation retrieval evidence unavailable", exc_info=True)
-        release = None
+    except Exception:  # noqa: BLE001 - the release plane failing means abstain, not serve
+        log.warning("activation release plane unavailable; abstaining", exc_info=True)
+        return working_set_module.abstained_packet(
+            reason="unavailable", max_chars=budget, generation=generation_stub
+        )
+    retrieval_paths = frozenset(
+        str(getattr(hit, "path", "") or "") for hit in release.hits
+    ) - {""}
 
     freshness_key: Any = ""
     try:
@@ -5906,20 +5917,33 @@ def op_activate_context(
         retrieval_paths=retrieval_paths,
         freshness_key=freshness_key,
     )
-    if release is not None:
+    # Unconditional: every served packet crosses the guard. A guard that only ran
+    # when the retrieval lane happened to succeed is not a guard.
+    try:
         guarded = egress_module.guard_working_set(
             vault_root, packet, release, purpose=purpose
         )
-        if guarded is None:
-            return working_set_module.abstained_packet(
-                reason="withheld",
-                max_chars=budget,
-                generation=packet.get("generation") or generation_stub,
-            )
-        packet = guarded
+    except Exception:  # noqa: BLE001 - a guard that cannot decide must not disclose
+        log.warning("activation egress guard failed; abstaining", exc_info=True)
+        return working_set_module.abstained_packet(
+            reason="unavailable",
+            max_chars=budget,
+            generation=packet.get("generation") or generation_stub,
+        )
+    if guarded is None:
+        return working_set_module.abstained_packet(
+            reason="withheld",
+            max_chars=budget,
+            generation=packet.get("generation") or generation_stub,
+        )
+    packet = guarded
     if timings is not None:
         packet["timings"] = timings.as_dict()
-    return _with_due_state(vault_root, packet, purpose=purpose)
+    # Deliberately NOT `_with_due_state`. That helper consults the emission
+    # ledger and marks it emitted, so an activation carrying the block would eat
+    # the next recall's delta — a read-only operation changing what a later read
+    # returns. Recall is the only `due_state` carrier.
+    return packet
 
 
 def op_read_memory(
