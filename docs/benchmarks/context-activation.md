@@ -112,15 +112,33 @@ manifests":
 > case the control arm got right; accepted for v0 only if A3 beats A4 in at
 > least seven of nine cases with every deterministic threshold met, zero
 > poison use and a p95 packet at most 1,500 tokens; and indeterminate
-> otherwise. Every run manifest SHALL carry the fixture-set digest, the
-> corpus digest and the threshold digest; a manifest missing any of them
-> SHALL void the run. All eighteen fixtures SHALL run or no verdict SHALL be
-> published.
+> otherwise. The no-memory case counts as a win for A3 only when A3 answers
+> correctly with zero injected characters and zero memory searches while A4
+> searched or injected. Because the padded case shares the grill case's
+> query, the bar of seven tolerates the loss of at most one distinct query
+> and never the grill query; the report SHALL state that reading beside the
+> count. Every run manifest SHALL carry the fixture-set digest, the corpus
+> digest and the threshold digest; a manifest missing any of them SHALL void
+> the run. All eighteen fixtures SHALL run or no verdict SHALL be published.
 
 And, from "Agent arms and controls":
 
 > A case for which A5 does not beat A1 SHALL be struck from the report and
 > never scored against the compiler.
+
+And, from "Pre-registered thresholds" (the C9/T9 corpus-tree and precision
+rules this runbook's own naive-latency step and `score_padding_robustness`
+implement):
+
+> Every fixture and every packet SHALL record the corpus tree (its
+> distractor count) it belongs to, and a padding comparison whose two
+> packets share a tree SHALL fail. [...] activation precision at least 0.80,
+> computed over every ref the packet surfaces as a resolved anchor, unit or
+> pointer and excluding superseded ancestors the packet credits as marked
+> [...] a current-state statement of at most 200 characters, a longer one
+> failing the case as a packet-contract violation [...] percentiles taken
+> ceil-rank so that over the eighteen packets of one run the p95 bound is
+> the run's maximum and the hard refusal is reached only by larger runs.
 
 ## Running the deterministic audit (CI, always available)
 

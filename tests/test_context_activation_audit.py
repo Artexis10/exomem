@@ -577,6 +577,19 @@ def test_precision_is_none_when_nothing_is_resolved() -> None:
     assert score.precision is None
 
 
+def test_precision_denominator_includes_unit_and_pointer_refs_not_just_anchors() -> None:
+    # BLOCKER-adjacent residue (round two): 60 junk *units* (never touching
+    # an anchor at all) padding a packet with 2 correctly resolved gold
+    # anchors was invisible to the old resolved-anchors-only denominator.
+    c1 = fixture_by_id("C1")
+    anchors = tuple(Anchor(ref=key, title=key, kind="note", status="resolved") for key in c1.gold[:2])
+    units = tuple(Unit(ref=f"junk_unit_{i}", role="note", text=f"junk unit {i}") for i in range(60))
+    score = score_case(ActivationPacket(anchors=anchors, units=units), c1)
+    assert score.precision is not None and score.precision < PRECISION_FLOOR
+    assert not score.passed
+    assert any("precision" in reason for reason in score.failure_reasons)
+
+
 def test_credited_superseded_ancestor_is_excluded_from_the_precision_denominator() -> None:
     # A deliberately, transparently marked supersession is correct compiler
     # behaviour, not irrelevant padding, and must not dilute precision.
@@ -657,22 +670,22 @@ def test_audit_passed_fails_when_end_to_end_latency_exceeds_the_measured_baselin
     assert audit_passed(report) is False
 
 
-# -- N1: C9/T9 padding-robustness comparison --------------------------------
+# -- N1 (round two): C9-vs-C2 padding-robustness comparison, tree-bound ----
 
 
-def _c9_packet() -> ActivationPacket:
-    c9 = fixture_by_id("C9")
+def _grill_packet(*, distractor_count: int | None) -> ActivationPacket:
+    c9 = fixture_by_id("C9")  # C9 shares C2's own gold/poison
     anchors = tuple(Anchor(ref=key, title=key, kind="note", status="resolved") for key in c9.gold)
     units = (
         Unit(ref="c2_grill_equipment_page", role="equipment_profile", text="A two-zone gas grill."),
         Unit(ref="c2_cooking_method_insight", role="method_insight", text="Indirect heat works best, cooking method."),
     )
-    return ActivationPacket(anchors=anchors, units=units)
+    return ActivationPacket(anchors=anchors, units=units, distractor_count=distractor_count)
 
 
 def test_c9_padding_robustness_passes_when_padding_changes_nothing() -> None:
-    padded_score = score_case(_c9_packet(), fixture_by_id("C9"))
-    base_score = score_case(_c9_packet(), fixture_by_id("T9"))
+    padded_score = score_case(_grill_packet(distractor_count=200), fixture_by_id("C9"))
+    base_score = score_case(_grill_packet(distractor_count=0), fixture_by_id("C2"))
     result = score_padding_robustness(padded_score, base_score)
     assert result.passed, result.reasons
     assert result.recall_padded == result.recall_base == 1.0
@@ -681,8 +694,13 @@ def test_c9_padding_robustness_passes_when_padding_changes_nothing() -> None:
 
 def test_c9_padding_robustness_fails_when_padding_drops_recall() -> None:
     c9 = fixture_by_id("C9")
-    padded_score = score_case(ActivationPacket(anchors=(Anchor(ref=c9.gold[0], title="x", kind="note", status="resolved"),)), c9)
-    base_score = score_case(_c9_packet(), fixture_by_id("T9"))
+    padded_score = score_case(
+        ActivationPacket(
+            anchors=(Anchor(ref=c9.gold[0], title="x", kind="note", status="resolved"),), distractor_count=200
+        ),
+        c9,
+    )
+    base_score = score_case(_grill_packet(distractor_count=0), fixture_by_id("C2"))
     result = score_padding_robustness(padded_score, base_score)
     assert not result.passed
     assert any("recall" in reason for reason in result.reasons)
@@ -694,18 +712,32 @@ def test_c9_padding_robustness_fails_below_the_precision_floor() -> None:
     anchors += tuple(
         Anchor(ref=f"distractor_{i}", title=f"distractor {i}", kind="note", status="resolved") for i in range(10)
     )
-    padded_score = score_case(ActivationPacket(anchors=anchors), c9)
-    base_score = score_case(ActivationPacket(anchors=tuple(Anchor(ref=key, title=key, kind="note", status="resolved") for key in c9.gold)), fixture_by_id("T9"))
+    padded_score = score_case(ActivationPacket(anchors=anchors, distractor_count=200), c9)
+    base_anchors = tuple(Anchor(ref=key, title=key, kind="note", status="resolved") for key in c9.gold)
+    base_score = score_case(ActivationPacket(anchors=base_anchors, distractor_count=0), fixture_by_id("C2"))
     result = score_padding_robustness(padded_score, base_score)
     assert not result.passed
     assert any("precision" in reason for reason in result.reasons)
 
 
+def test_padding_comparison_refuses_packets_that_share_one_tree() -> None:
+    # Spec scenario "Padding comparison refuses packets from one tree": two
+    # IDENTICAL packets recording the same distractor_count must fail --
+    # before this fix, identical precision/recall made this pass vacuously,
+    # proving nothing about padding at all.
+    same_packet = _grill_packet(distractor_count=200)
+    padded_score = score_case(same_packet, fixture_by_id("C9"))
+    base_score = score_case(same_packet, fixture_by_id("C2"))
+    result = score_padding_robustness(padded_score, base_score)
+    assert not result.passed
+    assert any("same corpus tree" in reason for reason in result.reasons)
+
+
 def test_report_includes_c9_padding_robustness_when_both_scores_are_present() -> None:
     manifest = validate_manifest(MANIFEST)
     packets = {fixture.case_id: DISABLED_PACKET for fixture in FIXTURES}
-    packets["C9"] = _c9_packet()
-    packets["T9"] = _c9_packet()
+    packets["C9"] = _grill_packet(distractor_count=200)
+    packets["C2"] = _grill_packet(distractor_count=0)
     report = run_audit(packets, manifest=manifest)
     payload = report_to_dict(report)
     assert payload["c9_padding_robustness"] is not None
@@ -714,7 +746,7 @@ def test_report_includes_c9_padding_robustness_when_both_scores_are_present() ->
 
 def test_report_c9_padding_robustness_is_none_when_either_score_is_absent() -> None:
     manifest = validate_manifest(MANIFEST)
-    report = run_audit({}, manifest=manifest, fixtures=tuple(f for f in FIXTURES if f.case_id != "T9"))
+    report = run_audit({}, manifest=manifest, fixtures=tuple(f for f in FIXTURES if f.case_id != "C2"))
     payload = report_to_dict(report)
     assert payload["c9_padding_robustness"] is None
 
@@ -749,6 +781,29 @@ def test_current_state_statement_text_feeds_char_and_token_counts() -> None:
     score = score_case(packet, fixture_by_id("C5"))
     assert score.packet_chars == len("status: unavailable")
     assert score.packet_tokens > 0
+
+
+def test_current_state_statement_over_200_chars_fails_as_a_packet_contract_violation() -> None:
+    # Spec: "a current-state statement of at most 200 characters, a longer
+    # one failing the case as a packet-contract violation" -- never silently
+    # truncated in packet_from_dict, which would hide the violation.
+    data = {
+        "anchors": [{"ref": "c5_resource_profile", "title": "bench", "kind": "resource", "status": "resolved"}],
+        "current_state": [{"anchor": "c5_records_latest_unavailable", "source": "records", "statement": "x" * 201}],
+    }
+    packet = packet_from_dict(data)
+    assert packet.current_state[0].statement == "x" * 201  # not truncated
+    score = score_case(packet, fixture_by_id("C5"))
+    assert not score.passed
+    assert any("packet-contract violation" in reason and "200" in reason for reason in score.failure_reasons)
+
+
+def test_current_state_statement_at_exactly_200_chars_does_not_violate() -> None:
+    packet = ActivationPacket(
+        current_state=(CurrentStateEntry(anchor="a", source="records", statement="x" * 200),)
+    )
+    score = score_case(packet, fixture_by_id("C5"))
+    assert not any("packet-contract violation" in reason for reason in score.failure_reasons)
 
 
 def test_pointer_ref_is_covered_by_mentioned_and_precision_channels() -> None:

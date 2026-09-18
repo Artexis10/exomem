@@ -9,23 +9,30 @@ pure function of a packet and a fixture, matching this package's sibling
 ``scoring.py`` ("Pure paired scorer over observed action outcomes. No model
 judge, no I/O.").
 
-One documented simplification relative to the full activation-packet
-contract (``openspec/changes/add-context-activation/specs/context-activation/
-spec.md`` in the sibling ``add-context-activation`` change), because this
-scorer only has to be *correct*, not *complete*, before the compiler exists:
+This module's thresholds quote, rather than restate, ``openspec/changes/
+add-context-activation-benchmark/specs/context-activation-benchmark/
+spec.md`` -- the amended spec is the contract; a docstring that paraphrases
+it is a second copy that can drift. In its own words (Requirement:
+Pre-registered thresholds):
 
-- **Twin false activation is "outside the twin's own gold", not "any
-  resolved anchor".** Broadened (correction round, B1) beyond a
-  resolved-anchor-only reading: a ``resolved``-status anchor, or *any* unit,
-  pointer, current-state entry or ambiguity candidate (channels with no
-  "status" concept of their own -- their mere presence already injected
-  content) that names a ref outside the twin's own gold, is a false
-  activation. A ``partial``-status anchor outside gold is deliberately
-  excluded from this definition: that is the twin hedging allowance (see
-  ``score_case``'s ``hedged`` field) and is bounded at the run level, not
-  blanket-credited as safe or silently ignored. See ``context_activation``
-  fixtures module's docstring for why the maximally literal spec reading is
-  unsatisfiable for T3/T4/T7/T8's explicit design intent.
+    activation precision at least 0.80, computed over every ref the packet
+    surfaces as a resolved anchor, unit or pointer and excluding superseded
+    ancestors the packet credits as marked [...] `resolved` false activation
+    [...] is a `resolved` anchor, unit, pointer, current-state entry or
+    ambiguity candidate outside the twin's own gold set (a twin designed to
+    resolve on a narrow gold of its own is not a false activation); `partial`
+    activation on twins whose expected status is `unresolved` limited to at
+    most one twin per run [...] (a twin without gold of its own cannot hedge
+    as `ambiguous`, because naming any ambiguity candidate is itself a false
+    activation) [...] a current-state statement of at most 200 characters, a
+    longer one failing the case as a packet-contract violation [...]
+    percentiles taken ceil-rank so that over the eighteen packets of one run
+    the p95 bound is the run's maximum and the hard refusal is reached only
+    by larger runs.
+
+See :func:`score_case` (false activation, hedging, precision, the
+statement-length check) and :func:`_percentile` (ceil-rank) for where each
+clause above is implemented.
 
 The real contract allows a superseded ancestor to be surfaced either omitted
 or marked ``lifecycle: superseded`` with its successor named
@@ -140,6 +147,12 @@ class ActivationPacket:
     #: when a caller has not measured or does not carry this breakdown
     #: (an oracle packet, or a pre-instrumentation product run).
     working_set_ms: float | None = None
+    #: The corpus tree (distractor count) this packet was compiled against
+    #: (round-two N1 consequence 1, spec: "Every fixture and every packet
+    #: SHALL record the corpus tree ... it belongs to"). Set by whatever
+    #: compiled the packet -- the harness for a product run, the test/oracle
+    #: author for a hand-written one -- never inferred here.
+    distractor_count: int | None = None
 
 
 #: The documented kill-switch shape (``EXOMEM_DISABLE_WORKING_SET=1``): see
@@ -211,6 +224,7 @@ def packet_from_dict(data: dict[str, Any]) -> ActivationPacket:
         abstention_reason=abstention.get("reason"),
         latency_ms=data.get("latency_ms"),
         working_set_ms=data.get("working_set_ms"),
+        distractor_count=data.get("distractor_count"),
     )
 
 
@@ -337,6 +351,10 @@ class CaseScore:
     packet_tokens: int
     latency_ms: float | None
     working_set_ms: float | None
+    #: The corpus tree (distractor count) the scored packet was compiled
+    #: against, propagated from :attr:`ActivationPacket.distractor_count`
+    #: (round-two N1 consequence 1); ``None`` when the packet didn't record it.
+    distractor_count: int | None
     by_anchor_kind: tuple[AnchorKindTally, ...]
     #: True when no packet was supplied for this case at all (M2) -- distinct
     #: from a packet that was supplied and scored ``unresolved``/abstained.
@@ -473,32 +491,41 @@ def score_case(
         fixture.case_id.startswith("T") and any(ref not in own_gold for ref in false_activation_candidates)
     )
 
-    # Hedging (B3): a twin expected to resolve nothing may instead report
-    # partial/ambiguous status without being punished for the status
-    # mismatch itself -- bounded at the run level by HEDGED_TWINS_CEILING,
-    # not blanket-permitted here.
-    # `ambiguous` requires *naming* concrete candidate refs (`ambiguity` is
-    # one of the unconditional false_activation_candidates channels), so for
-    # a twin with no legitimate gold of its own (T1/T2/T6), naming any
-    # candidate at all is already a false activation; `partial` (a status on
-    # one anchor, asserting no specific alternative) is the hedge shape that
-    # is actually achievable clean. Both remain in the vocabulary here so a
-    # twin that *does* carry its own narrow gold (T4) can still hedge via
-    # `ambiguous` between its own candidates without being blocked by this.
+    # Hedging (B3, spec scenario "Hedged twin activation is reported, not
+    # punished as resolution"): a twin expected to resolve nothing may
+    # instead yield only `partial` anchors and *nothing else* -- no units,
+    # pointers, current state or ambiguity candidates -- without being
+    # punished for the status mismatch itself, bounded at the run level by
+    # HEDGED_TWINS_CEILING, not blanket-permitted here. `ambiguous` is not a
+    # hedge shape at all (spec: "a twin without gold of its own cannot hedge
+    # as ambiguous, because naming any ambiguity candidate is itself a false
+    # activation"; a twin with its own narrow gold, e.g. T4, is scored on its
+    # `ambiguous` expectation directly, never credited as "hedging").
     is_unresolved_expected_twin = fixture.case_id.startswith("T") and fixture.expected_status == "unresolved"
-    hedged = is_unresolved_expected_twin and observed_status in ("partial", "ambiguous") and not twin_false_activation
+    hedged = (
+        is_unresolved_expected_twin
+        and observed_status == "partial"
+        and not packet.units
+        and not packet.pointers
+        and not packet.current_state
+        and not packet.ambiguity
+    )
 
-    # Precision (M1): gold hits over *all* resolved anchors, not just the
-    # curated poison list -- a packet padded with dozens of irrelevant
-    # resolved anchors that happen not to be on the poison list must still
-    # fail, which a poison-only precision figure would miss entirely. A
-    # credited superseded ancestor (task 2.3) is excluded from the
-    # denominator: deliberately, transparently marking it is correct
-    # compiler behaviour, not irrelevant padding, and must not be penalised
-    # as if it were.
-    gold_hit_resolved = sum(1 for ref in gold_refs if ref in resolved)
-    total_resolved = len(resolved - credited)
-    precision = (gold_hit_resolved / total_resolved) if total_resolved else None
+    # Precision (M1, spec: "computed over every ref the packet surfaces as a
+    # resolved anchor, unit or pointer and excluding superseded ancestors the
+    # packet credits as marked"): gold hits over the union of resolved
+    # anchors, unit refs and pointer refs -- not resolved anchors alone, or
+    # padding with dozens of junk *units* (never touching an anchor at all)
+    # would be invisible to precision entirely (round-two review: "60 junk
+    # units with 2 gold anchors must fail"). A credited superseded ancestor
+    # (task 2.3) is excluded from the denominator: deliberately,
+    # transparently marking it is correct compiler behaviour, not irrelevant
+    # padding, and must not be penalised as if it were.
+    precision_denominator_refs = resolved | {unit.ref for unit in packet.units} | {p.ref for p in packet.pointers}
+    precision_denominator_refs -= credited
+    gold_hit_for_precision = sum(1 for ref in gold_refs if ref in precision_denominator_refs)
+    total_precision_denominator = len(precision_denominator_refs)
+    precision = (gold_hit_for_precision / total_precision_denominator) if total_precision_denominator else None
 
     injected_text = _injected_text(packet)
     # C6's must_include fact ("9.5") is a response-reflection fact for the
@@ -511,6 +538,19 @@ def score_case(
     else:
         must_include_missing = tuple(s for s in fixture.must_include if s not in injected_text)
     must_exclude_present = tuple(s for s in fixture.must_exclude if s in injected_text)
+
+    # STATEMENT_MAX_CHARS (spec: "a current-state statement of at most 200
+    # characters, a longer one failing the case as a packet-contract
+    # violation"). Enforced here, over the packet's own field, never by
+    # truncating it in `packet_from_dict`: a silent truncation would hide
+    # exactly the violation this is meant to catch, and scoring (not
+    # loading) is where "fails the case" -- rather than aborting the whole
+    # run -- makes contractual sense.
+    overlong_statements = tuple(
+        entry.anchor
+        for entry in packet.current_state
+        if entry.statement is not None and len(entry.statement) > STATEMENT_MAX_CHARS
+    )
 
     failure_reasons: list[str] = []
     if not status_match and not hedged:
@@ -536,6 +576,11 @@ def score_case(
     # sibling add-context-activation spec's "no role lane runs" scenario.)
     if observed_status == "ambiguous" and (packet.units or packet.pointers):
         failure_reasons.append("ambiguous status packet must carry no units or pointers (no role lane runs)")
+    if overlong_statements:
+        failure_reasons.append(
+            f"packet-contract violation: current_state statement exceeds {STATEMENT_MAX_CHARS} chars "
+            f"for {list(overlong_statements)}"
+        )
 
     return CaseScore(
         case_id=fixture.case_id,
@@ -556,6 +601,7 @@ def score_case(
         packet_tokens=packet_token_count(packet),
         latency_ms=packet.latency_ms,
         working_set_ms=packet.working_set_ms,
+        distractor_count=packet.distractor_count,
         by_anchor_kind=by_anchor_kind,
         blocked=False,
         passed=not failure_reasons,
@@ -592,6 +638,7 @@ def _blocked_score(fixture: FixtureCase) -> CaseScore:
         packet_tokens=0,
         latency_ms=None,
         working_set_ms=None,
+        distractor_count=fixture.distractor_count,
         by_anchor_kind=(),
         blocked=True,
         passed=False,
@@ -601,12 +648,17 @@ def _blocked_score(fixture: FixtureCase) -> CaseScore:
 
 @dataclass(frozen=True)
 class PaddingRobustnessResult:
-    """C9 (padded tree) vs. T9 (unpadded tree) consistency check (N1).
+    """C9 (padded tree) vs. C2's own score (unpadded tree) consistency check.
 
-    A twin carrying a different turn cannot show padding did anything to a
-    query; two identical queries scored against two different corpus states
-    can. C9 is meant to pass only when padding neither craters precision nor
-    silently drops a gold hit T9 found on the unpadded tree.
+    Round-two N1 revision: compares C9 against C2's *own* unpadded-tree
+    score, never T9 (T9 is C2's twin's own turn, restored as an ordinary
+    ninth negative twin -- see the fixtures module docstring). A twin
+    carrying a different turn cannot show what padding did to the grill
+    query's own precision or recall; only the identical query scored on two
+    different corpus states can, and C9-vs-C2 is that comparison. C9 is
+    meant to pass only when padding neither craters precision nor silently
+    drops a gold hit C2 found on the unpadded tree, and only when the two
+    scores actually came from different trees in the first place.
     """
 
     padded_case_id: str
@@ -624,7 +676,32 @@ def _recall(score: CaseScore) -> float | None:
 
 
 def score_padding_robustness(padded_score: CaseScore, base_score: CaseScore) -> PaddingRobustnessResult:
-    """Compare C9's padded-tree score against T9's unpadded-tree score."""
+    """Compare C9's padded-tree score against C2's own unpadded-tree score.
+
+    Spec scenario "Padding comparison refuses packets from one tree": when
+    both scores record the *same* ``distractor_count`` (including both
+    ``None``), the comparison is vacuous by construction -- it cannot tell
+    "padding changed nothing" apart from "these two packets were never on
+    different trees to begin with" -- and refusing is the only honest
+    outcome.
+    """
+
+    reasons: list[str] = []
+    if padded_score.distractor_count is not None and padded_score.distractor_count == base_score.distractor_count:
+        reasons.append(
+            f"padded and base packets record the same corpus tree (distractor_count="
+            f"{padded_score.distractor_count}); a padding comparison requires two different trees"
+        )
+        return PaddingRobustnessResult(
+            padded_case_id=padded_score.case_id,
+            base_case_id=base_score.case_id,
+            precision_padded=padded_score.precision,
+            recall_padded=_recall(padded_score),
+            recall_base=_recall(base_score),
+            precision_delta=None,
+            passed=False,
+            reasons=tuple(reasons),
+        )
 
     recall_padded = _recall(padded_score)
     recall_base = _recall(base_score)
@@ -633,7 +710,6 @@ def score_padding_robustness(padded_score: CaseScore, base_score: CaseScore) -> 
         if padded_score.precision is not None and base_score.precision is not None
         else None
     )
-    reasons: list[str] = []
     if padded_score.precision is None or padded_score.precision < PADDING_PRECISION_FLOOR:
         reasons.append(f"padded-tree precision below the {PADDING_PRECISION_FLOOR} floor")
     if recall_padded != recall_base:
@@ -740,10 +816,19 @@ def run_audit(
 
 
 def _percentile(data: list[float], pct: float) -> float | None:
-    """Ceil-rank percentile (``rank = ceil(pct * n)``, ``index = rank - 1``):
-    pins p95 over n = 18 to the maximum value, matching this benchmark's own
-    pre-registered reporting convention (minor fix; the prior nearest-rank
-    approximation under-reported p95 for small n).
+    """Ceil-rank percentile (``rank = ceil(pct * n)``, ``index = rank - 1``).
+
+    Spec: "percentiles taken ceil-rank so that over the eighteen packets of
+    one run the p95 bound is the run's maximum and the hard refusal is
+    reached only by larger runs." At the pre-registered run size (eighteen
+    fixtures, one packet each), ``rank = ceil(0.95 * 18) = 18``, i.e. p95
+    *is* ``max(data)`` -- the p95 ceiling and the hard-refusal cap
+    (:data:`TOKEN_HARD_CAP`) are deliberately two separate bounds at n = 18:
+    the p95 bound covers every packet in a normal run, while the hard cap is
+    a backstop that only starts distinguishing outliers once a run has more
+    than eighteen packets (e.g. the n = 5 repeats of task 4). A prior
+    nearest-rank approximation under-reported p95 for this small n (minor
+    fix).
     """
 
     if not data:
@@ -824,8 +909,8 @@ def audit_passed(report: AuditReport) -> bool:
         return False
 
     scores_by_id = {score.case_id: score for score in report.per_case}
-    if "C9" in scores_by_id and "T9" in scores_by_id:
-        if not score_padding_robustness(scores_by_id["C9"], scores_by_id["T9"]).passed:
+    if "C9" in scores_by_id and "C2" in scores_by_id:
+        if not score_padding_robustness(scores_by_id["C9"], scores_by_id["C2"]).passed:
             return False
 
     return True
@@ -834,8 +919,8 @@ def audit_passed(report: AuditReport) -> bool:
 def report_to_dict(report: AuditReport) -> dict[str, Any]:
     scores_by_id = {score.case_id: score for score in report.per_case}
     padding_robustness = None
-    if "C9" in scores_by_id and "T9" in scores_by_id:
-        result = score_padding_robustness(scores_by_id["C9"], scores_by_id["T9"])
+    if "C9" in scores_by_id and "C2" in scores_by_id:
+        result = score_padding_robustness(scores_by_id["C9"], scores_by_id["C2"])
         padding_robustness = {
             "padded_case_id": result.padded_case_id,
             "base_case_id": result.base_case_id,

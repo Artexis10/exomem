@@ -33,13 +33,21 @@ activation injected through units/pointers alone and would make T3/T4/T7/T8's
 own explicit design narrative unsatisfiable by construction. See
 ``membench.utility.context_activation.score_case``.
 
-T9 is the one exception to "different query, same corpus": per the
-reviewer's ruling (N1), a single corpus tree cannot make C9's padding claim
-falsifiable, because C9 and a differently-worded T9 would be indistinguishable
-from "two different queries got two different results" -- nothing there
-shows *padding* did anything. T9 carries C2's own turn and gold, scored
-against the *unpadded* (``distractor_count=0``) tree, so C9 (same turn,
-padded tree) has an honest same-query baseline to be compared against.
+C9/T9 are the one pair whose corpus tree is part of the fixture's own
+identity (spec: "Every fixture and every packet SHALL record the corpus
+tree ... it belongs to"). C9 is the grill case's own turn (C2) scored
+against the padded (``distractor_count=200``) tree; T9 is C2's *twin's* own
+turn (T2, verbatim), scored on that *same* padded tree, gold empty, expected
+``unresolved`` -- an ordinary ninth negative twin, proving distractor
+padding alone doesn't manufacture a false activation for an unrelated query.
+Padding robustness itself (``membench.utility.context_activation.
+score_padding_robustness``) compares C9's padded-tree score against C2's own
+score on the unpadded tree, never against T9: a twin with a different turn
+cannot show what padding did to the *grill query's own* precision or
+recall; only the same query scored on two different corpus states can, and
+that is what C9-vs-C2 is for. A round-one design (T9 sharing C9's own turn,
+scored unpadded) is superseded: it worked for the padding comparison but
+cost the ninth negative twin, which this shape restores.
 """
 
 from __future__ import annotations
@@ -63,7 +71,8 @@ EXPECTED_STATUSES: tuple[str, ...] = ("resolved", "partial", "ambiguous", "unres
 
 #: Default distractor-page count for C9's padded neighbourhood (design.md D3).
 DEFAULT_DISTRACTOR_COUNT = 200
-#: The unpadded tree's distractor count -- T9's own corpus state (N1).
+#: The unpadded tree's distractor count -- C2's own corpus state for the
+#: padding-robustness comparison against C9 (N1 round-two revision).
 BASE_DISTRACTOR_COUNT = 0
 
 
@@ -94,6 +103,14 @@ class FixtureCase:
     #: design); every twin's oracle is abstained by design, so twins never
     #: set this field.
     oracle_text: str = ""
+    #: The corpus tree (distractor count) this fixture is scored against
+    #: (round-two N1 consequence 1, spec: "Every fixture and every packet
+    #: SHALL record the corpus tree ... it belongs to"). ``None`` for every
+    #: fixture but C9/T9, which pin ``DEFAULT_DISTRACTOR_COUNT`` -- the only
+    #: two fixtures for which "which tree" is part of the fixture's own
+    #: identity, not an incidental property of how a given run happened to
+    #: build its corpus.
+    distractor_count: int | None = None
 
     def __post_init__(self) -> None:
         if self.expected_status not in EXPECTED_STATUSES:
@@ -336,12 +353,17 @@ FIXTURES: tuple[FixtureCase, ...] = (
         must_exclude=("superseded",),
         expected_status="resolved",
     ),
-    # -- C9 / T9: C2 padded with ~200 distractor pages -----------------------
-    # N1: C9 and T9 share C2's own turn and gold. They differ only in which
-    # corpus tree they are scored against (padded vs. unpadded) -- see
-    # `context_activation.score_c9_padding_robustness`. A twin with a
-    # different turn cannot show padding did anything; two identical queries
-    # against two different corpus states can.
+    # -- C9 / T9: C2's turn and its twin's turn, both on a corpus tree padded
+    # with ~200 domain-vocabulary distractors --------------------------------
+    # N1 (round-two revision): C9 is the grill case's own turn (C2) scored
+    # against the padded tree; T9 is C2's *twin's* own turn (T2, verbatim) on
+    # that same padded tree -- a real negative control again (gold empty,
+    # expected unresolved), restoring the ninth negative twin. Padding
+    # robustness compares C9's padded-tree score against C2's own score on
+    # the unpadded tree (`score_padding_robustness`), never against T9: T9's
+    # job is to prove padding alone doesn't manufacture a false activation
+    # for an unrelated query, which is a different property from "did
+    # padding change the grill query's own precision/recall".
     FixtureCase(
         case_id="C9",
         pairs_with=None,
@@ -358,18 +380,20 @@ FIXTURES: tuple[FixtureCase, ...] = (
             "spring, and the cooking-method insight recommends indirect heat for "
             "this recipe."
         ),
+        distractor_count=DEFAULT_DISTRACTOR_COUNT,
     ),
     FixtureCase(
         case_id="T9",
         pairs_with="C9",
-        turn="I'm planning to cook this recipe for the dinner on Saturday.",
-        reminder_turn="I already looked at the grill equipment page for this — use that.",
-        gold=("c2_grill_equipment_page", "c2_cooking_method_insight"),
-        poison=("t2_camera_gear_note",),
-        roles=("equipment_profile", "method_insight"),
-        must_include=("grill", "cooking method"),
+        turn="I'm planning to photograph this for the dinner on Saturday.",
+        reminder_turn="No, this is about the camera gear, not any cooking equipment.",
+        gold=(),
+        poison=("c2_grill_equipment_page", "c2_cooking_method_insight"),
+        roles=(),
+        must_include=(),
         must_exclude=(),
-        expected_status="resolved",
+        expected_status="unresolved",
+        distractor_count=DEFAULT_DISTRACTOR_COUNT,
     ),
 )
 
@@ -503,6 +527,7 @@ def _canonical(fixture: FixtureCase) -> dict:
         "must_exclude": list(fixture.must_exclude),
         "expected_status": fixture.expected_status,
         "oracle_text": fixture.oracle_text,
+        "distractor_count": fixture.distractor_count,
     }
 
 
@@ -522,6 +547,16 @@ def fixture_set_digest(fixtures: Iterable[FixtureCase] = FIXTURES) -> str:
     return hashlib.sha256(blob).hexdigest()
 
 
+#: Twins carrying a *narrow* legitimate gold of their own (module docstring):
+#: only these may have a non-empty gold that overlaps in kind with, but is
+#: always disjoint from, their paired case's own gold. Every other twin's
+#: gold must be fully disjoint from its case's gold -- for the eight with
+#: empty gold this holds trivially, but the check is written to catch a
+#: future edit that accidentally gives a twin outside this list gold drawn
+#: from its own case.
+NARROW_GOLD_TWIN_IDS: tuple[str, ...] = ("T3", "T4", "T5", "T7", "T8")
+
+
 def assert_manifest_consistent(fixtures: tuple[FixtureCase, ...] = FIXTURES) -> None:
     """Refuse a fixture set that is not exactly nine cases paired with nine twins."""
 
@@ -535,6 +570,21 @@ def assert_manifest_consistent(fixtures: tuple[FixtureCase, ...] = FIXTURES) -> 
         twin = by_id[twin_id]
         if twin.pairs_with not in CASE_IDS:
             raise FixtureError(f"{twin_id}: pairs_with must name a case id, got {twin.pairs_with!r}")
+        if twin.gold and twin_id not in NARROW_GOLD_TWIN_IDS:
+            raise FixtureError(
+                f"{twin_id}: carries gold {twin.gold} but is not in NARROW_GOLD_TWIN_IDS "
+                f"{NARROW_GOLD_TWIN_IDS} -- every other twin's gold must stay empty"
+            )
+        if twin_id not in NARROW_GOLD_TWIN_IDS:
+            # A narrow-gold twin is trusted to overlap its case's own gold on
+            # purpose (T7's narrow gold is one of C7's own three ambiguous
+            # candidates -- resolving to it is the whole point, not a false
+            # activation); every other twin's gold must be disjoint.
+            case = by_id[twin.pairs_with]
+            if not set(twin.gold).isdisjoint(case.gold):
+                raise FixtureError(
+                    f"{twin_id}: gold {twin.gold} overlaps its paired case {case.case_id}'s own gold {case.gold}"
+                )
     for case_id in CASE_IDS:
         case = by_id[case_id]
         if case.pairs_with is not None:
@@ -995,6 +1045,7 @@ __all__ = [
     "MEASURED_LATENCY_DATE",
     "MEASURED_LATENCY_MS",
     "MEASURED_LATENCY_SAMPLE_SIZE",
+    "NARROW_GOLD_TWIN_IDS",
     "TWIN_IDS",
     "CorpusManifest",
     "FixtureCase",

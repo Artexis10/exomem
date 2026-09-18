@@ -10,10 +10,17 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
-from epistemic.corpora.context_activation import CASE_IDS, TWIN_IDS, fixture_by_id
+from epistemic.corpora.context_activation import (
+    CASE_IDS,
+    FIXTURES,
+    GOLD_POISON_FACTS,
+    TWIN_IDS,
+    fixture_by_id,
+)
 from membench.utility.context_activation_arms import (
     ARM_IDS,
     COST_CAP_USD,
+    MECHANISM_ACCEPT_BAR,
     PER_EPISODE_RESERVATION_USD,
     ArmSetupError,
     BudgetError,
@@ -21,9 +28,11 @@ from membench.utility.context_activation_arms import (
     actor_turn_text,
     blind_rubric_input,
     build_context_activation_arm,
+    c6_win_for_a3,
     case_for_variant,
     context_activation_turn_argv,
     dry_run_lines,
+    effective_bar_reading,
     estimate_session_count,
     generate_context_activation_episode,
     harness_fault_status,
@@ -181,6 +190,31 @@ def test_other_arms_environment_does_carry_exomem_variables(tmp_path) -> None:
     assert any(key.startswith("EXOMEM_") for key in plan.env)
 
 
+def test_a1_control_argv_carries_no_mcp_config_or_allowedtools_flag_at_all(tmp_path) -> None:
+    # Spec (Requirement: Agent arms and controls): "A1 control with Exomem
+    # absent, carrying no Exomem environment variable, no MCP configuration
+    # and no tool allowlist flag" -- the flags themselves must be absent
+    # from argv, not merely carry an empty value.
+    variant = variant_for_case("C2")
+    episode = generate_context_activation_episode(9, variant)
+    plan = context_activation_turn_argv(
+        episode=episode, arm_id="A1_control", envelope=_FakeEnvelope(), out_dir=tmp_path / "out", parent_env={}
+    )
+    assert "--mcp-config" not in plan.argv
+    assert "--allowedTools" not in plan.argv
+    assert "--strict-mcp-config" not in plan.argv
+
+
+def test_other_arms_argv_does_carry_the_mcp_config_and_allowedtools_flags(tmp_path) -> None:
+    variant = variant_for_case("C2")
+    episode = generate_context_activation_episode(9, variant)
+    plan = context_activation_turn_argv(
+        episode=episode, arm_id="A2_raw_recall", envelope=_FakeEnvelope(), out_dir=tmp_path / "out", parent_env={}
+    )
+    assert "--mcp-config" in plan.argv
+    assert "--allowedTools" in plan.argv
+
+
 def test_a2_and_a4_both_expose_ask_memory_but_only_a4_is_nudged() -> None:
     a2 = build_context_activation_arm("A2_raw_recall")
     a4 = build_context_activation_arm("A4_nudged_recall")
@@ -333,6 +367,68 @@ def test_blind_intersection_does_not_match_on_the_raw_logical_key_alone() -> Non
     assert intersection.asserted_gold == ()
 
 
+# -- round-two BLOCKER (B5): stopwords, discriminating word, confusable sets -
+
+
+_CONFUSABLE_GROUPS: tuple[tuple[str, str, str], ...] = (
+    ("C4", "c4_entity_profile", "t4_shared_first_name_entity_a"),
+    ("C4", "c4_entity_profile", "t4_shared_first_name_entity_b"),
+    ("T4", "t4_shared_first_name_entity_a", "t4_shared_first_name_entity_b"),
+    ("C7", "c7_hub_feature", "c7_hub_market"),
+    ("C7", "c7_hub_feature", "c7_hub_search_ux"),
+    ("C7", "c7_hub_market", "c7_hub_search_ux"),
+    ("C8", "c8_superseded_ancestor_1", "c8_superseded_ancestor_2"),
+)
+
+
+def test_confusable_facts_never_match_each_other_directly() -> None:
+    # Direct unit-level proof (independent of which bucket a case sorts a
+    # key into): the private matcher itself must refuse every confusable
+    # pair, both directions.
+    from membench.utility.context_activation_arms import _fact_phrase_matches
+
+    for case_id, key_a, key_b in _CONFUSABLE_GROUPS:
+        fixture = fixture_by_id(case_id)
+        facts_by_key = {k: GOLD_POISON_FACTS[k] for k in (*fixture.gold, *fixture.poison) if k in GOLD_POISON_FACTS}
+        assert not _fact_phrase_matches(GOLD_POISON_FACTS[key_a], key_b, facts_by_key), f"{key_a} matched {key_b}"
+        assert not _fact_phrase_matches(GOLD_POISON_FACTS[key_b], key_a, facts_by_key), f"{key_b} matched {key_a}"
+
+
+def test_every_fixtures_own_gold_phrase_never_registers_as_poison() -> None:
+    # Across all 18 fixtures: asserting a case's own gold fact, verbatim,
+    # must never come back tagged as poison use for that same case.
+    for fixture in FIXTURES:
+        for key in fixture.gold:
+            if key not in GOLD_POISON_FACTS:
+                continue
+            extraction = ExtractedFacts(asserted=(GOLD_POISON_FACTS[key],), requested=())
+            intersection = intersect_with_gold_poison(extraction, fixture)
+            assert GOLD_POISON_FACTS[key] not in intersection.asserted_poison, (
+                f"{fixture.case_id}: {key}'s own gold phrase registered as poison"
+            )
+
+
+_REALISTIC_PARAPHRASES: tuple[tuple[str, str, str], ...] = (
+    # (case_id, key, realistic paraphrase asserting that key's own fact)
+    ("C1", "c1_weekly_limit_insight", "the user keeps hitting their weekly usage cap"),
+    ("C5", "c5_records_latest_unavailable", "the bench is unavailable, it's being repaired"),
+    ("C1", "c1_subscriptions_collection", "mentions an AI subscriptions collection that tracks plan tiers"),
+    ("C1", "t1_fitness_goal_note", "asks about a step-count fitness goal unrelated to tooling"),
+    ("C8", "c8_active_head", "says the current onboarding approach is the one to use"),
+)
+
+
+@pytest.mark.parametrize("case_id,key,paraphrase", _REALISTIC_PARAPHRASES)
+def test_realistic_paraphrases_match_their_own_fact_and_no_other(case_id: str, key: str, paraphrase: str) -> None:
+    fixture = fixture_by_id(case_id)
+    extraction = ExtractedFacts(asserted=(paraphrase,), requested=())
+    intersection = intersect_with_gold_poison(extraction, fixture)
+    own_bucket = intersection.asserted_gold if key in fixture.gold else intersection.asserted_poison
+    other_bucket = intersection.asserted_poison if key in fixture.gold else intersection.asserted_gold
+    assert paraphrase in own_bucket, f"{paraphrase!r} did not match its own fact {key}"
+    assert paraphrase not in other_bucket, f"{paraphrase!r} also matched the wrong side"
+
+
 def test_blind_rubric_input_carries_only_turn_and_response() -> None:
     c1 = fixture_by_id("C1")
     payload = blind_rubric_input(c1, "a response")
@@ -374,3 +470,84 @@ def test_strike_rule_applies_to_resolved_and_ambiguous_cases_only() -> None:
     assert strike_rule_applies(fixture_by_id("C1")) is True  # resolved
     assert strike_rule_applies(fixture_by_id("C7")) is True  # ambiguous
     assert strike_rule_applies(fixture_by_id("C6")) is False  # unresolved
+
+
+# -- round-two residue: C6's own narrower win rule for A3 -------------------
+
+
+def test_c6_win_requires_a3_correct_with_zero_injection_and_search_while_a4_did_something() -> None:
+    assert (
+        c6_win_for_a3(a3_correct=True, a3_injected_chars=0, a3_memory_searches=0, a4_searched=True, a4_injected_chars=0)
+        is True
+    )
+
+
+def test_c6_win_fails_if_a3_injected_anything() -> None:
+    assert (
+        c6_win_for_a3(a3_correct=True, a3_injected_chars=1, a3_memory_searches=0, a4_searched=True, a4_injected_chars=0)
+        is False
+    )
+
+
+def test_c6_win_fails_if_a3_searched_memory() -> None:
+    assert (
+        c6_win_for_a3(a3_correct=True, a3_injected_chars=0, a3_memory_searches=1, a4_searched=True, a4_injected_chars=0)
+        is False
+    )
+
+
+def test_c6_win_fails_if_a4_never_searched_or_injected() -> None:
+    assert (
+        c6_win_for_a3(
+            a3_correct=True, a3_injected_chars=0, a3_memory_searches=0, a4_searched=False, a4_injected_chars=0
+        )
+        is False
+    )
+
+
+def test_c6_win_fails_if_a3_answered_incorrectly() -> None:
+    assert (
+        c6_win_for_a3(
+            a3_correct=False, a3_injected_chars=0, a3_memory_searches=0, a4_searched=True, a4_injected_chars=0
+        )
+        is False
+    )
+
+
+# -- round-two residue: the effective-bar reading beside the count ---------
+
+
+def _all_wins(**overrides: bool) -> dict[str, bool]:
+    wins = dict.fromkeys(CASE_IDS, True)
+    wins.update(overrides)
+    return wins
+
+
+def test_effective_bar_reading_meets_the_bar_when_everything_is_won() -> None:
+    result = effective_bar_reading(_all_wins())
+    assert result.raw_wins == 9
+    assert result.distinct_query_wins == 8
+    assert result.grill_query_won is True
+    assert result.meets_bar is True
+
+
+def test_effective_bar_reading_never_meets_the_bar_when_the_grill_query_is_lost() -> None:
+    # Losing C2 (and, correlated, C9 -- the same query) leaves 7/9 raw wins,
+    # numerically clearing MECHANISM_ACCEPT_BAR, but the grill query itself
+    # must never be tolerated as the one loss.
+    result = effective_bar_reading(_all_wins(C2=False, C9=False))
+    assert result.raw_wins == MECHANISM_ACCEPT_BAR
+    assert result.grill_query_won is False
+    assert result.meets_bar is False
+
+
+def test_effective_bar_reading_tolerates_losing_one_other_distinct_query() -> None:
+    result = effective_bar_reading(_all_wins(C4=False))
+    assert result.raw_wins == 8
+    assert result.grill_query_won is True
+    assert result.meets_bar is True
+
+
+def test_effective_bar_reading_refuses_a_partial_case_set() -> None:
+    with pytest.raises(ArmSetupError):
+        effective_bar_reading({"C1": True})

@@ -265,6 +265,26 @@ class ArmTurnPlan:
     system_prompt_file: Path | None
 
 
+def _strip_argv_flags(argv: list[str], *, bare: tuple[str, ...] = (), valued: tuple[str, ...] = ()) -> list[str]:
+    """Remove named flags from an argv list: a bare flag outright, a valued
+    flag together with the single argument immediately after it.
+    """
+
+    result: list[str] = []
+    skip_next = False
+    for token in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if token in bare:
+            continue
+        if token in valued:
+            skip_next = True
+            continue
+        result.append(token)
+    return result
+
+
 def context_activation_turn_argv(
     *,
     episode: ContextActivationEpisode,
@@ -325,6 +345,14 @@ def context_activation_turn_argv(
         append_system_prompt_file=system_prompt_file,
         plugin_dir=None,
     )
+    if arm_id == "A1_control":
+        # Spec: A1 carries "no MCP configuration and no tool allowlist flag"
+        # -- not merely an empty value for either, which `build_turn_argv`
+        # (the released, shared f27 primitive, never modified here) always
+        # supplies. Post-processing the argv it returns is what keeps this
+        # benchmark-specific carve-out out of the shared function every
+        # other f32 arm and variant also calls.
+        argv = _strip_argv_flags(argv, bare=("--strict-mcp-config",), valued=("--mcp-config", "--allowedTools"))
     return ArmTurnPlan(
         arm_id=arm_id, episode_id=episode.episode_id, workdir=workdir, env=env, argv=argv, system_prompt_file=system_prompt_file
     )
@@ -459,35 +487,92 @@ class BlindIntersection:
     requested_poison: tuple[str, ...]
 
 
+#: Removed before matching or computing a discriminating word: a shared
+#: function word ("a", "the", "on", "team") is exactly what made "a colleague
+#: on the platform team" register against "a colleague on the support team"
+#: at a 0.67-0.83 raw-word ratio (round-two review finding) -- the words that
+#: actually distinguish the two facts are content words, never these.
+_STOPWORDS: frozenset[str] = frozenset(
+    """
+    a an the and or of on in at to for is are was were be been being it its
+    this that these those with as by from has have had no not but if so
+    than then there their they them i you your my me we our
+    """.split()
+)
+
+
 def _normalize_fact_phrase(text: str) -> str:
-    """Casefold, strip punctuation, and lightly stem so a grader's paraphrase
-    ("the AI subscriptions collection page") matches the fixture's own
-    authored fact phrase without requiring verbatim agreement (B5): a
-    realistic grader reports facts in its own words, never a fixture's
-    internal logical keys.
+    """Casefold and replace punctuation with whitespace (never delete it):
+    ``"in-app"`` must tokenize as ``"in app"``, not fuse into ``"inapp"``, or
+    a hyphenated word silently stops sharing a token with its unhyphenated
+    form elsewhere (round-two review: this hid a false "discriminating"
+    word for the AI-search hubs).
     """
 
     text = text.casefold()
-    text = re.sub(r"[^\w\s]", "", text)
-    words = [re.sub(r"(ing|ed|s)$", "", word) if len(word) > 4 else word for word in text.split()]
-    return " ".join(words)
+    text = re.sub(r"[^\w\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
-def _fact_phrase_matches(extracted_item: str, fact_phrase: str) -> bool:
-    """Whether ``extracted_item`` plausibly names the same fact as ``fact_phrase``.
+def _stem(word: str) -> str:
+    return re.sub(r"(ing|ed|s)$", "", word) if len(word) > 4 else word
 
-    A majority-content-word overlap after normalisation, not exact equality
-    or raw substring containment: a paraphrase need not repeat every word of
-    the authored phrase, but a coincidental one- or two-word overlap should
-    not count as the same fact either.
+
+def _content_words(text: str) -> set[str]:
+    """Stopword-free, lightly stemmed word set (B5 fix): the intersection
+    matches on content words, never on function words that every fact in a
+    case shares.
     """
 
-    fact_words = set(_normalize_fact_phrase(fact_phrase).split())
+    return {_stem(word) for word in _normalize_fact_phrase(text).split() if word and word not in _STOPWORDS}
+
+
+#: Chosen *after* the discriminating-word rule below, per the round-two
+#: finding ("choose the threshold after it, not before"): the discriminating
+#: word is what actually separates a confusable pair, so this floor only
+#: needs to catch a coincidental single-token overlap, not do the
+#: discrimination itself -- a real paraphrase legitimately drops filler
+#: words a fixed high ratio would have penalised (round-two review: "usage
+#: hits the weekly limit" vs. "keeps hitting their weekly usage cap" is a
+#: genuine match at a content-word ratio of 0.33, well under the old 0.6).
+_CONTENT_OVERLAP_FLOOR = 0.2
+
+
+def _discriminating_words(key: str, facts_by_key: dict[str, str]) -> set[str]:
+    """Content words of ``facts_by_key[key]`` that no *other* fact in the same
+    case's gold ∪ poison set shares (spec: "at least one discriminating
+    content word not shared with any other fact of the same case").
+    """
+
+    own = _content_words(facts_by_key[key])
+    others: set[str] = set()
+    for other_key, phrase in facts_by_key.items():
+        if other_key != key:
+            others |= _content_words(phrase)
+    return own - others
+
+
+def _fact_phrase_matches(extracted_item: str, key: str, facts_by_key: dict[str, str]) -> bool:
+    """Whether ``extracted_item`` plausibly names the fact at ``key``.
+
+    Two conditions, in order (B5 fix): the extracted item must share at
+    least one of the fact's *discriminating* words (a word the fact does not
+    share with any sibling fact in ``facts_by_key`` -- this is what keeps
+    the same-first-name persons, the AI-search hubs and the supersession
+    ancestors pairwise non-matching), and only once that gate passes does
+    the residual content-word overlap ratio apply.
+    """
+
+    fact_words = _content_words(facts_by_key[key])
     if not fact_words:
         return False
-    item_words = set(_normalize_fact_phrase(extracted_item).split())
-    overlap = fact_words & item_words
-    return len(overlap) / len(fact_words) >= 0.6
+    extracted_words = _content_words(extracted_item)
+    discriminating = _discriminating_words(key, facts_by_key)
+    if not (extracted_words & discriminating):
+        return False
+    overlap = extracted_words & fact_words
+    return len(overlap) / len(fact_words) >= _CONTENT_OVERLAP_FLOOR
 
 
 def intersect_with_gold_poison(extraction: ExtractedFacts, fixture: FixtureCase) -> BlindIntersection:
@@ -499,23 +584,33 @@ def intersect_with_gold_poison(extraction: ExtractedFacts, fixture: FixtureCase)
     model-free step that applies gold/poison *afterwards*, so the grader
     itself never sees them. B5: the grader's output is realistic prose (a
     paraphrase of what it read), so this intersects on the fixture's own
-    ``GOLD_POISON_FACTS`` phrase per key -- normalised, majority-word-overlap
-    matched -- rather than on raw key identity, which a real grader would
-    never emit.
+    ``GOLD_POISON_FACTS`` phrase per key -- content words, stopword-free,
+    stemmed, gated on a discriminating word -- rather than on key identity or
+    a raw ratio, which a real grader would never emit or a confusable
+    fact-set would defeat.
+
+    The discriminating-word computation is scoped to *this fixture's own*
+    gold ∪ poison keys (``facts_by_key`` below), matching the spec's "not
+    shared with any other fact of the same case": a twin and its paired case
+    reference the identical key universe with gold/poison swapped, so the
+    computation agrees between them.
     """
 
-    gold_facts = {key: GOLD_POISON_FACTS[key] for key in fixture.gold if key in GOLD_POISON_FACTS}
-    poison_facts = {key: GOLD_POISON_FACTS[key] for key in fixture.poison if key in GOLD_POISON_FACTS}
+    facts_by_key = {
+        key: GOLD_POISON_FACTS[key] for key in (*fixture.gold, *fixture.poison) if key in GOLD_POISON_FACTS
+    }
+    gold_keys = tuple(key for key in fixture.gold if key in facts_by_key)
+    poison_keys = tuple(key for key in fixture.poison if key in facts_by_key)
 
-    def _matched(items: tuple[str, ...], facts_by_key: dict[str, str]) -> tuple[str, ...]:
-        return tuple(item for item in items if any(_fact_phrase_matches(item, phrase) for phrase in facts_by_key.values()))
+    def _matched(items: tuple[str, ...], keys: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(item for item in items if any(_fact_phrase_matches(item, key, facts_by_key) for key in keys))
 
     return BlindIntersection(
         case_id=fixture.case_id,
-        asserted_gold=_matched(extraction.asserted, gold_facts),
-        asserted_poison=_matched(extraction.asserted, poison_facts),
-        requested_gold=_matched(extraction.requested, gold_facts),
-        requested_poison=_matched(extraction.requested, poison_facts),
+        asserted_gold=_matched(extraction.asserted, gold_keys),
+        asserted_poison=_matched(extraction.asserted, poison_keys),
+        requested_gold=_matched(extraction.requested, gold_keys),
+        requested_poison=_matched(extraction.requested, poison_keys),
     )
 
 
@@ -544,11 +639,96 @@ def harness_fault_status(*, exit_code: int, is_error: bool, malformed_transcript
     return "blocked" if (exit_code != 0 or is_error or malformed_transcript) else "not_blocked"
 
 
+def c6_win_for_a3(
+    *, a3_correct: bool, a3_injected_chars: int, a3_memory_searches: int, a4_searched: bool, a4_injected_chars: int
+) -> bool:
+    """Whether A3 wins the no-memory case (C6), per the run protocol's own
+    narrower win condition for this one case (spec, Run protocol: "The
+    no-memory case counts as a win for A3 only when A3 answers correctly
+    with zero injected characters and zero memory searches while A4 searched
+    or injected").
+    """
+
+    a4_did_something = a4_searched or a4_injected_chars > 0
+    return a3_correct and a3_injected_chars == 0 and a3_memory_searches == 0 and a4_did_something
+
+
+#: C9 shares C2's own turn (spec: "the padded case shares the grill case's
+#: query"). A per-case win tally collapses this pair into one distinct-query
+#: outcome, judged by C2 -- the canonical, unpadded reference -- alone: C9's
+#: own outcome under padding is `score_padding_robustness`'s concern, never
+#: this bar's.
+DISTINCT_QUERY_CASE_IDS: tuple[str, ...] = ("C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8")
+
+#: Spec, Run protocol: "accepted for v0 only if A3 beats A4 in at least
+#: seven of nine cases".
+MECHANISM_ACCEPT_BAR = 7
+
+
+@dataclass(frozen=True)
+class EffectiveBarReading:
+    """The run protocol's "reading beside the count" (spec, Run protocol):
+    the raw nine-case tally, the eight-distinct-query tally that accounts
+    for C9 sharing C2's own query, and whether the grill query itself (C2)
+    was won -- losing it disqualifies acceptance regardless of the numeric
+    bar.
+    """
+
+    raw_wins: int
+    raw_total: int
+    distinct_query_wins: int
+    distinct_query_total: int
+    grill_query_won: bool
+    meets_bar: bool
+    reading: str
+
+
+def effective_bar_reading(case_wins: dict[str, bool]) -> EffectiveBarReading:
+    """Compute the mechanism's win reading over the nine reminder-turn results.
+
+    ``case_wins`` maps every case id (C1-C9) to whether A3 beat A4 on the
+    reminder test for that case. Spec, Run protocol: "Because the padded
+    case shares the grill case's query, the bar of seven tolerates the loss
+    of at most one distinct query and never the grill query; the report
+    SHALL state that reading beside the count." The numeric bar is met only
+    when the raw count clears seven *and* the grill query (C2) itself was
+    won -- losing C2 while winning enough of the rest to still clear seven
+    numerically (by also losing C9, the same query) must not read as
+    acceptance.
+    """
+
+    missing = set(CASE_IDS) - set(case_wins)
+    if missing:
+        raise ArmSetupError(f"effective_bar_reading needs a result for every case; missing {sorted(missing)}")
+    raw_wins = sum(1 for won in case_wins.values() if won)
+    raw_total = len(case_wins)
+    grill_query_won = bool(case_wins["C2"])
+    distinct_wins = sum(1 for case_id in DISTINCT_QUERY_CASE_IDS if case_wins[case_id])
+    distinct_total = len(DISTINCT_QUERY_CASE_IDS)
+    meets_bar = raw_wins >= MECHANISM_ACCEPT_BAR and grill_query_won
+    grill_reading = "won" if grill_query_won else "lost, which disqualifies acceptance regardless of the numeric count"
+    reading = (
+        f"{raw_wins}/{raw_total} cases won ({distinct_wins}/{distinct_total} distinct queries, "
+        f"since C9 shares C2's own query); the grill query (C2) was {grill_reading}."
+    )
+    return EffectiveBarReading(
+        raw_wins=raw_wins,
+        raw_total=raw_total,
+        distinct_query_wins=distinct_wins,
+        distinct_query_total=distinct_total,
+        grill_query_won=grill_query_won,
+        meets_bar=meets_bar,
+        reading=reading,
+    )
+
+
 __all__ = [
     "ARM_IDS",
     "COST_CAP_USD",
     "DEFAULT_MAX_TURNS",
     "DEFAULT_MODEL",
+    "DISTINCT_QUERY_CASE_IDS",
+    "MECHANISM_ACCEPT_BAR",
     "PER_EPISODE_RESERVATION_USD",
     "ArmSetupError",
     "ArmTurnPlan",
@@ -556,14 +736,17 @@ __all__ = [
     "BlindIntersection",
     "BudgetError",
     "ContextActivationEpisode",
+    "EffectiveBarReading",
     "ExtractedFacts",
     "ReminderTurnResult",
     "actor_turn_text",
     "blind_rubric_input",
     "build_context_activation_arm",
+    "c6_win_for_a3",
     "case_for_variant",
     "context_activation_turn_argv",
     "dry_run_lines",
+    "effective_bar_reading",
     "estimate_session_count",
     "generate_context_activation_episode",
     "harness_fault_status",

@@ -50,8 +50,11 @@ Non-goals: a new amendment family in v0; a model judge inside `f32`; coding-task
   available resource must not be qualified); C6 no-memory turn (0 tokens; twin: a
   unit-conversion turn that does carry a domain cue); C7 ambiguous domain ("AI search";
   twin: a scoped variant that resolves); C8 supersession chain (active head + marked
-  ancestors; twin: unchained active note → no marking); C9 C2 padded with ~200
-  adjacent evidence/transcript pages (twin: unpadded). The synthetic corpus mirrors
+  ancestors; twin: unchained active note → no marking); C9 C2's own turn scored on a
+  tree padded with ~200 adjacent evidence/transcript pages (twin: C2's twin's own
+  turn, on that same padded tree — an ordinary negative control again; padding
+  robustness compares C9 against C2's own unpadded-tree score, round-two revision).
+  The synthetic corpus mirrors
   these shapes with generated names; the private instrument uses the real pages.
 - **D4 — Scoring.** Deterministic layer: per case × anchor kind, recall/precision with
   poison, twin false activation split by status, abstention, supersession, tokens,

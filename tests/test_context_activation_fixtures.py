@@ -227,17 +227,48 @@ def test_measured_latency_ms_carries_only_numeric_fields() -> None:
         assert isinstance(value, (int, float)), f"{key} is not numeric: {value!r}"
 
 
-# -- N1: C9/T9 share one turn, differing only in corpus tree ----------------
+# -- N1 (round two): C9 = C2's turn padded, T9 = T2's turn padded, an
+# ordinary negative twin again; padding robustness compares C9 to C2 --------
 
 
-def test_c9_and_t9_share_the_same_turn_and_gold() -> None:
-    # A twin with a *different* turn cannot show padding did anything; only
-    # an identical query scored on two different corpus states can.
-    c9, t9 = fixture_by_id("C9"), fixture_by_id("T9")
-    assert c9.turn == t9.turn
-    assert c9.gold == t9.gold
-    assert c9.poison == t9.poison
-    assert t9.expected_status == "resolved"
+def test_c9_is_c2s_own_turn_and_gold_pinned_to_the_padded_tree() -> None:
+    c2, c9 = fixture_by_id("C2"), fixture_by_id("C9")
+    assert c9.turn == c2.turn
+    assert c9.gold == c2.gold
+    assert c9.poison == c2.poison
+    assert c9.expected_status == "resolved"
+    assert c9.distractor_count == 200
+
+
+def test_t9_is_t2s_own_turn_a_real_negative_twin_pinned_to_the_padded_tree() -> None:
+    t2, t9 = fixture_by_id("T2"), fixture_by_id("T9")
+    assert t9.turn == t2.turn
+    assert t9.gold == () == t2.gold
+    assert t9.poison == t2.poison
+    assert t9.expected_status == "unresolved"
+    assert t9.distractor_count == 200
+
+
+def test_nine_negative_twins_have_empty_gold_or_are_narrow_gold_by_id() -> None:
+    from epistemic.corpora.context_activation import NARROW_GOLD_TWIN_IDS
+
+    for twin in twins():
+        if twin.case_id in NARROW_GOLD_TWIN_IDS:
+            assert twin.gold
+        else:
+            assert twin.gold == ()
+
+
+def test_every_twins_gold_is_disjoint_from_its_paired_cases_gold_except_t7() -> None:
+    # T7's narrow gold is legitimately one of C7's own three ambiguous
+    # candidates (resolving to it is the point, not a false activation);
+    # every other twin's gold must never overlap its case's own gold.
+    for twin in twins():
+        case = fixture_by_id(twin.pairs_with)
+        if twin.case_id == "T7":
+            assert set(twin.gold) <= set(case.gold)
+        else:
+            assert set(twin.gold).isdisjoint(case.gold)
 
 
 def test_base_distractor_count_is_zero() -> None:
