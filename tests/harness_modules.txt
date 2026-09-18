@@ -4,6 +4,8 @@
 # Pinned against the derivation by tests/test_ci_reliability_contract.py.
 tests/test_benchmark_capabilities.py
 tests/test_capture_sweep_journey.py
+tests/test_context_activation_audit.py
+tests/test_context_activation_fixtures.py
 tests/test_continuation_checkpoint.py
 tests/test_database_bootstrap_rotation_gate.py
 tests/test_dataset_identity_case_count.py
@@ -103,6 +105,7 @@ tests/test_membench_trackc_join.py
 tests/test_membench_trackd.py
 tests/test_membench_utility_actor.py
 tests/test_membench_utility_cell_fixture.py
+tests/test_membench_utility_context_activation_arms.py
 tests/test_membench_utility_report.py
 tests/test_membench_utility_runner.py
 tests/test_membench_utility_scenarios.py
