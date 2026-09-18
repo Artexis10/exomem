@@ -21,6 +21,7 @@ import logging
 import math
 import os
 import sqlite3
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -878,7 +879,7 @@ def chunk_text(title: str, body: str) -> list[str]:
     return out
 
 
-def _chunks_for_page(vault_root: Path, page) -> list[str]:
+def _chunks_for_page(vault_root: Path, page, *, allow_encode: bool = True) -> list[str] | None:
     """Chunking router — the single seam every writer/rebuild path goes through.
 
     Gated (`EXOMEM_SEMANTIC_SEGMENTS`) audio/video sidecars whose transcript is
@@ -887,6 +888,16 @@ def _chunks_for_page(vault_root: Path, page) -> list[str]:
     before/after `## Extracted text` still paragraph-chunked in document order.
     Every other page — and the gate-off world — returns `chunk_text` output
     unchanged (equality-tested).
+
+    Segmenting a timed transcript ENCODES: the segmenter scores every gap
+    between timed lines with embeddings of the windows on either side, so one
+    long recording is hundreds of texts through the model. A writer pays that
+    once per generation. A read path must not pay it per request, and it must
+    not quietly substitute a different chunking either, because the rows the
+    embedding pass published were cut by this seam and only an identical cut
+    matches them. So `allow_encode=False` returns None exactly where the
+    segmenter would have run, and the caller decides what a page whose current
+    chunking it cannot afford to derive is worth to it.
     """
     from . import semantic_segments as ss
 
@@ -907,6 +918,8 @@ def _chunks_for_page(vault_root: Path, page) -> list[str]:
     timed_lines = sum(1 for line in transcript.splitlines() if ss.TIMED_LINE_RE.match(line))
     if timed_lines < ss.MIN_TIMED_LINES:
         return chunk_text(page.title, page.body)
+    if not allow_encode:
+        return None
     events = (
         ss.gather_events(vault_root, page.media_file)
         if getattr(page, "media_file", None)
@@ -947,11 +960,42 @@ def embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     that handed the encoder a whole note body, and those are different defects
     with different fixes.
     """
-    with call_spans.span(
-        "embeddings.encode",
-        {"texts": len(texts), "chars": sum(len(text) for text in texts)},
+    # Resolved before the encode span opens, and only on the MCP path: off it
+    # the spans are no-ops and the frame walk would be the only cost paid.
+    caller = _encode_caller() if call_spans.MCP_CALL_TOKEN.get() is not None else "off-path"
+    with (
+        call_spans.span(
+            "embeddings.encode",
+            {"texts": len(texts), "chars": sum(len(text) for text in texts)},
+        ),
+        call_spans.span(f"encode.by.{caller}"),
     ):
         return _embed_texts(texts, is_query=is_query)
+
+
+def _encode_caller() -> str:
+    """The nearest Exomem module above the encoder, as a span name suffix.
+
+    An `embeddings.encode` of 80 s with 837 texts sat in the ledger for days
+    with no way to say who asked for it; the caller was the semantic segmenter
+    reached from the context pack. Span fields are integers, so the caller is
+    carried in a sibling span's name instead: `encode.by.<module>`, a small
+    fixed set of identifiers, never user data. Never raises.
+    """
+    try:
+        frame = sys._getframe(2)
+        for _ in range(16):
+            if frame is None:
+                break
+            module = str(frame.f_globals.get("__name__", ""))
+            if module.startswith("exomem."):
+                leaf = module.rsplit(".", 1)[-1]
+                if leaf not in {"embeddings", "embedding_backend"}:
+                    return leaf
+            frame = frame.f_back
+    except Exception:  # noqa: BLE001 - attribution must never break an encode
+        pass
+    return "unknown"
 
 
 def _embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
@@ -1047,6 +1091,14 @@ def _summarize_index_status(indexes: dict[str, object]) -> dict:
         "bytes": sum(int(s.get("bytes") or 0) for s in loaded),
         "by_vault": by_vault,
     }
+
+
+def index_cache_activity() -> tuple[tuple[str, int], ...]:
+    """A cheap fingerprint of matrix USE for the idle reaper: per shared index, its hit count."""
+    with _INDEX_CACHE_LOCK:
+        indexes = [("embedding:" + k, idx) for k, idx in _INDEX_CACHE.items()]
+        indexes += [("clip:" + k, idx) for k, idx in _CLIP_INDEX_CACHE.items()]
+    return tuple(sorted((key, int(idx.cache_status().get("hits") or 0)) for key, idx in indexes))
 
 
 def index_cache_status() -> dict:

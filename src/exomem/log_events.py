@@ -58,6 +58,7 @@ EVENT_CATALOG: dict[str, EventSpec] = {
     "lease_reclaimed": EventSpec(),
     "lease_renew_rejected": EventSpec(),
     "prevalidated_commit": EventSpec(),
+    "latency_ceiling_exceeded": EventSpec(),
 }
 
 

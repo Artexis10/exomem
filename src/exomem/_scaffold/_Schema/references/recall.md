@@ -66,6 +66,8 @@ stages it names under `skipped` and `truncated`: the result is complete for ever
 stage that ran and is not an error, so re-ask with a narrower option set when you
 need what was left out.
 
+A `latency` block on a `bootstrap` response means this client's own recent recalls have been slower than the service's ceiling; its `dominant_spans` name the stage responsible, and it is absent when nothing is slow.
+
 Performance presets:
 - Normal lookup: `ask_memory(detail="compact", rerank=false)`.
 - Reasoning context: `ask_memory(deep=true)` when you need a compressed evidence bundle;

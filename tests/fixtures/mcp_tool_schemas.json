@@ -20,6 +20,54 @@
       "type": "object"
     }
   },
+  "activate_context": {
+    "description": "Compile durable context for a raw conversational turn, without a query.\n\nCall this ONCE at the start of a substantive turn, before deciding what to\nsearch for. Pass the user's words verbatim — this is not a search query and\nmust not be rewritten into one. It returns a bounded working-memory packet:\nwhich durable anchors the turn is about (entities, resources, hubs, Records\ncollections, active plans, projects), the context roles it filled, short\nprovenance-bearing units, pointers to what did not fit the budget, and the\ncurrent state of any resource whose collection records one.\n\nRead-only and abstaining by construction. It writes nothing, changes no\n`ask_memory`/`find` result, runs no model beyond the retrieval scorers recall\nalready runs, and returns `abstained: true` with a reason rather than guessing\nwhen the turn resolves nothing (`unresolved`), names two competing senses\n(`ambiguous`), is served while the derived index is still warming\n(`index_warming`), or is switched off (`disabled`). An ambiguous turn lists\nboth anchors under `ambiguity` and runs no role lane — you pick the sense.\n\nUse `ask_memory` instead when you already know what you are looking for; use\nthis when you do not, and follow it with `read_memory` on whatever ref the\npacket points at.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "turn": {
+          "default": "",
+          "description": "The user's turn, verbatim. Empty abstains.",
+          "type": "string"
+        },
+        "max_chars": {
+          "default": 4000,
+          "description": "Character ceiling for the packet's text. Default 4,000, clamped to 500..8,000. Overflow becomes pointers, never truncated claims.",
+          "type": "integer"
+        },
+        "purpose": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional declared purpose for this request, e.g. \"audit\" or \"due-diligence\". Governance rules may widen or narrow what a given audience may see for a stated purpose; leaving it unset is deterministic, not a wildcard. Never affects ranking, and never enters the packet cache key."
+        },
+        "include_timings": {
+          "default": false,
+          "description": "Include per-stage timings for diagnostics.",
+          "type": "boolean"
+        },
+        "authorization_session_credential": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
+        }
+      },
+      "type": "object"
+    }
+  },
   "adopt_vault": {
     "description": "Adopt an existing vault safely without replacing originals.\n\nDefault mode scans only. Copy/compile modes write under the governed\nKnowledge Base layer and preserve original path/hash provenance.",
     "inputSchema": {

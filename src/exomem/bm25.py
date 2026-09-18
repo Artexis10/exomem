@@ -92,6 +92,8 @@ class BM25Index:
 
     def __init__(self) -> None:
         self._cache: dict[tuple[Path, str], _CorpusCacheEntry] = {}
+        #: Searches served: the use signal the idle reaper watches.
+        self._hits = 0
         # Per-doc token cache, shared across scopes (a file's tokens don't depend
         # on scope; KB ⊆ vault). Mirrors find.FrontmatterCache's mtime
         # invalidation: a doc is Snowball-tokenized once and reused until its
@@ -331,6 +333,9 @@ class BM25Index:
         )
         if indexed is not None:
             return indexed
+        # Counted only where the python corpus actually serves: a sidecar-served
+        # query touches nothing the reaper could reclaim here.
+        self._hits += 1
         bm25, paths = self._fresh_corpus(vault_root, scope, freshness)
         if bm25 is None or not paths:
             return []
@@ -387,6 +392,7 @@ class BM25Index:
             token_count = sum(len(tokens) for _mtime, tokens in self._tokens.values())
             return {
                 "loaded": bool(self._cache or self._tokens),
+                "hits": self._hits,
                 "corpora": len(self._cache),
                 "documents": doc_count,
                 "tokenized_documents": len(self._tokens),

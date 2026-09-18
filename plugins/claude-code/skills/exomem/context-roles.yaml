@@ -1,0 +1,139 @@
+# Context roles — the lenses a context packet is assembled through.
+#
+# When an agent calls `activate_context` with a raw turn, the server resolves
+# which durable anchors the turn is about and then fills a small working-memory
+# packet. A ROLE is one question that packet answers about an anchor: what is
+# this thing, what am I allowed to do with it, what state is it in now, what is
+# already planned for it. Each role names the retrieval lane it runs through,
+# the semantic-unit categories it selects, the anchor kinds it is a default for,
+# and the turn cues that call for it even when no anchor kind asks.
+#
+# Roles are retrieval lenses, not conclusions. Nothing here ranks authority,
+# nothing carries a confidence number, and no server component edits this file:
+# the vocabulary changes by a shipped revision or by your own override, and a
+# proposal from anywhere else belongs in a review queue.
+#
+# YOUR OVERRIDE: copy this file to `<vault>/<Knowledge Base>/_Schema/
+# context-roles.yaml` and edit it there. An override may add a role, add
+# categories or cues to a shipped one, or narrow which anchor kinds a role
+# defaults for. It may not remove or rename a shipped role — a packet that
+# silently lost `constraints` would read as "there are no constraints".
+#
+#   schema_version: 1
+#   roles:
+#     logistics:                     # a new role of your own
+#       description: Depot and freight movement
+#       lane: units
+#       categories: [fact, decision]
+#       anchor_defaults: [resource]
+#       cues: ["shipping", "in transit"]
+#     preferences:
+#       add_cues: ["i'd rather"]     # extend a shipped role
+#     people:
+#       anchor_defaults: []          # narrow a shipped default away
+#
+# Lanes: units (semantic units by category), records (Records collection items),
+# planning (active Planning items), entity (entity/profile page facets),
+# graph (typed neighbourhood), evidence (pointers only, never bodies).
+#
+# Anchor kinds: entity, resource, hub, collection, plan, project.
+
+schema_version: 1
+roles:
+  identity:
+    description: What this anchor is, in its own words.
+    lane: entity
+    categories: [fact, insight]
+    anchor_defaults: [entity, resource, hub, project]
+    cues: ["who is", "what is", "remind me about"]
+
+  preferences:
+    description: Stated inclinations that should shape a recommendation.
+    lane: units
+    categories: [preference]
+    anchor_defaults: [entity, project]
+    cues: ["prefer", "i like", "i hate", "usually", "i'd rather"]
+
+  constraints:
+    description: Limits, requirements and assumptions that bound what is allowed.
+    lane: units
+    categories: [constraint, requirement, assumption]
+    anchor_defaults: [resource, project, plan]
+    cues: ["constraint", "limit", "allowed to", "can i", "am i able", "budget"]
+
+  resources:
+    description: The things themselves — products, systems, accounts, equipment.
+    lane: units
+    categories: [fact, config]
+    anchor_defaults: [resource, collection]
+    cues: ["which one", "do i have", "what do i own"]
+
+  current_state:
+    description: What is true right now, newest observation first.
+    lane: records
+    categories: [fact, config]
+    anchor_defaults: [resource, collection]
+    cues: ["right now", "currently", "at the moment", "how much", "how many", "left"]
+
+  recent_change:
+    description: What changed lately and the decision behind it.
+    lane: units
+    categories: [decision, finding]
+    anchor_defaults: [project, hub]
+    cues: ["again", "still", "changed", "since", "lately"]
+
+  active_plans:
+    description: Intents and work already committed for this anchor.
+    lane: planning
+    categories: [action]
+    anchor_defaults: [plan, project]
+    cues: ["i'm planning", "im planning", "planning to", "next", "should i"]
+
+  methods:
+    description: Reusable approaches and designs that apply here.
+    lane: units
+    categories: [technique, design]
+    anchor_defaults: [hub]
+    cues: ["how do i", "how to", "what is the best way", "approach"]
+
+  precedents:
+    description: What was decided or learned the last time this came up.
+    lane: units
+    categories: [decision, insight, finding]
+    anchor_defaults: [hub, project]
+    cues: ["last time", "before", "previously", "we already"]
+
+  people:
+    description: Who is involved and in what relationship.
+    lane: entity
+    categories: [fact]
+    anchor_defaults: [entity, project]
+    cues: ["who", "with", "ask them", "their"]
+
+  location:
+    description: Where this is, and where it has to be.
+    lane: units
+    categories: [fact]
+    anchor_defaults: [resource]
+    cues: ["where", "at home", "abroad", "in storage", "shipped"]
+
+  baseline:
+    description: Durable measurements and reference values to compare against.
+    lane: units
+    categories: [fact, finding]
+    anchor_defaults: [collection, project]
+    cues: ["baseline", "normal", "typical", "compared to"]
+
+  evidence:
+    description: Pointers to the proof — never the proof's body.
+    lane: evidence
+    categories: [fact, finding]
+    anchor_defaults: [collection]
+    cues: ["proof", "receipt", "evidence", "how do we know"]
+
+  open_questions:
+    description: What is still unanswered or unresolved here.
+    lane: units
+    categories: [question, problem, risk]
+    anchor_defaults: [hub, plan]
+    cues: ["unsure", "open question", "still don't know", "why does", "?"]

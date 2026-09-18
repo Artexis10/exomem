@@ -237,6 +237,13 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `delivery.vocabulary_after_commit` | Vocabulary delivery after the commit. |
 | `derived.advisory_execute`, `derived.component_dispatch`, `derived.component_completion` | The derived drain. |
 | `recall.*` | Retrieval phases, named by `find`'s own timings. |
+| `recall.due_state` | Serving the advisory due-state block a recall carries. On a memo hit its re-checks are `recall.due_state.verdicts` (`paths` = release verdicts re-asked), `recall.due_state.role` and `recall.due_state.exists` (`rows`); on a miss, `recall.due_state.build`. |
+| `recall.due_state.emit` | Deciding whether that block is new to the session and recording its delivery. |
+| `command.leaf`, `command.postfilter` | The two halves of a tool's `duration_ms`: the command itself, then the MCP-layer post-filter and scrub of its result. |
+| `lexical.publication_wait` | Time a request spent waiting for the lexical publication barrier, with `timeout_ms` (the bound it chose) and `acquired` (1 or 0). Recorded only on the MCP path. |
+| `recall.pack.parents`, `recall.pack.units`, `recall.pack.neighborhood`, `recall.pack.tension` | The deep pack's phases: reading the packed parents, extracting claims and packing semantic units, the one-hop wikilink neighbourhood, and supersession plus proximity tension (the sidecar reads). `recall.graph_enrich` remains the fifth. |
+| `encode.by.<module>` | Beside every `embeddings.encode`: the Exomem module that asked for the encode (`context_pack`, `semantic_segments`, `index_sync`, ...). The name is the attribution because span fields are integers. |
+| `read.page`, `read.history`, `read.links` | A direct read's phases: the page read, the edit log (`entries`), and the wikilink summary (`inbound`, `outbound`). |
 
 Spans are aggregated by name within a call, so a phase entered once per changed
 path reports a count and a total rather than hundreds of rows. Instrumentation
@@ -380,12 +387,46 @@ exomem logs verify
 `--file` accepts
 `cli | ledger | media | mutations | queries | reads | server | writes`.
 
+## Latency watch
+
+The ledger is also read back, so a latency regression is found by the system
+and not by a person getting annoyed. `src/exomem/latency_watch.py` keeps a
+bounded, content-free ring of recent recall calls (tool, client, deep or not,
+`total_ms`, the five largest spans), fed beside the ledger row and under the
+same rule that it can never break or slow a call. Over a trailing 24 h window
+it reports p50 and p90 per (tool, client, deep) and compares the p90 against
+PROVISIONAL ceilings held in that one module: 1,000 ms for `ask_memory`
+without `deep`, `read_memory` and `find`; 5,000 ms for `ask_memory` with
+`deep`. A verdict needs 20 samples, and calls in the first 10 minutes after
+the process started do not count, so the cold window after a promotion is not
+reported as a regression. There is no environment override: change the
+constants through a spec change.
+
+Where a breach shows up:
+
+- `bootstrap` carries a `latency` block, only while the calling client's own
+  recalls breach: per tool `{deep, samples, p50_ms, p90_ms, ceiling_ms,
+  dominant_spans: [{name, ms, calls}]}`. A healthy service returns today's
+  response shape. Another client's slowness is never reported to this one.
+- `event=latency_ceiling_exceeded` (WARNING) with the same fields, at most
+  once per hour per (tool, client, deep).
+- `exomem doctor` `latency` (below), which reads the file instead of the ring.
+
 ## Doctor
 
 `exomem doctor` includes an `observability` check: log directory writability,
 active/rotated file sizes, JSONL tail parseability, the NSSM `service.*`
 rotation pile (warns above 50), and metrics-snapshot freshness (warns past 2×
 the snapshot interval).
+
+It also includes a `latency` check: the same figures as the latency watch,
+computed from `ledger.jsonl` (and the newest archive generations when the 24 h
+window reaches past the active file) so they survive restarts, per tool and
+calling client, with the dominant spans among the calls over the ceiling. It
+warns above a ceiling, passes otherwise, notes pairs with fewer than 20 calls,
+and passes with a note rather than failing when the ledger is absent or
+unreadable. The startup grace is not applied here: a slow post-promotion
+window is worth seeing in a diagnosis, and its spans say what it was.
 
 ## Environment variables
 
