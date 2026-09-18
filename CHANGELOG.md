@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.86.0](https://github.com/Artexis10/exomem/compare/v0.85.5...v0.86.0) (2026-09-18)
+
+
+### Features
+
+* **observability:** name the recall time that ran outside every span ([#1288](https://github.com/Artexis10/exomem/issues/1288)) ([9e3dc61](https://github.com/Artexis10/exomem/commit/9e3dc6122badc68f5961750569aca28a20236c95))
+
 ## [0.85.5](https://github.com/Artexis10/exomem/compare/v0.85.4...v0.85.5) (2026-09-16)
 
 
