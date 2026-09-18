@@ -960,12 +960,15 @@ def embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     that handed the encoder a whole note body, and those are different defects
     with different fixes.
     """
+    # Resolved before the encode span opens, and only on the MCP path: off it
+    # the spans are no-ops and the frame walk would be the only cost paid.
+    caller = _encode_caller() if call_spans.MCP_CALL_TOKEN.get() is not None else "off-path"
     with (
         call_spans.span(
             "embeddings.encode",
             {"texts": len(texts), "chars": sum(len(text) for text in texts)},
         ),
-        call_spans.span(f"encode.by.{_encode_caller()}"),
+        call_spans.span(f"encode.by.{caller}"),
     ):
         return _embed_texts(texts, is_query=is_query)
 
