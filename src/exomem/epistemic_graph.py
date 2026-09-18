@@ -412,12 +412,136 @@ def _connect_existing_owner_target(
                     raise
 
 
+#: Everything SQLite can create beside a private rebuild.  A publication moves
+#: or copies only the main file, so any of these outliving it is stranded in the
+#: state root -- where it ages into a `doctor` WARN on a healthy vault and, being
+#: the newest group for the preserved-temporary reaper, gets a genuinely retained
+#: temporary collected in its place.
+_GRAPH_REBUILD_COMPANIONS = ("-journal", "-wal", "-shm")
+
+
+def _present_rebuild_companions(temporary: Path, suffixes: tuple[str, ...]) -> list[Path]:
+    """Which companions exist beside a private rebuild, following no alias.
+
+    `lstat`, not `exists()`: this module never follows a private alias, and a
+    dangling `<temp>-wal` symlink is present for the purposes of a single-file
+    publication even though `exists()` reports it absent.
+    """
+
+    present: list[Path] = []
+    for suffix in suffixes:
+        companion = temporary.with_name(f"{temporary.name}{suffix}")
+        try:
+            os.lstat(companion)
+        except OSError:
+            continue
+        present.append(companion)
+    return present
+
+
+def _seal_graph_rebuild_as_wal(vault_root: Path, temporary: Path) -> None:
+    """Put a proven private rebuild in WAL mode before it is published.
+
+    The live graph store must be a WAL database from its *first* publication.
+    `graph_sync.replace_sidecar` promises it ("An existing live graph runs in WAL
+    mode"), `_publish_sidecar_in_place` builds on that promise, and
+    `_prepare_live_graph_wal_family` establishes WAL with a deliberate *zero*
+    busy timeout on the strength of it, because identity coordination must never
+    inherit the ordinary five-second SQLite wait.
+
+    A first publication has no live database to back up into, so it hands the
+    proven rebuild to a content-agnostic move -- and a private rebuild is kept in
+    rollback-journal mode so that no authoritative row is ever left behind in a
+    detached `-wal` companion the move would not carry.  Publishing in that mode
+    leaves the DELETE->WAL conversion to whichever caller opens the live store
+    next, contending with live traffic and with no patience for a lock:
+    converting needs exclusive access, so a single held SHARED reader refuses it
+    and the fail-closed converter then reports a store that "could not establish
+    WAL mode" although the store is perfectly capable of it.
+
+    The proven rebuild is the one place that conversion cannot race: the file is
+    private, all of its writes are done, and this process owns it.  A clean last
+    close checkpoints the companions away and leaves the WAL setting in the
+    database header, so the move still transports exactly one self-contained
+    file and the rollback-journal rationale above is still honoured.
+
+    `openspec/specs/category-retrieval-reliability/spec.md:92` already requires
+    the first half of this of the lexical sidecar: "Journal-mode setup SHALL occur
+    only during schema setup or rebuild and SHALL soft-fail."  The graph follows
+    the placement half and deliberately **deviates from the soft-fail half** --
+    see the paragraph below.  That requirement was added after the same defect in
+    the lexical sidecar, where, per
+    `openspec/changes/archive/2026-08-20-restore-indexed-category-recall/design.md:5`,
+    "a transient lock can therefore disable unit recall until restart".
+
+    Refusing rather than soft-failing is correct *here*, unlike in an ordinary
+    opener: this rebuild is private and uncontended, so a pragma that does not
+    return `wal`, or a companion that outlives a clean close, is a fault rather
+    than a busy signal.  An ordinary opener sees the opposite -- contention is
+    the normal case there -- which is why `_prepare_live_graph_wal_family` keeps
+    its zero busy timeout and its own guard untouched.
+
+    This runs while the rebuild is still being proved, and adds **no SQLite work
+    under the publication hold**.  (The hold is not SQLite-free in general: an
+    in-place republication's `Connection.backup` runs under it by existing
+    design.  `test_rebuild_publication_hold_runs_no_disk_or_sqlite_work` pins the
+    first-publication case, and the seal must not add to it.)  It also runs
+    before the caller captures the temp's `nofollow_regular_file_identity`,
+    because sealing rewrites the file and the publication ticket re-verifies that
+    identity.
+
+    `sqlite3.DatabaseError` is what each caller already turns into its own
+    "cannot publish this candidate" answer: in `_prepare_publication_ticket` the
+    enclosing `except (OSError, sqlite3.Error)` discards the ticket, so exhausting
+    the bounded publication attempts becomes the documented Class B publication
+    failure; at the registry-rebind site the seal call is wrapped to return
+    `False`, which is that path's existing "fall back to the full rebuild".
+    """
+
+    connection = _connect_existing_owner_target(vault_root, temporary, readonly=False)
+    try:
+        journal_mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
+    finally:
+        connection.close()
+    if (
+        journal_mode is None
+        or not journal_mode
+        or str(journal_mode[0]).lower() != "wal"
+    ):
+        raise sqlite3.DatabaseError("proven graph rebuild could not be sealed in WAL mode")
+    stranded = _present_rebuild_companions(temporary, _GRAPH_REBUILD_COMPANIONS)
+    if stranded:
+        # Clear them on the way out.  Leaving one behind is not neutral: an
+        # orphan companion ages into a `doctor` WARN on a healthy vault and
+        # displaces a genuinely preserved temporary in the reaper's newest
+        # group.  Best effort only -- the refusal below is what stops the
+        # publication, and cleanup must never mask it.
+        for companion in stranded:
+            try:
+                _remove_graph_rebuild_artifact(vault_root, companion, missing_ok=True)
+            except (OSError, RuntimeError):
+                pass
+        raise sqlite3.DatabaseError(
+            "proven graph rebuild retained "
+            + ", ".join(companion.name[len(temporary.name) :] for companion in stranded)
+            + " after a clean close"
+        )
+
+
 def _move_graph_rebuild_into_store(
     vault_root: Path,
     temporary: Path,
     live: Path,
 ) -> None:
-    """Publish the first graph rebuild through an absent-target held move."""
+    """Publish the first graph rebuild through an absent-target held move.
+
+    The moved bytes are already a WAL database: `_seal_graph_rebuild_as_wal` runs
+    at the publication call sites, before the rebuild reaches this
+    content-agnostic move, so the live store satisfies
+    `graph_sync.replace_sidecar`'s "An existing live graph runs in WAL mode" from
+    the moment it becomes live.  This function still moves opaque bytes and does
+    not interpret them.
+    """
 
     with reserved_paths._subsystem_authority_scope("epistemic_graph"):
         reserved_paths._move_owner_file(
@@ -545,8 +669,49 @@ def _backup_graph_rebuild_into_store(
                         create=False,
                     )
                 )
+                # `immutable=1` tells SQLite the file cannot change, so it skips
+                # locking AND ignores a hot rollback journal. That turns an
+                # unsettled source into an undetectable wrong answer instead of a
+                # loud failure: measured on this SQLite, an immutable open of a
+                # rollback-mode database with a hot journal served 499
+                # uncommitted rows and reported `integrity_check = ok`, where a
+                # plain read-only open refuses outright. So the precondition is
+                # checked here rather than asserted in prose. A sealed, cleanly
+                # closed rebuild has none of these three companions, so a wrong
+                # firing is not reachable on the settled path, and "immutable is
+                # a true statement" becomes something this code holds rather than
+                # a comment a later edit can walk past.
+                unsettled = _present_rebuild_companions(
+                    retained_temporary, _GRAPH_REBUILD_COMPANIONS
+                )
+                if unsettled:
+                    raise sqlite3.DatabaseError(
+                        "proven graph rebuild is not settled for an immutable read: "
+                        + ", ".join(
+                            companion.name[len(retained_temporary.name) :]
+                            for companion in unsettled
+                        )
+                    )
+                # `immutable=1`, not a bare `mode=ro`. A read-only open of a
+                # sealed WAL database that has no companions still CREATES
+                # `-wal`/`-shm`, and a read-only last close does not remove them,
+                # so a plain read-only source stranded a pair in the state root on
+                # every in-place publication: `doctor` then warns on a healthy
+                # vault once the pair ages past `vault.REBUILD_TEMP_STALE_AGE_SECONDS`,
+                # and the pair becomes the newest group for the preserved-temporary
+                # reaper, so a genuinely retained temporary is collected instead.
+                #
+                # `immutable` is a true statement here, not a shortcut: this
+                # temporary is private to this publication, already sealed to WAL
+                # and fully checkpointed by `_seal_graph_rebuild_as_wal`, and has
+                # no writer. SQLite therefore takes no locks and creates no
+                # companions. It also cannot be reading a torn file: `immutable`
+                # ignores a hot rollback journal, but both
+                # `_prepare_publication_ticket` and the seal open this temporary
+                # read-WRITE first, which recovers any journal before this point,
+                # and a sealed WAL database has no rollback journal to ignore.
                 source = _sqlite_connect_owned(
-                    f"{retained_temporary.as_uri()}?mode=ro",
+                    f"{retained_temporary.as_uri()}?mode=ro&immutable=1",
                     uri=True,
                 )
                 retained.callback(source.close)
@@ -2862,6 +3027,10 @@ class EpistemicGraphIndex:
                 return None
             if freshness.external_pending(self.vault_root):
                 return None
+            # Every write to the rebuild is done and every proof above has read
+            # it back, so this is the last uncontended moment to settle its
+            # journal mode -- and it must precede the identity captured below.
+            _seal_graph_rebuild_as_wal(self.vault_root, temporary)
             return _GraphPublicationTicket(
                 epoch,
                 recall,
@@ -3091,6 +3260,20 @@ class EpistemicGraphIndex:
                     raise sqlite3.DatabaseError("registry rebind candidate failed integrity check")
             finally:
                 candidate.close()
+            # Same ordering as the rebuild ticket: settle the journal mode while
+            # the candidate is private, before its identity is captured and
+            # before the publication hold below.
+            #
+            # Wrapped, because this path has no `except` of its own: an escaping
+            # refusal would skip the full-rebuild fallback and surface as a
+            # convergence failure. `False` is this function's existing "cannot
+            # rebind, fall back to the full rebuild", and the `finally` below
+            # still removes the candidate. The pre-existing integrity-check
+            # `DatabaseError` above keeps propagating exactly as before.
+            try:
+                _seal_graph_rebuild_as_wal(self.vault_root, temporary)
+            except (OSError, sqlite3.Error):
+                return False
             ticket = _GraphPublicationTicket(
                 epoch,
                 recall,
