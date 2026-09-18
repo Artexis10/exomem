@@ -686,3 +686,226 @@ def test_a_colliding_name_decides_every_page_that_bears_it(vault: Path) -> None:
 
     assert guarded is not None
     assert guarded["units"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Round three: every spelling of a reference, and no sidecar on an open vault
+# --------------------------------------------------------------------------- #
+
+RESTRICTED_TITLE = "Kill switch for risky releases"
+
+
+def _titled_release() -> egress.AnnotatedHits:
+    """The withheld page is already in the release's withheld set, no policy."""
+    return egress.AnnotatedHits(
+        hits=[_hit(OPEN_PATH)],
+        withheld_paths=frozenset({RESTRICTED_PATH}),
+        active=True,
+    )
+
+
+def test_a_title_spelled_wikilink_to_a_withheld_page_drops_the_unit(
+    vault: Path,
+) -> None:
+    """The reviewer's leak: comparison stems come from filenames, titles do not.
+
+    `[[Kill switch for risky releases]]` resolves to the withheld path, the path is
+    decided and withheld — and then the prose match canonicalises the target to the
+    spaced title, which is no filename stem, so the unit was served. Every earlier
+    test linked by stem, which is why this stayed invisible.
+    """
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    packet = _packet()
+    packet["units"] = [_prose_unit(RESTRICTED_TITLE, ref="unit-title-link")]
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _prose_release())
+
+    assert guarded is not None
+    assert guarded["units"] == []
+    assert RESTRICTED_TITLE.casefold() not in str(guarded).casefold()
+
+
+def test_a_title_spelled_wikilink_is_caught_with_no_policy_at_all(vault: Path) -> None:
+    """Already-withheld is enough: the leak did not need a policy to fire."""
+    _indexed(vault)
+
+    packet = _packet()
+    packet["units"] = [_prose_unit(RESTRICTED_TITLE, ref="unit-title-link")]
+
+    guarded = egress.guard_working_set(vault, packet, _titled_release())
+
+    assert guarded is not None
+    assert guarded["units"] == []
+
+
+def test_a_title_spelled_wikilink_to_a_permitted_page_keeps_the_unit(
+    vault: Path,
+) -> None:
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    unit = _prose_unit("Autovacuum thresholds prevent table bloat", ref="unit-open-title")
+    packet = _packet()
+    packet["units"] = [unit]
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _prose_release())
+
+    assert guarded is not None
+    assert guarded["units"] == [unit]
+
+
+def _prose_only_packet(spelling: str) -> dict:
+    """A packet naming the withheld page NOWHERE except one unit's prose.
+
+    `_packet()` lists it in anchors, pointers, current_state and ambiguity, so the
+    decision loop withholds the path from those fields and the prose match then
+    succeeds however the link was spelled — which hides whether the resolver ever
+    saw the target. Isolating it here is what makes the resolver's own behaviour
+    observable.
+    """
+    return {
+        "anchors": [
+            {
+                "ref": OPEN_PATH,
+                "path": OPEN_PATH,
+                "title": "Open anchor",
+                "kind": "resource",
+                "status": "resolved",
+                "evidence": ["lexical_overlap"],
+            }
+        ],
+        "roles": [{"id": "resources", "source": "anchor_default", "lane": "units"}],
+        "units": [_prose_unit(spelling, ref="unit-decorated-link")],
+        "pointers": [],
+        "current_state": [],
+        "missing": [],
+        "ambiguity": [],
+        "budget": {"limit_chars": 4000, "used_chars": 40},
+        "generation": {
+            "freshness_key": "k",
+            "index_generation": 3,
+            "roles_hash": "abc",
+            "roles_source": "shipped",
+        },
+        "abstained": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        _stem_of(RESTRICTED_PATH),
+        f"{_stem_of(RESTRICTED_PATH)}|the kill switch",
+        f"{_stem_of(RESTRICTED_PATH)}#Summary",
+        RESTRICTED_TITLE,
+        f"{RESTRICTED_TITLE}|that pattern",
+        f"{RESTRICTED_TITLE}#Summary",
+    ],
+)
+def test_every_spelling_of_a_prose_only_withheld_link_drops_the_unit(
+    vault: Path, spelling: str
+) -> None:
+    """Four spellings, one identity: stem, title, `[[x|label]]`, `[[x#Section]]`.
+
+    The alias and heading forms are presentation. Handing the raw capture to the
+    resolver made them resolve to nothing, so a page named only in prose was never
+    decided and the unit was served.
+    """
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(
+            vault, _prose_only_packet(spelling), _prose_release()
+        )
+
+    assert guarded is not None
+    assert guarded["units"] == []
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "autovacuum-thresholds-prevent-table-bloat",
+        "autovacuum-thresholds-prevent-table-bloat|the autovacuum note",
+        "autovacuum-thresholds-prevent-table-bloat#Summary",
+        "Autovacuum thresholds prevent table bloat",
+        "Autovacuum thresholds prevent table bloat|that note",
+    ],
+)
+def test_every_spelling_of_a_permitted_link_keeps_the_unit(
+    vault: Path, spelling: str
+) -> None:
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    packet = _prose_only_packet(spelling)
+    expected = list(packet["units"])
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _prose_release())
+
+    assert guarded is not None
+    assert guarded["units"] == expected
+
+
+def test_an_ungoverned_vault_never_touches_the_activation_sidecar(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No policy, no grants, nothing withheld: release needs no sidecar at all.
+
+    Resolving above the fast path made a vault that has opted into no governance
+    depend on a derived index for its reads, so a sidecar hiccup abstained a
+    request that had nothing to decide.
+    """
+    from exomem import working_set_index
+
+    calls: list[int] = []
+
+    def boom(self, names):
+        calls.append(1)
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(working_set_index.WorkingSetIndex, "resolve_names", boom)
+
+    packet = _packet()
+    packet["units"] = [_prose_unit(_stem_of(RESTRICTED_PATH))]
+    open_release = egress.AnnotatedHits(
+        hits=[_hit(OPEN_PATH)], withheld_paths=frozenset(), active=False
+    )
+
+    guarded = egress.guard_working_set(vault, packet, open_release)
+
+    assert guarded == packet
+    assert calls == [], "an ungoverned read must not consult the activation index"
+
+
+def test_a_governed_vault_still_fails_closed_on_a_sidecar_error(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The NEW-7 move must not weaken the governed path."""
+    from exomem import working_set_index
+
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    def boom(self, names):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(working_set_index.WorkingSetIndex, "resolve_names", boom)
+
+    packet = _packet()
+    packet["units"] = [_prose_unit(_stem_of(RESTRICTED_PATH))]
+
+    with pytest.raises(egress.WorkingSetResolutionUnavailable):
+        with request_scope(_external()):
+            egress.guard_working_set(vault, packet, _prose_release())

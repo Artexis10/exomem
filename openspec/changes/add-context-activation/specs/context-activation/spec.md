@@ -182,8 +182,15 @@ exactly as it is for recall and SHALL never enter ranking or a cache key.
 
 #### Scenario: Withheld page never leaks through unit prose
 - **WHEN** a permitted unit's text contains a wikilink to a page withheld from the
-  caller's audience
+  caller's audience, spelled by filename stem, by page title, with a display alias
+  (`[[page|label]]`) or with a heading (`[[page#section]]`)
 - **THEN** the served packet contains no reference to that page in any unit's text
+
+#### Scenario: An ungoverned vault never depends on the activation sidecar for release
+- **WHEN** no governance policy is active, no page is withheld and the packet carries
+  prose wikilinks
+- **THEN** the guard serves the packet without consulting the page-name map, and a
+  sidecar fault cannot abstain the read
 
 #### Scenario: Withheld page never leaks through provenance
 - **WHEN** a governed audience withholds a page that is a typed neighbour of a resolved

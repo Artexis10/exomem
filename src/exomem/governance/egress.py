@@ -2163,13 +2163,28 @@ def guard_working_set(
         return None
 
     named_paths, prose_names = _working_set_paths(guarded)
-    named_paths |= _resolved_prose_paths(vault_root, prose_names)
     tombstoned = {
         path for path in named_paths if path and lifecycle.is_tombstoned(vault_root, path)
     }
     withheld = set(release.withheld_paths) | tombstoned
     if not release_gate_active and policy.empty and not withheld:
+        # Nothing to decide, so nothing to resolve. A vault that has opted into no
+        # governance must not depend on a DERIVED index for its reads: resolving
+        # above this line made a sidecar hiccup abstain a request that had no
+        # release decision to take. Governed vaults fall through and keep failing
+        # closed.
         return guarded
+
+    # Prose resolution happens only now, when the decision loop below (or the
+    # already-withheld set) will actually use it.
+    prose_resolved = _resolved_prose_names(vault_root, prose_names)
+    resolved_paths = {path for paths in prose_resolved.values() for path in paths}
+    named_paths |= resolved_paths
+    withheld |= {
+        path
+        for path in resolved_paths
+        if path and lifecycle.is_tombstoned(vault_root, path)
+    }
 
     decisions: dict[str, Decision | None] = {}
     if not policy.empty:
@@ -2199,7 +2214,24 @@ def guard_working_set(
                 purpose=declared_purpose,
             )
 
-    frozen = frozenset(withheld)
+    # The match set is wider than the withheld PATH set on purpose. `_withheld_keys`
+    # derives its comparison keys from filenames, so a prose link spelled as the
+    # page's TITLE — `[[Kill switch for risky releases]]` — canonicalises to
+    # something that is no filename stem and matched nothing, even though the path
+    # it resolves to was decided and withheld. Every name that resolved to a
+    # withheld path is therefore added as its own match key.
+    #
+    # Deliberately local to this guard. The same gap exists in the shared
+    # `_withheld_keys` that `guard_referents` and hit projection use, and fixing it
+    # there changes what every consumer strips; that root cause gets its own change.
+    frozen = frozenset(
+        withheld
+        | {
+            name
+            for name, paths in prose_resolved.items()
+            if any(path in withheld for path in paths)
+        }
+    )
     guarded["anchors"] = [
         anchor
         for anchor in (
@@ -2276,11 +2308,20 @@ def _working_set_paths(packet: Mapping[str, Any]) -> tuple[set[str], set[str]]:
                 if key in _WORKING_SET_PATH_FIELDS and isinstance(item, str):
                     _add(item)
                 elif key in _WORKING_SET_PROSE_FIELDS and isinstance(item, str):
-                    for target in _WIKILINK_ANYWHERE.findall(item):
-                        target = str(target).strip()
+                    for raw_target in _WIKILINK_ANYWHERE.findall(item):
+                        # `_unwrap_reference` is the SAME helper the matcher uses,
+                        # deliberately: a display alias (`[[x|label]]`) and a
+                        # heading anchor (`[[x#Section]]`) are presentation, not
+                        # identity, and two independent unwrappings would drift.
+                        # Handing the raw capture to the resolver made `x|label`
+                        # resolve to nothing, so a prose-only reference was never
+                        # decided.
+                        target, _explicit = _unwrap_reference(str(raw_target))
+                        if not target:
+                            continue
                         if target.endswith(".md"):
                             _add(target)
-                        elif target:
+                        else:
                             names.add(target)
                 else:
                     _collect(item)
@@ -2305,7 +2346,7 @@ class WorkingSetResolutionUnavailable(RuntimeError):
     """
 
 
-def _resolved_prose_paths(vault_root: Path, names: set[str]) -> set[str]:
+def _resolved_prose_names(vault_root: Path, names: set[str]) -> dict[str, tuple[str, ...]]:
     """Resolve wikilink names to every vault path bearing them, via the index.
 
     The index already performs exactly this resolution at build time to turn a
@@ -2315,13 +2356,20 @@ def _resolved_prose_paths(vault_root: Path, names: set[str]) -> set[str]:
     indexed lookup: no corpus walk, no per-stem filesystem work, and no dependency
     on a warm semantic snapshot it could not guarantee.
 
+    Returns the mapping, not a flattened path set, because the NAMES matter after
+    the decision: a page withheld by its path is matched in prose through
+    `_withheld_keys`, which derives comparison keys from filenames only — so
+    `[[Kill switch for risky releases]]` found no match and was served. The names
+    that resolved to a withheld path are added as extra match keys for this
+    guard's own comparisons.
+
     An unknown name is absent from the result and decides nothing. A resolver that
     cannot run raises: the packet reaching this guard was COMPILED from that index,
     so an index that is now unavailable is a contradiction about the release plane,
     not a vault with nothing in it.
     """
     if not names:
-        return set()
+        return {}
     from .. import working_set_index
 
     index = working_set_index.WorkingSetIndex(vault_root)
@@ -2330,14 +2378,13 @@ def _resolved_prose_paths(vault_root: Path, names: set[str]) -> set[str]:
             "the activation index is unavailable while guarding a packet built from it"
         )
     try:
-        resolved = index.resolve_names(names)
+        return index.resolve_names(names)
     except working_set_index.WorkingSetIndexUnavailable as error:
         raise WorkingSetResolutionUnavailable(str(error)) from error
     except sqlite3.Error as error:
         raise WorkingSetResolutionUnavailable(
             "the activation index could not resolve prose references"
         ) from error
-    return {path for paths in resolved.values() for path in paths}
 
 
 def _guarded_anchor(
