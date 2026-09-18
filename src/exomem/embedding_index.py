@@ -1180,6 +1180,36 @@ class EmbeddingIndex:
             conn.close()
         return out
 
+    def stored_chunks_for(self, rel_path: str) -> tuple[list[str], float | None]:
+        """One page's published chunk texts in index order, and the file mtime
+        the embedding pass stamped on them.
+
+        `([], None)` when the sidecar or the page's rows are absent, or the rows
+        are not a contiguous `0..n-1` run (a partially replaced generation is not
+        a chunking anyone cut). A reader that must not re-derive a page's
+        chunking -- the context pack, for a media transcript whose chunking is
+        an encode -- compares the mtime with the file it holds and takes these
+        texts as the page's chunking when they match. One primary-key range
+        read; never creates the sidecar.
+        """
+        if not self.path.exists():
+            return [], None
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT chunk_idx, chunk_text, file_mtime FROM chunks "
+                "WHERE file_path = ? ORDER BY chunk_idx",
+                (rel_path,),
+            ).fetchall()
+        finally:
+            conn.close()
+        if not rows or [int(idx) for idx, _text, _mtime in rows] != list(range(len(rows))):
+            return [], None
+        mtimes = [float(mtime) for _idx, _text, mtime in rows if mtime is not None]
+        if len(mtimes) != len(rows):
+            return [], None
+        return [str(text) for _idx, text, _mtime in rows], max(mtimes)
+
     def _vec_search(
         self, query_vec: np.ndarray, k: int
     ) -> list[tuple[str, int, str, float]] | None:
