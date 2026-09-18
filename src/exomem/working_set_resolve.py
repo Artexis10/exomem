@@ -484,8 +484,10 @@ def _ambiguity(resolved: Sequence[ResolvedAnchor]) -> tuple[dict[str, Any], ...]
     so both carry `graph_corroboration` from that very edge.
 
     `project` anchors come from project keys rather than from a page, so their
-    path is empty and no neighbourhood can contain them: they are structurally
-    outside this predicate and can neither bridge nor compete with anything.
+    path is empty and no neighbourhood can contain them: they can neither bridge
+    two anchors nor be anyone's neighbour, so two resolved project anchors are
+    trivially disjoint and are reported as competing, which is the right outcome
+    for two keys with no structure to judge them by.
 
     The reported `neighbourhood_size` stays the FULL one: the brain is being told
     how large each neighbourhood is, not how the rule was evaluated.

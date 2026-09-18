@@ -75,7 +75,8 @@ neighbourhood is the set of its typed-link neighbours that are themselves anchor
 the activation index (resolved anchors of different kinds are complementary; a shared
 page that is not an anchor, reached by alias or otherwise, never makes two anchors
 complementary; a direct typed link between the two always does; project-key anchors
-have no page and take no part in the test); otherwise,
+have no page, so they can neither bridge two anchors nor be anyone's neighbour, and two
+resolved project anchors are therefore trivially competing); otherwise,
 when no anchor is `resolved`, the turn SHALL be `unresolved` and the operation SHALL
 abstain with an empty packet. Lexical overlap SHALL ignore stopwords, and turn tokens
 SHALL keep their order and repetitions for n-gram construction so that two anchors
