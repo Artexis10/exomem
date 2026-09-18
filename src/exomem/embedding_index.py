@@ -1220,9 +1220,11 @@ class EmbeddingIndex:
         instead of encoding them again. A row is offered only when its blob is
         one full `VECTOR_DIM` float32 vector; anything else is left out, so the
         caller encodes that text. Reuse assumes what every search over this
-        sidecar already assumes -- one model wrote all of it -- and a model
-        change is answered by the same rebuild either way. Two primary-key range
-        reads on one connection; never creates the sidecar.
+        sidecar already assumes -- one model wrote all of it. The sidecar carries
+        no model stamp, so a change of `MODEL_NAME` must ship with a full
+        rebuild, as it already had to for every page no write touches; reuse
+        means an edited page no longer converges on its own. Two primary-key
+        range reads on one connection; never creates the sidecar.
         """
         if not self.path.exists():
             return {}, {}
