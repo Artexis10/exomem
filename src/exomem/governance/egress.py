@@ -2162,7 +2162,8 @@ def guard_working_set(
         _record_blocked_outcome(who.audience_id)
         return None
 
-    named_paths = _working_set_paths(guarded)
+    named_paths, prose_names = _working_set_paths(guarded)
+    named_paths |= _resolved_prose_paths(vault_root, prose_names)
     tombstoned = {
         path for path in named_paths if path and lifecycle.is_tombstoned(vault_root, path)
     }
@@ -2250,15 +2251,24 @@ _WORKING_SET_PATH_FIELDS = ("ref", "path", "anchor")
 _WORKING_SET_PROSE_FIELDS = ("text", "statement", "why", "title")
 
 
-def _working_set_paths(packet: Mapping[str, Any]) -> set[str]:
-    """Every vault item the packet names — through a path field or inside prose."""
-    out: set[str] = set()
+def _working_set_paths(packet: Mapping[str, Any]) -> tuple[set[str], set[str]]:
+    """`(vault paths, wikilink names)` the packet names.
+
+    Kept apart because they are not the same kind of thing. A path field holds a
+    vault-relative path the release plane can decide directly; a wikilink inside
+    authored prose holds a NAME, and a name is not a path. Handing a bare stem to
+    `_decide_path` returns no decision, which reads as "withheld" and withheld
+    every unit that linked anything — permitted and dangling links alike. The
+    caller resolves names to paths first, and only real paths are ever decided.
+    """
+    paths: set[str] = set()
+    names: set[str] = set()
 
     def _add(candidate: str) -> None:
         if candidate.endswith(".md"):
-            out.add(candidate)
+            paths.add(candidate)
         elif "#" in candidate and candidate.split("#", 1)[0].endswith(".md"):
-            out.add(candidate.split("#", 1)[0])
+            paths.add(candidate.split("#", 1)[0])
 
     def _collect(value: Any) -> None:
         if isinstance(value, Mapping):
@@ -2267,18 +2277,67 @@ def _working_set_paths(packet: Mapping[str, Any]) -> set[str]:
                     _add(item)
                 elif key in _WORKING_SET_PROSE_FIELDS and isinstance(item, str):
                     for target in _WIKILINK_ANYWHERE.findall(item):
-                        out.add(str(target).strip())
+                        target = str(target).strip()
+                        if target.endswith(".md"):
+                            _add(target)
+                        elif target:
+                            names.add(target)
                 else:
                     _collect(item)
         elif isinstance(value, (list, tuple)):
             for item in value:
                 _collect(item)
         elif isinstance(value, str) and value.endswith(".md"):
-            out.add(value)
+            paths.add(value)
 
     for section in ("anchors", "units", "pointers", "current_state", "ambiguity", "missing"):
         _collect(packet.get(section))
-    return out
+    return paths, names
+
+
+class WorkingSetResolutionUnavailable(RuntimeError):
+    """The prose-name resolver could not answer.
+
+    Deliberately NOT an empty result. "This name matches no page" and "I could
+    not look up this name" are different facts, and a guard that returns the
+    first when it means the second removes its own filter at the moment that is
+    least safe. The caller abstains on this; it never serves.
+    """
+
+
+def _resolved_prose_paths(vault_root: Path, names: set[str]) -> set[str]:
+    """Resolve wikilink names to every vault path bearing them, via the index.
+
+    The index already performs exactly this resolution at build time to turn a
+    page's wikilinks into typed edges (`working_set_index._resolve_links`), over a
+    name map covering every walked knowledge-base page — the vault's page set, not
+    only its anchors. Persisting that map means the guard answers a stem with one
+    indexed lookup: no corpus walk, no per-stem filesystem work, and no dependency
+    on a warm semantic snapshot it could not guarantee.
+
+    An unknown name is absent from the result and decides nothing. A resolver that
+    cannot run raises: the packet reaching this guard was COMPILED from that index,
+    so an index that is now unavailable is a contradiction about the release plane,
+    not a vault with nothing in it.
+    """
+    if not names:
+        return set()
+    from .. import working_set_index
+
+    index = working_set_index.WorkingSetIndex(vault_root)
+    if not index.available():
+        raise WorkingSetResolutionUnavailable(
+            "the activation index is unavailable while guarding a packet built from it"
+        )
+    try:
+        resolved = index.resolve_names(names)
+    except working_set_index.WorkingSetIndexUnavailable as error:
+        raise WorkingSetResolutionUnavailable(str(error)) from error
+    except sqlite3.Error as error:
+        raise WorkingSetResolutionUnavailable(
+            "the activation index could not resolve prose references"
+        ) from error
+    return {path for paths in resolved.values() for path in paths}
 
 
 def _guarded_anchor(
@@ -2286,8 +2345,13 @@ def _guarded_anchor(
     withheld: frozenset[str],
     decisions: Mapping[str, Decision | None],
 ) -> dict[str, Any] | None:
-    if _names_withheld(anchor.get("path"), withheld) or _names_withheld(
-        anchor.get("ref"), withheld, reference_field=True
+    if (
+        _names_withheld(anchor.get("path"), withheld)
+        or _names_withheld(anchor.get("ref"), withheld, reference_field=True)
+        # `title` is authored prose: a hub called "Open hub (supersedes
+        # [[kill-switch-for-risky-releases]])" names the withheld page as plainly
+        # as a path field would.
+        or _names_withheld(anchor.get("title"), withheld, reference_field=True)
     ):
         return None
     out = dict(anchor)
@@ -2333,6 +2397,14 @@ def _guarded_unit(
     # construction (`[[kill-switch-for-risky-releases]]`), and the stem
     # comparison is what recognises it. On a prose string the bare-word branch
     # can only fire when the whole text IS the stem, which is itself a reference.
+    #
+    # The asymmetry below is deliberate. A withheld target in
+    # `provenance.superseded_by` STRIPS that field and keeps the unit, because a
+    # provenance field is a list of references and removing one entry leaves the
+    # rest meaning what it meant. The same target in `text` drops the WHOLE unit,
+    # because prose cannot be edited surgically: cutting the link out of a
+    # sentence leaves a claim whose warrant nobody can check, and rewriting the
+    # sentence would be the server authoring text.
     if _names_withheld(unit.get("text"), withheld, reference_field=True):
         return None
     # A unit whose ANCHOR is withheld is dropped rather than kept with the anchor

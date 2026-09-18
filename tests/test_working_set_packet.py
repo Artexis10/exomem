@@ -9,6 +9,7 @@ Records-first current-state rule, the abstained shape, and the graph depths.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -652,3 +653,164 @@ def test_every_current_state_source_fills_a_statement(stateful_vault: Path) -> N
         assert entry["source"] in {"records", "profile", "note"}
         assert entry["statement"], f"{entry['source']} produced no statement"
         assert len(entry["statement"]) <= working_set_state.STATEMENT_MAX_CHARS
+
+
+# --------------------------------------------------------------------------- #
+# Round two: budget loss is reported, truncation is exact
+# --------------------------------------------------------------------------- #
+
+
+def _fat(role: str, ref: str, *, text: str = "z" * 300) -> working_set.LaneItem:
+    """An item whose pointer is expensive, so the budget can starve it."""
+    return working_set.LaneItem(
+        role=role,
+        level="unit",
+        ref=ref,
+        path=f"Knowledge Base/Notes/{ref}.md",
+        title="T" * 120,
+        text=text,
+        lifecycle="active",
+        updated="2026-09-01",
+        anchor="anchor",
+        why="W" * 120,
+    )
+
+
+def test_no_item_vanishes_without_a_pointer_or_a_marker() -> None:
+    """The reviewer's shape: 8 items at max_chars=500 lost 6 with an empty missing[].
+
+    The invariant is accounting, not a count: every candidate leaves the packet as
+    a unit, as a pointer, or as a `budget` marker naming its role. Pointer prose
+    is now cheap enough that this particular shape keeps all eight, which is a
+    better outcome than the reviewer measured — and the assertion below holds
+    either way, which is the point.
+    """
+    items = tuple(_item("resources", ref=f"r-{i}", text="z" * 300) for i in range(8))
+    packet = working_set.build_packet(
+        items=items,
+        anchors=(),
+        roles=({"id": "resources", "source": "anchor_default", "lane": "units"},),
+        current_state=(),
+        ambiguity=(),
+        missing=(),
+        max_chars=500,
+        generation=_generation(),
+        status="resolved",
+    )
+
+    kept = len(packet["units"]) + len(packet["pointers"])
+    markers = {entry["role"] for entry in packet["missing"] if entry["reason"] == "budget"}
+    assert kept == len(items) or markers == {"resources"}
+    assert packet["budget"]["used_chars"] <= 500
+
+
+def test_items_lost_to_the_budget_are_reported_once_per_role() -> None:
+    packet = working_set.build_packet(
+        items=tuple(_fat("resources", f"r-{i}") for i in range(8)),
+        anchors=(),
+        roles=({"id": "resources", "source": "anchor_default", "lane": "units"},),
+        current_state=(),
+        ambiguity=(),
+        missing=(),
+        max_chars=500,
+        generation=_generation(),
+        status="resolved",
+    )
+
+    kept = len(packet["units"]) + len(packet["pointers"])
+    assert kept < 8, "this shape must lose items to the budget"
+    budget_markers = [
+        entry for entry in packet["missing"] if entry["reason"] == "budget"
+    ]
+    assert budget_markers == [{"role": "resources", "reason": "budget"}]
+    assert packet["budget"]["used_chars"] <= 500
+
+
+def test_a_role_that_loses_nothing_gets_no_budget_marker() -> None:
+    packet = working_set.build_packet(
+        items=(_item("resources", text="short"),),
+        anchors=(),
+        roles=({"id": "resources", "source": "anchor_default", "lane": "units"},),
+        current_state=(),
+        ambiguity=(),
+        missing=(),
+        max_chars=8000,
+        generation=_generation(),
+        status="resolved",
+    )
+
+    assert [entry for entry in packet["missing"] if entry["reason"] == "budget"] == []
+
+
+def test_each_losing_role_gets_its_own_budget_marker() -> None:
+    packet = working_set.build_packet(
+        items=tuple(
+            _fat(role, f"{role}-{i}")
+            for role in ("resources", "constraints")
+            for i in range(6)
+        ),
+        anchors=(),
+        roles=(
+            {"id": "resources", "source": "anchor_default", "lane": "units"},
+            {"id": "constraints", "source": "anchor_default", "lane": "units"},
+        ),
+        current_state=(),
+        ambiguity=(),
+        missing=(),
+        max_chars=700,
+        generation=_generation(),
+        status="resolved",
+    )
+
+    roles = sorted(
+        entry["role"] for entry in packet["missing"] if entry["reason"] == "budget"
+    )
+    assert roles == ["constraints", "resources"]
+
+
+def test_an_exact_limit_read_does_not_claim_truncation() -> None:
+    """`lane_truncated` must mean "there was more", not "the read was full".
+
+    Reading one row past the limit and slicing is what makes the marker exact: a
+    read that returns exactly `UNIT_LANE_LIMIT` rows has no evidence that a
+    single further unit existed.
+    """
+    import exomem.find as find_module
+    from exomem import context_roles
+
+    role = context_roles.load_roles().roles["constraints"]
+    calls: list[int] = []
+
+    def fake_units(_vault_root, **kwargs):
+        calls.append(int(kwargs["limit"]))
+        return [
+            SimpleNamespace(
+                unit_ref=f"u-{index}",
+                parent_path="Knowledge Base/Notes/Patterns/p.md",
+                parent_title="P",
+                parent_updated="2026-09-01",
+                parent_superseded_by=[],
+                content="text",
+                excerpt="text",
+                category="constraint",
+                kind="claim",
+            )
+            for index in range(working_set.UNIT_LANE_LIMIT)
+        ]
+
+    original = find_module._find_semantic_units
+    find_module._find_semantic_units = fake_units
+    try:
+        result = working_set._units_lane(
+            Path("/nonexistent"),
+            role,
+            neighbourhood=frozenset({"Knowledge Base/Notes/Patterns/p.md"}),
+        )
+    finally:
+        find_module._find_semantic_units = original
+
+    assert calls == [working_set.UNIT_LANE_LIMIT + 1], (
+        "the lane must read one past its limit so the marker can be exact"
+    )
+    assert result.truncated is False
+    assert len(result.items) == working_set.UNIT_LANE_LIMIT

@@ -32,7 +32,7 @@ import re
 import sqlite3
 import threading
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -44,7 +44,11 @@ from .state_paths import vault_state_dir
 log = logging.getLogger(__name__)
 
 #: Schema version of the sidecar this binary writes. A mismatch wipes.
-SCHEMA_VERSION = 1
+#: v2 added `page_names`: an index without it cannot tell a dangling wikilink
+#: from an unresolved one, so it must rebuild rather than answer from silence.
+#: v3 keyed it on `(name, path)`: one row per name dropped every page but one
+#: whose stem normalised the same way, leaving the loser undecided.
+SCHEMA_VERSION = 3
 SIDECAR_NAME = ".working-set.sqlite"
 DISABLE_ENV = "EXOMEM_DISABLE_WORKING_SET"
 _TRUE = frozenset({"1", "true", "yes", "on"})
@@ -145,6 +149,15 @@ def terms_of(text: str) -> tuple[str, ...]:
     for match in _TOKEN.finditer(normalize(text)):
         seen.setdefault(match.group(0), None)
     return tuple(seen)
+
+
+class WorkingSetIndexUnavailable(RuntimeError):
+    """The sidecar could not be opened or queried.
+
+    Distinct from an empty answer on purpose: a consumer that cannot tell "I
+    looked and found nothing" from "I could not look" will eventually treat the
+    second as the first.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,13 +300,18 @@ def _source_signature(path: Path) -> str:
 
 def _page_candidates(
     vault_root: Path,
-) -> tuple[list[_Candidate], dict[str, tuple[str, ...]], dict[str, str]]:
-    """Walk the knowledge base once: anchor pages, wikilink edges, and a name map."""
+) -> tuple[list[_Candidate], dict[str, tuple[str, ...]], dict[str, list[str]]]:
+    """Walk the knowledge base once: anchor pages, wikilink edges, and a name map.
+
+    The name map is one name to MANY paths: `normalize()` folds case and Unicode
+    form, so distinct pages can share a spelling, and collapsing them would hide
+    every page but one from both edge resolution and the egress guard.
+    """
     from . import recall_policy
 
     candidates: list[_Candidate] = []
     outbound: dict[str, tuple[str, ...]] = {}
-    names: dict[str, str] = {}
+    names: dict[str, list[str]] = {}
     kb = kb_dirname()
     for path in _walk_kb(vault_root):
         rel = path.relative_to(vault_root).as_posix()
@@ -304,11 +322,18 @@ def _page_candidates(
             continue
         frontmatter = page.frontmatter if isinstance(page.frontmatter, dict) else {}
         title = str(frontmatter.get("title") or page.title or path.stem).strip()
-        names.setdefault(normalize(rel.removesuffix(".md")), rel)
-        names.setdefault(normalize(rel.removesuffix(".md").removeprefix(f"{kb}/")), rel)
-        names.setdefault(normalize(path.stem), rel)
-        if title:
-            names.setdefault(normalize(title), rel)
+        for spelling in (
+            rel.removesuffix(".md"),
+            rel.removesuffix(".md").removeprefix(f"{kb}/"),
+            path.stem,
+            title,
+        ):
+            key = normalize(spelling)
+            if not key:
+                continue
+            bucket = names.setdefault(key, [])
+            if rel not in bucket:
+                bucket.append(rel)
         links = tuple(
             dict.fromkeys(
                 normalize(match)
@@ -497,7 +522,7 @@ def _project_candidates(vault_root: Path) -> list[_Candidate]:
 
 def _resolve_links(
     outbound: Mapping[str, tuple[str, ...]],
-    names: Mapping[str, str],
+    names: Mapping[str, Sequence[str]],
     anchor_paths: Mapping[str, str],
 ) -> dict[str, list[tuple[str, str, str]]]:
     """Turn wikilink names into edges between the pages the index knows.
@@ -517,14 +542,14 @@ def _resolve_links(
     for source_rel, targets in outbound.items():
         source_anchor = anchor_paths.get(source_rel)
         for name in targets:
-            target_rel = names.get(name)
-            if target_rel is None or target_rel == source_rel:
-                continue
-            if source_anchor is not None:
-                _add(source_anchor, target_rel, "outbound")
-            target_anchor = anchor_paths.get(target_rel)
-            if target_anchor is not None:
-                _add(target_anchor, source_rel, "inbound")
+            for target_rel in names.get(name) or ():
+                if target_rel == source_rel:
+                    continue
+                if source_anchor is not None:
+                    _add(source_anchor, target_rel, "outbound")
+                target_anchor = anchor_paths.get(target_rel)
+                if target_anchor is not None:
+                    _add(target_anchor, source_rel, "inbound")
     return edges
 
 
@@ -650,6 +675,21 @@ class WorkingSetIndex:
             "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS anchor_term_rows_term ON anchor_term_rows(term)")
+        # Every KB page's wikilink-resolvable names -> its vault-relative path.
+        # `_page_candidates` already computes this map to resolve anchor links; it
+        # is persisted rather than discarded so the egress guard can resolve a
+        # stem found in authored prose WITHOUT a corpus walk and without needing a
+        # warm semantic snapshot. It covers the vault's page set, not only anchors.
+        # Keyed on the PAIR, not the name: `normalize()` folds case and Unicode
+        # form, so `Widget.md` and `widget.md` share a key. A name resolves to
+        # EVERY path that bears it, and the guard decides all of them — otherwise
+        # the page that lost the row is never decided and a wikilink to the shared
+        # stem is served against it.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS page_names "
+            "(name TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (name, path))"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS page_names_name ON page_names(name)")
         sidecar_store.ensure_meta_table(conn, "anchors", self.path.name)
         stored = conn.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
@@ -676,6 +716,7 @@ class WorkingSetIndex:
             "anchor_links",
             "anchor_vectors",
             "anchor_term_rows",
+            "page_names",
             "index_meta",
         ):
             conn.execute(f"DELETE FROM {table}")
@@ -723,6 +764,47 @@ class WorkingSetIndex:
         except sqlite3.Error:
             return ""
         return str(row[0]) if row else ""
+
+    def resolve_names(self, names: Iterable[str]) -> dict[str, tuple[str, ...]]:
+        """Map wikilink names to EVERY vault path that bears them.
+
+        The same resolution `_resolve_links` performs at build time, exposed for
+        the egress guard: a bare stem out of authored prose is not a
+        vault-relative path, and handing one to a release decision returns "no
+        decision", which is indistinguishable from "withheld". An indexed lookup
+        answers it with no filesystem work.
+
+        Two outcomes that must not be conflated:
+
+        * a name absent from the map resolves to nothing and is simply not in the
+          result — it names no page, so there is nothing to decide; and
+        * a query that cannot run RAISES. A resolver that answered "no names
+          resolved" when it merely failed would remove the filter precisely when
+          removing it is least safe, which is the fail-open class the guard exists
+          to prevent. The caller decides what a failure means; this method will
+          not decide it by returning a plausible-looking empty answer.
+        """
+        wanted = [normalize(name) for name in names]
+        wanted = [name for name in dict.fromkeys(wanted) if name]
+        if not wanted:
+            return {}
+        conn = self._connect()
+        if conn is None:
+            raise WorkingSetIndexUnavailable(
+                "the activation index could not be opened for name resolution"
+            )
+        out: dict[str, list[str]] = {}
+        for start in range(0, len(wanted), 400):
+            chunk = wanted[start : start + 400]
+            placeholders = ",".join("?" * len(chunk))
+            rows = conn.execute(
+                f"SELECT name, path FROM page_names WHERE name IN ({placeholders}) "
+                "ORDER BY name, path",
+                chunk,
+            ).fetchall()
+            for name, path in rows:
+                out.setdefault(str(name), []).append(str(path))
+        return {name: tuple(paths) for name, paths in out.items()}
 
     def anchors(self) -> tuple[AnchorRow, ...]:
         """Every anchor row, copy-on-write cached on the sidecar's write token."""
@@ -814,7 +896,7 @@ class WorkingSetIndex:
         conn = self._connect()
         if conn is None:
             return {"anchors": 0, "generation": 0, "unavailable": True}
-        candidates, edges = self._collect()
+        candidates, edges, page_names = self._collect()
         existing = {
             anchor_id: signature
             for anchor_id, signature in conn.execute(
@@ -830,6 +912,10 @@ class WorkingSetIndex:
             )
         if not changed:
             changed = self._links_differ(conn, edges)
+        if not changed:
+            stored_names = conn.execute("SELECT COUNT(*) FROM page_names").fetchone()
+            wanted_names = sum(len(paths) for paths in page_names.values())
+            changed = int(stored_names[0] if stored_names else 0) != wanted_names
         if not changed:
             # The vault did not move, so the rows and the generation must not
             # either; only the stamp advances, so the next request stops asking.
@@ -850,6 +936,7 @@ class WorkingSetIndex:
                 "anchor_links",
                 "anchor_vectors",
                 "anchor_term_rows",
+                "page_names",
             ):
                 conn.execute(f"DELETE FROM {table}")
             self._delete_fts(conn)
@@ -887,6 +974,14 @@ class WorkingSetIndex:
                         "INSERT OR REPLACE INTO anchor_vectors (anchor_id, vector) VALUES (?, ?)",
                         (candidate.anchor_id, blob),
                     )
+            conn.executemany(
+                "INSERT OR REPLACE INTO page_names (name, path) VALUES (?, ?)",
+                sorted(
+                    (name, path)
+                    for name, paths in page_names.items()
+                    for path in paths
+                ),
+            )
             for anchor_id, rows in edges.items():
                 if anchor_id not in wanted:
                     continue
@@ -952,7 +1047,11 @@ class WorkingSetIndex:
         except sqlite3.Error:
             pass
 
-    def _collect(self) -> tuple[list[_Candidate], dict[str, list[tuple[str, str, str]]]]:
+    def _collect(
+        self,
+    ) -> tuple[
+        list[_Candidate], dict[str, list[tuple[str, str, str]]], dict[str, list[str]]
+    ]:
         pages, outbound, names = _page_candidates(self.vault_root)
         records, plans = _collection_candidates(self.vault_root)
         projects = _project_candidates(self.vault_root)
@@ -964,7 +1063,7 @@ class WorkingSetIndex:
         }
         edges = _resolve_links(outbound, names, anchor_paths)
         candidates.sort(key=lambda candidate: candidate.anchor_id)
-        return candidates, edges
+        return candidates, edges, names
 
 
 def _signature_vectors(candidates: Iterable[_Candidate]) -> dict[str, bytes]:

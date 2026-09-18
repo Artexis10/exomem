@@ -10,6 +10,7 @@ depended on a withheld neighbour.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -324,37 +325,128 @@ def test_a_wikilink_in_a_current_state_statement_is_dropped(vault: Path) -> None
     assert "kill-switch-for-risky-releases" not in str(guarded)
 
 
-def test_prose_wikilinks_are_decided_even_when_not_already_withheld(vault: Path) -> None:
-    """A page named only in prose still gets a release decision.
+def _prose_unit(stem: str, ref: str = "unit-only-prose") -> dict:
+    return {
+        "ref": ref,
+        "role": "resources",
+        "text": f"See [[{stem}]] for the rest.",
+        "lifecycle": "active",
+        "updated": "2026-09-01",
+        "provenance": {"path": OPEN_PATH, "level": "unit", "anchor": OPEN_PATH},
+    }
 
-    `release.withheld_paths` carries what hit projection happened to touch. A
-    wikilink in a unit's text can name a page that recall never surfaced, so the
-    guard has to harvest it and decide it rather than assume silence means
-    permitted.
-    """
-    write_scope(vault)
-    write_rule(vault, ceiling=0)
 
-    packet = _packet()
-    packet["units"] = [
-        {
-            "ref": "unit-only-prose",
-            "role": "resources",
-            "text": f"See [[{RESTRICTED_PATH.rsplit('/', 1)[-1].removesuffix('.md')}]].",
-            "lifecycle": "active",
-            "updated": "2026-09-01",
-            "provenance": {"path": OPEN_PATH, "level": "unit", "anchor": OPEN_PATH},
-        },
-    ]
-    empty_release = egress.AnnotatedHits(
+def _stem_of(path: str) -> str:
+    return path.rsplit("/", 1)[-1].removesuffix(".md")
+
+
+def _prose_release() -> egress.AnnotatedHits:
+    """A release that withheld nothing, so only a real decision can withhold."""
+    return egress.AnnotatedHits(
         hits=[_hit(OPEN_PATH)], withheld_paths=frozenset(), active=True
     )
 
+
+def _indexed(vault: Path) -> None:
+    """Build the activation index so its page-name map can resolve prose stems."""
+    from exomem import working_set_index, working_set_runtime
+
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).reset()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+
+
+def test_a_prose_wikilink_to_a_withheld_page_drops_the_unit(vault: Path) -> None:
+    """A page named only in prose still gets a release decision.
+
+    `release.withheld_paths` carries what hit projection happened to touch. A
+    wikilink in a unit's text can name a page recall never surfaced, so the guard
+    resolves the stem to its real path and decides that path.
+    """
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    packet = _packet()
+    packet["units"] = [_prose_unit(_stem_of(RESTRICTED_PATH))]
+
     with request_scope(_external()):
-        guarded = egress.guard_working_set(vault, packet, empty_release)
+        guarded = egress.guard_working_set(vault, packet, _prose_release())
 
     assert guarded is not None
     assert guarded["units"] == []
+
+
+def test_a_prose_wikilink_to_a_permitted_page_keeps_the_unit_unchanged(
+    vault: Path,
+) -> None:
+    """The defect this closes: a permitted link withheld its own unit.
+
+    A bare stem is not a vault-relative path, so handing it straight to the
+    release decision returned `None` — indistinguishable from "withheld" — and
+    every unit that linked anything lost itself.
+    """
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    permitted = "Knowledge Base/Notes/Insights/autovacuum-thresholds-prevent-table-bloat.md"
+    assert (vault / permitted).is_file()
+    unit = _prose_unit(_stem_of(permitted), ref="unit-permitted-link")
+    packet = _packet()
+    packet["units"] = [unit]
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _prose_release())
+
+    assert guarded is not None
+    assert guarded["units"] == [unit]
+
+
+def test_a_prose_wikilink_to_a_nonexistent_page_keeps_the_unit_unchanged(
+    vault: Path,
+) -> None:
+    """A stem that resolves to no page names nothing, so it decides nothing."""
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    unit = _prose_unit("no-such-page-anywhere", ref="unit-dangling-link")
+    packet = _packet()
+    packet["units"] = [unit]
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _prose_release())
+
+    assert guarded is not None
+    assert guarded["units"] == [unit]
+
+
+def test_an_anchor_title_naming_a_withheld_page_drops_the_anchor(vault: Path) -> None:
+    """`title` is authored prose and can carry a wikilink like any other field."""
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    packet = _packet()
+    packet["anchors"] = [
+        {
+            "ref": OPEN_PATH,
+            "path": OPEN_PATH,
+            "title": f"Open hub (supersedes [[{_stem_of(RESTRICTED_PATH)}]])",
+            "kind": "hub",
+            "status": "resolved",
+            "evidence": ["lexical_overlap", "retrieval"],
+        }
+    ]
+    packet["units"] = []
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _prose_release())
+
+    assert guarded is not None
+    assert guarded["anchors"] == []
+    assert _stem_of(RESTRICTED_PATH) not in str(guarded)
 
 
 def test_missing_entries_are_scanned_too(vault: Path) -> None:
@@ -422,3 +514,175 @@ def test_two_serves_differing_only_in_retrieval_paths_are_compiled_separately(
 
     assert "retrieval" in _evidence(with_hit)
     assert "retrieval" not in _evidence(without)
+
+
+# --------------------------------------------------------------------------- #
+# Micro-round: a broken resolver is a release-plane failure, not a silent pass
+# --------------------------------------------------------------------------- #
+
+
+def _wikilink_unit_packet(stem: str) -> dict:
+    packet = _packet()
+    packet["units"] = [_prose_unit(stem)]
+    return packet
+
+
+def test_a_broken_name_resolver_raises_rather_than_dropping_the_filter(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """"Name unknown" and "resolver broken" are different answers.
+
+    Swallowing a query error into "no names resolved" removes the filter exactly
+    when it is least safe to remove it, which is the fail-open class the guard was
+    rebuilt to close.
+    """
+    from exomem import working_set_index
+
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    def boom(self, names):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(working_set_index.WorkingSetIndex, "resolve_names", boom)
+
+    with pytest.raises(Exception, match="prose|resolve|locked"):  # noqa: B017
+        with request_scope(_external()):
+            egress.guard_working_set(
+                vault, _wikilink_unit_packet(_stem_of(RESTRICTED_PATH)), _prose_release()
+            )
+
+
+def test_an_unavailable_index_at_guard_time_is_a_release_plane_failure(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The packet was compiled FROM the index, so an absent one is a contradiction."""
+    from exomem import working_set_index
+
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    monkeypatch.setattr(
+        working_set_index.WorkingSetIndex, "available", lambda self: False
+    )
+
+    with pytest.raises(egress.WorkingSetResolutionUnavailable):
+        with request_scope(_external()):
+            egress.guard_working_set(
+                vault, _wikilink_unit_packet(_stem_of(RESTRICTED_PATH)), _prose_release()
+            )
+
+
+def test_a_resolver_failure_abstains_through_the_operation(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: the operation's guard handler turns it into an abstention."""
+    from test_working_set_index import _seed_planning, _seed_structure
+
+    from exomem import commands, working_set_index, working_set_runtime
+
+    _seed_structure(vault)
+    _seed_planning(vault)
+    # A constraint unit whose prose links another page, so the guard must resolve.
+    (vault / "Knowledge Base" / "Products" / "Tow Bar.md").write_text(
+        """---
+type: note
+status: active
+updated: 2026-09-07
+---
+
+# Tow Bar
+
+## Summary
+
+The bar that couples the sled.
+
+## Constraints
+
+Never tow without checking [[Cargo Sled]] first.
+""",
+        encoding="utf-8",
+    )
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).reset()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+
+    write_scope(vault, paths="Products/**")
+    write_rule(vault, ceiling=0, audience="external")
+
+    turn = "what are the constraints on the tow bar"
+    with request_scope(_external()):
+        baseline = commands.op_activate_context(vault, turn=turn)
+    assert baseline is not None
+
+    def boom(self, names):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(working_set_index.WorkingSetIndex, "resolve_names", boom)
+    working_set_runtime.reset_caches_for_tests()
+
+    with request_scope(_external()):
+        packet = commands.op_activate_context(vault, turn=turn)
+
+    assert packet["abstained"] is True
+    assert packet["abstention"] == {"reason": "unavailable"}
+    assert packet["units"] == []
+    assert packet["anchors"] == []
+
+
+def test_an_unknown_name_still_decides_nothing(vault: Path) -> None:
+    """The unknown-name path is unchanged: it names no page, so it withholds none."""
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    unit = _prose_unit("still-no-such-page", ref="unit-unknown")
+    packet = _packet()
+    packet["units"] = [unit]
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _prose_release())
+
+    assert guarded is not None
+    assert guarded["units"] == [unit]
+
+
+def test_a_colliding_name_decides_every_page_that_bears_it(vault: Path) -> None:
+    """One name, two pages: the withheld one must still be decided.
+
+    `page_names` normalises (NFKC + casefold), so `Widget.md` and `widget.md` share
+    a key. Keeping one row per name let the loser go undecided, and a wikilink to
+    the shared stem would then be served against a withheld page.
+    """
+    from exomem import working_set_index
+
+    withheld = vault / "Knowledge Base" / "Notes" / "Patterns" / "Widget.md"
+    permitted = vault / "Knowledge Base" / "Notes" / "Insights" / "widget.md"
+    for path, title in ((withheld, "Widget"), (permitted, "widget")):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\ntype: pattern\nstatus: active\nupdated: 2026-09-01\n---\n\n# {title}\n\nBody.\n",
+            encoding="utf-8",
+        )
+
+    write_scope(vault)  # Notes/Patterns/** -> Widget.md is withheld
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    index = working_set_index.WorkingSetIndex(vault)
+    resolved = index.resolve_names(["widget"])
+    assert set(resolved.get("widget") or ()) == {
+        "Knowledge Base/Notes/Patterns/Widget.md",
+        "Knowledge Base/Notes/Insights/widget.md",
+    }, resolved
+
+    packet = _packet()
+    packet["units"] = [_prose_unit("widget", ref="unit-colliding-link")]
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _prose_release())
+
+    assert guarded is not None
+    assert guarded["units"] == []

@@ -119,7 +119,9 @@ never exceed `max_chars`. Units SHALL be emitted before pages, pages beyond the
 budget SHALL become pointers, and a superseded unit SHALL be marked `superseded`
 with its active successor named rather than presented as current. A lane that
 reaches its read limit before exhausting the anchor neighbourhood SHALL report
-`missing[] {role, reason: "lane_truncated"}`. The packet SHALL NOT carry the
+`missing[] {role, reason: "lane_truncated"}`, and a lane whose items fit neither as
+units nor as pointers within `max_chars` SHALL report `missing[] {role, reason:
+"budget"}`; the packet never drops material silently. The packet SHALL NOT carry the
 `due_state` block and SHALL NOT read or advance the due-state emission ledger; recall
 remains the only `due_state` carrier.
 
@@ -172,6 +174,11 @@ exactly as it is for recall and SHALL never enter ranking or a cache key.
 - **WHEN** an active policy withholds a page from the caller's audience and the
   internal recall call raises
 - **THEN** the packet is still guarded and names nothing from the withheld page
+
+#### Scenario: A permitted wikilink in prose survives the guard
+- **WHEN** a permitted unit's text contains a wikilink to a page the caller's audience
+  may read, or to a page that does not exist
+- **THEN** the unit is served unchanged; only a wikilink to a withheld page drops it
 
 #### Scenario: Withheld page never leaks through unit prose
 - **WHEN** a permitted unit's text contains a wikilink to a page withheld from the

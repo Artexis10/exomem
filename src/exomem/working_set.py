@@ -212,12 +212,19 @@ def build_packet(
     # pays for, so the same ceiling bounds them. Once the budget is spent the
     # overflow is not reported at all rather than silently breaking the bound.
     pointers: list[dict[str, Any]] = []
+    # Roles that lost at least one item to the ceiling. An item that fits neither
+    # as a unit nor as a pointer leaves no trace otherwise, and a packet that
+    # silently drops six of eight candidates reads exactly like one where the
+    # material did not exist.
+    starved: dict[str, None] = {}
     for item, reason in deferred:
         if len(pointers) >= MAX_POINTERS:
-            break
+            starved.setdefault(item.role, None)
+            continue
         pointer = _pointer(item, reason)
         cost = len(pointer["title"]) + len(pointer["why"])
         if used + cost > limit:
+            starved.setdefault(item.role, None)
             continue
         pointers.append(pointer)
         used += cost
@@ -228,7 +235,10 @@ def build_packet(
         "units": units,
         "pointers": pointers,
         "current_state": state_entries,
-        "missing": [dict(entry) for entry in missing],
+        "missing": [
+            *(dict(entry) for entry in missing),
+            *({"role": role, "reason": "budget"} for role in starved),
+        ],
         "ambiguity": [dict(entry) for entry in ambiguity],
         "budget": {"limit_chars": limit, "used_chars": used},
         "generation": dict(generation),
@@ -465,10 +475,13 @@ def _units_lane(
         None,
         shortcuts=structured_filters.FilterShortcuts(categories=tuple(sorted(role.categories))),
     )
+    # One row past the limit, then sliced. Reading exactly `UNIT_LANE_LIMIT` rows
+    # cannot distinguish "there was more" from "that was all", so the marker would
+    # over-report on a corpus that happens to hold exactly the limit.
     hits = find_module._find_semantic_units(
         Path(vault_root),
         query="",
-        limit=UNIT_LANE_LIMIT,
+        limit=UNIT_LANE_LIMIT + 1,
         scope="kb",
         plan=plan,
         snapshot=find_module.FreshnessSnapshot(Path(vault_root)),
@@ -478,7 +491,8 @@ def _units_lane(
         degraded_out=None,
         failed_out=None,
     )
-    truncated = len(hits) >= UNIT_LANE_LIMIT
+    truncated = len(hits) > UNIT_LANE_LIMIT
+    hits = hits[:UNIT_LANE_LIMIT]
     out: list[LaneItem] = []
     for hit in hits:
         parent = str(getattr(hit, "parent_path", "") or "")
