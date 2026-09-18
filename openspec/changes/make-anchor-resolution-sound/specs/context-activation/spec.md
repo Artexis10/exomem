@@ -61,7 +61,7 @@ treat it as an alias only while no other anchor's names include it and every ter
 is within the rare-term threshold, measured before derived names are added and over
 every anchor kind. A derived name SHALL be the title's leading words as the resolver
 tokenises them, joined by single spaces; none SHALL be derived when that leaves nothing,
-more than three words, a word shorter than two characters, only stopwords, only digits,
+more than three words, a word with fewer than two letters, only stopwords, only digits,
 fewer than three characters, or a filename-like lead. `usage_prior` SHALL
 only break ties between otherwise equal candidates and SHALL never contribute to the
 two-kinds rule. `claims_match` SHALL be computed with the existing collection-claims
