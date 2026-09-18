@@ -13,8 +13,15 @@ with its provenance ref, SHALL keep whole items only, and SHALL never exceed the
 render ceiling (`EXOMEM_RETRIEVE_INJECT_MAX_CHARS`, default 4,000 characters), dropping
 trailing items rather than cutting one. A packet abstained as `ambiguous` SHALL inject
 the data header, the competing anchors' titles and refs and one line telling the agent
-to call `activate_context` with `anchor` set to the ref it chooses; a packet abstained
-for any other reason SHALL inject nothing beyond the ordinary reminder. Any transport
+to call `activate_context` with `anchor` set to the ref it chooses. A packet abstained
+as `unresolved` that lists at least one candidate reached by the turn's own words (a
+candidate carrying `exact_alias`, `lexical_overlap`, `claims_match` or `rare_term`)
+SHALL inject the data header, at most five such candidates in the packet's order, each
+as one whole line with its kind, title and ref, and the same one-line instruction;
+candidates reached only by retrieval SHALL NOT be rendered, and the ordinary reminder
+SHALL follow the block, because the agent may still need ordinary recall. A packet
+abstained for any other reason, or as `unresolved` with no worded candidate, SHALL
+inject nothing beyond the ordinary reminder. Any transport
 failure, non-JSON response or budget exhaustion SHALL fall back to the existing
 reminder behaviour. The mode SHALL honour the same prominence presets, prompt-length
 gate, cooldown, control-prompt silence and absent-client skip as stub mode, SHALL
@@ -35,9 +42,16 @@ the client delivers (Claude Code: `SessionStart`, `PreCompact`, `SessionEnd`; Co
 - **THEN** the hook injects the data header, the competing anchors' titles and refs
   and the instruction to call `activate_context` with `anchor`, and no unit text
 
+#### Scenario: An unresolved turn hands its worded candidates to the agent
+- **WHEN** the service abstains as `unresolved` and lists two candidates carrying
+  `lexical_overlap` and three carrying only `retrieval`
+- **THEN** the hook injects the data header, the two worded candidates with kind, title
+  and ref, the instruction to call `activate_context` with `anchor`, no unit text and
+  none of the retrieval-only candidates, followed by the ordinary reminder
+
 #### Scenario: Any other abstention injects nothing extra
 - **WHEN** the service answers with `abstained: true` for a reason other than
-  `ambiguous`
+  `ambiguous`, or as `unresolved` with no candidate reached by the turn's own words
 - **THEN** the hook emits exactly the ordinary reminder
 
 #### Scenario: Failure falls back to the reminder

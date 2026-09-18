@@ -133,15 +133,44 @@ _WORKING_SET_HEADER = (
 )
 # One default with an environment override, no per-prominence table (design D9).
 _WORKING_SET_MAX_CHARS = 4000
-# The only thing a hook can say about an ambiguous turn, and the whole reason the
-# abstention is rendered at all: the agent is the one that can choose.
-_WORKING_SET_AMBIGUITY_LINE = (
-    "Two senses match this turn. Call `activate_context` again with `anchor` set to "
-    "the ref you mean."
+# The one thing a hook can ask of the agent, and the whole reason an abstention is
+# rendered at all: the agent is the only party allowed to choose a sense. Both
+# rendered abstentions end with this exact string; each gets its own lead, because
+# "two senses match" is false when none resolved and five candidates are listed.
+_WORKING_SET_ANCHOR_INSTRUCTION = (
+    "Call `activate_context` again with `anchor` set to the ref you mean."
 )
+_WORKING_SET_AMBIGUITY_LINE = (
+    "Two senses match this turn. " + _WORKING_SET_ANCHOR_INSTRUCTION
+)
+_WORKING_SET_UNRESOLVED_LINE = (
+    "None of these resolved on the turn's words alone. "
+    + _WORKING_SET_ANCHOR_INSTRUCTION
+)
+# Evidence kinds meaning the TURN'S OWN WORDS reached the anchor, as against
+# recall having surfaced it. This is the whole filter on an `unresolved` block: a
+# turn about a Planning item or a Records collection routinely ends `unresolved`
+# while naming exactly the right anchor, because structured items are kept out of
+# recall and so can never earn `retrieval`, and one worded kind alone is only
+# `partial`. Those turns ARE decidable — but only by the agent, and only if it is
+# shown the candidates.
+#
+# `rare_term` is a kind the resolver fix adds on another branch. All four are
+# named here as a closed set so this hook renders correctly before and after that
+# merge, and so a kind nobody has invented yet simply fails to qualify rather
+# than breaking the filter.
+_WORDED_CONTACT_KINDS = frozenset(
+    {"exact_alias", "lexical_overlap", "claims_match", "rare_term"}
+)
+# A menu for the agent to pick from, not a hit list. Five is already more senses
+# than a turn plausibly meant.
+_MAX_UNRESOLVED_CANDIDATES = 5
 # A token is base64 of a small JSON payload; anything much larger than a full
 # packet's refs is not one, and is ignored rather than posted.
 _ACTIVATION_TOKEN_MAX_CHARS = 8192
+# How old a write temporary must be before it counts as abandoned rather than as
+# another prompt's work in flight. Generously past the injection budget.
+_ACTIVATION_TEMP_STALE_SECONDS = 60.0
 
 # Recall mode for the inject lane. See the module docstring for why this is not
 # "keyword".
@@ -807,8 +836,8 @@ def activation_token_path(home, client: str, session_id: str) -> Path:
     )
 
 
-def _mkdir_private(path: Path) -> None:
-    """Create `path` and every missing ancestor at exactly 0700.
+def _mkdir_private(path: Path) -> bool:
+    """Create `path` and every missing ancestor at exactly 0700. False to refuse.
 
     NOT `mkdir(parents=True, mode=0o700)`: that mode applies to the LEAF only, so
     the intermediate levels land at `0777 & ~umask` — 0775 on a umask-0002 box,
@@ -823,21 +852,65 @@ def _mkdir_private(path: Path) -> None:
     `~/.cache` and tightening a directory somebody else created is not its
     business — `unsafe_trusted_directory_ancestors` in the checkpoint hook is
     where that chain gets reported to a human who can decide.
+
+    A level that is a SYMLINK makes the whole store refuse, and the link is left
+    untouched — not chased, not replaced, not chmodded. `O_NOFOLLOW` on the token
+    file guards the final component only, so without this a link at any directory
+    level would be created and written through, putting the token and the tree the
+    checkpoint hook shares wherever it points.
+
+    The check is `islink` per level rather than a descending walk of
+    `O_RDONLY|O_DIRECTORY|O_NOFOLLOW` handles, which is what the checkpoint hook
+    does. That walk needs `dir_fd`, which Windows does not support, so it would
+    mean two creation paths in a hook that ships to both; the residual is a TOCTOU
+    window whose worst case is a directory created somewhere unintended, because
+    the token file itself is still opened `O_NOFOLLOW|O_EXCL`.
     """
     missing: list[Path] = []
     probe = path
-    # `lexists`, not `exists`: a symlink at a level must stop the walk rather than
-    # be treated as absent and then created through.
     while not os.path.lexists(probe):
         missing.append(probe)
         parent = probe.parent
         if parent == probe:
             break
         probe = parent
+    # `probe` is the deepest level that already exists, so it is the first that
+    # could be somebody else's link.
+    if os.path.islink(probe):
+        return False
     for level in reversed(missing):
         try:
             os.mkdir(level, 0o700)
         except FileExistsError:
+            pass
+        except OSError:
+            return False
+        if os.path.islink(level) or not os.path.isdir(level):
+            return False
+    return True
+
+
+def _sweep_stale_temporaries(directory: Path, prefix: str) -> None:
+    """Unlink abandoned write temporaries. Never raises.
+
+    A crash between `open` and `replace` leaves one behind, and nothing else
+    prunes this directory, so they would accumulate one per crash for ever. Only
+    temporaries older than `_ACTIVATION_TEMP_STALE_SECONDS` go: another prompt in
+    another process may be mid-write, and unlinking its temporary would cost that
+    write for no gain.
+    """
+    cutoff = time.time() - _ACTIVATION_TEMP_STALE_SECONDS
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.name.startswith(prefix):
+            continue
+        try:
+            if entry.stat().st_mtime < cutoff:
+                entry.unlink()
+        except OSError:
             pass
 
 
@@ -889,7 +962,9 @@ def _write_activation_token(session_id: str, token: str) -> None:
         os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     )
     try:
-        _mkdir_private(path.parent)
+        if not _mkdir_private(path.parent):
+            return
+        _sweep_stale_temporaries(path.parent, f"{path.name}.tmp-")
         descriptor = os.open(temporary, flags, 0o600)
         try:
             os.write(descriptor, token.encode("utf-8"))
@@ -913,9 +988,10 @@ def _packet_line(kind: str, text: str, ref: str) -> str:
     is bounded by WHOLE lines, so a line count that the data can change is a
     line count the ceiling cannot bound either.
     """
+    label = " ".join(str(kind).split())
     body = " ".join(str(text).split())
     handle = " ".join(str(ref).split())
-    return f"- {kind}: {body} [{handle}]" if handle else f"- {kind}: {body}"
+    return f"- {label}: {body} [{handle}]" if handle else f"- {label}: {body}"
 
 
 def _packet_lines(packet: dict) -> list[str]:
@@ -995,25 +1071,92 @@ def _format_ambiguity_block(packet: dict, max_chars: int) -> str:
     return f"{block}\n{_WORKING_SET_AMBIGUITY_LINE}" if block else ""
 
 
+def _worded_candidates(packet: dict) -> list[dict]:
+    """The packet's candidates that the turn's own WORDS reached, in its order.
+
+    Shape verified against the leaf rather than assumed: an `unresolved`
+    abstention carries its candidates in `anchors[]`, each with `status:
+    "partial"` and an `evidence` list that survives the egress guard. The filter
+    is on evidence alone, not on the status — the status is the resolver's
+    business and a later resolver change must not silently empty this block.
+    """
+    out: list[dict] = []
+    for anchor in packet.get("anchors") or ():
+        if not isinstance(anchor, dict):
+            continue
+        evidence = anchor.get("evidence")
+        if not isinstance(evidence, (list, tuple)):
+            continue
+        if not _WORDED_CONTACT_KINDS.intersection(str(kind) for kind in evidence):
+            continue
+        out.append(anchor)
+        if len(out) >= _MAX_UNRESOLVED_CANDIDATES:
+            break
+    return out
+
+
+def _format_unresolved_block(packet: dict, max_chars: int) -> str:
+    """The worded candidates of an `unresolved` turn, for the agent to choose from.
+
+    A candidate reached ONLY by retrieval is not rendered. Recall surfaced it, the
+    turn did not name it, and a menu of pages the user never mentioned is exactly
+    the hit list this compiler exists to replace.
+    """
+    lines = [
+        _packet_line(
+            str(anchor.get("kind") or "anchor"),
+            str(anchor.get("title") or anchor.get("ref") or ""),
+            str(anchor.get("ref") or ""),
+        )
+        for anchor in _worded_candidates(packet)
+    ]
+    reserve = len(_WORKING_SET_UNRESOLVED_LINE) + 1
+    block = _bounded_block(lines, max_chars - reserve)
+    return f"{block}\n{_WORKING_SET_UNRESOLVED_LINE}" if block else ""
+
+
+def _abstention_reason(packet: dict) -> str:
+    """The packet's abstention reason, or `""` when it did not abstain."""
+    if not isinstance(packet, dict) or not packet.get("abstained"):
+        return ""
+    abstention = packet.get("abstention")
+    return str(abstention.get("reason") or "") if isinstance(abstention, dict) else ""
+
+
 def _format_working_set_block(packet: dict, max_chars: int) -> str:
     """The packet as a bounded data block, or `""` to leave the reminder alone.
 
-    An `ambiguous` abstention is the ONE abstention this renders (design D7):
-    without it the hook path could never resolve an ambiguous turn, because the
-    agent — the only party allowed to choose a sense — would never see that there
-    was a choice. Every other abstention renders nothing, because injecting
-    nothing is precisely what an abstention means."""
+    Two abstentions are rendered, and both for the same reason: they are the ones
+    the AGENT can still decide, and it can only decide what it is shown.
+    `ambiguous` lists senses that each resolved and compete. `unresolved` lists
+    the candidates the turn's own words reached but that no rule could promote —
+    which is the ordinary outcome for Planning items and Records collections, and
+    would otherwise be invisible. Every other abstention renders nothing, because
+    injecting nothing is precisely what those abstentions mean.
+    """
     if not isinstance(packet, dict) or max_chars <= 0:
         return ""
+    reason = _abstention_reason(packet)
     if packet.get("abstained"):
-        abstention = packet.get("abstention")
-        reason = (
-            str(abstention.get("reason") or "") if isinstance(abstention, dict) else ""
-        )
-        if reason != "ambiguous":
-            return ""
-        return _format_ambiguity_block(packet, max_chars)
+        if reason == "ambiguous":
+            return _format_ambiguity_block(packet, max_chars)
+        if reason == "unresolved":
+            return _format_unresolved_block(packet, max_chars)
+        return ""
     return _bounded_block(_packet_lines(packet), max_chars)
+
+
+def _block_keeps_the_reminder(packet: dict) -> bool:
+    """Whether the ordinary reminder follows the block instead of being replaced.
+
+    Only for a rendered `unresolved` block. There the packet resolved nothing, so
+    the agent may still need ordinary recall and the reminder is the thing that
+    tells it so. A resolved packet or an `ambiguous` one has either handed over
+    the material or handed over a decision, and repeating advice about searching
+    beside it would spend the ceiling on the one instruction the agent least
+    needs.
+    """
+    return _abstention_reason(packet) == "unresolved"
 
 
 def _format_inject_block(hits: list[dict]) -> str:
@@ -1100,9 +1243,13 @@ def main() -> int:
     lane, hit_count = "off", 0
     mode = _inject_mode()
     if mode == _WORKING_SET_MODE:
-        # A payload REPLACEMENT rather than an upgrade: the packet already says
-        # what to do with what it carries, so repeating the reminder beside it
-        # would spend the ceiling on advice about material the agent now has.
+        # Usually a payload REPLACEMENT rather than an upgrade: a packet that
+        # resolved, or that hands over a choice between senses that each did,
+        # already says what to do with what it carries, and repeating the reminder
+        # beside it would spend the ceiling on advice about material the agent now
+        # has. The exception is a rendered `unresolved` block, where nothing
+        # resolved and ordinary recall may still be exactly what is wanted — there
+        # the reminder FOLLOWS, and `_block_keeps_the_reminder` is what knows.
         try:
             packet, lane = _gather_packet_with_lane(
                 prompt, _read_activation_token(session_id)
@@ -1111,10 +1258,13 @@ def main() -> int:
             hit_count = len(packet.get("anchors") or ())
             _write_activation_token(session_id, str(packet.get("continuity") or ""))
             block = _format_working_set_block(packet, _working_set_max_chars())
+            keep_reminder = _block_keeps_the_reminder(packet)
         except Exception:  # noqa: BLE001 - hook must never break prompt submission
-            lane, hit_count, block = "none", 0, ""
+            lane, hit_count, block, keep_reminder = "none", 0, "", False
         if block:
-            additional_context = block
+            additional_context = (
+                block + "\n\n" + REMINDER if keep_reminder else block
+            )
     elif mode == _STUB_MODE:
         # Inject mode is a payload upgrade on this same gate, not a second
         # trigger — REST/CLI are only ever attempted past this point. Any

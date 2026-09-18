@@ -250,7 +250,17 @@ def encode_continuity(
         "roles": [str(role) for role in roles if str(role)],
     }
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
-    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+    # `surrogatepass`, symmetrically with `decode_continuity`. A vault path reaches
+    # Python through filesystem decoding, so a filename with invalid UTF-8 arrives
+    # as a lone surrogate and strict encoding raises on it — turning one awkward
+    # filename in the packet into a failed mint. The hooks' own digests already
+    # take this posture. Encoding with it and decoding without would be worse than
+    # either: tokens minted and then called stale, continuity lost undiagnosed.
+    return (
+        base64.urlsafe_b64encode(raw.encode("utf-8", "surrogatepass"))
+        .decode("ascii")
+        .rstrip("=")
+    )
 
 
 def decode_continuity(token: str | None) -> dict[str, Any] | None:
@@ -274,7 +284,7 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
         return None
     try:
         raw = base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
-        payload = json.loads(raw.decode("utf-8"))
+        payload = json.loads(raw.decode("utf-8", "surrogatepass"))
     except (
         ValueError,
         binascii.Error,
@@ -362,13 +372,21 @@ def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
         for role in packet.get("roles") or ()
         if isinstance(role, Mapping)
     ]
-    return encode_continuity(
-        identity=identity,
-        roles_hash=str(generation.get("roles_hash") or ""),
-        generation=int(generation.get("index_generation") or 0),
-        refs=refs,
-        roles=[role for role in roles if role],
-    )
+    # The mint cannot raise. It runs at the very end of a read that has already
+    # succeeded and crossed the egress guard, so anything that fails here must
+    # cost the turn its token and nothing else: a packet the caller has earned
+    # must not be lost to the encoding of a ref.
+    try:
+        return encode_continuity(
+            identity=identity,
+            roles_hash=str(generation.get("roles_hash") or ""),
+            generation=int(generation.get("index_generation") or 0),
+            refs=refs,
+            roles=[role for role in roles if role],
+        )
+    except Exception:  # noqa: BLE001 - a token is an optimisation, never a promise
+        log.debug("continuity token could not be minted; serving without", exc_info=True)
+        return ""
 
 
 def reset_caches_for_tests() -> None:

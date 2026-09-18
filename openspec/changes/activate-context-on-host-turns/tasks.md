@@ -50,6 +50,10 @@
 
 ## 5. Delivery
 
-- [ ] 5.1 Hook journey test (f27 shape) with the packet under a data header on a real
-      `claude -p` run — one session, opt-in, reported as a finding.
+- [x] 5.1 Hook journey test with no paid model session: run the shipped hook as a
+      subprocess against a local stub of `/api/activate_context` through a three-turn
+      session (resolved packet, then an `unresolved` turn with worded candidates, then a
+      follow-up carrying the persisted continuity token), asserting the injected block,
+      the token round-trip and the lifecycle clear. The owner's own use is the live
+      acceptance; a paid `claude -p` run is not wanted.
 - [ ] 5.2 `openspec validate --all --strict`; scoped suites; privacy gate; PR.

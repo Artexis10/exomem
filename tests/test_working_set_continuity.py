@@ -592,6 +592,67 @@ def test_no_token_is_minted_without_an_index_identity() -> None:
     assert runtime_module.mint_continuity(_packet(), identity="") == ""
 
 
+#: A ref that cannot be encoded as strict UTF-8. Vault paths reach Python through
+#: filesystem decoding, so a name with invalid UTF-8 arrives as a lone surrogate;
+#: `json.dumps(..., ensure_ascii=False).encode("utf-8")` then raises on it.
+SURROGATE_REF = "Knowledge Base/Products/Cargo\ud800 Sled.md"
+
+
+def test_the_mint_cannot_raise_on_a_ref_it_cannot_encode() -> None:
+    """The mint runs on a read that has already succeeded and been guarded. A
+    filename the encoder dislikes must cost the turn its token, never its
+    packet — the same posture the hooks' own digests already take with
+    `surrogatepass`."""
+    packet = _packet()
+    packet["anchors"] = [
+        {
+            "ref": SURROGATE_REF,
+            "path": SURROGATE_REF,
+            "title": "Cargo Sled",
+            "kind": "resource",
+            "status": "resolved",
+            "evidence": ["exact_alias"],
+        }
+    ]
+
+    token = runtime_module.mint_continuity(packet, identity=IDENTITY)
+
+    assert isinstance(token, str)
+    if token:
+        assert SURROGATE_REF in _decoded(token)["refs"]
+
+
+def test_a_surrogate_ref_round_trips_rather_than_being_dropped() -> None:
+    token = runtime_module.encode_continuity(
+        identity=IDENTITY,
+        roles_hash=ROLES_HASH,
+        generation=1,
+        refs=(SURROGATE_REF,),
+        roles=("resources",),
+    )
+
+    refs, state = runtime_module.read_continuity(
+        token, identity=IDENTITY, roles_hash=ROLES_HASH
+    )
+
+    assert state == runtime_module.CONTINUITY_APPLIED
+    assert refs == frozenset({SURROGATE_REF})
+
+
+def test_the_codec_is_symmetric_about_surrogates() -> None:
+    """Encoding with `surrogatepass` and decoding without it would mint tokens
+    this server then calls stale — continuity lost with no diagnosis."""
+    token = runtime_module.encode_continuity(
+        identity=IDENTITY,
+        roles_hash=ROLES_HASH,
+        generation=1,
+        refs=(SURROGATE_REF, "plain.md"),
+        roles=(),
+    )
+
+    assert runtime_module.decode_continuity(token) is not None
+
+
 # --------------------------------------------------------------------------- #
 # The operation
 # --------------------------------------------------------------------------- #

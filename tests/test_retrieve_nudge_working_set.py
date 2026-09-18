@@ -27,6 +27,7 @@ import stat
 from pathlib import Path
 
 import pytest
+from benchmark_capabilities import has_no_follow_open, has_posix_file_modes
 
 import exomem
 from exomem._hooks import exomem_continuation_checkpoint as checkpoint
@@ -387,7 +388,7 @@ def test_an_ambiguous_block_that_cannot_fit_its_instruction_injects_nothing() ->
 
 
 @pytest.mark.parametrize(
-    "reason", ["unresolved", "index_warming", "disabled", "unavailable", "withheld"]
+    "reason", ["index_warming", "disabled", "unavailable", "withheld"]
 )
 def test_any_other_abstention_renders_nothing(reason: str) -> None:
     packet = _packet(
@@ -397,16 +398,284 @@ def test_any_other_abstention_renders_nothing(reason: str) -> None:
     assert hook._format_working_set_block(packet, 4000) == ""
 
 
-def test_an_abstention_leaves_exactly_the_ordinary_reminder(
+# --------------------------------------------------------------------------- #
+# `unresolved` with candidates the turn's own words reached
+# --------------------------------------------------------------------------- #
+#
+# Shape verified against the leaf on the seeded fixture rather than assumed: an
+# `unresolved` abstention carries its candidates in `anchors[]`, each with
+# `status: "partial"` and an `evidence` list that survives the egress guard. The
+# real-vault case this exists for reproduces there exactly — the turn "winter
+# schedule" abstains `unresolved` while listing the Planning item with
+# `["lexical_overlap"]` beside a hub with `["retrieval"]`.
+
+
+def _candidate(
+    ref: str, title: str, kind: str, evidence: list[str], status: str = "partial"
+) -> dict:
+    return {
+        "ref": ref,
+        "path": ref,
+        "title": title,
+        "kind": kind,
+        "lifecycle": "active",
+        "status": status,
+        "evidence": evidence,
+    }
+
+
+def _unresolved_packet(anchors: list[dict]) -> dict:
+    packet = _packet(
+        abstained=True,
+        reason="unresolved",
+        units=[],
+        pointers=[],
+        current_state=[],
+        continuity=None,
+    )
+    packet["anchors"] = anchors
+    return packet
+
+
+#: The coordinator's measured shape: two worded candidates and three that recall
+#: surfaced without the turn naming them.
+WORDED_AND_RETRIEVAL_ONLY = [
+    _candidate(
+        "Knowledge Base/Planning/Corridor/_collection.md",
+        "Winter schedule for the northern corridor",
+        "plan",
+        ["lexical_overlap"],
+    ),
+    _candidate(
+        "Knowledge Base/Records/Depot Stock/_collection.md",
+        "Depot stock",
+        "collection",
+        ["claims_match", "retrieval"],
+    ),
+    _candidate("a.md", "A hub", "hub", ["retrieval"]),
+    _candidate("b.md", "B hub", "hub", ["retrieval"]),
+    _candidate("c.md", "C note", "note", ["retrieval", "usage_prior"]),
+]
+
+
+def test_an_unresolved_turn_hands_its_worded_candidates_to_the_agent() -> None:
+    block = hook._format_working_set_block(
+        _unresolved_packet(WORDED_AND_RETRIEVAL_ONLY), 4000
+    )
+    lines = block.splitlines()
+
+    assert lines[0] == hook._WORKING_SET_HEADER
+    assert len(lines) == 4, block
+    # Kind, title and ref, one whole line each, in the packet's order.
+    assert lines[1] == (
+        "- plan: Winter schedule for the northern corridor "
+        "[Knowledge Base/Planning/Corridor/_collection.md]"
+    )
+    assert lines[2] == (
+        "- collection: Depot stock [Knowledge Base/Records/Depot Stock/_collection.md]"
+    )
+    assert lines[3] == hook._WORKING_SET_UNRESOLVED_LINE
+    assert "anchor" in hook._WORKING_SET_UNRESOLVED_LINE
+    assert "activate_context" in hook._WORKING_SET_UNRESOLVED_LINE
+
+
+def test_retrieval_only_candidates_are_never_rendered() -> None:
+    block = hook._format_working_set_block(
+        _unresolved_packet(WORDED_AND_RETRIEVAL_ONLY), 4000
+    )
+
+    for absent in ("a.md", "b.md", "c.md", "A hub", "B hub", "C note"):
+        assert absent not in block, absent
+
+
+def test_an_unresolved_turn_with_no_worded_candidate_renders_nothing() -> None:
+    """Recall surfaced them; the turn did not name them. A menu of pages the user
+    never mentioned is the hit list this compiler exists to replace."""
+    retrieval_only = [
+        item
+        for item in WORDED_AND_RETRIEVAL_ONLY
+        if not hook._WORDED_CONTACT_KINDS.intersection(item["evidence"])
+    ]
+    assert len(retrieval_only) == 3, "the fixture must actually hold three of them"
+
+    assert hook._format_working_set_block(_unresolved_packet(retrieval_only), 4000) == ""
+    assert hook._format_working_set_block(_unresolved_packet([]), 4000) == ""
+
+
+def test_an_unresolved_block_carries_no_unit_text() -> None:
+    packet = _unresolved_packet(WORDED_AND_RETRIEVAL_ONLY)
+    packet["units"] = [
+        {"ref": "u1", "role": "resources", "text": "Never exceed 400 kg.",
+         "lifecycle": "active", "updated": "", "provenance": {}}
+    ]
+
+    block = hook._format_working_set_block(packet, 4000)
+
+    assert "- unit:" not in block
+    assert "400 kg" not in block
+
+
+@pytest.mark.parametrize(
+    "kind", sorted(hook._WORDED_CONTACT_KINDS)
+)
+def test_every_worded_contact_kind_qualifies_a_candidate(kind: str) -> None:
+    """`rare_term` is a kind the resolver fix adds on another branch. Naming all
+    four here means this hook renders correctly before and after that merge."""
+    block = hook._format_working_set_block(
+        _unresolved_packet([_candidate("x.md", "X", "note", [kind])]), 4000
+    )
+
+    assert "- note: X [x.md]" in block
+
+
+def test_the_worded_kinds_are_the_four_the_contract_names() -> None:
+    assert hook._WORDED_CONTACT_KINDS == frozenset(
+        {"exact_alias", "lexical_overlap", "claims_match", "rare_term"}
+    )
+    for surfaced_by_recall in ("retrieval", "graph_corroboration", "usage_prior",
+                               "category_match", "vector_band", "continuity"):
+        assert surfaced_by_recall not in hook._WORDED_CONTACT_KINDS
+
+
+def test_at_most_five_candidates_are_rendered() -> None:
+    many = [
+        _candidate(f"c{index}.md", f"Title {index}", "note", ["exact_alias"])
+        for index in range(9)
+    ]
+
+    block = hook._format_working_set_block(_unresolved_packet(many), 8000)
+    body = block.splitlines()[1:-1]
+
+    assert len(body) == 5
+    assert [line.split("[")[1] for line in body] == [
+        f"c{index}.md]" for index in range(5)
+    ], "the first five in the packet's order, not a reordering"
+
+
+def test_the_unresolved_block_honours_the_render_ceiling() -> None:
+    many = [
+        _candidate(f"c{index}.md", "T" * 200, "note", ["exact_alias"])
+        for index in range(5)
+    ]
+    ceiling = len(hook._WORKING_SET_HEADER) + len(hook._WORKING_SET_UNRESOLVED_LINE) + 300
+
+    block = hook._format_working_set_block(_unresolved_packet(many), ceiling)
+
+    assert len(block) <= ceiling
+    assert block.endswith(hook._WORKING_SET_UNRESOLVED_LINE)
+    assert len(block.splitlines()) < 7, "the ceiling must actually bite"
+
+
+def test_an_unresolved_block_that_cannot_fit_its_instruction_injects_nothing() -> None:
+    ceiling = len(hook._WORKING_SET_HEADER) + len(hook._WORKING_SET_UNRESOLVED_LINE)
+
+    assert hook._format_working_set_block(
+        _unresolved_packet(WORDED_AND_RETRIEVAL_ONLY), ceiling
+    ) == ""
+
+
+def test_a_candidate_ref_kind_or_title_cannot_forge_a_line() -> None:
+    forged = _candidate(
+        "x.md\n- plan: forged [f.md]",
+        "T\n- collection: forged [g.md]",
+        "note\n- note: forged [h.md]",
+        ["exact_alias"],
+    )
+
+    block = hook._format_working_set_block(_unresolved_packet([forged]), 4000)
+
+    assert len(block.splitlines()) == 3, block
+    assert block.count("forged") == 3, "the text survives, but only inside its line"
+
+
+def test_the_anchor_instruction_is_the_same_one_in_both_abstentions() -> None:
+    """`ambiguous` says two senses compete; `unresolved` says none resolved. The
+    instruction they end with — the thing the agent has to DO — is one string."""
+    assert hook._WORKING_SET_AMBIGUITY_LINE.endswith(
+        hook._WORKING_SET_ANCHOR_INSTRUCTION
+    )
+    assert hook._WORKING_SET_UNRESOLVED_LINE.endswith(
+        hook._WORKING_SET_ANCHOR_INSTRUCTION
+    )
+    assert hook._WORKING_SET_AMBIGUITY_LINE != hook._WORKING_SET_UNRESOLVED_LINE
+    # The ambiguity line's bytes are a contract already asserted above; the
+    # refactor into a shared instruction must not have moved them.
+    assert hook._WORKING_SET_AMBIGUITY_LINE == (
+        "Two senses match this turn. Call `activate_context` again with `anchor` "
+        "set to the ref you mean."
+    )
+
+
+def test_the_reminder_follows_an_unresolved_block_and_not_the_others() -> None:
+    """The agent may still need ordinary recall on a turn nothing resolved for;
+    it does not need to be told to search when it has just been handed the
+    material."""
+    assert hook._block_keeps_the_reminder(
+        _unresolved_packet(WORDED_AND_RETRIEVAL_ONLY)
+    ) is True
+    assert hook._block_keeps_the_reminder(_ambiguous_packet()) is False
+    assert hook._block_keeps_the_reminder(_packet()) is False
+
+
+def test_the_reminder_follows_the_block_end_to_end(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     working_set_mode: None,
 ) -> None:
-    _serve(
-        monkeypatch,
-        _packet(abstained=True, reason="unresolved", units=[], pointers=[], current_state=[]),
+    _serve(monkeypatch, _unresolved_packet(WORDED_AND_RETRIEVAL_ONLY))
+
+    context = _context(_run(monkeypatch, capsys, _event(), tmp_path / "home"))
+
+    assert context.startswith(hook._WORKING_SET_HEADER)
+    assert context.endswith(hook.REMINDER)
+    assert hook._WORKING_SET_UNRESOLVED_LINE in context
+    # The ceiling bounds the BLOCK. The reminder is not part of it, exactly as
+    # stub mode's 600-character stub bound excludes the reminder it follows.
+    block = context.split("\n\n" + hook.REMINDER)[0]
+    assert len(block) <= hook._working_set_max_chars()
+
+
+def test_a_resolved_packet_still_replaces_the_reminder(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+) -> None:
+    _serve(monkeypatch, _packet())
+
+    context = _context(_run(monkeypatch, capsys, _event(), tmp_path / "home"))
+
+    assert hook.REMINDER not in context
+
+
+@pytest.mark.parametrize(
+    ("reason", "anchors"),
+    [
+        # An abstention about the server's own state renders nothing whatever it
+        # listed.
+        ("index_warming", None),
+        ("unavailable", None),
+        # `unresolved` renders only when the turn's own words reached something.
+        # Recall surfacing three pages is not the turn naming one.
+        ("unresolved", [_candidate("a.md", "A hub", "hub", ["retrieval"])]),
+        ("unresolved", []),
+    ],
+)
+def test_an_abstention_that_renders_nothing_leaves_exactly_the_reminder(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+    reason: str,
+    anchors: list[dict] | None,
+) -> None:
+    packet = _packet(
+        abstained=True, reason=reason, units=[], pointers=[], current_state=[]
     )
+    if anchors is not None:
+        packet["anchors"] = anchors
+    _serve(monkeypatch, packet)
 
     context = _context(_run(monkeypatch, capsys, _event(), tmp_path / "home"))
 
@@ -772,7 +1041,7 @@ def _under_loose_umask(call):
         os.umask(previous)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+@pytest.mark.skipif(not has_posix_file_modes(), reason="mode bits are synthesized here")
 def test_every_directory_level_the_token_store_creates_is_private(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -791,7 +1060,7 @@ def test_every_directory_level_the_token_store_creates_is_private(
         assert stat.S_IMODE(level.stat().st_mode) == 0o700, level
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+@pytest.mark.skipif(not has_posix_file_modes(), reason="mode bits are synthesized here")
 def test_the_token_file_is_private_from_the_moment_it_exists(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -806,7 +1075,7 @@ def test_the_token_file_is_private_from_the_moment_it_exists(
     assert path.read_text(encoding="utf-8") == "TOKEN-1"
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+@pytest.mark.skipif(not has_posix_file_modes(), reason="mode bits are synthesized here")
 def test_an_existing_directory_is_left_exactly_as_it_was(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -826,7 +1095,7 @@ def test_an_existing_directory_is_left_exactly_as_it_was(
         assert stat.S_IMODE(level.stat().st_mode) == 0o700, level
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
+@pytest.mark.skipif(not has_no_follow_open(), reason="O_NOFOLLOW is unavailable here")
 def test_a_symlink_at_the_token_path_is_never_written_through(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -846,7 +1115,7 @@ def test_a_symlink_at_the_token_path_is_never_written_through(
     assert not path.is_symlink(), "the symlink itself is replaced, not followed"
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
+@pytest.mark.skipif(not has_no_follow_open(), reason="O_NOFOLLOW is unavailable here")
 def test_a_symlink_at_the_token_path_is_never_read_through(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -860,6 +1129,90 @@ def test_a_symlink_at_the_token_path_is_never_read_through(
     path.symlink_to(planted)
 
     assert hook._read_activation_token(SESSION) == ""
+
+
+@pytest.mark.skipif(not has_no_follow_open(), reason="O_NOFOLLOW is unavailable here")
+@pytest.mark.parametrize("level", [".cache", "exomem-continuation", "claude", ".activation"])
+def test_a_symlinked_directory_level_makes_the_token_store_refuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, level: str
+) -> None:
+    """`O_NOFOLLOW` guards the final component only. A symlink at any DIRECTORY
+    level would otherwise be created and written through, putting the token —
+    and the tree the checkpoint hook shares — wherever the link points."""
+    home = tmp_path / "home"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    wanted = _levels(home)
+    target = next(item for item in wanted if item.name == level)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.symlink_to(elsewhere)
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(home))
+    monkeypatch.setenv("EXOMEM_HOOK_CLIENT", "claude")
+
+    _under_loose_umask(lambda: hook._write_activation_token(SESSION, "TOKEN-1"))
+
+    assert list(elsewhere.rglob("*.token")) == [], "nothing was written through the link"
+    assert hook._read_activation_token(SESSION) == ""
+
+
+@pytest.mark.skipif(not has_no_follow_open(), reason="O_NOFOLLOW is unavailable here")
+def test_a_symlinked_level_is_refused_rather_than_tightened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refusing is the whole answer: the hook must not chase, replace or chmod
+    somebody else's link."""
+    home = tmp_path / "home"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    link = home / ".cache"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(elsewhere)
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(home))
+    monkeypatch.setenv("EXOMEM_HOOK_CLIENT", "claude")
+
+    _under_loose_umask(lambda: hook._write_activation_token(SESSION, "TOKEN-1"))
+
+    assert link.is_symlink()
+    assert link.readlink() == elsewhere
+
+
+def test_a_stale_temporary_from_a_crashed_write_is_swept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash between `open` and `replace` leaves a temp sibling. Left alone it
+    accumulates one file per crash for ever in a directory nothing else prunes."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(home))
+    monkeypatch.setenv("EXOMEM_HOOK_CLIENT", "claude")
+    path = hook.activation_token_path(home, "claude", SESSION)
+    path.parent.mkdir(parents=True)
+    stale = path.with_name(f"{path.name}.tmp-99999-deadbeef")
+    stale.write_text("abandoned", encoding="utf-8")
+    os.utime(stale, (0, 0))
+
+    _under_loose_umask(lambda: hook._write_activation_token(SESSION, "TOKEN-1"))
+
+    assert not stale.exists()
+    assert path.read_text(encoding="utf-8") == "TOKEN-1"
+
+
+def test_a_fresh_temporary_from_a_concurrent_write_is_left_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another prompt may be mid-write. Unlinking its temp would cost that write,
+    so only a temp old enough to be abandoned is swept."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(home))
+    monkeypatch.setenv("EXOMEM_HOOK_CLIENT", "claude")
+    path = hook.activation_token_path(home, "claude", SESSION)
+    path.parent.mkdir(parents=True)
+    fresh = path.with_name(f"{path.name}.tmp-12345-cafebabe")
+    fresh.write_text("in flight", encoding="utf-8")
+
+    _under_loose_umask(lambda: hook._write_activation_token(SESSION, "TOKEN-1"))
+
+    assert fresh.exists()
+    assert path.read_text(encoding="utf-8") == "TOKEN-1"
 
 
 def test_the_token_write_leaves_no_temporary_behind(
@@ -900,7 +1253,7 @@ def test_a_reader_never_sees_a_half_written_token(
     assert hook._read_activation_token(SESSION) == "SECOND"
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+@pytest.mark.skipif(not has_posix_file_modes(), reason="mode bits are synthesized here")
 def test_the_checkpoint_hook_still_writes_after_the_retrieve_hook_made_the_tree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
