@@ -92,6 +92,7 @@ from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any
 
+from . import call_spans
 from . import review_state as review_state_module
 
 log = logging.getLogger(__name__)
@@ -2400,28 +2401,32 @@ def served_entries(
         and monotonic - hit["built"] < _SERVE_CACHE_TTL_SECONDS
         and (hit["horizon"] is None or effective_now < hit["horizon"])
     ):
-        try:
-            keep = egress_module.release_walk_filter(
-                Path(vault_root), principal=who, purpose=purpose
-            )
-        except Exception:  # noqa: BLE001
-            # The build's rule: a release plane that cannot decide serves
-            # nothing -- never a memo built while it could.
-            log.debug("release filter unavailable; serving no due state", exc_info=True)
-            return []
-        if keep is None:
+        with call_spans.span("recall.due_state.verdicts", {"paths": len(hit["asked"])}):
+            try:
+                keep = egress_module.release_walk_filter(
+                    Path(vault_root), principal=who, purpose=purpose
+                )
+            except Exception:  # noqa: BLE001
+                # The build's rule: a release plane that cannot decide serves
+                # nothing -- never a memo built while it could.
+                log.debug("release filter unavailable; serving no due state", exc_info=True)
+                return []
+            if keep is None:
 
-            def keep(_path: str) -> bool:
-                return True
+                def keep(_path: str) -> bool:
+                    return True
 
-        if all(keep(path) == verdict for path, verdict in hit["asked"].items()) and (
-            hit["role_token"] is None or _role_token(vault_root, keep) == hit["role_token"]
-        ):
-            return [
-                dict(row)
-                for row in hit["rows"]
-                if not row.get("path") or _page_exists(vault_root, row["path"])
-            ]
+            unchanged = all(keep(path) == verdict for path, verdict in hit["asked"].items())
+        if unchanged and hit["role_token"] is not None:
+            with call_spans.span("recall.due_state.role", {}):
+                unchanged = _role_token(vault_root, keep) == hit["role_token"]
+        if unchanged:
+            with call_spans.span("recall.due_state.exists", {"rows": len(hit["rows"])}):
+                return [
+                    dict(row)
+                    for row in hit["rows"]
+                    if not row.get("path") or _page_exists(vault_root, row["path"])
+                ]
     payload = load(vault_root)
     if payload is None or _owes_nothing(payload):
         # Unreadable: the build recomputes or recovers, and nothing is filed.
@@ -2431,14 +2436,15 @@ def served_entries(
             vault_root, today=today, now=effective_now, principal=who, purpose=purpose
         )
         return rows
-    rows, horizon, asked, role_token = _served_entries_uncached(
-        vault_root,
-        today=today,
-        now=effective_now,
-        principal=who,
-        purpose=purpose,
-        payload=payload,
-    )
+    with call_spans.span("recall.due_state.build", {}):
+        rows, horizon, asked, role_token = _served_entries_uncached(
+            vault_root,
+            today=today,
+            now=effective_now,
+            principal=who,
+            purpose=purpose,
+            payload=payload,
+        )
     with _SERVE_LOCK:
         if len(_SERVE_CACHE) >= _SERVE_CACHE_CAP:
             _SERVE_CACHE.pop(next(iter(_SERVE_CACHE)), None)
