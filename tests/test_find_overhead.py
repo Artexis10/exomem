@@ -99,6 +99,7 @@ def test_bm25_cache_status_and_unload_rebuilds(vault: Path, monkeypatch) -> None
     monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
     bm25.clear_cache()
     cold = bm25.cache_status()
+    cold.pop("hits", None)  # the reaper's use counter runs across the whole process
     assert cold == {
         "loaded": False,
         "corpora": 0,

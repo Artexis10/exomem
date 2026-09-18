@@ -87,35 +87,70 @@ def _should_unload(slot: ResourceSlot, now: float, threshold: float) -> bool:
     return (now - slot.last_activity()) >= threshold
 
 
+_UNSEEN = object()
+
+
 def _quiet_cache_slot(
     name: str,
     is_loaded: Callable[[], bool],
     unload: Callable[[], bool],
+    activity: Callable[[], object] | None = None,
+    *,
+    clock: Callable[[], float] = time.monotonic,
 ) -> ResourceSlot:
-    """Cache slot with approximate idle tracking, active only when caches are evictable."""
+    """Cache slot whose idle clock follows USE, active only when caches are evictable.
+
+    `activity` returns a cheap fingerprint of use -- hit counters, entry
+    counts -- and the clock restarts whenever it changes between ticks. A slot
+    without one is treated as used at the moment it is first observed loaded.
+    Either way the clock also restarts on eviction.
+
+    Measured 2026-09-18 on the personal service: the previous version stamped
+    only the last time a tick saw the cache EMPTY. A cache that requests kept
+    refilling between ticks was never seen empty, so fifteen minutes after
+    process start it looked stale forever and was evicted on every 60 s tick
+    -- 48 evictions of the find RAM caches in four hours, and the first recall
+    after each one paid the cold cliff: a 73k-row matrix reload, page
+    re-parses, a BM25 corpus rebuild.
+    """
     from . import mode
 
-    state = {"last_empty": time.monotonic()}
+    state = {"last_empty": clock(), "last_used": clock(), "seen": _UNSEEN}
 
     def loaded() -> bool:
         should_retain = mode.retain_cpu_caches()
         resident = (not should_retain) and is_loaded()
+        now = clock()
         if not resident:
-            state["last_empty"] = time.monotonic()
-        return resident
+            state["last_empty"] = now
+            state["seen"] = _UNSEEN
+            return False
+        signal = activity() if activity is not None else None
+        if state["seen"] is _UNSEEN or (activity is not None and signal != state["seen"]):
+            state["seen"] = signal
+            state["last_used"] = now
+        return True
+
+    def unload_and_restart() -> bool:
+        released = unload()
+        if released:
+            state["last_empty"] = clock()
+            state["seen"] = _UNSEEN
+        return released
 
     return ResourceSlot(
         name=name,
         is_loaded=loaded,
         inflight=lambda: 0,
-        last_activity=lambda: state["last_empty"],
-        unload=unload,
+        last_activity=lambda: max(state["last_empty"], state["last_used"]),
+        unload=unload_and_restart,
     )
 
 
 def default_slots() -> list[ResourceSlot]:
     """Default reclaimable resources: models when policy allows, CPU caches in quiet mode."""
-    from . import bm25, embeddings as e, find
+    from . import bm25, find
+    from . import embeddings as e
 
     return [
         ResourceSlot(
@@ -137,11 +172,13 @@ def default_slots() -> list[ResourceSlot]:
             "index-matrices",
             lambda: any(v.get("loaded", 0) for v in e.index_cache_status().values()),
             lambda: any(e.unload_index_caches().values()),
+            e.index_cache_activity,
         ),
         _quiet_cache_slot(
             "bm25-cache",
             lambda: bool(bm25.cache_status().get("loaded")),
             bm25.unload_cache,
+            lambda: bm25.cache_status().get("hits"),
         ),
         _quiet_cache_slot(
             "find-ram-caches",
@@ -149,6 +186,7 @@ def default_slots() -> list[ResourceSlot]:
                 section.get("entries", 0) for section in find.cache_status().values()
             ),
             lambda: any(find.release_idle_ram_caches().values()),
+            find.cache_activity,
         ),
     ]
 

@@ -26,7 +26,9 @@ REGISTRY_VERSION = 1
 
 _SQLITE_SUFFIXES = ("", "-wal", "-shm", "-journal")
 _REVIEW_TEMP_RE = re.compile(r"^\.\.review-state\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII)
-_DUE_TEMP_RE = re.compile(r"^\.\.due-state\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII)
+_DUE_TEMP_RE = re.compile(
+    r"^\.\.due-state(?:-emission)?\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII
+)
 _LEXICAL_REBUILD_RE = re.compile(
     r"^\.lexical\.sqlite\.rebuild-[0-9a-f]{32}\.tmp(?:-(?:wal|shm|journal))?$",
     re.ASCII,
@@ -459,7 +461,7 @@ _REGISTRY = (
         "due-state",
         "due_state",
         StatePlacement.EXTERNAL_STATE,
-        exact=(".due-state.json",),
+        exact=(".due-state.json", ".due-state-emission.json"),
         patterns=(_DUE_TEMP_RE,),
     ),
     InternalStateDescriptor(

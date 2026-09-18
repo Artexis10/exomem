@@ -78,18 +78,21 @@ projection state.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import logging
 import os
 import tempfile
 import threading
+import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any
 
+from . import call_spans
 from . import review_state as review_state_module
 
 log = logging.getLogger(__name__)
@@ -285,6 +288,125 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
             raise
     except Exception:  # noqa: BLE001 — a projection write never breaks a caller
         log.debug("could not persist the due-state projection", exc_info=True)
+
+
+#: The emission ledger lives beside the projection, not inside it. It changes
+#: on every delivered advisory; the projection changes on every governed
+#: write. Keeping them in one file made each delivery rewrite the whole
+#: projection (20 MB, ~600 ms on the personal vault) and, worse, made every
+#: read look like a state change to anything keyed on the projection file.
+EMISSION_FILENAME = ".due-state-emission.json"
+
+
+def emission_path(vault_root: Path) -> Path:
+    from . import state_paths
+
+    return state_paths.vault_state_dir(vault_root) / EMISSION_FILENAME
+
+
+def _read_emission_file(vault_root: Path) -> dict[str, Any] | None:
+    """The sidecar ledger, or None when it is absent or unreadable."""
+    path = emission_path(vault_root)
+    if not path.exists():
+        return None
+    try:
+        from . import vault
+
+        raw = json.loads(vault.read_bytes_without_pinning(path).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        log.debug("due-state emission ledger unreadable at %s", path)
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _write_emission_file(vault_root: Path, section: dict[str, Any]) -> bool:
+    """Atomically replace the sidecar ledger. Best effort: False when it could not be written."""
+    path = emission_path(vault_root)
+    try:
+        from . import state_paths, vault
+
+        state_paths.ensure_vault_state_dir(vault_root)
+        handle_fd, temp_name = tempfile.mkstemp(
+            prefix=f".{EMISSION_FILENAME}.", suffix=".tmp", dir=path.parent
+        )
+        try:
+            with os.fdopen(handle_fd, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(section, handle, sort_keys=True, separators=(",", ":"))
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            vault.replace_tolerating_transient_sharing(lambda: os.replace(temp_name, path))
+        except BaseException:
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
+            raise
+    except Exception:  # noqa: BLE001 — a ledger write never breaks a caller
+        log.debug("could not persist the due-state emission ledger", exc_info=True)
+        return False
+    return True
+
+
+def _ledger_section(vault_root: Path, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The current ledger: the sidecar when it exists, else the section a projection carries.
+
+    A projection written before the sidecar existed is the ledger's seed; the
+    first bump copies it out. `payload` spares a second load when the caller
+    already holds the projection.
+    """
+    section = _read_emission_file(vault_root)
+    if section is not None:
+        return _emission_section({"emission": section})
+    if payload is None:
+        payload = load(vault_root) or _UNPERSISTED.get(str(vault_root))
+    return _emission_section(payload)
+
+
+#: Read-modify-write on the sidecar is serialised within a process; two
+#: deliveries or a delivery racing a governed write must not lose a count.
+_LEDGER_LOCK = threading.Lock()
+_LEDGER_WRITE_FAILED: set[str] = set()
+
+
+def _bump_ledger(
+    vault_root: Path,
+    payload: dict[str, Any] | None,
+    *,
+    writes: int = 0,
+    emissions: int = 0,
+    last_digest: str | None = None,
+    due_total: int | None = None,
+) -> dict[str, Any]:
+    """Apply a delta to the ledger, persist the sidecar, and return what the sidecar now holds.
+
+    The sidecar is the ledger of record and the projection carries a copy of
+    it, so the copy must never run ahead: when the sidecar cannot be written
+    the bump is lost -- exactly what a failed projection save lost before --
+    and the caller gets the unbumped section to copy. A copy that was ahead
+    would be silently outvoted by the stale sidecar on every later read, and
+    nothing would heal it.
+    """
+    with _LEDGER_LOCK:
+        before = _ledger_section(vault_root, payload)
+        section = _emission_delta(
+            {"emission": before},
+            writes=writes,
+            emissions=emissions,
+            last_digest=last_digest,
+            due_total=due_total,
+        )
+        if _write_emission_file(vault_root, section):
+            return section
+    key = str(vault_root)
+    if key not in _LEDGER_WRITE_FAILED:
+        _LEDGER_WRITE_FAILED.add(key)
+        log.warning(
+            "due-state emission ledger could not be written at %s; counts from "
+            "this process are lost until it can be",
+            emission_path(vault_root),
+        )
+    return before
 
 
 # --------------------------------------------------------------------------
@@ -1091,7 +1213,7 @@ def reconcile(
     # unfiltered count under the same name, which gave the field two meanings
     # and let an anti-vacuity gate read a pre-dismissal number as evidence that
     # a later batch had something to say. One writer, one meaning.
-    payload["emission"] = _emission_delta(existing)
+    payload["emission"] = _ledger_section(vault_root, existing)
     save(vault_root, payload)
     _remember_unpersisted(vault_root, payload)
     return payload
@@ -1275,7 +1397,7 @@ def apply_write_delta(
             # denominator the "more automatic" claim is measured against, and
             # it has to be persisted because the emission governor above it is
             # per-process memory no projector can read.
-            "emission": _emission_delta(current, writes=1),
+            "emission": _bump_ledger(vault_root, current, writes=1),
             # Carried, not rebuilt. A page write learns nothing about bindings
             # and must not drop the index the structured deltas depend on --
             # losing it here would silently send every later plan write back to
@@ -1672,7 +1794,7 @@ def _persist_delta(
         # Bumped once per governed write, including one into a collection nobody
         # bound. Observation maintenance shares the page-write carrier's tick, so
         # its preceding family delta explicitly leaves this counter unchanged.
-        "emission": _emission_delta(current, writes=1 if count_write else 0),
+        "emission": _bump_ledger(vault_root, current, writes=1 if count_write else 0),
         **(
             {"bindings": bindings}
             if bindings is not None
@@ -2138,17 +2260,15 @@ def _record_emission(
     if not vault_root:
         return
     try:
-        payload = load(vault_root) or _UNPERSISTED.get(str(vault_root))
-        if payload is None:
-            return
-        payload = {
-            **payload,
-            "emission": _emission_delta(
-                payload, emissions=1, last_digest=digest, due_total=due_total
-            ),
-        }
-        save(vault_root, payload)
-        _remember_unpersisted(vault_root, payload)
+        section = _bump_ledger(
+            vault_root, None, emissions=1, last_digest=digest, due_total=due_total
+        )
+        if not emission_path(vault_root).exists():
+            # A state dir that refuses the write: keep the in-process copy
+            # honest, exactly as the projection itself is kept.
+            payload = _UNPERSISTED.get(str(vault_root))
+            if payload is not None:
+                _remember_unpersisted(vault_root, {**payload, "emission": section})
     except Exception:  # noqa: BLE001 — a ledger write never breaks a response
         log.debug("could not record the due-state emission", exc_info=True)
 
@@ -2161,7 +2281,7 @@ def emission_ledger(vault_root: Path) -> dict[str, Any]:
     carrier that authors no projected category can therefore add one emission
     while leaving `writes` unchanged.
     """
-    return _emission_section(load(vault_root) or _UNPERSISTED.get(str(vault_root)))
+    return _ledger_section(vault_root)
 
 
 # --------------------------------------------------------------------------
@@ -2224,7 +2344,189 @@ def served_entries(
     principal: Any = None,
     purpose: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Every open item this audience may see, most-overdue first.
+    """Every open item this audience may see, most-overdue first -- memoised.
+
+    Rebuilding the rows on every recall was the whole cost of a read on the
+    personal vault -- 25 s before PR #1279 and still 0.6 s idle to 4 s under
+    host load after it, on every call, when nothing had changed; the cost is
+    the recomposition of every collection candidate under the audience's
+    filter. So one build is kept per (vault, audience, session, purpose, day)
+    and reused while the projection file and the review-state file are the
+    same objects on disk, the clock has not reached the earliest future
+    `due_at` the build skipped, and the build is younger than
+    `_SERVE_CACHE_TTL_SECONDS`.
+
+    What the build reads live, a hit re-checks live, at the cost the profile
+    showed to be milliseconds against the build's seconds: the release plane
+    is asked again for every verdict the build asked for, and one changed
+    answer rebuilds, so a revocation stays immediate; the artifact-role
+    findings are served again and compared, so advice whose source changed
+    out of band is omitted until reconcile exactly as before; a page deleted
+    out of band is dropped from the hit the way the build drops it. Every
+    write replaces the projection file, so the next read after a write
+    rebuilds once. A projection that could not be persisted is never cached,
+    because a write then updates it in memory with no file to notice.
+    """
+    from .governance import egress as egress_module
+    from .governance import principal as principal_module
+
+    if now is not None:
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=dt.UTC)
+        now = now.astimezone(dt.UTC)
+    effective_now = now or dt.datetime.now(dt.UTC)
+    today = today or effective_now.date()
+    projection_token = _file_token(state_path(vault_root))
+    if projection_token is None:
+        rows, *_ = _served_entries_uncached(
+            vault_root, today=today, now=effective_now, principal=principal, purpose=purpose
+        )
+        return rows
+    who = principal if principal is not None else principal_module.effective_principal()
+    key = (
+        str(vault_root),
+        getattr(who, "audience_id", None),
+        getattr(who, "authorization_session_id", None),
+        bool(getattr(who, "resolved", True)),
+        purpose,
+        today.isoformat(),
+        projection_token,
+        _file_token(review_state_module.state_path(vault_root)),
+    )
+    monotonic = time.monotonic()
+    with _SERVE_LOCK:
+        hit = _SERVE_CACHE.get(key)
+    if (
+        hit is not None
+        and monotonic - hit["built"] < _SERVE_CACHE_TTL_SECONDS
+        and (hit["horizon"] is None or effective_now < hit["horizon"])
+    ):
+        with call_spans.span("recall.due_state.verdicts", {"paths": len(hit["asked"])}):
+            try:
+                keep = egress_module.release_walk_filter(
+                    Path(vault_root), principal=who, purpose=purpose
+                )
+            except Exception:  # noqa: BLE001
+                # The build's rule: a release plane that cannot decide serves
+                # nothing -- never a memo built while it could.
+                log.debug("release filter unavailable; serving no due state", exc_info=True)
+                return []
+            if keep is None:
+
+                def keep(_path: str) -> bool:
+                    return True
+
+            unchanged = all(keep(path) == verdict for path, verdict in hit["asked"].items())
+        if unchanged and hit["role_token"] is not None:
+            with call_spans.span("recall.due_state.role", {}):
+                unchanged = _role_token(vault_root, keep) == hit["role_token"]
+        if unchanged:
+            with call_spans.span("recall.due_state.exists", {"rows": len(hit["rows"])}):
+                return [
+                    dict(row)
+                    for row in hit["rows"]
+                    if not row.get("path") or _page_exists(vault_root, row["path"])
+                ]
+    payload = load(vault_root)
+    if payload is None or _owes_nothing(payload):
+        # Unreadable: the build recomputes or recovers, and nothing is filed.
+        # Owes nothing: the empty list under any filter, and -- as in the
+        # build -- no release filter to pay for.
+        rows, *_ = _served_entries_uncached(
+            vault_root, today=today, now=effective_now, principal=who, purpose=purpose
+        )
+        return rows
+    with call_spans.span("recall.due_state.build", {}):
+        rows, horizon, asked, role_token = _served_entries_uncached(
+            vault_root,
+            today=today,
+            now=effective_now,
+            principal=who,
+            purpose=purpose,
+            payload=payload,
+        )
+    with _SERVE_LOCK:
+        if len(_SERVE_CACHE) >= _SERVE_CACHE_CAP:
+            _SERVE_CACHE.pop(next(iter(_SERVE_CACHE)), None)
+        _SERVE_CACHE[key] = {
+            "rows": [dict(row) for row in rows],
+            "horizon": horizon,
+            "built": monotonic,
+            "asked": asked,
+            "role_token": role_token,
+        }
+    return rows
+
+
+#: One served build per (vault, audience, session, purpose, day, projection
+#: file, review-state file); see `served_entries`.
+_SERVE_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
+_SERVE_LOCK = threading.Lock()
+_SERVE_CACHE_CAP = 64
+_SERVE_CACHE_TTL_SECONDS = 300.0
+
+
+def reset_serve_cache() -> None:
+    """Drop every memoised served build: tests, and anything editing state files by hand."""
+    with _SERVE_LOCK:
+        _SERVE_CACHE.clear()
+    with _FINGERPRINTS_LOCK:
+        _FINGERPRINTS.clear()
+    _LEDGER_WRITE_FAILED.clear()
+
+
+def _owes_nothing(payload: Mapping[str, Any]) -> bool:
+    """A projection with no entry and no origin: the served view is empty under any filter."""
+    return not _has_entries(payload) and not (payload.get("role_state") or {}).get("has_origins")
+
+
+def _role_token(vault_root: Path, keep: Callable[[str], bool]) -> str:
+    """Fingerprint of the artifact-role findings this audience would be served right now."""
+    from . import artifact_role_state
+
+    try:
+        findings, _ = artifact_role_state.served(vault_root, keep)
+    except Exception:  # noqa: BLE001 - the build omits advice whose evidence is unavailable
+        return "unavailable"
+    return _findings_token(findings)
+
+
+def _findings_token(findings: list[Any]) -> str:
+    """One comparable value for a list of findings, whatever their concrete type."""
+    parts = [asdict(f) if is_dataclass(f) else repr(f) for f in findings]
+    encoded = json.dumps(parts, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _file_token(path: Path) -> tuple[int, int, int] | None:
+    """Identity of a file's current bytes for a cache key, or None when it is absent.
+
+    Inode, mtime and size together: every writer here replaces the file
+    (mkstemp + rename), so a rewrite always changes the inode even when it
+    lands inside the same coarse-clock tick with the same byte count.
+    """
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return (info.st_ino, info.st_mtime_ns, info.st_size)
+
+
+def _served_entries_uncached(
+    vault_root: Path,
+    *,
+    today: dt.date,
+    now: dt.datetime,
+    principal: Any = None,
+    purpose: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dt.datetime | None, dict[str, bool], str | None]:
+    """The build behind `served_entries`, and what a memo of it must re-check.
+
+    Returns the rows, the earliest future `due_at` it skipped, every release
+    verdict it asked for (path -> allowed), and a fingerprint of the artifact
+    role findings it served (None when the projection has no role index,
+    "unavailable" when their evidence could not be read).
 
     The order of operations is the contract, not an implementation detail:
     re-bucket against today, drop what this audience may not see, drop what the
@@ -2234,28 +2536,25 @@ def served_entries(
     """
     from .governance import egress as egress_module
 
-    if now is not None:
-        if now.tzinfo is None:
-            now = now.replace(tzinfo=dt.UTC)
-        now = now.astimezone(dt.UTC)
-    today = today or (now.date() if now is not None else dt.date.today())
-    payload = load(vault_root)
+    horizon: dt.datetime | None = None
+    if payload is None:
+        payload = load(vault_root)
     if payload is None:
         # An unpersistable vault recomputes ONCE per process, not once per read.
         payload = _UNPERSISTED.get(str(vault_root))
     if payload is None:
         payload = _schedule_reconcile(vault_root, today=today)
         if payload is None:
-            return []
+            return [], None, {}, None
 
-    if not _has_entries(payload) and not (payload.get("role_state") or {}).get("has_origins"):
+    if _owes_nothing(payload):
         # Nothing stored, so nothing to filter, count or order — and no disclosure
         # decision to make, because the answer is the empty list either way. This
         # is not an optimisation of the egress rule; it is the case where the rule
         # has no input. It matters because building the release filter is
         # governance-proportional work, and a vault that owes nothing is the
         # common case on every recall and every bootstrap.
-        return []
+        return [], None, {}, None
 
     keep = None
     try:
@@ -2267,11 +2566,20 @@ def served_entries(
         # everything". Fail closed: serve nothing rather than count something
         # this audience may not be allowed to know exists.
         log.debug("release filter unavailable; serving no due state", exc_info=True)
-        return []
-    if keep is None:
-        def keep(_path: str) -> bool:
-            return True
+        return [], None, {}, None
+    # Every verdict this build relies on, recorded so a memo of the build can
+    # ask the plane the same questions again. An empty policy is recorded too:
+    # its answers are the ones a policy arriving later must be checked against.
+    asked: dict[str, bool] = {}
+    decide = keep
 
+    def keep(path: str) -> bool:
+        verdict = asked.get(path)
+        if verdict is None:
+            verdict = asked[path] = True if decide is None else bool(decide(path))
+        return verdict
+
+    role_token: str | None = None
     store = review_state_module.ReviewStateStore(vault_root)
     try:
         state_payload = store.load()
@@ -2286,7 +2594,7 @@ def served_entries(
         # dismissing works. The write itself is untouched: this is the advisory
         # attached to the response, not the mutation.
         log.debug("review state unreadable; serving no due state", exc_info=True)
-        return []
+        return [], None, {}, None
     excluded = _excluded_families(state_payload)
 
     routing = _routing_snapshot(vault_root, payload, keep)
@@ -2300,6 +2608,7 @@ def served_entries(
         from . import artifact_role_review, artifact_role_state
         try:
             findings, _ = artifact_role_state.served(vault_root, keep)
+            role_token = _findings_token(findings)
             role_grouped = _entries_from_findings(vault_root, findings)
             for family in artifact_role_review.FAMILIES:
                 categories[family] = {
@@ -2307,6 +2616,7 @@ def served_entries(
                     for path, entries in (role_grouped.get(family) or {}).items()
                 }
         except Exception:  # noqa: BLE001 - omit advice when its evidence is unavailable
+            role_token = "unavailable"
             for family in artifact_role_review.FAMILIES:
                 categories[family] = {}
     for category in PROJECTION_CATEGORIES:
@@ -2329,7 +2639,9 @@ def served_entries(
                         continue
                     due = _date(entry.get(date_key))
                     due_at = _datetime(entry.get("due_at"))
-                    if due_at is not None and due_at > (now or dt.datetime.now(dt.UTC)):
+                    if due_at is not None and due_at > now:
+                        if horizon is None or due_at < horizon:
+                            horizon = due_at
                         continue
                     if due is None or due > today:
                         continue  # not yet due — the day-boundary re-bucket
@@ -2382,7 +2694,7 @@ def served_entries(
             row["ref"],
         )
     )
-    return rows
+    return rows, horizon, asked, role_token
 
 
 def _excluded_families(state_payload: dict[str, Any]) -> frozenset[str]:
@@ -2423,10 +2735,9 @@ def _record_delivered(vault_root: Path | None, block: dict[str, Any] | None) -> 
     if not rows:
         return
     try:
-        projection = load(vault_root) or _UNPERSISTED.get(str(vault_root))
-        if projection is None:
+        fingerprints = _fingerprints_for(vault_root)
+        if not fingerprints:
             return
-        fingerprints = _fingerprints_by_ref(projection)
         entries = []
         for row in rows:
             ref = str(row.get("ref") or "")
@@ -2438,6 +2749,39 @@ def _record_delivered(vault_root: Path | None, block: dict[str, Any] | None) -> 
         review_state_module.record_surfaced(vault_root, entries, surface="carrier")
     except Exception:  # noqa: BLE001 — a ledger write never breaks a carrier
         log.debug("first-surfaced ledger not recorded for the carrier", exc_info=True)
+
+
+#: `ref -> fingerprint` per vault, valid for one projection file identity.
+_FINGERPRINTS: dict[str, tuple[tuple[int, int, int], dict[str, str]]] = {}
+_FINGERPRINTS_LOCK = threading.Lock()
+_FINGERPRINTS_CAP = 8
+
+
+def _fingerprints_for(vault_root: Path) -> dict[str, str]:
+    """`_fingerprints_by_ref` over the current projection, computed once per projection file.
+
+    Loading the projection to stamp a delivery cost as much as the recall it
+    followed (240 ms on the personal vault) and happened on every response
+    that carried a block. The index only changes when the projection file
+    does, so it is kept beside the file's identity.
+    """
+    token = _file_token(state_path(vault_root))
+    key = str(vault_root)
+    if token is not None:
+        with _FINGERPRINTS_LOCK:
+            hit = _FINGERPRINTS.get(key)
+        if hit is not None and hit[0] == token:
+            return hit[1]
+    projection = load(vault_root) or _UNPERSISTED.get(key)
+    if projection is None:
+        return {}
+    fingerprints = _fingerprints_by_ref(projection)
+    if token is not None:
+        with _FINGERPRINTS_LOCK:
+            if len(_FINGERPRINTS) >= _FINGERPRINTS_CAP:
+                _FINGERPRINTS.pop(next(iter(_FINGERPRINTS)), None)
+            _FINGERPRINTS[key] = (token, fingerprints)
+    return fingerprints
 
 
 def _fingerprints_by_ref(payload: dict[str, Any]) -> dict[str, str]:
