@@ -61,6 +61,19 @@ CONTINUITY_APPLIED = "applied"
 CONTINUITY_STALE = "stale"
 CONTINUITY_ABSENT = "absent"
 
+#: Ceilings on an inbound token, all three of them cheap refusals rather than
+#: expensive parses. The token is a string a CALLER chose: it is not evidence
+#: that this server ever minted one, so every dimension it can grow in has to be
+#: bounded before any work is spent on it. The length bound matches the hook's
+#: own (`_ACTIVATION_TOKEN_MAX_CHARS`) and is checked before the base64 decode,
+#: so a megabytes-long argument costs a comparison instead of a megabytes-long
+#: allocation on the request thread. The ref and role ceilings sit far above
+#: anything a real packet produces — `working_set.MAX_ANCHORS` is 6 — so they
+#: refuse the absurd without ever refusing the legitimate.
+CONTINUITY_MAX_CHARS = 8192
+CONTINUITY_MAX_REFS = 32
+CONTINUITY_MAX_ROLES = 32
+
 READY = "ready"
 #: The abstention reason a managed runtime returns while the derived index is
 #: still cold. Spelled `index_warming` in the packet because a reader needs to
@@ -228,6 +241,12 @@ def encode_continuity(
         "roles_hash": str(roles_hash),
         "generation": int(generation),
         "refs": sorted({str(ref) for ref in refs if str(ref)}),
+        # RESERVED. The delta requires the selected roles in the token and they
+        # are carried and validated, but nothing reads them back yet: continuity
+        # qualifies anchors, and the roles a turn fills are re-selected from that
+        # turn's own cues every time. They are here so a later tier can ask what
+        # the previous turn actually looked at without a token format change —
+        # deliberately kept, not dead weight to be tidied away.
         "roles": [str(role) for role in roles if str(role)],
     }
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
@@ -235,14 +254,34 @@ def encode_continuity(
 
 
 def decode_continuity(token: str | None) -> dict[str, Any] | None:
-    """The token's fields, or `None` when it is not a token this server wrote."""
+    """The token's fields, or `None` when it is not a token this server wrote.
+
+    Every refusal is `None`, which the caller reports as `stale`. Nothing in here
+    may raise, because the argument is attacker-chosen and the delta says an
+    undecodable token is IGNORED — a token that could fail the operation instead
+    would hand a stranger a switch for turning activation off.
+
+    The exception list is wider than it looks like it needs to be, and each entry
+    is a shape that got through the obvious one:
+
+    * `ArithmeticError` — `"generation": 1e400` parses as `inf`, and `int(inf)`
+      raises OverflowError, which is not a ValueError.
+    * `RecursionError` — JSON nested past the interpreter's stack limit raises it
+      out of `json.loads`, and it is a RuntimeError, not a ValueError.
+    """
     text = str(token or "").strip()
-    if not text:
+    if not text or len(text) > CONTINUITY_MAX_CHARS:
         return None
     try:
         raw = base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
         payload = json.loads(raw.decode("utf-8"))
-    except (ValueError, binascii.Error, UnicodeDecodeError):
+    except (
+        ValueError,
+        binascii.Error,
+        UnicodeDecodeError,
+        ArithmeticError,
+        RecursionError,
+    ):
         return None
     if not isinstance(payload, dict) or payload.get("v") != CONTINUITY_VERSION:
         return None
@@ -254,9 +293,11 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
         return None
     if not isinstance(refs, list) or not isinstance(roles, list):
         return None
+    if len(refs) > CONTINUITY_MAX_REFS or len(roles) > CONTINUITY_MAX_ROLES:
+        return None
     try:
         generation = int(payload.get("generation") or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, ArithmeticError):
         return None
     return {
         "identity": identity,
@@ -280,7 +321,16 @@ def read_continuity(
     """
     if not str(token or "").strip():
         return frozenset(), CONTINUITY_ABSENT
-    payload = decode_continuity(token)
+    try:
+        payload = decode_continuity(token)
+    except Exception:  # noqa: BLE001 - a caller's string must not fail the request
+        # Belt to the codec's braces. `decode_continuity` enumerates the shapes
+        # that are known to escape a ValueError guard; this catches the next one
+        # nobody has thought of yet, because the cost of getting it wrong is a
+        # 500 on an argument a stranger controls, and the correct answer to any
+        # unreadable token is the same single word.
+        log.debug("continuity token could not be read; ignoring", exc_info=True)
+        return frozenset(), CONTINUITY_STALE
     if payload is None:
         return frozenset(), CONTINUITY_STALE
     if not identity or payload["identity"] != identity:
@@ -455,11 +505,20 @@ def serve(
             },
         )
 
-    continuity_refs, continuity_state = read_continuity(
-        continuity,
-        identity=index_identity(index),
-        roles_hash=registry.roles_hash,
-    )
+    # Outside the try that wraps `compile_packet`, so it gets an abstain-never-raise
+    # shape of its own: `serve` promises never to raise, and everything the token
+    # touches — the identity read, the codec — is either sqlite or a caller's
+    # string. An unreadable token degrades to `stale`, which is what the delta
+    # says it must do.
+    try:
+        continuity_refs, continuity_state = read_continuity(
+            continuity,
+            identity=index_identity(index),
+            roles_hash=registry.roles_hash,
+        )
+    except Exception:  # noqa: BLE001 - the whole operation is additive and abstains
+        log.warning("continuity evaluation failed; ignoring the token", exc_info=True)
+        continuity_refs, continuity_state = frozenset(), CONTINUITY_STALE
     key = cache_key(
         freshness_key=freshness_key,
         index_generation=index.generation(),

@@ -714,6 +714,11 @@ def compile_packet(
     }
 
     with _span(timings, "working_set.resolve"):
+        # `analysis` is needed on BOTH branches. The override replaces which
+        # anchor the turn is about; it does not replace which lenses the turn asks
+        # for, and `context_roles.select_roles` below reads `analysis.text` for its
+        # `turn_cue` sources. Deleting it here as unused on the override path would
+        # silently narrow an overridden packet to the anchor kind's default roles.
         analysis = working_set_resolve.analyze_turn(turn)
         rows = working_set_resolve.facts_from_rows(index.anchors())
         if anchor:

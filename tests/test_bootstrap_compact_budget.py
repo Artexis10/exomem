@@ -347,6 +347,29 @@ from exomem import commands
 #: and both are surface decisions rather than trims, which is why this change did
 #: not take them; but a payload carrying 10.6 KB of duplication has no business
 #: raising this ceiling a sixth time before it takes one of them.
+#:
+#: 2026-09-18, `activate-context-on-host-turns`, +183 B and NO raise. The
+#: activation carrier line (182 B of served JSON plus its separating space) went
+#: into the `balanced` and `maximal` recall contracts. The measurement that
+#: matters here is the one this file did not previously take: headroom BY
+#: ENGAGEMENT LEVEL, `(default surface, claude-code)` --
+#:
+#:     off       2,755 / 2,746
+#:     light     2,471 / 2,462
+#:     balanced    557 /   548   <- the default level, and the warning margin
+#:     maximal     192 /   183   <- the real worst case
+#:
+#: `maximal` was ALREADY inside the 512-byte warning band before this change
+#: (375 B), and it is the level whose entire purpose is to spend prose budget, so
+#: the margin is not claimed there and the ceiling is. The prior belief that a
+#: hook-capable surface and `maximal` could not combine was wrong --
+#: `hook_cadence` is served at every level -- and that mistake is why the tight
+#: case went unmeasured for five raises. The level matrix now lives in
+#: `tests/test_bootstrap_activation_carrier.py`.
+#:
+#: 192 bytes is not a budget, and the next addition at `maximal` trips the
+#: ceiling. The two redundancies above are still the place to get them from; do
+#: not raise this to buy room for one more sentence.
 COMPACT_BYTE_CEILING = 63_300
 
 #: The defect was compact and full being near-identical. A profile that does not
@@ -403,14 +426,25 @@ def test_compact_clears_the_warning_headroom(payloads):
 
 
 def test_a_hook_capable_client_still_clears_the_ceiling(monkeypatch):
-    """The largest compact payload is the one a client that may run hooks gets.
+    """A hook-capable client at the DEFAULT level, which is what this measures.
 
-    `engagement.hook_cadence` rides on the coding context, and `maximal` -- the
-    longer contract prose -- rides on the conversational one, so neither surface
-    is the worst case for the other. Measure this one here rather than
-    discovering it on a laptop.
+    The previous version of this docstring claimed `engagement.hook_cadence`
+    rides on the coding context while `maximal` rides on the conversational one,
+    so "neither surface is the worst case for the other". That is wrong, and it
+    hid the real worst case: `hook_cadence` is served at every level, `maximal`
+    included, so the hook-capable surface and the longest contract prose combine.
+    Measured 2026-09-18: `maximal` on `claude-code` is 63,117 bytes, 183 under
+    the ceiling, against 62,752 (548 under) at the default level here.
+
+    So this test is not the worst case and does not claim to be. It covers the
+    level a real install without a stored preference resolves through, and keeps
+    the warning margin for that one.
+    `tests/test_bootstrap_activation_carrier.py` carries the full
+    level-by-surface matrix, where the hard ceiling is asserted everywhere and
+    the margin only at the default level.
     """
     monkeypatch.setenv("EXOMEM_SURFACE", "claude-code")
+    monkeypatch.delenv("EXOMEM_PROMINENCE", raising=False)
     root = pathlib.Path(tempfile.mkdtemp())
     (root / "Knowledge Base").mkdir()
     payload = commands.op_bootstrap(root, profile="compact")

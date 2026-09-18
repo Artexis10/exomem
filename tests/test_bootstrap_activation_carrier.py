@@ -151,28 +151,94 @@ def test_the_line_costs_at_most_its_budget_in_served_json() -> None:
     )
 
 
-def test_compact_keeps_its_warning_margin_with_the_line(compact_payload: dict) -> None:
-    size = len(json.dumps(compact_payload))
+#: The two surfaces that differ in what compact serves, and every engagement
+#: level. Measured 2026-09-18 with the carrier line in place, `(default surface,
+#: claude-code)` headroom: off 2,755/2,746 · light 2,471/2,462 ·
+#: balanced 557/548 · maximal 192/183.
+#:
+#: The two assertions below are deliberately not the same assertion. The HARD
+#: ceiling is a claim about every level, because a payload over it is a payload a
+#: client truncates. The 512-byte WARNING margin is a claim about the DEFAULT
+#: level only: `maximal` exists in order to spend prose budget, and it was
+#: already inside the warning band before this change (375 bytes at base), so
+#: requiring the margin there would be requiring `maximal` not to be `maximal`.
+#: Which level is the default is asserted below rather than assumed.
+BUDGET_SURFACES = (None, "claude-code")
+
+
+def _compact_for(
+    monkeypatch: pytest.MonkeyPatch, *, level: str | None, surface: str | None
+) -> dict:
+    if level is None:
+        monkeypatch.delenv("EXOMEM_PROMINENCE", raising=False)
+    else:
+        monkeypatch.setenv("EXOMEM_PROMINENCE", level)
+    if surface is None:
+        monkeypatch.delenv("EXOMEM_SURFACE", raising=False)
+    else:
+        monkeypatch.setenv("EXOMEM_SURFACE", surface)
+    return commands.op_bootstrap(_empty_vault(), profile="compact")
+
+
+@pytest.mark.parametrize("surface", BUDGET_SURFACES)
+@pytest.mark.parametrize("level", prominence.CANON)
+def test_compact_stays_under_the_hard_ceiling_at_every_level(
+    monkeypatch: pytest.MonkeyPatch, level: str, surface: str | None
+) -> None:
+    payload = _compact_for(monkeypatch, level=level, surface=surface)
+    size = len(json.dumps(payload))
+
+    assert size <= COMPACT_BYTE_CEILING, (
+        f"compact bootstrap at {level!r} on {surface or 'the default surface'} is "
+        f"{size:,} bytes, over the {COMPACT_BYTE_CEILING:,} ceiling by "
+        f"{size - COMPACT_BYTE_CEILING:,}"
+    )
+    carried = prominence.ACTIVATION_CARRIER_LINE in json.dumps(payload["engagement"])
+    assert carried is (level in CARRYING_LEVELS)
+
+
+@pytest.mark.parametrize("surface", BUDGET_SURFACES)
+def test_the_default_level_keeps_the_warning_margin(
+    monkeypatch: pytest.MonkeyPatch, surface: str | None
+) -> None:
+    """Measured with no `EXOMEM_PROMINENCE` at all, which is what a real install
+    without a stored preference resolves through."""
+    payload = _compact_for(monkeypatch, level=None, surface=surface)
+    size = len(json.dumps(payload))
     headroom = COMPACT_BYTE_CEILING - size
 
-    assert prominence.ACTIVATION_CARRIER_LINE in json.dumps(compact_payload)
+    assert payload["engagement"]["level"] == prominence.DEFAULT_PROMINENCE
+    assert prominence.ACTIVATION_CARRIER_LINE in json.dumps(payload["engagement"])
     assert headroom >= HEADROOM_WARNING_BYTES, (
-        f"compact bootstrap is {size:,} bytes with {headroom:,} bytes of headroom; "
-        f"the carrier line must leave at least {HEADROOM_WARNING_BYTES:,}"
+        f"compact bootstrap at the default level on "
+        f"{surface or 'the default surface'} is {size:,} bytes with {headroom:,} "
+        f"bytes of headroom; the carrier line must leave at least "
+        f"{HEADROOM_WARNING_BYTES:,}"
     )
 
 
-def test_a_hook_capable_client_also_keeps_the_margin(
+def test_the_default_level_is_the_one_the_margin_is_claimed_for() -> None:
+    """If the default ever moves to `maximal`, the margin assertion above starts
+    claiming something this change did not establish."""
+    assert prominence.DEFAULT_PROMINENCE == "balanced"
+    assert prominence.DEFAULT_PROMINENCE in CARRYING_LEVELS
+
+
+def test_a_hook_capable_client_is_not_a_separate_worst_case(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The worst case: the surface that additionally earns a `hook_cadence`."""
-    monkeypatch.setenv("EXOMEM_SURFACE", "claude-code")
+    """`engagement.hook_cadence` is served at EVERY level, including `maximal`, so
+    the hook-capable surface and the longest contract prose do combine — they are
+    one worst case, not two. Asserted because the opposite was believed."""
+    payloads = {
+        level: _compact_for(monkeypatch, level=level, surface="claude-code")
+        for level in prominence.CANON
+    }
 
-    payload = commands.op_bootstrap(_empty_vault(), profile="compact")
-    size = len(json.dumps(payload))
-
-    assert "hook_cadence" in payload["engagement"]
-    assert COMPACT_BYTE_CEILING - size >= HEADROOM_WARNING_BYTES
+    assert all("hook_cadence" in payload["engagement"] for payload in payloads.values())
+    worst = max(len(json.dumps(payload)) for payload in payloads.values())
+    assert worst == len(json.dumps(payloads["maximal"]))
+    assert worst <= COMPACT_BYTE_CEILING
 
 
 # --------------------------------------------------------------------------- #

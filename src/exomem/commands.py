@@ -6014,9 +6014,20 @@ def op_activate_context(
         )
     # The release plane's own decision, reused rather than re-derived: the
     # override anchor was the packet's ONLY anchor, so the guard emptying the
-    # packet IS the answer to "may this audience see that ref" — and the answer
-    # a caller gets is the one an unknown ref gets, so neither can be told apart
-    # from the other and the argument is no existence oracle.
+    # packet IS the answer to "may this audience see that ref".
+    #
+    # What is equal between an unknown ref and a withheld one is the RESPONSE —
+    # same code, same words, neither naming the ref. The work is not: a withheld
+    # ref has been compiled and guarded by the time it is refused, an unknown one
+    # abstains before the guard, and the two are separable by latency (measured
+    # 168 ms against 375 ms, non-overlapping). That is left as it is rather than
+    # padded, because equalising it would mean either doing the withheld ref's
+    # work for every unknown one or timing the response, and neither buys
+    # anything: the same audience asking the same vault an ORDINARY turn already
+    # learns as much from `missing[].reason = "withheld"`, which is the honest
+    # marker saying a section lost something. A timing side channel that discloses
+    # strictly less than a documented field is not the thing to spend a request
+    # budget closing.
     if anchor and (guarded is None or _abstention_reason(guarded) == "withheld"):
         raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
     if guarded is None:

@@ -371,15 +371,24 @@ def activation_token_path(home: Path, client: str, session_id: str) -> Path:
     Dot-prefixed, so the prune scan below — which skips every name beginning with
     a dot — never mistakes the token directory for an expired session entry.
 
+    The name is a readable stem plus the SAME 20-hex `client\0session_id` digest
+    `session_state_dir` above uses, so the token keyspace partitions exactly the
+    sessions the checkpoint keyspace does. The sanitised stem alone does not:
+    `abc-123`, `abc/123` and `abc 123` collapse onto one spelling, and any two
+    long ids sharing a prefix collapse onto one more.
+
     Kept identical in `exomem_retrieve_nudge.py`, which writes the token: two
     standalone hook scripts cannot import each other, and
     `tests/test_retrieve_nudge_working_set.py` asserts the two derivations agree.
     """
     safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(session_id or "")).strip("-._")
+    digest = _sha256_bytes(
+        f"{client}\0{session_id}".encode("utf-8", "surrogatepass")
+    )[:20]
     return (
         client_state_root(home, client)
         / ".activation"
-        / f"{(safe or 'session')[:96]}.token"
+        / f"{(safe or 'session')[:48]}-{digest}.token"
     )
 
 

@@ -4,7 +4,7 @@
 
 ## 1. Continuity token and anchor override (server)
 
-- [ ] 1.1 Red: `tests/test_working_set_continuity.py` — token round-trip; minted from
+- [x] 1.1 Red: `tests/test_working_set_continuity.py` — token round-trip; minted from
       the served packet (a guard-removed anchor is absent from the decoded token);
       continuity is a qualifier (one contact kind + continuity → resolved; continuity
       alone → nothing); unresolved stays unresolved; a token from another index, another
@@ -12,10 +12,10 @@
       index stays valid with removed refs dropped; `generation.continuity` reports
       `applied` / `stale` / `absent`; a request with a token or an override is never
       served another request's cached packet.
-- [ ] 1.2 Red: `anchor` override — ambiguous → resolved with `[agent_choice]` and the
+- [x] 1.2 Red: `anchor` override — ambiguous → resolved with `[agent_choice]` and the
       competitors omitted; unknown ref and withheld ref refused with the same
       structured error, neither naming the page; the operation writes nothing.
-- [ ] 1.3 Implement in `working_set_resolve.py`, `working_set_runtime.py`,
+- [x] 1.3 Implement in `working_set_resolve.py`, `working_set_runtime.py`,
       `commands.py` (two optional arguments; docstring contract), CLI and REST parity;
       regenerate the schema fixture, digests, capabilities, pending connector digest.
 
@@ -27,23 +27,23 @@
 
 ## 3. Hook working-set mode
 
-- [ ] 3.1 Red: `tests/test_retrieve_nudge_working_set.py` — mode gate; data header;
+- [x] 3.1 Red: `tests/test_retrieve_nudge_working_set.py` — mode gate; data header;
       current state, units, pointers as whole items under the render ceiling;
       `ambiguous` → header + competing anchors + the `anchor` instruction; any other
       abstention → reminder only; failure → reminder within budget; prominence and
       cooldown gates unchanged; token persisted beside the checkpoint and cleared on
       the lifecycle events each client delivers; `src/exomem/_hooks` copy
       byte-identical.
-- [ ] 3.2 Implement in `exomem_retrieve_nudge.py` (+ `_hooks` copy) and
+- [x] 3.2 Implement in `exomem_retrieve_nudge.py` (+ `_hooks` copy) and
       `exomem_continuation_checkpoint.py`; document the mode in `install_hook.py`.
 
 ## 4. Hosted carrier line
 
-- [ ] 4.1 Red: bootstrap guidance contains the line at balanced/maximal, absent at
+- [x] 4.1 Red: bootstrap guidance contains the line at balanced/maximal, absent at
       light/off; the line costs at most 220 bytes and compact keeps its 512-byte
       warning margin (measured 2026-09-18: 62,564 of 63,300 bytes before the line);
       scaffold recall loop byte-identical to the served projection.
-- [ ] 4.2 Implement in `commands.py` bootstrap guidance and the scaffold; run
+- [x] 4.2 Implement in `commands.py` bootstrap guidance and the scaffold; run
       `refresh-skill-contract` and `package-skills`.
 
 ## 5. Delivery

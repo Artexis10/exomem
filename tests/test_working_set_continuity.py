@@ -193,6 +193,155 @@ def test_an_undecodable_token_is_stale(token: str) -> None:
     assert state == runtime_module.CONTINUITY_STALE
 
 
+def _raw_token(body: str) -> str:
+    """A token whose JSON text is exactly `body` — including text `json.dumps`
+    will not produce, which is the whole point: a forged token is a string a
+    stranger chose, not one this server round-tripped."""
+    return base64.urlsafe_b64encode(body.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+#: Forged tokens that escape `(ValueError, binascii.Error, UnicodeDecodeError)`.
+#: `1e400` parses as `inf`, and `int(inf)` raises OverflowError — an
+#: ArithmeticError, not a ValueError. Nesting deep enough raises RecursionError, a
+#: RuntimeError. Both reached the REST door as a 500 before this was fixed, so a
+#: stranger's `continuity` argument could make the operation fail rather than
+#: ignore it, which is the one thing the delta says it must not do.
+#: The identity and roles hash a forged token would carry to get past the two
+#: equality checks, so each shape below is refused by the DECODER rather than by
+#: happening not to match this vault.
+_FORGED_HEAD = f'"identity":"{IDENTITY}","roles_hash":"{ROLES_HASH}",'
+
+
+def _forged(fields: str) -> str:
+    """A token whose JSON text is exactly `{"v":1,<fields>}`."""
+    return _raw_token('{"v":1,' + fields + "}")
+
+
+def _many(template: str, count: int) -> str:
+    return ",".join(template.format(index=index) for index in range(count))
+
+
+FORGED_TOKENS = {
+    "generation is positive infinity": _forged(
+        _FORGED_HEAD + '"generation":1e400,"refs":["a.md"],"roles":[]'
+    ),
+    "generation is negative infinity": _forged(
+        _FORGED_HEAD + '"generation":-1e400,"refs":["a.md"],"roles":[]'
+    ),
+    "generation is a vast integer": _forged(
+        _FORGED_HEAD + '"generation":' + "9" * 5000 + ',"refs":["a.md"],"roles":[]'
+    ),
+    # Deep enough to exhaust the interpreter's stack, short enough to get past
+    # the length bound — so this exercises the exception guard and not the bound.
+    "refs are nested past the recursion limit": _forged(
+        '"refs":' + "[" * 2000 + "]" * 2000
+    ),
+    # Far past the bound: refused without ever being base64-decoded.
+    "token is megabytes long": "A" * (17 * 1024 * 1024),
+    "refs are an unbounded list": _forged(
+        _FORGED_HEAD
+        + '"generation":1,"refs":['
+        + _many('"r{index}.md"', 500)
+        + '],"roles":[]'
+    ),
+    "roles are an unbounded list": _forged(
+        _FORGED_HEAD
+        + '"generation":1,"refs":["a.md"],"roles":['
+        + _many('"role{index}"', 500)
+        + "]"
+    ),
+}
+
+
+@pytest.mark.parametrize("token", FORGED_TOKENS.values(), ids=FORGED_TOKENS.keys())
+def test_a_forged_token_is_stale_and_never_raises(token: str) -> None:
+    refs, state = runtime_module.read_continuity(
+        token, identity=IDENTITY, roles_hash=ROLES_HASH
+    )
+
+    assert refs == frozenset()
+    assert state == runtime_module.CONTINUITY_STALE
+
+
+@pytest.mark.parametrize("token", FORGED_TOKENS.values(), ids=FORGED_TOKENS.keys())
+def test_a_forged_token_abstains_the_packet_rather_than_failing_it(
+    activation_vault: Path, token: str
+) -> None:
+    packet = commands.op_activate_context(
+        activation_vault, turn=TURN, continuity=token
+    )
+
+    assert packet["generation"]["continuity"] == runtime_module.CONTINUITY_STALE
+    assert packet["abstained"] is False, "the turn still resolves on its own evidence"
+
+
+@pytest.mark.parametrize("token", FORGED_TOKENS.values(), ids=FORGED_TOKENS.keys())
+def test_a_forged_token_reaches_the_rest_door_as_a_served_packet(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch, token: str
+) -> None:
+    """A 500 here would be a stranger's string deciding whether the operation
+    works. The delta says an undecodable token is ignored and reported."""
+    from starlette.testclient import TestClient
+
+    from exomem import server
+
+    monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
+    for leaky in ("EXOMEM_UPLOAD_TOKEN", "EXOMEM_CF_ACCESS_TEAM_DOMAIN", "EXOMEM_CF_ACCESS_AUD"):
+        monkeypatch.delenv(leaky, raising=False)
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
+    client = TestClient(server.build_server(require_auth=False).http_app())
+
+    response = client.post(
+        "/api/activate_context",
+        json={"turn": TURN, "continuity": token},
+        headers={"Authorization": "Bearer sekret"},
+    )
+
+    assert response.status_code == 200, response.text[:400]
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["data"]["generation"]["continuity"] == runtime_module.CONTINUITY_STALE
+
+
+def test_an_oversized_token_is_refused_without_being_decoded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bound is the cheap half of the defence: a megabytes-long argument must
+    not buy a megabytes-long base64 decode on the request thread."""
+    called: list[int] = []
+    real = base64.urlsafe_b64decode
+
+    def _counting(value):
+        called.append(len(value))
+        return real(value)
+
+    monkeypatch.setattr(runtime_module.base64, "urlsafe_b64decode", _counting)
+
+    assert runtime_module.decode_continuity("A" * 9000) is None
+    assert called == []
+    assert runtime_module.decode_continuity(_token()) is not None
+    assert called, "a token inside the bound is still decoded"
+
+
+def test_the_refs_and_roles_ceilings_are_declared() -> None:
+    assert runtime_module.CONTINUITY_MAX_CHARS == 8192
+    assert runtime_module.CONTINUITY_MAX_REFS == 32
+    assert runtime_module.CONTINUITY_MAX_ROLES == 32
+
+
+def test_a_token_at_the_refs_ceiling_still_applies() -> None:
+    """The bound refuses the absurd, not the legitimate: a packet reports at most
+    `MAX_ANCHORS` anchors, so a real token is far inside it."""
+    refs = tuple(f"a{index}.md" for index in range(runtime_module.CONTINUITY_MAX_REFS))
+
+    _kept, state = runtime_module.read_continuity(
+        _token(refs=refs), identity=IDENTITY, roles_hash=ROLES_HASH
+    )
+
+    assert state == runtime_module.CONTINUITY_APPLIED
+    assert resolve_module.MAX_ANCHORS <= runtime_module.CONTINUITY_MAX_REFS
+
+
 def test_a_token_from_another_index_is_stale() -> None:
     refs, state = runtime_module.read_continuity(
         _token(identity=OTHER_IDENTITY), identity=IDENTITY, roles_hash=ROLES_HASH
@@ -622,6 +771,28 @@ def test_an_override_runs_the_role_lanes(activation_vault: Path) -> None:
     )
 
     assert packet["roles"], "the lanes must run for the anchor the agent chose"
+
+
+def test_the_turn_still_chooses_the_lenses_on_the_override_path(
+    activation_vault: Path,
+) -> None:
+    """The override replaces which ANCHOR the turn is about, not which lenses the
+    turn asks for. `context_roles.select_roles` reads the turn's own text for its
+    `turn_cue` sources, so the same anchor reached by two differently-phrased
+    turns can legitimately fill different roles — and a review that reads the
+    override branch as ignoring the turn would have deleted that."""
+    plain = commands.op_activate_context(activation_vault, turn=TURN)
+    chosen = _refs(plain)[0]
+
+    cued = commands.op_activate_context(activation_vault, turn=TURN, anchor=chosen)
+    bare = commands.op_activate_context(
+        activation_vault, turn="Cargo Sled", anchor=chosen
+    )
+
+    assert {role["source"] for role in cued["roles"]} != set()
+    assert [role["id"] for role in cued["roles"]] != [
+        role["id"] for role in bare["roles"]
+    ], "the turn's cues must still reach role selection"
 
 
 def test_an_unknown_and_a_withheld_anchor_receive_the_same_error(

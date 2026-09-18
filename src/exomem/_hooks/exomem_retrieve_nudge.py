@@ -86,6 +86,7 @@ hook crash must not break the session.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -746,7 +747,12 @@ def _fetch_packet_via_cli(
     argv = [script, "activate_context", "--max-chars", str(_working_set_max_chars())]
     if continuity:
         argv += ["--continuity", continuity]
-    argv += ["--json", prompt]
+    # `--` before the turn: the turn is a user's words and those words are argv.
+    # A prompt of `--purpose` otherwise exits the CLI with a usage error, the rung
+    # returns nothing, and the mode degrades to the plain reminder for exactly the
+    # prompts a user would least expect it to. Stub mode's rung is deliberately
+    # left as it is; its behaviour is out of this change's scope.
+    argv += ["--json", "--", prompt]
     try:
         proc = subprocess.run(
             argv,
@@ -771,53 +777,145 @@ def activation_token_path(home, client: str, session_id: str) -> Path:
     SESSION entries under this same client root and skips every name beginning
     with a dot, so the token directory is never mistaken for an old session.
 
+    The name is a readable stem PLUS the same 20-hex digest of
+    `client\\0session_id` that the checkpoint hook's own `session_state_dir` uses,
+    so the two keyspaces partition exactly the same sessions. The stem alone does
+    not, and that is the whole reason the digest is here: the
+    sanitiser maps whole classes of id onto one spelling (`abc-123`, `abc/123`
+    and `abc 123` all become `abc-123`) and the length bound maps every long id
+    with a shared prefix onto one more. Two tabs sharing a token file would hand
+    one session the other's anchors, and the server would then honour them as its
+    own evidence. The stem is ASCII by construction after the substitution, so
+    slicing it is byte-safe.
+
     Kept identical in that hook, which clears the token on each lifecycle event
     its client delivers: two standalone hook scripts cannot import each other,
     and `tests/test_retrieve_nudge_working_set.py` asserts the two derivations
     agree. A token this lookup cannot find costs continuity and nothing else —
     the next turn simply starts the sequence again."""
     safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(session_id or "")).strip("-._")
+    digest = hashlib.sha256(
+        f"{client}\0{session_id}".encode("utf-8", "surrogatepass")
+    ).hexdigest()[:20]
     return (
         Path(home)
         / ".cache"
         / "exomem-continuation"
         / client
         / ".activation"
-        / f"{(safe or 'session')[:96]}.token"
+        / f"{(safe or 'session')[:48]}-{digest}.token"
     )
 
 
+def _mkdir_private(path: Path) -> None:
+    """Create `path` and every missing ancestor at exactly 0700.
+
+    NOT `mkdir(parents=True, mode=0o700)`: that mode applies to the LEAF only, so
+    the intermediate levels land at `0777 & ~umask` — 0775 on a umask-0002 box,
+    which is the Debian/Ubuntu default. That matters here and nowhere else in
+    this hook, because the levels are SHARED with the continuation checkpoint
+    hook, which requires its client root to be exactly 0700 and swallows the
+    failure when it is not. The retrieve hook fires on the first prompt of a
+    session, so it is the process that wins the race to create that root; one
+    broad parent here reads to a user as "checkpoints silently stopped".
+
+    A level that already exists is left exactly as it is. This hook does not own
+    `~/.cache` and tightening a directory somebody else created is not its
+    business — `unsafe_trusted_directory_ancestors` in the checkpoint hook is
+    where that chain gets reported to a human who can decide.
+    """
+    missing: list[Path] = []
+    probe = path
+    # `lexists`, not `exists`: a symlink at a level must stop the walk rather than
+    # be treated as absent and then created through.
+    while not os.path.lexists(probe):
+        missing.append(probe)
+        parent = probe.parent
+        if parent == probe:
+            break
+        probe = parent
+    for level in reversed(missing):
+        try:
+            os.mkdir(level, 0o700)
+        except FileExistsError:
+            pass
+
+
 def _read_activation_token(session_id: str) -> str:
-    """The token this session last received, or `""`. Never raises."""
+    """The token this session last received, or `""`. Never raises.
+
+    `O_NOFOLLOW` so a symlink planted at the token path is refused rather than
+    read through: the token is posted to the service, and a hook that will read
+    whatever a symlink points at is a primitive for exfiltrating one file per
+    prompt. One byte past the ceiling is read deliberately, so an oversized file
+    fails the length check instead of being silently truncated into a token.
+    """
+    path = activation_token_path(_hook_home(), _hook_client(), session_id)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        raw = activation_token_path(
-            _hook_home(), _hook_client(), session_id
-        ).read_text(encoding="utf-8")
-    except Exception:  # noqa: BLE001 - hook must never break prompt submission
+        descriptor = os.open(path, flags)
+    except OSError:
         return ""
-    token = raw.strip()
+    try:
+        raw = os.read(descriptor, _ACTIVATION_TOKEN_MAX_CHARS + 1)
+    except OSError:
+        return ""
+    finally:
+        os.close(descriptor)
+    try:
+        token = raw.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return ""
     return token if 0 < len(token) <= _ACTIVATION_TOKEN_MAX_CHARS else ""
 
 
 def _write_activation_token(session_id: str, token: str) -> None:
     """Persist a freshly returned token. Only ever called with a real one: an
     abstained packet mints none, and forgetting the last good token over one
-    unresolved turn would cost continuity for the rest of the session."""
+    unresolved turn would cost continuity for the rest of the session.
+
+    Written to a private temporary and `os.replace`d into place, so a reader on
+    another prompt sees either the previous token whole or the new one whole,
+    never a prefix — and `rename(2)` does not follow a symlink at the
+    destination, so a planted link is replaced rather than written through. The
+    file is 0600 from the moment it exists rather than created at `0666 & ~umask`
+    and chmodded after, which leaves a window in which it is group-readable.
+    """
     if not token or len(token) > _ACTIVATION_TOKEN_MAX_CHARS:
         return
     path = activation_token_path(_hook_home(), _hook_client(), session_id)
+    temporary = path.with_name(f"{path.name}.tmp-{os.getpid()}-{os.urandom(4).hex()}")
+    flags = (
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        path.write_text(token, encoding="utf-8")
-        os.chmod(path, 0o600)
+        _mkdir_private(path.parent)
+        descriptor = os.open(temporary, flags, 0o600)
+        try:
+            os.write(descriptor, token.encode("utf-8"))
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
     except Exception:  # noqa: BLE001 - hook must never break prompt submission
-        pass
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
 
 
 def _packet_line(kind: str, text: str, ref: str) -> str:
-    """One rendered item. The ref is omitted rather than invented when absent."""
+    """One rendered item. The ref is omitted rather than invented when absent.
+
+    The ref is collapsed exactly like the prose is. It is the one field a reader
+    might take for structure rather than content, and it is content: a newline in
+    a ref would end this line early and start a second one the agent reads as
+    another retrieved item, carrying whatever the rest of the ref says. The block
+    is bounded by WHOLE lines, so a line count that the data can change is a
+    line count the ceiling cannot bound either.
+    """
     body = " ".join(str(text).split())
-    return f"- {kind}: {body} [{ref}]" if ref else f"- {kind}: {body}"
+    handle = " ".join(str(ref).split())
+    return f"- {kind}: {body} [{handle}]" if handle else f"- {kind}: {body}"
 
 
 def _packet_lines(packet: dict) -> list[str]:
