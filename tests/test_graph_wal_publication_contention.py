@@ -197,6 +197,11 @@ def test_an_in_place_republication_keeps_the_live_store_in_wal_mode(tmp_path: Pa
         "mode, which re-opens the DELETE->WAL conversion window for every later "
         "opener"
     )
+    # The immutable backup source is the one line that could transport wrong
+    # bytes, so read the published file back rather than trusting the report.
+    with sqlite3.connect(graph.path) as conn:
+        assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert conn.execute("SELECT count(*) FROM graph_nodes").fetchone()[0] == 4
 
 
 def _publish_again(vault: Path, graph: EpistemicGraphIndex, index: int) -> dict[str, int]:

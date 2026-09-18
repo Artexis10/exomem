@@ -509,7 +509,7 @@ def _seal_graph_rebuild_as_wal(vault_root: Path, temporary: Path) -> None:
         or str(journal_mode[0]).lower() != "wal"
     ):
         raise sqlite3.DatabaseError("proven graph rebuild could not be sealed in WAL mode")
-    stranded = _present_rebuild_companions(temporary, ("-wal", "-shm"))
+    stranded = _present_rebuild_companions(temporary, _GRAPH_REBUILD_COMPANIONS)
     if stranded:
         # Clear them on the way out.  Leaving one behind is not neutral: an
         # orphan companion ages into a `doctor` WARN on a healthy vault and
