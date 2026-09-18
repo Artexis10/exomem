@@ -1338,9 +1338,10 @@ def upsert_after_write_status(
                 log.warning("embedding drift purge failed for %s: %s", rel_path, e)
             failure_code = failure_code or "embedding_input_drifted"
             continue
+        stored_chunks, stored_units = _stored_text_vectors(index, rel_path)
         if chunks:
             try:
-                vectors = _embed_live_chunks(chunks)
+                vectors = _embed_live_chunks_reusing(chunks, stored_chunks)
                 if not still_current():
                     index.purge_paths_if_present([rel_path])
                     failure_code = failure_code or "embedding_input_drifted"
@@ -1378,7 +1379,9 @@ def upsert_after_write_status(
             state = semantic_index.current_parent_index_state(vault_root, md)
             units = [unit for unit in state.document.units if unit.unit_ref is not None]
             if units:
-                unit_vectors = _embed_live_chunks([unit.content for unit in units])
+                unit_vectors = _embed_live_chunks_reusing(
+                    [unit.content for unit in units], stored_units
+                )
                 if not still_current():
                     index.purge_paths_if_present([rel_path])
                     failure_code = failure_code or "embedding_input_drifted"
@@ -1432,6 +1435,44 @@ def _live_embed_max_chunks() -> int:
         return max(1, int(os.environ.get("EXOMEM_LIVE_EMBED_MAX_CHUNKS") or "256"))
     except ValueError:
         return 256
+
+
+def _stored_text_vectors(
+    index: Any, rel_path: str
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+    """The page's published vectors by text, or nothing when they cannot be read.
+
+    Reuse is an economy, never a dependency: a sidecar that cannot answer costs
+    this write a full encode, which is what it cost before."""
+    try:
+        chunks, units = index.stored_text_vectors(rel_path)
+    except Exception as e:  # noqa: BLE001 - fall back to encoding everything
+        log.debug("stored vectors unavailable for reuse (%s)", type(e).__name__)
+        return {}, {}
+    return chunks, units
+
+
+def _embed_live_chunks_reusing(
+    texts: list[str], stored: dict[str, np.ndarray]
+) -> np.ndarray:
+    """Vectors for `texts` in order, encoding only the texts `stored` lacks.
+
+    A vector is a function of its text, so an unchanged chunk keeps the vector
+    the sidecar already published for that exact text. Appending one observation
+    to a ninety-chunk note then encodes one chunk, not ninety. With nothing to
+    reuse this is `_embed_live_chunks` unchanged."""
+    missing = [text for text in dict.fromkeys(texts) if text not in stored]
+    with call_spans.span(
+        "index.embeddings.reuse",
+        {"texts": len(texts), "reused": sum(1 for text in texts if text in stored)},
+    ):
+        if len(missing) == len(texts):
+            return _embed_live_chunks(texts)
+        lookup = {text: stored[text] for text in texts if text in stored}
+        if missing:
+            fresh = np.asarray(_embed_live_chunks(missing), dtype=np.float32)
+            lookup.update(zip(missing, fresh, strict=True))
+        return np.stack([lookup[text] for text in texts]).astype(np.float32, copy=False)
 
 
 def _embed_live_chunks(chunks: list[str]) -> np.ndarray:
