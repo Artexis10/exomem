@@ -48,7 +48,10 @@ log = logging.getLogger(__name__)
 #: from an unresolved one, so it must rebuild rather than answer from silence.
 #: v3 keyed it on `(name, path)`: one row per name dropped every page but one
 #: whose stem normalised the same way, leaving the loser undecided.
-SCHEMA_VERSION = 3
+#: v4 added frontmatter `aliases` to the indexed spellings: `[[Dossier]]` is a
+#: working vault link, so a name map without it left an alias-spelled reference
+#: unresolvable and therefore undecidable.
+SCHEMA_VERSION = 4
 SIDECAR_NAME = ".working-set.sqlite"
 DISABLE_ENV = "EXOMEM_DISABLE_WORKING_SET"
 _TRUE = frozenset({"1", "true", "yes", "on"})
@@ -322,11 +325,18 @@ def _page_candidates(
             continue
         frontmatter = page.frontmatter if isinstance(page.frontmatter, dict) else {}
         title = str(frontmatter.get("title") or page.title or path.stem).strip()
+        # Every spelling this vault resolves for the page. Frontmatter `aliases`
+        # belong here for the same reason the title does: `[[Dossier]]` is a
+        # working link, so an alias IS identity, and a map without it leaves an
+        # alias-spelled reference unresolvable — which the egress guard reads as
+        # "names nothing" and serves. It is also the resolver's strongest evidence
+        # kind (`exact_alias`), so treating it as weaker here was incoherent.
         for spelling in (
             rel.removesuffix(".md"),
             rel.removesuffix(".md").removeprefix(f"{kb}/"),
             path.stem,
             title,
+            *_strings(frontmatter.get("aliases")),
         ):
             key = normalize(spelling)
             if not key:

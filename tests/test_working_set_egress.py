@@ -1110,3 +1110,131 @@ def test_the_fully_withheld_flip_keeps_its_markers(vault: Path) -> None:
     assert guarded["abstained"] is True
     assert guarded["abstention"] == {"reason": "withheld"}
     assert {"role": "anchors", "reason": "withheld"} in guarded["missing"]
+
+
+# --------------------------------------------------------------------------- #
+# Round five: a frontmatter alias is identity too
+# --------------------------------------------------------------------------- #
+
+ALIAS_ONE = "Dossier"
+ALIAS_TWO = "The Partner File"
+
+
+def _aliased_page(vault: Path, rel: str, title: str, aliases: list[str]) -> None:
+    path = vault / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rendered = ", ".join(aliases)
+    path.write_text(
+        f"---\ntype: pattern\ntitle: {title}\naliases: [{rendered}]\n"
+        f"status: active\nupdated: 2026-09-01\n---\n\n# {title}\n\nBody.\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("spelling", [ALIAS_ONE, ALIAS_TWO])
+def test_an_alias_spelled_link_to_a_withheld_page_drops_the_unit(
+    vault: Path, spelling: str
+) -> None:
+    """`[[Dossier]]` is a working Obsidian link, so it is identity, not decoration.
+
+    The page-name map indexed four spellings and read `aliases` two lines later for
+    the anchor row without ever adding them, so the stem and title spellings
+    dropped the unit while every alias was served. `exact_alias` is the resolver's
+    strongest evidence kind; the guard cannot treat it as weaker.
+    """
+    _aliased_page(
+        vault,
+        "Knowledge Base/Notes/Patterns/partner-dossier.md",
+        "Partner dossier",
+        [ALIAS_ONE, ALIAS_TWO],
+    )
+    write_scope(vault)  # Notes/Patterns/** -> withheld from this audience
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(
+            vault, _prose_only_packet(spelling), _prose_release()
+        )
+
+    assert guarded is not None
+    assert guarded["units"] == []
+
+
+@pytest.mark.parametrize("spelling", [ALIAS_ONE, ALIAS_TWO])
+def test_an_alias_spelled_link_to_a_permitted_page_keeps_the_unit(
+    vault: Path, spelling: str
+) -> None:
+    _aliased_page(
+        vault,
+        "Knowledge Base/Notes/Insights/partner-dossier.md",
+        "Partner dossier",
+        [ALIAS_ONE, ALIAS_TWO],
+    )
+    write_scope(vault)  # only Notes/Patterns/** is governed
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    packet = _prose_only_packet(spelling)
+    expected = list(packet["units"])
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _prose_release())
+
+    assert guarded is not None
+    assert guarded["units"] == expected
+
+
+def test_an_alias_shared_by_a_withheld_and_a_permitted_page_drops_the_unit(
+    vault: Path,
+) -> None:
+    """The collision ruling applies to aliases exactly as it does to titles."""
+    _aliased_page(
+        vault,
+        "Knowledge Base/Notes/Patterns/withheld-dossier.md",
+        "Withheld dossier",
+        [ALIAS_ONE],
+    )
+    _aliased_page(
+        vault,
+        "Knowledge Base/Notes/Insights/permitted-dossier.md",
+        "Permitted dossier",
+        [ALIAS_ONE],
+    )
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(
+            vault, _prose_only_packet(ALIAS_ONE), _prose_release()
+        )
+
+    assert guarded is not None
+    assert guarded["units"] == []
+    assert {"role": "units", "reason": "withheld"} in guarded["missing"]
+
+
+def test_an_alias_spelling_resolves_to_every_page_bearing_it(vault: Path) -> None:
+    from exomem import working_set_index
+
+    _aliased_page(
+        vault,
+        "Knowledge Base/Notes/Patterns/withheld-dossier.md",
+        "Withheld dossier",
+        [ALIAS_ONE],
+    )
+    _aliased_page(
+        vault,
+        "Knowledge Base/Notes/Insights/permitted-dossier.md",
+        "Permitted dossier",
+        [ALIAS_ONE],
+    )
+    _indexed(vault)
+
+    resolved = working_set_index.WorkingSetIndex(vault).resolve_names([ALIAS_ONE])
+
+    assert set(resolved.get(working_set_index.normalize(ALIAS_ONE)) or ()) == {
+        "Knowledge Base/Notes/Patterns/withheld-dossier.md",
+        "Knowledge Base/Notes/Insights/permitted-dossier.md",
+    }

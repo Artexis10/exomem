@@ -606,3 +606,40 @@ def test_a_cold_unmanaged_build_is_single_flight(
     for packet in results:
         reason = (packet.get("abstention") or {}).get("reason")
         assert reason != "unavailable", packet.get("abstention")
+
+
+def test_aliases_are_indexed_as_page_names(seeded: Path) -> None:
+    """A frontmatter alias is a spelling the vault resolves, so the map holds it.
+
+    Two consumers read this map: `_resolve_links` (typed edges) and the egress
+    guard (prose references). Indexing the alias serves both — an alias-spelled
+    wikilink now becomes an edge as well as a decidable reference.
+    """
+    index = working_set_index.WorkingSetIndex(seeded)
+    index.rebuild()
+
+    entity = "Knowledge Base/Entities/People/Marit Solheim.md"
+    for spelling in ("Marit", "M. Solheim", "Marit Solheim", "marit solheim"):
+        resolved = index.resolve_names([spelling])
+        assert resolved.get(working_set_index.normalize(spelling)) == (entity,), spelling
+
+
+def test_an_alias_spelled_wikilink_becomes_a_typed_edge(seeded: Path) -> None:
+    _write(
+        seeded / "Knowledge Base" / "Notes" / "Insights" / "alias-linker.md",
+        """---
+type: insight
+status: active
+updated: 2026-09-08
+---
+
+# Alias linker
+
+Spoke to [[Marit]] about the corridor.
+""",
+    )
+    index = working_set_index.WorkingSetIndex(seeded)
+    index.rebuild()
+
+    person = _by_title(index.anchors(), "Marit Solheim")
+    assert "Knowledge Base/Notes/Insights/alias-linker.md" in person.neighbourhood
