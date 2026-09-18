@@ -1049,6 +1049,14 @@ def _summarize_index_status(indexes: dict[str, object]) -> dict:
     }
 
 
+def index_cache_activity() -> tuple[tuple[str, int], ...]:
+    """A cheap fingerprint of matrix USE for the idle reaper: per shared index, its hit count."""
+    with _INDEX_CACHE_LOCK:
+        indexes = [("embedding:" + k, idx) for k, idx in _INDEX_CACHE.items()]
+        indexes += [("clip:" + k, idx) for k, idx in _CLIP_INDEX_CACHE.items()]
+    return tuple(sorted((key, int(idx.cache_status().get("hits") or 0)) for key, idx in indexes))
+
+
 def index_cache_status() -> dict:
     """No-allocation residency status for already-created embedding index objects."""
     with _INDEX_CACHE_LOCK:

@@ -59,6 +59,8 @@ class ClipIndex:
         self.path = index_paths.clip_sidecar_path(vault_root)
         self._cache: _ClipCache | None = None
         self._lock = threading.RLock()
+        #: Matrix served or loaded: the use signal the idle reaper watches.
+        self._hits = 0
         self._vec = vecstore.SqliteVecStore("images", "vector", CLIP_DIM, "vec_images")
         self._vec_ready: bool | None = None
         self._vec_quant_synced = False
@@ -459,6 +461,7 @@ class ClipIndex:
             else None
         )
         if served is not None:
+            self._hits += 1
             return served.paths, served.frame_ts, served.matrix
         with self._lock:
             c = self._cache
@@ -468,6 +471,7 @@ class ClipIndex:
                 else None
             )
             if served is not None:
+                self._hits += 1
                 return served.paths, served.frame_ts, served.matrix
             # Keep this call zero-argument: cache tests and production probes
             # deliberately wrap the named full-reload seam.
@@ -480,6 +484,7 @@ class ClipIndex:
                 loaded.epoch,
             )
             self._cache = loaded
+            self._hits += 1
             return loaded.paths, loaded.frame_ts, loaded.matrix
 
     def unload_cache(self) -> bool:
@@ -493,9 +498,10 @@ class ClipIndex:
         """Best-effort residency status for this in-memory matrix only."""
         c = self._cache
         if c is None:
-            return {"loaded": False, "rows": 0, "bytes": 0}
+            return {"loaded": False, "rows": 0, "bytes": 0, "hits": self._hits}
         return {
             "loaded": True,
+            "hits": self._hits,
             "rows": len(c.paths),
             "bytes": int(c.matrix.nbytes),
             "epoch": c.epoch,

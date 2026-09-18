@@ -6168,10 +6168,26 @@ def cache_status() -> dict:
         "pages": {
             "entries": len(page_entries),
             "body_chars": sum(len(p.body) for p in page_entries),
+            "hits": int(_CACHE.hits),
         },
         "resolvers": {"entries": resolver_entries},
         "hot_find": {"entries": hot_entries, "hits": hot_hits},
     }
+
+
+def cache_activity() -> tuple[int, int, int, int]:
+    """A cheap fingerprint of find-cache USE for the idle reaper: it changes when a
+    page is served from cache or parsed into it, and when the hot find cache is
+    consulted. Static across ticks means nobody asked."""
+    status = cache_status()
+    pages = status.get("pages") or {}
+    hot = status.get("hot_find") or {}
+    return (
+        int(pages.get("hits") or 0),
+        int(pages.get("entries") or 0),
+        int(hot.get("entries") or 0),
+        int(hot.get("hits") or 0),
+    )
 
 
 def clear_cache() -> None:

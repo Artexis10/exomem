@@ -251,6 +251,8 @@ class EmbeddingIndex:
         # Guards in-memory cache mutation only (never held across a sqlite write).
         # Reentrant so rebuild_all()-style nesting can't self-deadlock.
         self._lock = threading.RLock()
+        #: Matrix served or loaded: the use signal the idle reaper watches.
+        self._hits = 0
         # vec0 backend state (see vec_gate): sync memo + per-instance retirement.
         self._vec = vecstore.SqliteVecStore("chunks", "vector", VECTOR_DIM, "vec_chunks")
         self._vec_ready: bool | None = None
@@ -682,6 +684,7 @@ class EmbeddingIndex:
             else None
         )
         if served is not None:
+            self._hits += 1
             return served.metadata, served.matrix
         with self._lock:
             # Re-check under the lock: another thread may have loaded while we
@@ -693,6 +696,7 @@ class EmbeddingIndex:
                 else None
             )
             if served is not None:
+                self._hits += 1
                 return served.metadata, served.matrix
             # Bounded catch-up BEFORE the full reload: a cache a couple of
             # generations behind (the common case — another instance wrote, or a
@@ -723,6 +727,7 @@ class EmbeddingIndex:
                 c.generation if c is not None else -1,
             )
             self._cache = loaded
+            self._hits += 1
             return loaded.metadata, loaded.matrix
 
     def unload_cache(self) -> bool:
@@ -741,9 +746,10 @@ class EmbeddingIndex:
         """Best-effort residency status for this in-memory matrix only."""
         c = self._cache
         if c is None:
-            return {"loaded": False, "rows": 0, "bytes": 0}
+            return {"loaded": False, "rows": 0, "bytes": 0, "hits": self._hits}
         return {
             "loaded": True,
+            "hits": self._hits,
             "rows": len(c.metadata),
             "bytes": int(c.matrix.nbytes),
             "epoch": c.epoch,
