@@ -135,7 +135,19 @@ def test_a_matrix_served_by_catch_up_counts_as_used(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(recall_policy, "recall_policy_identity", lambda _root: identity)
     matrix = np.zeros((1, embedding_index.VECTOR_DIM), dtype=np.float32)
     first = embedding_index._EmbCache(1, 1, 1, 0.0, identity, [("a.md", 0)], matrix)
-    monkeypatch.setattr(idx, "_load_all_rows", lambda: first)
+    loads = 0
+
+    def _load_once():
+        # A second full load means the catch-up branch was declined and the
+        # serve fell through; that would count hits on the wrong branch, so
+        # it fails loudly here instead of passing by accident.
+        nonlocal loads
+        loads += 1
+        if loads > 1:
+            raise AssertionError("full reload taken; the catch-up branch was not exercised")
+        return first
+
+    monkeypatch.setattr(idx, "_load_all_rows", _load_once)
     idx.all_vectors()
     assert idx.cache_status()["hits"] == 1
     monkeypatch.setattr(sidecar_store, "try_serve_cached", lambda _c, _path: None)
