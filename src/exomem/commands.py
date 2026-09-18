@@ -1995,10 +1995,30 @@ def op_bootstrap(
         **compact_payload,
     }
     if session_unavailable is not None:
-        return compact_payload | {"session_profile_unavailable": session_unavailable}
-    if session_requested:
-        return _session_bootstrap_projection(compact_payload)
-    return compact_payload
+        result = compact_payload | {"session_profile_unavailable": session_unavailable}
+    elif session_requested:
+        result = _session_bootstrap_projection(compact_payload)
+    else:
+        result = compact_payload
+    # After every projection, so the session profile's key whitelist cannot
+    # drop it: the client on a reduced surface is exactly the one with no other
+    # way to hear that its own recalls have gone slow. Absent when healthy, so a
+    # healthy bootstrap keeps today's shape on every profile.
+    latency_block = _bootstrap_latency_block()
+    if latency_block is not None:
+        result["latency"] = latency_block
+    return result
+
+
+def _bootstrap_latency_block() -> list[dict] | None:
+    """The calling client's recall-latency breaches, from the in-process watch only."""
+    try:
+        from . import latency_watch
+        from .command_surface import mcp_caller_identity
+
+        return latency_watch.bootstrap_block(mcp_caller_identity().get("client_name"))
+    except Exception:  # noqa: BLE001 — a watch failure never breaks a bootstrap
+        return None
 
 
 _SESSION_POST_WRITE_KEYS = (

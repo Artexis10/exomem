@@ -2946,6 +2946,69 @@ def _check_edge_ingress_read_routing(base_url: str, config: LeaseConfig) -> Doct
     )
 
 
+def _check_latency() -> DoctorCheck:
+    """Recall latency per tool and calling client over the trailing window, read
+    from the call ledger on disk so it sees across restarts. Warns above the
+    provisional ceilings and names the stage spans that dominate the slow calls,
+    so the finding is a diagnosis rather than a number. Reads no note content,
+    query text or path. Never touches the network."""
+    from . import call_ledger, latency_watch
+
+    details: dict[str, object] = {
+        "window_seconds": int(latency_watch.WINDOW_SECONDS),
+        "ceilings_ms": {
+            "recall": int(latency_watch.RECALL_P90_CEILING_MS),
+            "deep_recall": int(latency_watch.DEEP_RECALL_P90_CEILING_MS),
+        },
+        "min_samples": latency_watch.MIN_SAMPLES,
+    }
+    try:
+        path = call_ledger.ledger_path()
+        archive = call_ledger.archive_dir()
+    except Exception:  # noqa: BLE001 - doctor must stay structured
+        return _check("latency", "pass", "Call ledger location unavailable; nothing to measure.", details=details)
+    details["ledger"] = str(path)
+    if not path.exists():
+        return _check("latency", "pass", "No call ledger yet; nothing to measure.", details=details)
+    now = time.time()
+    try:
+        samples = latency_watch.samples_from_ledger(path, archive_dir=archive, now=now)
+        rows = latency_watch.summarize(samples, now=now)
+    except Exception as exc:  # noqa: BLE001 - doctor must stay structured
+        details["error"] = type(exc).__name__
+        return _check("latency", "pass", "Call ledger could not be summarised.", details=details)
+    details["rows"] = rows
+    if not rows:
+        return _check("latency", "pass", "No recall calls in the window; nothing to measure yet.", details=details)
+    warnings: list[str] = []
+    for row in rows:
+        if not row["breach"]:
+            continue
+        label = f"{row['tool']}{' deep' if row['deep'] else ''} from {row['client']}"
+        dominant = ", ".join(
+            f"{span['name']} {span['ms']} ms over {span['calls']} call(s)"
+            for span in row["dominant_spans"][:3]
+        )
+        warnings.append(
+            f"{label}: p90 {row['p90_ms']} ms over the {row['ceiling_ms']} ms ceiling "
+            f"({row['samples']} calls); dominant spans: {dominant or 'none recorded'}"
+        )
+    thin = sum(1 for row in rows if row["samples"] < latency_watch.MIN_SAMPLES)
+    if warnings:
+        return _check(
+            "latency",
+            "warn",
+            "; ".join(warnings),
+            "Read the dominant spans first: they name the stage that regressed. "
+            "`exomem logs --file ledger` has the rows; docs/observability.md explains each span.",
+            details=details,
+        )
+    message = "Recall latency is under its ceilings."
+    if thin:
+        message += f" {thin} tool/client pair(s) have fewer than {latency_watch.MIN_SAMPLES} calls in the window."
+    return _check("latency", "pass", message, details=details)
+
+
 def _check_observability() -> DoctorCheck:
     """Log directory writability, active/rotated file sizes, JSONL
     tail-parseability, the NSSM `service.*` rotation pile, and
@@ -3236,6 +3299,7 @@ def doctor(
     # enabled, and the section self-skips when it is not (design.md Decision 3).
     checks.extend(_check_edge_ingress(probe=probe))
     checks.append(_check_observability())
+    checks.append(_check_latency())
     checks.append(_check_idempotency_store())
 
     return DoctorReport(profile=profile, checks=checks)

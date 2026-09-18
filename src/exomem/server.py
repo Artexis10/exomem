@@ -395,6 +395,21 @@ def _record_ledger_row(
         )
     except Exception:  # noqa: BLE001 - the ledger must never break a call
         pass
+    # After the row, never before it: the watch is a reader of the same facts,
+    # and a failure in it must leave the ledger exactly as it was.
+    try:
+        from . import latency_watch
+        from .command_surface import mcp_caller_identity
+
+        latency_watch.observe(
+            tool=tool,
+            client=mcp_caller_identity().get("client_name"),
+            deep=latency_watch.deep_flag(arguments),
+            total_ms=total_ms,
+            spans=spans,
+        )
+    except Exception:  # noqa: BLE001 - the watch must never break a call either
+        pass
 
 
 def _translated_edit_context(context: MiddlewareContext) -> MiddlewareContext:
