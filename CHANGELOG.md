@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.87.0](https://github.com/Artexis10/exomem/compare/v0.86.0...v0.87.0) (2026-09-18)
+
+
+### Features
+
+* **benchmarks:** context-activation utility benchmark (CCUB v0) ([#1283](https://github.com/Artexis10/exomem/issues/1283)) ([74fa5fa](https://github.com/Artexis10/exomem/commit/74fa5fa8d5d5f8ef1075803b1e86276adf73c82a))
+* **latency:** watch recall latency from the ledger and surface a breach ([#1293](https://github.com/Artexis10/exomem/issues/1293)) ([83e6d5b](https://github.com/Artexis10/exomem/commit/83e6d5b2e5dd9ea6a57a895f098bcc6ddee5a916))
+* **recall:** context activation — working-set compiler ([#1282](https://github.com/Artexis10/exomem/issues/1282)) ([4836ecd](https://github.com/Artexis10/exomem/commit/4836ecde5769a9f25cb13728b4eb8edbd0bb7502))
+
+
+### Bug Fixes
+
+* **hosted:** give the storage initializer a writable /tmp ([#1296](https://github.com/Artexis10/exomem/issues/1296)) ([3bc2f74](https://github.com/Artexis10/exomem/commit/3bc2f74c5a4a333242f4add71326a0875be86140))
+* **hosted:** select the provisioner with the init /tmp and runtime-wait fixes ([#1299](https://github.com/Artexis10/exomem/issues/1299)) ([0c30dda](https://github.com/Artexis10/exomem/commit/0c30dda90ddd9351be2aac31f923b2fefcb1b09a))
+* **hosted:** wait out a terminating runtime pod instead of refusing it ([#1297](https://github.com/Artexis10/exomem/issues/1297)) ([418e3eb](https://github.com/Artexis10/exomem/commit/418e3eb085fee683cebd990851b131181f2d35de))
+* **pack:** never re-segment a media transcript to learn its chunking ([#1291](https://github.com/Artexis10/exomem/issues/1291)) ([dc19f38](https://github.com/Artexis10/exomem/commit/dc19f3871bcad27634b9d6f3f96b3258522b210d))
+* **reaper:** idle means unused, not never observed empty ([#1290](https://github.com/Artexis10/exomem/issues/1290)) ([768a2a1](https://github.com/Artexis10/exomem/commit/768a2a1c4745a6faf9e9329cbdc42e88cca9f989))
+
+
+### Performance
+
+* **spans:** name the pack's phases, the encoder's caller, and a read's parts ([#1294](https://github.com/Artexis10/exomem/issues/1294)) ([cc2433d](https://github.com/Artexis10/exomem/commit/cc2433d284dbc54d8197d935803f097d8bc32f72))
+
 ## [0.86.0](https://github.com/Artexis10/exomem/compare/v0.85.5...v0.86.0) (2026-09-18)
 
 
