@@ -41,6 +41,8 @@ MIN_SAMPLES = 20
 WINDOW_SECONDS = 86400.0
 STARTUP_GRACE_SECONDS = 600.0
 REPORT_INTERVAL_SECONDS = 3600.0
+SWEEP_SECONDS = 600.0
+"""How long a key may go without a verdict when only fast calls arrive."""
 RING_SIZE = 2048
 DOMINANT_SPANS = 5
 WATCHED_TOOLS = frozenset({"ask_memory", "read_memory", "find"})
@@ -197,6 +199,7 @@ class Watch:
         self._lock = threading.Lock()
         self._reported: dict[tuple[str, str, bool], float] = {}
         self._seen: dict[tuple[str, str, bool], int] = {}
+        self._swept: dict[tuple[str, str, bool], float] = {}
         self.failures = 0
 
     @property
@@ -228,12 +231,23 @@ class Watch:
         with self._lock:
             self._ring.append(sample)
             seen = self._seen[key] = self._seen.get(key, 0) + 1
+            swept = self._swept.get(key)
+            if swept is None:
+                self._swept[key] = now  # one sample cannot breach; start the sweep clock
+                due = False
+            else:
+                due = now - swept >= SWEEP_SECONDS
+                if due:
+                    self._swept[key] = now
         # A call under its ceiling cannot raise the p90, so it cannot create a
-        # breach; the one exception is the call that completes the minimum
-        # sample count, which can make an existing breach reportable. Every
-        # other fast call skips the ring scan entirely, so a healthy service
-        # pays a dict update per call, not a summary.
-        if sample.total_ms > ceiling_for(sample.tool, sample.deep) or seen == MIN_SAMPLES:
+        # breach by itself; the call that completes the minimum sample count
+        # can make an existing breach reportable, and so can the window aging
+        # old fast calls out from under old slow ones. So a slow call always
+        # gets a verdict, the MIN_SAMPLES call gets one, and otherwise a key
+        # gets one at most every SWEEP_SECONDS: a healthy service pays a dict
+        # update per call and one ring scan per key per sweep, never a summary
+        # per call.
+        if sample.total_ms > ceiling_for(sample.tool, sample.deep) or seen == MIN_SAMPLES or due:
             self._maybe_report(sample, now)
 
     def _eligible(self, now: float) -> list[Sample]:

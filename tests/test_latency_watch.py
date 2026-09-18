@@ -124,29 +124,26 @@ def test_a_fast_call_never_pays_for_the_verdict(monkeypatch: pytest.MonkeyPatch)
     assert len(scans) == 2
 
 
-def test_a_breach_reports_once_under_concurrent_crossings(monkeypatch: pytest.MonkeyPatch) -> None:
-    import threading
-
+def test_an_aging_driven_breach_is_reported_within_one_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Old fast calls aging out from under old slow ones can turn a key into a
+    breach with no new slow call and no MIN_SAMPLES crossing. The bootstrap
+    block sees it at once (it recomputes); the log event sees it within one
+    sweep."""
     from exomem import log_events
 
     events: list[str] = []
-    monkeypatch.setattr(
-        log_events, "log_event",
-        lambda logger, level, event, **_k: events.append(event),
-    )
-    watch, _clock = _watch()
-    _fill(watch, n=19, total_ms=150)
-    barrier = threading.Barrier(8)
-
-    def cross():
-        barrier.wait()
-        watch.observe(tool="ask_memory", client="openai-mcp/1.0.0", deep=False, total_ms=9000)
-
-    threads = [threading.Thread(target=cross) for _ in range(8)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    monkeypatch.setattr(log_events, "log_event", lambda logger, level, event, **_k: events.append(event))
+    watch, clock = _watch()
+    _fill(watch, n=30, total_ms=100)
+    clock.now += 2000
+    _fill(watch, n=3, total_ms=9000)  # p90 of 33 samples is still 100: no breach
+    assert events == []
+    clock.now += latency_watch.WINDOW_SECONDS - 1995  # the 30 fast calls age out; the 3 slow stay
+    _fill(watch, n=17, total_ms=100)  # 20 in the window, 3 of them slow: a breach by aging
+    assert watch.breaches(client="openai-mcp/1.0.0")  # on-demand surfaces see it now
+    assert events == []  # the log channel has not swept yet
+    clock.now += latency_watch.SWEEP_SECONDS + 1
+    _fill(watch, n=1, total_ms=100)  # a fast call, but the sweep is due
     assert events == ["latency_ceiling_exceeded"]
 
 

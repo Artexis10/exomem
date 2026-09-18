@@ -87,10 +87,14 @@ than paid for with two clocks that can disagree.
 ### D7. A fast call never pays for the verdict
 
 A call under its ceiling cannot raise a p90, so `observe` computes the verdict
-only for a call over its ceiling, or for the call that completes the minimum
-sample count for its key (which can make an existing breach reportable). A
-healthy service pays one dictionary update per call; the ring scan is reserved
-for calls that could be part of a breach.
+for a call over its ceiling, for the call that completes the minimum sample
+count for its key (which can make an existing breach reportable), and
+otherwise for a key at most once per `SWEEP_SECONDS` (600), because the window
+aging old fast calls out from under old slow ones can turn a key into a breach
+with no new slow call at all. A healthy service pays one dictionary update per
+call and one ring scan per key per sweep; the log event therefore lags such an
+aging-driven breach by at most one sweep, while the bootstrap block and the
+doctor check, which recompute on demand, never lag.
 
 ## Alternatives considered
 
