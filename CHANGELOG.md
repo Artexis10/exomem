@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.87.1](https://github.com/Artexis10/exomem/compare/v0.87.0...v0.87.1) (2026-09-18)
+
+
+### Bug Fixes
+
+* **embeddings:** reuse a page's published vectors for text a write did not change ([#1303](https://github.com/Artexis10/exomem/issues/1303)) ([c0489c4](https://github.com/Artexis10/exomem/commit/c0489c466fe5a77017e0a5d21c04bf6027d4805b))
+* **graph:** publish the first graph store in WAL mode ([#1301](https://github.com/Artexis10/exomem/issues/1301)) ([04764d7](https://github.com/Artexis10/exomem/commit/04764d7ada98d905b46f74f4f1f8503021ad3b3f))
+
 ## [0.87.0](https://github.com/Artexis10/exomem/compare/v0.86.0...v0.87.0) (2026-09-18)
 
 
