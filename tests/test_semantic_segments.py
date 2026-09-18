@@ -303,3 +303,35 @@ def test_seam_timed_video_gets_segment_chunks(vault, monkeypatch) -> None:
     assert len(seg_chunks) == 2
     assert all(c.startswith("Evidence: demo.mp4\n\n") for c in chunks)
     assert "[1:20]" in seg_chunks[1] and "beta" in seg_chunks[1]
+
+
+def test_seam_declines_a_timed_video_rather_than_encode_when_asked(vault, monkeypatch) -> None:
+    """`allow_encode=False` is the read path's contract with the seam.
+
+    The segmenter ENCODES (TextTiling windows over every timed line), so a caller
+    that must not pay an encode gets None for a timed transcript, and the plain
+    chunking for everything else -- never a silent fallback to a different
+    chunking that would no longer match the rows the embedding pass published.
+    """
+    monkeypatch.setenv("EXOMEM_SEMANTIC_SEGMENTS", "1")
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("the seam encoded")
+
+    monkeypatch.setattr(embeddings, "embed_texts", refuse)
+    transcript = _timed_block(["alpha"] * 8 + ["beta"] * 8)
+    timed = _page("A video", f"## Extracted text\n\n{transcript}\n", media_type="video")
+    assert embeddings._chunks_for_page(vault, timed, allow_encode=False) is None
+
+    note = _page("A note", "First paragraph.\n\nSecond paragraph.")
+    assert embeddings._chunks_for_page(vault, note, allow_encode=False) == embeddings.chunk_text(
+        note.title, note.body
+    )
+    flat = _page("A video", "## Extracted text\n\njust flat prose", media_type="video")
+    assert embeddings._chunks_for_page(vault, flat, allow_encode=False) == embeddings.chunk_text(
+        flat.title, flat.body
+    )
+    monkeypatch.delenv("EXOMEM_SEMANTIC_SEGMENTS", raising=False)
+    assert embeddings._chunks_for_page(vault, timed, allow_encode=False) == embeddings.chunk_text(
+        timed.title, timed.body
+    )

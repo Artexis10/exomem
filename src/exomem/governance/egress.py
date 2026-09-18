@@ -2125,6 +2125,407 @@ def guard_referents(
     return guarded
 
 
+def guard_working_set(
+    vault_root: Path,
+    packet: dict[str, Any],
+    release: AnnotatedHits,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> dict[str, Any] | None:
+    """Apply release decisions to a working-memory packet (design D7).
+
+    Sits beside `guard_referents` and takes the SAME release object hit
+    projection gets, because the packet is assembled from the same pages and
+    walks further: a typed neighbourhood, a Records collection's newest item, a
+    supersession pointer. Each of those is a way for a permitted page to
+    enumerate a withheld one, which is the disclosure the release ceiling exists
+    to prevent.
+
+    Three states, the same three every other consumer has: `empty` policy and no
+    tombstones -> untouched; `blocked` or an unresolved-but-expected principal ->
+    no packet at all; otherwise every named path is decided and every field that
+    names a withheld one is dropped.
+
+    `neighbourhood` is removed from every anchor unconditionally. It is private
+    resolution state that exists so the compiler can bound its lanes and detect
+    ambiguity; publishing it would hand an audience a page list it never asked
+    for, and filtering it entry-by-entry would still disclose its SIZE.
+    """
+    if release.blocked:
+        return None
+    vault_root = Path(vault_root)
+    guarded = copy.deepcopy(packet)
+    policy, release_gate_active = gate_state(vault_root)
+    who = principal if principal is not None else effective_principal()
+    if policy.blocked or (not policy.empty and not who.resolved):
+        _record_blocked_outcome(who.audience_id)
+        return None
+
+    named_paths, prose_names = _working_set_paths(guarded)
+    tombstoned = {
+        path for path in named_paths if path and lifecycle.is_tombstoned(vault_root, path)
+    }
+    withheld = set(release.withheld_paths) | tombstoned
+    if not release_gate_active and policy.empty and not withheld:
+        # Nothing to decide, so nothing to resolve. A vault that has opted into no
+        # governance must not depend on a DERIVED index for its reads: resolving
+        # above this line made a sidecar hiccup abstain a request that had no
+        # release decision to take. Governed vaults fall through and keep failing
+        # closed.
+        return guarded
+
+    # Prose resolution happens only now, when the decision loop below (or the
+    # already-withheld set) will actually use it.
+    prose_resolved = _resolved_prose_names(vault_root, prose_names)
+    resolved_paths = {path for paths in prose_resolved.values() for path in paths}
+    named_paths |= resolved_paths
+    withheld |= {
+        path
+        for path in resolved_paths
+        if path and lifecycle.is_tombstoned(vault_root, path)
+    }
+
+    decisions: dict[str, Decision | None] = {}
+    if not policy.empty:
+        grants_hash = _grants_hash(policy)
+        declared_purpose = _declared_purpose(vault_root, who, purpose)
+        for rel_path in sorted(path for path in named_paths if path):
+            decision = _decide_path(
+                vault_root,
+                rel_path,
+                policy=policy,
+                audience=who.audience_id,
+                purpose=declared_purpose,
+                grants_hash=grants_hash,
+                authorization_session=who.authorization_session_id,
+                authorization_context=who.verified_authorization_session,
+            )
+            decisions[rel_path] = decision
+            if decision is None or decision.level < RELEASE_FLOOR:
+                withheld.add(rel_path)
+            _outcome_for_decision(
+                vault_root,
+                rel_path,
+                decision=decision,
+                policy=policy,
+                audience=who.audience_id,
+                outcome="withheld" if rel_path in withheld else "released",
+                purpose=declared_purpose,
+            )
+
+    # The match set is wider than the withheld PATH set on purpose. `_withheld_keys`
+    # derives its comparison keys from filenames, so a prose link spelled as the
+    # page's TITLE — `[[Kill switch for risky releases]]` — canonicalises to
+    # something that is no filename stem and matched nothing, even though the path
+    # it resolves to was decided and withheld. Every name that resolved to a
+    # withheld path is therefore added as its own match key, in BOTH the spelling
+    # the prose contained and its normalised form: the matcher casefolds without
+    # normalising, so a normalised key alone misses an NBSP or full-width spelling.
+    #
+    # Deliberately local to this guard. The same gap exists in the shared
+    # `_withheld_keys` that `guard_referents` and hit projection use, and fixing it
+    # there changes what every consumer strips; that root cause gets its own change.
+    frozen = frozenset(
+        withheld
+        | {
+            name
+            for name, paths in prose_resolved.items()
+            if any(path in withheld for path in paths)
+        }
+    )
+    #: Sections whose removals are reported. `ambiguity` and `missing` are
+    #: excluded: the first is a diagnostic about resolution rather than material,
+    #: and the second is where the markers themselves live.
+    removed: dict[str, int] = {}
+
+    def _note_removal(section: str, before: int, after: int) -> None:
+        if after < before:
+            removed[section] = before - after
+
+    original_anchors = [
+        item for item in guarded.get("anchors") or () if isinstance(item, Mapping)
+    ]
+    guarded["anchors"] = [
+        anchor
+        for anchor in (
+            _guarded_anchor(item, frozen, decisions) for item in original_anchors
+        )
+        if anchor is not None
+    ]
+    _note_removal("anchors", len(original_anchors), len(guarded["anchors"]))
+
+    original_units = [
+        item for item in guarded.get("units") or () if isinstance(item, Mapping)
+    ]
+    guarded["units"] = [
+        unit
+        for unit in (_guarded_unit(item, frozen, decisions) for item in original_units)
+        if unit is not None
+    ]
+    _note_removal("units", len(original_units), len(guarded["units"]))
+
+    for section in ("pointers", "ambiguity", "current_state", "missing"):
+        values = guarded.get(section)
+        if isinstance(values, list):
+            kept = [
+                dict(item)
+                for item in values
+                if not _names_withheld(item, frozen, reference_field=True)
+            ]
+            if section in ("pointers", "current_state"):
+                _note_removal(section, len(values), len(kept))
+            guarded[section] = kept
+
+    # Appended AFTER the `missing` filter runs, never before: `missing[]` entries
+    # are compared as reference fields, so a bare word matches a withheld page's
+    # filename stem, and a vault holding `anchors.md` would otherwise delete the
+    # very marker explaining why its anchors vanished.
+    #
+    # Fail-closed is right here — a title a withheld page also bears cannot be told
+    # apart at this layer — but a silent removal reads exactly like a vault with
+    # nothing to say, which is what `lane_truncated` and `budget` already refuse to
+    # do. The marker names no path and no name: it says a section lost something,
+    # which is what the caller needs to know and the most it may be told.
+    if removed and isinstance(guarded.get("missing"), list):
+        guarded["missing"].extend(
+            {"role": section, "reason": "withheld"} for section in sorted(removed)
+        )
+    # A packet whose every anchor was withheld is not a resolved packet with a
+    # short answer — it is an abstention. Serving it with `abstained: false` and
+    # empty blocks would state that the turn resolved and the vault had nothing,
+    # which is a different and false claim. Everything downstream of an anchor
+    # goes with it, since a unit's only warrant was the anchor it hung from.
+    if packet.get("anchors") and not guarded["anchors"] and not guarded.get("abstained"):
+        guarded["abstained"] = True
+        guarded["abstention"] = {"reason": "withheld"}
+        for section in ("units", "pointers", "current_state", "roles"):
+            guarded[section] = []
+        # `missing` is deliberately NOT cleared: its markers are the only thing
+        # left saying the packet is empty because the guard emptied it, rather
+        # than because the compiler found nothing.
+        budget = guarded.get("budget")
+        if isinstance(budget, Mapping):
+            guarded["budget"] = {**dict(budget), "used_chars": 0}
+    return guarded
+
+
+#: Packet fields whose values are, or contain, vault paths.
+_WORKING_SET_PATH_FIELDS = ("ref", "path", "anchor")
+#: Packet fields carrying authored PROSE that may name a page in wikilink syntax.
+#: Harvested so a page mentioned only inside a sentence still gets a release
+#: decision: `release.withheld_paths` carries what hit projection happened to
+#: touch, and a unit's text can name a page recall never surfaced.
+_WORKING_SET_PROSE_FIELDS = ("text", "statement", "why", "title")
+
+
+def _working_set_paths(packet: Mapping[str, Any]) -> tuple[set[str], set[str]]:
+    """`(vault paths, wikilink names)` the packet names.
+
+    Kept apart because they are not the same kind of thing. A path field holds a
+    vault-relative path the release plane can decide directly; a wikilink inside
+    authored prose holds a NAME, and a name is not a path. Handing a bare stem to
+    `_decide_path` returns no decision, which reads as "withheld" and withheld
+    every unit that linked anything — permitted and dangling links alike. The
+    caller resolves names to paths first, and only real paths are ever decided.
+    """
+    paths: set[str] = set()
+    names: set[str] = set()
+
+    def _add(candidate: str) -> None:
+        if candidate.endswith(".md"):
+            paths.add(candidate)
+        elif "#" in candidate and candidate.split("#", 1)[0].endswith(".md"):
+            paths.add(candidate.split("#", 1)[0])
+
+    def _collect(value: Any) -> None:
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                if key in _WORKING_SET_PATH_FIELDS and isinstance(item, str):
+                    _add(item)
+                elif key in _WORKING_SET_PROSE_FIELDS and isinstance(item, str):
+                    for raw_target in _WIKILINK_ANYWHERE.findall(item):
+                        # `_unwrap_reference` is the SAME helper the matcher uses,
+                        # deliberately: a display alias (`[[x|label]]`) and a
+                        # heading anchor (`[[x#Section]]`) are presentation, not
+                        # identity, and two independent unwrappings would drift.
+                        # Handing the raw capture to the resolver made `x|label`
+                        # resolve to nothing, so a prose-only reference was never
+                        # decided.
+                        target, _explicit = _unwrap_reference(str(raw_target))
+                        if not target:
+                            continue
+                        if target.endswith(".md"):
+                            _add(target)
+                        else:
+                            names.add(target)
+                else:
+                    _collect(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                _collect(item)
+        elif isinstance(value, str) and value.endswith(".md"):
+            paths.add(value)
+
+    for section in ("anchors", "units", "pointers", "current_state", "ambiguity", "missing"):
+        _collect(packet.get(section))
+    return paths, names
+
+
+class WorkingSetResolutionUnavailable(RuntimeError):
+    """The prose-name resolver could not answer.
+
+    Deliberately NOT an empty result. "This name matches no page" and "I could
+    not look up this name" are different facts, and a guard that returns the
+    first when it means the second removes its own filter at the moment that is
+    least safe. The caller abstains on this; it never serves.
+    """
+
+
+def _resolved_prose_names(vault_root: Path, names: set[str]) -> dict[str, tuple[str, ...]]:
+    """Resolve wikilink names to every vault path bearing them, via the index.
+
+    The index already performs exactly this resolution at build time to turn a
+    page's wikilinks into typed edges (`working_set_index._resolve_links`), over a
+    name map covering every walked knowledge-base page — the vault's page set, not
+    only its anchors. Persisting that map means the guard answers a stem with one
+    indexed lookup: no corpus walk, no per-stem filesystem work, and no dependency
+    on a warm semantic snapshot it could not guarantee.
+
+    Returns the mapping, not a flattened path set, because the NAMES matter after
+    the decision: a page withheld by its path is matched in prose through
+    `_withheld_keys`, which derives comparison keys from filenames only — so
+    `[[Kill switch for risky releases]]` found no match and was served. The names
+    that resolved to a withheld path are added as extra match keys for this
+    guard's own comparisons.
+
+    Every resolved path is keyed under BOTH the spelling the prose contained and
+    its normalised form. The resolver normalises NFKC + casefold; the matcher
+    casefolds only. Keying on the normalised form alone therefore missed a title
+    carrying a non-breaking space or a full-width letter — resolved, decided,
+    withheld, and still matched nothing. The match has to be available on the text
+    that is actually written, not only on a canonical form of it.
+
+    An unknown name is absent from the result and decides nothing. A resolver that
+    cannot run raises: the packet reaching this guard was COMPILED from that index,
+    so an index that is now unavailable is a contradiction about the release plane,
+    not a vault with nothing in it.
+    """
+    if not names:
+        return {}
+    from .. import working_set_index
+
+    index = working_set_index.WorkingSetIndex(vault_root)
+    if not index.available():
+        raise WorkingSetResolutionUnavailable(
+            "the activation index is unavailable while guarding a packet built from it"
+        )
+    try:
+        resolved = index.resolve_names(names)
+    except working_set_index.WorkingSetIndexUnavailable as error:
+        raise WorkingSetResolutionUnavailable(str(error)) from error
+    except sqlite3.Error as error:
+        raise WorkingSetResolutionUnavailable(
+            "the activation index could not resolve prose references"
+        ) from error
+    out: dict[str, tuple[str, ...]] = {}
+    for raw in names:
+        key = working_set_index.normalize(raw)
+        paths = resolved.get(key)
+        if not paths:
+            continue
+        out[raw] = paths
+        out[key] = paths
+    return out
+
+
+def _guarded_anchor(
+    anchor: Mapping[str, Any],
+    withheld: frozenset[str],
+    decisions: Mapping[str, Decision | None],
+) -> dict[str, Any] | None:
+    if (
+        _names_withheld(anchor.get("path"), withheld)
+        or _names_withheld(anchor.get("ref"), withheld, reference_field=True)
+        # `title` is authored prose: a hub called "Open hub (supersedes
+        # [[kill-switch-for-risky-releases]])" names the withheld page as plainly
+        # as a path field would.
+        or _names_withheld(anchor.get("title"), withheld, reference_field=True)
+    ):
+        return None
+    out = dict(anchor)
+    # Private resolution state: never published, at any release level.
+    neighbourhood = out.pop("neighbourhood", None)
+    if neighbourhood is not None and _names_withheld(
+        neighbourhood, withheld, reference_field=True
+    ):
+        # Corroboration that leaned on a withheld neighbour is not evidence this
+        # audience may be shown to have.
+        out["evidence"] = [
+            kind for kind in out.get("evidence") or () if kind != "graph_corroboration"
+        ]
+    decision = decisions.get(str(out.get("path") or ""))
+    if decision is not None and decision.release_strip:
+        protected = {key: out[key] for key in ("ref", "path", "title", "kind") if key in out}
+        detail = {key: value for key, value in out.items() if key not in protected}
+        stripped = bridges.strip_provenance(detail, decision.release_strip)
+        out = dict(protected)
+        if isinstance(stripped, Mapping):
+            out.update(stripped)
+    return out
+
+
+def _guarded_unit(
+    unit: Mapping[str, Any],
+    withheld: frozenset[str],
+    decisions: Mapping[str, Decision | None],
+) -> dict[str, Any] | None:
+    provenance = unit.get("provenance")
+    path = str(provenance.get("path") or "") if isinstance(provenance, Mapping) else ""
+    anchor = str(provenance.get("anchor") or "") if isinstance(provenance, Mapping) else ""
+    if _names_withheld(unit.get("ref"), withheld, reference_field=True):
+        return None
+    if path and _names_withheld(path, withheld):
+        return None
+    # The unit's own PROSE. A wikilink inside authored text is an unambiguous
+    # reference wherever it appears, so a permitted unit that quotes a withheld
+    # page's link names it just as plainly as a provenance field would — and
+    # truncating the sentence around it would leave a claim nobody can audit.
+    #
+    # `reference_field=True` because a wikilink TARGET is a bare stem by
+    # construction (`[[kill-switch-for-risky-releases]]`), and the stem
+    # comparison is what recognises it. On a prose string the bare-word branch
+    # can only fire when the whole text IS the stem, which is itself a reference.
+    #
+    # The asymmetry below is deliberate. A withheld target in
+    # `provenance.superseded_by` STRIPS that field and keeps the unit, because a
+    # provenance field is a list of references and removing one entry leaves the
+    # rest meaning what it meant. The same target in `text` drops the WHOLE unit,
+    # because prose cannot be edited surgically: cutting the link out of a
+    # sentence leaves a claim whose warrant nobody can check, and rewriting the
+    # sentence would be the server authoring text.
+    if _names_withheld(unit.get("text"), withheld, reference_field=True):
+        return None
+    # A unit whose ANCHOR is withheld is dropped rather than kept with the anchor
+    # filtered out of its provenance: an unattributable claim in working memory is
+    # worse than a missing one, and the audience cannot see the anchor anyway.
+    if anchor and _names_withheld(anchor, withheld, reference_field=True):
+        return None
+    out = dict(unit)
+    if isinstance(provenance, Mapping):
+        out["provenance"] = {
+            key: value
+            for key, value in provenance.items()
+            if not _names_withheld(value, withheld, reference_field=True)
+        }
+    decision = decisions.get(path)
+    if decision is not None and decision.release_strip:
+        stripped = bridges.strip_provenance(out.get("provenance") or {}, decision.release_strip)
+        if isinstance(stripped, Mapping):
+            out["provenance"] = dict(stripped)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Direct reads (get / read_memory) — D3 applied to a whole page
 # ---------------------------------------------------------------------------
@@ -2977,6 +3378,11 @@ _COMMAND_PROJECTOR_KIND: dict[str, str] = {
     # inspection/query/mutation projectors before it returns.
     "record_memory": "structure",
     "plan_memory": "structure",
+    # The context packet has its own guard (`guard_working_set`, design D7) and
+    # the dispatcher cross-check behind it. It is declared `structure` because
+    # what it emits is refs and short provenance-bearing excerpts naming vault
+    # items, which is exactly what the structure backstop filters.
+    "activate_context": "structure",
 }
 
 # Receipt adapters follow the same default-deny registry as serializers.  A
@@ -3005,6 +3411,7 @@ _COMMAND_OUTCOME_ADAPTER: dict[str, str] = {
     "record_memory": "structure",
     "plan_memory": "structure",
     "schema_memory": "structure",
+    "activate_context": "structure",
 }
 
 # Every content selector declares both evidence collection and tombstone

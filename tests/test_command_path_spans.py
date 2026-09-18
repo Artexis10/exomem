@@ -100,3 +100,51 @@ def test_off_the_mcp_path_the_barrier_span_is_a_no_op() -> None:
     assert call_spans.MCP_CALL_TOKEN.get() is None
     with lexstore._timed_barrier(contextlib.nullcontext(), 0.05):
         pass
+
+
+# --- the deep pack, the encoder and a direct read name their phases ---------------
+
+
+def test_a_deep_pack_names_its_phases(vault: Path, token: str) -> None:
+    """A slow pack has to say which phase paid: the 2026-09-18 media
+    re-segmentation hid inside one opaque `recall.pack` for days."""
+    out = commands.op_find(vault, query="metabolism", pack=True)
+    assert out["pack"]["packed_paths"]
+    names = _names(token)
+    assert "recall.pack" in names
+    for phase in ("parents", "units", "neighborhood", "tension"):
+        assert f"recall.pack.{phase}" in names, phase
+    assert names["recall.pack.parents"]["ms"] <= names["recall.pack"]["ms"]
+
+
+def test_an_encode_names_the_module_that_asked(token: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    import numpy as np
+
+    from exomem import embeddings
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(
+        embeddings, "_embed_texts",
+        lambda texts, is_query=False: np.zeros((len(texts), embeddings.VECTOR_DIM), dtype=np.float32),
+    )
+    # A caller whose frame belongs to an Exomem module, without importing one
+    # that would need a model: the attribution reads the frame's module name.
+    namespace = {"__name__": "exomem.context_pack", "embeddings": embeddings}
+    exec("def ask():\n    return embeddings.embed_texts(['one', 'two'])\n", namespace)
+    namespace["ask"]()
+    names = _names(token)
+    assert names["embeddings.encode"]["fields"] == {"texts": 2, "chars": 6}
+    assert "encode.by.context_pack" in names
+    assert embeddings._encode_caller.__doc__  # the attribution is documented at the seam
+
+
+def test_a_direct_read_names_its_phases(vault: Path, token: str) -> None:
+    found = commands.op_find(vault, query="metabolism")
+    hit = (found["hits"] if isinstance(found, dict) else found)[0]
+    _names(token)  # discard the find's spans
+    out = commands.op_read_memory(vault, path=hit["path"], links=True, include_history=True)
+    assert "links" in out and "history" in out
+    names = _names(token)
+    assert "read.page" in names
+    assert set(names["read.links"]["fields"]) == {"inbound", "outbound"}
+    assert "entries" in names["read.history"]["fields"]

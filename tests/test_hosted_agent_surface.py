@@ -139,6 +139,7 @@ def test_hosted_v4_membership_equals_the_product_surface_minus_exclusions() -> N
 
 def test_hosted_exclusions_state_a_reason_and_a_lifting_condition() -> None:
     assert set(commands.HOSTED_SURFACE_EXCLUSIONS) == {
+        "activate_context",
         "configure_memory",
         "transfer_artifact",
         "adopt_vault",

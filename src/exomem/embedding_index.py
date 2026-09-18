@@ -251,6 +251,8 @@ class EmbeddingIndex:
         # Guards in-memory cache mutation only (never held across a sqlite write).
         # Reentrant so rebuild_all()-style nesting can't self-deadlock.
         self._lock = threading.RLock()
+        #: Matrix served or loaded: the use signal the idle reaper watches.
+        self._hits = 0
         # vec0 backend state (see vec_gate): sync memo + per-instance retirement.
         self._vec = vecstore.SqliteVecStore("chunks", "vector", VECTOR_DIM, "vec_chunks")
         self._vec_ready: bool | None = None
@@ -682,6 +684,7 @@ class EmbeddingIndex:
             else None
         )
         if served is not None:
+            self._hits += 1
             return served.metadata, served.matrix
         with self._lock:
             # Re-check under the lock: another thread may have loaded while we
@@ -693,6 +696,7 @@ class EmbeddingIndex:
                 else None
             )
             if served is not None:
+                self._hits += 1
                 return served.metadata, served.matrix
             # Bounded catch-up BEFORE the full reload: a cache a couple of
             # generations behind (the common case — another instance wrote, or a
@@ -709,6 +713,7 @@ class EmbeddingIndex:
                     patched = None
                 if patched is not None:
                     self._cache = patched
+                    self._hits += 1
                     return patched.metadata, patched.matrix
             # Keep this call zero-argument: cache tests and production probes
             # deliberately wrap the named full-reload seam.
@@ -723,6 +728,7 @@ class EmbeddingIndex:
                 c.generation if c is not None else -1,
             )
             self._cache = loaded
+            self._hits += 1
             return loaded.metadata, loaded.matrix
 
     def unload_cache(self) -> bool:
@@ -741,9 +747,10 @@ class EmbeddingIndex:
         """Best-effort residency status for this in-memory matrix only."""
         c = self._cache
         if c is None:
-            return {"loaded": False, "rows": 0, "bytes": 0}
+            return {"loaded": False, "rows": 0, "bytes": 0, "hits": self._hits}
         return {
             "loaded": True,
+            "hits": self._hits,
             "rows": len(c.metadata),
             "bytes": int(c.matrix.nbytes),
             "epoch": c.epoch,
@@ -1172,6 +1179,36 @@ class EmbeddingIndex:
         finally:
             conn.close()
         return out
+
+    def stored_chunks_for(self, rel_path: str) -> tuple[list[str], float | None]:
+        """One page's published chunk texts in index order, and the file mtime
+        the embedding pass stamped on them.
+
+        `([], None)` when the sidecar or the page's rows are absent, or the rows
+        are not a contiguous `0..n-1` run (a partially replaced generation is not
+        a chunking anyone cut). A reader that must not re-derive a page's
+        chunking -- the context pack, for a media transcript whose chunking is
+        an encode -- compares the mtime with the file it holds and takes these
+        texts as the page's chunking when they match. One primary-key range
+        read; never creates the sidecar.
+        """
+        if not self.path.exists():
+            return [], None
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT chunk_idx, chunk_text, file_mtime FROM chunks "
+                "WHERE file_path = ? ORDER BY chunk_idx",
+                (rel_path,),
+            ).fetchall()
+        finally:
+            conn.close()
+        if not rows or [int(idx) for idx, _text, _mtime in rows] != list(range(len(rows))):
+            return [], None
+        mtimes = [float(mtime) for _idx, _text, mtime in rows if mtime is not None]
+        if len(mtimes) != len(rows):
+            return [], None
+        return [str(text) for _idx, text, _mtime in rows], max(mtimes)
 
     def _vec_search(
         self, query_vec: np.ndarray, k: int
