@@ -40,8 +40,10 @@
 ## 4. Hosted carrier line
 
 - [x] 4.1 Red: bootstrap guidance contains the line at balanced/maximal, absent at
-      light/off; the line costs at most 220 bytes and compact keeps its 512-byte
-      warning margin (measured 2026-09-18: 62,564 of 63,300 bytes before the line);
+      light/off; the line costs at most 220 bytes; compact stays under its ceiling at
+      every level and surface and keeps its 512-byte warning margin at the default
+      (balanced) level (measured 2026-09-18 with the line: balanced 557 bytes of
+      headroom, maximal 192, maximal having been inside the margin before the line);
       scaffold recall loop byte-identical to the served projection.
 - [x] 4.2 Implement in `commands.py` bootstrap guidance and the scaffold; run
       `refresh-skill-contract` and `package-skills`.
