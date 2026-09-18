@@ -40,8 +40,14 @@ meaningless.
 
 1. **Naive-path latency baseline.** Measure the deterministic baseline's own
    `ask_memory` latency on a quiesced cell before pinning any latency
-   threshold. This is what turns the placeholder p50 800 ms / p95 2500 ms
-   in the spec into a measured constant.
+   threshold. This is the measured constant behind the spec's two
+   pre-registered latency bounds: the compiler's own `working_set.*` stages
+   at p50 at most 800 ms and p95 at most 2,500 ms on the reference corpus,
+   and end-to-end `activate_context` no slower than the measured naive-path
+   baseline on the same cell (p50 10,745 ms / p95 16,488 ms over 18 nonce
+   queries on the personal cell on 2026-09-16, recorded in the fixture
+   manifest) -- the end-to-end bound to be tightened once
+   `accelerate-governed-recall` lands.
 2. **A5 ceilings.** Oracle-packet dry runs (or, once authorized, replays)
    per case. "A case for which A5 does not beat A1 SHALL be struck from
    the report and never scored against the compiler" — striking unwinnable
@@ -58,8 +64,8 @@ meaningless.
 
 ## Quiesced-cell and nonce rules
 
-Two Exomem services may be live on this host (a personal cell and a
-secondary POLLY cell). Before any measurement against either:
+Two Exomem services may be live on this host (a personal cell and the second
+client cell). Before any measurement against either:
 
 - **Check the cell is quiet first.** Read instantaneous CPU from
   `/proc/<pid>/stat` deltas (two samples a second or more apart), never

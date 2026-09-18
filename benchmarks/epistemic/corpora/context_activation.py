@@ -16,16 +16,30 @@ packet's anchor refs against gold/poison for either corpus.
 Every twin is a negative control: none carries legitimate gold for its own
 paired case's content. A minority (T3, T4, T5, T7, T8) carry a *narrow*
 legitimate gold of their own -- a different, unremarkable thing that should
-resolve or stay ambiguous normally -- so the fixture asserts the absence of
+resolve, or stay ambiguous, normally -- so the fixture asserts the absence of
 one specific spurious signal (cross-case leakage, false ambiguity, a
 fabricated unavailability label, a false supersession mark) rather than mere
-silence. Deviation, flagged for the pre-registration owner: the spec's literal
-scenario text ("any twin turn yields an anchor with status resolved -> the
-case fails") is read here as "any anchor *outside a twin's own gold* resolves"
--- the strictly literal reading would make T3/T7/T8's own explicit design
-narrative in ``design.md`` ("a scoped variant that resolves", "unchained
-active note", "the other workstream's own item") unsatisfiable by
-construction. See ``membench.utility.context_activation.score_case``.
+silence. T4's narrow gold is the two same-kind person candidates it is
+genuinely ambiguous between (a shared first name): the case is winnable
+because the twin rule scores `resolved` anchors *outside* that gold, and a
+correct packet's own two candidates are never outside it. T3 ("the other
+workstream's own item"), T7 ("a scoped variant that resolves") and T8 ("an
+unchained active note") follow the same shape. Deviation, flagged for the
+pre-registration owner: the spec's literal scenario text ("any twin turn
+yields an anchor with status resolved -> the case fails") is read here as
+"any ref *outside a twin's own gold* is mentioned anywhere in the packet" --
+the strictly literal, resolved-anchor-only reading both misses false
+activation injected through units/pointers alone and would make T3/T4/T7/T8's
+own explicit design narrative unsatisfiable by construction. See
+``membench.utility.context_activation.score_case``.
+
+T9 is the one exception to "different query, same corpus": per the
+reviewer's ruling (N1), a single corpus tree cannot make C9's padding claim
+falsifiable, because C9 and a differently-worded T9 would be indistinguishable
+from "two different queries got two different results" -- nothing there
+shows *padding* did anything. T9 carries C2's own turn and gold, scored
+against the *unpadded* (``distractor_count=0``) tree, so C9 (same turn,
+padded tree) has an honest same-query baseline to be compared against.
 """
 
 from __future__ import annotations
@@ -33,6 +47,8 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import re
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +63,8 @@ EXPECTED_STATUSES: tuple[str, ...] = ("resolved", "partial", "ambiguous", "unres
 
 #: Default distractor-page count for C9's padded neighbourhood (design.md D3).
 DEFAULT_DISTRACTOR_COUNT = 200
+#: The unpadded tree's distractor count -- T9's own corpus state (N1).
+BASE_DISTRACTOR_COUNT = 0
 
 
 class FixtureError(ValueError):
@@ -67,6 +85,15 @@ class FixtureCase:
     must_include: tuple[str, ...]
     must_exclude: tuple[str, ...]
     expected_status: str
+    #: A5's hand-authored, per-case oracle-packet prose (task 3, B6).
+    #: Deliberately *not* derived from ``must_include``: A5 is meant to be an
+    #: independent ceiling estimate, and deriving its content from the same
+    #: facts the reminder-turn test checks would make A5 pass that test by
+    #: construction rather than by being a plausible packet. Non-empty for
+    #: every case except C6 (whose oracle is the abstained packet, by
+    #: design); every twin's oracle is abstained by design, so twins never
+    #: set this field.
+    oracle_text: str = ""
 
     def __post_init__(self) -> None:
         if self.expected_status not in EXPECTED_STATUSES:
@@ -93,6 +120,11 @@ FIXTURES: tuple[FixtureCase, ...] = (
         must_include=("weekly limit", "capacity ceiling"),
         must_exclude=(),
         expected_status="resolved",
+        oracle_text=(
+            "Your AI subscriptions collection shows you tend to hit the weekly "
+            "limit before renewal, and the capacity-ceilings pattern note explains "
+            "why: flat-rate plans scale by parallel pools, not a bigger per-call quota."
+        ),
     ),
     FixtureCase(
         case_id="T1",
@@ -118,6 +150,11 @@ FIXTURES: tuple[FixtureCase, ...] = (
         must_include=("grill", "cooking method"),
         must_exclude=(),
         expected_status="resolved",
+        oracle_text=(
+            "The grill equipment page describes a two-zone gas grill serviced this "
+            "spring, and the cooking-method insight recommends indirect heat for "
+            "this recipe."
+        ),
     ),
     FixtureCase(
         case_id="T2",
@@ -140,9 +177,13 @@ FIXTURES: tuple[FixtureCase, ...] = (
         gold=("c3_planning_item", "c3_design_pointer"),
         poison=("t3_other_project_planning_item",),
         roles=("planning_item", "design_pointer"),
-        must_include=("roadmap item",),
+        must_include=("extending the reporting module",),
         must_exclude=(),
         expected_status="resolved",
+        oracle_text=(
+            "The next roadmap item is extending the reporting module, and its "
+            "design pointer is the roadmap-item-A design note."
+        ),
     ),
     FixtureCase(
         case_id="T3",
@@ -165,16 +206,22 @@ FIXTURES: tuple[FixtureCase, ...] = (
         gold=("c4_entity_profile", "c4_failure_note"),
         poison=("t4_shared_first_name_entity_a", "t4_shared_first_name_entity_b"),
         roles=("entity_profile", "failure_note"),
-        must_include=(),
+        must_include=("failed on the Mac build",),
         must_exclude=(),
         expected_status="resolved",
+        oracle_text=(
+            "That's the colleague whose deployment failed on the Mac build last "
+            "month, root-caused to a config drift."
+        ),
     ),
     FixtureCase(
         case_id="T4",
         pairs_with="C4",
         turn="Alex mentioned the deployment issue again.",
         reminder_turn="Which Alex — there are two on the team. Check before assuming either.",
-        gold=(),
+        # Winnable (B2): T4's own narrow gold is the two same-kind person
+        # candidates it is genuinely ambiguous between -- never C4's content.
+        gold=("t4_shared_first_name_entity_a", "t4_shared_first_name_entity_b"),
         poison=("c4_entity_profile", "c4_failure_note"),
         roles=(),
         must_include=(),
@@ -193,6 +240,7 @@ FIXTURES: tuple[FixtureCase, ...] = (
         must_include=("unavailable",),
         must_exclude=(),
         expected_status="resolved",
+        oracle_text="The workshop bench's records show it was marked unavailable for repair as of 2026-09-10, its latest entry.",
     ),
     FixtureCase(
         case_id="T5",
@@ -210,14 +258,15 @@ FIXTURES: tuple[FixtureCase, ...] = (
     FixtureCase(
         case_id="C6",
         pairs_with=None,
-        turn="What's a good conversion for two cups of flour in grams?",
+        turn="What's half of nineteen?",
         reminder_turn="There's nothing to look up here — that's a general question, not something from our history.",
         gold=(),
         poison=(),
         roles=(),
-        must_include=(),
+        must_include=("9.5",),
         must_exclude=(),
         expected_status="unresolved",
+        # C6's oracle is the abstained packet by design (B6): left empty.
     ),
     FixtureCase(
         case_id="T6",
@@ -240,9 +289,14 @@ FIXTURES: tuple[FixtureCase, ...] = (
         gold=("c7_hub_feature", "c7_hub_market", "c7_hub_search_ux"),
         poison=(),
         roles=("hub_context",),
-        must_include=(),
+        must_include=("AI search feature", "AI search market"),
         must_exclude=(),
         expected_status="ambiguous",
+        oracle_text=(
+            "\"AI search\" is ambiguous here between at least two senses: the "
+            "in-app AI search feature implementation hub, and the AI search "
+            "market-research hub comparing competing search engines."
+        ),
     ),
     FixtureCase(
         case_id="T7",
@@ -265,9 +319,10 @@ FIXTURES: tuple[FixtureCase, ...] = (
         gold=("c8_active_head",),
         poison=("c8_superseded_ancestor_1", "c8_superseded_ancestor_2"),
         roles=("current_state", "supersession"),
-        must_include=("current",),
+        must_include=("version 3",),
         must_exclude=("retired approach presented as current",),
         expected_status="resolved",
+        oracle_text="The current onboarding approach is version 3; versions 1 and 2 are retired.",
     ),
     FixtureCase(
         case_id="T8",
@@ -282,6 +337,11 @@ FIXTURES: tuple[FixtureCase, ...] = (
         expected_status="resolved",
     ),
     # -- C9 / T9: C2 padded with ~200 distractor pages -----------------------
+    # N1: C9 and T9 share C2's own turn and gold. They differ only in which
+    # corpus tree they are scored against (padded vs. unpadded) -- see
+    # `context_activation.score_c9_padding_robustness`. A twin with a
+    # different turn cannot show padding did anything; two identical queries
+    # against two different corpus states can.
     FixtureCase(
         case_id="C9",
         pairs_with=None,
@@ -293,18 +353,23 @@ FIXTURES: tuple[FixtureCase, ...] = (
         must_include=("grill", "cooking method"),
         must_exclude=(),
         expected_status="resolved",
+        oracle_text=(
+            "The grill equipment page describes a two-zone gas grill serviced this "
+            "spring, and the cooking-method insight recommends indirect heat for "
+            "this recipe."
+        ),
     ),
     FixtureCase(
         case_id="T9",
         pairs_with="C9",
-        turn="I'm planning to paint this room this weekend.",
-        reminder_turn="No connection to the cooking notes — this one's just painting.",
-        gold=(),
-        poison=("c2_grill_equipment_page", "c2_cooking_method_insight"),
-        roles=(),
-        must_include=(),
+        turn="I'm planning to cook this recipe for the dinner on Saturday.",
+        reminder_turn="I already looked at the grill equipment page for this — use that.",
+        gold=("c2_grill_equipment_page", "c2_cooking_method_insight"),
+        poison=("t2_camera_gear_note",),
+        roles=("equipment_profile", "method_insight"),
+        must_include=("grill", "cooking method"),
         must_exclude=(),
-        expected_status="unresolved",
+        expected_status="resolved",
     ),
 )
 
@@ -348,28 +413,65 @@ def anchor_kind_for(key: str) -> str:
     return KEY_KINDS.get(key, "unknown")
 
 
+#: Short natural-language phrases per logical gold/poison key (task 3, B5).
+#: Used by the blind-extraction/gold-poison intersection: a realistic grader
+#: reports *paraphrased facts*, never a fixture's internal logical keys, so
+#: the intersection step matches on these phrases (normalised: casefold,
+#: punctuation stripped, simple stemming), not on key identity.
+GOLD_POISON_FACTS: dict[str, str] = {
+    "c1_subscriptions_collection": "an AI subscriptions collection tracking plan tiers",
+    "c1_weekly_limit_insight": "usage hits the weekly limit before renewal",
+    "c1_capacity_ceilings_pattern": "a recurring capacity ceilings pattern on flat-rate plans",
+    "t1_fitness_goal_note": "a step-count fitness goal, unrelated to tooling",
+    "c2_grill_equipment_page": "a two-zone gas grill serviced this spring",
+    "c2_cooking_method_insight": "indirect heat works best for this recipe",
+    "t2_camera_gear_note": "a camera body and prime lens for photography",
+    "c3_planning_item": "the next roadmap item extends the reporting module",
+    "c3_design_pointer": "the design notes for that roadmap item",
+    "t3_other_project_planning_item": "the other workstream's own roadmap item",
+    "c4_entity_profile": "a colleague on the platform team",
+    "c4_failure_note": "a deployment failed on the Mac build last month",
+    "t4_shared_first_name_entity_a": "a colleague on the data team",
+    "t4_shared_first_name_entity_b": "a colleague on the support team",
+    "c5_resource_profile": "a shared workshop bench booked by session",
+    "c5_records_latest_unavailable": "the bench was marked unavailable for repair",
+    "t5_available_resource": "a mobile scanner cart currently available",
+    "c7_hub_feature": "the in-app AI search feature implementation hub",
+    "c7_hub_market": "the AI search market-research hub",
+    "c7_hub_search_ux": "the general search UX research hub",
+    "c8_superseded_ancestor_1": "an earlier onboarding approach, since retired",
+    "c8_superseded_ancestor_2": "a second onboarding approach, since retired",
+    "c8_active_head": "the current onboarding approach",
+    "t8_unchained_active_note": "the current support rota with no prior revisions",
+}
+
+
+def fact_for(key: str) -> str:
+    """The natural-language fact phrase for a logical key; ``""`` if unmapped."""
+
+    return GOLD_POISON_FACTS.get(key, "")
+
+
 #: The naive-path latency constant (task 4.2), replacing the spec's
 #: pre-registered p50 800 ms / p95 2,500 ms placeholder with a measured
-#: figure. Measured 2026-09-16 on the personal cell (quiesced, checked via
-#: /proc/<pid>/stat CPU deltas before the run): `ask_memory` over the 18
-#: fixture turns, each with a nonce appended, `mode="hybrid"`, `limit=5`,
-#: `detail="compact"`, `include_timings=true`; the figure is each call's
-#: reported `timings.total_ms` (server-side, excludes MCP transport). n=18,
-#: nearest-rank percentile (matching docs/benchmarks.md's own convention).
-#: This constant carries only figures -- no vault path or title -- and is
-#: the only part of the baseline committed to the repository. The full
-#: per-case report (which does name real vault paths/titles, never body
-#: content, per the private-instrument privacy rule) lives only in the
-#: operator-passed output directory and is preserved as Evidence, never
-#: committed here.
-MEASURED_LATENCY_MS: dict[str, float] | None = {
-    "n": 18,
+#: figure. Measured on ``MEASURED_LATENCY_DATE`` on the personal cell
+#: (quiesced, checked via /proc/<pid>/stat CPU deltas before the run):
+#: `ask_memory` over ``MEASURED_LATENCY_SAMPLE_SIZE`` fixture turns, each
+#: with a nonce appended, `mode="hybrid"`, `limit=5`, `detail="compact"`,
+#: `include_timings=true`; the figure is each call's reported
+#: `timings.total_ms` (server-side, excludes MCP transport). Nearest-rank
+#: percentile (matching docs/benchmarks.md's own convention). Numeric-only
+#: (minor fix): the sample size and date are separate constants so this dict
+#: is honestly typed as ``dict[str, float]`` throughout, not a mix of floats
+#: and strings.
+MEASURED_LATENCY_SAMPLE_SIZE = 18
+MEASURED_LATENCY_DATE = "2026-09-16"
+MEASURED_LATENCY_MS: dict[str, float] = {
     "min_ms": 881.653,
     "p50_ms": 10744.641,
     "p95_ms": 16488.201,
     "max_ms": 16823.787,
     "mean_ms": 11197.24,
-    "measured_on": "2026-09-16",
 }
 
 
@@ -400,6 +502,7 @@ def _canonical(fixture: FixtureCase) -> dict:
         "must_include": list(fixture.must_include),
         "must_exclude": list(fixture.must_exclude),
         "expected_status": fixture.expected_status,
+        "oracle_text": fixture.oracle_text,
     }
 
 
@@ -445,10 +548,17 @@ ALL_TURNS: tuple[str, ...] = tuple(
     text for fixture in FIXTURES for text in (fixture.turn, fixture.reminder_turn) if text.strip()
 )
 
+#: Every gold/poison fact phrase (never `must_include`: those are
+#: response-reflection facts, some of them content-free numeric answers like
+#: C6's "9.5" that a naive normalised substring check would false-positive
+#: on). Used only by :func:`find_fact_leaks_outside_gold_poison_pages` (N2),
+#: scoped to non-gold-poison pages -- a gold/poison fact legitimately belongs
+#: on its own gold or poison page, so checking every page indiscriminately
+#: would misfire on the fixture's own intended content.
+ALL_FACT_PHRASES: tuple[str, ...] = tuple(sorted(set(GOLD_POISON_FACTS.values())))
 
-def find_verbatim_leaks(
-    root: Path, *, turns: Iterable[str] = ALL_TURNS
-) -> tuple[tuple[str, str], ...]:
+
+def find_verbatim_leaks(root: Path, *, turns: Iterable[str] = ALL_TURNS) -> tuple[tuple[str, str], ...]:
     """Every ``(relative page path, leaked turn)`` pair found verbatim under ``root``."""
 
     leaks: list[tuple[str, str]] = []
@@ -458,6 +568,73 @@ def find_verbatim_leaks(
         for turn in turns:
             if turn and turn in text:
                 leaks.append((rel, turn))
+    return tuple(leaks)
+
+
+def _normalize_for_leak_check(text: str) -> str:
+    """Casefold, collapse whitespace (incl. newlines), strip punctuation,
+    and map common typographic variants to ASCII (N3): a line-wrapped quote
+    or an em-dash rendering of a fixture turn is exactly as much a leak as a
+    byte-identical one, and must not hide behind formatting.
+    """
+
+    normalized = unicodedata.normalize("NFKD", text)
+    normalized = normalized.translate(
+        str.maketrans({"—": "-", "–": "-", "‘": "'", "’": "'", "“": '"', "”": '"'})
+    )
+    normalized = normalized.casefold()
+    normalized = re.sub(r"[^\w\s]", "", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
+def find_normalized_leaks(root: Path, *, turns: Iterable[str] = ALL_TURNS) -> tuple[tuple[str, str], ...]:
+    """Every ``(relative page path, leaked turn)`` pair found near-verbatim under ``root``.
+
+    Catches a leak that survives casefolding, whitespace/newline collapse,
+    punctuation stripping, and em/en-dash or curly-quote normalisation --
+    exactly the class a line-wrapped quotation or a ``--``-for-em-dash
+    rewrite would otherwise hide from :func:`find_verbatim_leaks`.
+    """
+
+    leaks: list[tuple[str, str]] = []
+    normalized_terms = {turn: _normalize_for_leak_check(turn) for turn in turns if turn}
+    for path in sorted(Path(root).rglob("*.md")):
+        normalized_text = _normalize_for_leak_check(path.read_text(encoding="utf-8"))
+        rel = path.relative_to(root).as_posix()
+        for turn, normalized_turn in normalized_terms.items():
+            if normalized_turn and normalized_turn in normalized_text:
+                leaks.append((rel, turn))
+    return tuple(leaks)
+
+
+def find_fact_leaks_outside_gold_poison_pages(
+    root: Path, key_to_path: dict[str, str], *, facts: Iterable[str] = ALL_FACT_PHRASES
+) -> tuple[tuple[str, str], ...]:
+    """Verbatim or near-verbatim gold/poison *fact* leakage into any page that
+    is not itself one of the fixture's own designated gold/poison pages (N2).
+
+    Distinct from :func:`find_verbatim_leaks`/:func:`find_normalized_leaks`
+    (which check every page, gold/poison pages included, for a leaked
+    *turn* -- something no corpus page, gold or otherwise, should ever
+    contain): a gold/poison fact legitimately belongs on its own gold or
+    poison page, so checking every page indiscriminately for fact leakage
+    would misfire on the fixture's own intended content. Only distractor and
+    neighbourhood pages, which carry no such license, are checked here.
+    """
+
+    gold_poison_pages = set(key_to_path.values())
+    leaks: list[tuple[str, str]] = []
+    normalized_facts = {fact: _normalize_for_leak_check(fact) for fact in facts if fact}
+    for path in sorted(Path(root).rglob("*.md")):
+        rel = path.relative_to(root).as_posix()
+        if rel in gold_poison_pages:
+            continue
+        text = path.read_text(encoding="utf-8")
+        normalized_text = _normalize_for_leak_check(text)
+        for fact, normalized_fact in normalized_facts.items():
+            if fact in text or (normalized_fact and normalized_fact in normalized_text):
+                leaks.append((rel, fact))
     return tuple(leaks)
 
 
@@ -512,6 +689,41 @@ def _corpus_hash(root: Path) -> str:
     return digest.hexdigest()
 
 
+#: Distractor vocabulary for C9's padded neighbourhood (N2): generic,
+#: generated-domain words adjacent to C2/C9's grilling content, so the
+#: padding is realistically *near* the gold content rather than inert noise
+#: -- a real discriminator has to do better than "ignore everything that
+#: isn't verbatim". Deliberately excludes "grill" and "cooking method"
+#: themselves: those are C2/C9's own `must_include` terms, and the leak
+#: checks below refuse any distractor that reproduces a must_include fact.
+_DISTRACTOR_WORD_BANK: tuple[str, ...] = (
+    "smoke",
+    "brine",
+    "sear",
+    "temperature",
+    "wood",
+    "doneness",
+    "marinade",
+    "thermometer",
+    "charcoal",
+    "basting",
+    "resting",
+    "rub",
+    "coals",
+    "drip pan",
+    "wood chips",
+)
+
+
+def _distractor_body(rng: random.Random, index: int) -> str:
+    words = rng.sample(_DISTRACTOR_WORD_BANK, k=4)
+    return (
+        f"Background synthetic transcript material, entry {index:04d}. "
+        f"Generic outdoor-cooking notes touching on {words[0]}, {words[1]}, "
+        f"{words[2]} and {words[3]}, from an unrelated session."
+    )
+
+
 def build_corpus(
     root: Path, *, seed: int = 20260916, distractor_count: int = DEFAULT_DISTRACTOR_COUNT
 ) -> CorpusManifest:
@@ -519,9 +731,9 @@ def build_corpus(
 
     Generated names only -- no personal names, products, hosts or
     vault-structure labels. Refuses (:class:`FixtureError`) if any fixture
-    turn or reminder turn leaked verbatim into a rendered page, which is
-    exactly the contamination class ``design.md`` recorded against the real
-    vault (2026-09-16 reproduction).
+    turn, reminder turn, or authored fact leaked verbatim or near-verbatim
+    into a rendered page, which is exactly the contamination class
+    ``design.md`` recorded against the real vault (2026-09-16 reproduction).
     """
 
     root = Path(root)
@@ -554,8 +766,8 @@ def build_corpus(
         "A step-count goal tracked for general fitness, unrelated to tooling.",
     )
 
-    # C2/T2/C9/T9 -- planning to cook vs. photographing; C9 reuses these
-    # same pages inside the padded (distractor-heavy) corpus.
+    # C2/T2/C9/T9 -- planning to cook vs. photographing; C9/T9 reuse these
+    # same pages, scored against the padded and unpadded trees respectively.
     key_to_path["c2_grill_equipment_page"] = _page(
         root,
         "Equipment/grill.md",
@@ -609,7 +821,7 @@ def build_corpus(
         root,
         "Notes/deployment-issue-rowan.md",
         "Deployment issue note",
-        "Rowan Ashfield flagged a deployment issue last month; root-caused to a config drift.",
+        "Rowan Ashfield's deployment failed on the Mac build last month; root-caused to a config drift.",
     )
     key_to_path["t4_shared_first_name_entity_a"] = _page(
         root, "Entities/alex-monroe.md", "Alex Monroe", "A colleague on the data team."
@@ -619,17 +831,28 @@ def build_corpus(
     )
 
     # C5/T5 -- a resource made unavailable by its Records collection's
-    # latest item, vs. an available resource that must not be mislabeled.
+    # latest item (by date, never by line order -- N supplement), vs. an
+    # available resource that must not be mislabeled.
     key_to_path["c5_resource_profile"] = _page(
-        root, "Resources/workshop-bench.md", "Workshop bench", "A shared workshop bench, booked by session."
+        root,
+        "Resources/workshop-bench.md",
+        "Workshop bench",
+        "A shared workshop bench, booked by session. See [[workshop-bench-records]] for status.",
     )
     key_to_path["c5_records_latest_unavailable"] = _page(
         root,
         "Resources/workshop-bench-records.md",
         "Workshop bench records",
-        "manifest: records\n"
-        "2026-09-10: bench marked unavailable for repair.\n"
-        "2026-08-02: bench booked, returned in good order.",
+        "Structured records collection for the workshop bench resource.",
+        extra_frontmatter=(
+            "semantic_profile: records\n"
+            "fields: [observed_on, status]\n"
+            "items:\n"
+            '  - observed_on: "2026-08-02"\n'
+            "    status: available\n"
+            '  - observed_on: "2026-09-10"\n'
+            "    status: unavailable\n"
+        ),
     )
     key_to_path["t5_available_resource"] = _page(
         root,
@@ -641,15 +864,34 @@ def build_corpus(
     # C6/T6 -- no pages are seeded for the no-memory turn itself: it must
     # resolve nothing. T6 mentions the C2 grill only lexically.
 
-    # C7/T7 -- an ambiguous domain triple with disjoint neighbourhoods.
+    # C7/T7 -- an ambiguous domain triple with distinct, pairwise-disjoint
+    # wikilink neighbourhoods (N supplement): three pages each hub links to,
+    # shared by no other hub, so "disjoint neighbourhoods" is a real,
+    # checkable property rather than an assertion about empty link sets.
+    for suffix, blurb in (("a", "reference material"), ("b", "a design note"), ("c", "a status update")):
+        _page(root, f"Hubs/feature-neighbour-{suffix}.md", f"Feature neighbour {suffix}", f"Feature-hub {blurb}.")
+        _page(root, f"Hubs/market-neighbour-{suffix}.md", f"Market neighbour {suffix}", f"Market-hub {blurb}.")
+        _page(root, f"Hubs/ux-neighbour-{suffix}.md", f"UX neighbour {suffix}", f"Search-UX-hub {blurb}.")
     key_to_path["c7_hub_feature"] = _page(
-        root, "Hubs/ai-search-feature.md", "AI search feature hub", "Implementation hub for the in-app AI search feature."
+        root,
+        "Hubs/ai-search-feature.md",
+        "AI search feature hub",
+        "Implementation hub for the in-app AI search feature. See "
+        "[[feature-neighbour-a]], [[feature-neighbour-b]], [[feature-neighbour-c]].",
     )
     key_to_path["c7_hub_market"] = _page(
-        root, "Hubs/ai-search-market.md", "AI search market hub", "Market-research hub comparing AI search engines."
+        root,
+        "Hubs/ai-search-market.md",
+        "AI search market hub",
+        "Market-research hub comparing AI search engines. See "
+        "[[market-neighbour-a]], [[market-neighbour-b]], [[market-neighbour-c]].",
     )
     key_to_path["c7_hub_search_ux"] = _page(
-        root, "Hubs/search-ux.md", "Search UX hub", "UX research hub for search result presentation generally."
+        root,
+        "Hubs/search-ux.md",
+        "Search UX hub",
+        "UX research hub for search result presentation generally. See "
+        "[[ux-neighbour-a]], [[ux-neighbour-b]], [[ux-neighbour-c]].",
     )
 
     # C8/T8 -- a supersession chain (two retired ancestors, one active
@@ -677,20 +919,19 @@ def build_corpus(
         root, "Notes/support-rota-current.md", "Support rota (current)", "The current support rota, with no prior revisions."
     )
 
-    # ~200 distractor evidence/transcript pages padding C9's neighbourhood.
-    # Deterministic body text drawn only from a numeric RNG stream, so no
-    # fixture vocabulary can leak in through this loop.
+    # Distractor evidence/transcript pages padding C9's neighbourhood (N2):
+    # composed from a generic outdoor-cooking word bank adjacent to, but
+    # never reproducing, C2/C9's own gold pages or must_include facts.
     for index in range(distractor_count):
-        _page(
-            root,
-            f"Evidence/distractor-{index:04d}.md",
-            f"Distractor evidence {index:04d}",
-            f"Background synthetic transcript material, entry {rng.randint(0, 999999):06d}.",
-        )
+        _page(root, f"Evidence/distractor-{index:04d}.md", f"Distractor evidence {index:04d}", _distractor_body(rng, index))
 
-    leaks = find_verbatim_leaks(root)
+    leaks = (
+        find_verbatim_leaks(root)
+        + find_normalized_leaks(root)
+        + find_fact_leaks_outside_gold_poison_pages(root, key_to_path)
+    )
     if leaks:
-        raise FixtureError(f"fixture turn(s) leaked verbatim into the corpus: {leaks!r}")
+        raise FixtureError(f"fixture turn(s) or fact(s) leaked (verbatim or near-verbatim) into the corpus: {leaks!r}")
 
     return CorpusManifest(
         corpus_id=CORPUS_ID,
@@ -701,16 +942,59 @@ def build_corpus(
     )
 
 
+def parse_records_items(page_text: str) -> list[dict[str, str]]:
+    """Parse a records-collection page's frontmatter ``items`` list.
+
+    Deliberately independent of any real YAML parser (this repository's
+    corpus generator writes a small, fixed subset of YAML by hand, and a
+    full parser dependency would be disproportionate to reading four known
+    lines): pulls each ``- observed_on: "..."`` / ``  status: ...`` pair in
+    frontmatter order. Returns them in file order; :func:`latest_record` is
+    what actually determines "latest" -- by ``observed_on``, never by which
+    line happens to come first.
+    """
+
+    items: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    for line in page_text.splitlines():
+        stripped = line.strip()
+        match_date = re.match(r'-\s*observed_on:\s*"?([^"\s]+)"?', stripped)
+        if match_date:
+            if current:
+                items.append(current)
+            current = {"observed_on": match_date.group(1)}
+            continue
+        match_status = re.match(r"status:\s*(\S+)", stripped)
+        if match_status and current:
+            current["status"] = match_status.group(1)
+    if current:
+        items.append(current)
+    return items
+
+
+def latest_record(items: list[dict[str, str]]) -> dict[str, str] | None:
+    """The item with the latest ``observed_on`` date, never the first in file order."""
+
+    if not items:
+        return None
+    return max(items, key=lambda item: item["observed_on"])
+
+
 __all__ = [
+    "ALL_FACT_PHRASES",
     "ALL_TURNS",
+    "BASE_DISTRACTOR_COUNT",
     "CASE_IDS",
     "CORPUS_ID",
     "DEFAULT_DISTRACTOR_COUNT",
     "EXPECTED_STATUSES",
     "FIXTURE_SET_ID",
     "FIXTURES",
+    "GOLD_POISON_FACTS",
     "KEY_KINDS",
+    "MEASURED_LATENCY_DATE",
     "MEASURED_LATENCY_MS",
+    "MEASURED_LATENCY_SAMPLE_SIZE",
     "TWIN_IDS",
     "CorpusManifest",
     "FixtureCase",
@@ -719,8 +1003,13 @@ __all__ = [
     "assert_manifest_consistent",
     "build_corpus",
     "cases",
+    "fact_for",
+    "find_fact_leaks_outside_gold_poison_pages",
+    "find_normalized_leaks",
     "find_verbatim_leaks",
     "fixture_by_id",
     "fixture_set_digest",
+    "latest_record",
+    "parse_records_items",
     "twins",
 ]

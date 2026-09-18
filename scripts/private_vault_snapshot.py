@@ -25,6 +25,8 @@ import argparse
 import dataclasses
 import hashlib
 import json
+import re
+import unicodedata
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -45,17 +47,33 @@ class SnapshotManifest:
     digest: str
 
 
+def _is_bare_repository(path: Path) -> bool:
+    """Whether ``path`` is itself a bare repository (N4).
+
+    A bare repo has no ``.git`` subdirectory -- ``HEAD``, ``objects/`` and
+    ``refs/`` sit directly in the repository directory itself -- so
+    ``_is_repository_checkout``'s ``.git``-subdirectory check alone misses
+    it entirely. Requires all three markers so an unrelated directory that
+    merely happens to be named ``*.git`` or contain one stray file is not
+    misclassified.
+    """
+
+    return (path / "HEAD").is_file() and (path / "objects").is_dir() and (path / "refs").is_dir()
+
+
 def _is_repository_checkout(path: Path) -> bool:
-    """Whether ``path`` sits inside a git working tree (main checkout or a worktree)."""
+    """Whether ``path`` sits inside a git working tree (main checkout, a
+    worktree, or a bare repository -- N4)."""
 
     for ancestor in (path, *path.parents):
-        if (ancestor / ".git").exists():
+        if (ancestor / ".git").exists() or _is_bare_repository(ancestor):
             return True
     return False
 
 
 def refuse_unsafe_destination(dest: Path) -> Path:
-    """Refuse a destination that resolves inside any git checkout."""
+    """Refuse a destination that resolves inside any git checkout, including
+    a bare repository (N4)."""
 
     resolved = Path(dest).expanduser().resolve()
     if _is_repository_checkout(resolved):
@@ -66,9 +84,32 @@ def refuse_unsafe_destination(dest: Path) -> Path:
     return resolved
 
 
+def _normalize_for_contamination_check(text: str) -> str:
+    """Casefold, collapse whitespace (incl. newlines), strip punctuation,
+    and map common typographic variants to ASCII (N3): a line-wrapped quote
+    or an em-dash/curly-quote rendering of a fixture turn is exactly as much
+    contamination as a byte-identical one, and must not hide behind
+    formatting the way a plain substring check would miss.
+    """
+
+    normalized = unicodedata.normalize("NFKD", text)
+    normalized = normalized.translate(
+        str.maketrans({"—": "-", "–": "-", "‘": "'", "’": "'", "“": '"', "”": '"'})
+    )
+    normalized = normalized.casefold()
+    normalized = re.sub(r"[^\w\s]", "", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
 def _contains_any(text: str, needles: Iterable[str]) -> str | None:
+    normalized_text = _normalize_for_contamination_check(text)
     for needle in needles:
-        if needle and needle in text:
+        if not needle:
+            continue
+        if needle in text:
+            return needle
+        if _normalize_for_contamination_check(needle) in normalized_text:
             return needle
     return None
 

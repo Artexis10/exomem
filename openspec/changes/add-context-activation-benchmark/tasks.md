@@ -27,7 +27,7 @@
 
 - [x] 2.3 Credit a superseded ancestor that the packet carries with `lifecycle:
       superseded` and its successor named as non-poison in the C8 scorer (the compiler
-      contract allows marking or omission; the v0 scorer credits omission only).
+      contract allows marking or omission; the v0 scorer credits both paths).
 
 ## 3. Agent arms under `f32`
 

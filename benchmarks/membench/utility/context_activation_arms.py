@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,7 @@ from pathlib import Path
 from epistemic.corpora.context_activation import (
     CASE_IDS,
     FIXTURES,
+    GOLD_POISON_FACTS,
     TWIN_IDS,
     FixtureCase,
     fixture_by_id,
@@ -102,6 +104,17 @@ def _assert_variants_match_fixtures() -> None:
 _assert_variants_match_fixtures()
 
 
+#: Distinct multipliers for `rotate_arm_order`'s mix (minor fix): a plain
+#: `(seed + case_index) % n` is symmetric, so (seed=1, case_index=2) and
+#: (seed=2, case_index=1) rotate to the *same* offset even though they are
+#: two different episodes -- not the independent rotation the design intends.
+#: Weighting the two terms differently breaks that symmetry while staying a
+#: pure, auditable function (no hash-collision risk across a small seed
+#: range, unlike a cryptographic hash mod 5).
+_SEED_WEIGHT = 7
+_CASE_INDEX_WEIGHT = 13
+
+
 def rotate_arm_order(seed: int, case_index: int) -> tuple[str, ...]:
     """Rotate :data:`ARM_IDS` by seed and case index (design.md D6: "rotated arm order").
 
@@ -110,7 +123,7 @@ def rotate_arm_order(seed: int, case_index: int) -> tuple[str, ...]:
     effect while keeping the five arms' relative sequence auditable by hand.
     """
 
-    offset = (seed + case_index) % len(ARM_IDS)
+    offset = (seed * _SEED_WEIGHT + case_index * _CASE_INDEX_WEIGHT) % len(ARM_IDS)
     return ARM_IDS[offset:] + ARM_IDS[:offset]
 
 
@@ -165,18 +178,31 @@ def actor_turn_text(episode: ContextActivationEpisode) -> str:
 def oracle_packet_text(fixture: FixtureCase) -> str:
     """A5's hand-written-per-case packet, rendered as injectable text.
 
-    Derived transparently from the fixture's own ``must_include`` facts
-    (authored alongside gold/poison in the same fixture manifest) rather than
-    free-standing prose kept in a second place a fixture edit could drift
-    from. If a case declares no ``must_include`` facts (the no-memory case,
-    ambiguous-domain case), its oracle packet is empty text: A5 gets nothing
-    to hand over because there is nothing to hand over.
+    B6: reads the fixture's own ``oracle_text`` field -- authored
+    independently of ``must_include`` -- rather than deriving text from
+    ``must_include`` itself. Deriving A5's ceiling packet from the same facts
+    the reminder-turn test checks would make A5 pass that test by
+    construction, not because it is a plausible packet; ``oracle_text`` is a
+    separate, hand-written estimate of what a correct packet would actually
+    say. Empty for C6 (the no-memory case, whose oracle is the abstained
+    packet by design) and for every twin (each twin's oracle is abstained by
+    design): A5 gets nothing to hand over because there is nothing correct to
+    hand over.
     """
 
-    if not fixture.must_include:
-        return ""
-    facts = "\n".join(f"- {fact}" for fact in fixture.must_include)
-    return f"Relevant context for this turn:\n{facts}\n"
+    return fixture.oracle_text
+
+
+def strike_rule_applies(fixture: FixtureCase) -> bool:
+    """Whether a case is in scope for the reminder-turn "strike" pass/fail at all.
+
+    Only a case with something to resolve or narrow down -- ``resolved`` or
+    ``ambiguous`` expected status -- has a fact the reminder turn could add;
+    an ``unresolved``/no-memory or merely ``partial`` case has no positive
+    claim for the first response to have gotten right or wrong.
+    """
+
+    return fixture.expected_status in ("resolved", "ambiguous")
 
 
 def build_context_activation_arm(arm_id: str) -> Arm:
@@ -273,7 +299,19 @@ def context_activation_turn_argv(
 
     parent = dict(os.environ if parent_env is None else parent_env)
     floor, _removed = environment_floor(parent)
-    env = arm_environment(floor, arm=arm, workdir=workdir, vault=workdir / "vault")
+    if arm_id == "A1_control":
+        # M6: A1 must have Exomem truly *absent*, not merely denied via the
+        # tool allowlist over an otherwise-normal isolated environment.
+        # `arm_environment` unconditionally injects `EXOMEM_VAULT_PATH` /
+        # `EXOMEM_CONFIG_PATH` / etc. for every arm (even one with no
+        # allowed tools) so that a hooked plugin arm's child processes never
+        # see a stray real-vault variable; A1 carries no plugin and no
+        # allowed tools at all, so it gets the floor with every `EXOMEM_*`
+        # key stripped and nothing re-added -- the same shape a session with
+        # no Exomem installed would present.
+        env = {key: value for key, value in floor.items() if not key.startswith("EXOMEM_")}
+    else:
+        env = arm_environment(floor, arm=arm, workdir=workdir, vault=workdir / "vault")
 
     argv = build_turn_argv(
         executable=envelope.executable,
@@ -320,6 +358,43 @@ def estimate_session_count(*, case_ids: Sequence[str], arm_ids: Sequence[str], r
     return len(case_ids) * len(arm_ids) * repeats
 
 
+class BudgetError(ValueError):
+    """Raised when a planned run's session count would exceed the cost cap."""
+
+
+#: The paid-probe ceiling for one full run of this benchmark (M1): a bound
+#: pre-registered here, not discovered mid-run. Mirrors the existing
+#: `epistemic-utility-regression` paid-probe rule ("Paid probes are bounded
+#: and opt-in") for this benchmark's own five-arm, cold-start-turn shape.
+COST_CAP_USD = 25.0
+#: Conservative per-episode reservation (one cold-start turn, `sonnet`,
+#: `DEFAULT_MAX_TURNS` headroom for at most one tool call): a deliberate
+#: overestimate, so `reserve_budget` refuses *before* a run starts spending
+#: rather than after it has already overrun.
+PER_EPISODE_RESERVATION_USD = 0.05
+
+
+def reserve_budget(
+    session_count: int, *, cap_usd: float = COST_CAP_USD, reservation_usd: float = PER_EPISODE_RESERVATION_USD
+) -> float:
+    """Reserve budget for ``session_count`` sessions, or refuse the run outright.
+
+    Returns the reserved total (never a running/actual spend figure -- this
+    module executes nothing, so it has no way to observe real spend). Raises
+    :class:`BudgetError` when the reservation alone would already exceed the
+    cap, which is meant to catch a mis-sized run (e.g. an accidental
+    ``repeats=50``) before a single session is attempted, not after.
+    """
+
+    reserved = session_count * reservation_usd
+    if reserved > cap_usd:
+        raise BudgetError(
+            f"{session_count} sessions at ${reservation_usd:.4f} each would reserve "
+            f"${reserved:.2f}, over the ${cap_usd:.2f} cap"
+        )
+    return reserved
+
+
 # --------------------------------------------------------------------------
 # Task 3.3: reminder-turn test, blind extraction + model-free intersection,
 # blind rubric input. All pure, deterministic, and grader-agnostic: the
@@ -360,11 +435,12 @@ class ReminderTurnResult:
 def score_reminder_turn(response_text: str, fixture: FixtureCase) -> ReminderTurnResult:
     """Whether ``response_text`` already reflects the fixture's required facts.
 
-    Model-free: a literal substring check against ``fixture.must_include``,
-    the same facts :func:`oracle_packet_text` hands to A5. A case that
-    declares no ``must_include`` facts (nothing gold-load-bearing to check
-    for) is vacuously reflected -- there is nothing the reminder turn could
-    have corrected.
+    Model-free: a literal substring check against ``fixture.must_include``
+    (authored independently of A5's ``oracle_text``; see B6 in
+    ``membench.utility.context_activation_arms``'s module history). A case
+    that declares no ``must_include`` facts is vacuously reflected -- there
+    is nothing the reminder turn could have corrected -- though every
+    pre-registered case now authors at least one (B4).
     """
 
     missing = tuple(fact for fact in fixture.must_include if fact not in response_text)
@@ -383,6 +459,37 @@ class BlindIntersection:
     requested_poison: tuple[str, ...]
 
 
+def _normalize_fact_phrase(text: str) -> str:
+    """Casefold, strip punctuation, and lightly stem so a grader's paraphrase
+    ("the AI subscriptions collection page") matches the fixture's own
+    authored fact phrase without requiring verbatim agreement (B5): a
+    realistic grader reports facts in its own words, never a fixture's
+    internal logical keys.
+    """
+
+    text = text.casefold()
+    text = re.sub(r"[^\w\s]", "", text)
+    words = [re.sub(r"(ing|ed|s)$", "", word) if len(word) > 4 else word for word in text.split()]
+    return " ".join(words)
+
+
+def _fact_phrase_matches(extracted_item: str, fact_phrase: str) -> bool:
+    """Whether ``extracted_item`` plausibly names the same fact as ``fact_phrase``.
+
+    A majority-content-word overlap after normalisation, not exact equality
+    or raw substring containment: a paraphrase need not repeat every word of
+    the authored phrase, but a coincidental one- or two-word overlap should
+    not count as the same fact either.
+    """
+
+    fact_words = set(_normalize_fact_phrase(fact_phrase).split())
+    if not fact_words:
+        return False
+    item_words = set(_normalize_fact_phrase(extracted_item).split())
+    overlap = fact_words & item_words
+    return len(overlap) / len(fact_words) >= 0.6
+
+
 def intersect_with_gold_poison(extraction: ExtractedFacts, fixture: FixtureCase) -> BlindIntersection:
     """Intersect a blind grader's extracted facts with gold/poison.
 
@@ -390,16 +497,25 @@ def intersect_with_gold_poison(extraction: ExtractedFacts, fixture: FixtureCase)
     (spec: "A grader that sees only the turn and the response SHALL list
     asserted facts and requested facts"); this function is the separate,
     model-free step that applies gold/poison *afterwards*, so the grader
-    itself never sees them.
+    itself never sees them. B5: the grader's output is realistic prose (a
+    paraphrase of what it read), so this intersects on the fixture's own
+    ``GOLD_POISON_FACTS`` phrase per key -- normalised, majority-word-overlap
+    matched -- rather than on raw key identity, which a real grader would
+    never emit.
     """
 
-    gold, poison = set(fixture.gold), set(fixture.poison)
+    gold_facts = {key: GOLD_POISON_FACTS[key] for key in fixture.gold if key in GOLD_POISON_FACTS}
+    poison_facts = {key: GOLD_POISON_FACTS[key] for key in fixture.poison if key in GOLD_POISON_FACTS}
+
+    def _matched(items: tuple[str, ...], facts_by_key: dict[str, str]) -> tuple[str, ...]:
+        return tuple(item for item in items if any(_fact_phrase_matches(item, phrase) for phrase in facts_by_key.values()))
+
     return BlindIntersection(
         case_id=fixture.case_id,
-        asserted_gold=tuple(f for f in extraction.asserted if f in gold),
-        asserted_poison=tuple(f for f in extraction.asserted if f in poison),
-        requested_gold=tuple(f for f in extraction.requested if f in gold),
-        requested_poison=tuple(f for f in extraction.requested if f in poison),
+        asserted_gold=_matched(extraction.asserted, gold_facts),
+        asserted_poison=_matched(extraction.asserted, poison_facts),
+        requested_gold=_matched(extraction.requested, gold_facts),
+        requested_poison=_matched(extraction.requested, poison_facts),
     )
 
 
@@ -430,12 +546,15 @@ def harness_fault_status(*, exit_code: int, is_error: bool, malformed_transcript
 
 __all__ = [
     "ARM_IDS",
+    "COST_CAP_USD",
     "DEFAULT_MAX_TURNS",
     "DEFAULT_MODEL",
+    "PER_EPISODE_RESERVATION_USD",
     "ArmSetupError",
     "ArmTurnPlan",
     "BlindExtractor",
     "BlindIntersection",
+    "BudgetError",
     "ContextActivationEpisode",
     "ExtractedFacts",
     "ReminderTurnResult",
@@ -450,8 +569,10 @@ __all__ = [
     "harness_fault_status",
     "intersect_with_gold_poison",
     "oracle_packet_text",
+    "reserve_budget",
     "rotate_arm_order",
     "score_reminder_turn",
+    "strike_rule_applies",
     "system_prompt_text_for",
     "variant_for_case",
 ]

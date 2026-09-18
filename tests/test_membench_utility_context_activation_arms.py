@@ -13,7 +13,10 @@ import pytest
 from epistemic.corpora.context_activation import CASE_IDS, TWIN_IDS, fixture_by_id
 from membench.utility.context_activation_arms import (
     ARM_IDS,
+    COST_CAP_USD,
+    PER_EPISODE_RESERVATION_USD,
     ArmSetupError,
+    BudgetError,
     ExtractedFacts,
     actor_turn_text,
     blind_rubric_input,
@@ -26,8 +29,10 @@ from membench.utility.context_activation_arms import (
     harness_fault_status,
     intersect_with_gold_poison,
     oracle_packet_text,
+    reserve_budget,
     rotate_arm_order,
     score_reminder_turn,
+    strike_rule_applies,
     system_prompt_text_for,
     variant_for_case,
 )
@@ -133,6 +138,13 @@ def test_arm_order_rotates_with_seed_and_case_index() -> None:
     assert len(orders) == len(ARM_IDS)
 
 
+def test_rotate_arm_order_is_not_symmetric_in_seed_and_case_index() -> None:
+    # minor: a plain (seed + case_index) % n is symmetric, so swapping the
+    # two arguments silently produced the same rotation -- not the
+    # independent rotation "seeded by (seed, case_index)" the design intends.
+    assert rotate_arm_order(1, 2) != rotate_arm_order(2, 1)
+
+
 def test_unknown_arm_id_refused() -> None:
     with pytest.raises(ArmSetupError):
         build_context_activation_arm("A99_bogus")
@@ -147,6 +159,28 @@ def test_a1_control_has_no_exomem_surface() -> None:
     assert arm.uses_plugin is False
 
 
+def test_a1_control_environment_carries_no_exomem_variables_at_all(tmp_path) -> None:
+    # M6: A1 must have Exomem truly *absent* -- not merely denied via the
+    # tool allowlist over an otherwise-normal isolated environment that
+    # still points EXOMEM_CONFIG_PATH/EXOMEM_VAULT_PATH at a real directory.
+    variant = variant_for_case("C2")
+    episode = generate_context_activation_episode(9, variant)
+    parent_env = {"PATH": "/usr/bin", "EXOMEM_VAULT_PATH": "/should/not/survive", "HOME": "/home/test"}
+    plan = context_activation_turn_argv(
+        episode=episode, arm_id="A1_control", envelope=_FakeEnvelope(), out_dir=tmp_path / "out", parent_env=parent_env
+    )
+    assert not any(key.startswith("EXOMEM_") for key in plan.env)
+
+
+def test_other_arms_environment_does_carry_exomem_variables(tmp_path) -> None:
+    variant = variant_for_case("C2")
+    episode = generate_context_activation_episode(9, variant)
+    plan = context_activation_turn_argv(
+        episode=episode, arm_id="A2_raw_recall", envelope=_FakeEnvelope(), out_dir=tmp_path / "out", parent_env={}
+    )
+    assert any(key.startswith("EXOMEM_") for key in plan.env)
+
+
 def test_a2_and_a4_both_expose_ask_memory_but_only_a4_is_nudged() -> None:
     a2 = build_context_activation_arm("A2_raw_recall")
     a4 = build_context_activation_arm("A4_nudged_recall")
@@ -157,19 +191,28 @@ def test_a2_and_a4_both_expose_ask_memory_but_only_a4_is_nudged() -> None:
     assert system_prompt_text_for("A4_nudged_recall", episode) is not None
 
 
-def test_a5_oracle_packet_is_derived_from_must_include_and_never_from_gold_keys() -> None:
-    variant = variant_for_case("C1")
-    episode = generate_context_activation_episode(1, variant)
-    text = oracle_packet_text(episode.oracle)
-    for fact in episode.oracle.must_include:
-        assert fact in text
-    for key in episode.oracle.gold:
-        assert key not in text  # logical keys are evaluator plumbing, not prose
+def test_a5_oracle_packet_is_the_fixtures_own_hand_authored_oracle_text() -> None:
+    # B6: A5's ceiling packet reads `fixture.oracle_text` -- authored
+    # independently of `must_include` -- never derived from must_include
+    # itself (that would make A5 pass the reminder-turn test by
+    # construction, since both would share one source).
+    c1 = fixture_by_id("C1")
+    assert oracle_packet_text(c1) == c1.oracle_text
+    assert c1.oracle_text.strip()
+    for key in c1.gold:
+        assert key not in c1.oracle_text  # logical keys are evaluator plumbing, not prose
 
 
-def test_a5_oracle_packet_is_empty_for_a_case_with_no_must_include_facts() -> None:
+def test_a5_oracle_packet_is_empty_for_c6_the_no_memory_case() -> None:
     c6 = fixture_by_id("C6")
+    assert c6.oracle_text == ""
     assert oracle_packet_text(c6) == ""
+
+
+@pytest.mark.parametrize("twin_id", TWIN_IDS)
+def test_a5_oracle_packet_is_empty_for_every_twin(twin_id: str) -> None:
+    twin = fixture_by_id(twin_id)
+    assert oracle_packet_text(twin) == ""
 
 
 # -- dry-run argv construction (never executes anything) ------------------
@@ -256,18 +299,38 @@ def test_reminder_turn_not_reflected_when_response_misses_the_facts() -> None:
     assert result.missing_gold == c1.must_include
 
 
-def test_reminder_turn_vacuously_reflected_when_nothing_is_required() -> None:
+def test_reminder_turn_reflected_when_the_response_states_the_arithmetic_answer() -> None:
+    # B4: C6's turn changed to a pure-arithmetic question with an exact
+    # numeric answer ("9.5"), so its must_include fact is no longer vacuous.
     c6 = fixture_by_id("C6")
-    assert score_reminder_turn("214 grams, roughly.", c6).reflected is True
+    assert c6.must_include == ("9.5",)
+    assert score_reminder_turn("Half of nineteen is 9.5.", c6).reflected is True
+    assert score_reminder_turn("That's roughly ten.", c6).reflected is False
 
 
-def test_blind_intersection_never_receives_gold_or_poison_in_the_extraction_step() -> None:
+def test_blind_intersection_matches_a_realistic_paraphrase_not_a_raw_key() -> None:
+    # B5: a realistic grader reports prose it read from the response, never
+    # a fixture's own internal logical keys -- the intersection must match
+    # on the fixture's authored fact phrase (normalised, paraphrase-tolerant),
+    # not on key-identity substring/equality.
     c1 = fixture_by_id("C1")
-    extraction = ExtractedFacts(asserted=(c1.gold[0], "unrelated_fact"), requested=(c1.poison[0],))
+    extraction = ExtractedFacts(
+        asserted=("mentions an AI subscriptions collection that tracks plan tiers", "unrelated fact"),
+        requested=("asks about a step-count fitness goal unrelated to tooling",),
+    )
     intersection = intersect_with_gold_poison(extraction, c1)
-    assert intersection.asserted_gold == (c1.gold[0],)
+    assert intersection.asserted_gold == (extraction.asserted[0],)
     assert intersection.asserted_poison == ()
-    assert intersection.requested_poison == (c1.poison[0],)
+    assert intersection.requested_poison == (extraction.requested[0],)
+
+
+def test_blind_intersection_does_not_match_on_the_raw_logical_key_alone() -> None:
+    # A raw key is exactly what a grader that only ever saw the turn and the
+    # response could not have produced; it must not match by construction.
+    c1 = fixture_by_id("C1")
+    extraction = ExtractedFacts(asserted=(c1.gold[0],), requested=())
+    intersection = intersect_with_gold_poison(extraction, c1)
+    assert intersection.asserted_gold == ()
 
 
 def test_blind_rubric_input_carries_only_turn_and_response() -> None:
@@ -282,3 +345,32 @@ def test_fixture_case_is_frozen_and_dataclasses_replace_still_works() -> None:
     c1 = fixture_by_id("C1")
     with pytest.raises(dataclasses.FrozenInstanceError):
         c1.turn = "mutated"  # type: ignore[misc]
+
+
+# -- M1: cost cap and per-episode reservation -------------------------------
+
+
+def test_reserve_budget_within_cap_returns_the_reservation() -> None:
+    reserved = reserve_budget(10, cap_usd=1.0, reservation_usd=0.05)
+    assert reserved == 0.5
+
+
+def test_reserve_budget_over_cap_refuses_the_run() -> None:
+    with pytest.raises(BudgetError):
+        reserve_budget(1000, cap_usd=1.0, reservation_usd=0.05)
+
+
+def test_reserve_budget_uses_the_pre_registered_defaults() -> None:
+    session_count = estimate_session_count(case_ids=CASE_IDS + TWIN_IDS, arm_ids=ARM_IDS, repeats=1)
+    reserved = reserve_budget(session_count)
+    assert reserved == session_count * PER_EPISODE_RESERVATION_USD
+    assert reserved <= COST_CAP_USD
+
+
+# -- B6: the strike rule only applies where there is something to strike ---
+
+
+def test_strike_rule_applies_to_resolved_and_ambiguous_cases_only() -> None:
+    assert strike_rule_applies(fixture_by_id("C1")) is True  # resolved
+    assert strike_rule_applies(fixture_by_id("C7")) is True  # ambiguous
+    assert strike_rule_applies(fixture_by_id("C6")) is False  # unresolved

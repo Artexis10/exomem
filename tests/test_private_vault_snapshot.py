@@ -113,3 +113,73 @@ def test_refuses_a_missing_source(tmp_path: Path) -> None:
     module = _module()
     with pytest.raises(module.SnapshotError):
         module.build_snapshot(tmp_path / "does-not-exist", tmp_path / "snapshot", fixture_turns=(), taken_at="t")
+
+
+# -- N3: contamination matching survives line-wrapping and typographic variants --
+
+
+def test_excludes_a_page_that_line_wraps_a_fixture_turn(tmp_path: Path) -> None:
+    module = _module()
+    source = tmp_path / "vault"
+    (source / "notes").mkdir(parents=True)
+    (source / "notes" / "clean.md").write_text("# Clean\n\nNothing sensitive here.\n", encoding="utf-8")
+    (source / "notes" / "wrapped.md").write_text(
+        "# Meta note\n\nAs discussed: I keep hitting my AI usage\nlimits again this week.\n",
+        encoding="utf-8",
+    )
+    dest = tmp_path / "snapshot"
+    manifest = module.build_snapshot(
+        source, dest, fixture_turns=("I keep hitting my AI usage limits again this week.",), taken_at="t"
+    )
+    assert "notes/wrapped.md" in manifest.excluded
+
+
+def test_excludes_a_page_that_renders_a_fixture_turn_with_an_em_dash_and_curly_quotes(tmp_path: Path) -> None:
+    module = _module()
+    source = tmp_path / "vault"
+    (source / "notes").mkdir(parents=True)
+    (source / "notes" / "typographic.md").write_text(
+        "# Meta note\n\nAs discussed—“I keep hitting my AI usage limits again this week.”\n",
+        encoding="utf-8",
+    )
+    dest = tmp_path / "snapshot"
+    manifest = module.build_snapshot(
+        source, dest, fixture_turns=("I keep hitting my AI usage limits again this week.",), taken_at="t"
+    )
+    assert "notes/typographic.md" in manifest.excluded
+
+
+def test_clean_page_is_not_excluded_by_the_normalized_check(tmp_path: Path) -> None:
+    module = _module()
+    source = tmp_path / "vault"
+    _seed_vault(source)
+    dest = tmp_path / "snapshot"
+    manifest = module.build_snapshot(
+        source, dest, fixture_turns=("I keep hitting my AI usage limits again this week.",), taken_at="t"
+    )
+    assert "notes/clean.md" not in manifest.excluded
+
+
+# -- N4: a bare repository is exactly as unsafe as a normal checkout -------
+
+
+def test_refuses_a_destination_inside_a_bare_repository(tmp_path: Path) -> None:
+    module = _module()
+    bare_repo = tmp_path / "fake-bare-repo.git"
+    (bare_repo / "objects").mkdir(parents=True)
+    (bare_repo / "refs").mkdir(parents=True)
+    (bare_repo / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    dest = bare_repo / "snapshot-out"
+    with pytest.raises(module.SnapshotError):
+        module.refuse_unsafe_destination(dest)
+
+
+def test_accepts_a_directory_that_merely_looks_like_a_bare_repo_by_name(tmp_path: Path) -> None:
+    # Only the actual HEAD/objects/refs shape marks a bare repo -- a
+    # directory named "*.git" with none of that structure is not one.
+    almost_bare = tmp_path / "just-a-folder.git"
+    almost_bare.mkdir(parents=True)
+    dest = almost_bare / "snapshot-out"
+    module = _module()
+    resolved = module.refuse_unsafe_destination(dest)
+    assert resolved == dest.expanduser().resolve()
