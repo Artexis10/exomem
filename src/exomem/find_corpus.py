@@ -61,6 +61,8 @@ class FrontmatterCache:
     _signatures: dict[Path, tuple[int, int, int, int, int, bytes]] = field(
         default_factory=dict, repr=False
     )
+    #: Served-from-cache count: the use signal the idle reaper watches.
+    hits: int = 0
 
     def clear(self) -> None:
         """Discard every row, and record it as a whole-cache re-derivation.
@@ -180,6 +182,7 @@ class FrontmatterCache:
         cached = self.entries.get(path)
         if cached and self._signatures.get(path) == signature:
             self.entries.move_to_end(path)
+            self.hits += 1
             return cached
         parsed = parse_page(path, snapshot.mtime, vault_root, content=content)
         if parsed is not None:
