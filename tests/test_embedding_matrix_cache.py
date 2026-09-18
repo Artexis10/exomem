@@ -906,3 +906,26 @@ def _bump_mtime(path: Path) -> None:
     import os
 
     os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
+
+
+def test_stored_chunks_for_returns_one_pages_rows_and_their_mtime(tmp_path, monkeypatch):
+    """The context pack's route to a media page's chunking without an encode:
+    the texts in index order and the mtime the embedding pass stamped, or
+    `([], None)` when the sidecar, the page, or a contiguous run is absent."""
+    vault = _fresh_vault(tmp_path)
+    monkeypatch.setenv("EXOMEM_STATE_DIR", str(tmp_path / "state"))
+    idx = embeddings.EmbeddingIndex(vault)
+    assert idx.stored_chunks_for("a.md") == ([], None)  # no sidecar file yet
+    assert not idx.path.exists()  # and asking never created one
+
+    idx.upsert_file("a.md", ["a1", "a2", "a3"], _mat([1, 0], [2, 0], [3, 0]), 1785540447.194806)
+    idx.upsert_file("b.md", ["b"], _mat([0, 1]), 2.0)
+    assert idx.stored_chunks_for("a.md") == (["a1", "a2", "a3"], 1785540447.194806)
+    assert idx.stored_chunks_for("b.md") == (["b"], 2.0)
+    assert idx.stored_chunks_for("missing.md") == ([], None)
+
+    conn = sqlite3.connect(idx.path)
+    with conn:
+        conn.execute("DELETE FROM chunks WHERE file_path = 'a.md' AND chunk_idx = 1")
+    conn.close()
+    assert idx.stored_chunks_for("a.md") == ([], None)  # a hole is not a chunking
