@@ -34,17 +34,34 @@ profile, any new prominence level, any change to `ask_memory` or to stub mode.
   pointers exactly as the packet orders them, cut at `max_chars`; provenance refs stay
   attached so the agent can `read_memory` on demand.
 - **D3 — Continuity is a signed-nothing opaque token.** Base64 of a compact JSON
-  (vault identity hash, registry hash, index generation, anchor refs, roles). No
-  secret: the server trusts nothing in it beyond matching its own generation, and it
-  only qualifies anchors the current turn already reached. Persisted by the hook next
-  to the continuation checkpoint, cleared on SessionStart, PreCompact and SessionEnd.
-- **D4 — `anchor` override yields `agent_choice` evidence.** The agent is the decider;
-  the override is refused for refs outside the index or withheld for the audience,
-  without naming the page (same guard as referents).
-- **D5 — Decision ledger reuses review-state.** Family `working_set`, refs
-  `exomem://review/working-set/<fingerprint>`, closed reason vocabulary, manual origin,
-  no due-state family, no emission. It is a ledger for the future verifier tier, not a
-  feedback loop into activation.
+  (activation index identity, registry hash, index generation, served anchor refs,
+  roles). The index identity is the sidecar's own identity token, so no new
+  vault-identity primitive is introduced. No secret: the server trusts nothing in it
+  beyond matching its own index identity and registry hash, re-validates every ref
+  against the current index, and only qualifies anchors the current turn already
+  reached. A newer generation of the same index does not invalidate it, because the
+  generation moves on every vault write and a token that died on every capture would
+  never be used. It is minted from the packet as served, after the egress guard, so
+  it cannot carry a withheld ref. Persisted by the hook next to the continuation
+  checkpoint, cleared on the lifecycle events each client delivers.
+- **D4 — `anchor` override yields `agent_choice` evidence.** The agent is the decider.
+  The server is stateless, so the override accepts any anchor ref in the index that
+  the audience may see rather than trying to prove the ref came from a previous
+  ambiguity block; unknown and withheld refs receive the same structured error and
+  neither names the page. The choice is not recorded: the operation stays read-only.
+- **D5 — Decision ledger deferred.** Review families in `review_state.py` are signal
+  families tied to due-state dispositions, and a ledger nobody consumes yet would
+  accrue nothing because no carrier asks the agent to record decisions. It moves to
+  `add-consolidation-dreamer` with its consumer.
+- **D7 — Ambiguity reaches the agent through the hook.** An `ambiguous` abstention is
+  the one abstention the hook renders: header, competing anchors' titles and refs,
+  and the instruction to call again with `anchor`. Without it the hook path could
+  never resolve an ambiguous turn, because the agent would never see the block.
+- **D8 — Cache keying.** A request with a token or an override is keyed on them (or
+  bypasses the packet cache), so it is never served another request's packet.
+- **D9 — Render ceiling.** The hook renders whole items only under
+  `EXOMEM_RETRIEVE_INJECT_MAX_CHARS` (default 4,000), current state first; one default
+  with an environment override, no per-prominence table.
 - **D6 — Carrier line lives in bootstrap generic guidance.** One sentence at balanced
   and maximal; the compact ceiling has 512 bytes of headroom warning, so the line is
   budgeted and asserted by the existing compact-budget test.
@@ -56,17 +73,15 @@ profile, any new prominence level, any change to `ask_memory` or to stub mode.
 - Injecting 4,000 characters on every substantive prompt is the context-abstinence
   trade the benchmark exists to measure; the mode stays off by default until the
   compiler is accepted.
-- The surface digest moves again for two optional arguments; landing in the same
-  release as `add-context-activation` avoids a second connector refresh.
+- The surface digest moves again for two optional arguments, so the connector needs
+  one more action-schema refresh after this release.
 
 ## Migration Plan
 
 Additive. Hook mode off by default; no vault migration; token absence is the normal
-first state. Depends on `add-context-activation` being merged; implementation
-rebases onto it.
+first state. `add-context-activation` is merged and this branch carries main.
 
 ## Open Questions
 
-- Whether the hook should honour `max_chars` from a preset per prominence level
-  (maximal 4,000, balanced 2,000) rather than one default.
-- Whether `agent_choice` should be recorded automatically in the `working_set` ledger.
+None. The two earlier questions are settled by D9 (one default, environment override)
+and D4 (an agent's choice is not recorded).

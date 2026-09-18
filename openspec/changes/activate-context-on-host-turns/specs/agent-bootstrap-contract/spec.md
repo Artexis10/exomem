@@ -7,8 +7,9 @@ At balanced and maximal prominence, the generic client workflow guidance served 
 bootstrap SHALL include one line instructing the agent to call `activate_context`
 with the user's turn before answering a substantive turn that has no prior
 conversation context, and to resolve a returned `ambiguous` packet by calling again
-with `anchor` set; at light and off it SHALL be absent. The line SHALL fit within
-the compact profile's byte ceiling and SHALL be byte-identical between the served
+with `anchor` set; at light and off it SHALL be absent. The line SHALL cost at most 220 bytes in the
+served JSON, SHALL leave the compact profile at least its 512-byte headroom warning
+margin under its byte ceiling and SHALL be byte-identical between the served
 projection and the shipped scaffold's recall loop.
 
 #### Scenario: Line present at maximal, absent at light

@@ -31,18 +31,16 @@ later verifier tier needs.
   own; a token from another vault, another registry hash or an older index generation
   is ignored and reported. The hook persists the token beside the continuation
   checkpoint keyed by client and session, and drops it on compaction or a new session.
-- A `working_set` review family records the agent's acceptance or rejection of a
-  packet's anchors through the existing triage surface with a closed reason
-  vocabulary, as a durable decision ledger and nothing else: no due-state counters,
-  no ranking effect, no policy effect.
+- The decision ledger first sketched here (a `working_set` review family) is deferred
+  to `add-consolidation-dreamer`, where its consumer lives: review families are signal
+  families tied to due-state, and a read-only operation must not write.
 - Non-goals: hosted-profile publication of the tool (a new profile decision), the hot
   profile, any server-side model, any change to `ask_memory`.
 
 ## Capabilities
 
 ### New Capabilities
-- `context-activation-continuity`: the continuity token, the `anchor` override, and
-  the `working_set` decision ledger.
+- `context-activation-continuity`: the continuity token and the `anchor` override.
 
 ### Modified Capabilities
 - `retrieve-inject-hook`: adds the working-set injection mode beside the existing
@@ -57,8 +55,8 @@ later verifier tier needs.
   documented), `exomem_continuation_checkpoint.py` (token persistence).
 - `src/exomem/commands.py` (`op_activate_context` arguments), `working_set_resolve.py`
   (`continuity` evidence, `anchor` override), `working_set_runtime.py` (token
-  encode/decode), `review_state.py` (family registration), bootstrap guidance text.
+  encode/decode, cache keying), bootstrap guidance text.
 - Tool-surface digests move again (two new optional arguments); schema fixture,
   capabilities and the pending connector digest regenerate; ideally lands in the same
   release as `add-context-activation` so the connector refreshes once.
-- Depends on `add-context-activation` (PR #1282) being merged first.
+- `add-context-activation` is merged (PR #1282); this change builds on main.
