@@ -65,7 +65,12 @@ Lexical comparison folds regular plurals on both sides (`posts`/`post`,
 ### 5. A title's leading name is a name
 A page titled `Bike (Trek 520, 2019)` is called "the bike". The index derives one short name per anchor
 from a title with a trailing parenthetical or a ` - `/` — ` qualifier, and admits it as an
-alias only if no other anchor's names include it. Uniqueness is recomputed at build, so a
+alias only if no other anchor's names include it and every term of it names at most
+`RARE_TERM_MAX_ANCHORS` anchors (counts taken before derived names are added). The
+second guard came from the real-vault run: one page titled with a product name, a dash
+and a subtopic took the bare product name as its alias although twenty other pages
+begin with the same word, and resolved alone for any turn naming the product.
+Uniqueness is recomputed at build, so a
 second bike page retires the short name and both fall back to lexical contact. Owners
 keep full control through frontmatter `aliases`.
 
@@ -82,11 +87,13 @@ technical name) arrive this way, as `partial` on `vector_band` or
 `retrieval`.
 
 ### 7. Instruments
-- Seeded corpus: one dense cluster (at least 20 interlinked pages, at least 6 of them
-  anchors) on the padded tree; `T10` a negative twin whose recall hits fall inside the
-  cluster; `T11` a turn whose only link to an anchor is a recall hit on the anchor's
-  neighbour; `C10` a one-word reference to a uniquely named resource. These land before
-  the fixture digest freezes.
+- Seeded probe corpus (`build_soundness_probe_corpus`), separate from the pre-registered
+  fixture set: one dense cluster (at least 20 interlinked pages, at least 6 of them
+  anchors); `T10` a negative twin whose recall hits fall inside the cluster; `T11` a
+  turn whose only link to an anchor is a recall hit on the anchor's neighbour; `C10` a
+  one-word reference to a uniquely named resource. It is scored against the real
+  resolver in its own test module. The pre-registered cases and the agent-arm module
+  are not changed.
 - `scripts/activation_real_turns.py --snapshot DIR --turns FILE`: runs each turn in one
   resident process after the recall index is built, prints per-turn status, anchors and
   evidence, and compares against expected anchor paths in the private file. Refuses a

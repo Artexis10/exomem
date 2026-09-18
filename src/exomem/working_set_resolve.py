@@ -21,12 +21,13 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from .ranking_config import DEFAULT_RANKING, RankingConfig
-from .working_set_index import normalize, tokens_of
+from .working_set_index import RARE_TERM_MAX_ANCHORS, fold_plural, normalize, tokens_of
 
 #: The closed evidence vocabulary. Order is the reporting order.
 EVIDENCE_KINDS: tuple[str, ...] = (
     "exact_alias",
     "lexical_overlap",
+    "rare_term",
     "vector_band",
     "category_match",
     "claims_match",
@@ -34,6 +35,10 @@ EVIDENCE_KINDS: tuple[str, ...] = (
     "graph_corroboration",
     "usage_prior",
 )
+
+#: `RARE_TERM_MAX_ANCHORS` lives in `working_set_index` (re-exported here):
+#: `_finalize_anchor_aliases`'s derived-short-name rarity gate needs it too,
+#: and that module has no dependency on this one.
 
 #: `usage_prior` is a tie-break only. It never contributes to the two-kinds
 #: rule, because "you looked at this a lot" is not evidence that this turn is
@@ -61,15 +66,30 @@ CUE_PATTERNS: Mapping[str, tuple[str, ...]] = {
     "precedent": ("last time", "before", "previously"),
 }
 
+#: Worded contact: the turn's OWN WORDS reached the anchor's own names, terms
+#: or claims. Two of these together (or one plus any other kind besides
+#: `usage_prior`) is independent evidence that the turn is about the anchor —
+#: words and a ranking engine agreeing is two facts. `rare_term` is the weak
+#: member: a single shared term rare enough to be a lead, never a decision by
+#: itself (see the three-clause rule in `_status_for`).
+WORDED_CONTACT_KINDS: frozenset[str] = frozenset(
+    {"exact_alias", "lexical_overlap", "claims_match", "rare_term"}
+)
+
+#: Retrieved contact: a RANKING ENGINE surfaced the anchor near the turn.
+#: `retrieval` and `vector_band` both restate "recall/vectors placed this
+#: nearby" — a ranking engine agreeing with itself is one fact, however many
+#: of these co-occur, and neither ever creates `graph_corroboration` on its
+#: own account either (see `add_graph_corroboration`).
+RETRIEVED_CONTACT_KINDS: frozenset[str] = frozenset({"retrieval", "vector_band"})
+
 #: Kinds that establish CONTACT between a turn and an anchor — the turn actually
 #: named it, claimed it, or retrieved it. `category_match` and `usage_prior` are
 #: qualifiers: they say something about an anchor already in contact, never that a
 #: turn is about one. Without this split, "how much is left?" matched the cue
 #: category `fact`, every page with a `## Summary` section carries `fact`, and the
 #: whole vault became a candidate on one cue.
-CONTACT_KINDS: frozenset[str] = frozenset(
-    {"exact_alias", "lexical_overlap", "vector_band", "claims_match", "retrieval"}
-)
+CONTACT_KINDS: frozenset[str] = WORDED_CONTACT_KINDS | RETRIEVED_CONTACT_KINDS
 
 #: Function words are dropped before the lexical band is measured. "the" shared
 #: between a turn and a title is not a reference; two content words are.
@@ -259,15 +279,25 @@ def candidates_for(
     routing_targets: Sequence[Any] = (),
     retrieval_paths: frozenset[str] = frozenset(),
     used_paths: frozenset[str] = frozenset(),
+    term_anchor_counts: Mapping[str, int] | None = None,
     config: RankingConfig | None = None,
 ) -> tuple[CandidateFacts, ...]:
-    """Assemble categorical evidence for every anchor this turn can reach."""
+    """Assemble categorical evidence for every anchor this turn can reach.
+
+    `term_anchor_counts` is the index's title/alias term -> anchor-count table
+    (`WorkingSetIndex.term_anchor_counts()`), the structure `rare_term`'s
+    rarity check is measured against. Absent (`None`) simply means no anchor
+    can earn `rare_term` this call — never a fabricated rarity.
+    """
     config = config or DEFAULT_RANKING
+    term_counts = term_anchor_counts or {}
     turn_terms = frozenset(analysis.tokens) - _STOPWORDS
+    turn_terms_folded = frozenset(fold_plural(term) for term in turn_terms)
     phrases = frozenset(analysis.ngrams) | frozenset(analysis.tokens)
     cue_categories = analysis.cue_categories
     claims_winner = _claims_winner(analysis, routing_targets)
     bands = _vector_bands(rows, vectors, query_vector, config) if query_vector is not None else {}
+    min_terms = max(1, int(config.working_set_lexical_min_terms))
 
     out: list[CandidateFacts] = []
     for row in rows:
@@ -275,16 +305,25 @@ def candidates_for(
         names = {normalize(row.title), *row.aliases} - {""}
         if names & phrases:
             evidence.add("exact_alias")
-        shared = turn_terms & frozenset(row.terms)
-        if len(shared) >= max(1, int(config.working_set_lexical_min_terms)):
+        row_terms_folded = frozenset(fold_plural(term) for term in row.terms)
+        shared = turn_terms_folded & row_terms_folded
+        if len(shared) >= min_terms:
             evidence.add("lexical_overlap")
+        elif len(shared) == 1:
+            (term,) = shared
+            count = term_counts.get(term)
+            if count is not None and count <= RARE_TERM_MAX_ANCHORS:
+                evidence.add("rare_term")
         if bands.get(row.anchor_id):
             evidence.add("vector_band")
         if claims_winner is not None and claims_winner == row.path:
             evidence.add("claims_match")
+        # The anchor's OWN page, never a page in its neighbourhood: recall
+        # returns hits for every turn, and a hub or a person links dozens of
+        # pages, so a neighbour hit is not the turn reaching the anchor —
+        # it is corroborated instead, and only from a WORDED partner (see
+        # `add_graph_corroboration`).
         if row.path and row.path in retrieval_paths:
-            evidence.add("retrieval")
-        elif row.neighbourhood & retrieval_paths:
             evidence.add("retrieval")
         # Qualifiers, applied only to an anchor the turn already reached. An
         # anchor with no contact kind is not a candidate at all.
@@ -367,13 +406,22 @@ def add_graph_corroboration(
     *,
     retrieval_paths: frozenset[str] = frozenset(),
 ) -> tuple[CandidateFacts, ...]:
-    """Add `graph_corroboration` to every candidate typed-linked to another one.
+    """Add `graph_corroboration` to a candidate linked to an INDEPENDENTLY
+    reached partner — one that carries a worded contact kind.
 
     The find lane discards graph corroboration for pages already in its primary
     set, because there it would double-count one page's own retrieval signal.
     Here the signal is about a DIFFERENT fact — that two candidates the turn
     reached are connected — so the discard would throw away the only evidence
     that distinguishes a coherent neighbourhood from two coincidences.
+
+    "Independently reached" is the qualifier a link alone cannot supply: two
+    candidates admitted through retrieved contact ALONE are linked by
+    construction whenever they share a neighbourhood (a hub's own recall hit
+    plus its members' hits, say), so a link between them restates the same
+    ranking-engine fact rather than adding a second one. A partner that
+    carries a worded contact kind — the turn's own words reached it — is the
+    independent fact a link can legitimately corroborate.
     `retrieval_paths` is accepted so that intent is explicit at the call site.
     """
     del retrieval_paths  # deliberately unused: see the docstring.
@@ -382,12 +430,11 @@ def add_graph_corroboration(
         for other in candidates:
             if other.anchor_id == item.anchor_id:
                 continue
-            if other.path and other.path in item.neighbourhood:
+            linked = (other.path and other.path in item.neighbourhood) or (
+                item.path and item.path in other.neighbourhood
+            )
+            if linked and (other.evidence & WORDED_CONTACT_KINDS):
                 corroborated.add(item.anchor_id)
-                corroborated.add(other.anchor_id)
-            elif item.path and item.path in other.neighbourhood:
-                corroborated.add(item.anchor_id)
-                corroborated.add(other.anchor_id)
     return tuple(
         replace(item, evidence=item.evidence | {"graph_corroboration"})
         if item.anchor_id in corroborated
@@ -416,10 +463,24 @@ def _candidate_order(candidate: CandidateFacts) -> tuple:
 
 
 def _status_for(candidate: CandidateFacts) -> str:
+    """The three-clause soundness rule (design.md decision 1).
+
+    `resolved` iff: `exact_alias`; or `lexical_overlap`/`claims_match` plus at
+    least one other kind besides `usage_prior` (a qualifier is enough — the
+    turn's own words already reached the anchor); or `rare_term` plus at
+    least one other CONTACT kind specifically (a qualifier alone is not
+    enough — the weak worded kind needs a second, independent fact, not
+    merely a strengthener of itself). Retrieved contact alone, however many
+    retrieved kinds and qualifiers co-occur, is never more than `partial`.
+    """
     deciding = candidate.deciding_kinds
-    if "exact_alias" in deciding or len(deciding) >= 2:
+    if "exact_alias" in deciding:
         return "resolved"
-    if len(deciding) == 1:
+    if deciding & {"lexical_overlap", "claims_match"} and len(deciding) >= 2:
+        return "resolved"
+    if "rare_term" in deciding and (deciding & CONTACT_KINDS) - {"rare_term"}:
+        return "resolved"
+    if deciding:
         return "partial"
     return "unresolved"
 

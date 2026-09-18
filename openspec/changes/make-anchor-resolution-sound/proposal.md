@@ -52,13 +52,17 @@ words and compares unfolded tokens.
   next call.
 - **A title's leading name is a name.** The index derives a short name from a title
   that carries a parenthetical or dash qualifier (`Bike (Trek 520, 2019)` → `bike`) and
-  treats it as an alias only while it is unique in the catalogue.
+  treats it as an alias only while it is unique in the catalogue and every word of it
+  is rare there by the `rare_term` measure, so a topic prefix shared by twenty pages
+  never becomes one page's name.
 - **Uncertain turns go to the agent.** An `unresolved` abstention keeps listing its
   `partial` candidates, so the agent can choose one with the `anchor` override from
   `activate-context-on-host-turns`. The server measures; the agent decides.
-- **The benchmark can see this class.** The seeded corpus gains a dense cluster, a
-  negative twin on it, a recall-neighbour twin and a one-word-reference case, before the
-  fixture digest freezes.
+- **CI can see this class.** A seeded dense-cluster corpus with a negative twin, a
+  recall-neighbour twin and a one-word-reference case runs against the real resolver as
+  a standalone check. The pre-registered fixture set and the agent-arm module are left
+  untouched: the owner has ruled out the paid agent-arm run, so widening its case count
+  would buy nothing.
 - **A local real-vault check.** A script runs a private, never-committed list of turns
   with expected anchors against a vault snapshot and reports per-turn resolution. Its
   results are the acceptance evidence for this change and stay in the owner's knowledge

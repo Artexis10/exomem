@@ -206,7 +206,15 @@ def test_claims_match_delegates_to_collection_claims_route(monkeypatch) -> None:
     assert "claims_match" in candidates[0].evidence
 
 
-def test_retrieval_evidence_comes_from_a_fused_hit_or_its_neighbour() -> None:
+def test_retrieval_evidence_comes_from_the_anchors_own_page_only() -> None:
+    """A recall hit near an anchor is not contact (canonical spec scenario).
+
+    The neighbourhood clause is gone: `retrieval` is granted only when the
+    anchor's OWN page is among recall's hits. On a dense vault a hub links
+    dozens of pages, and hybrid recall returns hits for every turn, so the
+    removed clause reached every hub for every turn — the mechanism behind
+    the real-vault false activation this change fixes.
+    """
     rows = (
         resolve_module.AnchorFacts(
             anchor_id="hub",
@@ -221,14 +229,16 @@ def test_retrieval_evidence_comes_from_a_fused_hit_or_its_neighbour() -> None:
             neighbourhood=frozenset({"note.md"}),
         ),
     )
-    analysis = resolve_module.analyze_turn("corridor")
+    analysis = resolve_module.analyze_turn("something else entirely")
     direct = resolve_module.candidates_for(analysis, rows, retrieval_paths=frozenset({"hub.md"}))
     via_link = resolve_module.candidates_for(
         analysis, rows, retrieval_paths=frozenset({"note.md"})
     )
 
     assert "retrieval" in direct[0].evidence
-    assert "retrieval" in via_link[0].evidence
+    # The hub is not a candidate at all on account of a neighbour's hit: it
+    # carries no contact kind, so it never enters the candidate list.
+    assert via_link == ()
 
 
 def test_category_match_comes_from_turn_cues() -> None:
@@ -287,6 +297,151 @@ def test_graph_corroboration_counts_an_edge_between_two_candidates() -> None:
     )
 
     assert all("graph_corroboration" in item.evidence for item in corroborated)
+
+
+def test_corroboration_needs_an_independently_reached_partner() -> None:
+    """Two candidates admitted through retrieved contact only never corroborate.
+
+    They are linked by construction whenever they share a neighbourhood a
+    hybrid recall run would surface, so a link between them restates the same
+    ranking-engine fact rather than adding a second one.
+    """
+    left = _facts("left.md", evidence=("retrieval",), neighbourhood=("right.md",))
+    right = _facts("right.md", evidence=("vector_band",), neighbourhood=("left.md",))
+
+    corroborated = resolve_module.add_graph_corroboration((left, right))
+
+    assert all("graph_corroboration" not in item.evidence for item in corroborated)
+
+
+def test_corroboration_from_a_worded_partner_is_granted_but_does_not_alone_resolve() -> None:
+    """A retrieval-only candidate linked to a worded partner gets the qualifier,
+    but two non-worded kinds still never resolve it (canonical spec: "Retrieved
+    evidence alone never resolves").
+    """
+    worded = _facts("worded.md", evidence=("lexical_overlap",), neighbourhood=("retrieved.md",))
+    retrieved_only = _facts(
+        "retrieved.md", evidence=("retrieval", "vector_band"), neighbourhood=("worded.md",)
+    )
+
+    corroborated = resolve_module.add_graph_corroboration((worded, retrieved_only))
+    by_id = {item.anchor_id: item for item in corroborated}
+
+    assert "graph_corroboration" in by_id["retrieved.md"].evidence
+    resolution = resolve_module.resolve(corroborated)
+    retrieved_anchor = next(a for a in resolution.anchors if a.anchor_id == "retrieved.md")
+    assert retrieved_anchor.status == "partial"
+
+
+def test_retrieved_evidence_alone_never_resolves_however_many_kinds_stack() -> None:
+    """Canonical spec scenario "Retrieved evidence alone never resolves": own
+    page a recall hit, vector band, typed-linked (so `graph_corroboration` from
+    a worded partner), and a matching turn cue -- still `partial`.
+    """
+    resolution = resolve_module.resolve(
+        (
+            _facts(
+                "a",
+                evidence=("retrieval", "vector_band", "category_match", "graph_corroboration"),
+            ),
+        )
+    )
+
+    assert resolution.anchors[0].status == "partial"
+    assert resolution.status == "unresolved"
+
+
+# --------------------------------------------------------------------------- #
+# rare_term and folded lexical comparison (task 3)
+# --------------------------------------------------------------------------- #
+
+
+def _term_row(
+    path: str,
+    title: str,
+    *,
+    terms: tuple[str, ...],
+    aliases: tuple[str, ...] = (),
+) -> resolve_module.AnchorFacts:
+    return resolve_module.AnchorFacts(
+        anchor_id=path,
+        path=path,
+        ref=None,
+        title=title,
+        kind="resource",
+        lifecycle="active",
+        aliases=aliases,
+        terms=terms,
+        categories=("constraint",),
+        neighbourhood=frozenset(),
+    )
+
+
+def test_a_rare_shared_term_is_a_weak_worded_contact() -> None:
+    row = _term_row("bench.md", "Workshop bench", terms=("workshop", "bench"))
+    analysis = resolve_module.analyze_turn("is the bench free")
+    candidates = resolve_module.candidates_for(
+        analysis, (row,), term_anchor_counts={"bench": 1}
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].evidence == frozenset({"rare_term"})
+
+
+def test_a_common_shared_term_is_neither_rare_term_nor_lexical_overlap() -> None:
+    row = _term_row("bench.md", "Workshop bench", terms=("workshop", "bench"))
+    analysis = resolve_module.analyze_turn("is the bench free")
+    candidates = resolve_module.candidates_for(
+        analysis, (row,), term_anchor_counts={"bench": 4}
+    )
+
+    assert candidates == ()
+
+
+def test_rare_term_alone_is_partial() -> None:
+    resolution = resolve_module.resolve((_facts("a", evidence=("rare_term",)),))
+
+    assert resolution.anchors[0].status == "partial"
+    assert resolution.status == "unresolved"
+
+
+def test_rare_term_with_a_qualifier_only_is_partial() -> None:
+    """Canonical spec: "A rare word and a turn cue are not enough."""
+    resolution = resolve_module.resolve(
+        (_facts("a", evidence=("rare_term", "category_match")),)
+    )
+
+    assert resolution.anchors[0].status == "partial"
+    assert resolution.status == "unresolved"
+
+
+def test_rare_term_with_another_contact_kind_resolves() -> None:
+    """Canonical spec: "A rare word and the anchor's own page in recall resolve"."""
+    resolution = resolve_module.resolve(
+        (_facts("a", evidence=("rare_term", "retrieval")),)
+    )
+
+    assert resolution.anchors[0].status == "resolved"
+    assert resolution.anchors[0].evidence == ("rare_term", "retrieval")
+
+
+def test_lexical_comparison_folds_regular_plurals() -> None:
+    """Canonical spec: "Plural and singular agree"."""
+    row = _term_row(
+        "posts.md", "Post collection", terms=("post", "collection")
+    )
+    analysis = resolve_module.analyze_turn("what about the old posts collection")
+    candidates = resolve_module.candidates_for(analysis, (row,))
+
+    assert "lexical_overlap" in candidates[0].evidence
+
+
+def test_lexical_comparison_folds_ies_plurals() -> None:
+    row = _term_row("batteries.md", "Spare battery box", terms=("battery", "box"))
+    analysis = resolve_module.analyze_turn("where are the spare batteries box")
+    candidates = resolve_module.candidates_for(analysis, (row,))
+
+    assert "lexical_overlap" in candidates[0].evidence
 
 
 # --------------------------------------------------------------------------- #
@@ -495,6 +650,7 @@ def test_evidence_vocabulary_is_closed() -> None:
     assert resolve_module.EVIDENCE_KINDS == (
         "exact_alias",
         "lexical_overlap",
+        "rare_term",
         "vector_band",
         "category_match",
         "claims_match",

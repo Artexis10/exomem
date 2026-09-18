@@ -51,7 +51,12 @@ log = logging.getLogger(__name__)
 #: v4 added frontmatter `aliases` to the indexed spellings: `[[Dossier]]` is a
 #: working vault link, so a name map without it left an alias-spelled reference
 #: unresolvable and therefore undecidable.
-SCHEMA_VERSION = 4
+#: v5 (`make-anchor-resolution-sound`) added the title/alias term->anchor-count
+#: table `rare_term` rarity is measured against, and derived short names (a
+#: title's leading name before a trailing parenthetical or dash qualifier) as
+#: aliases while unique in the catalogue: an index without either cannot tell a
+#: rare word from a common one or resolve a natural short reference at all.
+SCHEMA_VERSION = 5
 SIDECAR_NAME = ".working-set.sqlite"
 DISABLE_ENV = "EXOMEM_DISABLE_WORKING_SET"
 _TRUE = frozenset({"1", "true", "yes", "on"})
@@ -160,6 +165,58 @@ def tokens_of(text: str) -> tuple[str, ...]:
 def terms_of(text: str) -> tuple[str, ...]:
     """Deterministic lexical terms: NFKC-casefolded word tokens, deduplicated."""
     return tuple(dict.fromkeys(tokens_of(text)))
+
+
+#: A shared term this rare in the catalogue's title/alias vocabulary is a weak
+#: worded contact on its own account (`working_set_resolve.rare_term`), and a
+#: derived short name whose OWN terms are this rare is a genuine identifying
+#: name rather than a common topic prefix (see `_derived_name_is_rare`).
+#: Lives here, not in `working_set_resolve`, because both the resolver and
+#: `_finalize_anchor_aliases` need it and this module has no dependency on
+#: the resolver. Shipped default, judged against one vault (design.md: 622 of
+#: 650 title terms there name at most three anchors) — moves into the
+#: vault-owned conventions registry with `make-activation-conventions-vault-owned`.
+RARE_TERM_MAX_ANCHORS = 3
+
+
+def fold_plural(term: str) -> str:
+    """Fold a regular plural to the same canonical spelling as its singular.
+
+    Approximate on purpose: a table of every English exception would be a
+    second grammar engine, and the resolver only needs a turn's "posts" and an
+    anchor's "post" to land on one canonical form for lexical comparison, not a
+    linguistically perfect lemma. `exact_alias` is never folded — it compares
+    the turn's own phrases against the anchor's own names verbatim.
+    """
+    if len(term) > 4 and term.endswith("ies"):
+        return term[:-3] + "y"
+    if len(term) > 3 and term.endswith("es"):
+        return term[:-2]
+    if len(term) > 2 and term.endswith("s") and not term.endswith("ss"):
+        return term[:-1]
+    return term
+
+
+#: A title's leading name before a trailing parenthetical (`Bike (Trek 520,
+#: 2019)`) or a dash qualifier (`Bike - Trek 520`, `Bike — Trek 520`). Matched
+#: on the title's own casing; normalised by the caller.
+_TRAILING_PAREN = re.compile(r"^(?P<name>.+?)\s*\([^()]*\)\s*$")
+_TRAILING_DASH = re.compile(r"^(?P<name>.+?)\s+[-–—]\s+\S.*$")
+
+
+def derived_short_name(title: str) -> str | None:
+    """The leading name of a title carrying a trailing qualifier, or `None`.
+
+    Structural extraction, not an inference: a title with no such qualifier
+    derives nothing. Uniqueness across the anchor set is the caller's job (see
+    `_page_candidates`) — this function only ever looks at one title.
+    """
+    stripped = str(title).strip()
+    match = _TRAILING_PAREN.match(stripped) or _TRAILING_DASH.match(stripped)
+    if match is None:
+        return None
+    name = match.group("name").strip()
+    return name or None
 
 
 class WorkingSetIndexUnavailable(RuntimeError):
@@ -317,16 +374,27 @@ def _source_signature(path: Path) -> str:
 
 def _page_candidates(
     vault_root: Path,
-) -> tuple[list[_Candidate], dict[str, tuple[str, ...]], dict[str, list[str]]]:
+) -> tuple[
+    list[_Candidate], dict[str, tuple[str, ...]], dict[str, list[str]], dict[str, set[str]]
+]:
     """Walk the knowledge base once: anchor pages, wikilink edges, and a name map.
 
     The name map is one name to MANY paths: `normalize()` folds case and Unicode
     form, so distinct pages can share a spelling, and collapsing them would hide
     every page but one from both edge resolution and the egress guard.
+
+    Anchor aliases are finalised in a second pass over the walked anchors only
+    (`_finalize_anchor_aliases`), after every anchor's own title/alias names
+    are known: a derived short name (`Bike (Trek 520, 2019)` -> `bike`) is
+    only an alias while unique across the anchor set AND its own terms are
+    rare in the authored title/alias vocabulary, and neither can be decided
+    from one page in isolation. The fourth return value is that same
+    authored-only term ownership, for the caller to fold into the persisted
+    term-count table (`WorkingSetIndex._collect`).
     """
     from . import recall_policy
 
-    candidates: list[_Candidate] = []
+    raw: list[dict[str, Any]] = []
     outbound: dict[str, tuple[str, ...]] = {}
     names: dict[str, list[str]] = {}
     kb = kb_dirname()
@@ -377,23 +445,132 @@ def _page_candidates(
         aliases = tuple(
             dict.fromkeys(normalize(alias) for alias in _strings(frontmatter.get("aliases")))
         )
-        signature = _signature(title, page.body)
+        raw.append(
+            {
+                "anchor_id": rel,
+                "path": rel,
+                "ref": _page_ref(frontmatter),
+                "title": title,
+                "kind": kind,
+                "lifecycle": normalize(frontmatter.get("status") or "active") or "active",
+                "aliases": aliases,
+                "sections": sections,
+                "tags": tags,
+                "body": page.body,
+                "source_signature": _source_signature(path),
+            }
+        )
+    candidates, term_owners = _finalize_anchor_aliases(raw)
+    return candidates, outbound, names, term_owners
+
+
+def _title_alias_term_owners(
+    entries: Iterable[tuple[str, str, Sequence[str]]],
+) -> dict[str, set[str]]:
+    """`(anchor_id, title, aliases)` triples -> folded term -> owning anchor ids.
+
+    Title and alias terms ONLY, folded the same way lexical comparison folds a
+    turn's terms — never the broader `terms` field (which also folds in
+    section names and tags). Shared by the persisted `term_anchor_counts`
+    table and the derived-short-name rarity gate below, so both measure
+    rarity identically.
+    """
+    owners: dict[str, set[str]] = {}
+    for anchor_id, title, aliases in entries:
+        own_terms = frozenset(fold_plural(term) for term in tokens_of(" ".join((title, *aliases))))
+        for term in own_terms:
+            owners.setdefault(term, set()).add(anchor_id)
+    return owners
+
+
+def _derived_name_is_rare(name: str, term_owners: Mapping[str, set[str]]) -> bool:
+    """Every term of a derived short name must be rare in the AUTHORED
+    title/alias vocabulary, not merely textually unique.
+
+    A dash- or parenthetical-qualified title whose leading words are a common
+    TOPIC PREFIX — twenty pages titled "Atlas Strategy", "Atlas Roadmap", ...
+    plus one titled "Atlas — Agentic Search" — derives "Atlas" as a name no
+    other anchor's names literally include, yet the word identifies twenty
+    anchors, not one. Measured the same way `rare_term` measures a shared
+    turn word's rarity (`RARE_TERM_MAX_ANCHORS`), over the SAME authored-only
+    counts, so a name is only ever admitted when it is genuinely rare by that
+    one shared yardstick.
+    """
+    terms = frozenset(fold_plural(term) for term in tokens_of(name))
+    if not terms:
+        return False
+    return all(len(term_owners.get(term, ())) <= RARE_TERM_MAX_ANCHORS for term in terms)
+
+
+def _finalize_anchor_aliases(
+    raw: Sequence[Mapping[str, Any]],
+) -> tuple[list[_Candidate], dict[str, set[str]]]:
+    """Build every anchor's `_Candidate`, adding a derived short name as an
+    alias only while BOTH hold: no other anchor's names — title, alias, or
+    own derived short name — include it, AND every one of its own terms is
+    rare in the authored title/alias vocabulary (`_derived_name_is_rare`).
+
+    One pass to collect who owns which name, a second to decide: a name is
+    "owned" by more than one anchor either because two anchors are genuinely
+    titled or aliased alike, or because two anchors independently derive the
+    same short name (a second `Bike (...)` page retires the alias for both).
+    Either way the alias is withheld from all of them, never awarded to
+    whichever anchor happened to be walked first.
+
+    The rarity gate is measured against `term_owners` — computed here, from
+    `raw` alone, BEFORE any derived name exists — and returned alongside the
+    candidates so the caller can fold it into the persisted term-count table
+    unchanged: a derived alias must never be able to inflate the very count
+    that gated its own admission, or any other anchor's.
+    """
+    name_owners: dict[str, set[str]] = {}
+    for entry in raw:
+        for name in (entry["title"], *entry["aliases"]):
+            key = normalize(name)
+            if key:
+                name_owners.setdefault(key, set()).add(entry["anchor_id"])
+
+    term_owners = _title_alias_term_owners(
+        (entry["anchor_id"], entry["title"], entry["aliases"]) for entry in raw
+    )
+
+    derived_key_by_anchor: dict[str, str] = {}
+    for entry in raw:
+        derived = derived_short_name(entry["title"])
+        key = normalize(derived) if derived else ""
+        if key:
+            derived_key_by_anchor[entry["anchor_id"]] = key
+            name_owners.setdefault(key, set()).add(entry["anchor_id"])
+
+    candidates: list[_Candidate] = []
+    for entry in raw:
+        aliases = tuple(entry["aliases"])
+        key = derived_key_by_anchor.get(entry["anchor_id"])
+        if (
+            key is not None
+            and name_owners.get(key) == {entry["anchor_id"]}
+            and _derived_name_is_rare(key, term_owners)
+        ):
+            aliases = (*aliases, key)
+        title = str(entry["title"])
+        sections = entry["sections"]
+        tags = entry["tags"]
         candidates.append(
             _Candidate(
-                anchor_id=rel,
-                path=rel,
-                ref=_page_ref(frontmatter),
+                anchor_id=entry["anchor_id"],
+                path=entry["path"],
+                ref=entry["ref"],
                 title=title,
-                kind=kind,
-                lifecycle=normalize(frontmatter.get("status") or "active") or "active",
-                signature=signature,
+                kind=entry["kind"],
+                lifecycle=entry["lifecycle"],
+                signature=_signature(title, entry["body"]),
                 aliases=aliases,
                 terms=terms_of(" ".join((title, *aliases, *sections, *tags))),
                 categories=_categories(sections, tags),
-                source_signature=_source_signature(path),
+                source_signature=entry["source_signature"],
             )
         )
-    return candidates, outbound, names
+    return candidates, term_owners
 
 
 def _page_anchor_kind(rel: str, frontmatter: Mapping[str, Any], *, kb: str) -> str | None:
@@ -690,6 +867,14 @@ class WorkingSetIndex:
             "CREATE TABLE IF NOT EXISTS anchor_term_rows "
             "(anchor_id TEXT NOT NULL, term TEXT NOT NULL, PRIMARY KEY (anchor_id, term))"
         )
+        # v5: how many anchors' OWN title/alias names a normalised, folded term
+        # — never the broader `terms` (which also folds in sections and tags).
+        # This is the structural count `rare_term` measures rarity against; it
+        # is never a relevance score and never leaves the server.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS term_anchor_counts "
+            "(term TEXT PRIMARY KEY, anchor_count INTEGER NOT NULL)"
+        )
         # `meta` is integer-valued by the shared sidecar contract, and the
         # freshness key the index was built at is text. A second, text-valued
         # table keeps the shared token table exactly as every other sidecar
@@ -741,6 +926,7 @@ class WorkingSetIndex:
             "anchor_vectors",
             "anchor_term_rows",
             "page_names",
+            "term_anchor_counts",
             "index_meta",
         ):
             conn.execute(f"DELETE FROM {table}")
@@ -896,6 +1082,23 @@ class WorkingSetIndex:
             )
         return tuple(out)
 
+    def term_anchor_counts(self) -> dict[str, int]:
+        """How many anchors' own title/alias names each folded term, by term.
+
+        Read fresh from the sidecar rather than cached: it is small (bounded by
+        the anchor set's distinct title/alias vocabulary) and read once per
+        `activate_context` call, unlike `anchors()`, which every candidate-
+        generation pass over every row would otherwise re-query per row.
+        """
+        conn = self._connect()
+        if conn is None:
+            return {}
+        try:
+            rows = conn.execute("SELECT term, anchor_count FROM term_anchor_counts").fetchall()
+        except sqlite3.Error:
+            return {}
+        return {str(term): int(count) for term, count in rows}
+
     def vectors(self) -> dict[str, Any]:
         """Signature embeddings, or `{}` when the backend produced none."""
         conn = self._connect()
@@ -927,7 +1130,7 @@ class WorkingSetIndex:
         conn = self._connect()
         if conn is None:
             return {"anchors": 0, "generation": 0, "unavailable": True}
-        candidates, edges, page_names = self._collect()
+        candidates, edges, page_names, term_counts = self._collect()
         existing = {
             anchor_id: signature
             for anchor_id, signature in conn.execute(
@@ -968,6 +1171,7 @@ class WorkingSetIndex:
                 "anchor_vectors",
                 "anchor_term_rows",
                 "page_names",
+                "term_anchor_counts",
             ):
                 conn.execute(f"DELETE FROM {table}")
             self._delete_fts(conn)
@@ -1012,6 +1216,10 @@ class WorkingSetIndex:
                     for name, paths in page_names.items()
                     for path in paths
                 ),
+            )
+            conn.executemany(
+                "INSERT OR REPLACE INTO term_anchor_counts (term, anchor_count) VALUES (?, ?)",
+                sorted(term_counts.items()),
             )
             for anchor_id, rows in edges.items():
                 if anchor_id not in wanted:
@@ -1081,9 +1289,12 @@ class WorkingSetIndex:
     def _collect(
         self,
     ) -> tuple[
-        list[_Candidate], dict[str, list[tuple[str, str, str]]], dict[str, list[str]]
+        list[_Candidate],
+        dict[str, list[tuple[str, str, str]]],
+        dict[str, list[str]],
+        dict[str, int],
     ]:
-        pages, outbound, names = _page_candidates(self.vault_root)
+        pages, outbound, names, page_term_owners = _page_candidates(self.vault_root)
         records, plans = _collection_candidates(self.vault_root)
         projects = _project_candidates(self.vault_root)
         candidates = [*pages, *records, *plans, *projects][:MAX_ANCHORS]
@@ -1094,7 +1305,21 @@ class WorkingSetIndex:
         }
         edges = _resolve_links(outbound, names, anchor_paths)
         candidates.sort(key=lambda candidate: candidate.anchor_id)
-        return candidates, edges, names
+        # The persisted term-count table, over the SAME candidates that made
+        # it past the `MAX_ANCHORS` cap: page terms are already computed
+        # (`page_term_owners`, authored-only, from `_finalize_anchor_aliases`);
+        # Records/Planning/project candidates are never subject to derived
+        # names at all, so their own `.title`/`.aliases` are authored-only by
+        # construction and can be folded in directly.
+        page_ids = {candidate.anchor_id for candidate in pages}
+        term_owners = {term: set(ids) for term, ids in page_term_owners.items()}
+        non_page = [c for c in candidates if c.anchor_id not in page_ids]
+        for term, ids in _title_alias_term_owners(
+            (c.anchor_id, c.title, c.aliases) for c in non_page
+        ).items():
+            term_owners.setdefault(term, set()).update(ids)
+        term_counts = {term: len(ids) for term, ids in term_owners.items()}
+        return candidates, edges, names, term_counts
 
 
 def _signature_vectors(candidates: Iterable[_Candidate]) -> dict[str, bytes]:

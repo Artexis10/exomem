@@ -2,9 +2,10 @@
 
 - [ ] 1.1 `scripts/activation_real_turns.py` with the repository-refusal guard; unit tests
       on a temp vault. Record the owner's before-image on the current resolver (private).
-- [ ] 1.2 Seeded corpus: dense cluster, `T10`, `T11`, `C10`. Red first: on the current
-      resolver `T10` and `T11` must FAIL (false activation) and `C10` must fail to
-      resolve. If any passes, the fixture does not reproduce the defect; fix the fixture.
+- [ ] 1.2 Seeded probe corpus, standalone from the pre-registered fixtures: dense
+      cluster, `T10`, `T11`, `C10`. Red first: on the current resolver `T10` and `T11`
+      must FAIL (false activation) and `C10` must fail to resolve. If any passes, the
+      corpus does not reproduce the defect; fix the corpus.
 
 ## 2. Soundness
 
@@ -25,8 +26,8 @@
 
 ## 4. Proof
 
-- [ ] 4.1 Seeded audit green including `T10`, `T11`, `C10`; every existing case stays
-      inside its pre-registered bounds or the change is reported with the numbers.
+- [ ] 4.1 Probe corpus green on `T10`, `T11`, `C10`; every pre-registered case stays
+      inside its bounds or the change is reported with the numbers.
 - [ ] 4.2 Real-turn run on the owner's snapshot: every negative turn abstains, no anchor
       is served without a worded contact or `exact_alias`, and the listed references
       reach their anchors as `resolved` or as a listed `partial`. Evidence to the

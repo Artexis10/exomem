@@ -39,7 +39,8 @@ measured when the index is built and SHALL never leave the server. Turn tokens S
 repetitions for n-gram construction so that two anchors sharing a word in their names
 can both receive `exact_alias` from one turn. The index SHALL derive one short name
 from an anchor title that carries a trailing parenthetical or dash qualifier and SHALL
-treat it as an alias only while no other anchor's names include it. `usage_prior` SHALL
+treat it as an alias only while no other anchor's names include it and every term of it
+is within the rare-term threshold, measured before derived names are added. `usage_prior` SHALL
 only break ties between otherwise equal candidates and SHALL never contribute to the
 two-kinds rule. `claims_match` SHALL be computed with the existing collection-claims
 routing.
@@ -133,3 +134,10 @@ routing.
 - **WHEN** a turn reaches anchors by retrieved contact only
 - **THEN** the packet abstains as `unresolved`, serves no units or pointers, and lists
   those anchors as `partial` with their evidence kinds
+
+#### Scenario: A shared topic prefix is nobody's name
+- **WHEN** one anchor is titled with a leading word, a dash and a subtopic, and that
+  leading word occurs among the title and alias terms of more anchors than the
+  rare-term threshold
+- **THEN** no short name is derived for it and a turn using the word does not give it
+  `exact_alias`

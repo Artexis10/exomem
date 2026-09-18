@@ -714,6 +714,7 @@ def compile_packet(
             retrieval_paths=retrieval_paths,
             routing_targets=_routing_targets(root),
             used_paths=_used_paths(root, rows),
+            term_anchor_counts=index.term_anchor_counts(),
         )
         candidates = working_set_resolve.add_graph_corroboration(
             candidates, retrieval_paths=retrieval_paths
