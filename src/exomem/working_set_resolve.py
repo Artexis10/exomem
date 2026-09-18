@@ -33,12 +33,20 @@ EVIDENCE_KINDS: tuple[str, ...] = (
     "retrieval",
     "graph_corroboration",
     "usage_prior",
+    "continuity",
+    "agent_choice",
 )
 
 #: `usage_prior` is a tie-break only. It never contributes to the two-kinds
 #: rule, because "you looked at this a lot" is not evidence that this turn is
 #: about it — that is how a rich-get-richer prior turns into a wrong anchor.
 TIE_BREAK_KINDS: frozenset[str] = frozenset({"usage_prior"})
+
+#: Kinds that resolve an anchor by themselves. `exact_alias` because the turn
+#: spelled the anchor's own name; `agent_choice` because the agent IS the
+#: decider of an ambiguous turn and the server has nothing to add to a decision
+#: already taken. Every other kind needs a second one.
+DECIDING_ALONE_KINDS: frozenset[str] = frozenset({"exact_alias", "agent_choice"})
 
 ANCHOR_STATUSES: tuple[str, ...] = ("resolved", "partial", "unresolved")
 TURN_STATUSES: tuple[str, ...] = ("resolved", "ambiguous", "unresolved")
@@ -62,11 +70,11 @@ CUE_PATTERNS: Mapping[str, tuple[str, ...]] = {
 }
 
 #: Kinds that establish CONTACT between a turn and an anchor — the turn actually
-#: named it, claimed it, or retrieved it. `category_match` and `usage_prior` are
-#: qualifiers: they say something about an anchor already in contact, never that a
-#: turn is about one. Without this split, "how much is left?" matched the cue
-#: category `fact`, every page with a `## Summary` section carries `fact`, and the
-#: whole vault became a candidate on one cue.
+#: named it, claimed it, or retrieved it. `category_match`, `usage_prior` and
+#: `continuity` are qualifiers: they say something about an anchor already in
+#: contact, never that a turn is about one. Without this split, "how much is
+#: left?" matched the cue category `fact`, every page with a `## Summary` section
+#: carries `fact`, and the whole vault became a candidate on one cue.
 CONTACT_KINDS: frozenset[str] = frozenset(
     {"exact_alias", "lexical_overlap", "vector_band", "claims_match", "retrieval"}
 )
@@ -396,6 +404,76 @@ def add_graph_corroboration(
     )
 
 
+def anchor_ref(row: Any) -> str:
+    """The ref a packet reports for a row — the SAME expression `as_dict` uses.
+
+    Continuity and the override both name anchors the way a previous packet
+    spelled them, so the comparison has to be made against that spelling and
+    not against the internal id. Spelling it once here keeps the two directions
+    from drifting apart.
+    """
+    return str(
+        getattr(row, "ref", None)
+        or getattr(row, "path", "")
+        or getattr(row, "anchor_id", "")
+    )
+
+
+def apply_continuity(
+    candidates: Sequence[CandidateFacts],
+    refs: frozenset[str] | set[str],
+) -> tuple[CandidateFacts, ...]:
+    """Qualify the candidates a client-carried token names. Adds no candidate.
+
+    This is the whole enforcement of "continuity never resolves alone": the
+    function can only ever ADD a kind to an anchor the current turn already
+    reached by a contact kind, because a candidate is what `candidates_for`
+    produced and nothing here produces one. A ref naming an anchor this turn did
+    not reach — or one the vault has since retired — simply matches nothing and
+    is dropped without a word, since a hint that half-missed is still a hint.
+    """
+    if not refs:
+        return tuple(candidates)
+    return tuple(
+        replace(item, evidence=item.evidence | {"continuity"})
+        if anchor_ref(item) in refs
+        else item
+        for item in candidates
+    )
+
+
+def override_candidate(
+    rows: Sequence[AnchorFacts], ref: str
+) -> CandidateFacts | None:
+    """The one candidate an agent's `anchor` choice names, or `None`.
+
+    `agent_choice` is its only evidence, and it resolves alone: the agent is the
+    decider, so the turn's own evidence for that anchor is beside the point and
+    the competing senses are not candidates at all. `None` means the ref names no
+    anchor in this index — the caller decides what to say about that, and by
+    contract says exactly what it says about a withheld one.
+    """
+    wanted = str(ref or "").strip()
+    if not wanted:
+        return None
+    for row in rows:
+        spellings = {anchor_ref(row), str(row.path or ""), str(row.anchor_id or "")}
+        if wanted in spellings - {""}:
+            return CandidateFacts(
+                anchor_id=row.anchor_id,
+                path=row.path,
+                ref=row.ref,
+                title=row.title,
+                kind=row.kind,
+                lifecycle=row.lifecycle,
+                categories=row.categories,
+                neighbourhood=row.neighbourhood,
+                anchor_neighbourhood=row.anchor_neighbourhood,
+                evidence=frozenset({"agent_choice"}),
+            )
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # The rule
 # --------------------------------------------------------------------------- #
@@ -417,7 +495,7 @@ def _candidate_order(candidate: CandidateFacts) -> tuple:
 
 def _status_for(candidate: CandidateFacts) -> str:
     deciding = candidate.deciding_kinds
-    if "exact_alias" in deciding or len(deciding) >= 2:
+    if deciding & DECIDING_ALONE_KINDS or len(deciding) >= 2:
         return "resolved"
     if len(deciding) == 1:
         return "partial"

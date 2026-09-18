@@ -83,10 +83,12 @@ def test_the_tool_is_registered_on_all_three_surfaces() -> None:
     assert command.tier == 1
     assert command.cli_writes is False
     assert command.leaf is commands.op_activate_context
-    assert [param.name for param in command.params][:4] == [
+    assert [param.name for param in command.params][:6] == [
         "turn",
         "max_chars",
         "purpose",
+        "continuity",
+        "anchor",
         "include_timings",
     ]
 
