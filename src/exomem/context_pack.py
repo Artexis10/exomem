@@ -612,7 +612,12 @@ def _published_chunks_if_current(vault_root: Path, page: ParsedPage) -> list[str
     )
     if not chunks or stored_mtime is None:
         return []
-    if not math.isclose(stored_mtime, float(page.mtime), abs_tol=1e-6):
+    # rel_tol=0.0 is load-bearing: `math.isclose`'s default relative tolerance
+    # is 1e-9, and at epoch magnitudes (1.8e9 s) that is ~1.8 s, wide enough to
+    # take a double-save's previous generation as current. The writers stamp
+    # the row from the same `st_mtime` the page carries, bit for bit, so only
+    # float round-trip slack is allowed.
+    if not math.isclose(stored_mtime, float(page.mtime), rel_tol=0.0, abs_tol=1e-6):
         return []
     return chunks
 

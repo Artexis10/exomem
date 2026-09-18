@@ -393,7 +393,7 @@ class _PublishedRows:
 
 
 def _pack_with_a_media_page(
-    cluster: Path, monkeypatch: pytest.MonkeyPatch, *, rows_current: bool
+    cluster: Path, monkeypatch: pytest.MonkeyPatch, *, rows_current: bool, stale_by: float = 100.0
 ) -> tuple[dict, list[int]]:
     from exomem import embeddings
 
@@ -423,7 +423,7 @@ def _pack_with_a_media_page(
                 ("Talk\n\n[00:06:00] line 6 of the talk transcript", [0.0, 1.0]),
             ],
         },
-        mtimes={ALPHA_P: 0.0, MEDIA_P: mtime if rows_current else mtime - 100.0},
+        mtimes={ALPHA_P: 0.0, MEDIA_P: mtime if rows_current else mtime - stale_by},
     )
     monkeypatch.setattr(embeddings, "get_embedding_index", lambda vault_root: index)
     pack = context_pack.assemble_pack(cluster, [_hit(ALPHA_P), _hit(MEDIA_P)])
@@ -458,6 +458,20 @@ def test_pack_leaves_a_media_transcript_uncovered_when_its_rows_are_stale(
     assert encoder_calls == []
     assert pack["contradictions"]["tension"] == []
     assert pack["embeddings_available"] is True  # Alpha's rows were exact
+    assert any("no current embedding rows" in t for t in pack["truncation"])
+
+
+def test_rows_from_a_save_half_a_second_earlier_are_another_generation(
+    cluster: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A double-save lands two generations within a second of each other. The
+    row mtime must match the file's to the float, not to a relative tolerance
+    that is ~1.8 s wide at epoch magnitudes (the `math.isclose` default)."""
+    pack, encoder_calls = _pack_with_a_media_page(
+        cluster, monkeypatch, rows_current=False, stale_by=0.5
+    )
+    assert encoder_calls == []
+    assert pack["contradictions"]["tension"] == []
     assert any("no current embedding rows" in t for t in pack["truncation"])
 
 
