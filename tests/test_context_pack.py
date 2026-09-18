@@ -9,8 +9,10 @@ embedding-dependent `tension` path is tested by monkeypatching
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from exomem import (
@@ -346,6 +348,117 @@ def test_pack_tension_never_encodes_the_packed_pages(
     )
     pack = context_pack.assemble_pack(cluster, [_hit(ALPHA_P), _hit(BETA_P)])
     assert [t["cosine"] for t in pack["contradictions"]["tension"]] == [0.85]
+
+
+MEDIA_P = "Knowledge Base/Sources/Videos/Talk.mp4.md"
+
+
+def _timed_media_page() -> str:
+    lines = "\n".join(f"[00:{i:02d}:00] line {i} of the talk transcript" for i in range(12))
+    return (
+        "---\ntype: source\nmedia_type: video\n---\n# Talk\n\nPreserved talk.\n\n"
+        f"## Extracted text\n\n{lines}\n"
+    )
+
+
+class _PublishedRows:
+    """A sidecar already holding each page's rows, stamped with the file mtime
+    the embedding pass saw when it published them."""
+
+    def __init__(
+        self, rows: dict[str, list[tuple[str, list[float]]]], mtimes: dict[str, float]
+    ) -> None:
+        self._rows = rows
+        self._mtimes = mtimes
+
+    def stored_chunks_for(self, rel_path: str) -> tuple[list[str], float | None]:
+        rows = self._rows.get(rel_path) or []
+        return [text for text, _vec in rows], self._mtimes.get(rel_path)
+
+    def all_vectors(self):
+        metadata = [(fp, ci) for fp, rows in self._rows.items() for ci, _row in enumerate(rows)]
+        matrix = np.asarray(
+            [vec for rows in self._rows.values() for _text, vec in rows], dtype=np.float32
+        )
+        return metadata, matrix
+
+    def _texts_for(self, pairs):
+        wanted = set(pairs)
+        return {
+            (fp, ci): text
+            for fp, rows in self._rows.items()
+            for ci, (text, _vec) in enumerate(rows)
+            if (fp, ci) in wanted
+        }
+
+
+def _pack_with_a_media_page(
+    cluster: Path, monkeypatch: pytest.MonkeyPatch, *, rows_current: bool
+) -> tuple[dict, list[int]]:
+    from exomem import embeddings
+
+    monkeypatch.setenv("EXOMEM_SEMANTIC_SEGMENTS", "1")
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    _write(cluster, MEDIA_P, _timed_media_page())
+    find_module.clear_cache()
+    mtime = (cluster / MEDIA_P).stat().st_mtime
+    encoder_calls: list[int] = []
+
+    def refuse(*args, **kwargs):
+        encoder_calls.append(1)
+        raise AssertionError("pack assembly reached the encoder")
+
+    monkeypatch.setattr(embeddings, "embed_texts", refuse)
+    monkeypatch.setattr(embeddings, "_embed_live_chunks", refuse)
+    monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", refuse)
+
+    alpha = find_module._CACHE.get(cluster / ALPHA_P, cluster)
+    assert alpha is not None
+    b_y = math.sqrt(1 - 0.85**2)
+    index = _PublishedRows(
+        rows={
+            ALPHA_P: [(chunk, [1.0, 0.0]) for chunk in embeddings.chunk_text(alpha.title, alpha.body)],
+            MEDIA_P: [
+                ("Talk\n\n[00:00:00] line 0 of the talk transcript", [0.85, b_y]),
+                ("Talk\n\n[00:06:00] line 6 of the talk transcript", [0.0, 1.0]),
+            ],
+        },
+        mtimes={ALPHA_P: 0.0, MEDIA_P: mtime if rows_current else mtime - 100.0},
+    )
+    monkeypatch.setattr(embeddings, "get_embedding_index", lambda vault_root: index)
+    pack = context_pack.assemble_pack(cluster, [_hit(ALPHA_P), _hit(MEDIA_P)])
+    return pack, encoder_calls
+
+
+def test_pack_takes_a_media_transcripts_published_chunks_without_encoding(
+    cluster: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-deriving a timed transcript's chunking runs the semantic segmenter,
+    which ENCODES. Measured 2026-09-18 on the personal service: 837 to 981 texts
+    and 80 to 110 s of `embeddings.encode` inside `recall.pack`, on every deep
+    recall that packed one video page. The pack takes the rows the embedding
+    pass published for this exact file generation instead, and encodes nothing.
+    """
+    pack, encoder_calls = _pack_with_a_media_page(cluster, monkeypatch, rows_current=True)
+    assert encoder_calls == []
+    tension = pack["contradictions"]["tension"]
+    assert [(t["a"], t["b"], t["cosine"]) for t in tension] == [
+        tuple(sorted((ALPHA_P, MEDIA_P))) + (0.85,)
+    ]
+    assert pack["embeddings_available"] is True
+    assert not [t for t in pack["truncation"] if "embedding rows" in t]
+
+
+def test_pack_leaves_a_media_transcript_uncovered_when_its_rows_are_stale(
+    cluster: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rows older than the file are another generation's; the page contributes
+    no proximity pair and says so, rather than being re-chunked (an encode)."""
+    pack, encoder_calls = _pack_with_a_media_page(cluster, monkeypatch, rows_current=False)
+    assert encoder_calls == []
+    assert pack["contradictions"]["tension"] == []
+    assert pack["embeddings_available"] is True  # Alpha's rows were exact
+    assert any("no current embedding rows" in t for t in pack["truncation"])
 
 
 def test_pack_tension_reports_no_embeddings_when_no_packed_page_has_rows(

@@ -878,7 +878,7 @@ def chunk_text(title: str, body: str) -> list[str]:
     return out
 
 
-def _chunks_for_page(vault_root: Path, page) -> list[str]:
+def _chunks_for_page(vault_root: Path, page, *, allow_encode: bool = True) -> list[str] | None:
     """Chunking router — the single seam every writer/rebuild path goes through.
 
     Gated (`EXOMEM_SEMANTIC_SEGMENTS`) audio/video sidecars whose transcript is
@@ -887,6 +887,16 @@ def _chunks_for_page(vault_root: Path, page) -> list[str]:
     before/after `## Extracted text` still paragraph-chunked in document order.
     Every other page — and the gate-off world — returns `chunk_text` output
     unchanged (equality-tested).
+
+    Segmenting a timed transcript ENCODES: the segmenter scores every gap
+    between timed lines with embeddings of the windows on either side, so one
+    long recording is hundreds of texts through the model. A writer pays that
+    once per generation. A read path must not pay it per request, and it must
+    not quietly substitute a different chunking either, because the rows the
+    embedding pass published were cut by this seam and only an identical cut
+    matches them. So `allow_encode=False` returns None exactly where the
+    segmenter would have run, and the caller decides what a page whose current
+    chunking it cannot afford to derive is worth to it.
     """
     from . import semantic_segments as ss
 
@@ -907,6 +917,8 @@ def _chunks_for_page(vault_root: Path, page) -> list[str]:
     timed_lines = sum(1 for line in transcript.splitlines() if ss.TIMED_LINE_RE.match(line))
     if timed_lines < ss.MIN_TIMED_LINES:
         return chunk_text(page.title, page.body)
+    if not allow_encode:
+        return None
     events = (
         ss.gather_events(vault_root, page.media_file)
         if getattr(page, "media_file", None)

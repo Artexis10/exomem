@@ -26,6 +26,7 @@ that drops content is reported in `truncation` — never a silent truncation.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import time
@@ -589,6 +590,33 @@ def _asserted_tension(
     return pairs, keys
 
 
+def _published_chunks_if_current(vault_root: Path, page: ParsedPage) -> list[str]:
+    """The chunking the embedding pass published for `page`, if it is this file's.
+
+    For a timed media transcript the chunking IS the semantic segmenter's
+    output, and deriving it again encodes: measured 2026-09-18 on the personal
+    service, 837 to 981 texts and 80 to 110 s of `embeddings.encode` inside
+    `recall.pack` on every deep recall that packed one video page. The pass
+    that published the page's rows cut them from the same bytes and stamped
+    them with the file's mtime, so a row mtime equal to the page's mtime is the
+    same generation, and its stored texts are the page's chunking without an
+    encode. Rows older than the file belong to another generation: the page
+    contributes no proximity pair this time, and the caller reports it.
+    """
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return []
+    from . import embeddings as embeddings_module
+
+    chunks, stored_mtime = embeddings_module.get_embedding_index(vault_root).stored_chunks_for(
+        page.rel_path
+    )
+    if not chunks or stored_mtime is None:
+        return []
+    if not math.isclose(stored_mtime, float(page.mtime), abs_tol=1e-6):
+        return []
+    return chunks
+
+
 def _tension_pairs(
     vault_root: Path, packed_pages: list[ParsedPage], max_tension: int
 ) -> tuple[list[dict], int, bool, int]:
@@ -626,7 +654,9 @@ def _tension_pairs(
         chunked: list[tuple[str, list[str]]] = []
         for page in packed_pages:
             try:
-                chunks = embeddings_module._chunks_for_page(vault_root, page)
+                chunks = embeddings_module._chunks_for_page(vault_root, page, allow_encode=False)
+                if chunks is None:
+                    chunks = _published_chunks_if_current(vault_root, page)
             except Exception:  # noqa: BLE001 -- chunking is best-effort here
                 chunks = []
             chunked.append((page.rel_path, chunks))
