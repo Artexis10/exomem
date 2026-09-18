@@ -275,6 +275,26 @@ def test_base_distractor_count_is_zero() -> None:
     assert BASE_DISTRACTOR_COUNT == 0
 
 
+def test_every_fixture_records_a_distractor_count() -> None:
+    # MAJOR-2 (micro round): "every fixture and every packet SHALL record
+    # the corpus tree it belongs to" -- all sixteen non-C9/T9 fixtures
+    # default to the base (unpadded) tree; C9/T9 pin the padded one.
+    for fixture in FIXTURES:
+        assert fixture.distractor_count is not None
+        if fixture.case_id in ("C9", "T9"):
+            assert fixture.distractor_count == 200
+        else:
+            assert fixture.distractor_count == BASE_DISTRACTOR_COUNT
+
+
+def test_a_fixture_with_no_distractor_count_fails_manifest_consistency() -> None:
+    c1 = fixture_by_id("C1")
+    broken = dataclasses.replace(c1, distractor_count=None)
+    broken_set = tuple(broken if f.case_id == "C1" else f for f in FIXTURES)
+    with pytest.raises(FixtureError):
+        assert_manifest_consistent(broken_set)
+
+
 def test_build_corpus_supports_a_base_unpadded_tree(tmp_path) -> None:
     manifest = build_corpus(tmp_path, distractor_count=BASE_DISTRACTOR_COUNT)
     assert manifest.distractor_count == 0

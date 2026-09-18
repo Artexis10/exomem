@@ -733,6 +733,26 @@ def test_padding_comparison_refuses_packets_that_share_one_tree() -> None:
     assert any("same corpus tree" in reason for reason in result.reasons)
 
 
+def test_padding_comparison_refuses_none_vs_none_naming_the_missing_tree() -> None:
+    # MAJOR-2 (micro round): the old `is not None and ...` guard let both
+    # sides recording no tree at all pass vacuously -- a missing tree is the
+    # violation "every fixture and packet SHALL record the corpus tree"
+    # exists to catch, not a third acceptable state.
+    padded_score = score_case(_grill_packet(distractor_count=None), fixture_by_id("C9"))
+    base_score = score_case(_grill_packet(distractor_count=None), fixture_by_id("C2"))
+    result = score_padding_robustness(padded_score, base_score)
+    assert not result.passed
+    assert any("None" in reason for reason in result.reasons)
+
+
+def test_padding_comparison_refuses_two_hundred_vs_none() -> None:
+    padded_score = score_case(_grill_packet(distractor_count=200), fixture_by_id("C9"))
+    base_score = score_case(_grill_packet(distractor_count=None), fixture_by_id("C2"))
+    result = score_padding_robustness(padded_score, base_score)
+    assert not result.passed
+    assert any("base packet must record" in reason for reason in result.reasons)
+
+
 def test_report_includes_c9_padding_robustness_when_both_scores_are_present() -> None:
     manifest = validate_manifest(MANIFEST)
     packets = {fixture.case_id: DISABLED_PACKET for fixture in FIXTURES}

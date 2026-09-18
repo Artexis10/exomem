@@ -58,6 +58,8 @@ from pathlib import Path
 from typing import Any
 
 from epistemic.corpora.context_activation import (
+    BASE_DISTRACTOR_COUNT,
+    DEFAULT_DISTRACTOR_COUNT,
     FIXTURES,
     MEASURED_LATENCY_MS,
     FixtureCase,
@@ -678,20 +680,34 @@ def _recall(score: CaseScore) -> float | None:
 def score_padding_robustness(padded_score: CaseScore, base_score: CaseScore) -> PaddingRobustnessResult:
     """Compare C9's padded-tree score against C2's own unpadded-tree score.
 
-    Spec scenario "Padding comparison refuses packets from one tree": when
-    both scores record the *same* ``distractor_count`` (including both
-    ``None``), the comparison is vacuous by construction -- it cannot tell
-    "padding changed nothing" apart from "these two packets were never on
-    different trees to begin with" -- and refusing is the only honest
-    outcome.
+    Spec scenario "Padding comparison refuses packets from one tree", and
+    the spec's own "every fixture and every packet SHALL record the corpus
+    tree it belongs to": this refuses (naming what is wrong) whenever the
+    two packets record the same tree -- ``None`` included, since a missing
+    tree is not a third valid state, it is the violation the "every packet"
+    requirement exists to catch -- and whenever either side is not exactly
+    the tree it is supposed to be (the base side ``BASE_DISTRACTOR_COUNT``,
+    the padded side ``DEFAULT_DISTRACTOR_COUNT``). Micro-round finding: a
+    prior ``is not None and ...`` guard let ``None`` vs. ``None`` and ``200``
+    vs. ``None`` both pass vacuously.
     """
 
     reasons: list[str] = []
-    if padded_score.distractor_count is not None and padded_score.distractor_count == base_score.distractor_count:
+    if padded_score.distractor_count == base_score.distractor_count:
         reasons.append(
             f"padded and base packets record the same corpus tree (distractor_count="
-            f"{padded_score.distractor_count}); a padding comparison requires two different trees"
+            f"{padded_score.distractor_count!r}); a padding comparison requires two different trees"
         )
+    if padded_score.distractor_count != DEFAULT_DISTRACTOR_COUNT:
+        reasons.append(
+            f"padded packet must record distractor_count={DEFAULT_DISTRACTOR_COUNT!r}, "
+            f"got {padded_score.distractor_count!r}"
+        )
+    if base_score.distractor_count != BASE_DISTRACTOR_COUNT:
+        reasons.append(
+            f"base packet must record distractor_count={BASE_DISTRACTOR_COUNT!r}, got {base_score.distractor_count!r}"
+        )
+    if reasons:
         return PaddingRobustnessResult(
             padded_case_id=padded_score.case_id,
             base_case_id=base_score.case_id,

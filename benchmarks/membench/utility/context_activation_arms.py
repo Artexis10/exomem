@@ -59,6 +59,14 @@ from membench.utility.schema import CONTEXT_ACTIVATION_VARIANTS
 #: performance).
 ARM_IDS: tuple[str, ...] = ("A1_control", "A2_raw_recall", "A3_compiler", "A4_nudged_recall", "A5_oracle_packet")
 
+#: The two arms with no Exomem tool surface at all (``allowed_tools == ""``):
+#: A1 (the control) and A5 (the oracle-packet ceiling). Both must have
+#: Exomem truly absent -- environment variables, MCP configuration and the
+#: tool allowlist flag alike -- not merely denied via an empty allowlist
+#: value over an otherwise-normal isolated environment (micro-round MINOR:
+#: A5 was missing this strip, so its ceiling could still search memory).
+_NO_EXOMEM_SURFACE_ARMS: tuple[str, ...] = ("A1_control", "A5_oracle_packet")
+
 DEFAULT_MODEL = "sonnet"
 #: One cold-start turn per episode: small headroom for a tool call, not a
 #: multi-turn conversation.
@@ -319,16 +327,20 @@ def context_activation_turn_argv(
 
     parent = dict(os.environ if parent_env is None else parent_env)
     floor, _removed = environment_floor(parent)
-    if arm_id == "A1_control":
-        # M6: A1 must have Exomem truly *absent*, not merely denied via the
-        # tool allowlist over an otherwise-normal isolated environment.
+    if arm_id in _NO_EXOMEM_SURFACE_ARMS:
+        # M6, and the same for A5 (micro-round MINOR): both carry
+        # allowed_tools="" -- no Exomem tool surface at all -- so both must
+        # have Exomem truly *absent*, not merely denied via the tool
+        # allowlist over an otherwise-normal isolated environment.
         # `arm_environment` unconditionally injects `EXOMEM_VAULT_PATH` /
         # `EXOMEM_CONFIG_PATH` / etc. for every arm (even one with no
         # allowed tools) so that a hooked plugin arm's child processes never
-        # see a stray real-vault variable; A1 carries no plugin and no
-        # allowed tools at all, so it gets the floor with every `EXOMEM_*`
+        # see a stray real-vault variable; A1/A5 carry no plugin and no
+        # allowed tools at all, so they get the floor with every `EXOMEM_*`
         # key stripped and nothing re-added -- the same shape a session with
-        # no Exomem installed would present.
+        # no Exomem installed would present. Without this, A5's oracle
+        # ceiling could also search memory, contaminating it as an
+        # independent ceiling estimate.
         env = {key: value for key, value in floor.items() if not key.startswith("EXOMEM_")}
     else:
         env = arm_environment(floor, arm=arm, workdir=workdir, vault=workdir / "vault")
@@ -345,13 +357,14 @@ def context_activation_turn_argv(
         append_system_prompt_file=system_prompt_file,
         plugin_dir=None,
     )
-    if arm_id == "A1_control":
+    if arm_id in _NO_EXOMEM_SURFACE_ARMS:
         # Spec: A1 carries "no MCP configuration and no tool allowlist flag"
         # -- not merely an empty value for either, which `build_turn_argv`
         # (the released, shared f27 primitive, never modified here) always
-        # supplies. Post-processing the argv it returns is what keeps this
-        # benchmark-specific carve-out out of the shared function every
-        # other f32 arm and variant also calls.
+        # supplies. A5 gets the identical treatment for the same reason as
+        # the environment strip above. Post-processing the argv it returns
+        # is what keeps this benchmark-specific carve-out out of the shared
+        # function every other f32 arm and variant also calls.
         argv = _strip_argv_flags(argv, bare=("--strict-mcp-config",), valued=("--mcp-config", "--allowedTools"))
     return ArmTurnPlan(
         arm_id=arm_id, episode_id=episode.episode_id, workdir=workdir, env=env, argv=argv, system_prompt_file=system_prompt_file
@@ -492,24 +505,41 @@ class BlindIntersection:
 #: on the platform team" register against "a colleague on the support team"
 #: at a 0.67-0.83 raw-word ratio (round-two review finding) -- the words that
 #: actually distinguish the two facts are content words, never these.
+#: Deliberately excludes "no"/"not"/"never" (micro-round finding): a
+#: negation is exactly the content a fact's polarity turns on ("the bench is
+#: *not* available" vs. "the bench is available" are opposite claims), and
+#: treating it as removable function-word noise let "not available" clear
+#: the floor against the *positive* "available" fact.
 _STOPWORDS: frozenset[str] = frozenset(
     """
     a an the and or of on in at to for is are was were be been being it its
-    this that these those with as by from has have had no not but if so
+    this that these those with as by from has have had but if so
     than then there their they them i you your my me we our
     """.split()
 )
 
+#: Contractions expanded before tokenising (micro-round finding: "and n't
+#: handling if you tokenise contractions") so a negation surfaces as the
+#: standalone content word "not" rather than splitting into a bare "t" (or
+#: being swallowed by punctuation stripping) when the sentence contracts it.
+_NEGATION_CONTRACTIONS: tuple[tuple[str, str], ...] = (
+    ("won't", "will not"),
+    ("can't", "cannot"),
+    ("n't", " not"),
+)
+
 
 def _normalize_fact_phrase(text: str) -> str:
-    """Casefold and replace punctuation with whitespace (never delete it):
-    ``"in-app"`` must tokenize as ``"in app"``, not fuse into ``"inapp"``, or
-    a hyphenated word silently stops sharing a token with its unhyphenated
-    form elsewhere (round-two review: this hid a false "discriminating"
-    word for the AI-search hubs).
+    """Casefold, expand negation contractions, and replace punctuation with
+    whitespace (never delete it): ``"in-app"`` must tokenize as ``"in app"``,
+    not fuse into ``"inapp"``, or a hyphenated word silently stops sharing a
+    token with its unhyphenated form elsewhere (round-two review: this hid a
+    false "discriminating" word for the AI-search hubs).
     """
 
     text = text.casefold()
+    for contraction, expansion in _NEGATION_CONTRACTIONS:
+        text = text.replace(contraction, expansion)
     text = re.sub(r"[^\w\s]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
@@ -537,23 +567,37 @@ def _content_words(text: str) -> set[str]:
 #: hits the weekly limit" vs. "keeps hitting their weekly usage cap" is a
 #: genuine match at a content-word ratio of 0.33, well under the old 0.6).
 _CONTENT_OVERLAP_FLOOR = 0.2
+#: A second, absolute floor alongside the ratio (micro-round finding): every
+#: authored fact phrase has at least three content words, so a *ratio* of
+#: 0.2 alone let a single bare shared token (1/5 = 0.20) carry a match on
+#: nine of sixteen fact phrases. The ratio and this count are both
+#: necessary, neither alone sufficient.
+_CONTENT_OVERLAP_MIN_WORDS = 2
 
 
-def _discriminating_words(key: str, facts_by_key: dict[str, str]) -> set[str]:
-    """Content words of ``facts_by_key[key]`` that no *other* fact in the same
-    case's gold ∪ poison set shares (spec: "at least one discriminating
-    content word not shared with any other fact of the same case").
+def _phrases_content_words(phrases: tuple[str, ...]) -> set[str]:
+    words: set[str] = set()
+    for phrase in phrases:
+        words |= _content_words(phrase)
+    return words
+
+
+def _discriminating_words(key: str, facts_by_key: dict[str, tuple[str, ...]]) -> set[str]:
+    """Content words of ``facts_by_key[key]`` (unioned across its own
+    phrasings) that no *other* fact in the same case's gold ∪ poison set
+    shares (spec: "at least one discriminating content word not shared with
+    any other fact of the same case").
     """
 
-    own = _content_words(facts_by_key[key])
+    own = _phrases_content_words(facts_by_key[key])
     others: set[str] = set()
-    for other_key, phrase in facts_by_key.items():
+    for other_key, phrases in facts_by_key.items():
         if other_key != key:
-            others |= _content_words(phrase)
+            others |= _phrases_content_words(phrases)
     return own - others
 
 
-def _fact_phrase_matches(extracted_item: str, key: str, facts_by_key: dict[str, str]) -> bool:
+def _fact_phrase_matches(extracted_item: str, key: str, facts_by_key: dict[str, tuple[str, ...]]) -> bool:
     """Whether ``extracted_item`` plausibly names the fact at ``key``.
 
     Two conditions, in order (B5 fix): the extracted item must share at
@@ -561,18 +605,24 @@ def _fact_phrase_matches(extracted_item: str, key: str, facts_by_key: dict[str, 
     share with any sibling fact in ``facts_by_key`` -- this is what keeps
     the same-first-name persons, the AI-search hubs and the supersession
     ancestors pairwise non-matching), and only once that gate passes does
-    the residual content-word overlap ratio apply.
+    the residual content-word overlap ratio and absolute-count floor apply,
+    checked against *each* of the key's pre-registered phrasings (most keys
+    carry one; a key whose negated shape needs an alternate phrasing, e.g.
+    ``c5_records_latest_unavailable``, carries more).
     """
 
-    fact_words = _content_words(facts_by_key[key])
-    if not fact_words:
-        return False
     extracted_words = _content_words(extracted_item)
     discriminating = _discriminating_words(key, facts_by_key)
     if not (extracted_words & discriminating):
         return False
-    overlap = extracted_words & fact_words
-    return len(overlap) / len(fact_words) >= _CONTENT_OVERLAP_FLOOR
+    for phrase in facts_by_key[key]:
+        fact_words = _content_words(phrase)
+        if not fact_words:
+            continue
+        overlap = extracted_words & fact_words
+        if len(overlap) >= _CONTENT_OVERLAP_MIN_WORDS and len(overlap) / len(fact_words) >= _CONTENT_OVERLAP_FLOOR:
+            return True
+    return False
 
 
 def intersect_with_gold_poison(extraction: ExtractedFacts, fixture: FixtureCase) -> BlindIntersection:

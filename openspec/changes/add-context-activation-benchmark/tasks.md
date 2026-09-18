@@ -50,7 +50,11 @@
 - [ ] 4.2 Run the pre-implementation measurements on the personal cell (A1, A2, A4,
       A5 at n = 1; deterministic baseline from `ask_memory` output; naive latency) and
       preserve the report as Evidence in the owner's knowledge base; record the
-      measured latency constant in the fixture manifest.
+      measured latency constant in the fixture manifest. The run report this task
+      produces must call `context_activation_arms.c6_win_for_a3` (the no-memory case's
+      narrower win rule) and `context_activation_arms.effective_bar_reading` (the
+      grill-query-aware reading beside the raw count) — both exist and are tested, not
+      yet wired into any report writer.
 
 ## 5. Delivery
 

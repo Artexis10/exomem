@@ -104,13 +104,15 @@ class FixtureCase:
     #: set this field.
     oracle_text: str = ""
     #: The corpus tree (distractor count) this fixture is scored against
-    #: (round-two N1 consequence 1, spec: "Every fixture and every packet
-    #: SHALL record the corpus tree ... it belongs to"). ``None`` for every
-    #: fixture but C9/T9, which pin ``DEFAULT_DISTRACTOR_COUNT`` -- the only
-    #: two fixtures for which "which tree" is part of the fixture's own
-    #: identity, not an incidental property of how a given run happened to
-    #: build its corpus.
-    distractor_count: int | None = None
+    #: (spec: "Every fixture and every packet SHALL record the corpus tree
+    #: ... it belongs to"). Defaults to :data:`BASE_DISTRACTOR_COUNT`: every
+    #: fixture but C9/T9 is meant to run on the unpadded tree; C9/T9
+    #: override it to :data:`DEFAULT_DISTRACTOR_COUNT`. Micro-round finding:
+    #: an earlier draft left this ``None`` for sixteen of eighteen fixtures,
+    #: which both contradicted the spec's "every fixture" and let a tree
+    #: guard checking only "not None and equal" pass None-vs-None or
+    #: 200-vs-None vacuously.
+    distractor_count: int | None = BASE_DISTRACTOR_COUNT
 
     def __post_init__(self) -> None:
         if self.expected_status not in EXPECTED_STATUSES:
@@ -437,43 +439,53 @@ def anchor_kind_for(key: str) -> str:
     return KEY_KINDS.get(key, "unknown")
 
 
-#: Short natural-language phrases per logical gold/poison key (task 3, B5).
+#: Short natural-language phrase(s) per logical gold/poison key (task 3, B5).
 #: Used by the blind-extraction/gold-poison intersection: a realistic grader
 #: reports *paraphrased facts*, never a fixture's internal logical keys, so
 #: the intersection step matches on these phrases (normalised: casefold,
-#: punctuation stripped, simple stemming), not on key identity.
-GOLD_POISON_FACTS: dict[str, str] = {
-    "c1_subscriptions_collection": "an AI subscriptions collection tracking plan tiers",
-    "c1_weekly_limit_insight": "usage hits the weekly limit before renewal",
-    "c1_capacity_ceilings_pattern": "a recurring capacity ceilings pattern on flat-rate plans",
-    "t1_fitness_goal_note": "a step-count fitness goal, unrelated to tooling",
-    "c2_grill_equipment_page": "a two-zone gas grill serviced this spring",
-    "c2_cooking_method_insight": "indirect heat works best for this recipe",
-    "t2_camera_gear_note": "a camera body and prime lens for photography",
-    "c3_planning_item": "the next roadmap item extends the reporting module",
-    "c3_design_pointer": "the design notes for that roadmap item",
-    "t3_other_project_planning_item": "the other workstream's own roadmap item",
-    "c4_entity_profile": "a colleague on the platform team",
-    "c4_failure_note": "a deployment failed on the Mac build last month",
-    "t4_shared_first_name_entity_a": "a colleague on the data team",
-    "t4_shared_first_name_entity_b": "a colleague on the support team",
-    "c5_resource_profile": "a shared workshop bench booked by session",
-    "c5_records_latest_unavailable": "the bench was marked unavailable for repair",
-    "t5_available_resource": "a mobile scanner cart currently available",
-    "c7_hub_feature": "the in-app AI search feature implementation hub",
-    "c7_hub_market": "the AI search market-research hub",
-    "c7_hub_search_ux": "the general search UX research hub",
-    "c8_superseded_ancestor_1": "an earlier onboarding approach, since retired",
-    "c8_superseded_ancestor_2": "a second onboarding approach, since retired",
-    "c8_active_head": "the current onboarding approach",
-    "t8_unchained_active_note": "the current support rota with no prior revisions",
+#: punctuation stripped, simple stemming), not on key identity. Almost every
+#: key carries exactly one phrasing; ``c5_records_latest_unavailable``
+#: carries two, pre-registered, because its negated shape ("not available")
+#: is not reachable from its positive phrasing by stopword removal and
+#: stemming alone -- "unavailable" and "available" share no root under this
+#: module's stemmer, and inventing one would risk conflating them elsewhere
+#: (micro-round finding: this is exactly the C5 gold/poison distinction the
+#: fixture tests).
+GOLD_POISON_FACTS: dict[str, tuple[str, ...]] = {
+    "c1_subscriptions_collection": ("an AI subscriptions collection tracking plan tiers",),
+    "c1_weekly_limit_insight": ("usage hits the weekly limit before renewal",),
+    "c1_capacity_ceilings_pattern": ("a recurring capacity ceilings pattern on flat-rate plans",),
+    "t1_fitness_goal_note": ("a step-count fitness goal, unrelated to tooling",),
+    "c2_grill_equipment_page": ("a two-zone gas grill serviced this spring",),
+    "c2_cooking_method_insight": ("indirect heat works best for this recipe",),
+    "t2_camera_gear_note": ("a camera body and prime lens for photography",),
+    "c3_planning_item": ("the next roadmap item extends the reporting module",),
+    "c3_design_pointer": ("the design notes for that roadmap item",),
+    "t3_other_project_planning_item": ("the other workstream's own roadmap item",),
+    "c4_entity_profile": ("a colleague on the platform team",),
+    "c4_failure_note": ("a deployment failed on the Mac build last month",),
+    "t4_shared_first_name_entity_a": ("a colleague on the data team",),
+    "t4_shared_first_name_entity_b": ("a colleague on the support team",),
+    "c5_resource_profile": ("a shared workshop bench booked by session",),
+    "c5_records_latest_unavailable": (
+        "the bench was marked unavailable for repair",
+        "the bench is not available",
+    ),
+    "t5_available_resource": ("a mobile scanner cart currently available",),
+    "c7_hub_feature": ("the in-app AI search feature implementation hub",),
+    "c7_hub_market": ("the AI search market-research hub",),
+    "c7_hub_search_ux": ("the general search UX research hub",),
+    "c8_superseded_ancestor_1": ("an earlier onboarding approach, since retired",),
+    "c8_superseded_ancestor_2": ("a second onboarding approach, since retired",),
+    "c8_active_head": ("the current onboarding approach",),
+    "t8_unchained_active_note": ("the current support rota with no prior revisions",),
 }
 
 
-def fact_for(key: str) -> str:
-    """The natural-language fact phrase for a logical key; ``""`` if unmapped."""
+def fact_for(key: str) -> tuple[str, ...]:
+    """The natural-language fact phrase(s) for a logical key; ``()`` if unmapped."""
 
-    return GOLD_POISON_FACTS.get(key, "")
+    return GOLD_POISON_FACTS.get(key, ())
 
 
 #: The naive-path latency constant (task 4.2), replacing the spec's
@@ -589,6 +601,11 @@ def assert_manifest_consistent(fixtures: tuple[FixtureCase, ...] = FIXTURES) -> 
         case = by_id[case_id]
         if case.pairs_with is not None:
             raise FixtureError(f"{case_id}: a case must not carry pairs_with, got {case.pairs_with!r}")
+    for fixture in fixtures:
+        if fixture.distractor_count is None:
+            raise FixtureError(
+                f"{fixture.case_id}: distractor_count must be set (every fixture records its corpus tree)"
+            )
 
 
 #: Every non-empty turn and reminder turn in the fixture set, for the
@@ -605,7 +622,9 @@ ALL_TURNS: tuple[str, ...] = tuple(
 #: scoped to non-gold-poison pages -- a gold/poison fact legitimately belongs
 #: on its own gold or poison page, so checking every page indiscriminately
 #: would misfire on the fixture's own intended content.
-ALL_FACT_PHRASES: tuple[str, ...] = tuple(sorted(set(GOLD_POISON_FACTS.values())))
+ALL_FACT_PHRASES: tuple[str, ...] = tuple(
+    sorted({phrase for phrases in GOLD_POISON_FACTS.values() for phrase in phrases})
+)
 
 
 def find_verbatim_leaks(root: Path, *, turns: Iterable[str] = ALL_TURNS) -> tuple[tuple[str, str], ...]:

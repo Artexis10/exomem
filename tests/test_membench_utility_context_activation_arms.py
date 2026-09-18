@@ -168,48 +168,56 @@ def test_a1_control_has_no_exomem_surface() -> None:
     assert arm.uses_plugin is False
 
 
-def test_a1_control_environment_carries_no_exomem_variables_at_all(tmp_path) -> None:
-    # M6: A1 must have Exomem truly *absent* -- not merely denied via the
-    # tool allowlist over an otherwise-normal isolated environment that
-    # still points EXOMEM_CONFIG_PATH/EXOMEM_VAULT_PATH at a real directory.
+@pytest.mark.parametrize("arm_id", ["A1_control", "A5_oracle_packet"])
+def test_no_exomem_surface_arms_environment_carries_no_exomem_variables_at_all(arm_id: str, tmp_path) -> None:
+    # M6 (A1), and the same fix applied to A5 (micro-round MINOR: A5 was
+    # missing this strip despite allowed_tools == "" meaning no tools, so
+    # its oracle ceiling could still search memory). Both must have Exomem
+    # truly *absent* -- not merely denied via the tool allowlist over an
+    # otherwise-normal isolated environment that still points
+    # EXOMEM_CONFIG_PATH/EXOMEM_VAULT_PATH at a real directory.
     variant = variant_for_case("C2")
     episode = generate_context_activation_episode(9, variant)
     parent_env = {"PATH": "/usr/bin", "EXOMEM_VAULT_PATH": "/should/not/survive", "HOME": "/home/test"}
     plan = context_activation_turn_argv(
-        episode=episode, arm_id="A1_control", envelope=_FakeEnvelope(), out_dir=tmp_path / "out", parent_env=parent_env
+        episode=episode, arm_id=arm_id, envelope=_FakeEnvelope(), out_dir=tmp_path / "out", parent_env=parent_env
     )
     assert not any(key.startswith("EXOMEM_") for key in plan.env)
 
 
-def test_other_arms_environment_does_carry_exomem_variables(tmp_path) -> None:
+@pytest.mark.parametrize("arm_id", ["A2_raw_recall", "A3_compiler", "A4_nudged_recall"])
+def test_other_arms_environment_does_carry_exomem_variables(arm_id: str, tmp_path) -> None:
     variant = variant_for_case("C2")
     episode = generate_context_activation_episode(9, variant)
     plan = context_activation_turn_argv(
-        episode=episode, arm_id="A2_raw_recall", envelope=_FakeEnvelope(), out_dir=tmp_path / "out", parent_env={}
+        episode=episode, arm_id=arm_id, envelope=_FakeEnvelope(), out_dir=tmp_path / "out", parent_env={}
     )
     assert any(key.startswith("EXOMEM_") for key in plan.env)
 
 
-def test_a1_control_argv_carries_no_mcp_config_or_allowedtools_flag_at_all(tmp_path) -> None:
+@pytest.mark.parametrize("arm_id", ["A1_control", "A5_oracle_packet"])
+def test_no_exomem_surface_arms_argv_carries_no_mcp_config_or_allowedtools_flag_at_all(arm_id: str, tmp_path) -> None:
     # Spec (Requirement: Agent arms and controls): "A1 control with Exomem
     # absent, carrying no Exomem environment variable, no MCP configuration
     # and no tool allowlist flag" -- the flags themselves must be absent
-    # from argv, not merely carry an empty value.
+    # from argv, not merely carry an empty value. A5 gets the same
+    # treatment for the same reason (micro-round MINOR).
     variant = variant_for_case("C2")
     episode = generate_context_activation_episode(9, variant)
     plan = context_activation_turn_argv(
-        episode=episode, arm_id="A1_control", envelope=_FakeEnvelope(), out_dir=tmp_path / "out", parent_env={}
+        episode=episode, arm_id=arm_id, envelope=_FakeEnvelope(), out_dir=tmp_path / "out", parent_env={}
     )
     assert "--mcp-config" not in plan.argv
     assert "--allowedTools" not in plan.argv
     assert "--strict-mcp-config" not in plan.argv
 
 
-def test_other_arms_argv_does_carry_the_mcp_config_and_allowedtools_flags(tmp_path) -> None:
+@pytest.mark.parametrize("arm_id", ["A2_raw_recall", "A3_compiler", "A4_nudged_recall"])
+def test_other_arms_argv_does_carry_the_mcp_config_and_allowedtools_flags(arm_id: str, tmp_path) -> None:
     variant = variant_for_case("C2")
     episode = generate_context_activation_episode(9, variant)
     plan = context_activation_turn_argv(
-        episode=episode, arm_id="A2_raw_recall", envelope=_FakeEnvelope(), out_dir=tmp_path / "out", parent_env={}
+        episode=episode, arm_id=arm_id, envelope=_FakeEnvelope(), out_dir=tmp_path / "out", parent_env={}
     )
     assert "--mcp-config" in plan.argv
     assert "--allowedTools" in plan.argv
@@ -384,28 +392,32 @@ _CONFUSABLE_GROUPS: tuple[tuple[str, str, str], ...] = (
 def test_confusable_facts_never_match_each_other_directly() -> None:
     # Direct unit-level proof (independent of which bucket a case sorts a
     # key into): the private matcher itself must refuse every confusable
-    # pair, both directions.
+    # pair, both directions, over every pre-registered phrasing of each.
     from membench.utility.context_activation_arms import _fact_phrase_matches
 
     for case_id, key_a, key_b in _CONFUSABLE_GROUPS:
         fixture = fixture_by_id(case_id)
         facts_by_key = {k: GOLD_POISON_FACTS[k] for k in (*fixture.gold, *fixture.poison) if k in GOLD_POISON_FACTS}
-        assert not _fact_phrase_matches(GOLD_POISON_FACTS[key_a], key_b, facts_by_key), f"{key_a} matched {key_b}"
-        assert not _fact_phrase_matches(GOLD_POISON_FACTS[key_b], key_a, facts_by_key), f"{key_b} matched {key_a}"
+        for phrase_a in GOLD_POISON_FACTS[key_a]:
+            assert not _fact_phrase_matches(phrase_a, key_b, facts_by_key), f"{phrase_a!r} matched {key_b}"
+        for phrase_b in GOLD_POISON_FACTS[key_b]:
+            assert not _fact_phrase_matches(phrase_b, key_a, facts_by_key), f"{phrase_b!r} matched {key_a}"
 
 
 def test_every_fixtures_own_gold_phrase_never_registers_as_poison() -> None:
-    # Across all 18 fixtures: asserting a case's own gold fact, verbatim,
-    # must never come back tagged as poison use for that same case.
+    # Across all 18 fixtures: asserting a case's own gold fact, verbatim
+    # (every pre-registered phrasing), must never come back tagged as
+    # poison use for that same case.
     for fixture in FIXTURES:
         for key in fixture.gold:
             if key not in GOLD_POISON_FACTS:
                 continue
-            extraction = ExtractedFacts(asserted=(GOLD_POISON_FACTS[key],), requested=())
-            intersection = intersect_with_gold_poison(extraction, fixture)
-            assert GOLD_POISON_FACTS[key] not in intersection.asserted_poison, (
-                f"{fixture.case_id}: {key}'s own gold phrase registered as poison"
-            )
+            for phrase in GOLD_POISON_FACTS[key]:
+                extraction = ExtractedFacts(asserted=(phrase,), requested=())
+                intersection = intersect_with_gold_poison(extraction, fixture)
+                assert phrase not in intersection.asserted_poison, (
+                    f"{fixture.case_id}: {key}'s own gold phrase {phrase!r} registered as poison"
+                )
 
 
 _REALISTIC_PARAPHRASES: tuple[tuple[str, str, str], ...] = (
@@ -415,6 +427,7 @@ _REALISTIC_PARAPHRASES: tuple[tuple[str, str, str], ...] = (
     ("C1", "c1_subscriptions_collection", "mentions an AI subscriptions collection that tracks plan tiers"),
     ("C1", "t1_fitness_goal_note", "asks about a step-count fitness goal unrelated to tooling"),
     ("C8", "c8_active_head", "says the current onboarding approach is the one to use"),
+    ("C5", "c5_records_latest_unavailable", "the bench is not available for tomorrow"),
 )
 
 
@@ -427,6 +440,31 @@ def test_realistic_paraphrases_match_their_own_fact_and_no_other(case_id: str, k
     other_bucket = intersection.asserted_poison if key in fixture.gold else intersection.asserted_gold
     assert paraphrase in own_bucket, f"{paraphrase!r} did not match its own fact {key}"
     assert paraphrase not in other_bucket, f"{paraphrase!r} also matched the wrong side"
+
+
+def test_negation_contraction_is_tokenised_as_a_standalone_not() -> None:
+    from membench.utility.context_activation_arms import _content_words
+
+    assert "not" in _content_words("the bench isn't available")
+    assert "not" in _content_words("the bench won't be available")
+
+
+def test_a_single_bare_shared_token_never_matches_any_fact() -> None:
+    # MAJOR-1 (micro round): the ratio alone let 1/5 = 0.20 clear the 0.2
+    # floor, so a single bare shared content word carried a match on 9 of
+    # 16 fact phrases. Every fact phrase has at least three content words,
+    # so `_CONTENT_OVERLAP_MIN_WORDS = 2` alongside the ratio must refuse a
+    # lone token, over every key of every fixture's own gold ∪ poison set.
+    from membench.utility.context_activation_arms import _content_words, _fact_phrase_matches
+
+    for fixture in FIXTURES:
+        facts_by_key = {k: GOLD_POISON_FACTS[k] for k in (*fixture.gold, *fixture.poison) if k in GOLD_POISON_FACTS}
+        for key, phrases in facts_by_key.items():
+            for phrase in phrases:
+                for word in _content_words(phrase):
+                    assert not _fact_phrase_matches(word, key, facts_by_key), (
+                        f"{fixture.case_id}: lone token {word!r} matched {key}"
+                    )
 
 
 def test_blind_rubric_input_carries_only_turn_and_response() -> None:
