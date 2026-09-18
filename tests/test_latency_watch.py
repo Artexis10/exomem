@@ -147,6 +147,31 @@ def test_an_aging_driven_breach_is_reported_within_one_sweep(monkeypatch: pytest
     assert events == ["latency_ceiling_exceeded"]
 
 
+def test_a_breach_reports_once_under_concurrent_crossings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Eight request threads crossing the ceiling together produce one event:
+    the once-per-interval mark is a check-and-set under the lock."""
+    import threading
+
+    from exomem import log_events
+
+    events: list[str] = []
+    monkeypatch.setattr(log_events, "log_event", lambda logger, level, event, **_k: events.append(event))
+    watch, _clock = _watch()
+    _fill(watch, n=19, total_ms=150)
+    barrier = threading.Barrier(8)
+
+    def cross():
+        barrier.wait()
+        watch.observe(tool="ask_memory", client="openai-mcp/1.0.0", deep=False, total_ms=9000)
+
+    threads = [threading.Thread(target=cross) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert events == ["latency_ceiling_exceeded"]
+
+
 def test_a_failing_watch_is_counted_not_raised(monkeypatch: pytest.MonkeyPatch) -> None:
     watch, _clock = _watch()
 
