@@ -412,12 +412,85 @@ def _connect_existing_owner_target(
                     raise
 
 
+def _seal_graph_rebuild_as_wal(vault_root: Path, temporary: Path) -> None:
+    """Put a proven private rebuild in WAL mode before it is published.
+
+    The live graph store must be a WAL database from its *first* publication.
+    `graph_sync.replace_sidecar` promises it ("An existing live graph runs in WAL
+    mode"), `_publish_sidecar_in_place` builds on that promise, and
+    `_prepare_live_graph_wal_family` establishes WAL with a deliberate *zero*
+    busy timeout on the strength of it, because identity coordination must never
+    inherit the ordinary five-second SQLite wait.
+
+    A first publication has no live database to back up into, so it hands the
+    proven rebuild to a content-agnostic move -- and a private rebuild is kept in
+    rollback-journal mode so that no authoritative row is ever left behind in a
+    detached `-wal` companion the move would not carry.  Publishing in that mode
+    leaves the DELETE->WAL conversion to whichever caller opens the live store
+    next, contending with live traffic and with no patience for a lock:
+    converting needs exclusive access, so a single held SHARED reader refuses it
+    and the fail-closed converter then reports a store that "could not establish
+    WAL mode" although the store is perfectly capable of it.
+
+    The proven rebuild is the one place that conversion cannot race: the file is
+    private, all of its writes are done, and this process owns it.  A clean last
+    close checkpoints the companions away and leaves the WAL setting in the
+    database header, so the move still transports exactly one self-contained
+    file and the rollback-journal rationale above is still honoured.
+
+    `openspec/specs/category-retrieval-reliability/spec.md` already requires this
+    of the lexical sidecar -- "Journal-mode setup SHALL occur only during schema
+    setup or rebuild" -- after the same defect there could "disable unit recall
+    until restart".  This applies that settled rule to the graph sidecar.
+
+    Refusing is correct here, unlike in an ordinary opener: the rebuild is
+    private and uncontended, so a pragma that does not return `wal`, or a
+    companion that outlives a clean close, means something is genuinely wrong
+    rather than merely busy.
+
+    This runs while the rebuild is still being proved, never under the
+    publication hold: `test_rebuild_publication_hold_runs_no_disk_or_sqlite_work`
+    pins that the hold opens no SQLite at all, and it must keep doing so.  It
+    also runs before the caller captures the temp's
+    `nofollow_regular_file_identity`, because sealing rewrites the file and the
+    publication ticket re-verifies that identity.  `sqlite3.DatabaseError` is the
+    refusal both callers already understand: it discards this ticket, and
+    exhausting the bounded publication attempts is the documented Class B
+    publication failure.
+    """
+
+    connection = _connect_existing_owner_target(vault_root, temporary, readonly=False)
+    try:
+        journal_mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
+    finally:
+        connection.close()
+    if (
+        journal_mode is None
+        or not journal_mode
+        or str(journal_mode[0]).lower() != "wal"
+    ):
+        raise sqlite3.DatabaseError("proven graph rebuild could not be sealed in WAL mode")
+    for suffix in ("-wal", "-shm"):
+        if temporary.with_name(f"{temporary.name}{suffix}").exists():
+            raise sqlite3.DatabaseError(
+                f"proven graph rebuild retained its {suffix} companion after a clean close"
+            )
+
+
 def _move_graph_rebuild_into_store(
     vault_root: Path,
     temporary: Path,
     live: Path,
 ) -> None:
-    """Publish the first graph rebuild through an absent-target held move."""
+    """Publish the first graph rebuild through an absent-target held move.
+
+    The moved bytes are already a WAL database: `_seal_graph_rebuild_as_wal` runs
+    at the publication call sites, before the rebuild reaches this
+    content-agnostic move, so the live store satisfies
+    `graph_sync.replace_sidecar`'s "An existing live graph runs in WAL mode" from
+    the moment it becomes live.  This function still moves opaque bytes and does
+    not interpret them.
+    """
 
     with reserved_paths._subsystem_authority_scope("epistemic_graph"):
         reserved_paths._move_owner_file(
@@ -2862,6 +2935,10 @@ class EpistemicGraphIndex:
                 return None
             if freshness.external_pending(self.vault_root):
                 return None
+            # Every write to the rebuild is done and every proof above has read
+            # it back, so this is the last uncontended moment to settle its
+            # journal mode -- and it must precede the identity captured below.
+            _seal_graph_rebuild_as_wal(self.vault_root, temporary)
             return _GraphPublicationTicket(
                 epoch,
                 recall,
@@ -3091,6 +3168,10 @@ class EpistemicGraphIndex:
                     raise sqlite3.DatabaseError("registry rebind candidate failed integrity check")
             finally:
                 candidate.close()
+            # Same ordering as the rebuild ticket: settle the journal mode while
+            # the candidate is private, before its identity is captured and
+            # before the publication hold below.
+            _seal_graph_rebuild_as_wal(self.vault_root, temporary)
             ticket = _GraphPublicationTicket(
                 epoch,
                 recall,
