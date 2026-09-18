@@ -75,7 +75,7 @@ soft-fail seams; every task names its gate.
       both surface digests, the hosted plugin/candidate trees, `docs/capabilities.md`,
       the README tool table; update SKILL.md recall loop (scaffold + plugin) with the
       balanced/maximal activation line; run the public-artifact privacy gate.
-- [ ] 6.2 `openspec validate --all --strict`; scoped suites green; full sharded corpus
+- [x] 6.2 `openspec validate --all --strict`; scoped suites green; full sharded corpus
       at the delivery boundary; PR with verification evidence.
 
 ## 7. Deferred to follow-up changes (recorded, not done here)
