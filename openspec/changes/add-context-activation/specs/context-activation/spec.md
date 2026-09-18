@@ -70,9 +70,14 @@ packet. An anchor SHALL resolve as `resolved` when it carries `exact_alias` or a
 two independent kinds other than `usage_prior`, at least one of them a contact kind; as
 `partial` when it carries exactly one kind other than `usage_prior`; the turn SHALL be
 `ambiguous` when two or more resolved anchors of the same anchor kind have disjoint
-typed-link neighbourhoods (resolved anchors of different kinds are complementary);
-otherwise, when no anchor is `resolved`, the turn SHALL be `unresolved` and the
-operation SHALL abstain with an empty packet. Lexical overlap SHALL ignore stopwords. `usage_prior` SHALL only break ties between
+anchor neighbourhoods, where an anchor's anchor neighbourhood is the set of its
+typed-link neighbours that are themselves anchors in the activation index (resolved
+anchors of different kinds are complementary, and a shared page that is not an anchor,
+reached by alias or otherwise, never makes two anchors complementary); otherwise,
+when no anchor is `resolved`, the turn SHALL be `unresolved` and the operation SHALL
+abstain with an empty packet. Lexical overlap SHALL ignore stopwords, and turn tokens
+SHALL keep their order and repetitions for n-gram construction so that two anchors
+sharing a word in their names can both receive `exact_alias` from one turn. `usage_prior` SHALL only break ties between
 otherwise equal candidates and SHALL never contribute to the two-kinds rule.
 `claims_match` SHALL be computed with the existing collection-claims routing and
 `graph_corroboration` SHALL count a typed edge between two candidates even when both
@@ -84,10 +89,20 @@ already appear in ordinary recall.
 - **THEN** the anchor resolves with evidence `[lexical_overlap, claims_match]`
 
 #### Scenario: Ambiguous domain is reported, not guessed
-- **WHEN** a turn's terms resolve two hub anchors whose typed-link neighbourhoods share
-  no page
+- **WHEN** a turn's terms resolve two hub anchors whose anchor neighbourhoods share no
+  anchor
 - **THEN** the packet status is `ambiguous`, both anchors are listed under
   `ambiguity` with their neighbourhood sizes, and no role lane runs for either
+
+#### Scenario: A shared boilerplate page does not suppress ambiguity
+- **WHEN** two same-kind resolved anchors both link one page that is not an anchor,
+  for example a handbook reached through a short alias, and share no anchor neighbour
+- **THEN** the packet status is still `ambiguous`
+
+#### Scenario: Two names sharing a word both resolve
+- **WHEN** a turn names two anchors whose names share a word, such as "Alpha
+  Initiative and Beta Initiative"
+- **THEN** both anchors carry `exact_alias`
 
 #### Scenario: Negative twin abstains
 - **WHEN** a turn is lexically similar to an anchor's domain but carries no alias, no
@@ -188,7 +203,8 @@ exactly as it is for recall and SHALL never enter ranking or a cache key.
 - **WHEN** a permitted unit's text contains a wikilink to a page withheld from the
   caller's audience, spelled by filename stem, by page title, by any frontmatter
   alias of the page, with a display alias (`[[page|label]]`) or with a heading
-  (`[[page#section]]`), in any Unicode form of that spelling
+  (`[[page#section]]`), in any Unicode form of that spelling the page-name map
+  resolves
 - **THEN** the served packet contains no reference to that page in any unit's text,
   and the match is made on the spelling the prose actually contains, never only on
   a normalised form of it

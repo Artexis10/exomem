@@ -643,3 +643,115 @@ Spoke to [[Marit]] about the corridor.
 
     person = _by_title(index.anchors(), "Marit Solheim")
     assert "Knowledge Base/Notes/Insights/alias-linker.md" in person.neighbourhood
+
+
+def _hub(vault: Path, name: str, title: str, body: str) -> str:
+    rel = f"Knowledge Base/Notes/Insights/{name}.md"
+    _write(
+        vault / rel,
+        f"""---
+type: insight
+status: active
+tags: [hub]
+updated: 2026-09-10
+---
+
+# {title}
+
+## Summary
+
+{body}
+""",
+    )
+    return rel
+
+
+def _two_hubs_over_one_page(vault: Path, *, alias: bool) -> tuple[str, str, str]:
+    """Two competing hubs that both link one page, reachable by alias or not.
+
+    The bridge page is an ordinary note, not an anchor. With `aliases: [Ops]` the
+    `[[Ops]]` wikilinks resolve to it and both hubs gain it as a typed neighbour;
+    without the alias they resolve to nothing and the neighbourhoods stay bare.
+    """
+    left = _hub(vault, "search-feature", "Search feature", "Implementation hub. See [[Ops]].")
+    right = _hub(vault, "search-market", "Search market", "Market-research hub. See [[Ops]].")
+    bridge = "Knowledge Base/Notes/operations-handbook.md"
+    _write(
+        vault / bridge,
+        """---
+type: insight
+status: active
+updated: 2026-09-10
+"""
+        + ("aliases: [Ops]\n" if alias else "")
+        + """---
+
+# Operations handbook
+
+How we run things, linked from everywhere.
+""",
+    )
+    return left, right, bridge
+
+
+def test_a_bridge_page_that_is_not_an_anchor_is_outside_the_anchor_neighbourhood(
+    seeded: Path,
+) -> None:
+    _left, _right, bridge = _two_hubs_over_one_page(seeded, alias=True)
+    index = working_set_index.WorkingSetIndex(seeded)
+    index.rebuild()
+    rows = index.anchors()
+
+    assert bridge not in {row.path for row in rows}, "the bridge page must not be an anchor"
+    left_row = _by_title(rows, "Search feature")
+    right_row = _by_title(rows, "Search market")
+    # The alias made it a typed neighbour of both hubs ...
+    assert bridge in left_row.neighbourhood
+    assert bridge in right_row.neighbourhood
+    # ... but it is not an anchor, so it joins neither anchor neighbourhood.
+    assert bridge not in left_row.anchor_neighbourhood
+    assert bridge not in right_row.anchor_neighbourhood
+    assert not (left_row.anchor_neighbourhood & right_row.anchor_neighbourhood)
+
+
+def test_a_linked_anchor_is_in_the_anchor_neighbourhood(seeded: Path) -> None:
+    _hub(seeded, "corridor-ops", "Corridor ops", "Run by [[Marit Solheim]].")
+    index = working_set_index.WorkingSetIndex(seeded)
+    index.rebuild()
+
+    hub = _by_title(index.anchors(), "Corridor ops")
+    person = "Knowledge Base/Entities/People/Marit Solheim.md"
+    assert person in hub.neighbourhood
+    assert person in hub.anchor_neighbourhood
+
+
+@pytest.mark.parametrize("alias", [False, True])
+def test_an_alias_bridge_does_not_suppress_the_ambiguous_verdict(
+    seeded: Path, alias: bool
+) -> None:
+    """The whole point of the anchor-neighbourhood rule, end to end over sqlite.
+
+    Both hubs are named by one turn. Without the alias their neighbourhoods are
+    disjoint and the turn abstains; with it they share a page that is not an
+    anchor, and the turn must still abstain rather than serve a packet carrying
+    two competing senses with no ambiguity block.
+    """
+    from exomem import working_set_resolve
+
+    _two_hubs_over_one_page(seeded, alias=alias)
+    index = working_set_index.WorkingSetIndex(seeded)
+    index.rebuild()
+
+    analysis = working_set_resolve.analyze_turn("search feature and search market")
+    candidates = working_set_resolve.candidates_for(
+        analysis, working_set_resolve.facts_from_rows(index.anchors())
+    )
+    resolution = working_set_resolve.resolve(
+        working_set_resolve.add_graph_corroboration(candidates)
+    )
+
+    assert resolution.status == "ambiguous", resolution.as_dict()
+    assert {item["title"] for item in resolution.ambiguity} == {
+        "Search feature",
+        "Search market",
+    }

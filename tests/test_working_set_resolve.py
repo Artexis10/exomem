@@ -21,7 +21,14 @@ def _facts(
     title: str | None = None,
     evidence: tuple[str, ...] = (),
     neighbourhood: tuple[str, ...] = (),
+    anchor_neighbourhood: tuple[str, ...] | None = None,
 ) -> resolve_module.CandidateFacts:
+    """One candidate. Listed neighbours are anchors unless stated otherwise.
+
+    `anchor_neighbourhood` defaults to the whole neighbourhood because that is
+    the common case in the vault, so a test that wants a neighbour which is NOT
+    an anchor — a boilerplate page two hubs both link — says so explicitly.
+    """
     return resolve_module.CandidateFacts(
         anchor_id=anchor_id,
         path=anchor_id,
@@ -31,7 +38,33 @@ def _facts(
         lifecycle="active",
         categories=(),
         neighbourhood=frozenset(neighbourhood),
+        anchor_neighbourhood=frozenset(
+            neighbourhood if anchor_neighbourhood is None else anchor_neighbourhood
+        ),
         evidence=frozenset(evidence),
+    )
+
+
+def _row(
+    path: str,
+    title: str,
+    *,
+    kind: str = "hub",
+    terms: tuple[str, ...] = (),
+    neighbourhood: tuple[str, ...] = (),
+) -> resolve_module.AnchorFacts:
+    return resolve_module.AnchorFacts(
+        anchor_id=path,
+        path=path,
+        ref=None,
+        title=title,
+        kind=kind,
+        lifecycle="active",
+        aliases=(),
+        terms=terms,
+        categories=(),
+        neighbourhood=frozenset(neighbourhood),
+        anchor_neighbourhood=frozenset(neighbourhood),
     )
 
 
@@ -357,6 +390,40 @@ def test_overlapping_neighbourhoods_are_not_ambiguous() -> None:
     assert resolution.ambiguity == ()
 
 
+def test_a_shared_page_that_is_not_an_anchor_does_not_suppress_ambiguity() -> None:
+    """Complementarity is a claim about structure, not about a shared page.
+
+    Two hubs that both link one boilerplate page have overlapping raw
+    neighbourhoods and nothing in common: the page is reached by an alias, a
+    navigation stub or a house-style footer, not by belonging to either sense.
+    Disjointness is therefore evaluated over the neighbours that are themselves
+    anchors, and the reported sizes stay the full ones so the brain can see how
+    big each neighbourhood really is.
+    """
+    resolution = resolve_module.resolve(
+        (
+            _facts(
+                "north.md",
+                kind="hub",
+                evidence=("exact_alias",),
+                neighbourhood=("ops.md",),
+                anchor_neighbourhood=(),
+            ),
+            _facts(
+                "south.md",
+                kind="hub",
+                evidence=("exact_alias",),
+                neighbourhood=("ops.md",),
+                anchor_neighbourhood=(),
+            ),
+        )
+    )
+
+    assert resolution.status == "ambiguous"
+    assert {item["ref"] for item in resolution.ambiguity} == {"north.md", "south.md"}
+    assert {item["neighbourhood_size"] for item in resolution.ambiguity} == {1}
+
+
 def test_anchors_of_different_kinds_are_complementary_not_ambiguous() -> None:
     resolution = resolve_module.resolve(
         (
@@ -393,3 +460,48 @@ def test_evidence_vocabulary_is_closed() -> None:
     )
     with pytest.raises(ValueError):
         resolve_module.resolve((_facts("a", evidence=("made_up_kind",)),))
+
+
+def test_repeated_tokens_survive_into_the_ngrams() -> None:
+    """A word repeated in one turn must still start an n-gram the second time.
+
+    "Alpha Initiative and Beta Initiative" repeats `initiative`; deduplicating
+    the tokens before the n-gram window slides over them destroys the phrase
+    "beta initiative" entirely, so the second name can never match a title.
+    """
+    analysis = resolve_module.analyze_turn("Alpha Initiative and Beta Initiative")
+
+    assert analysis.tokens == ("alpha", "initiative", "and", "beta", "initiative")
+    assert "alpha initiative" in analysis.ngrams
+    assert "beta initiative" in analysis.ngrams
+    assert len(analysis.ngrams) == len(set(analysis.ngrams))
+
+
+def test_two_names_sharing_a_word_both_reach_exact_alias() -> None:
+    candidates = resolve_module.candidates_for(
+        resolve_module.analyze_turn("Alpha Initiative and Beta Initiative"),
+        (_row("alpha.md", "Alpha Initiative"), _row("beta.md", "Beta Initiative")),
+    )
+
+    assert {item.path: "exact_alias" in item.evidence for item in candidates} == {
+        "alpha.md": True,
+        "beta.md": True,
+    }
+
+
+def test_two_hubs_named_in_one_turn_with_no_shared_anchor_are_ambiguous() -> None:
+    """The verdict the resolver defect was hiding: one turn, two competing hubs."""
+    candidates = resolve_module.candidates_for(
+        resolve_module.analyze_turn("Alpha Initiative and Beta Initiative"),
+        (
+            _row("alpha.md", "Alpha Initiative", neighbourhood=("alpha-note.md",)),
+            _row("beta.md", "Beta Initiative", neighbourhood=("beta-note.md",)),
+        ),
+    )
+    resolution = resolve_module.resolve(candidates)
+
+    assert resolution.status == "ambiguous"
+    assert {item["title"] for item in resolution.ambiguity} == {
+        "Alpha Initiative",
+        "Beta Initiative",
+    }

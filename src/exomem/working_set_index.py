@@ -146,12 +146,20 @@ def normalize(value: object) -> str:
     return unicodedata.normalize("NFKC", str(value)).strip().casefold()
 
 
+def tokens_of(text: str) -> tuple[str, ...]:
+    """NFKC-casefolded word tokens in reading order, repetitions kept.
+
+    Order and repetition matter to anything that slides a window over a turn:
+    dropping the second `initiative` of "Alpha Initiative and Beta Initiative"
+    destroys the phrase "beta initiative" entirely. Callers that want a term SET
+    use `terms_of`.
+    """
+    return tuple(match.group(0) for match in _TOKEN.finditer(normalize(text)))
+
+
 def terms_of(text: str) -> tuple[str, ...]:
     """Deterministic lexical terms: NFKC-casefolded word tokens, deduplicated."""
-    seen: dict[str, None] = {}
-    for match in _TOKEN.finditer(normalize(text)):
-        seen.setdefault(match.group(0), None)
-    return tuple(seen)
+    return tuple(dict.fromkeys(tokens_of(text)))
 
 
 class WorkingSetIndexUnavailable(RuntimeError):
@@ -178,6 +186,12 @@ class AnchorRow:
     terms: tuple[str, ...]
     categories: tuple[str, ...]
     links: tuple[tuple[str, str, str], ...]
+    #: The subset of `neighbourhood` whose pages are themselves anchors here.
+    #: Exposed from the index because only the index knows the anchor set, and
+    #: the resolver needs it to tell a shared SENSE from a shared page: a
+    #: boilerplate note two hubs both link — reached by an alias or otherwise —
+    #: makes them neither complementary nor related.
+    anchor_neighbourhood: frozenset[str] = frozenset()
 
     @property
     def neighbourhood(self) -> frozenset[str]:
@@ -853,6 +867,9 @@ class WorkingSetIndex:
             "ORDER BY anchor_id, other_path, relation_type, direction"
         ):
             links.setdefault(anchor_id, []).append((other, relation, direction))
+        anchor_paths = frozenset(
+            str(row[0]) for row in conn.execute("SELECT path FROM anchors")
+        )
         out: list[AnchorRow] = []
         for anchor_id, path, ref, title, kind, lifecycle, signature in conn.execute(
             "SELECT anchor_id, path, ref, title, kind, lifecycle, signature FROM anchors "
@@ -871,6 +888,10 @@ class WorkingSetIndex:
                     terms=tuple(terms.get(anchor_id, ())),
                     categories=tuple(categories.get(anchor_id, ())),
                     links=tuple(links.get(anchor_id, ())),
+                    anchor_neighbourhood=frozenset(
+                        other for other, _relation, _direction in links.get(anchor_id, ())
+                    )
+                    & anchor_paths,
                 )
             )
         return tuple(out)

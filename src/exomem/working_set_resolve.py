@@ -21,7 +21,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from .ranking_config import DEFAULT_RANKING, RankingConfig
-from .working_set_index import normalize, terms_of
+from .working_set_index import normalize, tokens_of
 
 #: The closed evidence vocabulary. Order is the reporting order.
 EVIDENCE_KINDS: tuple[str, ...] = (
@@ -130,6 +130,7 @@ class AnchorFacts:
     terms: tuple[str, ...]
     categories: tuple[str, ...]
     neighbourhood: frozenset[str]
+    anchor_neighbourhood: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +146,7 @@ class CandidateFacts:
     categories: tuple[str, ...]
     neighbourhood: frozenset[str]
     evidence: frozenset[str]
+    anchor_neighbourhood: frozenset[str] = frozenset()
 
     @property
     def deciding_kinds(self) -> frozenset[str]:
@@ -165,6 +167,7 @@ class ResolvedAnchor:
     evidence: tuple[str, ...]
     categories: tuple[str, ...]
     neighbourhood: frozenset[str]
+    anchor_neighbourhood: frozenset[str] = frozenset()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -221,7 +224,11 @@ class Resolution:
 def analyze_turn(turn: str) -> TurnAnalysis:
     """Normalise a raw turn once: NFKC + casefold, tokens, n-grams, cues."""
     text = unicodedata.normalize("NFKC", str(turn)).strip().casefold()
-    tokens = terms_of(text)
+    # Order and repetitions are kept: the n-gram window below must be able to
+    # start a phrase at a word the turn has already used, or a turn naming two
+    # anchors that share a word can only ever reach the first of them. Callers
+    # that want a term set take one from these tokens themselves.
+    tokens = tokens_of(text)
     ngrams: list[str] = []
     seen: set[str] = set()
     for size in range(2, MAX_NGRAM + 1):
@@ -297,6 +304,7 @@ def candidates_for(
                 lifecycle=row.lifecycle,
                 categories=row.categories,
                 neighbourhood=row.neighbourhood,
+                anchor_neighbourhood=row.anchor_neighbourhood,
                 evidence=frozenset(evidence),
             )
         )
@@ -440,6 +448,7 @@ def resolve(candidates: Sequence[CandidateFacts]) -> Resolution:
                 evidence=tuple(sorted(candidate.evidence)),
                 categories=candidate.categories,
                 neighbourhood=candidate.neighbourhood,
+                anchor_neighbourhood=candidate.anchor_neighbourhood,
             )
         )
     anchors = anchors[:MAX_ANCHORS]
@@ -453,13 +462,22 @@ def resolve(candidates: Sequence[CandidateFacts]) -> Resolution:
 
 
 def _ambiguity(resolved: Sequence[ResolvedAnchor]) -> tuple[dict[str, Any], ...]:
-    """Two resolved anchors of ONE kind with disjoint neighbourhoods compete.
+    """Two resolved anchors of ONE kind with disjoint ANCHOR neighbourhoods compete.
 
     Restricted to a single anchor kind deliberately. A person and a product
     resolved by the same turn are complementary — that is the whole point of a
     cross-cutting packet — and treating them as competing senses would abstain
     on nearly every useful turn. Competing SENSES are same-kind by construction:
     two hubs, two resources, two people.
+
+    Disjointness is evaluated over each anchor's ANCHOR neighbourhood — the
+    neighbours that are themselves anchors in the activation index — because
+    complementarity is a claim about structure. A shared page that is not an
+    anchor is boilerplate, a navigation stub, or a page one hub happened to reach
+    through an alias spelling; it says nothing about whether two senses belong
+    together, and letting it bridge them would silently suppress the abstention.
+    The reported `neighbourhood_size` stays the FULL one: the brain is being told
+    how large each neighbourhood is, not how the rule was evaluated.
     """
     for kind in sorted({anchor.kind for anchor in resolved}):
         group = [anchor for anchor in resolved if anchor.kind == kind]
@@ -469,7 +487,7 @@ def _ambiguity(resolved: Sequence[ResolvedAnchor]) -> tuple[dict[str, Any], ...]
             anchor
             for anchor in group
             if all(
-                not (anchor.neighbourhood & other.neighbourhood)
+                not (anchor.anchor_neighbourhood & other.anchor_neighbourhood)
                 for other in group
                 if other.anchor_id != anchor.anchor_id
             )
@@ -501,6 +519,7 @@ def facts_from_rows(rows: Iterable[Any]) -> tuple[AnchorFacts, ...]:
             terms=row.terms,
             categories=row.categories,
             neighbourhood=row.neighbourhood,
+            anchor_neighbourhood=row.anchor_neighbourhood,
         )
         for row in rows
     )
