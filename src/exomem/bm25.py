@@ -318,7 +318,6 @@ class BM25Index:
         reference implementation and the `EXOMEM_LEXICAL_BACKEND=python`
         target. Interface identical either way.
         """
-        self._hits += 1
         if not query.strip():
             return []
         from . import lexstore
@@ -334,6 +333,9 @@ class BM25Index:
         )
         if indexed is not None:
             return indexed
+        # Counted only where the python corpus actually serves: a sidecar-served
+        # query touches nothing the reaper could reclaim here.
+        self._hits += 1
         bm25, paths = self._fresh_corpus(vault_root, scope, freshness)
         if bm25 is None or not paths:
             return []

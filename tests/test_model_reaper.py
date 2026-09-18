@@ -69,7 +69,7 @@ def test_a_cache_refilled_between_ticks_is_not_reaped_on_every_tick() -> None:
     # fifteen minutes after each eviction -- never once per tick. Sixty
     # ticks used to mean up to forty-five evictions.
     assert len(unloads) == 3, unloads
-    assert min(b - a for a, b in zip(unloads, unloads[1:])) >= 900
+    assert min(b - a for a, b in zip(unloads, unloads[1:], strict=False)) >= 900
     assert reaped.count("cache") == 3
 
 
@@ -120,3 +120,50 @@ def test_find_reports_a_use_fingerprint_that_moves_with_use(tmp_path: Path) -> N
     after = find.cache_activity()
     assert after != before
     assert find.cache_status()["pages"]["hits"] >= 1
+
+
+def test_a_matrix_served_by_catch_up_counts_as_used(tmp_path: Path, monkeypatch) -> None:
+    """The catch-up branch is the common serve under a moving write generation."""
+    import numpy as np
+
+    from exomem import embedding_index, recall_policy, sidecar_store
+
+    idx = embedding_index.EmbeddingIndex(tmp_path)
+    idx.path.parent.mkdir(parents=True, exist_ok=True)
+    idx.path.touch()
+    identity = ("id", "sig")
+    monkeypatch.setattr(recall_policy, "recall_policy_identity", lambda _root: identity)
+    matrix = np.zeros((1, embedding_index.VECTOR_DIM), dtype=np.float32)
+    first = embedding_index._EmbCache(1, 1, 1, 0.0, identity, [("a.md", 0)], matrix)
+    monkeypatch.setattr(idx, "_load_all_rows", lambda: first)
+    idx.all_vectors()
+    assert idx.cache_status()["hits"] == 1
+    monkeypatch.setattr(sidecar_store, "try_serve_cached", lambda _c, _path: None)
+    monkeypatch.setattr(
+        idx,
+        "_catch_up_cache",
+        lambda c: embedding_index._EmbCache(
+            c.epoch,
+            c.generation + 1,
+            c.instance,
+            c.mtime,
+            c.recall_policy_identity,
+            c.metadata,
+            c.matrix,
+        ),
+    )
+    for _ in range(3):
+        idx.all_vectors()
+    assert idx.cache_status()["hits"] == 4
+
+
+def test_bm25_counts_only_searches_its_own_corpus_served(tmp_path: Path, monkeypatch) -> None:
+    from exomem import bm25, lexstore
+
+    index = bm25.BM25Index()
+    monkeypatch.setattr(lexstore, "search_bm25", lambda *_a, **_k: [("a.md", 1.0)])
+    assert index.search(tmp_path, "query", 5) == [("a.md", 1.0)]
+    assert index.cache_status()["hits"] == 0  # the sidecar served; nothing here to reclaim
+    monkeypatch.setattr(lexstore, "search_bm25", lambda *_a, **_k: None)
+    index.search(tmp_path, "query", 5)  # falls through to the python corpus (empty vault)
+    assert index.cache_status()["hits"] == 1

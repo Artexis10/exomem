@@ -713,6 +713,7 @@ class EmbeddingIndex:
                     patched = None
                 if patched is not None:
                     self._cache = patched
+                    self._hits += 1
                     return patched.metadata, patched.matrix
             # Keep this call zero-argument: cache tests and production probes
             # deliberately wrap the named full-reload seam.
