@@ -35,12 +35,15 @@ conventions belong with them.
   then reaches both role selection and anchor evidence, in any language.
 - **New registry `activation-conventions.yaml`**, shipped in the skill scaffold and the
   plugin copy, overridable at `<Knowledge Base>/_Schema/activation-conventions.yaml`,
-  with three sections:
+  with four sections:
   - `anchors`: which folders, tags and frontmatter `type` values make a page a
     `resource` or a `hub` anchor. The six anchor kinds stay closed; how a vault spells
     membership of them becomes the owner's.
   - `state`: ordered state-field and date-field names for the current-state resolver.
   - `stopwords`: words ignored by the lexical band.
+  - `resolution`: the structural thresholds the resolver ships as defaults, starting
+    with `rare_term_max_anchors` from `make-anchor-resolution-sound`. A threshold is a
+    count the server measures against, never a relevance score.
 - **Layout follows the product.** The index walk uses the product's shared skip list and
   `in_append_only_tree` instead of private copies. Raw material stays out of the anchor
   catalogue because it is immutable evidence, wherever the product says it lives.
