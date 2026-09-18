@@ -5785,7 +5785,9 @@ def _with_due_state(
             call_spans_module.span("recall.due_state", {}),
         ):
             block = due_state_module.served(vault_root, purpose=purpose)
-        if not due_state_module.should_emit(block, vault_root=vault_root):
+        with call_spans_module.span("recall.due_state.emit", {}):
+            emit = due_state_module.should_emit(block, vault_root=vault_root)
+        if not emit:
             return result
     except Exception:  # noqa: BLE001 — a due-state count never breaks a recall
         log.debug("due-state projection unavailable for recall", exc_info=True)

@@ -69,3 +69,12 @@ def test_fingerprint_cli_accepts_no_runtime_arguments(monkeypatch, tmp_path: Pat
 
     assert vault_fingerprint.main([]) == 0
     assert vault_fingerprint.main(["--vault-root", str(vault)]) == 2
+
+
+def test_fingerprint_excludes_the_due_state_emission_ledger(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _write(vault / "Knowledge Base/index.md", "# Preserved\n")
+    before = vault_fingerprint.canonical_vault_fingerprint(vault)
+    _write(vault / "Knowledge Base/.due-state-emission.json", '{"emissions":1}\n')
+    _write(vault / "Knowledge Base/..due-state-emission.json.abc123_4.tmp", "partial")
+    assert vault_fingerprint.canonical_vault_fingerprint(vault) == before

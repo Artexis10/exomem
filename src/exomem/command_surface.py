@@ -479,6 +479,7 @@ def bind_vault(
             retry_scope = None if invocation_read_only else mcp_retry_scope()
             t0 = time.perf_counter()
             try:
+                call_spans.mark("command.leaf_start")
                 result = invoke_command(
                     command,
                     *injected,
@@ -486,6 +487,11 @@ def bind_vault(
                     implicit_idempotency_scope=retry_scope,
                     **kwargs,
                 )
+                # Two spans that together are the leaf's `duration_ms`: the
+                # command itself, and the MCP-layer post-filter and scrub that
+                # run on its result. A slow call then says which side it was on.
+                call_spans.record_span_since("command.leaf", "command.leaf_start")
+                call_spans.mark("command.leaf_done")
                 # MCP-layer second pass (design D1): defense in depth where
                 # the FastMCP context is live. `postfilter` is idempotent —
                 # an already-replaced credential matches nothing — so running
@@ -522,6 +528,7 @@ def bind_vault(
                         ],
                         structured_content=dict(result),
                     )
+                call_spans.record_span_since("command.postfilter", "command.leaf_done")
                 _log_tool_success(
                     tool=tool_name,
                     duration_ms=round((time.perf_counter() - t0) * 1000, 2),
