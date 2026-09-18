@@ -137,6 +137,7 @@ def _pod_spec() -> dict[str, object]:
                         "subPath": "init.json",
                         "readOnly": True,
                     },
+                    {"name": "tmp", "mountPath": "/tmp"},
                 ],
             }
         ],
@@ -156,6 +157,7 @@ def _pod_spec() -> dict[str, object]:
                     "defaultMode": 292,
                 },
             },
+            {"name": "tmp", "emptyDir": {"sizeLimit": "64Mi"}},
         ],
     }
 
@@ -420,6 +422,17 @@ def test_adapter_requires_a_digest_pinned_runtime_image() -> None:
             identity_verifier=CODEC.verifier(),
             runtime_image="registry.example/runtime:latest",
         )
+
+
+def test_initializer_gives_its_read_only_root_a_writable_temporary_directory() -> None:
+    # The runtime takes its vault creation lock under the temporary directory. Without
+    # one every first initialization failed, and the Job's retry skipped the staged
+    # scaffold and published a vault with no activation manifest.
+    spec = _adapter(Cluster())._pod_spec(METADATA)
+    [container] = spec["containers"]
+    assert container["securityContext"]["readOnlyRootFilesystem"] is True
+    assert {"name": "tmp", "mountPath": "/tmp"} in container["volumeMounts"]
+    assert {"name": "tmp", "emptyDir": {"sizeLimit": "64Mi"}} in spec["volumes"]
 
 
 def test_initializer_job_proof_accepts_only_kubernetes_default_replacement_policy() -> None:
