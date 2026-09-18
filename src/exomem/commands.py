@@ -3842,7 +3842,8 @@ def op_get(
         missing_path=prepared.missing_path,
     )
     try:
-        result = get_page_module.get_page(vault_root, path=path, _prepared=prepared)
+        with call_spans_module.span("read.page"):
+            result = get_page_module.get_page(vault_root, path=path, _prepared=prepared)
     except get_page_module.GetError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
     if frontmatter_only:
@@ -3861,9 +3862,16 @@ def op_get(
         include_history=include_history,
     )
     if include_history:
-        out["history"] = vault.read_log_entries(vault_root, out["path"])
+        with call_spans_module.span("read.history", {}) as measured:
+            out["history"] = vault.read_log_entries(vault_root, out["path"])
+            if measured is not None:
+                measured["entries"] = len(out["history"] or [])
     if links:
-        out["links"] = _link_summary(vault_root, out.get("path", ""), out.get("body", ""))
+        with call_spans_module.span("read.links", {}) as measured:
+            out["links"] = _link_summary(vault_root, out.get("path", ""), out.get("body", ""))
+            if measured is not None:
+                measured["inbound"] = len((out["links"] or {}).get("inbound") or [])
+                measured["outbound"] = len((out["links"] or {}).get("outbound") or [])
     # Release gate for direct reads: render at the page's decision level, and
     # answer byte-identically to a missing path when it is below notice — a
     # withheld page must be indistinguishable from one that never existed.

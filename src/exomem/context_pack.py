@@ -794,166 +794,174 @@ def assemble_pack(
     semantic_states: dict[str, semantic_index.SemanticParentIndexState] = {}
     selected_by_path: dict[str, list[tuple[int, int, str]]] = {}
     missing = 0
-    for group in packed_groups:
-        if deadline is not None and _monotonic() >= deadline:
-            truncation.append(DEADLINE_TRUNCATION)
-            break
-        snapshot = _load_parent_snapshot(vault_root, str(group["path"]))
-        if snapshot is None:
-            missing += 1  # a packed hit whose file is gone/unreadable — surface it.
-            continue
-        page, state = snapshot
-        packed_pages.append(page)
-        semantic_states[page.rel_path] = state
-        selected_by_path[page.rel_path] = list(group["selected_refs"])
+    # Each phase below is its own span under `pack`: the 2026-09-18 media
+    # re-segmentation sat inside `recall.pack` for days because the pack was
+    # one opaque number, and a slow pack has to say which of its phases paid.
+    with find_module._span(timings, "pack.parents"):
+        for group in packed_groups:
+            if deadline is not None and _monotonic() >= deadline:
+                truncation.append(DEADLINE_TRUNCATION)
+                break
+            snapshot = _load_parent_snapshot(vault_root, str(group["path"]))
+            if snapshot is None:
+                missing += 1  # a packed hit whose file is gone/unreadable — surface it.
+                continue
+            page, state = snapshot
+            packed_pages.append(page)
+            semantic_states[page.rel_path] = state
+            selected_by_path[page.rel_path] = list(group["selected_refs"])
     if missing:
         truncation.append(f"{missing} packed hit(s) unreadable or missing, not packed")
 
-    claims = {p.rel_path: _extract_claims(p, claim_chars=claim_chars) for p in packed_pages}
-    semantic_unit_map: dict[str, dict[str, Any]] = {}
-    semantic_block_map: dict[str, list[dict]] = {}
-    plans: list[_UnitPackPlan] = []
-    for page in packed_pages:
-        document = semantic_states[page.rel_path].document
-        by_ref = {
-            unit.unit_ref: unit for unit in document.units if unit.unit_ref is not None
-        }
-        selected: list[tuple[int, int, semantic_units.SemanticUnit]] = []
-        unresolved = 0
-        for hit_rank, unit_order, unit_ref in selected_by_path.get(page.rel_path, []):
-            unit = by_ref.get(unit_ref)
-            if unit is None:
-                unresolved += 1
-            elif all(existing[2] is not unit for existing in selected):
-                selected.append((hit_rank, unit_order, unit))
-        if unresolved:
-            truncation.append(
-                f"{page.rel_path}: {unresolved} selected semantic unit(s) stale or missing"
+    units_span = find_module._span(timings, "pack.units")
+    with units_span:
+        claims = {p.rel_path: _extract_claims(p, claim_chars=claim_chars) for p in packed_pages}
+        semantic_unit_map: dict[str, dict[str, Any]] = {}
+        semantic_block_map: dict[str, list[dict]] = {}
+        plans: list[_UnitPackPlan] = []
+        for page in packed_pages:
+            document = semantic_states[page.rel_path].document
+            by_ref = {
+                unit.unit_ref: unit for unit in document.units if unit.unit_ref is not None
+            }
+            selected: list[tuple[int, int, semantic_units.SemanticUnit]] = []
+            unresolved = 0
+            for hit_rank, unit_order, unit_ref in selected_by_path.get(page.rel_path, []):
+                unit = by_ref.get(unit_ref)
+                if unit is None:
+                    unresolved += 1
+                elif all(existing[2] is not unit for existing in selected):
+                    selected.append((hit_rank, unit_order, unit))
+            if unresolved:
+                truncation.append(
+                    f"{page.rel_path}: {unresolved} selected semantic unit(s) stale or missing"
+                )
+
+            selected_ids = {id(item[2]) for item in selected}
+            parent, dropped_provenance = _parent_context(
+                page, semantic_states[page.rel_path].parent_ref
+            )
+            plans.append(
+                _UnitPackPlan(
+                    page=page,
+                    parent=parent,
+                    selected=selected,
+                    fillers=[
+                        unit for unit in document.units if id(unit) not in selected_ids
+                    ],
+                    dropped_provenance=dropped_provenance,
+                )
             )
 
-        selected_ids = {id(item[2]) for item in selected}
-        parent, dropped_provenance = _parent_context(
-            page, semantic_states[page.rel_path].parent_ref
-        )
-        plans.append(
-            _UnitPackPlan(
-                page=page,
-                parent=parent,
-                selected=selected,
-                fillers=[
-                    unit for unit in document.units if id(unit) not in selected_ids
-                ],
-                dropped_provenance=dropped_provenance,
+        packed_unit_count = 0
+
+        def _try_pack(
+            plan: _UnitPackPlan,
+            unit: semantic_units.SemanticUnit,
+        ) -> None:
+            nonlocal packed_unit_count
+            if len(plan.packed_units) >= max_units_per_page:
+                plan.omitted_reasons.add("per-page cap")
+                return
+            if packed_unit_count >= max_units:
+                plan.omitted_reasons.add("pack-wide cap")
+                return
+
+            packed, dropped = _pack_unit(unit, unit_chars=unit_chars)
+            block, dropped_metadata = _legacy_block_from_packed_unit(unit, packed)
+            candidate_unit_map = {
+                **semantic_unit_map,
+                plan.page.rel_path: {
+                    "parent": plan.parent,
+                    "units": plan.packed_units + [packed],
+                },
+            }
+            candidate_block_map = dict(semantic_block_map)
+            if block is not None:
+                candidate_block_map[plan.page.rel_path] = plan.legacy_blocks + [block]
+            encoded = json.dumps(
+                {
+                    "semantic_units": candidate_unit_map,
+                    "semantic_blocks": candidate_block_map,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
             )
-        )
+            if len(encoded) > max_unit_total_chars:
+                plan.omitted_reasons.add("character cap")
+                return
 
-    packed_unit_count = 0
-
-    def _try_pack(
-        plan: _UnitPackPlan,
-        unit: semantic_units.SemanticUnit,
-    ) -> None:
-        nonlocal packed_unit_count
-        if len(plan.packed_units) >= max_units_per_page:
-            plan.omitted_reasons.add("per-page cap")
-            return
-        if packed_unit_count >= max_units:
-            plan.omitted_reasons.add("pack-wide cap")
-            return
-
-        packed, dropped = _pack_unit(unit, unit_chars=unit_chars)
-        block, dropped_metadata = _legacy_block_from_packed_unit(unit, packed)
-        candidate_unit_map = {
-            **semantic_unit_map,
-            plan.page.rel_path: {
+            plan.packed_units.append(packed)
+            plan.chosen_units.append((unit, packed))
+            if block is not None:
+                plan.legacy_blocks.append(block)
+            plan.dropped_fields += dropped + dropped_metadata
+            packed_unit_count += 1
+            semantic_unit_map[plan.page.rel_path] = {
                 "parent": plan.parent,
-                "units": plan.packed_units + [packed],
-            },
-        }
-        candidate_block_map = dict(semantic_block_map)
-        if block is not None:
-            candidate_block_map[plan.page.rel_path] = plan.legacy_blocks + [block]
-        encoded = json.dumps(
-            {
-                "semantic_units": candidate_unit_map,
-                "semantic_blocks": candidate_block_map,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
+                "units": plan.packed_units,
+            }
+            if plan.legacy_blocks:
+                semantic_block_map[plan.page.rel_path] = plan.legacy_blocks
+
+        selected_candidates = sorted(
+            (
+                (hit_rank, unit_order, plan_index, plan, unit)
+                for plan_index, plan in enumerate(plans)
+                for hit_rank, unit_order, unit in plan.selected
+            ),
+            key=lambda item: (item[0], item[1], item[2]),
         )
-        if len(encoded) > max_unit_total_chars:
-            plan.omitted_reasons.add("character cap")
-            return
-
-        plan.packed_units.append(packed)
-        plan.chosen_units.append((unit, packed))
-        if block is not None:
-            plan.legacy_blocks.append(block)
-        plan.dropped_fields += dropped + dropped_metadata
-        packed_unit_count += 1
-        semantic_unit_map[plan.page.rel_path] = {
-            "parent": plan.parent,
-            "units": plan.packed_units,
-        }
-        if plan.legacy_blocks:
-            semantic_block_map[plan.page.rel_path] = plan.legacy_blocks
-
-    selected_candidates = sorted(
-        (
-            (hit_rank, unit_order, plan_index, plan, unit)
-            for plan_index, plan in enumerate(plans)
-            for hit_rank, unit_order, unit in plan.selected
-        ),
-        key=lambda item: (item[0], item[1], item[2]),
-    )
-    for _hit_rank, _unit_order, _plan_index, plan, unit in selected_candidates:
-        _try_pack(plan, unit)
-    for plan in plans:
-        for unit in plan.fillers:
+        for _hit_rank, _unit_order, _plan_index, plan, unit in selected_candidates:
             _try_pack(plan, unit)
+        for plan in plans:
+            for unit in plan.fillers:
+                _try_pack(plan, unit)
 
-    for plan in plans:
-        total_units = len(plan.selected) + len(plan.fillers)
-        omitted = total_units - len(plan.packed_units)
-        if omitted:
-            reason = ", ".join(sorted(plan.omitted_reasons)) or "configured bounds"
-            truncation.append(
-                f"{plan.page.rel_path}: {omitted} semantic units omitted by {reason}"
+        for plan in plans:
+            total_units = len(plan.selected) + len(plan.fillers)
+            omitted = total_units - len(plan.packed_units)
+            if omitted:
+                reason = ", ".join(sorted(plan.omitted_reasons)) or "configured bounds"
+                truncation.append(
+                    f"{plan.page.rel_path}: {omitted} semantic units omitted by {reason}"
+                )
+            selected_included = {
+                packed["unit_ref"]
+                for _unit, packed in plan.chosen_units
+                if packed["unit_ref"]
+            }
+            selected_omitted = sum(
+                1
+                for _hit_rank, _unit_order, unit in plan.selected
+                if unit.unit_ref not in selected_included
             )
-        selected_included = {
-            packed["unit_ref"]
-            for _unit, packed in plan.chosen_units
-            if packed["unit_ref"]
-        }
-        selected_omitted = sum(
-            1
-            for _hit_rank, _unit_order, unit in plan.selected
-            if unit.unit_ref not in selected_included
-        )
-        if selected_omitted:
-            truncation.append(
-                f"{plan.page.rel_path}: {selected_omitted} selected semantic unit(s) omitted by bounds"
-            )
-        if plan.dropped_provenance:
-            truncation.append(
-                f"{plan.page.rel_path}: {plan.dropped_provenance} provenance/lifecycle value(s) omitted"
-            )
-        if plan.dropped_fields:
-            truncation.append(
-                f"{plan.page.rel_path}: {plan.dropped_fields} semantic-unit field value(s) omitted by bounds"
-            )
+            if selected_omitted:
+                truncation.append(
+                    f"{plan.page.rel_path}: {selected_omitted} selected semantic unit(s) omitted by bounds"
+                )
+            if plan.dropped_provenance:
+                truncation.append(
+                    f"{plan.page.rel_path}: {plan.dropped_provenance} provenance/lifecycle value(s) omitted"
+                )
+            if plan.dropped_fields:
+                truncation.append(
+                    f"{plan.page.rel_path}: {plan.dropped_fields} semantic-unit field value(s) omitted by bounds"
+                )
 
-    neighborhood, n_dropped = _neighborhood(vault_root, packed_pages, max_neighbors)
+    with find_module._span(timings, "pack.neighborhood"):
+        neighborhood, n_dropped = _neighborhood(vault_root, packed_pages, max_neighbors)
     if n_dropped > 0:
         truncation.append(
             f"neighborhood capped at {max_neighbors} "
             f"({n_dropped} more not shown; raise EXOMEM_PACK_MAX_NEIGHBORS)"
         )
 
-    superseded = _supersession_edges(packed_pages)
-    tension, t_dropped, embeddings_available, uncovered = _tension_pairs(
-        vault_root, packed_pages, max_tension
-    )
+    with find_module._span(timings, "pack.tension"):
+        superseded = _supersession_edges(packed_pages)
+        tension, t_dropped, embeddings_available, uncovered = _tension_pairs(
+            vault_root, packed_pages, max_tension
+        )
     if uncovered > 0:
         truncation.append(
             f"{uncovered} packed page(s) had no current embedding rows; "

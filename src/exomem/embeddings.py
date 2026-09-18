@@ -21,6 +21,7 @@ import logging
 import math
 import os
 import sqlite3
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -959,11 +960,42 @@ def embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     that handed the encoder a whole note body, and those are different defects
     with different fixes.
     """
-    with call_spans.span(
-        "embeddings.encode",
-        {"texts": len(texts), "chars": sum(len(text) for text in texts)},
+    # Resolved before the encode span opens, and only on the MCP path: off it
+    # the spans are no-ops and the frame walk would be the only cost paid.
+    caller = _encode_caller() if call_spans.MCP_CALL_TOKEN.get() is not None else "off-path"
+    with (
+        call_spans.span(
+            "embeddings.encode",
+            {"texts": len(texts), "chars": sum(len(text) for text in texts)},
+        ),
+        call_spans.span(f"encode.by.{caller}"),
     ):
         return _embed_texts(texts, is_query=is_query)
+
+
+def _encode_caller() -> str:
+    """The nearest Exomem module above the encoder, as a span name suffix.
+
+    An `embeddings.encode` of 80 s with 837 texts sat in the ledger for days
+    with no way to say who asked for it; the caller was the semantic segmenter
+    reached from the context pack. Span fields are integers, so the caller is
+    carried in a sibling span's name instead: `encode.by.<module>`, a small
+    fixed set of identifiers, never user data. Never raises.
+    """
+    try:
+        frame = sys._getframe(2)
+        for _ in range(16):
+            if frame is None:
+                break
+            module = str(frame.f_globals.get("__name__", ""))
+            if module.startswith("exomem."):
+                leaf = module.rsplit(".", 1)[-1]
+                if leaf not in {"embeddings", "embedding_backend"}:
+                    return leaf
+            frame = frame.f_back
+    except Exception:  # noqa: BLE001 - attribution must never break an encode
+        pass
+    return "unknown"
 
 
 def _embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
