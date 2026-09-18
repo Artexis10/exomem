@@ -123,11 +123,18 @@ def bounded_text(text: str, limit: int = MAX_UNIT_CHARS) -> str:
 
 
 def graph_depth_for(status: str) -> int:
-    """Typed-graph depth by anchor status: 2 resolved, 1 partial, none otherwise."""
+    """Typed-graph depth by anchor status: 2 for `resolved`, none otherwise.
+
+    No lane runs for a `partial` anchor at all (canonical spec's restated
+    "Bounded role lanes" requirement): it is listed in `anchors[]` with its
+    status and evidence so the agent can choose it, and served only once it
+    resolves or is chosen. There is deliberately no depth-1 case to reach —
+    `_neighbourhood_paths` never hands this a `partial` anchor now that
+    `compile_packet` builds `run_lanes`' anchor list from `resolved_anchors`
+    alone.
+    """
     if status == "resolved":
         return 2
-    if status == "partial":
-        return 1
     return 0
 
 
@@ -738,7 +745,12 @@ def compile_packet(
             registry, anchor_kinds=anchor_kinds, analysis=analysis
         )
 
-    lane_anchors = (*resolution.resolved_anchors, *resolution.partial_anchors)
+    # RESOLVED anchors only: a `partial` anchor is listed in `anchors[]` with
+    # its status and evidence, but no lane runs for it and nothing of its page
+    # or neighbourhood enters `units`, `pointers` or `current_state` (canonical
+    # spec's restated "Bounded role lanes" requirement — "no lane SHALL run for
+    # a partial anchor").
+    lane_anchors = resolution.resolved_anchors
     # Resolved ONCE: the Records lane and the packet's `current_state[]` block are
     # two views of the same collection reads.
     current_state = working_set_state.current_state_for(

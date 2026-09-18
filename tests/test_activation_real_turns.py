@@ -139,6 +139,26 @@ def test_prepare_environment_honours_an_explicit_state_dir(tmp_path: Path) -> No
     assert os.environ["XDG_STATE_HOME"] == explicit
 
 
+def test_prepare_environment_ignores_an_inherited_xdg_state_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 3, MINOR 8: an inherited `XDG_STATE_HOME` (a machine that
+    exports one for its live, real vault) must never be honoured -- this
+    script always writes the snapshot's sidecars under the snapshot's own
+    parent unless `--state-dir` is given explicitly.
+    """
+    module = _module()
+    live_state_root = str(tmp_path / "live-state-root")
+    monkeypatch.setenv("XDG_STATE_HOME", live_state_root)
+    snapshot = tmp_path / "vault-snap"
+    snapshot.mkdir()
+
+    module.prepare_environment(snapshot, state_dir=None)
+
+    assert os.environ["XDG_STATE_HOME"] != live_state_root
+    assert os.environ["XDG_STATE_HOME"] == str(tmp_path / "vault-snap-activation-state")
+
+
 # --------------------------------------------------------------------------- #
 # Turns file
 # --------------------------------------------------------------------------- #
@@ -227,6 +247,51 @@ def test_run_turn_is_unjudged_with_neither_expectation(tmp_path: Path) -> None:
 
     assert result["judged"] is False
     assert result["passed"] is None
+
+
+def _seed_ambiguous_vault(vault: Path) -> None:
+    """Two hub anchors, named exactly by one turn, with disjoint
+    neighbourhoods -- a packet that must come back `ambiguous`, never
+    `unresolved`.
+    """
+    kb = vault / "Knowledge Base"
+    (kb / "Notes" / "Insights").mkdir(parents=True, exist_ok=True)
+    (kb / "Notes" / "Insights" / "north-hub.md").write_text(
+        "---\ntitle: Northern Programme\nstatus: active\ntags: [hub]\nupdated: 2026-09-01\n---\n\n"
+        "# Northern Programme\n\nA coordination hub. See [[Notes/Insights/north-note]].\n",
+        encoding="utf-8",
+    )
+    (kb / "Notes" / "Insights" / "north-note.md").write_text(
+        "---\ntitle: North note\nstatus: active\nupdated: 2026-09-01\n---\n\n# North note\n\nSupporting material.\n",
+        encoding="utf-8",
+    )
+    (kb / "Notes" / "Insights" / "south-hub.md").write_text(
+        "---\ntitle: Southern Venture\nstatus: active\ntags: [hub]\nupdated: 2026-09-01\n---\n\n"
+        "# Southern Venture\n\nA coordination hub. See [[Notes/Insights/south-note]].\n",
+        encoding="utf-8",
+    )
+    (kb / "Notes" / "Insights" / "south-note.md").write_text(
+        "---\ntitle: South note\nstatus: active\nupdated: 2026-09-01\n---\n\n# South note\n\nSupporting material.\n",
+        encoding="utf-8",
+    )
+
+
+def test_run_turn_labels_an_ambiguous_packet_ambiguous_not_unresolved(tmp_path: Path) -> None:
+    """Review round 3, MINOR 9: the packet's own `abstained` field is true for
+    BOTH `unresolved` and `ambiguous` -- checking it first made the
+    `ambiguous` branch unreachable.
+    """
+    module = _module()
+    vault = tmp_path / "vault"
+    _seed_ambiguous_vault(vault)
+    module.prepare_environment(vault, state_dir=str(tmp_path / "state"))
+
+    result = module.run_turn(
+        vault, {"turn": "compare the Northern Programme and the Southern Venture"}
+    )
+
+    assert result["status"] == "ambiguous"
+    assert result["abstained"] is True
 
 
 # --------------------------------------------------------------------------- #

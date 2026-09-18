@@ -21,7 +21,13 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from .ranking_config import DEFAULT_RANKING, RankingConfig
-from .working_set_index import RARE_TERM_MAX_ANCHORS, fold_plural, normalize, tokens_of
+from .working_set_index import (
+    RARE_TERM_MAX_ANCHORS,
+    STOPWORDS,
+    fold_plural,
+    normalize,
+    tokens_of,
+)
 
 #: The closed evidence vocabulary. Order is the reporting order.
 EVIDENCE_KINDS: tuple[str, ...] = (
@@ -93,19 +99,10 @@ CONTACT_KINDS: frozenset[str] = WORDED_CONTACT_KINDS | RETRIEVED_CONTACT_KINDS
 
 #: Function words are dropped before the lexical band is measured. "the" shared
 #: between a turn and a title is not a reference; two content words are.
-_STOPWORDS: frozenset[str] = frozenset(
-    {
-        "a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "do", "for",
-        "from", "how", "i", "i'm", "im", "in", "is", "it", "its", "just", "me", "much",
-        "my", "no", "not", "of", "on", "or", "our", "out", "so", "still", "that", "the",
-        "their", "them", "then", "there", "these", "they", "this", "to", "up", "was",
-        "we", "what", "when", "where", "which", "who", "why", "will", "with", "you",
-        "your", "again", "any", "does", "did", "get", "got", "had", "has", "have",
-        "left", "like", "make", "many", "more", "most", "need", "now", "one", "only",
-        "other", "over", "should", "some", "such", "than", "too", "use", "very",
-        "want", "way", "well", "about",
-    }
-)
+#: `STOPWORDS` lives in `working_set_index` (re-exported here): the derived-
+#: short-name validity check (`derived_short_name`) needs the SAME list, and
+#: that module has no dependency on this one.
+_STOPWORDS: frozenset[str] = STOPWORDS
 
 #: Cue → semantic-unit category, for `category_match`. Structural lookup only.
 _CUE_CATEGORIES: Mapping[str, tuple[str, ...]] = {
@@ -305,12 +302,25 @@ def candidates_for(
         names = {normalize(row.title), *row.aliases} - {""}
         if names & phrases:
             evidence.add("exact_alias")
+        # `lexical_overlap` stays over the BROAD terms (title, aliases,
+        # sections, tags): two shared content words anywhere in that vocabulary
+        # is a real reference. `rare_term` does NOT: it is granted for the
+        # anchor's OWN AUTHORED title/alias terms only, the exact vocabulary
+        # `term_anchor_counts` measures rarity against. Sharing it over the
+        # broad terms would let a common TAG word (every hub carries `hub`)
+        # look "rare" because only one anchor's TITLE says it — the count is
+        # honest, but the anchor claiming the count's rarity by way of its tag
+        # never earned it. See the canonical spec's "A tag is not a name".
         row_terms_folded = frozenset(fold_plural(term) for term in row.terms)
         shared = turn_terms_folded & row_terms_folded
         if len(shared) >= min_terms:
             evidence.add("lexical_overlap")
-        elif len(shared) == 1:
-            (term,) = shared
+        name_terms_folded = frozenset(
+            fold_plural(term) for term in tokens_of(" ".join((row.title, *row.aliases)))
+        )
+        shared_name = turn_terms_folded & name_terms_folded
+        if len(shared_name) == 1:
+            (term,) = shared_name
             count = term_counts.get(term)
             if count is not None and count <= RARE_TERM_MAX_ANCHORS:
                 evidence.add("rare_term")

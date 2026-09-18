@@ -307,9 +307,13 @@ def test_ambiguous_turn_runs_no_lane() -> None:
 
 @pytest.mark.parametrize(
     ("status", "depth"),
-    [("resolved", 2), ("partial", 1), ("unresolved", 0)],
+    [("resolved", 2), ("partial", 0), ("unresolved", 0)],
 )
 def test_graph_depth_follows_anchor_status(status: str, depth: int) -> None:
+    """No lane runs for a `partial` anchor at all (review round 3, BLOCKER 2):
+    depth 0, not the prior depth-1 case that let its neighbourhood leak into
+    `units`/`pointers`/`current_state`.
+    """
     assert working_set.graph_depth_for(status) == depth
 
 

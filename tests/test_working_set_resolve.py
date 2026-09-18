@@ -241,6 +241,35 @@ def test_retrieval_evidence_comes_from_the_anchors_own_page_only() -> None:
     assert via_link == ()
 
 
+def test_a_project_key_anchor_never_carries_retrieval() -> None:
+    """MINOR 12 (review round 3): a project-key anchor comes from a project
+    key rather than from a page, so `row.path` is `""`. `row.path and
+    row.path in retrieval_paths` is already false whenever `row.path` is
+    falsy, so this was already correct -- this test only pins it down.
+    Even the degenerate case where `retrieval_paths` itself holds the empty
+    string must not grant `retrieval`.
+    """
+    rows = (
+        resolve_module.AnchorFacts(
+            anchor_id="proj:orchard",
+            path="",
+            ref=None,
+            title="Orchard",
+            kind="project",
+            lifecycle="active",
+            aliases=(),
+            terms=("orchard",),
+            categories=(),
+            neighbourhood=frozenset(),
+        ),
+    )
+    analysis = resolve_module.analyze_turn("orchard project status")
+    candidates = resolve_module.candidates_for(analysis, rows, retrieval_paths=frozenset({""}))
+
+    assert len(candidates) == 1
+    assert "retrieval" not in candidates[0].evidence
+
+
 def test_category_match_comes_from_turn_cues() -> None:
     rows = (
         resolve_module.AnchorFacts(

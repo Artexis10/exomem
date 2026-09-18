@@ -778,11 +778,92 @@ def test_fold_plural_folds_simple_and_ies_plurals() -> None:
     assert working_set_index.fold_plural("glass") == "glass"
 
 
+# MAJOR 5 (review round 3): `fold_plural` was broken for a majority of
+# ordinary plurals -- "notes"/"note" did not fold, nor did
+# releases/files/names/pages/changes/sources/services, "alias"/"aliases"
+# folded to DIFFERENT strings, and "bus"/"gas" were corrupted to "bu"/"ga" by
+# a blind single-`s` strip. Table-driven so the whole required set is one
+# assertion loop, not one test per pair.
+def test_fold_plural_folds_the_required_pairs_to_the_same_form() -> None:
+    for singular, plural in (
+        ("note", "notes"),
+        ("file", "files"),
+        ("name", "names"),
+        ("page", "pages"),
+        ("change", "changes"),
+        ("source", "sources"),
+        ("service", "services"),
+        ("alias", "aliases"),
+        ("class", "classes"),
+        ("box", "boxes"),
+        ("process", "processes"),
+        ("bus", "buses"),
+        ("gas", "gases"),
+    ):
+        assert working_set_index.fold_plural(singular) == working_set_index.fold_plural(
+            plural
+        ), f"{singular!r} vs {plural!r}"
+
+
+def test_fold_plural_never_corrupts_these_words() -> None:
+    for word in ("status", "analysis", "class", "gas", "bus", "its", "has", "glass", "ss"):
+        assert working_set_index.fold_plural(word) == word, word
+
+
+def test_fold_plural_documents_the_release_releases_residual_collision() -> None:
+    """A deliberate, documented tradeoff (review round 3, MAJOR 5): no
+    suffix-only rule can fold "release"/"releases" together while ALSO
+    folding "alias"/"aliases" and "class"/"classes" correctly, because
+    "alias" + "es" and "release" + "s" both end in the literal letters
+    "-ses". This function chooses the sibilant-stem reading (the pairs the
+    ruling names explicitly), so "release" and "releases" do NOT converge --
+    exactly like the ruling's own named collisions (news/new, means/mean,
+    lens/len), just not yet named there. Asserted here rather than left to
+    surprise a future reader.
+    """
+    assert working_set_index.fold_plural("release") != working_set_index.fold_plural(
+        "releases"
+    )
+    # The three named residual collisions from the canonical spec/ruling.
+    assert working_set_index.fold_plural("news") == working_set_index.fold_plural("new")
+    assert working_set_index.fold_plural("means") == working_set_index.fold_plural("mean")
+    assert working_set_index.fold_plural("lens") == working_set_index.fold_plural("len")
+
+
 def test_derived_short_name_reads_a_trailing_parenthetical_or_dash() -> None:
-    assert working_set_index.derived_short_name("Bike (Trek 520, 2019)") == "Bike"
-    assert working_set_index.derived_short_name("Bike - Trek 520") == "Bike"
-    assert working_set_index.derived_short_name("Bike — Trek 520") == "Bike"
+    # The resolver's own tokeniser normalises and casefolds (review round 3,
+    # BLOCKER 3): the derived name is the lead's TOKENS joined by single
+    # spaces, never the raw substring, so it is always what a turn's own
+    # tokenised phrase could actually match.
+    assert working_set_index.derived_short_name("Bike (Trek 520, 2019)") == "bike"
+    assert working_set_index.derived_short_name("Bike - Trek 520") == "bike"
+    assert working_set_index.derived_short_name("Bike — Trek 520") == "bike"
     assert working_set_index.derived_short_name("Northern corridor") is None
+
+
+def test_derived_short_name_rejects_invalid_leads() -> None:
+    """Review round 3, BLOCKER 3: none of these leads is a name."""
+    # Filename-like.
+    assert working_set_index.derived_short_name("config.yaml - settings") is None
+    assert working_set_index.derived_short_name("_internal (notes)") is None
+    # Only stopwords.
+    assert working_set_index.derived_short_name("How — my method") is None
+    # Only digits.
+    assert working_set_index.derived_short_name("2026 — plan") is None
+    # Fewer than three characters once joined (a single letter).
+    assert working_set_index.derived_short_name("X — the platform") is None
+    assert working_set_index.derived_short_name("A (b)") is None
+    # More than three words.
+    assert working_set_index.derived_short_name("One two three four (qualifier)") is None
+
+
+def test_derived_short_name_collapses_multiple_spaces_and_drops_unmatchable_glyphs() -> None:
+    """MINOR 10: a multi-space or emoji-led lead derives a name a turn's own
+    tokeniser could actually produce, never one that can only occupy a name
+    slot without ever matching.
+    """
+    assert working_set_index.derived_short_name("Multi   Spaces - qualifier") == "multi spaces"
+    assert working_set_index.derived_short_name("\U0001f3af Goal - notes") == "goal"
 
 
 # --------------------------------------------------------------------------- #
@@ -834,9 +915,9 @@ def test_a_derived_short_name_already_owned_by_another_anchor_is_not_admitted(
 
 
 def test_a_dash_title_whose_lead_names_a_common_topic_is_not_admitted(tmp_path: Path) -> None:
-    """The "Atlas" shape (real-vault correction): a topic prefix shared by
+    """The "Orchard" shape (real-vault correction): a topic prefix shared by
     many pages derives a name no OTHER anchor's names literally include, yet
-    the word identifies far more than one anchor. Four anchors share "atlas"
+    the word identifies far more than one anchor. Four anchors share "orchard"
     (over `RARE_TERM_MAX_ANCHORS` = 3), so the dash-titled page's derived
     name is withheld even though (1)'s uniqueness check alone would admit it.
 
@@ -845,22 +926,22 @@ def test_a_dash_title_whose_lead_names_a_common_topic_is_not_admitted(tmp_path: 
     a vault with nothing in it but what this test writes.
     """
     vault = tmp_path / "vault"
-    _resource(vault, "Knowledge Base/Products/atlas-strategy.md", "Atlas Strategy")
-    _resource(vault, "Knowledge Base/Products/atlas-roadmap.md", "Atlas Roadmap")
-    _resource(vault, "Knowledge Base/Products/atlas-architecture.md", "Atlas platform architecture")
-    _resource(vault, "Knowledge Base/Products/atlas-search.md", "Atlas — Agentic Search")
+    _resource(vault, "Knowledge Base/Products/orchard-strategy.md", "Orchard Strategy")
+    _resource(vault, "Knowledge Base/Products/orchard-roadmap.md", "Orchard Roadmap")
+    _resource(vault, "Knowledge Base/Products/orchard-architecture.md", "Orchard platform architecture")
+    _resource(vault, "Knowledge Base/Products/orchard-search.md", "Orchard — Agentic Search")
     index = working_set_index.WorkingSetIndex(vault)
     index.rebuild()
 
     rows = index.anchors()
-    search = _by_title(rows, "Atlas — Agentic Search")
-    assert "atlas" not in search.aliases
-    atlas_term = working_set_index.fold_plural("atlas")
-    assert index.term_anchor_counts().get(atlas_term) == 4
+    search = _by_title(rows, "Orchard — Agentic Search")
+    assert "orchard" not in search.aliases
+    orchard_term = working_set_index.fold_plural("orchard")
+    assert index.term_anchor_counts().get(orchard_term) == 4
 
     from exomem import working_set_resolve
 
-    analysis = working_set_resolve.analyze_turn("where are we with Atlas?")
+    analysis = working_set_resolve.analyze_turn("where are we with Orchard?")
     candidates = working_set_resolve.candidates_for(
         analysis,
         working_set_resolve.facts_from_rows(rows),
@@ -887,19 +968,97 @@ def test_a_dash_title_whose_lead_names_at_most_three_anchors_is_admitted(tmp_pat
     assert index.term_anchor_counts().get("widget") == 1
 
 
+_LEDGER_COLLECTION = """---
+type: collection
+exomem_id: {exomem_id}
+title: Ledger
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: markdown-items
+  source: Items
+  format_version: 1
+claims:
+  terms: [ledger]
+item_schema:
+  natural_key: [observed_on, asset]
+  fields:
+    observed_on:
+      type: date
+      required: true
+    asset:
+      type: string
+      required: true
+---
+
+Ledger collection.
+"""
+
+
+def _write_ledger_collection(vault: Path, exomem_id: str) -> None:
+    _write(
+        vault / "Knowledge Base/Records/Ledger/_collection.md",
+        _LEDGER_COLLECTION.format(exomem_id=exomem_id),
+    )
+    (vault / "Knowledge Base/Records/Ledger/Items").mkdir(parents=True, exist_ok=True)
+
+
+def test_a_derived_page_alias_yields_to_a_collections_own_title(tmp_path: Path) -> None:
+    """MAJOR 6 (review round 3): the derived-name uniqueness gate must see
+    every anchor KIND before deciding a derived alias, not pages alone. A
+    page titled "Ledger (spare copy)" would derive "ledger" as an alias if
+    only OTHER PAGES were checked for uniqueness -- but a Records collection
+    is titled exactly "Ledger", so the derived name is withheld on the same
+    uniqueness ground a second PAGE named "Ledger" would withhold it.
+    """
+    vault = tmp_path / "vault"
+    _resource(vault, "Knowledge Base/Products/ledger-spare.md", "Ledger (spare copy)")
+    _write_ledger_collection(vault, "6f0f2b4c-1d3f-4a71-9c3d-2f9b5d2a7c22")
+
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild()
+
+    rows = index.anchors()
+    assert "collection" in _kinds(rows)
+    spare = _by_title(rows, "Ledger (spare copy)")
+    assert "ledger" not in spare.aliases
+
+
+def test_term_anchor_counts_cover_every_kind_not_pages_alone(tmp_path: Path) -> None:
+    """MAJOR 7 (review round 3): `term_anchor_counts` must cover exactly the
+    anchors held (post-cap), across EVERY kind -- the comment once claimed
+    this while pages alone were computed uncapped and every other kind
+    capped separately. A term that appears ONLY in a Records collection's
+    title must be counted, at exactly the count of anchors that hold it.
+    """
+    vault = tmp_path / "vault"
+    _resource(vault, "Knowledge Base/Products/unrelated-page.md", "Unrelated page")
+    _write_ledger_collection(vault, "6f0f2b4c-1d3f-4a71-9c3d-2f9b5d2a7c33")
+
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild()
+
+    rows = index.anchors()
+    ledger_collection = _by_title(rows, "Ledger")
+    assert ledger_collection.kind == "collection"
+    assert index.term_anchor_counts().get("ledger") == 1
+
+
 def test_the_term_count_table_matches_authored_names_alone(tmp_path: Path) -> None:
     """(d): the persisted term-count table is identical whether or not any
     anchor has a derived alias -- computed here independently, from raw
     frontmatter title/alias data only, and compared against the index's own
     table over a vault where one derived alias IS admitted (widget/blue-trim)
-    and one is deliberately withheld (the Atlas cluster).
+    and one is deliberately withheld (the Orchard cluster).
     """
     vault = tmp_path / "vault"
     _resource(vault, "Knowledge Base/Products/widget.md", "Widget - Blue trim")
-    _resource(vault, "Knowledge Base/Products/atlas-strategy.md", "Atlas Strategy")
-    _resource(vault, "Knowledge Base/Products/atlas-roadmap.md", "Atlas Roadmap")
-    _resource(vault, "Knowledge Base/Products/atlas-architecture.md", "Atlas platform architecture")
-    _resource(vault, "Knowledge Base/Products/atlas-search.md", "Atlas — Agentic Search")
+    _resource(vault, "Knowledge Base/Products/orchard-strategy.md", "Orchard Strategy")
+    _resource(vault, "Knowledge Base/Products/orchard-roadmap.md", "Orchard Roadmap")
+    _resource(vault, "Knowledge Base/Products/orchard-architecture.md", "Orchard platform architecture")
+    _resource(vault, "Knowledge Base/Products/orchard-search.md", "Orchard — Agentic Search")
     index = working_set_index.WorkingSetIndex(vault)
     index.rebuild()
 
@@ -915,14 +1074,14 @@ def test_the_term_count_table_matches_authored_names_alone(tmp_path: Path) -> No
             for t in working_set_index.tokens_of(" ".join((row.title, *authored)))
         }:
             expected.setdefault(term, set()).add(row.anchor_id)
-    # "atlas" IS an authored title term for all four pages (never a derived
+    # "orchard" IS an authored title term for all four pages (never a derived
     # alias -- withheld above), and "widget"/"blue"/"trim" are authored title
     # terms for the one widget page; "widget" is ALSO its (admitted) derived
     # alias, contributing no second owner since it is the same anchor.
     expected_counts = {term: len(ids) for term, ids in expected.items()}
 
     assert index.term_anchor_counts() == expected_counts
-    assert expected_counts[working_set_index.fold_plural("atlas")] == 4
+    assert expected_counts[working_set_index.fold_plural("orchard")] == 4
     assert expected_counts["widget"] == 1
 
 

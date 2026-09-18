@@ -69,15 +69,20 @@ def refuse_path_inside_a_repository(path: Path, *, label: str) -> Path:
 def prepare_environment(snapshot: Path, *, state_dir: str | None) -> None:
     """Strip inherited `EXOMEM_*` env vars except the kept set, set
     `EXOMEM_VAULT_PATH` to the snapshot, and set `XDG_STATE_HOME` under the
-    snapshot's parent unless the caller already set one.
+    snapshot's parent UNLESS `--state-dir` was given explicitly.
+
+    Never honours an inherited `XDG_STATE_HOME` (review round 3, MINOR 8): on
+    a machine that exports one, this script would otherwise write the
+    snapshot's sidecars under that LIVE state root instead of a scratch
+    directory next to the snapshot — exactly the shared-live-state boundary
+    this script exists to stay outside of.
     """
     for key in [k for k in os.environ if k.startswith("EXOMEM_") and k not in _KEPT_EXOMEM_ENV]:
         del os.environ[key]
     os.environ["EXOMEM_VAULT_PATH"] = str(snapshot)
-    if state_dir:
-        os.environ["XDG_STATE_HOME"] = state_dir
-    elif not os.environ.get("XDG_STATE_HOME"):
-        os.environ["XDG_STATE_HOME"] = str(snapshot.parent / f"{snapshot.name}-activation-state")
+    os.environ["XDG_STATE_HOME"] = (
+        state_dir if state_dir else str(snapshot.parent / f"{snapshot.name}-activation-state")
+    )
 
 
 def load_turns(path: Path) -> list[dict[str, Any]]:
@@ -122,9 +127,19 @@ def run_turn(vault_root: Path, entry: dict[str, Any]) -> dict[str, Any]:
         for anchor in packet.get("anchors", ()) or ()
     ]
     abstained = bool(packet.get("abstained"))
+    # Checked BEFORE `abstained` (review round 3, MINOR 9): the packet's own
+    # `abstained` field is true for BOTH `unresolved` and `ambiguous` (neither
+    # is `resolved`), so branching on `abstained` first made the `ambiguous`
+    # case unreachable — every ambiguous packet reported "unresolved" instead.
+    if packet.get("ambiguity"):
+        status = "ambiguous"
+    elif abstained:
+        status = "unresolved"
+    else:
+        status = "resolved"
     result: dict[str, Any] = {
         "turn": turn,
-        "status": "unresolved" if abstained else "resolved" if not packet.get("ambiguity") else "ambiguous",
+        "status": status,
         "abstained": abstained,
         "abstention_reason": (packet.get("abstention") or {}).get("reason") if abstained else None,
         "anchors": anchors,

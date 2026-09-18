@@ -140,3 +140,157 @@ def test_c10_derived_alias_is_retired_by_a_second_same_leading_name_page(probe) 
 
     resolved_paths = {a.path for a in resolution.anchors if a.status == "resolved"}
     assert manifest.bike_path not in resolved_paths
+
+
+# --------------------------------------------------------------------------- #
+# Independent review, round 3
+# --------------------------------------------------------------------------- #
+
+
+def _hub_page(vault: Path, rel: str, title: str) -> str:
+    from test_working_set_index import _write
+
+    _write(
+        vault / rel,
+        f"---\ntitle: {title}\nstatus: active\ntags: [hub]\nupdated: 2026-09-01\n---\n\n"
+        f"# {title}\n\nA coordination hub.\n",
+    )
+    return rel
+
+
+def test_a_tag_every_hub_carries_is_not_a_name_for_the_others(tmp_path: Path) -> None:
+    """BLOCKER 1 (the reviewer's four-page hub vault): every hub carries
+    `tags: [hub]`; exactly ONE hub's title literally contains the word "hub".
+    A turn saying only "hub" must not let a SECOND hub — reached only by a
+    recall hit on its own page, sharing nothing else with the turn — resolve
+    on `[rare_term, retrieval]`. That evidence pair is the original defect in
+    a new hat: `rare_term` must be granted only from the anchor's OWN
+    authored title/alias terms, never a term it carries only through a tag.
+    """
+    from exomem import working_set, working_set_index
+
+    vault = tmp_path / "vault"
+    _hub_page(vault, "Knowledge Base/Notes/Insights/h1.md", "Hub overview")
+    _hub_page(vault, "Knowledge Base/Notes/Insights/h2.md", "Northern Circuit")
+    _hub_page(vault, "Knowledge Base/Notes/Insights/h3.md", "Southern Circuit")
+    _hub_page(vault, "Knowledge Base/Notes/Insights/h4.md", "Eastern Circuit")
+
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild()
+    packet = working_set.compile_packet(
+        vault,
+        turn="hub",
+        retrieval_paths=frozenset({"Knowledge Base/Notes/Insights/h2.md"}),
+        index=index,
+    )
+
+    by_path = {a["path"]: a for a in packet["anchors"]}
+    h2 = by_path.get("Knowledge Base/Notes/Insights/h2.md")
+    assert h2 is None or (
+        "rare_term" not in h2["evidence"] and h2["status"] != "resolved"
+    ), h2
+    assert packet["abstained"] is True
+
+
+def test_a_partial_anchor_besides_a_resolved_one_contributes_nothing_to_units(
+    tmp_path: Path,
+) -> None:
+    """BLOCKER 2 (the reviewer's shape): one resolved anchor (exact_alias) and
+    one retrieval-only `partial` anchor. The partial anchor's own lede must
+    not appear anywhere in the packet -- not as a unit, not as a pointer, not
+    as current state (canonical spec's restated "Bounded role lanes"
+    requirement, "A partial anchor beside a resolved one is listed, not
+    served").
+    """
+    from test_working_set_index import _write
+
+    from exomem import working_set, working_set_index
+
+    vault = tmp_path / "vault"
+    _write(
+        vault / "Knowledge Base/Products/widget.md",
+        "---\ntitle: Widget\nstatus: active\nupdated: 2026-09-01\n---\n\n"
+        "# Widget\n\n## Summary\n\nA small generic device kept on the shelf.\n",
+    )
+    secret_lede = "This exact sentence must never leak into a served packet."
+    _write(
+        vault / "Knowledge Base/Products/other-thing.md",
+        "---\ntitle: Other thing\nstatus: active\nupdated: 2026-09-01\n---\n\n"
+        f"# Other thing\n\n{secret_lede}\n",
+    )
+
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild()
+    packet = working_set.compile_packet(
+        vault,
+        turn="what about the widget",
+        retrieval_paths=frozenset({"Knowledge Base/Products/other-thing.md"}),
+        index=index,
+    )
+
+    by_path = {a["path"]: a for a in packet["anchors"]}
+    widget = by_path["Knowledge Base/Products/widget.md"]
+    other = by_path["Knowledge Base/Products/other-thing.md"]
+    assert widget["status"] == "resolved"
+    assert other["status"] == "partial"
+    packet_text = str(packet)
+    assert secret_lede not in packet_text
+    assert all(unit.get("provenance", {}).get("path") != other["path"] for unit in packet["units"])
+    assert all(pointer.get("ref") != other["path"] for pointer in packet["pointers"])
+
+
+def test_a_graph_hop_only_hit_does_not_grant_the_linked_hub_retrieval(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAJOR 4 (the reviewer's p6 shape): a hub page shares no word with the
+    turn at all, but is wikilinked from a page that DOES answer the turn's
+    words. Real `find(graph=True)` surfaces the hub only via a
+    `graph_hop=True` hit -- never because the turn's own words reached it --
+    and `op_activate_context` must not let that graph-hop-only hit grant the
+    hub `retrieval`. This runs the REAL product surface end to end (never a
+    hand-built `retrieval_paths` set, which the lower-level `_resolve_turn`
+    tests above use and so never exercise this path at all).
+    """
+    from test_working_set_index import _write
+
+    from exomem import bm25, commands, working_set_index, working_set_runtime
+    from exomem import find as find_module
+
+    # Raw writes, not `create_file`: the tier-2 authoring contract (a
+    # qualifying relation, a non-empty `## Observations`/`## Decision` unit)
+    # is orthogonal to what this test exercises -- the resolver's own
+    # evidence rule -- and every other direct-write test in this module
+    # bypasses it the same way.
+    _write(
+        vault / "Knowledge Base/Notes/Insights/major4-hub.md",
+        "---\ntitle: Major4 hub\nstatus: active\ntags: [hub]\nupdated: 2026-09-01\n---\n\n"
+        "# Major4 hub\n\nA coordination hub with no lexical overlap with the query at all.\n",
+    )
+    _write(
+        vault / "Knowledge Base/Notes/Insights/major4-linker.md",
+        "---\ntitle: Major4 linker\nstatus: active\nupdated: 2026-09-01\n---\n\n"
+        "# Major4 linker\n\nDistinctive probe phrase used only here for the query. "
+        "See also [[Knowledge Base/Notes/Insights/major4-hub]].\n",
+    )
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    bm25.clear_cache()
+    find_module.clear_cache()
+    find_module._RESOLVER_CACHE.clear()
+
+    # Confirm the graph-hop shape is actually real before trusting the packet:
+    # the hub must come back ONLY as a graph_hop=True hit, never lexically.
+    hits = find_module.find(
+        vault, query="distinctive probe phrase", mode="hybrid", graph=True, limit=10
+    )
+    hub_hit = next((h for h in hits if "major4-hub" in h.path), None)
+    assert hub_hit is not None and hub_hit.graph_hop, (
+        f"expected a graph_hop=True hub hit, got {[(h.path, h.graph_hop) for h in hits]}"
+    )
+
+    packet = commands.op_activate_context(vault, turn="distinctive probe phrase")
+
+    by_path = {a.get("path"): a for a in packet.get("anchors", ()) or ()}
+    hub = by_path.get("Knowledge Base/Notes/Insights/major4-hub.md")
+    assert hub is None or "retrieval" not in (hub.get("evidence") or ()), hub

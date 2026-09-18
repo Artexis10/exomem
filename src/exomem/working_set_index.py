@@ -56,7 +56,14 @@ log = logging.getLogger(__name__)
 #: title's leading name before a trailing parenthetical or dash qualifier) as
 #: aliases while unique in the catalogue: an index without either cannot tell a
 #: rare word from a common one or resolve a natural short reference at all.
-SCHEMA_VERSION = 5
+#: v6 (same change, independent review round 3) corrects what v5 actually
+#: computed: the term-count table and the derived-name gates now cover every
+#: anchor kind (not pages alone) and respect the `MAX_ANCHORS` cap
+#: consistently, and a derived name is validated (no filename-like, digits-
+#: only, stopwords-only, four-or-more-word, or under-three-character lead). A
+#: v5 sidecar's stored aliases and counts were computed by the pre-fix rules
+#: and would otherwise survive unrebuilt until an unrelated vault edit.
+SCHEMA_VERSION = 6
 SIDECAR_NAME = ".working-set.sqlite"
 DISABLE_ENV = "EXOMEM_DISABLE_WORKING_SET"
 _TRUE = frozenset({"1", "true", "yes", "on"})
@@ -179,6 +186,26 @@ def terms_of(text: str) -> tuple[str, ...]:
 RARE_TERM_MAX_ANCHORS = 3
 
 
+#: A genuine "sibilant stem + `-es`" plural (class -> classes, box -> boxes,
+#: alias -> aliases, bus -> buses) checked on the WHOLE word's trailing
+#: letters. `fold_plural`'s docstring explains why this is a whole-word check
+#: rather than a "stem after removing -es" check, and the one required pair it
+#: cannot also satisfy (release/releases).
+_SIBILANT_ES_SUFFIXES = ("ses", "xes", "zes", "ches", "shes")
+
+
+def _fold_plural_once(term: str) -> str:
+    if len(term) <= 3:
+        return term
+    if len(term) > 4 and term.endswith("ies"):
+        return term[:-3] + "y"
+    if term.endswith(_SIBILANT_ES_SUFFIXES):
+        return term[:-2]
+    if term.endswith("s") and not term.endswith(("ss", "us", "is")):
+        return term[:-1]
+    return term
+
+
 def fold_plural(term: str) -> str:
     """Fold a regular plural to the same canonical spelling as its singular.
 
@@ -187,15 +214,59 @@ def fold_plural(term: str) -> str:
     anchor's "post" to land on one canonical form for lexical comparison, not a
     linguistically perfect lemma. `exact_alias` is never folded — it compares
     the turn's own phrases against the anchor's own names verbatim.
-    """
-    if len(term) > 4 and term.endswith("ies"):
-        return term[:-3] + "y"
-    if len(term) > 3 and term.endswith("es"):
-        return term[:-2]
-    if len(term) > 2 and term.endswith("s") and not term.endswith("ss"):
-        return term[:-1]
-    return term
 
+    Rules, applied for up to two passes so "aliases" and "alias" meet: never
+    fold a word of three characters or fewer; fold `-ies` (longer than four
+    characters) to `-y`; strip `-es` only when the WHOLE word ends in `-ses`,
+    `-xes`, `-zes`, `-ches` or `-shes` (a sibilant-stem plural: class, box,
+    alias, bus, process); otherwise strip one trailing `s` unless the word
+    ends in `ss`, `us` or `is` (status, analysis, class, gas, bus, its, has
+    are none of these three characters or fewer, or excluded, and so never
+    change).
+
+    Known residual collisions, accepted rather than hidden: "news"/"new",
+    "means"/"mean", "lens"/"len" each fold to a shorter word that is not
+    their singular. A further one, found while implementing this rule:
+    "release"/"releases" does NOT fold together. "release" ends in a silent
+    `e` (no trailing `s` at all, so neither rule ever touches it) while
+    "releases" ends in literal `-ses` (release + s), which is indistinguishable
+    BY SUFFIX ALONE from a genuine sibilant-stem plural — "alias" + "es" =
+    "aliases" ends in the identical `-ses` shape. Folding "releases" as a
+    sibilant-stem plural (this function's choice, so "alias"/"aliases" and
+    "class"/"classes" fold correctly, which the shipped requirement names
+    explicitly) makes it collide with "release" rather than match it; no
+    suffix rule can satisfy both pairs, because both wordforms produce the
+    same trailing letters once pluralised.
+    """
+    folded = term
+    for _ in range(2):
+        next_folded = _fold_plural_once(folded)
+        if next_folded == folded:
+            break
+        folded = next_folded
+    return folded
+
+
+#: Function words, shared with the resolver's lexical comparison
+#: (`working_set_resolve` imports this rather than keeping a second copy —
+#: doing so would let the two drift, and a derived-name validity check that
+#: used a different stopword list than the turn-matching one would not
+#: measure "is this a name" against the same vocabulary a turn ever produces).
+#: Lives here rather than in `working_set_resolve` because `derived_short_name`
+#: needs it too, and this module has no dependency on the resolver.
+STOPWORDS: frozenset[str] = frozenset(
+    {
+        "a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "do", "for",
+        "from", "how", "i", "i'm", "im", "in", "is", "it", "its", "just", "me", "much",
+        "my", "no", "not", "of", "on", "or", "our", "out", "so", "still", "that", "the",
+        "their", "them", "then", "there", "these", "they", "this", "to", "up", "was",
+        "we", "what", "when", "where", "which", "who", "why", "will", "with", "you",
+        "your", "again", "any", "does", "did", "get", "got", "had", "has", "have",
+        "left", "like", "make", "many", "more", "most", "need", "now", "one", "only",
+        "other", "over", "should", "some", "such", "than", "too", "use", "very",
+        "want", "way", "well", "about",
+    }
+)
 
 #: A title's leading name before a trailing parenthetical (`Bike (Trek 520,
 #: 2019)`) or a dash qualifier (`Bike - Trek 520`, `Bike — Trek 520`). Matched
@@ -208,15 +279,40 @@ def derived_short_name(title: str) -> str | None:
     """The leading name of a title carrying a trailing qualifier, or `None`.
 
     Structural extraction, not an inference: a title with no such qualifier
-    derives nothing. Uniqueness across the anchor set is the caller's job (see
-    `_page_candidates`) — this function only ever looks at one title.
+    derives nothing. Uniqueness (and rarity) across the anchor set is the
+    caller's job (see `_finalize_anchor_aliases`) — this function only ever
+    looks at one title, and decides only whether that title's own lead is a
+    NAME at all, never whether it is anyone else's.
+
+    Nothing is derived when the lead: is a filename (contains `.`, or starts
+    with `_` — a stray extension or a private note, never a name a turn would
+    say); tokenises to nothing, to more than three words, to only stopwords
+    (the resolver's own list, `STOPWORDS`) or to only digits (a bare year is a
+    date, not a name); or joins to fewer than three characters (a single
+    letter or two occupies a name slot it can never fill, since a turn that
+    short is dropped by the resolver's own stopword filtering before it could
+    ever match). The name itself is the lead's tokens, JOINED BY SINGLE
+    SPACES the way the resolver's own tokeniser would read it back — never the
+    raw substring — so a multi-space or emoji-led title ("Multi   Spaces -
+    qualifier", "🎯 Goal - notes") derives a name a turn can actually produce,
+    instead of one that can never match and only occupies a name slot.
     """
     stripped = str(title).strip()
     match = _TRAILING_PAREN.match(stripped) or _TRAILING_DASH.match(stripped)
     if match is None:
         return None
-    name = match.group("name").strip()
-    return name or None
+    lead = match.group("name").strip()
+    if not lead or "." in lead or lead.startswith("_"):
+        return None
+    tokens = tokens_of(lead)
+    if not tokens or len(tokens) > 3:
+        return None
+    if all(token in STOPWORDS for token in tokens):
+        return None
+    if all(token.isdigit() for token in tokens):
+        return None
+    name = " ".join(tokens)
+    return name if len(name) >= 3 else None
 
 
 class WorkingSetIndexUnavailable(RuntimeError):
@@ -372,25 +468,23 @@ def _source_signature(path: Path) -> str:
     return f"{int(stat.st_mtime_ns)}:{int(stat.st_size)}"
 
 
-def _page_candidates(
+def _walk_page_entries(
     vault_root: Path,
-) -> tuple[
-    list[_Candidate], dict[str, tuple[str, ...]], dict[str, list[str]], dict[str, set[str]]
-]:
-    """Walk the knowledge base once: anchor pages, wikilink edges, and a name map.
+) -> tuple[list[dict[str, Any]], dict[str, tuple[str, ...]], dict[str, list[str]]]:
+    """Walk the knowledge base once: raw anchor-page entries, wikilink edges,
+    and a name map.
 
     The name map is one name to MANY paths: `normalize()` folds case and Unicode
     form, so distinct pages can share a spelling, and collapsing them would hide
     every page but one from both edge resolution and the egress guard.
 
-    Anchor aliases are finalised in a second pass over the walked anchors only
-    (`_finalize_anchor_aliases`), after every anchor's own title/alias names
-    are known: a derived short name (`Bike (Trek 520, 2019)` -> `bike`) is
-    only an alias while unique across the anchor set AND its own terms are
-    rare in the authored title/alias vocabulary, and neither can be decided
-    from one page in isolation. The fourth return value is that same
-    authored-only term ownership, for the caller to fold into the persisted
-    term-count table (`WorkingSetIndex._collect`).
+    Entries are raw dicts, NOT `_Candidate`s: a derived short name (`Bike
+    (Trek 520, 2019)` -> `bike`) is only an alias while unique across, AND
+    rare within, the FULL held anchor set — pages, Records collections,
+    Planning items and project keys together, after the `MAX_ANCHORS` cap —
+    and neither can be decided from the page walk alone. `WorkingSetIndex.
+    _collect` gathers every kind, applies the cap, and only then calls
+    `_finalize_anchor_aliases` over everything that made the cut.
     """
     from . import recall_policy
 
@@ -460,8 +554,7 @@ def _page_candidates(
                 "source_signature": _source_signature(path),
             }
         )
-    candidates, term_owners = _finalize_anchor_aliases(raw)
-    return candidates, outbound, names, term_owners
+    return raw, outbound, names
 
 
 def _title_alias_term_owners(
@@ -488,10 +581,10 @@ def _derived_name_is_rare(name: str, term_owners: Mapping[str, set[str]]) -> boo
     title/alias vocabulary, not merely textually unique.
 
     A dash- or parenthetical-qualified title whose leading words are a common
-    TOPIC PREFIX — twenty pages titled "Atlas Strategy", "Atlas Roadmap", ...
-    plus one titled "Atlas — Agentic Search" — derives "Atlas" as a name no
-    other anchor's names literally include, yet the word identifies twenty
-    anchors, not one. Measured the same way `rare_term` measures a shared
+    TOPIC PREFIX — twenty pages titled "Orchard Strategy", "Orchard Roadmap",
+    ... plus one titled "Orchard — Agentic Search" — derives "Orchard" as a
+    name no other anchor's names literally include, yet the word identifies
+    twenty anchors, not one. Measured the same way `rare_term` measures a shared
     turn word's rarity (`RARE_TERM_MAX_ANCHORS`), over the SAME authored-only
     counts, so a name is only ever admitted when it is genuinely rare by that
     one shared yardstick.
@@ -504,11 +597,20 @@ def _derived_name_is_rare(name: str, term_owners: Mapping[str, set[str]]) -> boo
 
 def _finalize_anchor_aliases(
     raw: Sequence[Mapping[str, Any]],
+    other_candidates: Sequence[_Candidate] = (),
 ) -> tuple[list[_Candidate], dict[str, set[str]]]:
-    """Build every anchor's `_Candidate`, adding a derived short name as an
-    alias only while BOTH hold: no other anchor's names — title, alias, or
+    """Build every PAGE anchor's `_Candidate`, adding a derived short name as
+    an alias only while BOTH hold: no other anchor's names — title, alias, or
     own derived short name — include it, AND every one of its own terms is
     rare in the authored title/alias vocabulary (`_derived_name_is_rare`).
+
+    `other_candidates` is every non-page anchor ALREADY HELD in the index —
+    Records collections, Planning items, project keys, after the
+    `MAX_ANCHORS` cap — so a derived page name cannot duplicate a collection's
+    own title, and the rarity count it is measured against covers every anchor
+    kind, not pages alone. It contributes to `name_owners`/`term_owners` but is
+    never itself a candidate for derivation: only a page title carries a
+    parenthetical or dash qualifier in the sense this function derives from.
 
     One pass to collect who owns which name, a second to decide: a name is
     "owned" by more than one anchor either because two anchors are genuinely
@@ -518,10 +620,11 @@ def _finalize_anchor_aliases(
     whichever anchor happened to be walked first.
 
     The rarity gate is measured against `term_owners` — computed here, from
-    `raw` alone, BEFORE any derived name exists — and returned alongside the
-    candidates so the caller can fold it into the persisted term-count table
-    unchanged: a derived alias must never be able to inflate the very count
-    that gated its own admission, or any other anchor's.
+    `raw` and `other_candidates` alone, BEFORE any derived name exists — and
+    returned alongside the candidates so the caller can fold it into the
+    persisted term-count table unchanged: a derived alias must never be able
+    to inflate the very count that gated its own admission, or any other
+    anchor's.
     """
     name_owners: dict[str, set[str]] = {}
     for entry in raw:
@@ -529,10 +632,19 @@ def _finalize_anchor_aliases(
             key = normalize(name)
             if key:
                 name_owners.setdefault(key, set()).add(entry["anchor_id"])
+    for candidate in other_candidates:
+        for name in (candidate.title, *candidate.aliases):
+            key = normalize(name)
+            if key:
+                name_owners.setdefault(key, set()).add(candidate.anchor_id)
 
     term_owners = _title_alias_term_owners(
         (entry["anchor_id"], entry["title"], entry["aliases"]) for entry in raw
     )
+    for term, ids in _title_alias_term_owners(
+        (c.anchor_id, c.title, c.aliases) for c in other_candidates
+    ).items():
+        term_owners.setdefault(term, set()).update(ids)
 
     derived_key_by_anchor: dict[str, str] = {}
     for entry in raw:
@@ -885,7 +997,7 @@ class WorkingSetIndex:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS anchor_term_rows_term ON anchor_term_rows(term)")
         # Every KB page's wikilink-resolvable names -> its vault-relative path.
-        # `_page_candidates` already computes this map to resolve anchor links; it
+        # `_walk_page_entries` already computes this map to resolve anchor links; it
         # is persisted rather than discarded so the egress guard can resolve a
         # stem found in authored prose WITHOUT a corpus walk and without needing a
         # warm semantic snapshot. It covers the vault's page set, not only anchors.
@@ -1294,10 +1406,33 @@ class WorkingSetIndex:
         dict[str, list[str]],
         dict[str, int],
     ]:
-        pages, outbound, names, page_term_owners = _page_candidates(self.vault_root)
+        """Gather every anchor kind, cap to `MAX_ANCHORS`, THEN decide derived
+        page aliases and measure term rarity — both over the full, capped
+        catalogue, never pages alone (review round 3, MAJOR 6/7): a derived
+        page name must not duplicate a collection's own title, and the count
+        `rare_term` and the derived-name rarity gate measure against must
+        cover exactly the anchors this index actually holds, of every kind.
+        """
+        raw_pages, outbound, names = _walk_page_entries(self.vault_root)
         records, plans = _collection_candidates(self.vault_root)
         projects = _project_candidates(self.vault_root)
-        candidates = [*pages, *records, *plans, *projects][:MAX_ANCHORS]
+
+        # Cap in the SAME order `anchors()` has always reported (pages first),
+        # over anchor identities only — page entries are not `_Candidate`s yet.
+        ordered_ids = (
+            [entry["anchor_id"] for entry in raw_pages]
+            + [c.anchor_id for c in records]
+            + [c.anchor_id for c in plans]
+            + [c.anchor_id for c in projects]
+        )
+        kept_ids = frozenset(ordered_ids[:MAX_ANCHORS])
+        raw_pages = [entry for entry in raw_pages if entry["anchor_id"] in kept_ids]
+        other_candidates = [
+            c for c in (*records, *plans, *projects) if c.anchor_id in kept_ids
+        ]
+
+        pages, term_owners = _finalize_anchor_aliases(raw_pages, other_candidates)
+        candidates = [*pages, *other_candidates]
         anchor_paths = {
             candidate.path: candidate.anchor_id
             for candidate in candidates
@@ -1305,19 +1440,6 @@ class WorkingSetIndex:
         }
         edges = _resolve_links(outbound, names, anchor_paths)
         candidates.sort(key=lambda candidate: candidate.anchor_id)
-        # The persisted term-count table, over the SAME candidates that made
-        # it past the `MAX_ANCHORS` cap: page terms are already computed
-        # (`page_term_owners`, authored-only, from `_finalize_anchor_aliases`);
-        # Records/Planning/project candidates are never subject to derived
-        # names at all, so their own `.title`/`.aliases` are authored-only by
-        # construction and can be folded in directly.
-        page_ids = {candidate.anchor_id for candidate in pages}
-        term_owners = {term: set(ids) for term, ids in page_term_owners.items()}
-        non_page = [c for c in candidates if c.anchor_id not in page_ids]
-        for term, ids in _title_alias_term_owners(
-            (c.anchor_id, c.title, c.aliases) for c in non_page
-        ).items():
-            term_owners.setdefault(term, set()).update(ids)
         term_counts = {term: len(ids) for term, ids in term_owners.items()}
         return candidates, edges, names, term_counts
 
