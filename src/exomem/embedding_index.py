@@ -1210,6 +1210,45 @@ class EmbeddingIndex:
             return [], None
         return [str(text) for _idx, text, _mtime in rows], max(mtimes)
 
+    def stored_text_vectors(
+        self, rel_path: str
+    ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+        """One page's published vectors keyed by the exact text each was encoded
+        from: `(chunk_text -> vector, unit content -> vector)`.
+
+        A write that changes one chunk of a long page takes the rest from here
+        instead of encoding them again. A row is offered only when its blob is
+        one full `VECTOR_DIM` float32 vector; anything else is left out, so the
+        caller encodes that text. Reuse assumes what every search over this
+        sidecar already assumes -- one model wrote all of it -- and a model
+        change is answered by the same rebuild either way. Two primary-key range
+        reads on one connection; never creates the sidecar.
+        """
+        if not self.path.exists():
+            return {}, {}
+        conn = self._connect()
+        try:
+            chunk_rows = conn.execute(
+                "SELECT chunk_text, vector FROM chunks WHERE file_path = ?",
+                (rel_path,),
+            ).fetchall()
+            unit_rows = conn.execute(
+                "SELECT content, vector FROM semantic_unit_vectors WHERE parent_path = ?",
+                (rel_path,),
+            ).fetchall()
+        finally:
+            conn.close()
+        width = VECTOR_DIM * np.dtype(np.float32).itemsize
+
+        def keyed(rows: list[tuple[Any, Any]]) -> dict[str, np.ndarray]:
+            return {
+                str(text): np.frombuffer(blob, dtype=np.float32).copy()
+                for text, blob in rows
+                if isinstance(blob, (bytes, memoryview)) and len(blob) == width
+            }
+
+        return keyed(chunk_rows), keyed(unit_rows)
+
     def _vec_search(
         self, query_vec: np.ndarray, k: int
     ) -> list[tuple[str, int, str, float]] | None:
