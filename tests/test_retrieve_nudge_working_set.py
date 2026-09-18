@@ -519,8 +519,8 @@ def test_an_unresolved_block_carries_no_unit_text() -> None:
     "kind", sorted(hook._WORDED_CONTACT_KINDS)
 )
 def test_every_worded_contact_kind_qualifies_a_candidate(kind: str) -> None:
-    """`rare_term` is a kind the resolver fix adds on another branch. Naming all
-    four here means this hook renders correctly before and after that merge."""
+    """`rare_term` is a kind the resolver now actually emits. Naming all four
+    here means this hook renders every one of them correctly."""
     block = hook._format_working_set_block(
         _unresolved_packet([_candidate("x.md", "X", "note", [kind])]), 4000
     )
@@ -535,6 +535,48 @@ def test_the_worded_kinds_are_the_four_the_contract_names() -> None:
     for surfaced_by_recall in ("retrieval", "graph_corroboration", "usage_prior",
                                "category_match", "vector_band", "continuity"):
         assert surfaced_by_recall not in hook._WORDED_CONTACT_KINDS
+
+
+def test_a_real_rare_term_candidate_from_the_leaf_is_rendered(tmp_path: Path) -> None:
+    """Integration, not a hand-authored fixture. `rare_term` is the resolver's
+    weak worded kind (`working_set_resolve.WORDED_CONTACT_KINDS`) and this
+    drives the real leaf end to end — a seeded vault, the real index, the real
+    resolver, the real egress guard — so the rendered block reflects whatever
+    `commands.op_activate_context` actually returns rather than an assumed
+    shape. The hook's own `_WORDED_CONTACT_KINDS` must stay spelled identically
+    to the resolver's constant, or a rename on either side would silently stop
+    qualifying this kind.
+    """
+    from exomem import commands, working_set_index, working_set_resolve, working_set_runtime
+
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base" / "Products").mkdir(parents=True)
+    (vault / "Knowledge Base" / "Products" / "panel.md").write_text(
+        "---\ntitle: Quibbleflux Zorbnax Panel\nstatus: active\nupdated: 2026-09-01\n"
+        "---\n\n# Quibbleflux Zorbnax Panel\n\nAn unrelated fixture page.\n",
+        encoding="utf-8",
+    )
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+
+    packet = commands.op_activate_context(
+        vault, turn="What is the current status of the quibbleflux reading this week?"
+    )
+
+    assert packet["abstained"] is True
+    assert packet["abstention"]["reason"] == "unresolved"
+    (anchor,) = packet["anchors"]
+    assert anchor["evidence"] == ["rare_term"], anchor
+    assert hook._WORDED_CONTACT_KINDS == working_set_resolve.WORDED_CONTACT_KINDS
+
+    block = hook._format_working_set_block(packet, 4000)
+
+    assert block.splitlines()[0] == hook._WORKING_SET_HEADER
+    assert (
+        "- resource: Quibbleflux Zorbnax Panel [Knowledge Base/Products/panel.md]"
+        in block
+    )
+    assert hook._WORKING_SET_UNRESOLVED_LINE in block
 
 
 def test_at_most_five_candidates_are_rendered() -> None:
@@ -1193,6 +1235,38 @@ def test_a_stale_temporary_from_a_crashed_write_is_swept(
     _under_loose_umask(lambda: hook._write_activation_token(SESSION, "TOKEN-1"))
 
     assert not stale.exists()
+    assert path.read_text(encoding="utf-8") == "TOKEN-1"
+
+
+def test_a_symlinked_temporary_is_judged_by_its_own_mtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`lstat`, not `stat`: a symlinked temporary's fate turns on the LINK's own
+    mtime, never the target's. An old link to a fresh target must still be
+    swept, and a fresh link to an old target must still be left alone —
+    following the link either way would get one of the two backwards."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(home))
+    monkeypatch.setenv("EXOMEM_HOOK_CLIENT", "claude")
+    path = hook.activation_token_path(home, "claude", SESSION)
+    path.parent.mkdir(parents=True)
+
+    fresh_target = path.parent / "fresh-target"
+    fresh_target.write_text("fresh", encoding="utf-8")
+    stale_link = path.with_name(f"{path.name}.tmp-11111-deadbeef")
+    stale_link.symlink_to(fresh_target)
+    os.utime(stale_link, (0, 0), follow_symlinks=False)
+
+    old_target = path.parent / "old-target"
+    old_target.write_text("old", encoding="utf-8")
+    os.utime(old_target, (0, 0))
+    fresh_link = path.with_name(f"{path.name}.tmp-22222-cafebabe")
+    fresh_link.symlink_to(old_target)
+
+    _under_loose_umask(lambda: hook._write_activation_token(SESSION, "TOKEN-1"))
+
+    assert not stale_link.is_symlink(), "the OLD link must be swept despite its fresh target"
+    assert fresh_link.is_symlink(), "the FRESH link must survive despite its old target"
     assert path.read_text(encoding="utf-8") == "TOKEN-1"
 
 

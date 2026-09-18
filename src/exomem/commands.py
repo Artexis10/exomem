@@ -5971,8 +5971,17 @@ def op_activate_context(
         return working_set_module.abstained_packet(
             reason="unavailable", max_chars=budget, generation=generation_stub
         )
+    # `graph_hop` marks a hit `find()` admitted ONLY by expanding from another
+    # hit's typed link, never because the turn's own words reached it — the
+    # exact "recall hit elsewhere in the anchor's link neighbourhood" shape
+    # the canonical spec's `retrieval` clause forbids, just reached through the
+    # OTHER page's contact rather than the anchor's own. `find()` itself stays
+    # byte-identical (`graph=True` is unchanged): this filters the evidence
+    # this operation derives from its hits, not the call that produces them.
     retrieval_paths = frozenset(
-        str(getattr(hit, "path", "") or "") for hit in release.hits
+        str(getattr(hit, "path", "") or "")
+        for hit in release.hits
+        if not getattr(hit, "graph_hop", False)
     ) - {""}
 
     freshness_key: Any = ""

@@ -65,7 +65,13 @@ def _pvc_is_bound(value: object, *, metadata: OpaqueProviderMetadata, pvc_uid: s
         raise _refuse()
 
 
-def _runtime_is_stopped(value: object, *, resource: str, require_uid: bool = False) -> str | None:
+def _runtime_is_stopped(
+    value: object,
+    *,
+    metadata: OpaqueProviderMetadata,
+    require_uid: bool = False,
+) -> str | None:
+    resource = metadata.resource_name
     runtime = _mapping(value)
     identity = _mapping(runtime.get("metadata"))
     spec = _mapping(runtime.get("spec"))
@@ -79,6 +85,15 @@ def _runtime_is_stopped(value: object, *, resource: str, require_uid: bool = Fal
         raise _refuse()
     uid = identity.get("uid")
     if require_uid:
+        # A remnant pod is trusted through its controller, so the controller
+        # itself must carry this cell's exact identity. The cell chart
+        # annotates the StatefulSet, not the pods it creates.
+        annotations = _mapping(identity.get("annotations"))
+        if any(
+            annotations.get(key) != expected
+            for key, expected in metadata.kubernetes_annotations.items()
+        ):
+            raise _refuse()
         return _string(uid)
     return None
 
@@ -167,12 +182,17 @@ def _pod_evidence(
         and owner_identities[0].get("uid") == runtime_uid
         and owner_identities[0].get("controller") is True
     )
+    # The chart's runtime pods carry no identity annotations: they are bound to
+    # the authenticated StatefulSet by its UID. Requiring the annotations here
+    # made every terminating runtime pod look foreign, so a scale-down followed
+    # by the stopped proof failed terminally instead of waiting it out. Any
+    # identity a pod does claim must still be this cell's.
     retryable_runtime = (
         runtime_uid is not None
         and name == resource + "-0"
         and exact_controller
         and all(
-            annotations.get(key) == expected
+            annotations.get(key, expected) == expected
             for key, expected in metadata.kubernetes_annotations.items()
         )
     )
@@ -217,7 +237,7 @@ async def verify_stopped_cell(
         else:
             runtime_uid = _runtime_is_stopped(
                 runtime,
-                resource=resource,
+                metadata=metadata,
                 require_uid=wait_for_runtime,
             )
 

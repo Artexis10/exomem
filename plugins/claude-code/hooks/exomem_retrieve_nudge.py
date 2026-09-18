@@ -155,10 +155,11 @@ _WORKING_SET_UNRESOLVED_LINE = (
 # `partial`. Those turns ARE decidable — but only by the agent, and only if it is
 # shown the candidates.
 #
-# `rare_term` is a kind the resolver fix adds on another branch. All four are
-# named here as a closed set so this hook renders correctly before and after that
-# merge, and so a kind nobody has invented yet simply fails to qualify rather
-# than breaking the filter.
+# `rare_term` is the resolver's weak worded kind (`working_set_resolve.
+# WORDED_CONTACT_KINDS`) — a single shared term rare enough to be a lead, never
+# a decision by itself. The four are named here as a closed set, kept spelled
+# identically to the resolver's constant, so a kind nobody has invented yet
+# simply fails to qualify rather than breaking the filter.
 _WORDED_CONTACT_KINDS = frozenset(
     {"exact_alias", "lexical_overlap", "claims_match", "rare_term"}
 )
@@ -908,7 +909,11 @@ def _sweep_stale_temporaries(directory: Path, prefix: str) -> None:
         if not entry.name.startswith(prefix):
             continue
         try:
-            if entry.stat().st_mtime < cutoff:
+            # `lstat`, not `stat`: a symlinked temporary must be judged by its
+            # OWN mtime, never the target's — following the link here would
+            # let an unrelated target's freshness keep a stale link alive, or
+            # unlink a fresh link because its target happens to be old.
+            if entry.lstat().st_mtime < cutoff:
                 entry.unlink()
         except OSError:
             pass
