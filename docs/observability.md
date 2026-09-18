@@ -237,6 +237,10 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `delivery.vocabulary_after_commit` | Vocabulary delivery after the commit. |
 | `derived.advisory_execute`, `derived.component_dispatch`, `derived.component_completion` | The derived drain. |
 | `recall.*` | Retrieval phases, named by `find`'s own timings. |
+| `recall.due_state` | Serving the advisory due-state block a recall carries. On a memo hit its re-checks are `recall.due_state.verdicts` (`paths` = release verdicts re-asked), `recall.due_state.role` and `recall.due_state.exists` (`rows`); on a miss, `recall.due_state.build`. |
+| `recall.due_state.emit` | Deciding whether that block is new to the session and recording its delivery. |
+| `command.leaf`, `command.postfilter` | The two halves of a tool's `duration_ms`: the command itself, then the MCP-layer post-filter and scrub of its result. |
+| `lexical.publication_wait` | Time a request spent waiting for the lexical publication barrier, with `timeout_ms` (the bound it chose) and `acquired` (1 or 0). Recorded only on the MCP path. |
 
 Spans are aggregated by name within a call, so a phase entered once per changed
 path reports a count and a total rather than hundreds of rows. Instrumentation

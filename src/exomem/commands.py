@@ -5780,9 +5780,14 @@ def _with_due_state(
         # Inside the command's own disclosure boundary: the block aggregates
         # across pages, so every path is decided by the release plane before
         # anything is counted.
-        with egress_module.disclosure_boundary(vault_root, "ask_memory"):
+        with (
+            egress_module.disclosure_boundary(vault_root, "ask_memory"),
+            call_spans_module.span("recall.due_state", {}),
+        ):
             block = due_state_module.served(vault_root, purpose=purpose)
-        if not due_state_module.should_emit(block, vault_root=vault_root):
+        with call_spans_module.span("recall.due_state.emit", {}):
+            emit = due_state_module.should_emit(block, vault_root=vault_root)
+        if not emit:
             return result
     except Exception:  # noqa: BLE001 — a due-state count never breaks a recall
         log.debug("due-state projection unavailable for recall", exc_info=True)

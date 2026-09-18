@@ -246,6 +246,7 @@ FIELD_DECLARATIONS: tuple[FieldDeclaration, ...] = (
 REVIEW_STATE_FILE = ".review-state.json"
 #: The maintained due-state projection, carrying the persisted emission ledger.
 DUE_STATE_FILE = ".due-state.json"
+DUE_STATE_EMISSION_FILE = ".due-state-emission.json"
 
 #: ``surface name -> (projection status, why)`` for the four surfaces a quiet
 #: assertion must prove absence on. Only ``review_queue`` has a file surface at
@@ -1221,13 +1222,27 @@ class VaultProjector(Projector):
         )
         return tuple(projected)
 
-    def _due_state_ledger(self) -> dict[str, str] | None:
-        """The persisted emission ledger, when the vault has one."""
+    def _read_due_state_ledger(self) -> dict[str, Any] | None:
+        """The ledger of record: the sidecar beside the projection, else the copy inside it.
 
+        Delivering a block writes only the sidecar; governed writes refresh the
+        projection's copy. Reading the projection alone under-reports emissions
+        between writes.
+        """
+        sidecar = self._state_file(DUE_STATE_EMISSION_FILE)
+        ledger = _read_json(sidecar) if sidecar is not None else None
+        if isinstance(ledger, dict):
+            return ledger
         path = self._state_file(DUE_STATE_FILE)
         payload = _read_json(path) if path is not None else None
         ledger = payload.get("emission") if isinstance(payload, dict) else None
-        if not isinstance(ledger, dict):
+        return ledger if isinstance(ledger, dict) else None
+
+    def _due_state_ledger(self) -> dict[str, str] | None:
+        """The persisted emission ledger, when the vault has one."""
+
+        ledger = self._read_due_state_ledger()
+        if ledger is None:
             return None
         return {
             "writes": str(int(ledger.get("writes") or 0)),
@@ -1342,10 +1357,8 @@ class VaultProjector(Projector):
         because an assertion depends on it — one did, and that is exactly how a
         batch that delivered nothing came to inherit an earlier batch's `pass`.
         """
-        path = self._state_file(DUE_STATE_FILE)
-        payload = _read_json(path) if path is not None else None
-        ledger = payload.get("emission") if isinstance(payload, dict) else None
-        if not isinstance(ledger, dict):
+        ledger = self._read_due_state_ledger()
+        if ledger is None:
             return StateItem(
                 id="surface-due_state_counters",
                 kind="container",

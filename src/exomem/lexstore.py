@@ -550,6 +550,37 @@ _PUBLICATION_TIMEOUT_BACKGROUND = 30.0
 # bound. Requests and writers retain their 50ms fail-fast path.
 _PUBLICATION_TIMEOUT_PUBLISH = 120.0
 _PUBLICATION_TIMEOUT_FOREGROUND = 0.05
+
+
+@contextlib.contextmanager
+def _timed_barrier(barrier, timeout: float):
+    """Enter `barrier`, attributing the time spent waiting for it to the in-flight call.
+
+    Recorded as `lexical.publication_wait` with the bound the caller chose and
+    whether the barrier was acquired. A no-op off the MCP path, so background
+    rebuilds cost nothing here. Measured 2026-09-16: the first keyword recall
+    after a worker promotion sat 30.0 s in `recall.keyword` while the
+    post-promotion drain held this barrier, and nothing in the ledger named
+    the wait.
+    """
+    started = time.perf_counter()
+    acquired = 0
+    try:
+        with barrier:
+            acquired = 1
+            call_spans.record_span(
+                "lexical.publication_wait",
+                (time.perf_counter() - started) * 1000.0,
+                {"timeout_ms": int(timeout * 1000), "acquired": acquired},
+            )
+            yield
+    finally:
+        if not acquired:
+            call_spans.record_span(
+                "lexical.publication_wait",
+                (time.perf_counter() - started) * 1000.0,
+                {"timeout_ms": int(timeout * 1000), "acquired": acquired},
+            )
 # A watcher may land another large batch while a completed build is waiting for
 # the publication barrier. Catch that generation up outside the barrier, prove
 # the source again, and retry; never turn sustained write traffic into an
@@ -2895,8 +2926,11 @@ class LexicalStore:
         """
         from .vault import vault_creation_lock
 
-        return vault_creation_lock(
-            self.vault_root, "lexical-catalog-publication", timeout=timeout
+        return _timed_barrier(
+            vault_creation_lock(
+                self.vault_root, "lexical-catalog-publication", timeout=timeout
+            ),
+            timeout,
         )
 
     def _maybe_publication_barrier(
