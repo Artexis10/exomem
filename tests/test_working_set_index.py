@@ -755,3 +755,51 @@ def test_an_alias_bridge_does_not_suppress_the_ambiguous_verdict(
         "Search feature",
         "Search market",
     }
+
+
+def _resolution_for(vault: Path, turn: str):
+    """Resolve one turn end to end over a freshly built index."""
+    from exomem import working_set_resolve
+
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild()
+    candidates = working_set_resolve.candidates_for(
+        working_set_resolve.analyze_turn(turn),
+        working_set_resolve.facts_from_rows(index.anchors()),
+    )
+    return working_set_resolve.resolve(working_set_resolve.add_graph_corroboration(candidates))
+
+
+@pytest.mark.parametrize(
+    ("turn", "titles"),
+    [
+        (
+            "What did Ada Lovelace and Grace Hopper each contribute?",
+            {"Ada Lovelace", "Grace Hopper"},
+        ),
+        (
+            "How do Envelope and Write-Ahead Log relate?",
+            {"Envelope", "Write-Ahead Log"},
+        ),
+    ],
+)
+def test_two_directly_linked_anchors_are_complementary(
+    vault: Path, turn: str, titles: set[str]
+) -> None:
+    """A typed link between the two anchors IS the relatedness the rule looks for.
+
+    Both turns name two same-kind anchors of the real fixture vault that link to
+    each other. Asking only whether they share a THIRD anchor abstains on exactly
+    the turns the packet exists to serve — and abstains while both anchors carry
+    `graph_corroboration` earned from the very edge that makes them related.
+    """
+    resolution = _resolution_for(vault, turn)
+
+    assert resolution.status == "resolved", resolution.as_dict()
+    assert resolution.ambiguity == ()
+    resolved = {
+        anchor.title: anchor for anchor in resolution.anchors if anchor.status == "resolved"
+    }
+    assert titles <= set(resolved), sorted(resolved)
+    for title in titles:
+        assert "graph_corroboration" in resolved[title].evidence, resolved[title]

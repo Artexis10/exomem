@@ -390,6 +390,50 @@ def test_overlapping_neighbourhoods_are_not_ambiguous() -> None:
     assert resolution.ambiguity == ()
 
 
+def test_two_anchors_linked_to_each_other_are_not_ambiguous() -> None:
+    """A direct typed link in either direction is relatedness, not competition.
+
+    Sharing a third anchor is one way two senses can be related; being each
+    other's neighbour is a stronger one, and a predicate that only looks for the
+    first abstains on the turn that names two hubs precisely BECAUSE they are
+    connected.
+    """
+    resolution = resolve_module.resolve(
+        (
+            _facts(
+                "north.md",
+                kind="hub",
+                title="Northern Programme",
+                evidence=("exact_alias", "graph_corroboration"),
+                neighbourhood=("south.md",),
+            ),
+            _facts(
+                "south.md",
+                kind="hub",
+                title="Southern Venture",
+                evidence=("exact_alias", "graph_corroboration"),
+                neighbourhood=("north.md",),
+            ),
+        )
+    )
+
+    assert resolution.status == "resolved"
+    assert resolution.ambiguity == ()
+
+
+def test_one_way_link_between_two_anchors_is_also_relatedness() -> None:
+    """Link direction is an authoring accident; only the edge's existence counts."""
+    resolution = resolve_module.resolve(
+        (
+            _facts("north.md", kind="hub", evidence=("exact_alias",), neighbourhood=("south.md",)),
+            _facts("south.md", kind="hub", evidence=("exact_alias",), neighbourhood=()),
+        )
+    )
+
+    assert resolution.status == "resolved"
+    assert resolution.ambiguity == ()
+
+
 def test_a_shared_page_that_is_not_an_anchor_does_not_suppress_ambiguity() -> None:
     """Complementarity is a claim about structure, not about a shared page.
 

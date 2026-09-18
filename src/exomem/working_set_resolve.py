@@ -476,6 +476,17 @@ def _ambiguity(resolved: Sequence[ResolvedAnchor]) -> tuple[dict[str, Any], ...]
     anchor is boilerplate, a navigation stub, or a page one hub happened to reach
     through an alias spelling; it says nothing about whether two senses belong
     together, and letting it bridge them would silently suppress the abstention.
+    Two anchors are also related when one IS the other's anchor neighbour, in
+    either direction: a direct typed link is the strongest relatedness the graph
+    can express, and link direction is an authoring accident. Without that half
+    of the test the rule abstains on exactly the turns the packet exists to
+    serve — two entities the user asks to compare, which link to each other and
+    so both carry `graph_corroboration` from that very edge.
+
+    `project` anchors come from project keys rather than from a page, so their
+    path is empty and no neighbourhood can contain them: they are structurally
+    outside this predicate and can neither bridge nor compete with anything.
+
     The reported `neighbourhood_size` stays the FULL one: the brain is being told
     how large each neighbourhood is, not how the rule was evaluated.
     """
@@ -488,6 +499,8 @@ def _ambiguity(resolved: Sequence[ResolvedAnchor]) -> tuple[dict[str, Any], ...]
             for anchor in group
             if all(
                 not (anchor.anchor_neighbourhood & other.anchor_neighbourhood)
+                and other.path not in anchor.anchor_neighbourhood
+                and anchor.path not in other.anchor_neighbourhood
                 for other in group
                 if other.anchor_id != anchor.anchor_id
             )

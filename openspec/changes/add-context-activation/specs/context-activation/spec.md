@@ -69,11 +69,13 @@ and SHALL never create a candidate on their own. No float score SHALL appear in 
 packet. An anchor SHALL resolve as `resolved` when it carries `exact_alias` or at least
 two independent kinds other than `usage_prior`, at least one of them a contact kind; as
 `partial` when it carries exactly one kind other than `usage_prior`; the turn SHALL be
-`ambiguous` when two or more resolved anchors of the same anchor kind have disjoint
-anchor neighbourhoods, where an anchor's anchor neighbourhood is the set of its
-typed-link neighbours that are themselves anchors in the activation index (resolved
-anchors of different kinds are complementary, and a shared page that is not an anchor,
-reached by alias or otherwise, never makes two anchors complementary); otherwise,
+`ambiguous` when two or more resolved anchors of the same anchor kind share no anchor
+neighbour and neither is a neighbour of the other, where an anchor's anchor
+neighbourhood is the set of its typed-link neighbours that are themselves anchors in
+the activation index (resolved anchors of different kinds are complementary; a shared
+page that is not an anchor, reached by alias or otherwise, never makes two anchors
+complementary; a direct typed link between the two always does; project-key anchors
+have no page and take no part in the test); otherwise,
 when no anchor is `resolved`, the turn SHALL be `unresolved` and the operation SHALL
 abstain with an empty packet. Lexical overlap SHALL ignore stopwords, and turn tokens
 SHALL keep their order and repetitions for n-gram construction so that two anchors
@@ -93,6 +95,11 @@ already appear in ordinary recall.
   anchor
 - **THEN** the packet status is `ambiguous`, both anchors are listed under
   `ambiguity` with their neighbourhood sizes, and no role lane runs for either
+
+#### Scenario: Two directly linked anchors are complementary, not competing
+- **WHEN** a turn resolves two same-kind anchors and one of them links the other
+- **THEN** the packet is not `ambiguous`, both anchors are served, and both carry
+  `graph_corroboration`
 
 #### Scenario: A shared boilerplate page does not suppress ambiguity
 - **WHEN** two same-kind resolved anchors both link one page that is not an anchor,
