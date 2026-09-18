@@ -93,8 +93,10 @@ otherwise for a key at most once per `SWEEP_SECONDS` (600), because the window
 aging old fast calls out from under old slow ones can turn a key into a breach
 with no new slow call at all. A healthy service pays one dictionary update per
 call and one ring scan per key per sweep; the log event therefore lags such an
-aging-driven breach by at most one sweep, while the bootstrap block and the
-doctor check, which recompute on demand, never lag.
+aging-driven breach by at most one sweep when the breach persists that long,
+and a breach that appears and ages out again between two sweeps is not logged
+at all, while the bootstrap block and the doctor check, which recompute on
+demand, never lag.
 
 ## Alternatives considered
 
