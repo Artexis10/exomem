@@ -5834,11 +5834,30 @@ def _with_due_state(
 ACTIVATE_RETRIEVAL_LIMIT = 8
 
 
+#: The one refusal an unknown `anchor` ref and a withheld one share. Two
+#: distinguishable answers would turn the argument into an existence oracle: a
+#: caller could learn that a page exists precisely by being told it may not see
+#: it. Neither form names the ref back.
+ACTIVATE_ANCHOR_REFUSAL = (
+    "INVALID_ANCHOR: anchor must name an available anchor of this activation index"
+)
+
+
+def _abstention_reason(packet: dict) -> str:
+    """The packet's abstention reason, or `""` when it did not abstain."""
+    abstention = packet.get("abstention")
+    if not isinstance(abstention, Mapping):
+        return ""
+    return str(abstention.get("reason") or "")
+
+
 def op_activate_context(
     vault_root: Path,
     turn: str = "",
     max_chars: int = working_set_module.DEFAULT_BUDGET_CHARS,
     purpose: str | None = None,
+    continuity: str | None = None,
+    anchor: str | None = None,
     include_timings: bool = False,
 ) -> dict:
     """Compile durable context for a raw conversational turn, without a query.
@@ -5857,7 +5876,8 @@ def op_activate_context(
     when the turn resolves nothing (`unresolved`), names two competing senses
     (`ambiguous`), is served while the derived index is still warming
     (`index_warming`), or is switched off (`disabled`). An ambiguous turn lists
-    both anchors under `ambiguity` and runs no role lane — you pick the sense.
+    both anchors under `ambiguity` and runs no role lane — you pick the sense and
+    call again with `anchor` set to the ref you mean.
 
     Use `ask_memory` instead when you already know what you are looking for; use
     this when you do not, and follow it with `read_memory` on whatever ref the
@@ -5873,16 +5893,36 @@ def op_activate_context(
             audience may see for a stated purpose; leaving it unset is
             deterministic, not a wildcard. Never affects ranking, and never
             enters the packet cache key.
+        continuity: The opaque `continuity` token a previous packet of this
+            conversation returned. It only strengthens anchors this turn already
+            reaches on its own evidence: it never reaches one by itself, never
+            turns an `unresolved` turn into a resolved one, and is ignored and
+            reported as `generation.continuity = "stale"` when it was minted
+            against another vault's index or another role registry. Drop it on a
+            new session or after a compaction.
+        anchor: One canonical ref from a previous `ambiguity` block, naming the
+            sense you mean. That anchor is then treated as resolved on your
+            choice alone, its role lanes run and the competing senses are
+            omitted. A ref that is not an anchor of this index, or one this
+            audience may not see, is refused identically and no packet is built.
         include_timings: Include per-stage timings for diagnostics.
 
     Returns: {anchors, roles, units, pointers, current_state, missing,
-             ambiguity, budget, generation, abstained, abstention?}.
+             ambiguity, budget, generation, abstained, abstention?,
+             continuity?}. `generation.continuity` reports whether a token you
+             passed was `applied`, `stale` or `absent`.
     """
     timings = find_types.FindTimings() if include_timings else None
     budget = working_set_module.clamp_budget(max_chars)
     turn = str(turn or "")
+    anchor = str(anchor or "").strip() or None
 
-    generation_stub = {"freshness_key": "", "index_generation": 0, "roles_hash": ""}
+    generation_stub = {
+        "freshness_key": "",
+        "index_generation": 0,
+        "roles_hash": "",
+        "continuity": working_set_runtime_module.unevaluated_continuity(continuity),
+    }
     if not turn.strip():
         return working_set_module.abstained_packet(
             reason="unresolved", max_chars=budget, generation=generation_stub
@@ -5958,7 +5998,16 @@ def op_activate_context(
         timings=timings,
         retrieval_paths=retrieval_paths,
         freshness_key=freshness_key,
+        continuity=continuity,
+        anchor=anchor,
     )
+    # An override that resolved nothing named no anchor of this index. Refused
+    # here, before the guard, with the same words a withheld ref gets below —
+    # and deliberately NOT for the server's own abstentions (`index_warming`,
+    # `disabled`, `unavailable`), which say something about this server rather
+    # than about the ref the caller passed.
+    if anchor and _abstention_reason(packet) == "unresolved":
+        raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
     # Unconditional: every served packet crosses the guard. A guard that only ran
     # when the retrieval lane happened to succeed is not a guard.
     try:
@@ -5972,6 +6021,24 @@ def op_activate_context(
             max_chars=budget,
             generation=packet.get("generation") or generation_stub,
         )
+    # The release plane's own decision, reused rather than re-derived: the
+    # override anchor was the packet's ONLY anchor, so the guard emptying the
+    # packet IS the answer to "may this audience see that ref".
+    #
+    # What is equal between an unknown ref and a withheld one is the RESPONSE —
+    # same code, same words, neither naming the ref. The work is not: a withheld
+    # ref has been compiled and guarded by the time it is refused, an unknown one
+    # abstains before the guard, and the two are separable by latency (measured
+    # 168 ms against 375 ms, non-overlapping). That is left as it is rather than
+    # padded, because equalising it would mean either doing the withheld ref's
+    # work for every unknown one or timing the response, and neither buys
+    # anything: the same audience asking the same vault an ORDINARY turn already
+    # learns as much from `missing[].reason = "withheld"`, which is the honest
+    # marker saying a section lost something. A timing side channel that discloses
+    # strictly less than a documented field is not the thing to spend a request
+    # budget closing.
+    if anchor and (guarded is None or _abstention_reason(guarded) == "withheld"):
+        raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
     if guarded is None:
         return working_set_module.abstained_packet(
             reason="withheld",
@@ -5979,6 +6046,11 @@ def op_activate_context(
             generation=packet.get("generation") or generation_stub,
         )
     packet = guarded
+    token = working_set_runtime_module.mint_continuity(
+        packet, identity=working_set_runtime_module.identity_for(vault_root)
+    )
+    if token:
+        packet["continuity"] = token
     if timings is not None:
         packet["timings"] = timings.as_dict()
     # Deliberately NOT `_with_due_state`. That helper consults the emission

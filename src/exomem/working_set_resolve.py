@@ -40,6 +40,8 @@ EVIDENCE_KINDS: tuple[str, ...] = (
     "retrieval",
     "graph_corroboration",
     "usage_prior",
+    "continuity",
+    "agent_choice",
 )
 
 #: `RARE_TERM_MAX_ANCHORS` lives in `working_set_index` (re-exported here):
@@ -50,6 +52,12 @@ EVIDENCE_KINDS: tuple[str, ...] = (
 #: rule, because "you looked at this a lot" is not evidence that this turn is
 #: about it — that is how a rich-get-richer prior turns into a wrong anchor.
 TIE_BREAK_KINDS: frozenset[str] = frozenset({"usage_prior"})
+
+#: Kinds that resolve an anchor by themselves. `exact_alias` because the turn
+#: spelled the anchor's own name; `agent_choice` because the agent IS the
+#: decider of an ambiguous turn and the server has nothing to add to a decision
+#: already taken. Every other kind needs a second one.
+DECIDING_ALONE_KINDS: frozenset[str] = frozenset({"exact_alias", "agent_choice"})
 
 ANCHOR_STATUSES: tuple[str, ...] = ("resolved", "partial", "unresolved")
 TURN_STATUSES: tuple[str, ...] = ("resolved", "ambiguous", "unresolved")
@@ -90,11 +98,11 @@ WORDED_CONTACT_KINDS: frozenset[str] = frozenset(
 RETRIEVED_CONTACT_KINDS: frozenset[str] = frozenset({"retrieval", "vector_band"})
 
 #: Kinds that establish CONTACT between a turn and an anchor — the turn actually
-#: named it, claimed it, or retrieved it. `category_match` and `usage_prior` are
-#: qualifiers: they say something about an anchor already in contact, never that a
-#: turn is about one. Without this split, "how much is left?" matched the cue
-#: category `fact`, every page with a `## Summary` section carries `fact`, and the
-#: whole vault became a candidate on one cue.
+#: named it, claimed it, or retrieved it. `category_match`, `usage_prior` and
+#: `continuity` are qualifiers: they say something about an anchor already in
+#: contact, never that a turn is about one. Without this split, "how much is
+#: left?" matched the cue category `fact`, every page with a `## Summary` section
+#: carries `fact`, and the whole vault became a candidate on one cue.
 CONTACT_KINDS: frozenset[str] = WORDED_CONTACT_KINDS | RETRIEVED_CONTACT_KINDS
 
 #: Function words are dropped before the lexical band is measured. "the" shared
@@ -458,6 +466,76 @@ def add_graph_corroboration(
     )
 
 
+def anchor_ref(row: Any) -> str:
+    """The ref a packet reports for a row — the SAME expression `as_dict` uses.
+
+    Continuity and the override both name anchors the way a previous packet
+    spelled them, so the comparison has to be made against that spelling and
+    not against the internal id. Spelling it once here keeps the two directions
+    from drifting apart.
+    """
+    return str(
+        getattr(row, "ref", None)
+        or getattr(row, "path", "")
+        or getattr(row, "anchor_id", "")
+    )
+
+
+def apply_continuity(
+    candidates: Sequence[CandidateFacts],
+    refs: frozenset[str] | set[str],
+) -> tuple[CandidateFacts, ...]:
+    """Qualify the candidates a client-carried token names. Adds no candidate.
+
+    This is the whole enforcement of "continuity never resolves alone": the
+    function can only ever ADD a kind to an anchor the current turn already
+    reached by a contact kind, because a candidate is what `candidates_for`
+    produced and nothing here produces one. A ref naming an anchor this turn did
+    not reach — or one the vault has since retired — simply matches nothing and
+    is dropped without a word, since a hint that half-missed is still a hint.
+    """
+    if not refs:
+        return tuple(candidates)
+    return tuple(
+        replace(item, evidence=item.evidence | {"continuity"})
+        if anchor_ref(item) in refs
+        else item
+        for item in candidates
+    )
+
+
+def override_candidate(
+    rows: Sequence[AnchorFacts], ref: str
+) -> CandidateFacts | None:
+    """The one candidate an agent's `anchor` choice names, or `None`.
+
+    `agent_choice` is its only evidence, and it resolves alone: the agent is the
+    decider, so the turn's own evidence for that anchor is beside the point and
+    the competing senses are not candidates at all. `None` means the ref names no
+    anchor in this index — the caller decides what to say about that, and by
+    contract says exactly what it says about a withheld one.
+    """
+    wanted = str(ref or "").strip()
+    if not wanted:
+        return None
+    for row in rows:
+        spellings = {anchor_ref(row), str(row.path or ""), str(row.anchor_id or "")}
+        if wanted in spellings - {""}:
+            return CandidateFacts(
+                anchor_id=row.anchor_id,
+                path=row.path,
+                ref=row.ref,
+                title=row.title,
+                kind=row.kind,
+                lifecycle=row.lifecycle,
+                categories=row.categories,
+                neighbourhood=row.neighbourhood,
+                anchor_neighbourhood=row.anchor_neighbourhood,
+                evidence=frozenset({"agent_choice"}),
+            )
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # The rule
 # --------------------------------------------------------------------------- #
@@ -478,22 +556,29 @@ def _candidate_order(candidate: CandidateFacts) -> tuple:
 
 
 def _status_for(candidate: CandidateFacts) -> str:
-    """The three-clause soundness rule (design.md decision 1).
+    """The three-clause soundness rule (design.md decision 1), plus continuity.
 
-    `resolved` iff: `exact_alias`; or `lexical_overlap`/`claims_match` plus at
-    least one other kind besides `usage_prior` (a qualifier is enough — the
-    turn's own words already reached the anchor); or `rare_term` plus at
-    least one other CONTACT kind specifically (a qualifier alone is not
-    enough — the weak worded kind needs a second, independent fact, not
-    merely a strengthener of itself). Retrieved contact alone, however many
-    retrieved kinds and qualifiers co-occur, is never more than `partial`.
+    `resolved` iff: `exact_alias` or `agent_choice` (either decides alone —
+    the turn spelled the anchor's own name, or the agent IS the decider); or
+    `lexical_overlap`/`claims_match` plus at least one other kind besides
+    `usage_prior` (a qualifier is enough — the turn's own words already
+    reached the anchor); or `rare_term` plus at least one other CONTACT kind
+    specifically (a qualifier alone is not enough — the weak worded kind
+    needs a second, independent fact, not merely a strengthener of itself);
+    or `continuity` plus at least one CONTACT kind of either family (a
+    previous packet's resolution plus this turn's own contact — `continuity`
+    still never creates a candidate and never resolves alone or with
+    qualifiers only). Retrieved contact alone, however many retrieved kinds
+    and qualifiers co-occur, is never more than `partial`.
     """
     deciding = candidate.deciding_kinds
-    if "exact_alias" in deciding:
+    if deciding & DECIDING_ALONE_KINDS:
         return "resolved"
     if deciding & {"lexical_overlap", "claims_match"} and len(deciding) >= 2:
         return "resolved"
     if "rare_term" in deciding and (deciding & CONTACT_KINDS) - {"rare_term"}:
+        return "resolved"
+    if "continuity" in deciding and deciding & CONTACT_KINDS:
         return "resolved"
     if deciding:
         return "partial"

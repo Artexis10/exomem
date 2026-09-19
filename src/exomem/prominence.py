@@ -150,6 +150,31 @@ _SURFACE_ENV = "EXOMEM_SURFACE"
 _HOSTED_CELL_ENV = "EXOMEM_HOSTED_CELL"
 _CONFIG_KEY = "prominence"
 
+#: The activation carrier, at `balanced` and `maximal` only.
+#:
+#: Where the host exposes a prompt lifecycle, the retrieve hook injects the
+#: compiled packet before inference and this line is belt and braces. Where it
+#: does not — a hosted chat surface is tool-only and the pasted custom-instruction
+#: carrier has no headroom — the guidance bootstrap already serves is the ONLY
+#: portable carrier there is, so one sentence has to carry the whole contract:
+#: call the compiler with the turn, and resolve an `ambiguous` answer by naming
+#: the sense rather than guessing at one.
+#:
+#: Absent at `light` and `off` deliberately: a level whose whole promise is
+#: "only when asked" must not then instruct an unprompted call.
+#:
+#: Two properties are asserted by `tests/test_bootstrap_activation_carrier.py`
+#: rather than merely intended. It is byte-identical to the shipped scaffold's
+#: recall loop, so a reader of the skill and a reader of the payload follow one
+#: contract in one wording. And it is budgeted: the compact bootstrap profile
+#: runs within a few hundred bytes of a hard ceiling, so it stays ASCII (a
+#: non-ASCII dash costs six JSON bytes) and inside 220.
+ACTIVATION_CARRIER_LINE = (
+    "Call `activate_context` with the user's turn verbatim before answering a "
+    "substantive turn that has no prior context; resolve an `ambiguous` packet by "
+    "calling again with `anchor` set."
+)
+
 _ARTIFACT_ADOPTION_CAPTURE = (
     " Generated draft stays ephemeral. Selected is not write consent: proactive_capture "
     "preserves exact bytes as Source/Evidence by role, never MIME. No handle means "
@@ -322,6 +347,7 @@ CONTRACTS: dict[str, ProminenceContract] = {
     "balanced": ProminenceContract(
         level="balanced",
         recall=(
+            ACTIVATION_CARRIER_LINE + " "
             "Search memory for project, domain, entity, or conclusion context. "
             "Skip chit-chat, control messages, and context-free fresh tasks."
         ),
@@ -352,6 +378,7 @@ CONTRACTS: dict[str, ProminenceContract] = {
     "maximal": ProminenceContract(
         level="maximal",
         recall=(
+            ACTIVATION_CARRIER_LINE + " "
             "Search memory before answering any substantive turn, not only the ones "
             "that obviously reference prior work. Assume the knowledge base may hold "
             "something relevant until a search says otherwise. Only skip for pure "

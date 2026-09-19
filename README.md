@@ -162,7 +162,10 @@ content. It needs no MCP connection or Exomem credential.
 The read-side hook suppresses obvious control/status prompts like `continue`,
 `merge it`, and `are you done?`, and can optionally upgrade that reminder to real
 retrieved KB content (`EXOMEM_RETRIEVE_INJECT=1`, opt-in; the legacy
-`KB_RETRIEVE_INJECT` name still works). For Codex, run
+`KB_RETRIEVE_INJECT` name still works) — or, with
+`EXOMEM_RETRIEVE_INJECT=working_set`, to a compiled `activate_context` packet
+under a data header, bounded by `EXOMEM_RETRIEVE_INJECT_MAX_CHARS` (default
+4,000). For Codex, run
 `exomem install-hook --client codex`; for Claude Code, `exomem install-hook` —
 see
 [QUICKSTART.md § 7](QUICKSTART.md#7-recommended-make-the-kb-automatic-both-directions).

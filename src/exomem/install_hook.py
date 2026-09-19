@@ -16,6 +16,25 @@ scripts directly with `command` + `commandWindows` entries in `~/.codex/hooks.js
 Both gates are language-agnostic (structural + cooldown, no English keywords). By
 default this copies the scripts AND merges settings.json; `wire=False`
 (`--print-only`) copies them and returns the snippet to paste instead.
+
+The retrieve hook's payload is chosen by one environment variable, unwired and
+off by default — wiring the hook does not turn either mode on:
+
+- unset (or any falsy value) → the reminder alone, the cheap default.
+- any other truthy value → stub mode: up to three `ask_memory` routing stubs
+  appended to the reminder, additionally over the CLI when
+  `EXOMEM_RETRIEVE_INJECT_CLI` is truthy.
+- `EXOMEM_RETRIEVE_INJECT=working_set` → working-set mode: one
+  `activate_context` call, whose compiled packet REPLACES the reminder under a
+  fixed data header, bounded by `EXOMEM_RETRIEVE_INJECT_MAX_CHARS` (default
+  4,000 characters, whole items only). The packet's continuity token is kept per
+  client and session beside the continuation checkpoint and dropped by that hook
+  on each session lifecycle event. A standalone hook copy older than this mode
+  reads `working_set` as merely truthy and runs stub mode, which is why the two
+  modes share one variable rather than taking one each.
+
+Both modes honour the same prominence presets, prompt-length gate, cooldowns and
+control-prompt silence as the reminder, and fall back to it on any failure.
 """
 
 from __future__ import annotations

@@ -607,6 +607,24 @@ answered (`lane=rest|cli|none|off`) and the hit count, so a silent fall-through
 to the plain reminder is visible. (The legacy `KB_RETRIEVE_INJECT` /
 `KB_RETRIEVE_INJECT_CLI` names still work too.)
 
+**Opt-in: a compiled working set instead of routing stubs.** Set
+`EXOMEM_RETRIEVE_INJECT=working_set` and the same gated prompt goes to
+`activate_context` instead of `ask_memory`: one `POST /api/activate_context` over
+the same ladder and the same 8s budget, and the returned working-memory packet
+*replaces* the reminder under a fixed header that names it as retrieved memory
+rather than instructions. It carries current state first, then units, then
+pointers, each with the provenance ref you can `read_memory`, keeping whole items
+only under `EXOMEM_RETRIEVE_INJECT_MAX_CHARS` (default 4,000 characters) and
+dropping trailing ones rather than cutting one in half. A packet that abstains as
+`ambiguous` injects the competing anchors and asks the agent to call again with
+`anchor` set — it is the only decider of which sense a turn meant; every other
+abstention leaves exactly the plain reminder, as does any failure. The packet's
+`continuity` token is kept per client and session beside the continuation
+checkpoint and handed back on the next prompt, and the checkpoint hook drops it
+on each session lifecycle event, so consecutive turns do not re-resolve the world
+but a new session or a compaction starts clean. This mode injects far more per
+prompt than the stub block does, which is the trade it exists to let you make.
+
 (Hooks are local-client only — claude.ai web/mobile can't run them, so there the
 skill or `bootstrap()` contract stays best-effort: nudge it with *"save that to
 kb"* or *"check the kb."*)

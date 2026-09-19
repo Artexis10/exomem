@@ -2425,6 +2425,16 @@ def _activate_main(argv: list[str]) -> int:
     )
     parser.add_argument("--purpose", default=None, help="declared purpose for this request")
     parser.add_argument(
+        "--continuity",
+        default=None,
+        help="the opaque continuity token a previous packet of this conversation returned",
+    )
+    parser.add_argument(
+        "--anchor",
+        default=None,
+        help="one canonical ref from a previous ambiguity block, naming the sense you mean",
+    )
+    parser.add_argument(
         "--timings", action="store_true", help="include per-stage timings"
     )
     parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
@@ -2435,6 +2445,10 @@ def _activate_main(argv: list[str]) -> int:
         core += ["--max-chars", str(args.max_chars)]
     if args.purpose:
         core += ["--purpose", args.purpose]
+    if args.continuity:
+        core += ["--continuity", args.continuity]
+    if args.anchor:
+        core += ["--anchor", args.anchor]
     if args.timings:
         core.append("--include-timings")
     return _core_op_main(_with_json(core, args.json))

@@ -777,6 +777,11 @@ def test_evidence_vocabulary_is_closed() -> None:
         "retrieval",
         "graph_corroboration",
         "usage_prior",
+        # Added by `activate-context-on-host-turns`: a client-carried token
+        # qualifies an anchor the turn already reached, and an agent's own choice
+        # of sense resolves one outright.
+        "continuity",
+        "agent_choice",
     )
     with pytest.raises(ValueError):
         resolve_module.resolve((_facts("a", evidence=("made_up_kind",)),))
