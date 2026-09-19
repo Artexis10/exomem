@@ -22,6 +22,7 @@ import stat
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
@@ -36,6 +37,7 @@ _TENANT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$")
 _STAGES = ("oauth", "protocol", "continuity", "isolation", "restore", "performance", "claude-host", "openai-host")
 _STATUSES = {"pending", "passed", "failed", "blocked"}
 _MAX_RESPONSE_BYTES = 1_048_576
+_MAX_ERROR_BYTES = 65_536
 _CORPUS_TOPICS = (
     ("operating profile", "The synthetic operating profile records a routine service condition."),
     ("incident exercise", "The synthetic incident exercise records a bounded recovery decision."),
@@ -180,6 +182,58 @@ def _redact(value: object, secrets_to_remove: Sequence[str]) -> object:
     return value
 
 
+def _mcp_error_detail(payload: object, *, secrets_to_remove: Sequence[str] = ()) -> str:
+    """Keep bounded coded diagnostics, never an arbitrary response dump."""
+    candidates = [payload]
+    detail = ""
+    for _depth in range(5):
+        children = []
+        for candidate in candidates[:16]:
+            if isinstance(candidate, str) and len(candidate) <= 4096:
+                match = re.search(r"\b[A-Z][A-Z0-9_]{2,95}: [^\r\n]+", candidate)
+                if match:
+                    detail = match.group()
+            if not isinstance(candidate, dict):
+                continue
+            code = candidate.get("code")
+            message = candidate.get("message")
+            if isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{2,95}", code):
+                detail = code
+                if isinstance(message, str) and len(message) <= 4096:
+                    detail += ": " + message
+            elif isinstance(message, str):
+                children.append(message)
+            children.extend(candidate[key] for key in ("structuredContent", "result", "data", "error") if isinstance(candidate.get(key), dict))
+            blocks = candidate.get("content")
+            if isinstance(blocks, list):
+                for block in blocks[:4]:
+                    if not isinstance(block, dict) or block.get("type") != "text":
+                        continue
+                    text = block.get("text")
+                    if isinstance(text, str) and len(text) <= 4096:
+                        try:
+                            children.append(json.loads(text))
+                        except (ValueError, RecursionError):
+                            children.append(text)
+        candidates = children
+    if not detail:
+        return ""
+    # Redact before truncating so a long credential cannot leak its prefix.
+    detail = str(_redact(detail, secrets_to_remove))
+    detail = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", detail)
+    detail = re.sub(r"(?i)\bbearer\s+\S+", "Bearer [REDACTED]", detail)
+    detail = " ".join(detail.split())
+    return " (" + detail[:480] + ")"
+
+
+def _validate_tool_success(result: Mapping[str, Any], *, secrets_to_remove: Sequence[str] = ()) -> None:
+    flag = result.get("isError", False)
+    if type(flag) is not bool:
+        raise AcceptanceError("MCP tool result has a malformed isError flag")
+    if flag:
+        raise AcceptanceError("MCP tool result is unsuccessful" + _mcp_error_detail(result, secrets_to_remove=secrets_to_remove))
+
+
 @dataclass(frozen=True)
 class WallClockDeadline:
     started_at: float
@@ -276,7 +330,9 @@ def generate_synthetic_corpus(destination: Path, *, notes: int = 1000, minimum_b
 
 def committed_tool_receipt(result: Mapping[str, Any]) -> bool:
     """Recognize the compact terminal emitted by successful public mutations."""
-    if result.get("isError") is True:
+    try:
+        _validate_tool_success(result)
+    except AcceptanceError:
         return False
     content = result.get("structuredContent")
     if not isinstance(content, Mapping):
@@ -391,13 +447,28 @@ class MCPClient:
             with _open(request, timeout=30) as response:  # nosec B310: endpoint is validated HTTPS
                 body = response.read(_MAX_RESPONSE_BYTES + 1)
                 content_type = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
+        except urllib.error.HTTPError as exc:
+            diagnostic = ""
+            try:
+                with exc:
+                    failed_body = exc.read(_MAX_ERROR_BYTES + 1)
+                if len(failed_body) <= _MAX_ERROR_BYTES:
+                    diagnostic = _mcp_error_detail(json.loads(failed_body), secrets_to_remove=(self.access_token,))
+            except (OSError, ValueError, RecursionError):
+                pass
+            raise AcceptanceError(f"MCP request failed: HTTP {exc.code}{diagnostic}") from None
         except OSError as exc:
             raise AcceptanceError(f"MCP request failed: {type(exc).__name__}") from exc
         if len(body) > _MAX_RESPONSE_BYTES:
             raise AcceptanceError("MCP response exceeds size limit")
         envelope = _decode_mcp_envelope(body, content_type, request_id)
-        if not isinstance(envelope, dict) or envelope.get("jsonrpc") != "2.0" or envelope.get("id") != request_id or "error" in envelope or not isinstance(envelope.get("result"), dict):
+        if not isinstance(envelope, dict) or envelope.get("jsonrpc") != "2.0" or envelope.get("id") != request_id:
             raise AcceptanceError("MCP response does not match request")
+        if "error" in envelope:
+            raise AcceptanceError("MCP response failed" + _mcp_error_detail(envelope, secrets_to_remove=(self.access_token,)))
+        if not isinstance(envelope.get("result"), dict):
+            raise AcceptanceError("MCP response does not match request")
+        _validate_tool_success(envelope["result"], secrets_to_remove=(self.access_token,))
         return envelope["result"]
 
     def notify(self, method: str, params: Mapping[str, Any] | None = None) -> None:
@@ -1108,8 +1179,7 @@ class AcceptanceRunner:
 
 
 def _tool_result(result: Mapping[str, Any]) -> Mapping[str, Any]:
-    if result.get("isError") is True:
-        raise AcceptanceError("MCP tool result is unsuccessful")
+    _validate_tool_success(result)
     content = result.get("structuredContent")
     if not isinstance(content, dict):
         raise AcceptanceError("MCP tool result has no structured content")
