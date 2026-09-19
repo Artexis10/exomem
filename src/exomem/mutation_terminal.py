@@ -831,6 +831,14 @@ _MAX_ENTITY_CANDIDATE_MATCH_PATH_CHARS = 512
 _MAX_ENTITY_CANDIDATE_MATCH_TITLE_CHARS = 200
 _MAX_ENTITY_CANDIDATE_SHARED_TOKENS = 8
 _ENTITY_CANDIDATE_ROUTES = ("resolve-entity", "create-entity")
+#: The block's own copy of its one fixed guidance sentence (task 2.4), for the
+#: same reason `_ENTITY_CANDIDATE_ROUTES` is this module's own copy: the
+#: terminal re-validates what a leaf attached rather than trusting it, and
+#: re-emits its own constant rather than whatever bytes the leaf carried.
+_ENTITY_CANDIDATE_GUIDANCE = (
+    "Resolve before you create an Entity, and hydrate an existing Entity "
+    "before you make a second one."
+)
 
 
 def _entity_candidate_near_match(value: Any) -> dict[str, Any] | None:
@@ -917,7 +925,9 @@ def _entity_candidate_projection(leaf: Any) -> dict[str, Any] | None:
         projected = [_entity_candidate_identity(item) for item in identities]
         if any(item is None for item in projected):
             continue
-        return {"identities": projected}
+        if value.get("guidance") != _ENTITY_CANDIDATE_GUIDANCE:
+            continue
+        return {"identities": projected, "guidance": _ENTITY_CANDIDATE_GUIDANCE}
     return None
 
 

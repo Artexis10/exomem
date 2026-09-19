@@ -75,6 +75,16 @@ MAX_MENTION_CHARS = 64
 MAX_CANDIDATE_IDENTITIES = 3
 MAX_CANDIDATE_LINKING_PAGES = 8
 MAX_DEPENDENCY_ROWS = 16
+
+#: The one fixed sentence of guidance the `entity_candidate` block itself
+#: carries (`write-time-identity-candidates` spec, task 2.4; design D2's
+#: "resolve before you create and hydrate an existing Entity before you make
+#: a second one"). Block-level, not per identity: it reaches exactly the
+#: client that has no skill and no hook, at the moment it holds the block.
+ENTITY_CANDIDATE_GUIDANCE = (
+    "Resolve before you create an Entity, and hydrate an existing Entity "
+    "before you make a second one."
+)
 #: Bounded rather than unbounded: a long-lived server must not accumulate one
 #: entry per caller it has ever seen. Evicting the least recently written costs
 #: at worst one extra advisory for a caller who had gone quiet anyway.
@@ -447,7 +457,7 @@ def entity_candidate(
             )
         if not identities:
             return None
-        return {"identities": identities}
+        return {"identities": identities, "guidance": ENTITY_CANDIDATE_GUIDANCE}
     except Exception:  # noqa: BLE001 -- a candidate never breaks a commit or a block
         log.debug("entity-candidate advisory failed (non-fatal)", exc_info=True)
         return None

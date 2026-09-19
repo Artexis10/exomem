@@ -88,8 +88,25 @@ def test_the_second_page_carries_the_block(tmp_path: Path) -> None:
                 "near_matches": [],
                 "routes": ["resolve-entity", "create-entity"],
             }
-        ]
+        ],
+        "guidance": capture_sweep.ENTITY_CANDIDATE_GUIDANCE,
     }
+
+
+def test_the_block_carries_its_one_fixed_guidance_sentence(tmp_path: Path) -> None:
+    """The block tells a client with no skill and no hook what to do with it
+    (`write-time-identity-candidates` spec, task 2.4): resolve before create,
+    hydrate before duplicating -- one fixed sentence, not per identity."""
+    _seed(tmp_path, {A: _link_body()})
+    page = _page(NEW, ((NAME, 3),))
+    corpus = _corpus(tmp_path, pages={A: _page_state(A, title="A")})
+
+    result = capture_sweep.entity_candidate(tmp_path, page_state=page, corpus=corpus)
+
+    assert result is not None
+    assert result["guidance"] == capture_sweep.ENTITY_CANDIDATE_GUIDANCE
+    assert "resolve" in result["guidance"].lower()
+    assert "hydrate" in result["guidance"].lower()
 
 
 def test_an_edit_that_newly_adds_the_link_is_still_the_second_page(tmp_path: Path) -> None:

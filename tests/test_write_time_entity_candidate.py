@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands, graph_sync, mutation_terminal, writer_lease
+from exomem import capture_sweep, commands, graph_sync, mutation_terminal, writer_lease
 
 NAME = "Harbour Studio"
 
@@ -98,6 +98,7 @@ def test_the_second_page_carries_the_block(tmp_path: Path) -> None:
         first["path"],
         second["path"],
     }
+    assert candidate["guidance"] == capture_sweep.ENTITY_CANDIDATE_GUIDANCE
 
 
 def test_a_third_page_carries_no_block(tmp_path: Path) -> None:
@@ -334,9 +335,8 @@ def test_the_crossing_write_stays_inside_the_existing_commit_budget(
     )
 
 
-def test_project_terminal_carries_it_at_compact_and_drops_it_at_legacy() -> None:
-    """The terminal-level contract, independent of any one command's fixture."""
-    leaf = {
+def _candidate_leaf(*, guidance: str) -> dict:
+    return {
         "creation": {
             "applicability": "full",
             "mutated": True,
@@ -348,11 +348,15 @@ def test_project_terminal_carries_it_at_compact_and_drops_it_at_legacy() -> None
                         "near_matches": [],
                         "routes": ["resolve-entity", "create-entity"],
                     }
-                ]
+                ],
+                "guidance": guidance,
             },
         }
     }
-    result = {
+
+
+def _terminal_result(leaf: dict) -> dict:
+    return {
         "_terminal": mutation_terminal._TERMINAL_MARKER,
         "version": mutation_terminal._TERMINAL_VERSION,
         "state": "committed",
@@ -361,8 +365,35 @@ def test_project_terminal_carries_it_at_compact_and_drops_it_at_legacy() -> None
         "leaf_result": leaf,
     }
 
+
+def test_project_terminal_carries_it_at_compact_and_drops_it_at_legacy() -> None:
+    """The terminal-level contract, independent of any one command's fixture."""
+    result = _terminal_result(
+        _candidate_leaf(guidance=capture_sweep.ENTITY_CANDIDATE_GUIDANCE)
+    )
+
     compact = mutation_terminal.project_terminal(result, "compact")
     assert compact["entity_candidate"]["identities"][0]["name"] == NAME
+    assert compact["entity_candidate"]["guidance"] == capture_sweep.ENTITY_CANDIDATE_GUIDANCE
 
     legacy = mutation_terminal.project_terminal(result, "legacy")
     assert "entity_candidate" not in legacy
+
+
+def test_project_terminal_drops_the_block_when_the_guidance_does_not_match() -> None:
+    """The terminal re-validates the leaf's bytes rather than trusting them
+    (same posture as `routes`): a leaf naming anything but the one fixed
+    sentence is a malformed advisory, dropped rather than served."""
+    result = _terminal_result(_candidate_leaf(guidance="Do whatever you like."))
+
+    compact = mutation_terminal.project_terminal(result, "compact")
+    assert "entity_candidate" not in compact
+
+
+def test_project_terminal_drops_the_block_when_the_guidance_is_missing() -> None:
+    leaf = _candidate_leaf(guidance=capture_sweep.ENTITY_CANDIDATE_GUIDANCE)
+    del leaf["creation"]["entity_candidate"]["guidance"]
+    result = _terminal_result(leaf)
+
+    compact = mutation_terminal.project_terminal(result, "compact")
+    assert "entity_candidate" not in compact
