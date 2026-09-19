@@ -177,9 +177,16 @@ mapping (from `load_packet` on an oracle-packet file, or later from
 `activate_context` output) and a `RunManifest` carrying the three required
 pre-registered digests plus the required `logical_corpus_digest`, and returns
 a report with no aggregate field -- every metric is a
-per-case or per-case-per-anchor-kind numerator/denominator pair. A `case_id`
-with no supplied packet scores against the documented kill-switch shape
-(`DISABLED_PACKET`): this is the mechanism-removal check --
+per-case or per-case-per-anchor-kind numerator/denominator pair.
+
+Product packets may carry `missing` and `ambiguity` labels as JSON objects.
+The loader preserves every field as stable, sorted, compact Unicode JSON for
+budget and fact-text checks, while retaining each ambiguity object's non-empty
+`ref` as its scoring identity. Legacy string labels remain supported. An absent
+field remains compatible with older packets; a present field must be an array,
+including when empty, and malformed entries or `null` are rejected.
+A `case_id` with no supplied packet scores against the documented kill-switch
+shape (`DISABLED_PACKET`): this is the mechanism-removal check --
 `EXOMEM_DISABLE_WORKING_SET=1` should make every positive case fail, because
 running the audit against an empty packet map is exactly what "the compiler
 is disabled" looks like from this scorer's point of view.
