@@ -65,14 +65,18 @@ log = logging.getLogger(__name__)
 #: and would otherwise survive unrebuilt until an unrelated vault edit.
 #: v7 (task 4a, found after merge) replaced the ASCII-only `[a-z0-9]`
 #: tokeniser with a Unicode-aware one: a term is now a maximal run of
-#: letters, digits and combining marks in any script, not just basic Latin,
-#: and the typographic right single quote (`’`) folds to the plain
-#: apostrophe (`'`) so the two spellings of a contraction are one term. A v6
-#: sidecar's title/alias terms, derived short names and term->anchor counts
-#: were all computed by the fragmenting, non-Latin-blind, quote-splitting
-#: rule (an accented word split into fragments, a non-Latin script produced
-#: no terms at all, "i'd" and "i’d" tokenised as different words) and must
-#: rebuild rather than answer from those stale rows.
+#: letters, digits and combining marks in any script, not just basic Latin.
+#: `normalize()` — the one fold site every lexical comparison key in this
+#: module shares, including `resolve_names`'s egress-guard lookups — folds
+#: a typographic apostrophe (`’`) and a typographic or non-breaking hyphen
+#: to the plain one, drops a soft hyphen, and a derived short name longer
+#: than 48 characters is no longer admitted. A v6 sidecar's title/alias
+#: terms, derived short names and term->anchor counts were all computed by
+#: the fragmenting, non-Latin-blind, quote- and hyphen-splitting rule (an
+#: accented word split into fragments, a non-Latin script produced no terms
+#: at all, "i'd" and "i’d" tokenised as different words, "well-known" and
+#: "well‑known" did too) and must rebuild rather than answer from those
+#: stale rows.
 SCHEMA_VERSION = 7
 SIDECAR_NAME = ".working-set.sqlite"
 DISABLE_ENV = "EXOMEM_DISABLE_WORKING_SET"
@@ -109,7 +113,10 @@ _HEADING = re.compile(r"^#{2,3}\s+(.+?)\s*$", re.MULTILINE)
 #: was — every ASCII turn and title must tokenise exactly as it did before
 #: task 4a — and used only when the whole normalised string `.isascii()`.
 #: Non-ASCII text (a turn or a title with even one letter outside basic
-#: Latin) instead goes through `_unicode_tokens`, below.
+#: Latin) instead goes through `_unicode_tokens`, below. Its `’` is now
+#: unreachable — `normalize()` folds it to `'` before this pattern ever
+#: runs — and is kept anyway so the pattern itself stays byte-identical to
+#: the original regex, never separately maintained.
 _TOKEN = re.compile(r"[a-z0-9][a-z0-9'’\-]*")
 
 #: The typographic (curly) right single quote. `normalize()` folds it to the
@@ -123,6 +130,17 @@ _TOKEN = re.compile(r"[a-z0-9][a-z0-9'’\-]*")
 #: the turn's side and the anchor's side would each be folding, or not,
 #: independently, on the exact defect this constant exists to close.
 _TYPOGRAPHIC_APOSTROPHE = "’"
+
+#: HYPHEN (U+2010) and SOFT HYPHEN (U+00AD), folded/dropped by `normalize()`
+#: for the same reason as the apostrophe above: both sides of a comparison
+#: must agree. NFKC already maps NON-BREAKING HYPHEN (U+2011) to U+2010, so
+#: folding U+2010 alone covers both. En dash and em dash are deliberately
+#: NOT folded here: a title uses one of those, not a hyphen, as its
+#: qualifier separator (`derived_short_name`'s `_TRAILING_DASH`), and
+#: folding them would make a qualifier separator indistinguishable from a
+#: hyphenated word.
+_TYPOGRAPHIC_HYPHEN = "‐"
+_SOFT_HYPHEN = "­"
 
 #: Continuation punctuation a term may carry after its first character — an
 #: apostrophe or a hyphen — mirroring the fast path's `[a-z0-9'’\-]*` tail so
@@ -235,22 +253,42 @@ def sidecar_path(vault_root: Path) -> Path:
 
 
 def normalize(value: object) -> str:
-    """NFKC + casefold + the typographic-apostrophe fold: the ONE
-    normalisation every working-set comparison key shares.
+    """NFKC + casefold + the typographic-apostrophe and -hyphen folds: the
+    ONE normalisation every LEXICAL comparison key in this module shares.
 
     This is the single fold site (correction round, task 4a): every caller
     that builds a comparison key from an anchor's title or stored aliases,
     a turn's tokens, a derived short name, or a wikilink spelling goes
-    through this function, so a typographic apostrophe reads as the plain
-    one on BOTH sides of every comparison, not just the turn's. Folding it
-    only where a turn is tokenised left a title or alias itself AUTHORED
-    with a typographic apostrophe unable to ever earn `exact_alias`.
+    through this function, so a typographic apostrophe or hyphen reads as
+    the plain one on BOTH sides of every comparison, not just the turn's.
+    Folding an apostrophe only where a turn is tokenised once left a title
+    or alias itself AUTHORED with a typographic apostrophe unable to ever
+    earn `exact_alias` — and the egress guard relies on this exact function
+    too (`governance/egress._resolved_prose_names`, `working_set_index.
+    resolve_names`), so a title and a prose wikilink naming it disagreeing
+    on apostrophe or hyphen style once let a withheld page's own unit be
+    served in full: the folds have to live here, not in a caller.
+
+    "Every lexical comparison key in this module" is deliberately narrower
+    than "every working-set comparison key": `collection_claims.
+    normalize_text` and `structure_promotion._terms` (used for
+    `claims_match` and Records current-state routing) keep their own,
+    separate basic-Latin term splitter and do not call this function, so
+    neither is reached yet by a non-Latin turn or a typographic apostrophe —
+    a recorded, deliberate limit (see `SCHEMA_VERSION`'s v7 note), not an
+    oversight, and its own change to lift.
+
+    Locale-specific case rules are never applied: `str.casefold()` treats a
+    Turkish dotted capital İ and a plain I as different letters, which is
+    the correct behaviour for a vault with no locale of its own to assume.
     """
     return (
         unicodedata.normalize("NFKC", str(value))
         .strip()
         .casefold()
         .replace(_TYPOGRAPHIC_APOSTROPHE, "'")
+        .replace(_TYPOGRAPHIC_HYPHEN, "-")
+        .replace(_SOFT_HYPHEN, "")
     )
 
 
@@ -411,14 +449,18 @@ def derived_short_name(title: str) -> str | None:
     with `_` — a stray extension or a private note, never a name a turn would
     say); tokenises to nothing, to more than three words, to only stopwords
     (the resolver's own list, `STOPWORDS`) or to only digits (a bare year is a
-    date, not a name); or joins to fewer than three characters (a single
-    letter or two occupies a name slot it can never fill, since a turn that
-    short is dropped by the resolver's own stopword filtering before it could
-    ever match). The name itself is the lead's tokens, JOINED BY SINGLE
-    SPACES the way the resolver's own tokeniser would read it back — never the
-    raw substring — so a multi-space or emoji-led title ("Multi   Spaces -
-    qualifier", "🎯 Goal - notes") derives a name a turn can actually produce,
-    instead of one that can never match and only occupies a name slot.
+    date, not a name); or joins to fewer than three or more than 48
+    characters (a single letter or two occupies a name slot it can never
+    fill, since a turn that short is dropped by the resolver's own stopword
+    filtering before it could ever match; a script without word separators
+    caps a "word count" of one at three TOKENS per the check above but not at
+    any character count, so an unbroken CJK run of a whole sentence's length
+    would otherwise read as a "three-or-fewer-word" name). The name itself is
+    the lead's tokens, JOINED BY SINGLE SPACES the way the resolver's own
+    tokeniser would read it back — never the raw substring — so a multi-space
+    or emoji-led title ("Multi   Spaces - qualifier", "🎯 Goal - notes")
+    derives a name a turn can actually produce, instead of one that can never
+    match and only occupies a name slot.
     """
     stripped = str(title).strip()
     match = _TRAILING_PAREN.match(stripped) or _TRAILING_DASH.match(stripped)
@@ -446,7 +488,7 @@ def derived_short_name(title: str) -> str | None:
     if any(sum(1 for ch in token if ch.isalpha()) < 2 for token in tokens):
         return None
     name = " ".join(tokens)
-    return name if len(name) >= 3 else None
+    return name if 3 <= len(name) <= 48 else None
 
 
 class WorkingSetIndexUnavailable(RuntimeError):

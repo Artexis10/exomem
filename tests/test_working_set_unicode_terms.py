@@ -115,7 +115,16 @@ def test_ascii_text_tokenises_exactly_as_the_old_regex_did() -> None:
     """Spec scenario "Basic Latin text is unchanged", as a property test:
     for a few hundred generated ASCII strings — including apostrophes,
     hyphens, digits, underscores and punctuation — `tokens_of` must equal
-    the old ASCII-only regex's `findall`, byte for byte."""
+    the old ASCII-only regex's `findall`, byte for byte.
+
+    The property with teeth is the SECOND assertion: `_unicode_tokens`, the
+    slow-path scanner that only ever runs on text containing a non-ASCII
+    character, must tokenise a pure-ASCII string identically to the old
+    regex too. `tokens_of` alone only ever exercises the slow path on
+    non-ASCII input, so it cannot by itself rule out the slow path reading
+    the ASCII portion of a MIXED-script string differently from how the
+    fast path would — this pins that it does not.
+    """
     # `'` (ASCII apostrophe) is in the pool; `’` (U+2019) is deliberately not —
     # that curly quote is itself outside `str.isascii()`, so a string carrying
     # one takes the slow path in production and is not this test's concern.
@@ -126,7 +135,13 @@ def test_ascii_text_tokenises_exactly_as_the_old_regex_did() -> None:
         candidate = "".join(rng.choice(pool) for _ in range(rng.randint(0, 60)))
         assert candidate.isascii()  # the pool is ASCII-only; stay honest about it
         cases += 1
-        assert wsi.tokens_of(candidate) == _reference_tokens(candidate)
+        reference = _reference_tokens(candidate)
+        assert wsi.tokens_of(candidate) == reference
+        # `_unicode_tokens` is only ever called on ALREADY-normalised text in
+        # production (`tokens_of` normalises, then dispatches); feeding it
+        # the raw candidate here would just be checking that it does not
+        # casefold, which is not the property under test.
+        assert wsi._unicode_tokens(wsi.normalize(candidate)) == reference
     assert cases == 300
 
 
@@ -146,7 +161,14 @@ def test_a_curly_apostrophe_is_the_same_word_as_a_plain_one() -> None:
 
 def test_an_accented_anchor_earns_lexical_overlap_from_an_accented_turn() -> None:
     """Spec scenario "An accented word is one term", exercised end to end
-    through `candidates_for`, not just `tokens_of` in isolation."""
+    through `candidates_for`, not just `tokens_of` in isolation.
+
+    The `lexical_overlap` assertion alone does not pin the fix: the OLD
+    tokeniser fragments "Ausrüstung" into "ausr" and "stung" on BOTH the
+    title and the turn consistently, so the fragments still overlap each
+    other and `lexical_overlap` is granted either way. The two extra
+    assertions below are the ones only the fix satisfies — the whole word
+    as one token, and the fragment gone from the anchor's own terms."""
     rows = (_row("a.md", "Ausrüstung Lager"),)
     analysis = resolve_module.analyze_turn("wo ist die Ausrüstung im Lager")
 
@@ -154,6 +176,8 @@ def test_an_accented_anchor_earns_lexical_overlap_from_an_accented_turn() -> Non
 
     assert len(candidates) == 1
     assert "lexical_overlap" in candidates[0].evidence
+    assert "ausrüstung" in analysis.tokens
+    assert "ausr" not in wsi.terms_of("Ausrüstung Lager")
 
 
 def test_word_fragments_never_make_two_unrelated_pages_overlap() -> None:
@@ -234,11 +258,17 @@ def test_a_derived_short_name_from_an_accented_title_is_the_accented_lead() -> N
     assert wsi.derived_short_name("Ausrüstung — Inventar") == "ausrüstung"
 
 
-def test_fold_plural_on_non_ascii_input_never_raises_and_is_a_no_op() -> None:
-    """`fold_plural` has no non-Latin plural rule: it must leave a non-ASCII
-    word untouched rather than raise or mangle it, since none of its suffix
-    checks (`-s`, `-es`, `-ies`) are meant to fire outside ASCII spellings
-    it does not end in."""
+def test_fold_plural_never_raises_and_folds_by_ascii_suffix_regardless_of_script() -> None:
+    """`fold_plural` has no non-Latin plural rule, but it is NOT a no-op on
+    non-ASCII input in general: its suffix checks look only at a word's
+    TRAILING characters, so a non-ASCII word that happens to end in an
+    ASCII plural tail folds exactly as an ASCII one would ("cafés" ->
+    "café"; the Spanish "país"/"países" pair meet at the same folded form,
+    even though neither is the linguistically correct singular). A word
+    with no such tail (Cyrillic, Devanagari, CJK, Greek — none of these end
+    in an ASCII "s") is untouched, and no input may ever raise."""
+    assert wsi.fold_plural("cafés") == "café"
+    assert wsi.fold_plural("país") == wsi.fold_plural("países")
     for word in ("ausrüstung", "лагерь", "किताबें", "你好世界", "καλημέρα"):
         folded = wsi.fold_plural(word)
         assert folded == word
@@ -309,3 +339,74 @@ def test_analyze_turn_text_folds_the_typographic_apostrophe_too() -> None:
     substrings, such as "i'm planning"."""
     analysis = resolve_module.analyze_turn("I’m planning a trip")
     assert "i'm planning" in analysis.text
+
+
+# --------------------------------------------------------------------------- #
+# Correction round 2: hyphens, and the derived-name length ceiling
+# --------------------------------------------------------------------------- #
+
+
+def test_a_non_breaking_hyphen_tokenises_like_a_plain_one() -> None:
+    """Same argument as the apostrophe: `normalize()` folds a typographic
+    HYPHEN (U+2010) to the plain ASCII hyphen. NFKC already maps NON-
+    BREAKING HYPHEN (U+2011) to U+2010, so folding U+2010 alone covers a
+    word typed with either."""
+    assert wsi.tokens_of("well‑known plan") == wsi.tokens_of("well-known plan")
+    assert wsi.tokens_of("well‑known plan") == ("well-known", "plan")
+
+
+def test_a_soft_hyphen_is_dropped_not_tokenised_as_a_break() -> None:
+    """A SOFT HYPHEN (U+00AD) is a hint for where a renderer MAY break a
+    line, not a character a person typed on purpose; `normalize()` drops it
+    entirely rather than let it split a word the way a real hyphen does."""
+    assert wsi.tokens_of("co­operate") == ("cooperate",)
+
+
+def test_en_dash_and_em_dash_are_not_folded() -> None:
+    """Titles use an en dash or an em dash as the qualifier separator
+    `derived_short_name`'s `_TRAILING_DASH` matches on; folding either into
+    a hyphen would make a qualifier separator indistinguishable from a
+    hyphenated word inside the lead itself."""
+    assert wsi.normalize("a–b") == "a–b"
+    assert wsi.normalize("a—b") == "a—b"
+    assert wsi.derived_short_name("Bike – Trek 520") == "bike"
+    assert wsi.derived_short_name("Bike — Trek 520") == "bike"
+
+
+def test_a_non_breaking_hyphen_reaches_an_anchor_through_the_real_resolver() -> None:
+    """Spec scenario "A non-breaking hyphen is the same word", exercised end
+    to end: an anchor titled "Well-Known Plan" (plain hyphen) and a turn
+    writing "well‑known plan" with a non-breaking hyphen must share terms
+    and earn `lexical_overlap`."""
+    rows = (_row("k.md", "Well-Known Plan"),)
+    analysis = resolve_module.analyze_turn("is the well‑known plan still active")
+
+    candidates = resolve_module.candidates_for(analysis, rows)
+
+    assert len(candidates) == 1
+    assert "lexical_overlap" in candidates[0].evidence
+    assert wsi.terms_of("well‑known plan") == wsi.terms_of("well-known plan")
+
+
+def test_a_derived_name_longer_than_48_characters_is_not_admitted() -> None:
+    """Spec scenario "A sentence is not a name": a script without word
+    separators caps a "word count" of one at three TOKENS (the existing
+    `len(tokens) > 3` check), never at any character count, so an unbroken
+    CJK run the length of a whole sentence would otherwise read as a valid
+    "three-or-fewer-word" name. A 60-character unbroken lead before a
+    parenthetical must be refused; a 16-character one is still a name and
+    stays admitted."""
+    too_long = "你" * 60
+    assert wsi.derived_short_name(f"{too_long} (note)") is None
+
+    fine = "你" * 16
+    assert wsi.derived_short_name(f"{fine} (note)") == fine
+
+
+def test_a_derived_name_at_exactly_48_characters_is_the_ceiling() -> None:
+    """The ceiling is inclusive: exactly 48 characters is still admitted,
+    49 is not."""
+    at_ceiling = "你" * 48
+    over_ceiling = "你" * 49
+    assert wsi.derived_short_name(f"{at_ceiling} (note)") == at_ceiling
+    assert wsi.derived_short_name(f"{over_ceiling} (note)") is None

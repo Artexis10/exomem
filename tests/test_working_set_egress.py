@@ -422,6 +422,68 @@ def test_a_prose_wikilink_to_a_nonexistent_page_keeps_the_unit_unchanged(
     assert guarded["units"] == [unit]
 
 
+_PLAIN_APOSTROPHE_TITLE = "Kill switch's risky releases"
+_TYPOGRAPHIC_APOSTROPHE_TITLE = "Kill switch’s risky releases"
+
+
+def _retitled(vault: Path, title: str) -> None:
+    """Give the restricted fixture page its own frontmatter `title:` —
+    exactly the spelling the activation index records as a page name — so
+    the TITLE's own apostrophe style, not the fixture's unrelated H1, is
+    what a prose wikilink has to resolve against."""
+    page = vault / RESTRICTED_PATH
+    text = page.read_text(encoding="utf-8")
+    assert text.startswith("---\n")
+    head, rest = text[4:].split("\n---\n", 1)
+    page.write_text(f'---\n{head}\ntitle: "{title}"\n---\n{rest}', encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("title", "prose"),
+    [
+        (_PLAIN_APOSTROPHE_TITLE, _PLAIN_APOSTROPHE_TITLE),
+        (_PLAIN_APOSTROPHE_TITLE, _TYPOGRAPHIC_APOSTROPHE_TITLE),
+        (_TYPOGRAPHIC_APOSTROPHE_TITLE, _PLAIN_APOSTROPHE_TITLE),
+        (_TYPOGRAPHIC_APOSTROPHE_TITLE, _TYPOGRAPHIC_APOSTROPHE_TITLE),
+    ],
+    ids=[
+        "plain-title/plain-prose",
+        "plain-title/typographic-prose",
+        "typographic-title/plain-prose",
+        "typographic-title/typographic-prose",
+    ],
+)
+def test_a_withheld_page_stays_withheld_however_its_apostrophe_was_typed(
+    vault: Path, title: str, prose: str
+) -> None:
+    """Independent review, task 4a.2b: `_resolved_prose_names` resolves a
+    prose wikilink NAME to a path through the activation index's
+    `page_names` map, keyed by `working_set_index.normalize()` on both the
+    index-build side (the title) and the query side (the prose spelling).
+    Before the apostrophe fold moved into `normalize()` itself, a title
+    authored with one apostrophe style and prose written with the other
+    normalised to two DIFFERENT keys, so resolution found nothing at all —
+    not a matching failure downstream, a resolution failure — and the unit
+    was served in full. All four spelling combinations must resolve to the
+    SAME restricted page and withhold the unit that names it."""
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    _retitled(vault, title)
+    _indexed(vault)
+
+    packet = _packet()
+    packet["units"] = [_prose_unit(prose, ref="unit-apostrophe-link")]
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _prose_release())
+
+    assert guarded is not None
+    assert guarded["units"] == [], (
+        f"LEAK: title={title!r} named in prose as {prose!r} was served: "
+        f"{guarded['units']!r}"
+    )
+
+
 def test_an_anchor_title_naming_a_withheld_page_drops_the_anchor(vault: Path) -> None:
     """`title` is authored prose and can carry a wikilink like any other field."""
     write_scope(vault)
