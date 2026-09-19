@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Resumable hosted launch
 
 `accept_hosted_service.py launch` advances one durable owner or friends launch attempt. The default invocation performs only read-only preflight. `--execute` permits the two existing runtime control effects and, after ordinary owner consent, one reviewed memory write.
