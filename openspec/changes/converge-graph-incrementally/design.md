@@ -223,6 +223,21 @@ start surfacing placeholder nodes in `connect_memory` output. That is a user-vis
 contract change, and it should be made on measurement rather than on the way past. It
 belongs with Phase 3, whose whole premise is re-measuring before relaxing anything.
 
+## Recovering a barrier with unpublished external coverage
+
+A persisted read barrier combined with an external-pending epoch is not a
+per-path repair: the mark only identifies observed paths, while a cold process
+cannot prove that they cover the graph's current recall corpus. Barrier recovery
+therefore continues to refuse that state. The drain must convert the unresolved
+coverage into its existing durable full-rebuild marker, then let the guarded
+marker convergence perform the reconciled full pass.
+
+The marker remains the single retry handle. A current publication-refusal memo
+keeps its backoff, an active rebuild owner retains the marker without starting a
+second rebuild, and a newer external mark survives clear-through of the sampled
+epoch. Reconciliation evicts resolver and inbound caches before it retires an
+observed mark, so a newly available graph cannot share stale dependent answers.
+
 ## Alternatives considered
 
 **Tune the join bound.** This was the previous attempt. Rejected: the constant is

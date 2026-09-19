@@ -133,6 +133,58 @@ rather than assumed.
 - **THEN** the graph becomes available on its own
 - **AND** a client that polls a graph-backed read observes it become available
 
+### Requirement: An externally fenced graph barrier recovers through durable full debt
+
+When a graph read barrier remains after an external-pending epoch, the drain SHALL
+not treat a declined barrier recovery as settled. It SHALL persist the existing
+full-rebuild marker and let the guarded marker convergence reconcile and rebuild
+the complete recall corpus. It SHALL retain the existing publication-refusal
+backoff and active-owner coalescing behavior, and SHALL NOT create duplicate
+markers while one is pending.
+
+Before reconciliation clears an observed external epoch, it SHALL evict the
+resolver and inbound caches affected by that recall publication. Clearing SHALL
+remain limited to the sampled epoch, leaving any newer mark pending and the graph
+unavailable until it is itself reconciled and published.
+An eviction or cache clear SHALL revoke publication by a resolver or inbound
+builder that was already walking the old vault state; that detached request may
+complete, but it SHALL NOT repopulate the shared cache.
+
+#### Scenario: An external mark with a barrier converges through the full marker
+
+- **WHEN** the graph has a persisted read barrier, the per-path queue is empty,
+  and an external epoch is pending
+- **THEN** the drain creates one full-rebuild marker
+- **AND** guarded marker convergence publishes a current graph only after a
+  complete recall reconciliation
+
+#### Scenario: Cold recovery includes unqueued recall content
+
+- **WHEN** a replacement process has a suspended graph, an observed external
+  path, and an additional recall file not named by that event
+- **THEN** the recovered graph includes both files before it becomes available
+
+#### Scenario: A newer mark remains fenced
+
+- **WHEN** a newer external mark arrives after reconciliation sampled an older
+  mark and before its clear-through
+- **THEN** clear-through retires only the older mark
+- **AND** the graph remains unavailable until the newer mark is reconciled
+
+#### Scenario: Backoff and active ownership retain one marker
+
+- **WHEN** publication backoff is active, or another rebuild owner holds the
+  graph claim
+- **THEN** the drain does not spend a duplicate full rebuild
+- **AND** at most one durable full-rebuild marker remains pending
+
+#### Scenario: Cache eviction revokes an in-flight builder
+
+- **WHEN** recovery evicts an inbound or recall resolver cache while its builder
+  has already read the prior vault state
+- **THEN** the builder may return its detached snapshot to its original caller
+- **AND** it does not publish that old snapshot for a later request
+
 ### Requirement: The changed-path set is enqueued durably, never discarded
 
 When a canonical batch writes a graph sync checkpoint, the checkpoint's changed and

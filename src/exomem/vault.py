@@ -6197,6 +6197,8 @@ class _InboundIndexData:
 
 
 _INBOUND_INDEX: dict[str, tuple[tuple, _InboundIndexData]] = {}
+_INBOUND_INDEX_GENERATIONS: dict[str, int] = {}
+_INBOUND_INDEX_LOCK = threading.Lock()
 
 
 def _scan_wikilinks(text: str) -> list[tuple[int, str, str]]:
@@ -6260,11 +6262,15 @@ def _inbound_index(vault_root: Path) -> _InboundIndexData:
     """The cached index, rebuilt when the vault's freshness key moves."""
     key = _vault_freshness_key(vault_root)
     root = str(vault_root.resolve())
-    cached = _INBOUND_INDEX.get(root)
-    if cached and cached[0] == key:
-        return cached[1]
+    with _INBOUND_INDEX_LOCK:
+        generation = _INBOUND_INDEX_GENERATIONS.setdefault(root, 0)
+        cached = _INBOUND_INDEX.get(root)
+        if cached and cached[0] == key:
+            return cached[1]
     data = _build_inbound_index(vault_root)
-    _INBOUND_INDEX[root] = (key, data)
+    with _INBOUND_INDEX_LOCK:
+        if _INBOUND_INDEX_GENERATIONS.get(root) == generation:
+            _INBOUND_INDEX[root] = (key, data)
     return data
 
 
@@ -6291,28 +6297,42 @@ def on_inbound_files_changed(
     if not freshness.event_indexes_enabled():
         return
     root = str(vault_root.resolve())
-    cached = _INBOUND_INDEX.get(root)
-    if cached is None:
-        return
+    with _INBOUND_INDEX_LOCK:
+        generation = _INBOUND_INDEX_GENERATIONS.setdefault(root, 0)
+        cached = _INBOUND_INDEX.get(root)
+        if cached is None:
+            return
     changed_list = list(changed_rels)
     deleted_list = list(deleted_rels)
     if not (changed_list or deleted_list):
         return
     _, data = cached
     data.on_files_changed(vault_root, changed_list, deleted_list)
-    _INBOUND_INDEX[root] = (_vault_freshness_key(vault_root), data)
+    key = _vault_freshness_key(vault_root)
+    with _INBOUND_INDEX_LOCK:
+        if (
+            _INBOUND_INDEX_GENERATIONS.get(root) == generation
+            and _INBOUND_INDEX.get(root) is cached
+        ):
+            _INBOUND_INDEX[root] = (key, data)
 
 
 def clear_inbound_index() -> None:
     """Test hook: drop every cached inbound-link index (patch state included —
     `known_rels`/`buckets`/`stem_counts` all live inside the cached
     `_InboundIndexData`, so clearing the outer dict resets everything)."""
-    _INBOUND_INDEX.clear()
+    with _INBOUND_INDEX_LOCK:
+        _INBOUND_INDEX.clear()
+        for root in _INBOUND_INDEX_GENERATIONS:
+            _INBOUND_INDEX_GENERATIONS[root] += 1
 
 
 def evict_inbound_index(vault_root: Path) -> bool:
     """Withdraw one vault's rebuildable inbound-link projection."""
-    return _INBOUND_INDEX.pop(str(Path(vault_root).resolve()), None) is not None
+    root = str(Path(vault_root).resolve())
+    with _INBOUND_INDEX_LOCK:
+        _INBOUND_INDEX_GENERATIONS[root] = _INBOUND_INDEX_GENERATIONS.get(root, 0) + 1
+        return _INBOUND_INDEX.pop(root, None) is not None
 
 
 def find_inbound_wikilinks(vault_root: Path, target_rel_path: str) -> list[InboundLink]:

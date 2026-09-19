@@ -229,9 +229,18 @@ def _recover_once(vault_root: Path) -> bool:
 
 def _drain_once(vault_root: Path) -> int:
     """One bounded drain. Never raises; returns receipts cleared."""
-    from . import index_sync
+    from . import deferred_index, epistemic_graph, index_sync
 
     try:
+        # A full marker is the one queue item whose work is a whole rebuild.
+        # Keep the publication-refusal memo authoritative after the marker has
+        # been recorded as well as before it: otherwise every scheduler retry
+        # re-enters convergence and defeats the established bounded backoff.
+        if (
+            deferred_index.graph_full_rebuild_pending(vault_root) is not None
+            and epistemic_graph.publication_refusal_active(vault_root)
+        ):
+            return 0
         return int(index_sync.drain_graph_work(vault_root, limit=DRAIN_LIMIT) or 0)
     except Exception:  # noqa: BLE001 - queued work stays durable and retryable
         log.warning("graph drain: pass failed; work remains queued", exc_info=True)
@@ -278,6 +287,21 @@ def _work_once(vault_root: Path) -> int:
     if _barrier_pending(vault_root):
         if _recover_once(vault_root):
             processed += 1
+        else:
+            from . import epistemic_graph, freshness
+
+            # A barrier with an unpublished external epoch has no bounded
+            # receipt coverage to recover from.  The ordinary recovery refuses
+            # it correctly; route that unknown scope through the existing
+            # guarded full-marker convergence instead of leaving the barrier
+            # to retry a refusal forever.  A recent publication refusal keeps
+            # its established backoff rather than spending another rebuild.
+            if (
+                freshness.external_pending(vault_root)
+                and not epistemic_graph.publication_refusal_active(vault_root)
+                and _request_full_rebuild(vault_root)
+            ):
+                processed += 1
     elif _availability_pending(vault_root):
         # Only where there is no barrier: with one standing, repair is the
         # cheaper and more specific answer, and it is the one that knows how to
