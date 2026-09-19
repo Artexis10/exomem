@@ -747,13 +747,19 @@ def score_padding_robustness(padded_score: CaseScore, base_score: CaseScore) -> 
 # per-case or per-case-per-anchor-kind numerator/denominator dual).
 # --------------------------------------------------------------------------
 
-REQUIRED_DIGEST_FIELDS: tuple[str, ...] = ("fixture_set_digest", "corpus_digest", "threshold_digest")
+REQUIRED_DIGEST_FIELDS: tuple[str, ...] = (
+    "fixture_set_digest",
+    "corpus_digest",
+    "logical_corpus_digest",
+    "threshold_digest",
+)
 
 
 @dataclass(frozen=True)
 class RunManifest:
     fixture_set_digest: str
     corpus_digest: str
+    logical_corpus_digest: str
     threshold_digest: str
     mechanism: str = "unknown"
 
@@ -767,6 +773,7 @@ def validate_manifest(data: dict[str, Any]) -> RunManifest:
     return RunManifest(
         fixture_set_digest=data["fixture_set_digest"],
         corpus_digest=data["corpus_digest"],
+        logical_corpus_digest=data["logical_corpus_digest"],
         threshold_digest=data["threshold_digest"],
         mechanism=str(data.get("mechanism", "unknown")),
     )

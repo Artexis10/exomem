@@ -54,15 +54,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import random
 import re
+import subprocess
+import sys
+import tempfile
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 FIXTURE_SET_ID = "context-activation-fixtures-v1"
-CORPUS_ID = "context-activation-corpus-v1"
+CORPUS_ID = "context-activation-corpus-v2"
 
 CASE_IDS: tuple[str, ...] = tuple(f"C{i}" for i in range(1, 10))
 TWIN_IDS: tuple[str, ...] = tuple(f"T{i}" for i in range(1, 10))
@@ -746,16 +751,386 @@ class CorpusManifest:
     distractor_count: int
     key_to_path: dict[str, str]
     corpus_hash: str
+    logical_hash: str
 
 
 def _corpus_hash(root: Path) -> str:
+    """Digest exact canonical corpus bytes, excluding derived navigation/logs."""
+
     digest = hashlib.sha256()
-    for path in sorted(root.rglob("*.md")):
-        digest.update(path.relative_to(root).as_posix().encode())
+    kb_root = root / "Knowledge Base"
+    for path in sorted(candidate for candidate in kb_root.rglob("*") if candidate.is_file()):
+        if path.suffix.lower() not in {".json", ".md", ".yaml", ".yml"}:
+            continue
+        if path.name in {"index.md", "log.md"}:
+            continue
+        relative = path.relative_to(root).as_posix()
+        digest.update(relative.encode())
         digest.update(b"\0")
         digest.update(path.read_bytes())
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _logical_corpus_hash(
+    root: Path,
+    *,
+    seed: int,
+    distractor_count: int,
+    key_to_path: dict[str, str],
+) -> str:
+    """Digest stable fixture semantics separately from concrete write receipts.
+
+    Canonical note/entity writers mint their own ids, and Records/Planning
+    append audit receipts.  Those concrete values remain covered by
+    :func:`_corpus_hash`.  This identity covers the declared fixture inputs,
+    paths, and authored semantic projections so independently constructed
+    corpora with the same seed remain comparable.
+    """
+
+    pages: list[tuple[str, str]] = []
+    for path in sorted(root.rglob("*.md")):
+        relative = path.relative_to(root).as_posix()
+        if (
+            relative.startswith(".exomem/")
+            or relative.startswith("Knowledge Base/_Schema/")
+            or relative.startswith("Knowledge Base/_Governance/")
+            or path.name in {"index.md", "log.md"}
+        ):
+            continue
+        text = path.read_text(encoding="utf-8")
+        frontmatter = text.split("---", 2)[1] if text.startswith("---\n") else ""
+        governed_type = ""
+        match = re.search(r"(?m)^type:\s*([^\n]+)$", frontmatter)
+        if match:
+            governed_type = match.group(1).strip()
+        if governed_type in {"entity", "failure", "insight", "pattern"}:
+            text = re.sub(r"(?m)^exomem_id:\s*[^\n]+\n", "", text, count=1)
+        if governed_type == "note" and re.search(r"(?m)^tags:.*\bresource\b", frontmatter):
+            text = re.sub(r"(?m)^(?:created|updated):\s*[^\n]+\n", "", text)
+        text = re.sub(r"(?m)^(?:plan|record)_audit:\s*[^\n]+\n", "", text)
+        text = re.sub(r"(?m)^# exomem-(?:plan|record)-audit:\s*[^\n]+\n", "", text)
+        text = re.sub(
+            r"(?m)^<!-- exomem-item-presentation:v1 [^\n]+ -->\n",
+            "<!-- exomem-item-presentation:v1 -->\n",
+            text,
+        )
+        pages.append((relative, text))
+    payload = {
+        "corpus_id": CORPUS_ID,
+        "fixture_set_hash": fixture_set_digest(),
+        "seed": seed,
+        "distractor_count": distractor_count,
+        "key_to_path": dict(sorted(key_to_path.items())),
+        "pages": pages,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+_CORPUS_DATE = date(2026, 9, 1)
+
+
+def _compiled_note(
+    root: Path,
+    *,
+    title: str,
+    slug: str,
+    observation: str,
+    category: str = "finding",
+    tags: tuple[str, ...] = (),
+    extra_body: str = "",
+    note_type: str = "insight",
+) -> str:
+    """Create one fixture note through the canonical compiled-note writer."""
+
+    from exomem import note
+
+    tag_text = "" if not tags else " " + " ".join(f"#{tag}" for tag in tags)
+    body = (
+        f"## Observations\n\n- [{category}] {observation}{tag_text}\n"
+        + (f"\n{extra_body.strip()}\n" if extra_body.strip() else "")
+    )
+    arguments = {
+        "vault_root": root,
+        "content": body,
+        "note_type": note_type,
+        "title": title,
+        "slug": slug,
+        "sources": [],
+        "tags": list(tags),
+        "today": _CORPUS_DATE,
+    }
+    validation = note.note(validate_only=True, **arguments)
+    reviewed: dict[str, object] = {}
+    if getattr(validation.creation_validation, "reviewed_none_required", False):
+        reviewed = {
+            "relation_disposition": "reviewed_none",
+            "relation_review_hash": validation.draft_hash,
+            "relation_review_reason": "No honest relation exists in the synthetic fixture corpus.",
+        }
+    result = note.note(
+        draft_id=validation.draft_id,
+        draft_hash=validation.draft_hash,
+        draft_token=validation.draft_token,
+        **reviewed,
+        **arguments,
+    )
+    return result.path
+
+
+def _replace_note(root: Path, *, old_path: str, title: str, slug: str, observation: str) -> str:
+    """Supersede one fixture note through the reviewed canonical writer."""
+
+    from exomem import replace
+
+    arguments = {
+        "vault_root": root,
+        "old_path": old_path,
+        "reason": "replace the benchmark onboarding approach",
+        "today": _CORPUS_DATE,
+        "content": f"## Observations\n\n- [current state] {observation} #onboarding\n",
+        "note_type": "insight",
+        "title": title,
+        "slug": slug,
+        "sources": [],
+        "tags": ["onboarding"],
+    }
+    validation = replace.replace(validate_only=True, **arguments)
+    reviewed = {}
+    if getattr(validation.creation_validation, "reviewed_none_required", False):
+        reviewed = {
+            "relation_disposition": "reviewed_none",
+            "relation_review_hash": validation.draft_hash,
+            "relation_review_reason": "The supersession is the fixture's truthful relation.",
+        }
+    result = replace.replace(
+        draft_id=validation.draft_id,
+        draft_hash=validation.draft_hash,
+        draft_token=validation.draft_token,
+        **reviewed,
+        **arguments,
+    )
+    return result.new_path
+
+
+def _entity(
+    root: Path,
+    *,
+    name: str,
+    slug: str,
+    summary: str,
+    tags: tuple[str, ...] = (),
+) -> str:
+    """Create one person fixture through the canonical entity writer."""
+
+    from exomem import link
+
+    return link.link(
+        root,
+        entity_type="person",
+        name=name,
+        slug=slug,
+        summary=summary,
+        tags=list(tags),
+        today=_CORPUS_DATE,
+    ).path
+
+
+def _governed_resource(
+    root: Path,
+    *,
+    path: str,
+    title: str,
+    observation: str,
+    tags: tuple[str, ...],
+    extra_body: str = "",
+) -> str:
+    """Create one curated resource through the supported generic writer."""
+
+    from exomem.commands import op_manage_memory_file
+
+    tag_text = " ".join(f"#{tag}" for tag in tags)
+    content = (
+        f"# {title}\n\n## Observations\n\n- [resource] {observation} {tag_text}\n"
+        + (f"\n{extra_body.strip()}\n" if extra_body.strip() else "")
+    )
+    arguments = {
+        "operation": "create",
+        "path": path,
+        "content": content,
+        "frontmatter": {"type": "note", "status": "active", "tags": list(tags)},
+    }
+    validation = op_manage_memory_file(root, validate_only=True, **arguments)
+    result = op_manage_memory_file(
+        root,
+        draft_id=validation.get("draft_id"),
+        draft_hash=validation.get("draft_hash"),
+        draft_token=validation.get("draft_token"),
+        **arguments,
+    )
+    creation = result.get("creation") if isinstance(result, dict) else None
+    if not isinstance(creation, dict) or creation.get("mutated") is not True:
+        raise FixtureError(f"canonical resource writer did not commit {path}")
+    if not (root / path).is_file():
+        raise FixtureError(f"canonical resource writer omitted {path}")
+    return path
+
+
+def _records_manifest(
+    *,
+    exomem_id: str,
+    title: str,
+    source: str,
+    claims: tuple[str, ...],
+    fields: str,
+    natural_key: str,
+) -> str:
+    claim_rows = ", ".join(claims)
+    return f"""---
+type: collection
+exomem_id: {exomem_id}
+title: {title}
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: markdown-items
+  source: {source}
+  format_version: 1
+claims:
+  terms: [{claim_rows}]
+item_schema:
+  natural_key: [{natural_key}]
+  fields:
+{fields}
+---
+
+Synthetic observed state for the context-activation corpus.
+"""
+
+
+def _create_records_collection(
+    root: Path,
+    *,
+    manifest_path: str,
+    manifest_text: str,
+    items: tuple[tuple[str, dict[str, object]], ...],
+) -> str:
+    """Create and populate Records through the public product command."""
+
+    from exomem.commands import op_record_memory
+
+    op_record_memory(
+        root,
+        action="create",
+        manifest_path=manifest_path,
+        manifest_text=manifest_text,
+        scaffold=True,
+        why="seed the context-activation benchmark collection",
+    )
+    for item_key, item in items:
+        snapshot = op_record_memory(root, action="inspect", collection=manifest_path)["snapshot"]
+        op_record_memory(
+            root,
+            action="append",
+            collection=manifest_path,
+            item=item,
+            item_key=item_key,
+            expected_container_hash=snapshot,
+            why="seed one observed benchmark state",
+        )
+    return manifest_path
+
+
+def _planning_manifest(*, exomem_id: str, title: str) -> str:
+    return f"""---
+type: collection
+exomem_id: {exomem_id}
+title: {title}
+semantic_profile: planning
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: markdown-items
+  source: Items
+  format_version: 1
+item_schema:
+  natural_key: [title]
+  fields:
+    title:
+      type: string
+      required: true
+    kind:
+      type: string
+    status:
+      type: string
+    lifecycle:
+      type: string
+    priority:
+      type: string
+    commitment:
+      type: string
+    horizon:
+      type: string
+    health:
+      type: string
+    area:
+      type: string
+    parent:
+      type: string
+    pointer:
+      type: link
+item_filename:
+  version: 1
+  fields: [title]
+item_presentation:
+  version: 1
+  title: title
+  summary: [kind, status, lifecycle, priority, commitment, horizon, pointer]
+---
+
+Synthetic intended work for the context-activation corpus.
+"""
+
+
+def _create_planning_item(
+    root: Path,
+    *,
+    manifest_path: str,
+    manifest_text: str,
+    plan_id: str,
+    title: str,
+    pointer: str | None = None,
+) -> str:
+    """Create one collection and item through the canonical Planning writer."""
+
+    from exomem import planning
+
+    planning.create_collection(
+        root,
+        manifest_path,
+        manifest_text,
+        why="seed the context-activation benchmark plan",
+    )
+    item: dict[str, object] = {
+        "title": title,
+        "kind": "outcome",
+        "status": "candidate",
+        "lifecycle": "active",
+    }
+    if pointer is not None:
+        item["pointer"] = pointer
+    receipt = planning.add(
+        root,
+        manifest_path,
+        plan_id=plan_id,
+        item=item,
+        why="seed one intended benchmark outcome",
+    )
+    return str(receipt["affected_paths"][0])
 
 
 #: Distractor vocabulary for C9's padded neighbourhood (N2): generic,
@@ -793,7 +1168,7 @@ def _distractor_body(rng: random.Random, index: int) -> str:
     )
 
 
-def build_corpus(
+def _build_corpus_in_process(
     root: Path, *, seed: int = 20260916, distractor_count: int = DEFAULT_DISTRACTOR_COUNT
 ) -> CorpusManifest:
     """Render the seeded synthetic corpus under ``root``.
@@ -805,129 +1180,233 @@ def build_corpus(
     ``design.md`` recorded against the real vault (2026-09-16 reproduction).
     """
 
+    from exomem.init import init_vault
+
     root = Path(root)
+    init_vault(root)
     rng = random.Random(seed)
     key_to_path: dict[str, str] = {}
 
     # C1/T1 -- AI-usage complaint vs. an unrelated fitness goal.
-    key_to_path["c1_subscriptions_collection"] = _page(
+    key_to_path["c1_subscriptions_collection"] = _create_records_collection(
         root,
-        "Collections/ai-subscriptions.md",
-        "AI subscriptions collection",
-        "Tracks active AI tool subscriptions and their plan tiers.",
+        manifest_path="Knowledge Base/Records/AI Subscriptions/_collection.md",
+        manifest_text=_records_manifest(
+            exomem_id="10000000-0000-4000-8000-000000000001",
+            title="AI subscriptions",
+            source="Items",
+            claims=("ai subscriptions", "usage limits", "weekly cap", "plan tiers"),
+            natural_key="observed_on, subscription",
+            fields=(
+                "    observed_on:\n"
+                "      type: date\n"
+                "      required: true\n"
+                "    subscription:\n"
+                "      type: string\n"
+                "      required: true\n"
+                "    state:\n"
+                "      type: string\n"
+                "    note:\n"
+                "      type: string"
+            ),
+        ),
+        items=(
+            (
+                "10000000-0000-4000-8000-000000000011",
+                {
+                    "observed_on": "2026-09-01",
+                    "subscription": "assistant-plan-alpha",
+                    "state": "limit-reached",
+                    "note": "Weekly capacity was exhausted before the plan renewed.",
+                },
+            ),
+        ),
     )
-    key_to_path["c1_weekly_limit_insight"] = _page(
+    key_to_path["c1_weekly_limit_insight"] = _compiled_note(
         root,
-        "Notes/weekly-limit-insight.md",
-        "Weekly limit insight",
-        "Usage tends to hit the weekly cap by Thursday on the current tier.",
+        title="Weekly limit insight",
+        slug="weekly-limit-insight",
+        observation="Usage hits the weekly limit before renewal on the current tier.",
+        category="operating constraint",
+        tags=("capacity", "subscriptions"),
     )
-    key_to_path["c1_capacity_ceilings_pattern"] = _page(
+    key_to_path["c1_capacity_ceilings_pattern"] = _compiled_note(
         root,
-        "Notes/capacity-ceilings-pattern.md",
-        "Capacity ceilings pattern",
-        "A recurring pattern: capacity ceilings are reached before renewal.",
+        title="Capacity ceilings pattern",
+        slug="capacity-ceilings-pattern",
+        observation="Flat-rate plans repeatedly reach their capacity ceilings before renewal.",
+        category="pattern",
+        tags=("capacity", "subscriptions"),
+        note_type="pattern",
     )
-    key_to_path["t1_fitness_goal_note"] = _page(
+    key_to_path["t1_fitness_goal_note"] = _compiled_note(
         root,
-        "Notes/fitness-goal-note.md",
-        "Fitness goal note",
-        "A step-count goal tracked for general fitness, unrelated to tooling.",
+        title="Fitness goal note",
+        slug="fitness-goal-note",
+        observation="A step-count fitness goal is tracked separately from tooling.",
+        category="goal",
+        tags=("fitness",),
     )
 
     # C2/T2/C9/T9 -- planning to cook vs. photographing; C9/T9 reuse these
     # same pages, scored against the padded and unpadded trees respectively.
-    key_to_path["c2_grill_equipment_page"] = _page(
+    key_to_path["c2_grill_equipment_page"] = _governed_resource(
         root,
-        "Equipment/grill.md",
-        "Grill equipment page",
-        "A gas grill with a two-zone setup, serviced this spring.",
+        path="Knowledge Base/Products/Grill equipment.md",
+        title="Grill equipment page",
+        observation="A two-zone gas grill was serviced this spring.",
+        tags=("resource", "equipment", "cooking"),
+        extra_body="## Constraints\n\nUse indirect heat for long recipes.",
     )
-    key_to_path["c2_cooking_method_insight"] = _page(
+    key_to_path["c2_cooking_method_insight"] = _compiled_note(
         root,
-        "Notes/cooking-method-insight.md",
-        "Cooking method insight",
-        "Indirect heat works best for this recipe on the grill.",
+        title="Cooking method insight",
+        slug="cooking-method-insight",
+        observation="Indirect heat works best for this recipe on the grill.",
+        category="method",
+        tags=("cooking", "grill"),
     )
-    key_to_path["t2_camera_gear_note"] = _page(
+    key_to_path["t2_camera_gear_note"] = _governed_resource(
         root,
-        "Equipment/camera.md",
-        "Camera gear note",
-        "A camera body and one prime lens kept for weekend photography.",
+        path="Knowledge Base/Products/Camera gear.md",
+        title="Camera gear note",
+        observation="A camera body and prime lens are kept for photography.",
+        tags=("resource", "equipment", "photography"),
     )
 
     # C3/T3 -- a roadmap item and its design pointer, twinned across an
     # unrelated second project's own roadmap item.
-    key_to_path["c3_planning_item"] = _page(
+    key_to_path["c3_design_pointer"] = _compiled_note(
         root,
-        "Planning/roadmap-item-a.md",
-        "Roadmap item A",
-        "Next step: extend the reporting module. See the design pointer.",
+        title="Roadmap item A design pointer",
+        slug="roadmap-item-a-design",
+        observation="The design notes specify how the reporting module is extended.",
+        category="design",
+        tags=("roadmap", "reporting"),
     )
-    key_to_path["c3_design_pointer"] = _page(
+    key_to_path["c3_planning_item"] = _create_planning_item(
         root,
-        "Planning/roadmap-item-a-design.md",
-        "Roadmap item A design pointer",
-        "Design notes for roadmap item A live here.",
+        manifest_path="Knowledge Base/Planning/Roadmap/_collection.md",
+        manifest_text=_planning_manifest(
+            exomem_id="30000000-0000-4000-8000-000000000001",
+            title="Reporting roadmap",
+        ),
+        plan_id="30000000-0000-4000-8000-000000000011",
+        title="Extending the reporting module",
+        pointer=f"[[{key_to_path['c3_design_pointer'].removesuffix('.md')}]]",
     )
-    key_to_path["t3_other_project_planning_item"] = _page(
+    key_to_path["t3_other_project_planning_item"] = _create_planning_item(
         root,
-        "Planning/roadmap-item-b.md",
-        "Roadmap item B (other workstream)",
-        "Next step for the other workstream: migrate the billing job.",
+        manifest_path="Knowledge Base/Planning/Other Workstream/_collection.md",
+        manifest_text=_planning_manifest(
+            exomem_id="30000000-0000-4000-8000-000000000002",
+            title="Other workstream roadmap",
+        ),
+        plan_id="30000000-0000-4000-8000-000000000012",
+        title="Other workstream roadmap item",
     )
 
     # C4/T4 -- a named colleague and failure note vs. two entities sharing
     # one first name.
-    key_to_path["c4_entity_profile"] = _page(
+    key_to_path["c4_entity_profile"] = _entity(
         root,
-        "Entities/colleague-rowan.md",
-        "Rowan Ashfield",
-        "A colleague on the platform team.",
-        extra_frontmatter="aliases: [Rowan]\n",
+        name="Rowan Ashfield",
+        slug="rowan-ashfield",
+        summary="A colleague on the platform team.",
+        tags=("platform",),
     )
-    key_to_path["c4_failure_note"] = _page(
+    key_to_path["c4_failure_note"] = _compiled_note(
         root,
-        "Notes/deployment-issue-rowan.md",
-        "Deployment issue note",
-        "Rowan Ashfield's deployment failed on the Mac build last month; root-caused to a config drift.",
+        title="Deployment issue note",
+        slug="deployment-issue-rowan",
+        observation="Rowan Ashfield's deployment failed on the Mac build last month because of config drift.",
+        category="failure",
+        tags=("deployment", "platform"),
+        extra_body=(
+            "## Context\n\n"
+            f"Affected colleague: [[{key_to_path['c4_entity_profile'].removesuffix('.md')}]]."
+        ),
+        note_type="failure",
     )
-    key_to_path["t4_shared_first_name_entity_a"] = _page(
-        root, "Entities/alex-monroe.md", "Alex Monroe", "A colleague on the data team."
+    key_to_path["t4_shared_first_name_entity_a"] = _entity(
+        root,
+        name="Alex Monroe",
+        slug="alex-monroe",
+        summary="A colleague on the data team.",
+        tags=("data",),
     )
-    key_to_path["t4_shared_first_name_entity_b"] = _page(
-        root, "Entities/alex-park.md", "Alex Park", "A colleague on the support team."
+    key_to_path["t4_shared_first_name_entity_b"] = _entity(
+        root,
+        name="Alex Park",
+        slug="alex-park",
+        summary="A colleague on the support team.",
+        tags=("support",),
     )
 
     # C5/T5 -- a resource made unavailable by its Records collection's
     # latest item (by date, never by line order -- N supplement), vs. an
     # available resource that must not be mislabeled.
-    key_to_path["c5_resource_profile"] = _page(
+    key_to_path["c5_resource_profile"] = _governed_resource(
         root,
-        "Resources/workshop-bench.md",
-        "Workshop bench",
-        "A shared workshop bench, booked by session. See [[workshop-bench-records]] for status.",
-    )
-    key_to_path["c5_records_latest_unavailable"] = _page(
-        root,
-        "Resources/workshop-bench-records.md",
-        "Workshop bench records",
-        "Structured records collection for the workshop bench resource.",
-        extra_frontmatter=(
-            "semantic_profile: records\n"
-            "fields: [observed_on, status]\n"
-            "items:\n"
-            '  - observed_on: "2026-08-02"\n'
-            "    status: available\n"
-            '  - observed_on: "2026-09-10"\n'
-            "    status: unavailable\n"
+        path="Knowledge Base/Systems/Workshop bench.md",
+        title="Workshop bench",
+        observation="A shared workshop bench is booked by session.",
+        tags=("resource", "workshop"),
+        extra_body=(
+            "## Current state\n\n"
+            "See [[Knowledge Base/Records/Workshop Bench/_collection]] for status."
         ),
     )
-    key_to_path["t5_available_resource"] = _page(
+    key_to_path["c5_records_latest_unavailable"] = _create_records_collection(
         root,
-        "Resources/scanner-cart.md",
-        "Scanner cart",
-        "A mobile scanner cart, currently available with no open issues.",
+        manifest_path="Knowledge Base/Records/Workshop Bench/_collection.md",
+        manifest_text=_records_manifest(
+            exomem_id="50000000-0000-4000-8000-000000000001",
+            title="Workshop bench availability",
+            source="Items",
+            claims=("workshop bench", "availability", "repair", "shared resource"),
+            natural_key="observed_on, resource",
+            fields=(
+                "    observed_on:\n"
+                "      type: date\n"
+                "      required: true\n"
+                "    resource:\n"
+                "      type: string\n"
+                "      required: true\n"
+                "    status:\n"
+                "      type: enum\n"
+                "      enum: [available, unavailable]\n"
+                "    note:\n"
+                "      type: string"
+            ),
+        ),
+        items=(
+            (
+                "50000000-0000-4000-8000-000000000011",
+                {
+                    "observed_on": "2026-08-02",
+                    "resource": "workshop-bench",
+                    "status": "available",
+                    "note": "Released for booked sessions.",
+                },
+            ),
+            (
+                "50000000-0000-4000-8000-000000000012",
+                {
+                    "observed_on": "2026-09-10",
+                    "resource": "workshop-bench",
+                    "status": "unavailable",
+                    "note": "Held for repair.",
+                },
+            ),
+        ),
+    )
+    key_to_path["t5_available_resource"] = _governed_resource(
+        root,
+        path="Knowledge Base/Systems/Scanner cart.md",
+        title="Scanner cart",
+        observation="A mobile scanner cart is currently available with no open issues.",
+        tags=("resource", "scanning"),
     )
 
     # C6/T6 -- no pages are seeded for the no-memory turn itself: it must
@@ -937,62 +1416,102 @@ def build_corpus(
     # wikilink neighbourhoods (N supplement): three pages each hub links to,
     # shared by no other hub, so "disjoint neighbourhoods" is a real,
     # checkable property rather than an assertion about empty link sets.
-    for suffix, blurb in (("a", "reference material"), ("b", "a design note"), ("c", "a status update")):
-        _page(root, f"Hubs/feature-neighbour-{suffix}.md", f"Feature neighbour {suffix}", f"Feature-hub {blurb}.")
-        _page(root, f"Hubs/market-neighbour-{suffix}.md", f"Market neighbour {suffix}", f"Market-hub {blurb}.")
-        _page(root, f"Hubs/ux-neighbour-{suffix}.md", f"UX neighbour {suffix}", f"Search-UX-hub {blurb}.")
-    key_to_path["c7_hub_feature"] = _page(
+    neighbours: dict[str, list[str]] = {"feature": [], "market": [], "ux": []}
+    for family, label in (("feature", "Feature"), ("market", "Market"), ("ux", "UX")):
+        for suffix, blurb in (
+            ("a", "reference material"),
+            ("b", "a design note"),
+            ("c", "a status update"),
+        ):
+            neighbours[family].append(
+                _compiled_note(
+                    root,
+                    title=f"{label} neighbour {suffix}",
+                    slug=f"{family}-neighbour-{suffix}",
+                    observation=f"Synthetic {family} {blurb} for a distinct hub neighbourhood.",
+                    category="reference",
+                    tags=(family,),
+                )
+            )
+
+    def neighbour_links(family: str) -> str:
+        return ", ".join(f"[[{path.removesuffix('.md')}]]" for path in neighbours[family])
+
+    key_to_path["c7_hub_feature"] = _compiled_note(
         root,
-        "Hubs/ai-search-feature.md",
-        "AI search feature hub",
-        "Implementation hub for the in-app AI search feature. See "
-        "[[feature-neighbour-a]], [[feature-neighbour-b]], [[feature-neighbour-c]].",
+        title="AI search feature hub",
+        slug="ai-search-feature-hub",
+        observation="The in-app AI search feature implementation hub owns product delivery context.",
+        category="hub",
+        tags=("hub", "ai-search", "feature"),
+        extra_body=f"## References\n\n{neighbour_links('feature')}.",
     )
-    key_to_path["c7_hub_market"] = _page(
+    key_to_path["c7_hub_market"] = _compiled_note(
         root,
-        "Hubs/ai-search-market.md",
-        "AI search market hub",
-        "Market-research hub comparing AI search engines. See "
-        "[[market-neighbour-a]], [[market-neighbour-b]], [[market-neighbour-c]].",
+        title="AI search market hub",
+        slug="ai-search-market-hub",
+        observation="The AI search market-research hub compares competing search engines.",
+        category="hub",
+        tags=("hub", "ai-search", "market"),
+        extra_body=f"## References\n\n{neighbour_links('market')}.",
     )
-    key_to_path["c7_hub_search_ux"] = _page(
+    key_to_path["c7_hub_search_ux"] = _compiled_note(
         root,
-        "Hubs/search-ux.md",
-        "Search UX hub",
-        "UX research hub for search result presentation generally. See "
-        "[[ux-neighbour-a]], [[ux-neighbour-b]], [[ux-neighbour-c]].",
+        title="Search UX hub",
+        slug="search-ux-hub",
+        observation="The general search UX research hub studies result presentation.",
+        category="hub",
+        tags=("hub", "search", "ux"),
+        extra_body=f"## References\n\n{neighbour_links('ux')}.",
     )
 
     # C8/T8 -- a supersession chain (two retired ancestors, one active
     # head), vs. a single note with no revision history at all.
-    key_to_path["c8_superseded_ancestor_1"] = _page(
+    first = _compiled_note(
         root,
-        "Notes/onboarding-approach-v1.md",
-        "Onboarding approach v1",
-        "The original onboarding approach, since retired.",
-        status="superseded",
-        superseded_by="[[onboarding-approach-v2]]",
+        title="Onboarding approach v1",
+        slug="onboarding-approach-v1",
+        observation="The first onboarding approach used a long guided checklist.",
+        category="method",
+        tags=("onboarding",),
     )
-    key_to_path["c8_superseded_ancestor_2"] = _page(
+    second = _replace_note(
         root,
-        "Notes/onboarding-approach-v2.md",
-        "Onboarding approach v2",
-        "The second onboarding approach, since retired in turn.",
-        status="superseded",
-        superseded_by="[[onboarding-approach-v3]]",
+        old_path=first,
+        title="Onboarding approach v2",
+        slug="onboarding-approach-v2",
+        observation="The second onboarding approach used a shorter guided checklist.",
     )
-    key_to_path["c8_active_head"] = _page(
-        root, "Notes/onboarding-approach-v3.md", "Onboarding approach v3", "The current onboarding approach."
+    third = _replace_note(
+        root,
+        old_path=second,
+        title="Onboarding approach v3",
+        slug="onboarding-approach-v3",
+        observation="The current onboarding approach is version 3.",
     )
-    key_to_path["t8_unchained_active_note"] = _page(
-        root, "Notes/support-rota-current.md", "Support rota (current)", "The current support rota, with no prior revisions."
+    key_to_path["c8_superseded_ancestor_1"] = first
+    key_to_path["c8_superseded_ancestor_2"] = second
+    key_to_path["c8_active_head"] = third
+    key_to_path["t8_unchained_active_note"] = _compiled_note(
+        root,
+        title="Support rota current",
+        slug="support-rota-current",
+        observation="The current support rota has no prior revisions.",
+        category="current state",
+        tags=("support",),
     )
 
     # Distractor evidence/transcript pages padding C9's neighbourhood (N2):
     # composed from a generic outdoor-cooking word bank adjacent to, but
     # never reproducing, C2/C9's own gold pages or must_include facts.
     for index in range(distractor_count):
-        _page(root, f"Evidence/distractor-{index:04d}.md", f"Distractor evidence {index:04d}", _distractor_body(rng, index))
+        _page(
+            root,
+            f"Knowledge Base/Evidence/context-activation/distractor-{index:04d}.md",
+            f"Distractor evidence {index:04d}",
+            _distractor_body(rng, index),
+            extra_frontmatter="type: evidence\n",
+        )
 
     leaks = (
         find_verbatim_leaks(root)
@@ -1002,13 +1521,134 @@ def build_corpus(
     if leaks:
         raise FixtureError(f"fixture turn(s) or fact(s) leaked (verbatim or near-verbatim) into the corpus: {leaks!r}")
 
+    sorted_paths = dict(sorted(key_to_path.items()))
     return CorpusManifest(
         corpus_id=CORPUS_ID,
         seed=seed,
         distractor_count=distractor_count,
-        key_to_path=dict(sorted(key_to_path.items())),
+        key_to_path=sorted_paths,
         corpus_hash=_corpus_hash(root),
+        logical_hash=_logical_corpus_hash(
+            root,
+            seed=seed,
+            distractor_count=distractor_count,
+            key_to_path=sorted_paths,
+        ),
     )
+
+
+def _run_isolated_build_request(request_path: str, result_path: str) -> None:
+    """Child-process entry point for one isolated canonical corpus build."""
+
+    request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+    manifest = _build_corpus_in_process(
+        Path(request["root"]),
+        seed=int(request["seed"]),
+        distractor_count=int(request["distractor_count"]),
+    )
+    payload = {
+        "corpus_id": manifest.corpus_id,
+        "seed": manifest.seed,
+        "distractor_count": manifest.distractor_count,
+        "key_to_path": manifest.key_to_path,
+        "corpus_hash": manifest.corpus_hash,
+        "logical_hash": manifest.logical_hash,
+    }
+    Path(result_path).write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+
+def build_corpus(
+    root: Path, *, seed: int = 20260916, distractor_count: int = DEFAULT_DISTRACTOR_COUNT
+) -> CorpusManifest:
+    """Build the corpus in a child with private state, leases, config, and logs.
+
+    The caller's environment and already-created Exomem singletons are never
+    rebound. Any canonical writer refusal fails the child and therefore the
+    public build instead of falling back to hand-authored fixture bytes.
+    """
+
+    root = Path(root).resolve()
+    repository = Path(__file__).resolve().parents[3]
+    with tempfile.TemporaryDirectory(prefix="exomem-context-activation-") as runtime_raw:
+        runtime = Path(runtime_raw)
+        paths = {
+            "state": runtime / "state",
+            "xdg_state": runtime / "xdg-state",
+            "config": runtime / "config.json",
+            "logs": runtime / "logs",
+            "call_ledger": runtime / "call-ledger",
+            "writer_lease": runtime / "writer-lease",
+            "lease_db": runtime / "lease-coordinator.sqlite",
+            "tmp": runtime / "tmp",
+            "request": runtime / "request.json",
+            "result": runtime / "result.json",
+        }
+        for key in ("state", "xdg_state", "logs", "call_ledger", "writer_lease", "tmp"):
+            paths[key].mkdir(parents=True, exist_ok=True)
+        paths["request"].write_text(
+            json.dumps(
+                {"root": str(root), "seed": seed, "distractor_count": distractor_count},
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+
+        environment = {
+            key: value for key, value in os.environ.items() if not key.startswith("EXOMEM_")
+        }
+        inherited_pythonpath = environment.get("PYTHONPATH", "")
+        environment.update(
+            {
+                "PYTHONPATH": os.pathsep.join(
+                    path
+                    for path in (
+                        str(repository / "src"),
+                        str(repository / "benchmarks"),
+                        inherited_pythonpath,
+                    )
+                    if path
+                ),
+                "EXOMEM_STATE_ROOT": str(paths["state"]),
+                "EXOMEM_CONFIG_PATH": str(paths["config"]),
+                "EXOMEM_LOG_DIR": str(paths["logs"]),
+                "EXOMEM_CALL_LEDGER_DIR": str(paths["call_ledger"]),
+                "EXOMEM_WRITER_LEASE_STATE_DIR": str(paths["writer_lease"]),
+                "EXOMEM_LEASE_COORDINATOR_DB": str(paths["lease_db"]),
+                "EXOMEM_VAULT_PATH": str(root),
+                "EXOMEM_DISABLE_EMBEDDINGS": "1",
+                "EXOMEM_DISABLE_GRAPH_DRAIN": "1",
+                "EXOMEM_DISABLE_GRAPH_SCHEDULING": "1",
+                "XDG_STATE_HOME": str(paths["xdg_state"]),
+                "TMPDIR": str(paths["tmp"]),
+            }
+        )
+        code = (
+            "from epistemic.corpora.context_activation import _run_isolated_build_request; "
+            f"_run_isolated_build_request({str(paths['request'])!r}, {str(paths['result'])!r})"
+        )
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", code],
+                cwd=repository,
+                env=environment,
+                text=True,
+                capture_output=True,
+                timeout=180,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise FixtureError("isolated corpus build exceeded 180 seconds") from error
+        if completed.returncode != 0:
+            detail = completed.stderr[-4000:].strip() or completed.stdout[-4000:].strip()
+            raise FixtureError(
+                f"isolated corpus build failed with exit {completed.returncode}: {detail}"
+            )
+        if not paths["result"].is_file():
+            raise FixtureError("isolated corpus build returned no manifest")
+        return CorpusManifest(**json.loads(paths["result"].read_text(encoding="utf-8")))
 
 
 def parse_records_items(page_text: str) -> list[dict[str, str]]:

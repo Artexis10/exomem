@@ -46,6 +46,7 @@ from membench.utility.context_activation import (
 MANIFEST = {
     "fixture_set_digest": "a" * 64,
     "corpus_digest": "b" * 64,
+    "logical_corpus_digest": "d" * 64,
     "threshold_digest": "c" * 64,
     "mechanism": "oracle_packet",
 }
@@ -430,6 +431,15 @@ def test_manifest_missing_any_digest_is_void() -> None:
 def test_complete_manifest_validates() -> None:
     manifest = validate_manifest(MANIFEST)
     assert manifest.fixture_set_digest == MANIFEST["fixture_set_digest"]
+    assert manifest.logical_corpus_digest == MANIFEST["logical_corpus_digest"]
+
+
+def test_legacy_three_digest_manifest_is_void() -> None:
+    legacy = dict(MANIFEST)
+    legacy.pop("logical_corpus_digest")
+
+    with pytest.raises(ManifestVoidError, match="logical_corpus_digest"):
+        validate_manifest(legacy)
 
 
 # -- mechanism removal: the audit exits red with no packets supplied -----
@@ -529,6 +539,7 @@ def test_report_per_case_keys_match_the_allowlist_exactly() -> None:
     packets = {"C1": _good_c1_packet()}
     report = run_audit(packets, manifest=manifest)
     payload = report_to_dict(report)
+    assert payload["manifest"]["logical_corpus_digest"] == MANIFEST["logical_corpus_digest"]
     for case in payload["per_case"]:
         assert set(case) == _PER_CASE_ALLOWED_KEYS
         assert set(case["gold"]) == _DUAL_KEYS
