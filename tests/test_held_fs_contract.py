@@ -129,7 +129,6 @@ def test_repeated_enumeration_releases_its_scan_descriptors(tmp_path: Path) -> N
     held_fs = _module()
     (tmp_path / "directory").mkdir()
     (tmp_path / "directory" / "entry.txt").write_text("entry", encoding="utf-8")
-    baseline = len(os.listdir("/proc/self/fd"))
 
     with held_fs.acquire(tmp_path).require() as filesystem:
         with filesystem.parent(".").require() as root:
@@ -137,7 +136,17 @@ def test_repeated_enumeration_releases_its_scan_descriptors(tmp_path: Path) -> N
                 assert filesystem.children(root).ok
                 assert filesystem.enumerate(root).ok
 
-    assert len(os.listdir("/proc/self/fd")) == baseline
+    # Other tests may leave resources for later cleanup. Count only our own
+    # descriptors so unrelated closes neither fail this check nor hide a leak.
+    retained = {}
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            target = Path(os.readlink(f"/proc/self/fd/{name}"))
+        except FileNotFoundError:
+            continue  # The descriptor may close while we inspect the snapshot.
+        if target.is_relative_to(tmp_path.resolve()):
+            retained[name] = str(target)
+    assert retained == {}
 
 
 @_requires_native_route
