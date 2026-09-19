@@ -1049,6 +1049,102 @@ def latest_record(items: list[dict[str, str]]) -> dict[str, str] | None:
     return max(items, key=lambda item: item["observed_on"])
 
 
+# --------------------------------------------------------------------------
+# The resolver-soundness probe corpus (``make-anchor-resolution-sound``,
+# tasks 1.2/8): a dense hub cluster, a negative twin whose recall hits fall
+# inside it (T10), a turn whose only link to a hub is a recall hit on the
+# hub's OWN NEIGHBOUR rather than the hub itself (T11), and a one-word
+# reference to a uniquely, qualifier-titled resource (C10).
+#
+# Deliberately NOT folded into ``FIXTURES``/``CASE_IDS``/``TWIN_IDS``: those
+# tuples are shared with ``membench.utility.context_activation_arms``' own
+# session-count and variant-generation math (`len(CASE_IDS)`, a hardcoded
+# eighteen-packet run size), which this change's impact area
+# (``working_set_resolve.py``, ``working_set_index.py``, ``working_set.py``,
+# and this corpus/scorer pair) never names. Extending those shared tuples
+# would ripple into that sibling module's own pre-registered numbers for no
+# reason this change owns. This probe is scored directly against the real
+# resolver (see ``tests/test_context_activation_resolver_soundness.py``),
+# never through ``score_case``/``run_audit``, so it needs no digest, gold or
+# poison list of its own -- only real anchor paths a test can assert on.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SoundnessProbeManifest:
+    """Real vault-relative paths for the dense-cluster soundness probe."""
+
+    hub_paths: tuple[str, ...]
+    support_paths: tuple[str, ...]
+    #: `hub_paths[0]`'s own typed-link neighbour that is NOT itself a hub --
+    #: T11's turn only ever reaches this one page, never the hub itself.
+    first_hub_own_neighbour: str
+    #: A uniquely, qualifier-titled resource for the one-word-reference case.
+    bike_path: str
+
+
+#: T10: unrelated to every page in the corpus. T11: also unrelated -- its
+#: only "link" to `hub_paths[0]` is a recall hit on that hub's own neighbour.
+T10_TURN = "What's a good name for a new houseplant?"
+T11_TURN = "Is it going to rain again this weekend?"
+#: C10: a one-word reference to `bike_path`'s uniquely qualifier-titled page.
+C10_TURN = "Is the bike still in the garage?"
+
+
+def build_soundness_probe_corpus(root: Path, *, hub_count: int = 6, support_count: int = 14) -> SoundnessProbeManifest:
+    """Render the dense-cluster probe under ``root`` (a directory of its own,
+    never mixed into :func:`build_corpus`'s tree, so this probe's pages never
+    become distractors or gold/poison pages of the pre-registered fixtures).
+
+    ``hub_count`` hub anchors (``tags: [hub]``) ring-link their successor and
+    each link a rotating window of four ``support_count`` plain notes (never
+    anchors themselves) -- a hub or a person linking dozens of pages, the
+    mechanism the real vault reproduction named. ``hub_count + support_count``
+    is at least twenty pages with at least six anchors (design.md decision 7).
+    """
+
+    root = Path(root)
+    # Under the governed KB folder (`kbdir.kb_dirname()`, default "Knowledge
+    # Base"): the activation index only ever walks that subtree, and this
+    # probe is built for the real index, not for `build_corpus`'s own
+    # KB-prefix-free convention (never exercised through the index).
+    support_paths = [
+        _page(
+            root,
+            f"Knowledge Base/Notes/ClusterSupport/support-{i:02d}.md",
+            f"Cluster support note {i:02d}",
+            "Generic supporting material for the dense-cluster resolver-soundness probe.",
+        )
+        for i in range(1, support_count + 1)
+    ]
+    hub_paths: list[str] = []
+    for i in range(1, hub_count + 1):
+        next_hub_title = f"Cluster node {(i % hub_count) + 1:02d}"
+        support_links = " ".join(f"[[Cluster support note {((i - 1 + o) % support_count) + 1:02d}]]" for o in range(4))
+        body = f"A densely linked hub node in the resolver-soundness probe. See {support_links} and [[{next_hub_title}]]."
+        hub_paths.append(
+            _page(
+                root,
+                f"Knowledge Base/Hubs/cluster-node-{i:02d}.md",
+                f"Cluster node {i:02d}",
+                body,
+                extra_frontmatter="tags: [hub]\n",
+            )
+        )
+    bike_path = _page(
+        root,
+        "Knowledge Base/Products/spare-bike.md",
+        "Bike (spare, blue frame)",
+        "A spare bicycle kept for errands, distinct from the household's main one.",
+    )
+    return SoundnessProbeManifest(
+        hub_paths=tuple(hub_paths),
+        support_paths=tuple(support_paths),
+        first_hub_own_neighbour=support_paths[0],
+        bike_path=bike_path,
+    )
+
+
 __all__ = [
     "ALL_FACT_PHRASES",
     "ALL_TURNS",
@@ -1066,12 +1162,17 @@ __all__ = [
     "MEASURED_LATENCY_SAMPLE_SIZE",
     "NARROW_GOLD_TWIN_IDS",
     "TWIN_IDS",
+    "C10_TURN",
+    "T10_TURN",
+    "T11_TURN",
     "CorpusManifest",
     "FixtureCase",
     "FixtureError",
+    "SoundnessProbeManifest",
     "anchor_kind_for",
     "assert_manifest_consistent",
     "build_corpus",
+    "build_soundness_probe_corpus",
     "cases",
     "fact_for",
     "find_fact_leaks_outside_gold_poison_pages",

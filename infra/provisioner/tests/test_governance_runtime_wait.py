@@ -41,11 +41,23 @@ def _pvc():
     )
 
 
-def _runtime(*, uid: object = "statefulset-alpha"):
+def _runtime(
+    *,
+    uid: object = "statefulset-alpha",
+    annotations: dict[str, str] | None = None,
+):
+    # The cell chart annotates the StatefulSet with the provider identity.
     resource = METADATA.resource_name
     return _model(
         {
-            "metadata": {"name": resource, "namespace": resource, "uid": uid},
+            "metadata": {
+                "name": resource,
+                "namespace": resource,
+                "uid": uid,
+                "annotations": METADATA.kubernetes_annotations
+                if annotations is None
+                else annotations,
+            },
             "spec": {
                 "replicas": 0,
                 "serviceName": resource,
@@ -63,6 +75,8 @@ def _runtime(*, uid: object = "statefulset-alpha"):
 def _runtime_pod(
     *, annotations: dict[str, str] | None = None, owner_uid: str = "statefulset-alpha"
 ):
+    # The chart's pod template carries only the session revision, never the
+    # provider identity, so that is what a real runtime pod looks like.
     resource = METADATA.resource_name
     return _model(
         {
@@ -70,7 +84,7 @@ def _runtime_pod(
                 "name": resource + "-0",
                 "namespace": resource,
                 "uid": "pod-alpha",
-                "annotations": METADATA.kubernetes_annotations
+                "annotations": {"exomem.io/authorization-session-revision": "7"}
                 if annotations is None
                 else annotations,
                 "ownerReferences": [
@@ -159,11 +173,29 @@ async def test_wait_for_runtime_allows_only_an_authenticated_zero_target_pod_to_
         )
 
 
+async def test_wait_for_runtime_still_accepts_a_pod_that_carries_this_cells_identity() -> None:
+    cluster = Cluster(pods=[_runtime_pod(annotations=METADATA.kubernetes_annotations)])
+
+    with pytest.raises(DriverRetryable):
+        await verify_stopped_cell(
+            cluster,
+            cluster,
+            metadata=METADATA,
+            pvc_uid="pvc-alpha",
+            wait_for_runtime=True,
+        )
+
+
 @pytest.mark.parametrize(
     "runtime,pod",
     [
         (_runtime(uid=None), _runtime_pod()),
-        (_runtime(), _runtime_pod(annotations={})),
+        (_runtime(annotations={}), _runtime_pod()),
+        (
+            _runtime(annotations={**METADATA.kubernetes_annotations, "exomem.io/fence": "8"}),
+            _runtime_pod(),
+        ),
+        (_runtime(), _runtime_pod(annotations={"exomem.io/cell-id": "cell-other"})),
         (_runtime(), _runtime_pod(owner_uid="replacement")),
         (Missing, _runtime_pod()),
     ],

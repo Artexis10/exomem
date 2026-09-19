@@ -21,7 +21,7 @@
     }
   },
   "activate_context": {
-    "description": "Compile durable context for a raw conversational turn, without a query.\n\nCall this ONCE at the start of a substantive turn, before deciding what to\nsearch for. Pass the user's words verbatim — this is not a search query and\nmust not be rewritten into one. It returns a bounded working-memory packet:\nwhich durable anchors the turn is about (entities, resources, hubs, Records\ncollections, active plans, projects), the context roles it filled, short\nprovenance-bearing units, pointers to what did not fit the budget, and the\ncurrent state of any resource whose collection records one.\n\nRead-only and abstaining by construction. It writes nothing, changes no\n`ask_memory`/`find` result, runs no model beyond the retrieval scorers recall\nalready runs, and returns `abstained: true` with a reason rather than guessing\nwhen the turn resolves nothing (`unresolved`), names two competing senses\n(`ambiguous`), is served while the derived index is still warming\n(`index_warming`), or is switched off (`disabled`). An ambiguous turn lists\nboth anchors under `ambiguity` and runs no role lane — you pick the sense.\n\nUse `ask_memory` instead when you already know what you are looking for; use\nthis when you do not, and follow it with `read_memory` on whatever ref the\npacket points at.",
+    "description": "Compile durable context for a raw conversational turn, without a query.\n\nCall this ONCE at the start of a substantive turn, before deciding what to\nsearch for. Pass the user's words verbatim — this is not a search query and\nmust not be rewritten into one. It returns a bounded working-memory packet:\nwhich durable anchors the turn is about (entities, resources, hubs, Records\ncollections, active plans, projects), the context roles it filled, short\nprovenance-bearing units, pointers to what did not fit the budget, and the\ncurrent state of any resource whose collection records one.\n\nRead-only and abstaining by construction. It writes nothing, changes no\n`ask_memory`/`find` result, runs no model beyond the retrieval scorers recall\nalready runs, and returns `abstained: true` with a reason rather than guessing\nwhen the turn resolves nothing (`unresolved`), names two competing senses\n(`ambiguous`), is served while the derived index is still warming\n(`index_warming`), or is switched off (`disabled`). An ambiguous turn lists\nboth anchors under `ambiguity` and runs no role lane — you pick the sense and\ncall again with `anchor` set to the ref you mean.\n\nUse `ask_memory` instead when you already know what you are looking for; use\nthis when you do not, and follow it with `read_memory` on whatever ref the\npacket points at.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -46,6 +46,30 @@
           ],
           "default": null,
           "description": "Optional declared purpose for this request, e.g. \"audit\" or \"due-diligence\". Governance rules may widen or narrow what a given audience may see for a stated purpose; leaving it unset is deterministic, not a wildcard. Never affects ranking, and never enters the packet cache key."
+        },
+        "continuity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The opaque `continuity` token a previous packet of this conversation returned. It only strengthens anchors this turn already reaches on its own evidence: it never reaches one by itself, never turns an `unresolved` turn into a resolved one, and is ignored and reported as `generation.continuity = \"stale\"` when it was minted against another vault's index or another role registry. Drop it on a new session or after a compaction."
+        },
+        "anchor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "One canonical ref from a previous `ambiguity` block, naming the sense you mean. That anchor is then treated as resolved on your choice alone, its role lanes run and the competing senses are omitted. A ref that is not an anchor of this index, or one this audience may not see, is refused identically and no packet is built."
         },
         "include_timings": {
           "default": false,

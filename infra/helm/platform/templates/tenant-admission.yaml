@@ -299,7 +299,8 @@ spec:
     - expression: >-
         !variables.inScope ||
         (!variables.storageInit || variables.storageBinding) ||
-        (size(object.spec.volumes) == 3 && object.spec.volumes.all(volume,
+        (size(object.spec.volumes) == (object.spec.volumes.exists(volume, volume.name == 'tmp') ? 4 : 3) &&
+        object.spec.volumes.all(volume,
           (volume.name == 'data' && has(volume.persistentVolumeClaim) &&
             volume.persistentVolumeClaim.claimName == namespaceObject.metadata.annotations['exomem.io/pvc-name']) ||
           (volume.name == 'credentials' && has(volume.secret) &&
@@ -307,12 +308,14 @@ spec:
             volume.secret.defaultMode == 292) ||
           (volume.name == 'init-request' && has(volume.configMap) &&
             volume.configMap.name == namespaceObject.metadata.annotations['exomem.io/init-request-configmap-name'] &&
-            volume.configMap.defaultMode == 292)))
-      message: Storage initialization may mount only the exact tenant PVC, credential Secret, and request ConfigMap.
+            volume.configMap.defaultMode == 292) ||
+          (volume.name == 'tmp' && has(volume.emptyDir) && dyn(volume.emptyDir).sizeLimit == '64Mi')))
+      message: Storage initialization may mount only the exact tenant PVC, credential Secret, request ConfigMap, and temporary directory.
     - expression: >-
         !variables.inScope ||
         (!variables.storageInit || variables.storageBinding) ||
-        (size(object.spec.containers[0].volumeMounts) == 3 &&
+        (size(object.spec.containers[0].volumeMounts) ==
+          (object.spec.volumes.exists(volume, volume.name == 'tmp') ? 4 : 3) &&
         object.spec.containers[0].volumeMounts.exists(mount,
           mount.name == 'data' && mount.mountPath == '/var/lib/exomem' && !has(mount.subPath) &&
           (!has(mount.readOnly) || mount.readOnly == false)) &&
@@ -321,7 +324,11 @@ spec:
           mount.readOnly == true && !has(mount.subPath)) &&
         object.spec.containers[0].volumeMounts.exists(mount,
           mount.name == 'init-request' && mount.mountPath == '/run/exomem/operator-requests/init.json' &&
-          mount.readOnly == true && mount.subPath == 'init.json'))
+          mount.readOnly == true && mount.subPath == 'init.json') &&
+        (!object.spec.volumes.exists(volume, volume.name == 'tmp') ||
+          object.spec.containers[0].volumeMounts.exists(mount,
+            mount.name == 'tmp' && mount.mountPath == '/tmp' && !has(mount.subPath) &&
+            (!has(mount.readOnly) || mount.readOnly == false))))
       message: Storage initialization mounts must match the exact tenant paths.
     - expression: >-
         !variables.inScope || !variables.vaultFingerprint ||

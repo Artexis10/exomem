@@ -1623,7 +1623,7 @@ class KubernetesVaultFingerprintAdapter:
                 if _api_status(error) != 404:
                     raise
             else:
-                _runtime_is_stopped(runtime, resource=metadata.resource_name)
+                _runtime_is_stopped(runtime, metadata=metadata)
             job = await self._read(metadata)
             uid = None
             template = self._body(

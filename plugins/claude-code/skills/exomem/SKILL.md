@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: cc1fccb8468df75494dbabfdc43eee6b22d8d54ee331be3465c21ba16a469e86
+  skill_contract: d7def9c54b1a2df5c12b6a4daa50b326eba6fd3870df16b8d7d86ef510e24620
   version: "0.32.0"
 ---
 
@@ -109,10 +109,13 @@ required by the envelope. Raw capture is not automatic compilation.
 
 ## Recall loop
 
-At `balanced` or `maximal`, for a substantive turn with no prior context, call
-`activate_context` with the user's turn verbatim before deciding what to search
-for; it returns a bounded working-memory packet or abstains with a reason, and an
-`ambiguous` result is yours to disambiguate, not to guess. Then start with
+At `balanced` or `maximal`:
+
+Call `activate_context` with the user's turn verbatim before answering a substantive turn that has no prior context; resolve an `ambiguous` packet by calling again with `anchor` set.
+
+What comes back is bounded working memory, or an abstention with its reason; an
+`ambiguous` packet names the competing senses and runs no lane, so choosing one
+is yours and guessing is not. Then start with
 `ask_memory(detail="compact", rerank=false)`, then `read_memory` for
 selected hits. Use `ask_memory(deep=true)` for a bounded synthesis context, and
 request graph enrichment or full diagnostics only when needed. Keep retrieval

@@ -123,11 +123,18 @@ def bounded_text(text: str, limit: int = MAX_UNIT_CHARS) -> str:
 
 
 def graph_depth_for(status: str) -> int:
-    """Typed-graph depth by anchor status: 2 resolved, 1 partial, none otherwise."""
+    """Typed-graph depth by anchor status: 2 for `resolved`, none otherwise.
+
+    No lane runs for a `partial` anchor at all (canonical spec's restated
+    "Bounded role lanes" requirement): it is listed in `anchors[]` with its
+    status and evidence so the agent can choose it, and served only once it
+    resolves or is chosen. There is deliberately no depth-1 case to reach —
+    `_neighbourhood_paths` never hands this a `partial` anchor now that
+    `compile_packet` builds `run_lanes`' anchor list from `resolved_anchors`
+    alone.
+    """
     if status == "resolved":
         return 2
-    if status == "partial":
-        return 1
     return 0
 
 
@@ -693,8 +700,16 @@ def compile_packet(
     retrieval_paths: frozenset[str] = frozenset(),
     index: working_set_index.WorkingSetIndex | None = None,
     freshness_key: str = "",
+    continuity_refs: frozenset[str] = frozenset(),
+    anchor: str | None = None,
 ) -> dict[str, Any]:
-    """Resolve, select, retrieve and budget — the whole compiler in one call."""
+    """Resolve, select, retrieve and budget — the whole compiler in one call.
+
+    `anchor` is the agent's own choice of sense: it replaces resolution outright
+    rather than joining it, because the agent is the decider of an ambiguous turn
+    and the competing senses are then not candidates at all. `continuity_refs`
+    only ever qualifies anchors this turn already reached.
+    """
     root = Path(vault_root)
     limit = clamp_budget(max_chars)
     index = index or working_set_index.WorkingSetIndex(root)
@@ -706,19 +721,38 @@ def compile_packet(
     }
 
     with _span(timings, "working_set.resolve"):
+        # `analysis` is needed on BOTH branches. The override replaces which
+        # anchor the turn is about; it does not replace which lenses the turn asks
+        # for, and `context_roles.select_roles` below reads `analysis.text` for its
+        # `turn_cue` sources. Deleting it here as unused on the override path would
+        # silently narrow an overridden packet to the anchor kind's default roles.
         analysis = working_set_resolve.analyze_turn(turn)
         rows = working_set_resolve.facts_from_rows(index.anchors())
-        candidates = working_set_resolve.candidates_for(
-            analysis,
-            rows,
-            retrieval_paths=retrieval_paths,
-            routing_targets=_routing_targets(root),
-            used_paths=_used_paths(root, rows),
-        )
-        candidates = working_set_resolve.add_graph_corroboration(
-            candidates, retrieval_paths=retrieval_paths
-        )
-        resolution = working_set_resolve.resolve(candidates)
+        if anchor:
+            chosen = working_set_resolve.override_candidate(rows, anchor)
+            # A ref that names no anchor is not a packet with nothing in it: the
+            # caller asked about a sense that does not exist here. It abstains,
+            # and `op_activate_context` turns that into the one refusal an
+            # unknown and a withheld ref share.
+            resolution = working_set_resolve.resolve(
+                (chosen,) if chosen is not None else ()
+            )
+        else:
+            candidates = working_set_resolve.candidates_for(
+                analysis,
+                rows,
+                retrieval_paths=retrieval_paths,
+                routing_targets=_routing_targets(root),
+                used_paths=_used_paths(root, rows),
+                term_anchor_counts=index.term_anchor_counts(),
+            )
+            candidates = working_set_resolve.add_graph_corroboration(
+                candidates, retrieval_paths=retrieval_paths
+            )
+            candidates = working_set_resolve.apply_continuity(
+                candidates, continuity_refs
+            )
+            resolution = working_set_resolve.resolve(candidates)
 
     if resolution.status != "resolved":
         return abstained_packet(
@@ -737,7 +771,12 @@ def compile_packet(
             registry, anchor_kinds=anchor_kinds, analysis=analysis
         )
 
-    lane_anchors = (*resolution.resolved_anchors, *resolution.partial_anchors)
+    # RESOLVED anchors only: a `partial` anchor is listed in `anchors[]` with
+    # its status and evidence, but no lane runs for it and nothing of its page
+    # or neighbourhood enters `units`, `pointers` or `current_state` (canonical
+    # spec's restated "Bounded role lanes" requirement — "no lane SHALL run for
+    # a partial anchor").
+    lane_anchors = resolution.resolved_anchors
     # Resolved ONCE: the Records lane and the packet's `current_state[]` block are
     # two views of the same collection reads.
     current_state = working_set_state.current_state_for(

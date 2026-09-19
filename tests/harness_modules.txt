@@ -6,6 +6,7 @@ tests/test_benchmark_capabilities.py
 tests/test_capture_sweep_journey.py
 tests/test_context_activation_audit.py
 tests/test_context_activation_fixtures.py
+tests/test_context_activation_resolver_soundness.py
 tests/test_continuation_checkpoint.py
 tests/test_database_bootstrap_rotation_gate.py
 tests/test_dataset_identity_case_count.py
@@ -134,6 +135,8 @@ tests/test_protocol_update_probe_matching.py
 tests/test_protocol_validity.py
 tests/test_records_recall_reconcile.py
 tests/test_report_offline.py
+tests/test_retrieve_nudge_journey.py
+tests/test_retrieve_nudge_working_set.py
 tests/test_reviewer_bootstrap_cli.py
 tests/test_service_installers.py
 tests/test_transactional_writes.py

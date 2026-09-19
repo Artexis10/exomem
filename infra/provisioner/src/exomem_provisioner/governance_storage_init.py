@@ -242,6 +242,7 @@ class KubernetesGovernanceStorageInitAdapter:
                             "subPath": "init.json",
                             "readOnly": True,
                         },
+                        {"name": "tmp", "mountPath": "/tmp"},
                     ],
                 }
             ],
@@ -258,6 +259,11 @@ class KubernetesGovernanceStorageInitAdapter:
                     "name": "init-request",
                     "configMap": {"name": resource + "-init-request", "defaultMode": 292},
                 },
+                # The root filesystem is read-only and the runtime takes its vault
+                # creation lock under the temporary directory. Without a writable
+                # /tmp every first initialization failed, and only the Job's single
+                # retry succeeded because it skips the scaffold already staged.
+                {"name": "tmp", "emptyDir": {"sizeLimit": "64Mi"}},
             ],
         }
 

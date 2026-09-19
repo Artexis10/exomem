@@ -365,6 +365,49 @@ def session_state_dir(home: Path, client: str, session_id: str) -> Path:
     return client_state_root(home, client) / f"{safe}-{digest}"
 
 
+def activation_token_path(home: Path, client: str, session_id: str) -> Path:
+    """Where the retrieve hook's continuity token lives for one session.
+
+    Dot-prefixed, so the prune scan below — which skips every name beginning with
+    a dot — never mistakes the token directory for an expired session entry.
+
+    The name is a readable stem plus the SAME 20-hex `client\0session_id` digest
+    `session_state_dir` above uses, so the token keyspace partitions exactly the
+    sessions the checkpoint keyspace does. The sanitised stem alone does not:
+    `abc-123`, `abc/123` and `abc 123` collapse onto one spelling, and any two
+    long ids sharing a prefix collapse onto one more.
+
+    Kept identical in `exomem_retrieve_nudge.py`, which writes the token: two
+    standalone hook scripts cannot import each other, and
+    `tests/test_retrieve_nudge_working_set.py` asserts the two derivations agree.
+    """
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(session_id or "")).strip("-._")
+    digest = _sha256_bytes(
+        f"{client}\0{session_id}".encode("utf-8", "surrogatepass")
+    )[:20]
+    return (
+        client_state_root(home, client)
+        / ".activation"
+        / f"{(safe or 'session')[:48]}-{digest}.token"
+    )
+
+
+def _clear_activation_token(home: Path, client: str, session_id: str) -> None:
+    """Drop this session's continuity token. Called on EVERY lifecycle event the
+    client delivers, because every one of them ends the run of turns the token
+    described: a compaction rewrites the context it was minted against, and a
+    session boundary starts a new one.
+
+    Never raises and never reports: a token that outlives its session is only
+    ever ignored by the server as stale, and a token that is dropped early only
+    costs the next turn its qualifier.
+    """
+    try:
+        activation_token_path(home, client, session_id).unlink()
+    except (OSError, ValueError):
+        pass
+
+
 def _state_root_binding(home: Path, client: str) -> str:
     value = str(client_state_root(home, client).expanduser().absolute())
     return _sha256_bytes(value.encode("utf-8", "surrogatepass"))
@@ -4123,6 +4166,9 @@ def _dispatch_core(
         return None
     client = str(event["client"])
     started = time.monotonic_ns()
+    # Before anything else, and for every event: the retrieve hook's continuity
+    # token describes a run of turns this event ends.
+    _clear_activation_token(home, client, str(event["session_id"]))
     if event["event"] in {"PreCompact", "SessionEnd"}:
         try:
             outcome = write_checkpoint(event, home)
