@@ -1,9 +1,11 @@
 ## 0. Preconditions
 
-- [ ] 0.1 Confirm the graph's link-dependency index can answer "which eligible pages link
-      this identity" for an unresolved target without a vault walk, keyed compatibly with
-      the wikilink lane's identity key. If it cannot, stop and report; do not add a
-      vault walk to the write path without a ruling.
+- [ ] 0.1 Confirm the graph's link-dependency index returns, for a casefolded bare name,
+      the pages whose body links that bare name, and that the write's preflight holds
+      enough page state to evaluate `counts_as_evidence` for up to sixteen of them. The
+      block is allowed to miss folder-qualified and differently normalised spellings. If
+      the lookup needs a vault walk or a dependency-format change, stop and report; do
+      not build either without a ruling.
 - [ ] 0.2 Record the before-image on a seeded synthetic vault: candidates surfaced by the
       wikilink lane today and the write responses for the 5.1 sequence.
 
@@ -13,16 +15,26 @@
       not; `index.md` and `log.md` pages supply no spread and never anchor a finding; one
       eligible page plus one retired page does not fire; the grammar lane's gates are
       unchanged.
-- [ ] 1.2 Give the wikilink lane its own spread constant, 2, leaving the grammar lane's
-      gates as they are; exclude navigation pages from its evidence.
+- [ ] 1.2 `SPREAD_MIN_PAGES` is shared by both lanes today. Give the wikilink lane its own
+      constant, 2, leaving the grammar lane at 3; exclude navigation pages from the
+      wikilink lane's evidence through `find_corpus.NAVIGATION_BASENAMES`.
+- [ ] 1.3 The recurrence requirement is amended inside
+      `complete-recurring-entity-lifecycle`'s `action-first-audit` delta (gate of two,
+      navigation pages, the write-time clause, four scenarios). Verify at delivery that
+      those sentences still say so; if that change was archived first, move the edits
+      into a `MODIFIED` block here.
 
 ## 2. The candidate on the write response
 
 - [ ] 2.1 Red first: the crossing write carries the block; a third page does not; an edit
       of an already-linking page does not; a link to an active Entity yields an edge and
-      no block; two notes in one mutation batch count once; the block is withheld when
-      `structural_suggestions` is `off` and when derived sync is deferred; stateless HTTP
-      gets the same block; `legacy` detail drops it and compact keeps it.
+      no block; two notes in one mutation batch count once and the identity gets no later
+      block; the block is withheld when `structural_suggestions` is `off` and when the
+      graph index is warming, temporarily unavailable or quarantined, whatever
+      `derived_sync` reports; an excluded-tier, retired or navigation page is neither
+      counted nor listed; a folder-qualified second link yields no block while the audit
+      lane still fires; stateless HTTP gets the same block; `legacy` detail drops it and
+      compact keeps it.
 - [ ] 2.2 Compute the candidate beside `capture_sweep`'s page-less-link hint, reusing its
       link parsing, identity key, registry resolution and bounds, and the dependency
       index for the cross-page count.
@@ -33,11 +45,18 @@
 
 - [ ] 3.1 Bootstrap guidance line at `balanced` and `maximal`; re-measure the compact byte
       budget at every level and surface.
-- [ ] 3.2 Scaffold skill reference; keep it generic (`tests/test_scaffold_no_leak.py`).
+- [ ] 3.2 Scaffold skill reference for linking; keep it generic
+      (`tests/test_scaffold_no_leak.py`).
 - [ ] 3.3 One sentence in the `body` argument description of `remember` and
       `replace_memory`.
-- [ ] 3.4 Capture hook wording ("stable, and central or recurring") in the plugin hook and
-      its packaged copy, byte-identical.
+- [ ] 3.4 "Stable, and central or recurring" in all six capture texts, each pair
+      byte-identical: `src/exomem/_hooks/exomem_capture_nudge.py` and
+      `plugins/claude-code/hooks/exomem_capture_nudge.py` (today: "only for a stable
+      recurring identity"); `src/exomem/_scaffold/_Schema/workflow-skills/exomem-capture/SKILL.md`
+      and `plugins/claude-code/skills/exomem-capture/SKILL.md`;
+      `src/exomem/_scaffold/_Schema/references/operations.md` and
+      `plugins/claude-code/skills/exomem/references/operations.md` (today: "stable,
+      recurring, central"). A test greps the tree for both old phrases.
 
 ## 4. Proof
 
@@ -59,6 +78,4 @@
       plugin tree, hosted render, harness modules pin); `openspec validate --all
       --strict`; privacy gate; full sharded corpus at the delivery boundary.
 - [ ] 5.2 Independent review of the diff.
-- [ ] 5.3 Archive with `openspec archive` after `complete-recurring-entity-lifecycle` is
-      archived, refreshing this change's `action-first-audit` block onto that change's
-      text first.
+- [ ] 5.3 Archive with `openspec archive` in the same delivery, after confirming 1.3.

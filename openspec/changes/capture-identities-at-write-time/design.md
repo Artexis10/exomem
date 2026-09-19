@@ -70,9 +70,12 @@ declaration argument returns as its own change with that measurement as its case
 Carried in four places, because no single one reaches every client: bootstrap guidance
 at `balanced` and `maximal`; the scaffold skill; the `body` argument description of
 `remember` and `replace_memory` (the only text every connected client is certain to
-read), in one sentence; and the capture hook, whose current wording allows creation only
-for an identity that is "stable, recurring, central" and therefore forbids exactly the
-first-mention case the owner asked for. It becomes "stable, and central or recurring".
+read), in one sentence; and the capture texts that today forbid exactly the
+first-mention case the owner asked for. The capture hook allows `create-entity` "only
+for a stable recurring identity useful beyond this source"; the capture skill and the
+operations reference, each shipped in the scaffold and in the plugin, require an
+identity to be "stable, recurring, central". All six files change to "stable, and
+central or recurring", and each source and packaged pair stays byte-identical.
 
 This is compatible with the creation criterion `complete-recurring-entity-lifecycle`
 teaches (create only when no active Entity resolves and the agent judges the identity
@@ -100,19 +103,35 @@ field and a degraded mode to prevent a cheap, dismissible prompt.
 ### 4. Navigation pages are not evidence
 
 Pages named `index.md` or `log.md` do not supply spread and never anchor a finding. The
-product already sets these pages aside in its link and index audits; they list things,
-they do not reach for them. On the measured vault this removes ten of 34 identities and
+product already has the predicate: `find_corpus.NAVIGATION_BASENAMES`, which recall, the
+lexical store and the audits use to set these pages aside. `log.md` is the vault's own
+activity log, not collection storage. They list things, they do not reach for them. On the measured vault this removes ten of 34 identities and
 both surfaced candidates, all noise.
 
 ### 5. The candidate rides the write that creates it
 
-When a committed durable write adds a body wikilink to an identity that resolves to no
-page and no active Entity, the server counts the other eligible pages already linking
-that identity through the graph's dependency index, which is keyed by link target and
-needs no vault walk. If the count of distinct eligible pages reaches the gate because of
-this write, the committed response carries `entity_candidate`: at most three identities,
-each with its name, at most eight linking pages, near matches from the registry, and the
-routes to `resolve-entity` and `create-entity`.
+When a committed durable write adds a body wikilink to a bare name that resolves to no
+page and no active Entity, the server looks the name up in the graph's link-dependency
+index and keeps the linking pages that are eligible evidence (`counts_as_evidence` and
+not a navigation page). If this write takes that set from one page to two, the committed
+response carries `entity_candidate`: at most three identities, each with its name, at
+most eight linking pages, near matches from the registry, and the routes to
+`resolve-entity` and `create-entity`.
+
+The block measures its own quantity, and the audit family stays authoritative. The
+dependency index is keyed by a link's casefolded target spelling, with a bare-name key
+only when the target has no folder; the audit lane keys on the NFKC-normalised,
+whitespace-collapsed basename. So the block sees pages that wrote the same bare name and
+misses a page that wrote a folder-qualified target, a differently composed accent or a
+doubled space. It can only undercount, and an undercount costs a block that does not
+fire for an identity the family still holds. Making the index answer the audit's
+question would need a second dependency row per link and a dependency-format bump, which
+fails the index's coverage proof until every vault runs one full graph rebuild; that is
+too much migration for an advisory, and is recorded as the alternative.
+
+Eligibility is evaluated for the rows the lookup returned, at most sixteen, through the
+page state the write's preflight already holds. This is also what keeps the block from
+naming a page in an excluded access tier: raw dependency rows carry no tier.
 
 - It fires on the transition only: a page that already linked the identity, or an
   identity already at or past the gate, produces no block. The fact is derived from
@@ -120,11 +139,15 @@ routes to `resolve-entity` and `create-entity`.
   because remote HTTP is stateless and a per-caller ledger there either repeats or
   never fires.
 - Pages committed inside one mutation batch count once for the block, as the capture
-  sweep already treats a multi-write command as one episode.
+  sweep already treats a multi-write command as one episode. An identity whose second
+  page arrives inside such a batch therefore never gets a block, then or later, because
+  it is already at the gate when the next write comes; it is in the family.
 - It is a `structural_suggestions` disclosure and is withheld when that class is `off`.
-- If derived sync is deferred, the dependency index is behind and no block is sent. The
-  candidate is still in the `entity_recurrence` family, which balanced and maximal agents
-  read once per session.
+- It is sent only when the graph index answers the lookup as `available`. `derived_sync`
+  says nothing about the graph, which converges on its own; on `warming`,
+  `temporarily_unavailable` or a quarantined graph no block is sent. The candidate is
+  still in the `entity_recurrence` family, which balanced and maximal agents read once
+  per session.
 - It travels through the mutation terminal like `structure_suggestion` and
   `records_routing`: kept at compact detail, dropped at `legacy`.
 
@@ -156,7 +179,10 @@ are measured at no cost the moment the gate moves.
 ## Migration
 
 None. A few more candidates appear at once on existing vaults and index-page noise
-disappears.
+disappears. The recurrence requirement loses its blanket "no write-time work" clause:
+the audit sweep still does none, and the one write-time use, the candidate block, is
+bounded by a single indexed lookup and at most sixteen page-state reads, measured by
+the write-latency task.
 
 ## Open Questions
 

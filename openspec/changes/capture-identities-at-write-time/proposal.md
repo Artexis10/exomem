@@ -29,8 +29,8 @@ second page instead of the third, and a candidate delivered at the moment it app
 ## What Changes
 
 - **Doctrine: link what you name.** Bootstrap guidance, the scaffold skill, the `body`
-  argument description of `remember` and `replace_memory`, and the capture hook's text
-  tell the agent to wikilink the people, organisations, places, equipment and products a
+  argument description of `remember` and `replace_memory`, and the capture hook, capture
+  skill and operations reference tell the agent to wikilink the people, organisations, places, equipment and products a
   durable write names, whether or not a page exists yet, and to create the Entity in the
   same turn when the note is about an identity that has none. A count is a prompt to
   consider promotion; the agent still judges whether the identity is stable and useful.
@@ -42,8 +42,10 @@ second page instead of the third, and a candidate delivered at the moment it app
   that brings an unresolved identity to the gate, the response carries a bounded
   `entity_candidate` block: the name, the linking pages, near matches from the registry
   and the routes to `resolve-entity` and `create-entity`. It is derived from vault state,
-  so it needs no per-caller ledger, and it belongs to the `structural_suggestions`
-  authority class, so an owner who turned that class off is not prompted.
+  so it needs no per-caller ledger; it is advisory and may undercount, with the audit
+  family authoritative; it is sent only when the graph index is available; and it
+  belongs to the `structural_suggestions` authority class, so an owner who turned that
+  class off is not prompted.
 - **The server still never creates an Entity**, and no tool gains an argument.
 
 Not in this change: a `mentions` declaration argument or frontmatter key (the first
@@ -60,8 +62,12 @@ vault-owned threshold.
 
 ### Modified Capabilities
 
-- `action-first-audit`: the wikilink lane's spread gate and its evidence pages.
 - `agent-bootstrap-contract`: the link-what-you-name guidance.
+- `action-first-audit`, through the still-active change
+  `complete-recurring-entity-lifecycle`: that change already rewrites the recurrence
+  requirement and has not been archived, so the wikilink lane's gate, its evidence pages
+  and the write-time clause are amended in its delta rather than by a second, competing
+  `MODIFIED` block here.
 
 ## Impact
 
@@ -76,6 +82,7 @@ vault-owned threshold.
   every link that resolves is a typed link summary on an anchor row. No compiler change.
 - Existing vaults: the wikilink lane surfaces a few more candidates at once (four on the
   measured vault) and stops surfacing index-page noise.
-- Spec ordering: `complete-recurring-entity-lifecycle` is still active and modifies the
-  same `action-first-audit` requirement. This change archives after it, and its
-  `MODIFIED` block is refreshed onto that change's text at that point.
+- Spec ordering: the recurrence requirement is edited inside
+  `complete-recurring-entity-lifecycle`'s delta, so the rule and the code change in one
+  merge and no two active changes state opposite gates. If that change is archived
+  before this one merges, the same edits move into a `MODIFIED` block of this change.
