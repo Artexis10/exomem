@@ -41,17 +41,19 @@ This change does not make words in other scripts recognisable; the tokeniser fix
 ## What Changes
 
 - **One cue vocabulary, explicit evidence.** Delete `CUE_PATTERNS` and
-  `_CUE_CATEGORIES`. A role declares `evidence_categories`; a role's cue counts as
-  evidence only when it is three characters or longer and matches on term boundaries.
-  The shipped registry reproduces the deleted table exactly. An owner's added cue then
-  reaches both role selection and anchor evidence.
+  `_CUE_CATEGORIES`. A role declares `evidence_cues` and `evidence_categories`; a cue
+  counts as evidence only when it is three characters or longer, tokenises to at least
+  one term and matches on term boundaries. The shipped registry carries the deleted
+  table's patterns and category sets and never widens them; a question mark alone stops
+  counting. A cue an owner adds to a role reaches both role selection and anchor
+  evidence.
 - **New registry `activation-conventions.yaml`**, shipped in the skill scaffold and the
   plugin copy, overridable at `<Knowledge Base>/_Schema/activation-conventions.yaml`:
   - `anchors`: folders, tags and frontmatter `type` values that make a page a `resource`
     or a `hub` anchor, and the folders the index skips;
   - `state`: ordered state-field and date-field names;
   - `stopwords`: add-only;
-  - `resolution`: `rare_term_max_anchors`, bounded absolutely and relative to the vault.
+  - `resolution`: `rare_term_max_anchors`, which an owner may tighten and not loosen.
 - **Page categories from the product's own registry.** Section headings map to
   categories through the semantic-language registry first, the built-in map second.
 - **Layout.** Append-only trees and the governance trees come from the product's
@@ -62,8 +64,8 @@ This change does not make words in other scripts recognisable; the tokeniser fix
 - **A conventions edit wipes and rebuilds the sidecar**, changes the packet cache key and
   makes older continuity tokens `stale`.
 - **The agent can configure it, on every tier.** `schema_memory` gains the subjects
-  `context-roles` and `activation-conventions`: validate, diff, and a hash-guarded save
-  of a reviewed override with a `why`. The generic file tools stay refused for
+  `context-roles` and `activation-conventions`: validate, diff, and dedicated
+  hash-guarded save operations that take a `why` and refuse a proposal with findings. The generic file tools stay refused for
   `_Schema/`.
 - **The evidence rules stay in code.** No file can change which kinds establish contact
   or which combinations resolve.
@@ -97,8 +99,10 @@ or `Evidence/`.
   `context_roles.py` (evidence categories, caps, size cap, save), new
   `activation_conventions.py`, `commands.py` (`schema_memory`), `hosted_gateway.py`,
   scaffold and plugin registry files.
-- Behaviour on shipped defaults: resolution, state and packets equal today's, except
-  that `Products` and `Systems` match case-insensitively. Equivalence and property tests
+- Behaviour on shipped defaults: resolution, state and packets equal today's, with three
+  intended differences: `Products` and `Systems` match case-insensitively, pages inside
+  the governance trees are never anchors, and a question mark alone no longer makes
+  `question` and `problem` eligible. Equivalence and property tests
   pin it; the deterministic audit gates recall and precision before and after.
 - Existing `.working-set.sqlite` sidecars rebuild once.
 - Builds on `activate-context-on-host-turns` and `make-anchor-resolution-sound`, both

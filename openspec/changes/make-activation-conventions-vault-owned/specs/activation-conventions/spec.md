@@ -47,15 +47,13 @@ defines, on an agent's explicit request.
   derived short name whose words name more than one anchor
 
 #### Scenario: The threshold cannot be set out of range
-- **WHEN** an override declares `resolution.rare_term_max_anchors: 0` or a non-integer
+- **WHEN** an override declares `resolution.rare_term_max_anchors: 0`, `4` or a non-integer
 - **THEN** the shipped value applies and `generation.conventions_findings` reports the
   rejected value
 
-#### Scenario: The threshold cannot outgrow a small vault
-- **WHEN** the index holds 40 anchors and an override declares
-  `resolution.rare_term_max_anchors: 10`
-- **THEN** the shipped value applies with a finding, because ten exceeds both three and
-  one hundredth of the anchors held
+#### Scenario: Rarity can be tightened, never loosened
+- **WHEN** an override declares `resolution.rare_term_max_anchors: 10`
+- **THEN** the shipped value, three, applies and the rejected value is reported
 
 #### Scenario: The evidence rules are not configurable
 - **WHEN** an override declares any key under `resolution` other than the thresholds the
@@ -116,7 +114,8 @@ the shipped registry. Every packet SHALL carry `generation.conventions_source`
   `generation.conventions_source = "shipped"` with a finding naming the failure
 
 ### Requirement: A conventions edit rebuilds the sidecar
-The conventions digest SHALL be stored in the activation sidecar, and a sidecar whose
+The conventions digest SHALL be taken over the effective conventions, the values in
+force after bounds and findings are applied. It SHALL be stored in the activation sidecar, and a sidecar whose
 stored digest differs from the effective one SHALL be wiped and rebuilt exactly as on a
 schema-version mismatch, whether or not any vault file changed. The digest SHALL be part
 of the packet cache key and of the continuity token's payload, so that no packet built
@@ -140,14 +139,21 @@ under the previous conventions is served and a token minted under them reports `
 ### Requirement: The conventions registry has a governed write path on every tier
 `schema_memory` SHALL accept the subject `activation-conventions` to validate a proposed
 override and return its findings, diff it against the effective registry, and save a
-reviewed proposal under an expected-hash guard with a stated reason. The save SHALL
-write only the override file. The hosted gateway SHALL allow these calls while the
+reviewed proposal under an expected-hash guard with a stated reason through the
+dedicated operation `save-conventions`. The save SHALL refuse a proposal that has any
+finding and SHALL write only the override file; `infer` SHALL be refused for this
+subject. The hosted gateway SHALL allow these calls while the
 generic file tools remain refused for the schema folder.
 
 #### Scenario: A hosted agent configures its vault
 - **WHEN** an agent on a hosted tier saves a reviewed override through `schema_memory`
 - **THEN** the override is stored, and a direct file write to the schema folder by the
   same agent is still refused
+
+#### Scenario: A proposal with a finding is not saved
+- **WHEN** an agent saves a proposal holding one rejected folder rule
+- **THEN** the save is refused with the finding, although the same file placed by hand
+  would load with that rule ignored
 
 #### Scenario: Findings come back before anything is written
 - **WHEN** an agent validates a proposal holding one rejected folder rule

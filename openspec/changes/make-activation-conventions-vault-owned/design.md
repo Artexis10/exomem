@@ -46,50 +46,65 @@ design answers them; each decision says which.
 
 ### 1. Role cues are the cue vocabulary; evidence is explicit and bounded
 
-`CUE_PATTERNS` and `_CUE_CATEGORIES` are deleted. A role gains one optional field:
+`CUE_PATTERNS` and `_CUE_CATEGORIES` are deleted. A role gains two optional fields:
 
 ```yaml
-evidence_categories: [action, decision]   # default: none
+evidence_cues: [i'm planning, next step]   # default: none
+evidence_categories: [action, decision]    # default: none
 ```
 
 For a turn, the categories that may earn `category_match` are the union of
-`evidence_categories` over roles with an **evidence cue** in the turn. A role's cue is an
-evidence cue only when it is at least three characters long and occurs in the turn on
-term boundaries (whole terms, in order), not as a bare substring. Role *selection* keeps
-today's substring matching; only evidence is stricter.
+`evidence_categories` over roles with an **evidence cue** in the turn. An evidence cue is
+a cue listed in the role's `evidence_cues`, or any cue a vault override added to the
+role, that passes three bounds: it is at least three characters long, it tokenises to at
+least one term, and its terms occur in the turn as whole terms in order (the cue is
+tokenised with the resolver's own tokeniser and sought as a contiguous run in the turn's
+terms). A cue that fails a bound is never evidence and is reported as a finding. Role
+*selection* keeps today's substring matching over every cue; only evidence is stricter.
 
-The shipped registry sets `evidence_categories` on the eight roles the deleted table
-covered, with exactly the deleted table's category sets, and adds the one deleted
-pattern the roles lacked (`what about`, to `open_questions`). Roles whose cues match most
-turns (`identity`, `resources`, `people`, `location`, `baseline`, `evidence`) ship with
-none.
+The shipped registry sets `evidence_cues` and `evidence_categories` on the eight roles
+the deleted table covered, with the deleted table's patterns and category sets (adding
+`what about` to `open_questions`, which lacked it). The other shipped role cues
+(`budget`, `left`, `lately`, `next`, `we already` and the rest) select roles as today and
+are not evidence. Roles whose cues match most turns (`identity`, `resources`, `people`,
+`location`, `baseline`, `evidence`) ship with neither field.
 
-An override may add to a role's `evidence_categories`, on shipped roles and its own.
-Every entry must be a category the product's semantic-language registry knows (decision
-3a); an unknown one is dropped with a finding. At most 8 per role.
+One shipped difference is intended and pinned: the deleted table's `?` pattern cannot be
+an evidence cue (one character, no terms), so a turn whose only question signal is a
+question mark no longer makes `question` and `problem` eligible. It still selects
+`open_questions`. The direction is the safe one: fewer qualifiers, never more.
 
-Why explicit categories rather than reusing a role's `categories`: those lists exist for
-lane selection and are wider. Reusing them made `assumption`, `config` and `risk` newly
-eligible, and three turns that correctly abstain today resolved on anchors they were not
-about, on shipped defaults. Why term boundaries and a length floor: `open_questions`
-carries the cue `?`, and an owner's one-letter cue would otherwise make the qualifier
-fire on every turn. What the bounds cost: an owner cannot make a one- or two-character
-cue count as evidence, and is told so in `roles_findings`. The cue still selects the
-role.
+What an owner adds is theirs: a cue added to a role by an override counts for selection
+and, when it passes the bounds, for evidence, so one line reaches both. An override may
+also add to a role's `evidence_categories`, on shipped roles and its own. An entry is
+valid when the semantic-language registry's `resolve_category` returns a status other
+than `unregistered`, and its resolved key is what is stored; anything else is dropped
+with a finding. At most 8 per role.
+
+Why explicit cues and categories rather than reusing a role's own: those lists exist
+for lane selection and are wider. Reusing the categories made `assumption`, `config` and
+`risk` newly eligible, and three turns that correctly abstain today resolved on anchors
+they were not about; reusing the cues made five more turns earn a qualifier they do not
+earn today. Why the bounds: an owner's one-letter cue, or a cue made only of punctuation
+(which tokenises to nothing and would match at every position), would make the qualifier
+fire on every turn. What the bounds cost: an owner cannot make a very short or
+punctuation-only cue count as evidence, and is told so in `roles_findings`. The cue still
+selects the role.
 
 `category_match` stays a qualifier: it never establishes contact. Because it can promote
-an anchor from `partial` to `resolved`, the shipped behaviour is pinned by two tests: an
-equivalence test (shipped evidence cues and categories produce the deleted table's
-result on every turn of the audit corpus and an adversarial set) and a property test (an
-anchor in `partial` contact never becomes `resolved` through a category the deleted
-table did not make eligible, unless the owner's override named it).
+an anchor from `partial` to `resolved`, the shipped behaviour is pinned by three tests
+over the audit corpus and an adversarial turn set: no category becomes eligible that the
+deleted table did not make eligible; no anchor becomes `resolved` on a turn for which
+the deleted table made no category eligible; and a named-difference fixture asserts
+exactly the `?` loss and nothing else.
 
 Eligible categories are computed in the runtime from the effective registry and passed
 into `candidates_for`. `analyze_turn` stays free of registries and vault I/O, and
 `TurnAnalysis` no longer carries cues.
 
-*Alternative considered:* a boolean `cue_evidence` reusing `categories` (the first
-draft). Rejected on the measurement above.
+*Alternatives considered:* a boolean `cue_evidence` reusing `categories` (the first
+draft), and explicit categories with every role cue as a trigger (the second). Both
+rejected on measurement.
 
 ### 2. A conventions registry with the roles registry's load contract, plus a size cap
 
@@ -162,10 +177,14 @@ One rule, applied to the three that exist:
 third row. It stays readable there for compatibility, and the resolver enforces a floor
 of 2 whatever the file says.
 
-`rare_term_max_anchors` is an integer from 1 to 10 and may not exceed the larger of 3
-and one hundredth of the anchors the index holds. A value outside either bound is
-ignored with a finding and the shipped value applies. The relative bound is the one that
-defends the argument: on a vault of a dozen anchors, "names at most ten" is not rare.
+`rare_term_max_anchors` is an integer from 1 to 3; a value outside that range is
+ignored with a finding and the shipped value, 3, applies. An owner may tighten rarity
+and may not loosen it. What the ceiling prevents: on a small vault a loose threshold
+calls a word that names most of the catalogue rare, which defeats the argument the
+threshold encodes. What it costs: the owner of a very large vault cannot make
+single-word contact easier, and is told. A bound relative to vault size was considered
+and rejected: it makes the effective value move as the vault grows, without any file
+edit, which the sidecar digest in decision 5 could not see.
 
 The effective stopword list and threshold are read once per build and passed to both of
 their users (turn matching and `rare_term` in the resolver, derived short-name admission
@@ -197,11 +216,15 @@ and the Risks section names it.
 
 `_CATEGORY_BY_LABEL` maps English section headings to categories. The product already
 owns that vocabulary, vault-overridably, in the semantic-language registry
-(`heading_aliases`, `category_aliases`). `_categories` consults that registry first and
+(`category_aliases`). `_categories` consults that registry first and
 the built-in map second, so a vault that heads its sections in another language earns
 categories once its owner adds the aliases, in the registry they already use for
-semantic units. No category a page earns today may be lost on shipped defaults; a test
-compares the two over the scaffold vault and the audit corpus.
+semantic units. The accessor is the registry's `resolve_category`, which covers the core
+categories and a vault's `category_aliases` (the registry's `heading_aliases` belong to
+unit kinds and are not used here). Its result is taken only when its status is not
+`unregistered`; otherwise the built-in map decides, so a heading such as "Next Steps"
+keeps mapping to `action`. No category a page earns today may be lost on shipped
+defaults; a test compares the two over the scaffold vault and the audit corpus.
 
 ### 4. Layout: one product authority adopted, one list kept
 
@@ -223,7 +246,8 @@ Derived aliases and term counts are stored in the sidecar, and the incremental u
 notices only file changes, so a rule change alone recomputes nothing. The conventions
 digest is therefore stored in the sidecar's `meta` table and a mismatch is handled
 exactly like a `SCHEMA_VERSION` mismatch: the sidecar is wiped and rebuilt. The digest
-also joins the packet cache key, the `generation` block, and the continuity token's
+is taken over the effective conventions, the values in force after bounds and findings
+are applied, never over the file's bytes. It also joins the packet cache key, the `generation` block, and the continuity token's
 payload beside `roles_hash`, so a token minted under other conventions reports `stale`.
 `SCHEMA_VERSION` is bumped once for the new `meta` row.
 
@@ -248,14 +272,24 @@ prompt-injected capture must not rewrite the doctrine that governs later writes.
 roles registry has no write path at all. So the first draft's "no new tool, the agent
 writes the file" was false on every tier.
 
-`schema_memory` gains two subjects, `context-roles` and `activation-conventions`, on the
-`traversal-profiles` pattern: `validate` a proposed override and return its findings,
-`diff` it against the effective registry, and save a reviewed proposal under an
-`expected_hash` guard with a `why`. The save writes only the override file, only after
-the proposal loads with no rejected entry the caller has not acknowledged, and is
-allowed through the hosted gateway as a `schema_memory` call while `_Schema/` stays
-refused to the generic file tools. No tool is added; one tool's subject set grows by
-two.
+`schema_memory` gains two subjects, `context-roles` and `activation-conventions`, with
+this operation grammar:
+
+- `validate`: a proposed override in, its findings and the current content hash out;
+  nothing written.
+- `diff`: the proposal against the effective registry.
+- `save-roles` and `save-conventions`: dedicated operations on the `save-relations`
+  pattern, requiring `proposal`, `why` and `expected_hash`, and refusing the generic
+  `save` flag.
+- `infer` is refused for both subjects, naming the reason: the server does not propose
+  conventions.
+
+Saving is stricter than loading. A load falls back on a broken override so activation
+keeps working; a save refuses a proposal that has any finding, so nothing an agent
+writes through the tool is silently dropped later. The save writes only the override
+file and is allowed through the hosted gateway as a `schema_memory` call while
+`_Schema/` stays refused to the generic file tools. No tool is added; one tool's subject
+set grows by two.
 
 The agent's loop is: read `generation` on a packet (source, hash, findings), propose an
 override to the owner, `validate`, save on approval, activate again and confirm the new
@@ -272,14 +306,22 @@ hash. The scaffold skill gains a short reference section for it.
   first is slow; the latency gate reports it.
 - **Two registries to learn.** Roles say which questions a packet answers, conventions
   say how this vault spells things.
+- **Template headings.** The shipped stopwords name no template heading. In a heavily
+  templated vault a heading word carried by most anchors ("summary", "connections") can
+  supply the second shared term beside one real name word until the owner adds it to
+  `stopwords`. The shipped file's commented example shows that remedy, and deriving such
+  words from the vault's own counts is the follow-up named in Non-Goals.
 - **A registry save is a policy write.** It is hash-guarded, explained by `why`,
   validated before it lands, and reported on every later packet.
 
 ## Migration
 
-None for owners. Sidecars rebuild once. Shipped defaults reproduce today's membership
-(case-insensitively), state fields, stopwords, threshold, skip list and evidence
-categories; tests pin each against the deleted constants' values.
+None for owners. Sidecars rebuild once. Shipped defaults reproduce today's state fields,
+stopwords, threshold, skip list, evidence cues and evidence categories; tests pin each
+against the deleted constants' values. Three differences are intended and pinned by
+tests: `Products` and `Systems` match case-insensitively; a page inside `_Schema`,
+`_Governance` or `_Adoption` is never an anchor; a question mark alone no longer makes
+`question` and `problem` eligible.
 
 ## Open Questions
 

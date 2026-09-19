@@ -17,13 +17,14 @@
       `.` or `_`, knowledge-base-prefixed, entity folder, a Planning or Records tree,
       append-only tree); case-insensitive segment matching, pinned on a lowercase
       `products/` folder; caps with findings; the 256 KiB refusal before parsing; invalid
-      YAML fallback; one bad rule not voiding the file; threshold range, the relative
-      bound on a 40-anchor index, and unknown `resolution` keys.
+      YAML fallback; one bad rule not voiding the file; threshold range 1 to 3 and
+      unknown `resolution` keys; the digest taken over effective values, so two files
+      that resolve to the same conventions share a digest.
 - [ ] 1.2 Add `src/exomem/activation_conventions.py` on the `context_roles` load
       contract (shipped text from the scaffold, override path, digest memo, findings,
       size cap before parse).
 - [ ] 1.3 Ship `activation-conventions.yaml` in `src/exomem/_scaffold/_Schema/` with a
-      commented override example; regenerate the plugin copy. Keep it generic:
+      commented override example that includes template headings under `stopwords.add`; regenerate the plugin copy. Keep it generic:
       `tests/test_scaffold_no_leak.py` must pass.
 
 ## 2. Compiler reads the registry
@@ -34,9 +35,10 @@
       `vault.in_append_only_tree` plus the governance trees; `_archive` stays walked.
       Red first: a staged upload and a template tagged `hub` are not anchors; an
       archived entity stays an anchor; a `Planning` folder rule is refused.
-- [ ] 2.2 `_categories` consults the semantic-language registry's heading and category
-      aliases first and the built-in map second. Red first: a heading alias added in the
-      vault's semantic-language override earns its category; no category earned on the
+- [ ] 2.2 `_categories` consults `semantic_language_registry.resolve_category` first,
+      taking its result only when the status is not `unregistered`, and the built-in map
+      second. Red first: a category alias added in the vault's semantic-language override
+      earns its category; "Next Steps" still maps to `action`; no category earned on the
       scaffold vault or the audit corpus is lost.
 - [ ] 2.3 `working_set_state`: state and date fields from the conventions.
 - [ ] 2.4 Stopwords and `rare_term_max_anchors` from the conventions, read once per build
@@ -52,15 +54,18 @@
 
 ## 3. One cue vocabulary
 
-- [ ] 3.1 Red first: the `context-roles` scenarios, the equivalence test (shipped
-      evidence cues and categories reproduce the deleted table over the audit corpus and
-      an adversarial turn set that includes `?`, `how much is left` and `what about`),
-      and the property test (no `partial` anchor becomes `resolved` through a category
-      that was not eligible before).
-- [ ] 3.2 Add `evidence_categories` to the role model, the shipped registry (the eight
-      roles, with the deleted table's sets; `what about` added to `open_questions`) and
-      the override grammar, validated against the semantic-language registry's
-      categories; add the roles caps and the size cap before parse.
+- [ ] 3.1 Red first, over the audit corpus and an adversarial turn set that includes
+      `?`, `how much is left`, `what about`, `what is the budget`, `what is next` and
+      `we already decided`: the `context-roles` scenarios; a no-new-category test; a
+      no-new-trigger test (no anchor becomes `resolved` on a turn for which the deleted
+      table made no category eligible); and a named-difference fixture asserting exactly
+      the question-mark loss.
+- [ ] 3.2 Add `evidence_cues` and `evidence_categories` to the role model, the shipped
+      registry (the eight roles, with the deleted table's patterns and sets; `what about`
+      added to `open_questions`) and the override grammar; override-added cues count as
+      evidence when they pass the bounds (three characters, at least one term, whole
+      terms in order), otherwise a finding; categories validated through
+      `resolve_category`; add the roles caps and the size cap before parse.
 - [ ] 3.3 Delete `CUE_PATTERNS` and `_CUE_CATEGORIES`. Eligible categories are computed
       in the runtime from the effective registry and passed into `candidates_for`;
       `analyze_turn` stays registry-free and `TurnAnalysis` drops `cues`. Update every
@@ -70,9 +75,11 @@
 
 - [ ] 4.1 Red first, through the tool entry point and never `Path.write_text`:
       `schema_memory` subjects `context-roles` and `activation-conventions` validate a
-      proposal and return findings, diff it, save under `expected_hash` with `why`,
-      refuse a stale hash, and write only the override file.
-- [ ] 4.2 Implement on the `traversal-profiles` pattern; CLI and REST parity.
+      proposal and return findings, diff it, save through `save-roles` and
+      `save-conventions` with `proposal`, `why` and `expected_hash`, refuse a stale hash,
+      refuse a proposal with any finding, refuse the generic `save` flag and `infer`,
+      and write only the override file.
+- [ ] 4.2 Implement on the `save-relations` pattern; CLI and REST parity.
 - [ ] 4.3 The hosted gateway allows the two subjects while `manage_memory_file` and
       `edit_memory` stay refused for the schema folder. Red first on both halves.
 

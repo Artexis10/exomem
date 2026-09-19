@@ -40,5 +40,5 @@ and SHALL never be treated as canonical truth.
 #### Scenario: Shipped conventions admit the same anchors as before
 - **WHEN** a vault has no conventions override
 - **THEN** the index holds `resource` anchors for pages under `Products/` and `Systems/`
-  and `hub` anchors for pages tagged `hub` outside the append-only trees, as it did
-  before the registry existed
+  and `hub` anchors for pages tagged `hub` outside the append-only trees and the
+  governance trees
