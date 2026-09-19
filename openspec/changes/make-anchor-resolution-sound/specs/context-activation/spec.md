@@ -36,11 +36,18 @@ abstain with an empty packet that still lists its `partial` candidates and their
 evidence. A term SHALL be a maximal run of letters, digits and combining marks in any
 script, which may contain an apostrophe or a hyphen after its first character, taken
 after compatibility normalisation and case folding, with a typographic apostrophe read
-as the plain one so that a word typed on a phone equals the same word typed on a
-keyboard; a letter outside the basic Latin
+as the plain one, a typographic or non-breaking hyphen read as the plain hyphen, and a
+soft hyphen ignored, so that a word typed on a phone or pasted from a document equals
+the same word typed on a keyboard. The same reading SHALL apply to every name the
+egress guard compares, so that a withheld page is withheld however its apostrophe or
+hyphen was typed; a letter outside the basic Latin
 alphabet SHALL never split a word, and a turn in a script the basic Latin alphabet
 does not cover SHALL still yield terms. A script written without word separators
-yields one term per unbroken run, which the product does not segment. Lexical
+yields one term per unbroken run, which the product does not segment, and a derived
+name longer than 48 characters SHALL NOT be admitted. Locale-specific case rules are
+not applied: a Turkish dotted capital I and a plain I are different terms. Collection
+claims routing keeps its own basic-Latin term splitter, so `claims_match` and Records
+current state do not yet follow this rule. Lexical
 comparison SHALL ignore stopwords and SHALL compare terms with
 regular plural and singular forms folded together (`-s`; `-es` when the word ends `-ses`, `-xes`, `-zes`, `-ches` or `-shes`;
 `-ies` to `-y`), never folding a word of three characters or fewer and never a word
@@ -215,6 +222,21 @@ routing.
 - **WHEN** an anchor's alias is written with a plain apostrophe and a turn writes the
   same words with a typographic apostrophe
 - **THEN** the turn's terms equal the alias's terms and the anchor carries `exact_alias`
+
+#### Scenario: A withheld page stays withheld however its apostrophe was typed
+- **WHEN** a withheld page's title is written with one apostrophe style and a unit on a
+  permitted page names it in prose with the other
+- **THEN** the unit is withheld from the packet exactly as when both spellings agree
+
+#### Scenario: A non-breaking hyphen is the same word
+- **WHEN** an anchor is titled "Well-Known Plan" and a turn writes "well‑known plan" with
+  a non-breaking hyphen
+- **THEN** the turn's terms equal the title's terms
+
+#### Scenario: A sentence is not a name
+- **WHEN** a title in a script without word separators leads with an unbroken run longer
+  than 48 characters before its qualifier
+- **THEN** no derived name is admitted for it
 
 #### Scenario: Basic Latin text is unchanged
 - **WHEN** a turn and every anchor name are written in unaccented basic Latin letters
