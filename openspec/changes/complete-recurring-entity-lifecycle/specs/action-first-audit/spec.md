@@ -17,7 +17,12 @@ The category SHALL emit at most one finding per identity, carrying bounded deter
 - **THEN** one finding is produced carrying reason `unresolved_identity_recurs`, the candidate, the two pages sorted, and bounded near-match evidence
 
 #### Scenario: Frequency inside one page is not spread
-- **GIVEN** one page links an identity five times and no other eligible page links it, or one page repeats an identity five times through supported v1 frames and only one other independent origin mentions it
+- **GIVEN** one page links an identity five times and no other eligible page links it
+- **WHEN** the audit sweeps `entity_recurrence`
+- **THEN** zero findings are produced for that identity
+
+#### Scenario: Mention frequency inside one page is not spread
+- **GIVEN** one page repeats an identity five times through supported v1 frames and only one other independent origin mentions it
 - **WHEN** the audit sweeps `entity_recurrence`
 - **THEN** zero findings are produced for that identity
 
@@ -38,7 +43,13 @@ The category SHALL emit at most one finding per identity, carrying bounded deter
 - **AND** disconnected qualifying contexts would route only to hydration
 
 #### Scenario: Retired and excluded pages are not evidence
-- **GIVEN** an identity is linked from one eligible page, or reaches two eligible origins through supported v1 frames, and its only further occurrence is in a superseded, archived, draft, excluded-access, Entity-subtree, code, or frontmatter-only context
+- **GIVEN** an identity is linked from one eligible page and its only other link is in a superseded, archived, draft, excluded-access or Entity-subtree page
+- **WHEN** the audit sweeps `entity_recurrence`
+- **THEN** zero findings are produced for that identity
+- **AND** a finding never anchors on an ineligible page
+
+#### Scenario: Retired and excluded pages are not mention evidence
+- **GIVEN** an identity reaches two eligible origins through supported v1 frames and its only further occurrence is in a superseded, archived, draft, excluded-access, Entity-subtree, code, or frontmatter-only context
 - **WHEN** the audit sweeps `entity_recurrence`
 - **THEN** zero findings are produced for that identity
 - **AND** a finding never anchors on an ineligible page

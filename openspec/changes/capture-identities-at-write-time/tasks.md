@@ -22,7 +22,10 @@
       `complete-recurring-entity-lifecycle`'s `action-first-audit` delta (gate of two,
       navigation pages, the write-time clause, four scenarios). Verify at delivery that
       those sentences still say so; if that change was archived first, move the edits
-      into a `MODIFIED` block here.
+      into a `MODIFIED` block here. If this change archives while that one is still
+      active, the canonical `action-first-audit` requirement keeps saying three pages
+      until that change archives: say so in the delivery note, and prefer archiving that
+      change first when its owner-controlled order allows.
 
 ## 2. The candidate on the write response
 
@@ -31,8 +34,10 @@
       no block; two notes in one mutation batch count once and the identity gets no later
       block; the block is withheld when `structural_suggestions` is `off` and when the
       graph index is warming, temporarily unavailable or quarantined, whatever
-      `derived_sync` reports; an excluded-tier, retired or navigation page is neither
-      counted nor listed; a folder-qualified second link yields no block while the audit
+      `derived_sync` reports; an excluded-tier, retired, navigation or `Entities/` page is
+      neither counted nor listed; a page whose own title is the name does not count; a
+      suffixed name standing on a real file carries no block; at most sixteen rows are
+      evaluated; a folder-qualified second link yields no block while the audit
       lane still fires; stateless HTTP gets the same block; `legacy` detail drops it and
       compact keeps it.
 - [ ] 2.2 Compute the candidate beside `capture_sweep`'s page-less-link hint, reusing its

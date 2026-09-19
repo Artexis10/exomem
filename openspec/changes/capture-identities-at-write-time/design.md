@@ -119,12 +119,18 @@ most eight linking pages, near matches from the registry, and the routes to
 `resolve-entity` and `create-entity`.
 
 The block measures its own quantity, and the audit family stays authoritative. The
-dependency index is keyed by a link's casefolded target spelling, with a bare-name key
-only when the target has no folder; the audit lane keys on the NFKC-normalised,
-whitespace-collapsed basename. So the block sees pages that wrote the same bare name and
-misses a page that wrote a folder-qualified target, a differently composed accent or a
-doubled space. It can only undercount, and an undercount costs a block that does not
-fire for an identity the family still holds. Making the index answer the audit's
+dependency index is keyed by a link's casefolded target spelling, and yields the bare
+name as a key only when the target has no folder or is exactly the knowledge-base folder
+plus the name; the audit lane keys on the NFKC-normalised, whitespace-collapsed
+basename. So the block sees pages that wrote the same bare name and misses a page that
+wrote a deeper folder-qualified target (`Notes/People/Harbour Studio`), a differently
+composed accent or a doubled space. On spelling it can only undercount, and an undercount
+costs a block that does not fire for an identity the family still holds. It applies the
+family's page-level exclusions itself, because the index knows none of them: ineligible
+evidence, navigation pages, pages in the `Entities` subtree (Entity pages link each other
+as a matter of form), a page whose own title or stem is the name, and a suffixed name
+that stands on a real file. The two can still diverge in either direction, which is why
+the family is the authority and the block an early notice. Making the index answer the audit's
 question would need a second dependency row per link and a dependency-format bump, which
 fails the index's coverage proof until every vault runs one full graph rebuild; that is
 too much migration for an advisory, and is recorded as the alternative.

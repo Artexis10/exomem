@@ -7,10 +7,12 @@ that same bare name from one page to two, the committed response SHALL carry an
 `entity_candidate` block of at most three identities, each with its name, at most eight
 linking pages, registry near matches, and the routes to `resolve-entity` and
 `create-entity`. The set SHALL be read from the graph's link-dependency index, without a
-vault walk and without any per-caller record, and SHALL keep only pages that are
-eligible recurrence evidence and are not navigation pages. The block is advisory and MAY
-undercount relative to the `entity_recurrence` family, which remains authoritative; it
-SHALL never report a page the family would not. A write by a page that already linked
+vault walk and without any per-caller record, SHALL evaluate at most sixteen returned
+rows, and SHALL apply the family's page-level exclusions: ineligible evidence, navigation
+pages, pages in the `Entities` subtree, and a page whose own title or filename stem is
+the name. A suffixed name that stands on a real file SHALL carry no block. The block is
+advisory and MAY diverge from the `entity_recurrence` family in either direction; the
+family remains authoritative. A write by a page that already linked
 the name, or for a name already linked from two or more eligible pages, SHALL carry no
 block. Pages committed within one mutation batch SHALL count once. The block SHALL be
 withheld when the `structural_suggestions` authority class is `off` and whenever the
@@ -41,8 +43,13 @@ Entity.
 
 #### Scenario: A page the reader may not see is never named
 - **WHEN** one of the pages linking the name sits in an excluded access tier, is retired,
-  or is an `index.md` page
+  is an `index.md` page, or is an Entity page
 - **THEN** it is neither counted nor listed in the block
+
+#### Scenario: A name that is really a file is not a candidate
+- **WHEN** two pages link a suffixed name such as `Node.js` and a file of that name
+  exists in the vault
+- **THEN** the response carries no block for it
 
 #### Scenario: A warming graph sends nothing
 - **WHEN** the crossing write commits while the graph index reports warming, temporary
@@ -51,10 +58,10 @@ Entity.
   `entity_recurrence` family once the graph converges
 
 #### Scenario: A differently spelled link is the family's to count
-- **WHEN** one page links a bare name and a second links the same page name through a
-  folder-qualified target
-- **THEN** the response may carry no block, and the `entity_recurrence` family produces
-  the finding on its next sweep
+- **WHEN** one page links `[[Harbour Studio]]` and a second page is written linking
+  `[[Notes/People/Harbour Studio]]`
+- **THEN** the response carries no block, and the `entity_recurrence` family produces the
+  finding on its next sweep
 
 #### Scenario: An owner who turned suggestions off is not prompted
 - **WHEN** the `structural_suggestions` class is `off`
