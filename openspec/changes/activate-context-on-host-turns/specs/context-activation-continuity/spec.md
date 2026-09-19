@@ -4,14 +4,21 @@
 
 ### Requirement: Continuity token is client-carried and never resolves alone
 `activate_context` SHALL return an opaque `continuity` token minted from the packet as
-served after the egress guard, encoding the served anchor refs, the selected roles,
+served after the egress guard, encoding the refs of the anchors that packet RESOLVED
+(never the refs of anchors it only listed as `partial`), the selected roles,
 the activation index identity (the sidecar's own identity token, which differs per
 vault and per rebuilt sidecar), the role-registry hash and the index generation, and
 SHALL accept it back as an optional `continuity` argument. A token SHALL never encode
 a ref the guard removed. A valid token SHALL contribute only the `continuity` evidence
 kind, a qualifier, to the anchors it names that still exist in the current index; it
-SHALL never create a candidate, SHALL never satisfy the two-kinds rule on its own and
-SHALL never override a current-turn `unresolved` outcome. A token whose index identity
+SHALL never create a candidate, SHALL never resolve an anchor on its own or together
+with qualifiers only, and SHALL never override a current-turn `unresolved` outcome. An
+anchor carrying `continuity` together with at least one contact kind of either family
+SHALL resolve. This is a deliberate exception to the rule that retrieved contact alone
+is at most `partial`: the token names only anchors an earlier turn of the same
+conversation resolved on sound evidence, so a follow-up turn that reaches such an
+anchor again, even by recall alone, is continuing a subject rather than discovering
+one. A token whose index identity
 or registry hash does not match the serving state, or that cannot be decoded, SHALL be
 ignored and reported as `generation.continuity = "stale"`; a token minted under an
 older generation of the same index remains valid and its refs are re-validated against
@@ -25,6 +32,11 @@ packet. The server SHALL keep no per-conversation state.
   and passes that packet's token
 - **THEN** the anchor resolves with evidence `[<contact kind>, continuity]`, and the
   same turn without the token yields `partial`
+
+#### Scenario: A listed candidate is not carried forward
+- **WHEN** a packet resolves one anchor and lists a second as `partial`
+- **THEN** the token encodes the first anchor's ref and not the second's, and on the
+  next turn the second anchor gains no `continuity` evidence
 
 #### Scenario: Unresolved turn stays unresolved
 - **WHEN** a turn reaches no anchor by any contact kind and passes a valid token

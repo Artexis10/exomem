@@ -357,10 +357,21 @@ def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
     an anchor the guard removed is not in `anchors[]`, so it cannot reach the
     token, and the next turn cannot be handed back a ref this audience may not
     see as if the server had found it.
+
+    Only `resolved` anchors, never `partial` ones. `anchors[]` also lists a
+    turn's `partial` candidates, purely so the agent can see them; a candidate
+    merely LISTED is not evidence this conversation is about it, and carrying
+    its ref forward would let a later turn's `continuity` qualifier alone
+    promote a candidate no turn ever resolved -- exactly the widening the
+    resolver's soundness rule exists to stop.
     """
     if not identity or packet.get("abstained"):
         return ""
-    anchors = [item for item in packet.get("anchors") or () if isinstance(item, Mapping)]
+    anchors = [
+        item
+        for item in packet.get("anchors") or ()
+        if isinstance(item, Mapping) and item.get("status") == "resolved"
+    ]
     refs = [str(item.get("ref") or "") for item in anchors]
     refs = [ref for ref in refs if ref]
     if not refs:

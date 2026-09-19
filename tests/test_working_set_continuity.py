@@ -133,6 +133,17 @@ def _refs(packet: dict) -> list[str]:
     return [str(anchor.get("ref")) for anchor in packet.get("anchors") or ()]
 
 
+def _resolved_refs(packet: dict) -> list[str]:
+    """The refs of `resolved` anchors only -- what the token now actually
+    carries, since a `partial` anchor is listed for the agent but never
+    minted (see `test_the_mint_encodes_only_resolved_anchors_never_partial_ones`)."""
+    return [
+        str(anchor.get("ref"))
+        for anchor in packet.get("anchors") or ()
+        if anchor.get("status") == "resolved"
+    ]
+
+
 def _decoded(token: str) -> dict:
     payload = runtime_module.decode_continuity(token)
     assert payload is not None, "the token the packet returned must decode"
@@ -592,6 +603,28 @@ def test_no_token_is_minted_without_an_index_identity() -> None:
     assert runtime_module.mint_continuity(_packet(), identity="") == ""
 
 
+def test_the_mint_encodes_only_resolved_anchors_never_partial_ones() -> None:
+    """The change's own scenario ("A listed candidate is not carried forward"):
+    `anchors[]` lists a `partial` candidate beside a `resolved` one, but only an
+    anchor the packet actually RESOLVED may reach the next turn as continuity --
+    otherwise a candidate merely LISTED on one turn is silently promoted on the
+    next, exactly the widening the resolver's soundness rule exists to stop.
+    """
+    packet = {
+        "abstained": False,
+        "generation": {"index_generation": 3, "roles_hash": ROLES_HASH},
+        "roles": [{"id": "resources"}],
+        "anchors": [
+            {"ref": "a.md", "status": "resolved", "evidence": ["exact_alias"]},
+            {"ref": "b.md", "status": "partial", "evidence": ["rare_term"]},
+        ],
+    }
+
+    payload = _decoded(runtime_module.mint_continuity(packet, identity=IDENTITY))
+
+    assert set(payload["refs"]) == {"a.md"}
+
+
 #: A ref that cannot be encoded as strict UTF-8. Vault paths reach Python through
 #: filesystem decoding, so a name with invalid UTF-8 arrives as a lone surrogate;
 #: `json.dumps(..., ensure_ascii=False).encode("utf-8")` then raises on it.
@@ -666,7 +699,7 @@ def test_a_first_turn_reports_continuity_absent_and_returns_a_token(
     assert packet["abstained"] is False
     assert packet["generation"]["continuity"] == runtime_module.CONTINUITY_ABSENT
     assert packet["continuity"]
-    assert set(_decoded(packet["continuity"])["refs"]) == set(_refs(packet))
+    assert set(_decoded(packet["continuity"])["refs"]) == set(_resolved_refs(packet))
 
 
 @pytest.mark.parametrize(
@@ -714,6 +747,55 @@ def test_the_returned_token_is_accepted_and_reported_applied(
         kind for anchor in second["anchors"] for kind in anchor.get("evidence") or ()
     }
     assert "continuity" in evidence
+
+
+def test_a_listed_partial_candidate_is_not_promoted_on_the_next_turn(
+    activation_vault: Path,
+) -> None:
+    """The MAJOR the merge exposed: main's rule lists `partial` candidates in
+    `anchors[]` beside resolved ones, and continuity used to be minted from
+    every one of them. On this fixture `TURN` resolves two anchors and lists
+    Depot Ledger as `partial` (`["category_match", "rare_term"]`, never a
+    contact kind strong enough alone). A second turn that reaches Depot Ledger
+    by that same weak evidence, carrying the first turn's token, must still
+    leave it `partial` -- and an anchor the first turn actually RESOLVED
+    (Cargo Sled, via `exact_alias`), reached by the second turn through only a
+    single weak contact kind that alone stays `partial`, must still gain
+    `continuity` and resolve, so the fix does not also break the feature.
+    """
+    ledger_ref = "Knowledge Base/Systems/Depot Ledger.md"
+    sled_ref = "Knowledge Base/Products/Cargo Sled.md"
+
+    first = commands.op_activate_context(activation_vault, turn=TURN)
+    by_ref = {a["ref"]: a for a in first["anchors"]}
+    assert by_ref[ledger_ref]["status"] == "partial", by_ref[ledger_ref]
+    assert by_ref[sled_ref]["status"] == "resolved", by_ref[sled_ref]
+    token = first["continuity"]
+    token_refs = _decoded(token)["refs"]
+    assert ledger_ref not in token_refs, "a merely-listed anchor must not reach the token"
+    assert sled_ref in token_refs
+
+    turn2 = "How much sled capacity does the depot have right now?"
+    without = commands.op_activate_context(activation_vault, turn=turn2)
+    by_ref_without = {a["ref"]: a for a in without["anchors"]}
+    # Both are only weakly reached by turn 2 alone -- the fixture's precondition.
+    assert by_ref_without[ledger_ref]["status"] == "partial", by_ref_without[ledger_ref]
+    assert by_ref_without[sled_ref]["status"] == "partial", by_ref_without[sled_ref]
+
+    with_token = commands.op_activate_context(
+        activation_vault, turn=turn2, continuity=token
+    )
+    by_ref_with = {a["ref"]: a for a in with_token["anchors"]}
+
+    # The regression: never listed in the token, so continuity must not
+    # promote it even though turn 2 reaches it by the very same weak evidence.
+    assert by_ref_with[ledger_ref]["status"] == "partial", by_ref_with[ledger_ref]
+    assert "continuity" not in by_ref_with[ledger_ref]["evidence"]
+
+    # The feature: turn 1 actually RESOLVED Cargo Sled, so a single weak
+    # contact kind on turn 2 plus continuity still resolves it.
+    assert by_ref_with[sled_ref]["status"] == "resolved", by_ref_with[sled_ref]
+    assert "continuity" in by_ref_with[sled_ref]["evidence"]
 
 
 def test_a_token_from_another_index_is_reported_stale_and_ignored(
@@ -777,7 +859,7 @@ def test_the_token_is_minted_after_the_guard_not_before(
 
     dropped = set(_refs(served)) - set(_refs(guarded))
     assert dropped, "the fixture must actually drop an anchor"
-    assert set(_decoded(guarded["continuity"])["refs"]) == set(_refs(guarded))
+    assert set(_decoded(guarded["continuity"])["refs"]) == set(_resolved_refs(guarded))
     assert not dropped & set(_decoded(guarded["continuity"])["refs"])
 
 
