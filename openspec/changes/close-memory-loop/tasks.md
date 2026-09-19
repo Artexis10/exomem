@@ -8,7 +8,7 @@
 
 ## 2. Enable the independent local candidate iteration lane
 
-- [ ] 2.1 Add failing staging-source tests and an explicit immutable-wheel source to `service_upgrade` and supported staging entrypoints; verify digest/revision/interpreter identity and published-version compatibility without editing a serving environment.
+- [x] 2.1 Add failing staging-source tests and an explicit immutable-wheel source to `service_upgrade` and supported staging entrypoints; verify digest/revision/interpreter identity and published-version compatibility without editing a serving environment. Delivered in PR #1309 with independent review and required CI; the supported candidate entrypoint is `python -m exomem.service_upgrade`.
 - [ ] 2.2 Exercise local-wheel staging through managed standby/admission/cutover in isolated state; verify single-writer ownership, compatible-descriptor reuse, unsupported-runtime refusal and descriptor-changing recovery boundaries.
 - [ ] 2.3 Document the development, personal-candidate and public-release commands in the existing operational runbook; verify scoped development tests and full completion gates are distinct and a candidate does not require PyPI publication.
 
@@ -36,6 +36,12 @@
 - [ ] 5.3 Complete the existing vocabulary owner's future-endpoint vault-edge and trusted-owner integration tasks; verify deliberately opted-in entity/type/edge permissions support ordinary additions without widening existing grants or accepting cross-vault/caller-labelled targets.
 - [ ] 5.4 Exercise meaningful ownership, affiliation, operation, compatibility, production, supply/use and location relationships plus governed missing-meaning proposals; verify truthful registered reuse, per-edge provenance, contextual shared-name disambiguation by the active agent and uncertainty abstention. Verify mixed-producer lot attribution, unknown-origin silence, qualified operator succession and no inferred shortcut presented as a direct sourced edge; do not force generic edges or relation quotas.
 - [ ] 5.5 Obtain independent security review of episode recovery and the authority extension at their actual leaves; verify all blocking findings are resolved with repeatable tests before any live activation.
+- [ ] 5.6 Audit canonical vocabulary resolution across normal compiled Notes, source/domain projection, Evidence scopes and existing category/entity/type adapters on current main and overlapping work; reproduce exact-equivalence forks through public writes and identify reusable resolution, receipt and commit-revalidation seams before implementation.
+- [ ] 5.7 Prove the first Notes-domain slice with a strict write-side snapshot over the existing domain taxonomy, one canonical metadata/projection binding and bounded pre-destination neighbour preparation; verify exact/Unicode/slug/case and reviewed-alias reuse, explicit agent reuse/create/defer, legitimate new meanings and ambiguity refusal without silent migrations.
+- [ ] 5.8 Thread that binding through immutable drafts and both creation commit branches, receipt validation and compact/full/replay projections; verify registry and directory-census changes cannot retarget an old draft or create an equivalent sibling, and MCP/CLI/REST carry identical finite decision semantics.
+- [ ] 5.9 Add end-to-end Notes fixtures for existing Health/requested health, Food/food, reviewed aliases, malformed/unreadable registry, duplicate canonical/alias owners, equivalent legacy siblings, development/software-engineering pre-write suggestions, distinct health/wealth, canonical metadata and requested/resolved/destination receipts; exercise two-client and validate-to-commit races.
+- [ ] 5.10 Adapt Sources and artifact-adoption paths to the proven domain seam, including atomic registry additions and destination guards; verify cross-writer alias/metadata/receipt parity and no pre-commit directory fork.
+- [ ] 5.11 Integrate category/entity/type/relation family adapters under their existing contracts, preserving open categories and current authority; define Evidence scope/category handling separately so incident identifiers cannot inherit domain aliases or slug collapsing.
 
 ## 6. Demonstrate client coverage and excellent activation
 
@@ -43,6 +49,7 @@
 - [ ] 6.2 Exercise ChatGPT, Claude app and a generic MCP client through available capabilities; verify tool parity and ordinary use, and publish separate best-effort versus lifecycle-enforced results without inferring hooks from client brands.
 - [ ] 6.3 Extend current activation tests with unfamiliar/multilingual referents, rare anchors, cross-kind topology, current Records state, supersession, padding and partial-anchor negatives; verify existing token/latency/false-positive bounds and embeddings-on smoke.
 - [ ] 6.4 Replay private accepted dogfood episodes locally from appropriate snapshots with no corrective user nudge, including operator/site and supplier-to-producer provenance; verify all supported durable changes, meaningful relationships and later useful activation while preserving private evidence outside public artifacts. An ambiguous-name query must abstain or expose candidates; a lot-specific query must not substitute its seller for an unsupported producer.
+- [ ] 6.5 Verify the shipped title-first citation contract in ordinary cross-client answers, including visible custom-scheme Markdown, duplicate titles and missing-title fallback; stable IDs stay machine-facing unless explicitly requested.
 
 ## 7. Deliver governed adaptation and derived working context
 

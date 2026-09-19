@@ -1196,6 +1196,65 @@ def test_acknowledgement_loss_replays_the_persisted_original_terminal(
     assert calls == 1
 
 
+def test_acknowledgement_loss_replays_bound_vocabulary_resolution(tmp_path) -> None:
+    from exomem import writer_lease
+
+    calls = 0
+    interrupt = True
+    resolution = {
+        "family": "domain",
+        "requested": "Health",
+        "canonical": "health",
+        "destination": "Health",
+        "match_kind": "normalized",
+        "snapshot": "a" * 64,
+    }
+
+    def leaf(vault):  # noqa: ANN001, ARG001
+        nonlocal calls
+        calls += 1
+        writer_lease.mark_active_mutation_committed()
+        return {"vocabulary_resolution": resolution}
+
+    def after_terminal_persisted() -> None:
+        nonlocal interrupt
+        if interrupt:
+            interrupt = False
+            raise asyncio.CancelledError
+
+    command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state"),
+        after_terminal_persisted=after_terminal_persisted,
+    )
+    with pytest.raises(asyncio.CancelledError):
+        manager.invoke(
+            command,
+            (vault,),
+            {"response_detail": "compact"},
+            idempotency_key="vocabulary-replay",
+        )
+
+    full_replay = manager.invoke(
+        command,
+        (vault,),
+        {"response_detail": "full"},
+        idempotency_key="vocabulary-replay",
+    )
+    compact_replay = manager.invoke(
+        command,
+        (vault,),
+        {"response_detail": "compact"},
+        idempotency_key="vocabulary-replay",
+    )
+
+    assert full_replay["vocabulary_resolution"] == resolution
+    assert compact_replay["vocabulary_resolution"] == resolution
+    assert calls == 1
+
+
 def test_result_without_active_commit_marker_keeps_its_existing_shape(tmp_path) -> None:
     from exomem import writer_lease
 

@@ -117,6 +117,7 @@ _CREATE_NOTE_FIELDS = frozenset(
         "project_category",
         "relation_disposition",
         "relation_review_reason",
+        "vocabulary_decision",
     }
 )
 _CREATE_ENTITY_FIELDS = frozenset(
@@ -174,6 +175,7 @@ _SUPERSEDE_FIELDS = frozenset(
         "project_category",
         "relation_disposition",
         "relation_review_reason",
+        "vocabulary_decision",
     }
 )
 _MOVE_FIELDS = frozenset(
@@ -1073,6 +1075,12 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
                 if key in args
             }
             validation = commands.op_remember(vault_root, validate_only=True, **args)
+            preparation = validation.get("vocabulary_preparation")
+            if isinstance(preparation, Mapping):
+                raise _error(
+                    "CURATION_VOCABULARY_PREPARATION_REQUIRED",
+                    canonical_json({"vocabulary_preparation": preparation}),
+                )
             path = normalize_target_path(validation["destination"], field="destination")
             if not _guarded_absent(vault_root, path):
                 raise _error("CURATION_BINDING_STALE", f"create destination {path!r} exists")
@@ -1140,6 +1148,12 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
                 if key in args
             }
             validation = commands.op_replace_memory(vault_root, validate_only=True, **args)
+            preparation = validation.get("vocabulary_preparation")
+            if isinstance(preparation, Mapping):
+                raise _error(
+                    "CURATION_VOCABULARY_PREPARATION_REQUIRED",
+                    canonical_json({"vocabulary_preparation": preparation}),
+                )
             prepared = {
                 "draft_id": validation["draft_id"],
                 "draft_hash": validation["draft_hash"],

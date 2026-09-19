@@ -431,6 +431,79 @@ def test_remember_validate_only_exposes_review_draft(vault: Path, capsys) -> Non
     assert not (vault / data["destination"]).exists()
 
 
+def test_remember_cli_validation_projects_experiment_vocabulary(vault: Path, capsys) -> None:
+    code, out, err = _run(
+        [
+            "remember",
+            "--title",
+            "CLI canonical experiment",
+            "--content",
+            "# CLI canonical experiment\n\n## Hypothesis\n\nA bounded trial.\n",
+            "--field",
+            "note_type=experiment",
+            "--field",
+            "domain=Health",
+            "--field",
+            "started=2026-05-18",
+            "--field",
+            "duration=one day",
+            "--field",
+            "status=draft",
+            "--field",
+            "validate_only=true",
+            "--json",
+        ],
+        capsys,
+    )
+
+    assert code == 0, err
+    resolution = json.loads(out.strip().splitlines()[-1])["data"]["vocabulary_resolution"]
+    assert resolution["requested"] == "Health"
+    assert resolution["canonical"] == "health"
+
+
+def test_remember_cli_carries_neighbour_domain_decision(vault: Path, capsys) -> None:
+    fields = [
+        "note_type=experiment",
+        "domain=wealth",
+        "started=2026-05-18",
+        "duration=one day",
+        "status=draft",
+        "validate_only=true",
+    ]
+    base = [
+        "remember",
+        "--title",
+        "CLI prepared experiment",
+        "--content",
+        "# CLI prepared experiment\n\n## Hypothesis\n\nA bounded trial.\n",
+    ]
+    prepared_argv = [*base, *(item for field in fields for item in ("--field", field)), "--json"]
+    code, out, err = _run(prepared_argv, capsys)
+
+    assert code == 0, err
+    prepared = json.loads(out.strip().splitlines()[-1])["data"]
+    assert prepared["mutated"] is False
+    assert "destination" not in prepared
+
+    decision = json.dumps(
+        {
+            "evidence_fingerprint": prepared["vocabulary_preparation"]["evidence_fingerprint"],
+            "outcome": "create",
+            "canonical": "wealth",
+        }
+    )
+    decided_argv = [
+        *base,
+        *(item for field in [*fields, f"vocabulary_decision={decision}"] for item in ("--field", field)),
+        "--json",
+    ]
+    code, out, err = _run(decided_argv, capsys)
+
+    assert code == 0, err
+    assert json.loads(out.strip().splitlines()[-1])["data"]["vocabulary_resolution"]["canonical"] == "wealth"
+
+
 def test_remember_unicode_title_with_explicit_slug(vault: Path, capsys) -> None:
     code, out, err = _run(
         [

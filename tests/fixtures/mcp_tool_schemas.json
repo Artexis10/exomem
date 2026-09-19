@@ -5499,6 +5499,47 @@
           "default": null,
           "description": "Audit reason for a reviewed-none disposition."
         },
+        "vocabulary_decision": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "evidence_fingerprint": {
+                  "description": "Fingerprint returned by vocabulary_preparation.",
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "outcome": {
+                  "enum": [
+                    "reuse",
+                    "create",
+                    "defer"
+                  ]
+                },
+                "canonical": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "evidence_fingerprint",
+                "outcome",
+                "canonical"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "response_detail": {
           "default": "compact",
           "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
@@ -5927,6 +5968,47 @@
           ],
           "default": null,
           "description": "Audit reason for a reviewed-none disposition."
+        },
+        "vocabulary_decision": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "evidence_fingerprint": {
+                  "description": "Fingerprint returned by vocabulary_preparation.",
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "outcome": {
+                  "enum": [
+                    "reuse",
+                    "create",
+                    "defer"
+                  ]
+                },
+                "canonical": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "evidence_fingerprint",
+                "outcome",
+                "canonical"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "response_detail": {
           "default": "compact",

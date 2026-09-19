@@ -39,7 +39,7 @@ from typing import Annotated, Any, Literal, NotRequired
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as FastMCPImage
 from mcp.types import TextContent
-from pydantic import Field, StrictInt, StringConstraints, WithJsonSchema
+from pydantic import ConfigDict, Field, StrictInt, StringConstraints, WithJsonSchema
 from typing_extensions import TypedDict
 
 from . import add as add_module
@@ -69,7 +69,15 @@ from . import envelope as envelope_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
 from . import find as find_module
-from . import find_types, query_log, retrieval_models, semantic_census, upload_tokens, vault
+from . import (
+    find_types,
+    query_log,
+    retrieval_models,
+    semantic_census,
+    upload_tokens,
+    vault,
+    vocabulary_resolution,
+)
 from . import get_page as get_page_module
 from . import hosted_legacy_schemas as hosted_legacy_schemas_module
 from . import knowledge_packs as knowledge_packs_module
@@ -201,6 +209,40 @@ _OptionalRelationText = Annotated[
 _OptionalRelationProposal = Annotated[
     dict | None,
     WithJsonSchema({"anyOf": [{"type": "object"}, {"type": "null"}]}),
+]
+class _DomainVocabularyDecision(TypedDict):
+    """Evidence-bound disposition for a prepared domain-vocabulary candidate."""
+
+    __pydantic_config__ = ConfigDict(extra="forbid")
+
+    evidence_fingerprint: str
+    outcome: Literal["reuse", "create", "defer"]
+    canonical: str | None
+
+
+_DomainVocabularyDecisionArgument = Annotated[
+    _DomainVocabularyDecision | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["evidence_fingerprint", "outcome", "canonical"],
+                    "properties": {
+                        "evidence_fingerprint": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$",
+                            "description": "Fingerprint returned by vocabulary_preparation.",
+                        },
+                        "outcome": {"enum": ["reuse", "create", "defer"]},
+                        "canonical": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    },
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
 ]
 _VocabularyDecisionArgument = Annotated[
     dict[str, Any] | None,
@@ -4207,6 +4249,7 @@ def op_replace(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    vocabulary_decision: _DomainVocabularyDecisionArgument = None,
 ) -> dict:
     """Supersede an existing compiled page with a new one.
 
@@ -4237,6 +4280,8 @@ def op_replace(
         relation_disposition: Reviewed relation outcome for commit.
         relation_review_hash: Draft hash covered by the relation review.
         relation_review_reason: Audit reason for a reviewed-none disposition.
+        vocabulary_decision: Evidence-bound `reuse`, `create`, or `defer` response
+            returned by an experiment-domain vocabulary preparation.
 
     Returns:
         {old_path, new_path, warnings}.
@@ -4280,6 +4325,7 @@ def op_replace(
         "draft_token": draft_token,
         "relation_disposition": relation_disposition,
         "relation_review_reason": relation_review_reason,
+        "vocabulary_decision": vocabulary_decision,
     }
     try:
         predecessor_hash = _replacement_predecessor_hash(vault_root, old_path)
@@ -4296,6 +4342,8 @@ def op_replace(
                     "REPLACEMENT_PREVIEW_UNSTABLE: predecessor changed during advisory preview"
                 )
             value = result.as_dict()
+            if "vocabulary_preparation" in value:
+                return value
             base_hash = str(value["draft_hash"])
             value.update(
                 validate_only=True,
@@ -4326,6 +4374,8 @@ def op_replace(
                 raise ValueError(
                     "DRAFT_HASH_MISMATCH: predecessor changed during fresh replacement validation"
                 )
+            if isinstance(fresh, vocabulary_resolution.VocabularyPreparation):
+                return fresh.as_dict()
             base_hash = fresh.draft_hash
             expected_hash = _replacement_review_hash(
                 str(base_hash),
@@ -4684,6 +4734,7 @@ def op_note(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    vocabulary_decision: _DomainVocabularyDecisionArgument = None,
 ) -> dict:
     """Create a compiled note in the Knowledge Base.
 
@@ -4794,6 +4845,9 @@ def op_note(
             reviewed_none when no honest relation exists.
         relation_review_hash: Draft hash covered by the relation review.
         relation_review_reason: Audit reason for a reviewed-none disposition.
+        vocabulary_decision: After a vocabulary_preparation response, submit its
+            evidence_fingerprint with outcome reuse, create, or defer and the
+            reviewed canonical value. The response is bound to that evidence.
 
     Returns:
         {path, warnings, suggestions?, write_feedback}. `write_feedback` is
@@ -4839,6 +4893,7 @@ def op_note(
             relation_disposition=relation_disposition,
             relation_review_hash=relation_review_hash,
             relation_review_reason=relation_review_reason,
+            vocabulary_decision=vocabulary_decision,
         )
     except note_module.NoteError as e:
         raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
@@ -6216,6 +6271,7 @@ def op_remember(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    vocabulary_decision: _DomainVocabularyDecisionArgument = None,
 ) -> dict:
     """Remember a durable conclusion as compiled governed knowledge.
 
@@ -6284,6 +6340,9 @@ def op_remember(
         relation_disposition: Reviewed relation outcome for commit.
         relation_review_hash: Draft hash covered by the relation review.
         relation_review_reason: Audit reason for a reviewed-none disposition.
+        vocabulary_decision: After a vocabulary_preparation response, submit its
+            evidence_fingerprint with outcome reuse, create, or defer and the
+            reviewed canonical value. The response is bound to that evidence.
     """
     return op_note(
         vault_root,
@@ -6321,6 +6380,7 @@ def op_remember(
         relation_disposition=relation_disposition,
         relation_review_hash=relation_review_hash,
         relation_review_reason=relation_review_reason,
+        vocabulary_decision=vocabulary_decision,
     )
 
 
@@ -6552,6 +6612,7 @@ def op_replace_memory(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    vocabulary_decision: _DomainVocabularyDecisionArgument = None,
 ) -> dict:
     """Supersede an existing compiled memory with a new version.
 
@@ -6601,6 +6662,8 @@ def op_replace_memory(
         relation_disposition: Reviewed relation outcome for commit.
         relation_review_hash: Draft hash covered by the relation review.
         relation_review_reason: Audit reason for a reviewed-none disposition.
+        vocabulary_decision: Evidence-bound `reuse`, `create`, or `defer` response
+            returned by an experiment-domain vocabulary preparation.
     """
     return op_replace(
         vault_root,
@@ -6639,6 +6702,7 @@ def op_replace_memory(
         relation_disposition=relation_disposition,
         relation_review_hash=relation_review_hash,
         relation_review_reason=relation_review_reason,
+        vocabulary_decision=vocabulary_decision,
     )
 
 

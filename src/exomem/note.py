@@ -35,6 +35,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from . import (
     audit as audit_module,
@@ -49,6 +50,7 @@ from . import (
     semantic_writes,
     source_closure,
     temporal,
+    vocabulary_resolution,
 )
 from . import (
     find as find_module,
@@ -261,6 +263,9 @@ class NoteResult:
             out["write_feedback"] = self.write_feedback
         if self.creation:
             out["creation"] = self.creation
+            resolution = self.creation.get("vocabulary_resolution")
+            if isinstance(resolution, dict):
+                out["vocabulary_resolution"] = resolution
         return out
 
 
@@ -1124,9 +1129,8 @@ def _resolve_path(
 
 
 def _domain_folder(domain: str) -> str:
-    """Lowercase domain to subfolder name. Sanitize to avoid path traversal."""
-    safe = re.sub(r"[^a-z0-9-]", "", domain.strip().lower())
-    return safe or "misc"
+    """Return the strict resolver's already-validated path projection exactly."""
+    return domain
 
 
 def _medium_folder(medium: str) -> str:
@@ -1601,6 +1605,7 @@ def note(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    vocabulary_decision: dict[str, Any] | None = None,
     _return_prepared: bool = False,
     _supersedes_target: str | None = None,
     _preflight_operation: str = "create",
@@ -1621,6 +1626,7 @@ def note(
 
     key_candidates = [value for value in ([project] + list(projects or [])) if value]
     token_value: semantic_writes.DraftToken | None = None
+    domain_binding: vocabulary_resolution.DomainBinding | None = None
     replay: tuple[project_keys_module.ProjectKeyIntroduction, ...] = ()
     if draft_token is not None:
         try:
@@ -1629,6 +1635,19 @@ def note(
             raise NoteError(error.code, ["draft_token"], error.reason) from error
         if token_value.writer != "note" or token_value.operation != _preflight_operation:
             raise NoteError("INVALID_DRAFT_TOKEN", ["draft_token"], "draft token writer mismatch")
+        if note_type == "experiment":
+            if token_value.vocabulary_binding is None:
+                raise NoteError(
+                    "STALE_VOCABULARY_BINDING",
+                    ["draft_token"],
+                    "experiment draft requires fresh vocabulary validation",
+                )
+            try:
+                domain_binding = vocabulary_resolution.binding_from_dict(
+                    root, token_value.vocabulary_binding
+                )
+            except vocabulary_resolution.VocabularyResolutionError as error:
+                raise NoteError(error.code, ["domain"], error.reason, error.details) from error
         replay = tuple(
             project_keys_module.ProjectKeyIntroduction(item.key, item.folder, item.category)
             for item in token_value.registrations
@@ -1670,6 +1689,20 @@ def note(
     )
     if err is not None:
         raise NoteError(err.code, err.missing, err.reason)
+    if note_type == "experiment" and domain_binding is None:
+        try:
+            domain_binding = vocabulary_resolution.resolve_notes_domain(
+                root, domain, decision=vocabulary_decision
+            )
+        except vocabulary_resolution.VocabularyResolutionError as error:
+            preparation = error.details.get("vocabulary_preparation")
+            if error.code == "VOCABULARY_DECISION_REQUIRED" and isinstance(preparation, dict):
+                return vocabulary_resolution.VocabularyPreparation(preparation)
+            if error.code == "VOCABULARY_DEFERRED":
+                return vocabulary_resolution.VocabularyPreparation(
+                    {"family": "domain", "requested": str(domain)}, deferred=True
+                )
+            raise NoteError(error.code, ["domain"], error.reason, error.details) from error
 
     identity = draft_id or memory_refs.new_id()
     # The draft token pins the *path* date across the draft->commit gap, so a
@@ -1689,7 +1722,7 @@ def note(
             note_type=note_type,
             project=project,
             slug=filename_slug,
-            domain=domain,
+            domain=domain_binding.destination if domain_binding is not None else domain,
             medium=medium,
             started=started,
             date_iso=render_date,
@@ -1708,6 +1741,7 @@ def note(
             render_date,
             registrations,
             render_stamp=stamp_iso,
+            vocabulary_binding=(domain_binding.as_dict() if domain_binding is not None else None),
         )
         encoded_token = token_value.encode()
     else:
@@ -1737,7 +1771,7 @@ def note(
         content=body_clean,
         severity=severity,
         pattern_type=pattern_type,
-        domain=domain,
+        domain=domain_binding.canonical if domain_binding is not None else domain,
         started=started,
         duration=duration,
         hypothesis=hypothesis,
@@ -1773,6 +1807,7 @@ def note(
             relation_disposition=relation_disposition,
             predecessor_path=_predecessor_path,
             predecessor_content_hash=_predecessor_content_hash,
+            vocabulary_binding=domain_binding,
         )
     except (semantic_writes.SemanticWriteError, relation_review.RelationReviewError) as error:
         raise NoteError(
@@ -1801,6 +1836,7 @@ def note(
     backrefs_planned = len(sources_norm)
 
     kb = kb_root(root)
+    canonical_domain = domain_binding.canonical if domain_binding is not None else domain
     activity_summary = _activity_summary(
         rel_note_no_ext=rel_note_no_ext,
         title=title,
@@ -1809,7 +1845,7 @@ def note(
         projects=projects,
         severity=severity,
         pattern_type=pattern_type,
-        domain=domain,
+        domain=canonical_domain,
         medium=medium,
         status=status,
     )
@@ -1846,7 +1882,7 @@ def note(
                 sources=sources_norm,
                 severity=severity,
                 pattern_type=pattern_type,
-                domain=domain,
+                domain=canonical_domain,
                 medium=medium,
                 status=status,
                 started=started,
