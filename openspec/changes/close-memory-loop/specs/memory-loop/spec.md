@@ -39,6 +39,30 @@ The system SHALL resolve and enrich existing entities before creating duplicates
 - **THEN** the agent proposes or applies permitted hydration of that identity instead of creating a duplicate
 - **AND** ambiguous or incidental mentions do not cause automatic identity assignment
 
+#### Scenario: A useful reusable relationship is missing
+
+- **WHEN** no current registered relation truthfully expresses a supported reusable distinction
+- **THEN** the active agent may propose a governed namespaced extension with precise semantics, core parent/family and directionality/symmetry, validate it and publish it through the existing vocabulary workflow before ordinary use
+- **AND** pending or failed publication is not presented as an active definition
+- **AND** generic or absent edges remain legitimate when greater precision lacks evidence
+
+### Requirement: Destination acceptance observes ordinary-agent decisions
+
+The existing capture-to-activation benchmark SHALL include a separately named synthesis and a paired minor-refinement negative. Original input and the pre-capture vault snapshot SHALL be frozen before execution, with evaluator expectations withheld from the actor. The run SHALL observe relevant antecedent retrieval, destination decisions before effects, actual public-writer receipts, graph/index publication and subsequent useful activation. Scripted correct writes and repaired post-capture state SHALL NOT establish no-nudge success. Exact private replay SHALL require recoverable original input and the appropriate snapshot; reconstructed fixtures SHALL be labelled separately.
+
+#### Scenario: An agent chooses the focused destination without a correction
+
+- **WHEN** a synthetic ordinary product discussion synthesizes five narrower antecedents into an independently useful named thesis
+- **THEN** the first capture pass creates its focused home and truthful typed links without a save, routing or page-creation instruction
+- **AND** a later context activation retrieves the thesis with provenance
+- **AND** the matched refinement case stays on its existing page without fragmentation
+
+#### Scenario: Only the corrected note survives
+
+- **WHEN** the original private episode or its pre-capture snapshot is unavailable
+- **THEN** exact replay remains unmeasured
+- **AND** a reconstruction from the corrected note cannot be reported as a passing original no-nudge replay
+
 ### Requirement: Independent referents remain distinct from roles
 
 The system SHALL support separately evidenced operator organizations, physical sites and independently useful brands without conflating their identities. One entity MAY carry several governed roles/facets without duplicate identities per role. Canonical types and optional parent families SHALL use the existing dynamic registry; filesystem paths SHALL remain projections. The possibility of independent change SHALL inform active-agent consideration but SHALL NOT alone justify entity creation. Existing identity and alias resolution, hydration, authority and provenance rules SHALL apply before creation or restructuring.
