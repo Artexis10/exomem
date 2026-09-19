@@ -4512,6 +4512,7 @@ class LeaseManager:
                         "operation_id",
                         "warnings_count",
                         "additive_authority",
+                        "vocabulary_resolution",
                         "derived_sync",
                     )
                     if isinstance(result, Mapping) and name in result

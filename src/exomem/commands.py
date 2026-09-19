@@ -4684,6 +4684,7 @@ def op_note(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    vocabulary_decision: dict[str, Any] | None = None,
 ) -> dict:
     """Create a compiled note in the Knowledge Base.
 
@@ -4839,6 +4840,7 @@ def op_note(
             relation_disposition=relation_disposition,
             relation_review_hash=relation_review_hash,
             relation_review_reason=relation_review_reason,
+            vocabulary_decision=vocabulary_decision,
         )
     except note_module.NoteError as e:
         raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
@@ -6216,6 +6218,7 @@ def op_remember(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    vocabulary_decision: dict[str, Any] | None = None,
 ) -> dict:
     """Remember a durable conclusion as compiled governed knowledge.
 
@@ -6321,6 +6324,7 @@ def op_remember(
         relation_disposition=relation_disposition,
         relation_review_hash=relation_review_hash,
         relation_review_reason=relation_review_reason,
+        vocabulary_decision=vocabulary_decision,
     )
 
 

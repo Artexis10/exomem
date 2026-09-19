@@ -3804,6 +3804,7 @@ def commit_prepared_creation_draft(
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
     semantic_state: Any | None = None,
+    extra_required_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = (),
 ) -> CreationDraftCommit:
     """Commit a draft already validated by ``prepare_commit_creation_draft``.
 
@@ -3868,7 +3869,7 @@ def commit_prepared_creation_draft(
             resumed = False
             required_guards: tuple[
                 vault.PathGuard | vault.DirectoryCensusGuard, ...
-            ] = ()
+            ] = tuple(extra_required_guards)
             writes: list[vault.PlannedWrite] = []
             if existing_artifact is not None:
                 if attempt.artifact_bytes_hash is None:
@@ -3976,6 +3977,11 @@ def commit_prepared_creation_draft(
                     "DRAFT_ID_IN_USE", "draft identity became reserved"
                 ) from error
             except vault.PathGuardError:
+                if extra_required_guards:
+                    raise RelationReviewError(
+                        "STALE_VOCABULARY_BINDING",
+                        "domain vocabulary changed during commit; validate a fresh draft",
+                    ) from None
                 if attempt.lifecycle_guard is not None:
                     try:
                         attempt.lifecycle_guard.recheck(root)

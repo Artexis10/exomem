@@ -443,6 +443,40 @@ def test_mcp_only_empty_environment_is_sufficient_to_author(
     assert (tmp_path / "empty-vault" / committed["path"]).exists()
 
 
+def test_mcp_remember_carries_neighbour_domain_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcp = _build_server(tmp_path, monkeypatch)
+    base = {
+        "title": "MCP prepared experiment",
+        "content": "# MCP prepared experiment\n\n## Hypothesis\n\nA bounded trial.\n",
+        "note_type": "experiment",
+        "domain": "wealth",
+        "started": "2026-05-18",
+        "duration": "one day",
+        "status": "draft",
+        "validate_only": True,
+    }
+    prepared = _call_tool(mcp, "remember", base)
+
+    assert prepared["mutated"] is False
+    assert "destination" not in prepared
+    decided = _call_tool(
+        mcp,
+        "remember",
+        {
+            **base,
+            "vocabulary_decision": {
+                "evidence_fingerprint": prepared["vocabulary_preparation"]["evidence_fingerprint"],
+                "outcome": "create",
+                "canonical": "wealth",
+            },
+        },
+    )
+
+    assert decided["vocabulary_resolution"]["canonical"] == "wealth"
+
+
 def test_missing_unit_failure_envelope_matches_mcp_rest_and_cli_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

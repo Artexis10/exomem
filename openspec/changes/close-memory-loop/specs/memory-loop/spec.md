@@ -49,6 +49,65 @@ MCP, CLI and REST SHALL expose the same core semantics and versioned capabilitie
 - **THEN** it can perform the full workflow with the shared tools and its capability report says best-effort initiation
 - **AND** tool availability alone is not reported as automatic per-turn execution
 
+#### Scenario: A client exposes custom-scheme link targets
+
+- **WHEN** an ordinary answer cites a memory result and the client would display its opaque reference
+- **THEN** the answer follows the existing title-first presentation contract with a plain readable title and an optional human-readable disambiguator
+- **AND** stable identity remains available internally without becoming the default visible label
+
+### Requirement: Canonical vocabulary precedes destination projection
+
+Normal writes SHALL share family-aware resolution over existing canonical vocabularies before projecting filesystem destinations. Unique normalized exact equivalents and reviewed aliases SHALL reuse canonical identity deterministically. Ambiguous existing equivalents SHALL be surfaced without arbitrary selection. Non-exact proposals SHALL receive bounded authorized candidate definitions and representative usage for the active agent to decide reuse, enrichment, a distinct new identity or deferral. The server SHALL NOT reason about semantic equivalence, silently merge neighbours, create aliases or close an otherwise open vocabulary.
+
+Resolution SHALL preserve each family's validation and authority rules. Mutation receipts SHALL expose requested token, resolved canonical identity and final destination. Existing serialized write boundaries SHALL revalidate the chosen identity and destination before commitment across clients. Existing provenance and duplicate trees SHALL NOT be silently moved or merged.
+
+The first Notes-domain slice SHALL use a strict write-side registry snapshot and bind canonical metadata, identity, destination projection and agent disposition into immutable preparation. Read/bootstrap fallback SHALL NOT authorize a write under an unreadable or ambiguous registry. Validation, committed, replayed, compact and full responses SHALL preserve the bounded `vocabulary_resolution` fields `family`, `requested`, `canonical`, `destination`, `match_kind` and `snapshot`. The family SHALL be `domain`, shared across its projection adapters. Evidence incident/case/project scopes SHALL NOT inherit subject-domain alias or slug semantics.
+
+#### Scenario: Existing canonical spelling receives a case variant
+
+- **WHEN** Health already identifies an experiment domain and a normal write requests health, or Food exists and the request is food
+- **THEN** the write reuses the unique canonical identity and destination without creating a case-only sibling
+- **AND** the receipt exposes both the request and the resolved result
+
+#### Scenario: Reviewed alias and semantic neighbours remain distinct cases
+
+- **WHEN** a reviewed alias names an existing identity
+- **THEN** the normal write resolves it deterministically across participating writers
+- **WHEN** a new development proposal has software-engineering as a nearby existing meaning
+- **THEN** the agent receives bounded candidates and decides whether to reuse or create a distinct identity
+- **AND** a legitimate health/wealth distinction remains possible without automatic merging
+
+#### Scenario: Registry ambiguity cannot be resolved by entry order
+
+- **WHEN** the write registry is unreadable, malformed, or contains duplicate normalized canonical/alias owners or equivalent path-label collisions
+- **THEN** the write returns typed invalid-registry or ambiguity information without changing canon
+- **AND** it does not use permissive read defaults or choose the last registry entry
+
+#### Scenario: Alias resolution governs metadata and public receipts
+
+- **WHEN** an experiment uses a reviewed domain alias and a unique existing projection spelling
+- **THEN** persisted metadata and activity use the canonical key, the existing destination is reused, and public compact/full/replayed receipts retain the requested token and canonical resolution
+- **AND** changing a folder alone while leaving alias metadata does not satisfy acceptance
+
+#### Scenario: A nearby meaning is presented before a destination is committed
+
+- **WHEN** a non-exact domain proposal has nearby existing meanings
+- **THEN** a typed non-mutating preparation exposes bounded authorized definitions and representative usage before minting a committable destination
+- **AND** the active agent explicitly chooses reuse, create or defer against the returned evidence fingerprint without requiring a user confirmation
+- **AND** no hidden model, semantic merge or post-write-only advisory substitutes for that decision
+
+#### Scenario: A second client changes the vocabulary after preparation
+
+- **WHEN** a second writer introduces a canonical equivalent before the first prepared write commits
+- **THEN** commit revalidation reuses a still-valid canonical result or refuses for fresh resolution
+- **AND** it does not create an equivalent sibling from the stale preparation
+
+#### Scenario: A prepared draft crosses a registry or directory change
+
+- **WHEN** either the registry or projection-directory membership changes after validation
+- **THEN** both structural and relation-reviewed creation paths revalidate inside their existing commit boundary and preserve the identical binding or refuse for fresh preparation
+- **AND** an immutable draft token is never silently retargeted
+
 ### Requirement: Activation earns acceptance through useful bounded context
 
 Activation SHALL resolve anchors, apply task-conditioned roles and bounded typed expansion, qualify current state and carry provenance under the existing context-activation budgets. Ambiguity, partial anchor coverage and stale/unavailable publication SHALL remain explicit. Acceptance SHALL exercise negative twins, rare/unfamiliar and multilingual referents, cross-kind links, supersession, Records state, distractor padding and an embeddings-on smoke path. Accepted context SHALL improve a later ordinary response without poison facts or unsupported resolution.
