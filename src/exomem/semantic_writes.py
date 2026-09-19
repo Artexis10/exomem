@@ -47,7 +47,7 @@ log = logging.getLogger(__name__)
 # rejected: a token minted before the bump carries no knowledge-time stamp,
 # and inferring one at commit is exactly the non-determinism the freeze exists
 # to prevent. Clients mid validate->commit re-validate once at the boundary.
-_TOKEN_VERSION = 2
+_TOKEN_VERSION = 3
 _MAX_TOKEN_BYTES = 12 * 1024
 _COMPILED_TYPES = frozenset(
     {
@@ -761,6 +761,8 @@ class DraftToken:
     # Declared last so existing positional construction keeps binding
     # `registrations` where callers expect it; always pass this by keyword.
     render_stamp: str = ""
+    vocabulary_binding: dict[str, str] | None = None
+    version: int = _TOKEN_VERSION
 
     def stamp(self) -> str:
         """The frozen instant, falling back to the frozen day."""
@@ -768,7 +770,7 @@ class DraftToken:
 
     def encode(self) -> str:
         value = {
-            "version": _TOKEN_VERSION,
+            "version": self.version,
             "writer": self.writer,
             "operation": self.operation,
             "destination": self.destination,
@@ -776,6 +778,8 @@ class DraftToken:
             "render_stamp": self.render_stamp or self.render_date,
             "registrations": [item.as_dict() for item in self.registrations],
         }
+        if self.version == _TOKEN_VERSION:
+            value["vocabulary_binding"] = self.vocabulary_binding
         raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
             "utf-8"
         )
@@ -807,17 +811,15 @@ class DraftToken:
             json.JSONDecodeError,
         ) as error:
             raise SemanticWriteError("INVALID_DRAFT_TOKEN", "draft token is invalid") from error
-        if type(value) is not dict or set(value) != {
-            "version",
-            "writer",
-            "operation",
-            "destination",
-            "render_date",
-            "render_stamp",
-            "registrations",
-        }:
+        expected = {
+            "version", "writer", "operation", "destination", "render_date", "render_stamp", "registrations"
+        }
+        version = value.get("version") if type(value) is dict else None
+        if version == _TOKEN_VERSION:
+            expected.add("vocabulary_binding")
+        if type(value) is not dict or set(value) != expected:
             raise SemanticWriteError("INVALID_DRAFT_TOKEN", "draft token has invalid fields")
-        if value["version"] != _TOKEN_VERSION or any(
+        if version not in {2, _TOKEN_VERSION} or any(
             type(value[key]) is not str
             for key in ("writer", "operation", "destination", "render_date", "render_stamp")
         ):
@@ -874,6 +876,8 @@ class DraftToken:
             value["render_date"],
             tuple(registrations),
             render_stamp=value["render_stamp"],
+            vocabulary_binding=value.get("vocabulary_binding"),
+            version=version,
         )
         if decoded.encode() != token:
             raise SemanticWriteError("INVALID_DRAFT_TOKEN", "draft token is not canonical")
@@ -898,6 +902,8 @@ class CreationPreflight:
     #: a page is never its own destination.
     corpus: semantic_contract.SemanticCorpusContext | None = None
     source_closure_plan: source_closure.SourceClosurePlan | None = None
+    vocabulary_binding: Any | None = None
+    vocabulary_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = ()
 
     @property
     def draft_hash(self) -> str | None:
@@ -927,6 +933,8 @@ class CreationPreflight:
             value.update(self.creation_validation.as_dict())
             value["draft_token"] = self.draft_token
             value["applicability"] = self.applicability
+        if self.vocabulary_binding is not None:
+            value["vocabulary_resolution"] = self.vocabulary_binding.as_dict()
         return value
 
 
@@ -955,6 +963,7 @@ class CreationCommit:
     # Server-internal point-lookup context. The mutation terminal consumes and
     # strips it; no response detail exposes a local vault path.
     relation_advisory_context: dict[str, str] | None = None
+    vocabulary_resolution: dict[str, str] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         value = {
@@ -978,6 +987,8 @@ class CreationCommit:
             value["capture_sweep"] = self.capture_sweep
         if self.relation_advisory_context is not None:
             value["_relation_advisory_context"] = self.relation_advisory_context
+        if self.vocabulary_resolution is not None:
+            value["vocabulary_resolution"] = self.vocabulary_resolution
         return value
 
 
@@ -3816,6 +3827,7 @@ def preflight_creation(
     relation_disposition: str | None = None,
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
+    vocabulary_binding: Any | None = None,
 ) -> CreationPreflight:
     root = Path(vault_root)
     relation_disposition = relation_review.normalize_relation_disposition(relation_disposition)
@@ -3879,6 +3891,11 @@ def preflight_creation(
             census_token,
             before_corpus,
             closure_plan,
+            vocabulary_binding,
+            (
+                vocabulary_binding.registry_guard,
+                vocabulary_binding.parent_guard,
+            ) if vocabulary_binding is not None else (),
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural"
@@ -3899,6 +3916,11 @@ def preflight_creation(
         census_token,
         before_corpus,
         closure_plan,
+        vocabulary_binding,
+        (
+            vocabulary_binding.registry_guard,
+            vocabulary_binding.parent_guard,
+        ) if vocabulary_binding is not None else (),
     )
 
 
@@ -4015,6 +4037,11 @@ def commit_creation(
         due_state=due,
         capture_sweep=sweep,
         relation_advisory_context=context,
+        vocabulary_resolution=(
+            preflight.vocabulary_binding.as_dict()
+            if preflight.vocabulary_binding is not None
+            else None
+        ),
     )
 
 
@@ -4143,6 +4170,25 @@ def _commit_creation(
         operation=f"semantic_creation_{operation}_commit",
         holder_kind="command",
     ):
+        if preflight.vocabulary_binding is not None:
+            from . import vocabulary_resolution
+
+            try:
+                current_binding = vocabulary_resolution.binding_from_dict(
+                    root, preflight.vocabulary_binding.as_dict()
+                )
+            except vocabulary_resolution.VocabularyResolutionError as error:
+                raise SemanticWriteError(error.code, error.reason, details=error.details) from error
+            if current_binding.as_dict() != preflight.vocabulary_binding.as_dict():
+                raise SemanticWriteError(
+                    "STALE_VOCABULARY_BINDING", "domain vocabulary changed; validate a fresh draft"
+                )
+            vocabulary_guards = (
+                current_binding.registry_guard,
+                current_binding.parent_guard,
+            )
+        else:
+            vocabulary_guards = ()
         try:
             source_closure.enforce_source_closure(
                 root,
@@ -4191,6 +4237,7 @@ def _commit_creation(
                 predecessor_path=predecessor_path,
                 predecessor_content_hash=predecessor_content_hash,
                 semantic_state=semantic_index.from_semantic_page_state(preflight.semantic_state),
+                extra_required_guards=vocabulary_guards,
             )
             try:
                 catalog_publication.publish_markdown_batch(catalog_target)
@@ -4269,9 +4316,17 @@ def _commit_creation(
                 root, primary=primary_write, derived=derived_auxiliaries
             )
             written = vault.batch_atomic_write(
-                writes, vault_root=root, _vocabulary_auxiliaries=manifest
+                writes,
+                vault_root=root,
+                required_guards=vocabulary_guards,
+                _vocabulary_auxiliaries=manifest,
             )
         except vault.PathGuardError as error:
+            if vocabulary_guards:
+                raise SemanticWriteError(
+                    "STALE_VOCABULARY_BINDING",
+                    "domain vocabulary changed during commit; validate a fresh draft",
+                ) from error
             raise SemanticWriteError(
                 "STALE_SEMANTIC_WRITE",
                 "a concurrent write updated a shared auxiliary during commit; retry the operation",

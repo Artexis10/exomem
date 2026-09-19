@@ -208,6 +208,18 @@ def _assert_parity_candidate_derivation(flow: str, command: str) -> None:
     assert "hosted-alpha-agent-v4" not in flow
 
 
+def _assert_baseline_candidate_derivation(flow: str, command: str) -> None:
+    assert 'baseline_candidate="$(uv run --frozen python - <<\'PY\'' in flow
+    assert "from exomem.hosted_plugins import BASELINE_CANDIDATE" in flow
+    assert "print(BASELINE_CANDIDATE)" in flow
+    assert 'PY\n          )"' in flow
+    assert (
+        f'{command} --candidate "$baseline_candidate" --platform all '
+        '--openai-app-id "$openai_app_id"'
+    ) in flow
+    assert "hosted-alpha-agent-v5" not in flow
+
+
 def test_release_workflow_refreshes_and_checks_release_managed_candidates() -> None:
     text = _read(".github/workflows/release-please.yml")
     sync = _workflow_job(text, "sync-hosted-artifacts", "build-artifacts")
@@ -222,6 +234,8 @@ def test_release_workflow_refreshes_and_checks_release_managed_candidates() -> N
     _assert_openai_app_id_derivation(check, "check")
     _assert_parity_candidate_derivation(render, "render")
     _assert_parity_candidate_derivation(check, "check")
+    _assert_baseline_candidate_derivation(render, "render")
+    _assert_baseline_candidate_derivation(check, "check")
 
 
 def test_compose_overrides_select_cpu_ml_and_cuda() -> None:

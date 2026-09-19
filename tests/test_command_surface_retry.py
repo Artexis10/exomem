@@ -405,6 +405,57 @@ def test_replace_preview_is_advisory_and_bound_to_predecessor_without_writes(
     assert after == before
 
 
+def test_replace_memory_prepares_and_decides_neighbour_experiment_domain(vault: Path) -> None:
+    from exomem.commands import op_replace_memory
+
+    old_path = _write_editable_note(vault)
+    kwargs = {
+        "old_path": old_path,
+        "content": (
+            "# Replacement experiment\n\n## Observations\n\n"
+            "- [runtime reliability] Keep retries bounded #retry\n"
+        ),
+        "title": "Replacement experiment",
+        "note_type": "experiment",
+        "domain": "wealth",
+        "started": "2026-05-18",
+        "duration": "one day",
+    }
+
+    prepared = op_replace_memory(vault, validate_only=True, **kwargs)
+
+    assert prepared["mutated"] is False
+    assert "destination" not in prepared
+    decided = op_replace_memory(
+        vault,
+        validate_only=True,
+        vocabulary_decision={
+            "evidence_fingerprint": prepared["vocabulary_preparation"]["evidence_fingerprint"],
+            "outcome": "create",
+            "canonical": "wealth",
+        },
+        **kwargs,
+    )
+
+    assert decided["vocabulary_resolution"]["canonical"] == "wealth"
+    committed = op_replace_memory(
+        vault,
+        draft_id=decided["draft_id"],
+        draft_hash=decided["draft_hash"],
+        draft_token=decided["draft_token"],
+        vocabulary_decision={
+            "evidence_fingerprint": prepared["vocabulary_preparation"]["evidence_fingerprint"],
+            "outcome": "create",
+            "canonical": "wealth",
+        },
+        **kwargs,
+    )
+
+    assert committed["vocabulary_resolution"]["canonical"] == "wealth"
+    assert (vault / committed["new_path"]).exists()
+    assert "superseded" in (vault / old_path).read_text(encoding="utf-8")
+
+
 def test_replace_commit_rejects_when_predecessor_changed_after_preview(
     vault: Path,
 ) -> None:

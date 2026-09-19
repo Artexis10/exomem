@@ -561,6 +561,65 @@ def test_remember_route_preserves_unicode_title_and_explicit_slug(
     assert yaml.safe_load(frontmatter)["title"] == "睡眠"
 
 
+def test_remember_route_projects_experiment_vocabulary(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+    response = client.post(
+        "/api/remember",
+        json={
+            "title": "REST canonical experiment",
+            "content": "# REST canonical experiment\n\n## Hypothesis\n\nA bounded trial.\n",
+            "note_type": "experiment",
+            "domain": "Health",
+            "started": "2026-05-18",
+            "duration": "one day",
+            "status": "draft",
+            "validate_only": True,
+        },
+        headers=_auth(),
+    )
+
+    assert response.status_code == 200, response.text
+    resolution = response.json()["data"]["vocabulary_resolution"]
+    assert resolution["requested"] == "Health"
+    assert resolution["canonical"] == "health"
+
+
+def test_remember_route_carries_neighbour_domain_decision(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+    base = {
+        "title": "REST prepared experiment",
+        "content": "# REST prepared experiment\n\n## Hypothesis\n\nA bounded trial.\n",
+        "note_type": "experiment",
+        "domain": "wealth",
+        "started": "2026-05-18",
+        "duration": "one day",
+        "status": "draft",
+        "validate_only": True,
+    }
+    prepared_response = client.post("/api/remember", json=base, headers=_auth())
+    assert prepared_response.status_code == 200, prepared_response.text
+    prepared = prepared_response.json()["data"]
+    assert prepared["mutated"] is False
+    assert "destination" not in prepared
+
+    decided_response = client.post(
+        "/api/remember",
+        json={
+            **base,
+            "vocabulary_decision": {
+                "evidence_fingerprint": prepared["vocabulary_preparation"]["evidence_fingerprint"],
+                "outcome": "create",
+                "canonical": "wealth",
+            },
+        },
+        headers=_auth(),
+    )
+    assert decided_response.status_code == 200, decided_response.text
+    assert decided_response.json()["data"]["vocabulary_resolution"]["canonical"] == "wealth"
+
+
 def test_remember_route_completes_creation_review_round_trip(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -911,7 +970,7 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
     remember_schema = doc["paths"]["/api/remember"]["post"]["requestBody"]["content"][
         "application/json"
     ]["schema"]
-    assert {"slug", *REVIEW_FIELDS} <= set(remember_schema["properties"])
+    assert {"slug", "vocabulary_decision", *REVIEW_FIELDS} <= set(remember_schema["properties"])
     read_schema = doc["paths"]["/api/read_memory"]["post"]["requestBody"]["content"][
         "application/json"
     ]["schema"]

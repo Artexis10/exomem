@@ -10,7 +10,7 @@ from types import MappingProxyType
 
 import pytest
 from conftest import initialize_vault_state_offline
-from fastmcp.exceptions import ToolError
+from fastmcp.exceptions import ToolError, ValidationError
 from starlette.testclient import TestClient
 
 from exomem import commands, semantic_authoring, semantic_index
@@ -443,6 +443,74 @@ def test_mcp_only_empty_environment_is_sufficient_to_author(
     assert (tmp_path / "empty-vault" / committed["path"]).exists()
 
 
+def test_mcp_remember_carries_neighbour_domain_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcp = _build_server(tmp_path, monkeypatch)
+    decision_schema = _mcp_tools(mcp)["remember"]["inputSchema"]["properties"][
+        "vocabulary_decision"
+    ]
+    decision_object = decision_schema["anyOf"][0]
+    assert decision_object["additionalProperties"] is False
+    assert set(decision_object["required"]) == {"evidence_fingerprint", "outcome", "canonical"}
+    assert decision_object["properties"]["outcome"]["enum"] == ["reuse", "create", "defer"]
+    base = {
+        "title": "MCP prepared experiment",
+        "content": "# MCP prepared experiment\n\n## Hypothesis\n\nA bounded trial.\n",
+        "note_type": "experiment",
+        "domain": "wealth",
+        "started": "2026-05-18",
+        "duration": "one day",
+        "status": "draft",
+        "validate_only": True,
+    }
+    prepared = _call_tool(mcp, "remember", base)
+
+    assert prepared["mutated"] is False
+    assert "destination" not in prepared
+    decided = _call_tool(
+        mcp,
+        "remember",
+        {
+            **base,
+            "vocabulary_decision": {
+                "evidence_fingerprint": prepared["vocabulary_preparation"]["evidence_fingerprint"],
+                "outcome": "create",
+                "canonical": "wealth",
+            },
+        },
+    )
+
+    assert decided["vocabulary_resolution"]["canonical"] == "wealth"
+    with pytest.raises(ValidationError, match="reuse.*create.*defer"):
+        _call_tool(
+            mcp,
+            "remember",
+            {
+                **base,
+                "vocabulary_decision": {
+                    "evidence_fingerprint": prepared["vocabulary_preparation"]["evidence_fingerprint"],
+                    "outcome": "invalid",
+                    "canonical": "wealth",
+                },
+            },
+        )
+    with pytest.raises(ValidationError, match="extra"):
+        _call_tool(
+            mcp,
+            "remember",
+            {
+                **base,
+                "vocabulary_decision": {
+                    "evidence_fingerprint": prepared["vocabulary_preparation"]["evidence_fingerprint"],
+                    "outcome": "create",
+                    "canonical": "wealth",
+                    "extra": "refuse",
+                },
+            },
+        )
+
+
 def test_missing_unit_failure_envelope_matches_mcp_rest_and_cli_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -503,18 +571,18 @@ def test_observe_final_unit_removal_envelope_matches_all_facades_without_mutatio
     # `write_bytes`, not `write_text`: text mode turns these LF literals
     # into CRLF on Windows, and `expected_hash` is a hash of raw bytes.
     page.write_bytes(
-        "---\n"
-        "type: insight\n"
-        "exomem_id: 00000000-0000-4000-8000-000000000402\n"
-        "status: active\n"
-        "created: 2026-07-21\n"
-        "updated: 2026-07-21\n"
-        "tags: []\n"
-        "---\n\n"
-        "# Final unit\n\n"
-        "## Observations\n\n"
-        "- [operating constraint] Keep retries bounded #reliability ^only-unit\n"
-        .encode("utf-8")
+        b"---\n"
+        b"type: insight\n"
+        b"exomem_id: 00000000-0000-4000-8000-000000000402\n"
+        b"status: active\n"
+        b"created: 2026-07-21\n"
+        b"updated: 2026-07-21\n"
+        b"tags: []\n"
+        b"---\n\n"
+        b"# Final unit\n\n"
+        b"## Observations\n\n"
+        b"- [operating constraint] Keep retries bounded #reliability ^only-unit\n"
+
     )
     state = semantic_index.current_parent_index_state(vault, relative)
     unit = state.document.units[0]

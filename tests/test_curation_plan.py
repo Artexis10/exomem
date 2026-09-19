@@ -359,3 +359,55 @@ def test_create_proposal_seals_expected_absence_and_preview_detects_collision(va
     drifted = curation.preview(vault, run_id=proposed["run_id"])
     assert drifted["binding_health"] == "stale"
     assert drifted["blockers"][0]["code"] == "CURATION_BINDING_STALE"
+
+
+def test_create_note_vocabulary_preparation_is_actionable_and_decision_bound(vault) -> None:  # noqa: ANN001
+    from exomem import curation
+
+    registry = vault / "Knowledge Base/_Schema/source-taxonomy.yaml"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text("domains:\n  health:\n    path_label: Health\n", encoding="utf-8")
+    args = {
+        "title": "Curation wealth experiment",
+        "slug": "curation-wealth",
+        "content": "## Hypothesis\n\nA bounded trial.\n",
+        "note_type": "experiment",
+        "domain": "wealth",
+        "started": "2026-05-18",
+        "duration": "one day",
+        "relation_disposition": "reviewed_none",
+        "relation_review_reason": "No honest relation exists for this fixture.",
+    }
+    plan = {
+        "version": 1,
+        "title": "Curation vocabulary decision",
+        "steps": [{"step_id": "create-wealth", "kind": "create-note", "args": args}],
+    }
+
+    with pytest.raises(curation.CurationError, match="CURATION_VOCABULARY_PREPARATION_REQUIRED") as caught:
+        curation.propose(vault, plan)
+    assert "evidence_fingerprint" in caught.value.reason
+    with pytest.raises(ValueError, match="CURATION_VOCABULARY_PREPARATION_REQUIRED") as public:
+        commands.op_maintain_memory(vault, mode="curation", curation_action="propose", plan=plan)
+    assert "evidence_fingerprint" in str(public.value)
+    runs = vault / "Knowledge Base/_Governance/curation/runs"
+    assert not runs.exists() or not list(runs.iterdir())
+
+    preparation = commands.op_remember(vault, validate_only=True, **args)
+    args["vocabulary_decision"] = {
+        "evidence_fingerprint": preparation["vocabulary_preparation"]["evidence_fingerprint"],
+        "outcome": "create",
+        "canonical": "wealth",
+    }
+    proposed = curation.propose(vault, plan)
+    result = curation.apply(
+        vault,
+        run_id=proposed["run_id"],
+        plan_id=proposed["plan_id"],
+        expected_plan_fingerprint=proposed["plan_fingerprint"],
+        why="Approved bounded vocabulary decision.",
+    )
+
+    assert result["phase"] == "completed"
+    path = result["step"]["path"]
+    assert (vault / path).exists()

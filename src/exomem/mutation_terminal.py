@@ -1691,6 +1691,20 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
 
         if valid_projection(result["additive_authority"]):
             compact["additive_authority"] = result["additive_authority"]
+    if isinstance(leaf, Mapping):
+        resolution = leaf.get("vocabulary_resolution")
+        if resolution is None and isinstance(leaf.get("creation"), Mapping):
+            resolution = leaf["creation"].get("vocabulary_resolution")
+        if resolution is not None:
+            from .vocabulary_resolution import valid_public_resolution
+
+            if valid_public_resolution(resolution):
+                compact["vocabulary_resolution"] = resolution
+    if "vocabulary_resolution" in result:
+        from .vocabulary_resolution import valid_public_resolution
+
+        if valid_public_resolution(result["vocabulary_resolution"]):
+            compact["vocabulary_resolution"] = result["vocabulary_resolution"]
     compact["warnings_count"] = result["warnings_count"]
     # Projected from the leaf, never from the receipt. Receipt recovery replaces
     # `leaf_result` with `{}` on purpose (the portable receipt must not retain

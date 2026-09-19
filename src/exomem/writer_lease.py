@@ -4516,6 +4516,16 @@ class LeaseManager:
                     )
                     if isinstance(result, Mapping) and name in result
                 }
+                if isinstance(result, Mapping):
+                    resolution = result.get("vocabulary_resolution")
+                    leaf = result.get("leaf_result")
+                    if resolution is None and isinstance(leaf, Mapping):
+                        resolution = leaf.get("vocabulary_resolution")
+                    if resolution is not None:
+                        from .vocabulary_resolution import valid_public_resolution
+
+                        if valid_public_resolution(resolution):
+                            projection["vocabulary_resolution"] = resolution
                 projection["result_sha256"] = _receipt_result_sha256(result)
                 if not projection:
                     projection = {"status": "committed", "mutated": True}

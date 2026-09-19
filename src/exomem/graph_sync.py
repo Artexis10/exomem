@@ -106,6 +106,7 @@ _RECEIPT_TERMINAL_FIELDS = frozenset(
         "operation_id",
         "result_sha256",
         "additive_authority",
+        "vocabulary_resolution",
         "derived_sync",
     }
 )
@@ -235,6 +236,11 @@ def _is_receipt_terminal_projection(value: object) -> bool:
             from .vocabulary_receipts import valid_projection
 
             if not valid_projection(item):
+                return False
+        if key == "vocabulary_resolution":
+            from .vocabulary_resolution import valid_public_resolution
+
+            if not valid_public_resolution(item):
                 return False
         if key == "derived_sync":
             from .mutation_terminal import DERIVED_SYNC_OUTCOMES
