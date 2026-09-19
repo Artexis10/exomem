@@ -1,102 +1,105 @@
 ## Why
 
-The context compiler shipped with four of one owner's conventions compiled into the
-server. A vault that names its gear folder `Equipment/`, tracks state in a field called
-`stock`, or is written in a language other than English gets a compiler that quietly
-finds nothing, with no file to edit and no finding that says why.
+The context compiler shipped with one owner's conventions compiled into the server. A
+vault that names its gear folder `Equipment/`, tracks state in a field called `stock`,
+heads its sections in another language, or is simply denser than the one it was tuned on
+gets a compiler that quietly finds less, with no file to edit, no tool to change it and
+no finding that says why.
 
 Measured on main at `169e6deb`:
 
 - `working_set_resolve.CUE_PATTERNS` and `_CUE_CATEGORIES` are a second cue vocabulary
   held in code. It restates eight of the fourteen roles in `context-roles.yaml` with
-  slightly different patterns and category sets. The registry is already
-  vault-overridable; this copy is not, so an owner who adds a cue to a role changes
-  role selection but not the `category_match` evidence the same cue should produce.
+  different patterns and category sets. The registry is vault-overridable; this copy is
+  not, so an owner who adds a cue to a role changes role selection and not the
+  `category_match` evidence the same cue should produce.
 - `working_set_index._page_anchor_kind` admits `resource` anchors only from folders
-  named `Products` and `Systems`. No other module uses those names: they are this
-  feature's own invention, not a product convention.
-- `working_set_index._RAW_MATERIAL_FOLDERS` and `_SKIP_DIR_NAMES` are private copies of
-  layout the product already owns (`vault.in_append_only_tree`,
-  `vault.VAULT_SCAN_SKIP_DIRS`, `find_corpus.EXCLUDED_DIR_NAMES`). A future change to
-  the product's layout authority would leave the compiler behind.
-- `working_set_state._STATE_FIELDS` and `_DATE_FIELDS` decide which Records fields state
-  an anchor's current condition. They are English field names chosen from one vault.
-- `working_set_index.STOPWORDS` is an English function-word list. It decides two things:
-  which turn words the lexical band ignores, and which derived short names the index
-  admits. Both must read the same list, or a name the index admits could never be matched.
-- `working_set_index.RARE_TERM_MAX_ANCHORS = 3` decides when one shared name word is rare
-  enough to count as contact, and which derived short names are distinctive enough to
-  admit. Three is right for a vault of a few thousand pages and is a guess for any other.
+  named `Products` and `Systems`. No other module uses those names.
+- `working_set_index._SKIP_DIR_NAMES` is the index's own skip list, and
+  `_RAW_MATERIAL_FOLDERS` restates what `vault.in_append_only_tree` already defines.
+- `working_set_index._CATEGORY_BY_LABEL` maps English section headings to categories,
+  restating a vocabulary the semantic-language registry already owns and lets a vault
+  override.
+- `working_set_state._STATE_FIELDS` and `_DATE_FIELDS` are English field names chosen
+  from one vault.
+- `working_set_index.STOPWORDS` is an English function-word list. It decides which turn
+  words the lexical band ignores and which derived short names the index admits.
+- `working_set_index.RARE_TERM_MAX_ANCHORS = 3` decides when one shared name word is
+  rare enough to count as contact, and which derived short names are distinctive enough
+  to admit. Three suits a vault of a few hundred anchors and is a guess for any other.
+- Neither `context-roles.yaml` nor any new registry can be written by an agent through
+  MCP: `schema_memory` has no subject for them, and on hosted `_Schema/` is refused to
+  the generic file tools by design.
 
 Exomem's other vocabularies (relations, traversal profiles, source taxonomy, semantic
-language, context roles) are reviewed registries the owner extends. Activation
+language) are reviewed registries the owner extends through `schema_memory`. Activation
 conventions belong with them.
+
+This change does not make words in other scripts recognisable; the tokeniser fix on
+`make-anchor-resolution-sound` does, and this change depends on it.
 
 ## What Changes
 
-- **One cue vocabulary.** Delete `CUE_PATTERNS` and `_CUE_CATEGORIES`. The resolver
-  derives cue → category from the effective role registry: a role whose cue matches the
-  turn contributes that role's categories to `category_match`. An owner's `add_cues`
-  then reaches both role selection and anchor evidence, in any language.
+- **One cue vocabulary, explicit evidence.** Delete `CUE_PATTERNS` and
+  `_CUE_CATEGORIES`. A role declares `evidence_categories`; a role's cue counts as
+  evidence only when it is three characters or longer and matches on term boundaries.
+  The shipped registry reproduces the deleted table exactly. An owner's added cue then
+  reaches both role selection and anchor evidence.
 - **New registry `activation-conventions.yaml`**, shipped in the skill scaffold and the
-  plugin copy, overridable at `<Knowledge Base>/_Schema/activation-conventions.yaml`,
-  with four sections:
-  - `anchors`: which folders, tags and frontmatter `type` values make a page a
-    `resource` or a `hub` anchor. The six anchor kinds stay closed; how a vault spells
-    membership of them becomes the owner's.
-  - `state`: ordered state-field and date-field names for the current-state resolver.
-  - `stopwords`: words ignored by the lexical band.
-  - `resolution`: the structural thresholds the resolver ships as defaults, starting
-    with `rare_term_max_anchors` from `make-anchor-resolution-sound`. A threshold is a
-    count the server measures against, never a relevance score.
-- **Layout follows the product.** The index walk uses the product's shared skip list and
-  `in_append_only_tree` instead of private copies. Raw material stays out of the anchor
-  catalogue because it is immutable evidence, wherever the product says it lives.
-- **Same load contract as `context-roles.yaml`.** Shipped defaults plus vault override;
-  a broken override falls back to shipped and reports findings in
-  `generation.conventions_source` and `generation.conventions_findings`; the digest is
-  part of the index identity and the packet cache key, so an edit rebuilds the
-  disposable index and never serves a stale packet.
-- **Bounded by construction.** Patterns are plain substrings, never regular
-  expressions. Caps on entries per section; an entry over a cap is dropped with a
-  finding the owner can read.
-- **The agent can configure it.** The registry is a vault file under `_Schema/`, so an
-  agent edits it through the same governed write tools it uses for the other
-  registries, and reads back the effective conventions and findings from the packet's
-  `generation` block. No server component writes it.
+  plugin copy, overridable at `<Knowledge Base>/_Schema/activation-conventions.yaml`:
+  - `anchors`: folders, tags and frontmatter `type` values that make a page a `resource`
+    or a `hub` anchor, and the folders the index skips;
+  - `state`: ordered state-field and date-field names;
+  - `stopwords`: add-only;
+  - `resolution`: `rare_term_max_anchors`, bounded absolutely and relative to the vault.
+- **Page categories from the product's own registry.** Section headings map to
+  categories through the semantic-language registry first, the built-in map second.
+- **Layout.** Append-only trees and the governance trees come from the product's
+  authority; the skip list stays the index's own and becomes a convention; archived
+  anchors stay resolvable.
+- **Same load contract as `context-roles.yaml`, plus a size cap before parsing**, on both
+  loaders. A broken override falls back to shipped and reports findings in `generation`.
+- **A conventions edit wipes and rebuilds the sidecar**, changes the packet cache key and
+  makes older continuity tokens `stale`.
+- **The agent can configure it, on every tier.** `schema_memory` gains the subjects
+  `context-roles` and `activation-conventions`: validate, diff, and a hash-guarded save
+  of a reviewed override with a `why`. The generic file tools stay refused for
+  `_Schema/`.
+- **The evidence rules stay in code.** No file can change which kinds establish contact
+  or which combinations resolve.
 
-Not in this change: new anchor kinds, server-proposed conventions (that needs the
-decision ledger owned by `add-consolidation-dreamer`), making `Entities/`, `Sources/`
-or `Evidence/` relocatable (those are product-wide layout used by ten modules, and
-belong to a product-level change if wanted).
+Not in this change: the tokeniser, segmentation of scripts without word separators, new
+anchor kinds, server-proposed conventions, non-distinctive terms derived from the
+vault's own counts (a follow-up with its own audit), relocating `Entities/`, `Sources/`
+or `Evidence/`.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `activation-conventions`: the vault-owned registry of anchor membership rules,
-  state fields and stopwords that the context compiler reads.
+- `activation-conventions`: the vault-owned registry, its bounds, its effect on the
+  sidecar, and its governed write path.
 
 ### Modified Capabilities
 
-- `context-activation`: the activation index takes anchor membership from the
-  conventions registry and layout from the product's shared authorities.
-- `context-roles`: role cues are the single cue vocabulary, feeding `category_match`
-  as well as role selection.
+- `context-activation`: the activation index takes anchor membership and its skip list
+  from the conventions registry and raw-material exclusion from the product's authority.
+- `context-roles`: role cues are the single cue vocabulary; evidence categories are
+  explicit and bounded; the registry gains caps and a governed write path.
 
 ## Impact
 
+- Tool surface: `schema_memory` accepts two more subjects. Schema fixtures, digests,
+  capabilities and plugin trees are regenerated; connector clients need an action-schema
+  refresh. The hosted gateway allows the two subjects.
 - Code: `working_set_resolve.py`, `working_set_index.py`, `working_set_state.py`,
-  `working_set_runtime.py` (cache key, index identity), new
-  `activation_conventions.py` loader, scaffold and plugin registry files.
-- Behaviour on shipped defaults: anchor membership, state fields and stopwords are
-  byte-equivalent to today. Cue-derived `category_match` changes slightly because the
-  role registry's cues are a superset of the deleted table (`budget`, `left`, `lately`,
-  `next`, `we already`, plus six roles that had no entry). The deterministic activation
-  audit must stay inside its pre-registered bounds; this lands before the benchmark's
-  fixture digest freezes.
-- Existing `.working-set.sqlite` sidecars rebuild once (index identity now includes the
-  conventions digest).
+  `working_set_runtime.py` (cache key, `generation`, continuity payload),
+  `context_roles.py` (evidence categories, caps, size cap, save), new
+  `activation_conventions.py`, `commands.py` (`schema_memory`), `hosted_gateway.py`,
+  scaffold and plugin registry files.
+- Behaviour on shipped defaults: resolution, state and packets equal today's, except
+  that `Products` and `Systems` match case-insensitively. Equivalence and property tests
+  pin it; the deterministic audit gates recall and precision before and after.
+- Existing `.working-set.sqlite` sidecars rebuild once.
 - Builds on `activate-context-on-host-turns` and `make-anchor-resolution-sound`, both
-  merged: the continuity token already validates against index identity, and the
-  resolver's evidence rules are unchanged by this change.
+  merged, and on the tokeniser fix in the latter's tasks 4a.

@@ -6,10 +6,13 @@ the machine-local state root, built only from governed structure: entity pages (
 `aliases`, entity type, attributes), the pages the effective activation conventions
 registry admits as `hub` and `resource` anchors, active Planning items (title, kind,
 tags, execution pointer), Records collection manifests (title, item schema field names,
-`claims`), and project keys. The index walk SHALL take the directories it skips and the
-append-only raw-material trees it excludes from the product's shared layout
-definitions, not from a list of its own, and SHALL never admit a page inside an
-append-only tree as an anchor. Each anchor row SHALL carry a canonical ref, an anchor
+`claims`), and project keys. The index walk SHALL skip the folders the effective
+conventions registry names, SHALL take the append-only raw-material trees and the
+governance trees it excludes from the product's own layout definitions, SHALL never
+admit a page inside one of them as an anchor, and SHALL keep walking archived trees so
+that an archived anchor stays resolvable and is ranked down by lifecycle. A section
+heading SHALL map to a category through the semantic-language registry first and the
+built-in heading map second. Each anchor row SHALL carry a canonical ref, an anchor
 kind, a lifecycle, a structural signature extracted without any generative model,
 alias/lexical terms, an optional signature embedding produced by the configured
 embedding backend, typed link summaries and the index generation. The index SHALL be

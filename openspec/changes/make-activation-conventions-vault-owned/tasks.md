@@ -2,18 +2,26 @@
 
 - [x] 0.1 `activate-context-on-host-turns` (169e6deb) and `make-anchor-resolution-sound`
       (6cb28cfa) are merged; this branch carries main.
-- [ ] 0.2 Record the deterministic activation audit on the seeded corpus at the base
+- [ ] 0.2 The tokeniser fix (`make-anchor-resolution-sound` tasks 4a) is merged and this
+      branch carries it.
+- [ ] 0.3 Record the deterministic activation audit on the seeded corpus at the base
       commit: per-case anchor recall and precision, twin false activation, hedged-twin
-      count. This is the before-image for 4.2.
+      count. This is the before-image for 5.2.
 
 ## 1. Conventions registry
 
-- [ ] 1.1 Red first: tests for shipped-equals-previous-constants (folders, tags,
-      state-field order, date-field order, stopword set, rare-term threshold), override
-      add and drop in every list section, the threshold's range and unknown-key findings, the five rejected folder-rule shapes, caps with findings, invalid YAML
-      fallback, one bad rule not voiding the file.
+- [ ] 1.1 Red first: shipped-equals-previous-constants (folders, tags, skip folders,
+      state-field order, date-field order, stopword set, rare-term threshold); override
+      add and drop where dropping is allowed; `stopwords.drop` and skip-folder drop
+      ignored with a finding; the rejected folder-rule shapes (absolute, `..`, leading
+      `.` or `_`, knowledge-base-prefixed, entity folder, a Planning or Records tree,
+      append-only tree); case-insensitive segment matching, pinned on a lowercase
+      `products/` folder; caps with findings; the 256 KiB refusal before parsing; invalid
+      YAML fallback; one bad rule not voiding the file; threshold range, the relative
+      bound on a 40-anchor index, and unknown `resolution` keys.
 - [ ] 1.2 Add `src/exomem/activation_conventions.py` on the `context_roles` load
-      contract (shipped text from the scaffold, override path, digest memo, findings).
+      contract (shipped text from the scaffold, override path, digest memo, findings,
+      size cap before parse).
 - [ ] 1.3 Ship `activation-conventions.yaml` in `src/exomem/_scaffold/_Schema/` with a
       commented override example; regenerate the plugin copy. Keep it generic:
       `tests/test_scaffold_no_leak.py` must pass.
@@ -21,48 +29,80 @@
 ## 2. Compiler reads the registry
 
 - [ ] 2.1 `working_set_index`: `_page_anchor_kind` takes membership from the effective
-      conventions; delete `_RAW_MATERIAL_FOLDERS` and `_SKIP_DIR_NAMES` in favour of
-      `vault.in_append_only_tree` and the product's shared skip lists. Before deleting,
-      diff the directories skipped today against the shared lists and report any
-      difference instead of absorbing it.
-- [ ] 2.2 `working_set_state`: state and date fields from the conventions.
-- [ ] 2.3 Stopwords and `rare_term_max_anchors` from the conventions, read once per build
+      conventions and never evaluates a page the Planning or Records passes admitted;
+      the walk skips `anchors.skip_folders`; `_RAW_MATERIAL_FOLDERS` gives way to
+      `vault.in_append_only_tree` plus the governance trees; `_archive` stays walked.
+      Red first: a staged upload and a template tagged `hub` are not anchors; an
+      archived entity stays an anchor; a `Planning` folder rule is refused.
+- [ ] 2.2 `_categories` consults the semantic-language registry's heading and category
+      aliases first and the built-in map second. Red first: a heading alias added in the
+      vault's semantic-language override earns its category; no category earned on the
+      scaffold vault or the audit corpus is lost.
+- [ ] 2.3 `working_set_state`: state and date fields from the conventions.
+- [ ] 2.4 Stopwords and `rare_term_max_anchors` from the conventions, read once per build
       and passed to both users (turn matching and `rare_term` in `working_set_resolve`;
-      derived short-name admission in `working_set_index`). Red first: an override that
-      changes either one changes both uses, and the index identity.
-- [ ] 2.4 Conventions digest joins the index identity, the packet cache key and
-      `generation` (`conventions_source`, `conventions_hash`, `conventions_findings`).
-      Red first: edit the override, activate the same turn, assert a rebuilt index and a
-      different hash, and that no cached packet is served.
+      derived short-name admission in `working_set_index`). The resolver enforces a floor
+      of 2 on `working_set_lexical_min_terms`.
+- [ ] 2.5 The conventions digest is stored in the sidecar `meta` table; a mismatch wipes
+      the sidecar like a `SCHEMA_VERSION` mismatch; bump `SCHEMA_VERSION`. The digest
+      joins the packet cache key, `generation` (`conventions_source`,
+      `conventions_hash`, `conventions_findings`) and the continuity payload. Red first:
+      add a stopword with no vault write and assert a rebuilt sidecar, a derived alias
+      gone, no cached packet served and an older token reported `stale`.
 
 ## 3. One cue vocabulary
 
-- [ ] 3.1 Red first: the three `context-roles` scenarios (owner's cue reaches
-      `category_match`; broad cue selects a role without evidence; a cue alone abstains).
-- [ ] 3.2 Add `cue_evidence` to the role model, the shipped registry (true on the eight
-      roles named in the design) and the override grammar.
-- [ ] 3.3 Delete `CUE_PATTERNS` and `_CUE_CATEGORIES`; derive eligible categories from
-      the effective registry. Trace and update every reader of `TurnAnalysis.cues`.
+- [ ] 3.1 Red first: the `context-roles` scenarios, the equivalence test (shipped
+      evidence cues and categories reproduce the deleted table over the audit corpus and
+      an adversarial turn set that includes `?`, `how much is left` and `what about`),
+      and the property test (no `partial` anchor becomes `resolved` through a category
+      that was not eligible before).
+- [ ] 3.2 Add `evidence_categories` to the role model, the shipped registry (the eight
+      roles, with the deleted table's sets; `what about` added to `open_questions`) and
+      the override grammar, validated against the semantic-language registry's
+      categories; add the roles caps and the size cap before parse.
+- [ ] 3.3 Delete `CUE_PATTERNS` and `_CUE_CATEGORIES`. Eligible categories are computed
+      in the runtime from the effective registry and passed into `candidates_for`;
+      `analyze_turn` stays registry-free and `TurnAnalysis` drops `cues`. Update every
+      reader and the tests that read `cues`.
 
-## 4. Proof
+## 4. Governed write path
 
-- [ ] 4.1 End-to-end test on a vault with no `Products/` or `Systems/` folder, a
-      non-English cue and stopword override, and a custom state field: a turn resolves,
-      the packet carries the custom state, `generation` names the vault override.
-- [ ] 4.2 Re-run the deterministic activation audit and compare with 0.2. Twin false
-      activation and anchor precision stay inside the pre-registered bounds. If not,
-      narrow the shipped `cue_evidence` set and re-run; do not reinstate a table.
-- [ ] 4.3 Latency gate: `working_set` stages within `CEIL_WORKING_SET_MS` at 2k and 8k
-      notes with the shipped registry and with an override at the caps.
-- [ ] 4.4 Three-door parity (MCP, CLI, REST) still holds; `ask_memory` and `find`
+- [ ] 4.1 Red first, through the tool entry point and never `Path.write_text`:
+      `schema_memory` subjects `context-roles` and `activation-conventions` validate a
+      proposal and return findings, diff it, save under `expected_hash` with `why`,
+      refuse a stale hash, and write only the override file.
+- [ ] 4.2 Implement on the `traversal-profiles` pattern; CLI and REST parity.
+- [ ] 4.3 The hosted gateway allows the two subjects while `manage_memory_file` and
+      `edit_memory` stay refused for the schema folder. Red first on both halves.
+
+## 5. Proof
+
+- [ ] 5.1 End-to-end through the tools on a vault with no `Products/` or `Systems/`
+      folder: an agent saves a conventions override (custom resource folder, a custom
+      state field, added stopwords) and a roles override (a non-English cue with an
+      evidence category); a turn resolves, the packet carries the custom state, and
+      `generation` names both vault registries.
+- [ ] 5.2 Re-run the deterministic activation audit and compare with 0.3. Recall,
+      precision and twin false activation stay inside the pre-registered bounds. If a
+      role drifts, shrink its shipped `evidence_categories` and re-run; do not reinstate
+      a table.
+- [ ] 5.3 Latency gate: `working_set` stages within `CEIL_WORKING_SET_MS` at 2k and 8k
+      notes with the shipped registry, with an override at the caps, and with one rule
+      admitting a large folder (reported, not gated).
+- [ ] 5.4 Three-door parity (MCP, CLI, REST) still holds; `ask_memory` and `find`
       byte-identical for every input.
+- [ ] 5.5 Real-turn run on the owner's snapshot with the shipped registry: every
+      negative turn still abstains and nothing is served from a partial anchor. Evidence
+      to the owner's knowledge base, not the repository.
 
-## 5. Delivery
+## 6. Delivery
 
-- [ ] 5.1 Scaffold skill reference: how an agent diagnoses an abstention caused by
-      uncovered conventions and proposes an override to the owner.
-- [ ] 5.2 Regenerate derived artifacts (plugin tree, hosted render, capabilities doc);
-      `openspec validate --all --strict`; privacy gate; full sharded corpus at the
-      delivery boundary.
-- [ ] 5.3 Independent review of the diff, then archive this change with
+- [ ] 6.1 Scaffold skill reference: how an agent reads `generation`, diagnoses an
+      abstention caused by uncovered conventions, validates and saves an override with
+      the owner's approval.
+- [ ] 6.2 Regenerate derived artifacts (tool schemas and fingerprint, capabilities doc,
+      plugin tree, hosted render, harness modules pin); `openspec validate --all
+      --strict`; privacy gate; full sharded corpus at the delivery boundary.
+- [ ] 6.3 Independent review of the diff, then archive this change with
       `openspec archive` in the same delivery.
