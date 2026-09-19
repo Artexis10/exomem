@@ -42,6 +42,7 @@ from mcp.types import TextContent
 from pydantic import Field, StrictInt, StringConstraints, WithJsonSchema
 from typing_extensions import TypedDict
 
+from . import activation_conventions as activation_conventions_module
 from . import add as add_module
 from . import adopt as adopt_module
 from . import adoption_proposals as adoption_proposals_module
@@ -54,6 +55,7 @@ from . import call_spans as call_spans_module
 from . import capabilities as capabilities_module
 from . import compile_proposal as compile_proposal_module
 from . import context_pack as context_pack_module
+from . import context_roles as context_roles_module
 from . import contradiction_stance as contradiction_stance_module
 from . import corpus_aware as corpus_aware_module
 from . import create_directory as create_directory_module
@@ -9113,22 +9115,32 @@ def op_schema_memory(
             resolve (context plus at most one of name or proposal); preview (proposal,
             optional name); save (proposal and why, optional name plus expected_hash
             for updates); or refresh (name, expected_hash, and why). Other subjects
-            retain their existing operations.
+            retain their existing operations. For `context-roles` and
+            `activation-conventions`, `validate` returns a proposal's findings plus
+            the current registry's content_hash; `diff` compares a proposal against
+            the effective registry; `save-roles`/`save-conventions` (matched to their
+            subject) commit a reviewed proposal with why and expected_hash, refusing
+            a proposal that has any finding; `infer` is refused for both, since the
+            server does not propose conventions or roles.
         name: A saved workflow key for inspect/refresh, validate as an alternative to
             proposal, resolve (or `@standalone`), and optional preview/save update.
-        subject: `contract`, `categories`, `entity-types`, `relations`, `traversal-profiles`, or
+        subject: `contract`, `categories`, `entity-types`, `relations`,
+            `traversal-profiles`, `context-roles`, `activation-conventions`, or
             `workflow-contracts`. Workflow contracts support inventory, inspect,
             validate, resolve, preview, save, and refresh with their exact argument matrix.
         project: Optional project scope for inference.
         page_type: Optional page-type scope for inference.
         save: Legacy inference flag. Ignored when false for workflow contracts and
             refused when true; workflow writes use operation=`save`.
-        expected_hash: Current relation registry hash required by save-relations, or
-            current workflow hash required for workflow save updates and refresh.
+        expected_hash: Current relation registry hash required by save-relations, current
+            workflow hash required for workflow save updates and refresh, or the current
+            roles_hash/conventions_hash required by save-roles/save-conventions.
         strict: In validate mode, signal a failing CLI/CI outcome on findings.
         compare_to: In diff mode, compare to this saved contract instead of corpus reality.
         proposal: Reviewed relation definition for propose-relation, reviewed delta
-            for save-relations, or workflow proposal for workflow modes.
+            for save-relations, workflow proposal for workflow modes, or a complete
+            override document (the same shape as the vault file) for context-roles'
+            validate/diff/save-roles and activation-conventions' validate/diff/save-conventions.
             propose-relation requires requested_label (the name portion), parent
             (one core relation key), description, and direction (directed or symmetric);
             namespace supplies the prefix and defaults to vault. Optional fields are
@@ -9136,7 +9148,7 @@ def op_schema_memory(
             and query. Pass this mapping directly without an extensions wrapper.
             save-relations takes the returned delta and expected_hash.
         why: Required audit reason for relation delta save, workflow save/refresh,
-            and entity-type saves.
+            entity-type saves, and save-roles/save-conventions.
         include_model_suggestions: Request response-only optional relation suggestions.
         context: Exact optional workflow resolve mapping. Its only keys are project,
             domain, and activity; omit a key for unknown or set it null for known absent.
@@ -9210,6 +9222,26 @@ def op_schema_memory(
             page_type=page_type,
             strict=strict,
             compare_to=compare_to,
+            include_model_suggestions=include_model_suggestions,
+        )
+    if subject in ("context-roles", "activation-conventions"):
+        return _governed_registry_schema_operation(
+            vault_root,
+            subject=subject,
+            operation=operation,
+            proposal=proposal,
+            why=why,
+            expected_hash=expected_hash,
+            save=save,
+            project=project,
+            page_type=page_type,
+            strict=strict,
+            compare_to=compare_to,
+            name=name,
+            context=context,
+            date_from=date_from,
+            date_to=date_to,
+            continuation=continuation,
             include_model_suggestions=include_model_suggestions,
         )
     if operation == "save-entity-types":
@@ -9609,7 +9641,7 @@ def op_schema_memory(
     if subject != "contract":
         raise ValueError(
             "INVALID_SCHEMA_SUBJECT: subject must be contract, categories, relations, "
-            "or traversal-profiles"
+            "traversal-profiles, context-roles, or activation-conventions"
         )
     if not name:
         raise ValueError("INVALID_CONTRACT: name is required for contract governance")
@@ -9841,6 +9873,142 @@ def _workflow_contract_schema_operation(
     except workflow_contracts_module.WorkflowContractError as error:
         return {"resolved": False, "code": error.code}
     return invalid
+
+
+def _governed_registry_schema_operation(
+    vault_root: Path,
+    *,
+    subject: str,
+    operation: str,
+    proposal: dict[str, Any] | None,
+    why: str | None,
+    expected_hash: str | None,
+    save: bool,
+    project: str | None,
+    page_type: str | None,
+    strict: bool,
+    compare_to: str | None,
+    name: str | None,
+    context: Mapping[str, str | None] | None,
+    date_from: str | None,
+    date_to: str | None,
+    continuation: str | None,
+    include_model_suggestions: bool,
+) -> dict[str, Any]:
+    """`context-roles`/`activation-conventions` through their shared shape.
+
+    Both are vault-owned policy registries with no inference (design.md
+    decision 7): `validate` and `diff` are read-only, a dedicated save
+    operation takes `proposal`, `why` and `expected_hash` on the
+    `save-relations` pattern (the generic `save` flag is refused), a
+    proposal holding any finding is never saved, and `infer` is refused
+    outright because the server does not propose conventions or roles. The
+    two subjects differ only in which module answers and which attribute
+    name carries the effective registry's hash, which is what lets one
+    function serve both -- mirroring how `_workflow_contract_schema_operation`
+    already factors the workflow-contracts family out of this dispatch.
+    """
+    if subject == "context-roles":
+        load_fn = context_roles_module.load_roles
+        save_fn = context_roles_module.save_roles
+        hash_attribute = "roles_hash"
+        save_operation = "save-roles"
+
+        def as_named_dict(registry: Any) -> dict[str, Any]:
+            return {key: role.as_dict() for key, role in registry.roles.items()}
+
+    else:
+        load_fn = activation_conventions_module.load_conventions
+        save_fn = activation_conventions_module.save_conventions
+        hash_attribute = "conventions_hash"
+        save_operation = "save-conventions"
+
+        def as_named_dict(registry: Any) -> dict[str, Any]:
+            return activation_conventions_module.conventions_payload(registry.conventions)
+
+    if operation == "infer":
+        raise ValueError(
+            f"INVALID_SCHEMA_OPERATION: infer is refused for {subject}; "
+            "the server does not propose conventions or roles"
+        )
+    if operation not in ("validate", "diff", save_operation):
+        raise ValueError(
+            f"INVALID_SCHEMA_OPERATION: {subject} accepts validate, diff, or {save_operation}"
+        )
+    if (
+        save
+        or project is not None
+        or page_type is not None
+        or date_from is not None
+        or date_to is not None
+        or continuation is not None
+        or include_model_suggestions
+        or compare_to is not None
+        or strict
+        or name is not None
+        or context is not None
+    ):
+        raise ValueError(
+            f"INVALID_SCHEMA_ARGUMENT: {subject} accepts only proposal, why, and expected_hash"
+        )
+    if proposal is None or not isinstance(proposal, dict):
+        raise ValueError(
+            f"INCOMPLETE_REGISTRY_PROPOSAL: {operation} requires a reviewed proposal for {subject}"
+        )
+
+    current = load_fn(vault_root)
+    if operation == "validate":
+        if why is not None or expected_hash is not None:
+            raise ValueError(
+                "INVALID_SCHEMA_ARGUMENT: why and expected_hash apply only to "
+                f"{save_operation}"
+            )
+        candidate = load_fn(vault_root, proposal=proposal)
+        findings = [dict(item) for item in candidate.findings]
+        return {
+            "subject": subject,
+            "valid": not findings,
+            "findings": findings,
+            "content_hash": getattr(current, hash_attribute),
+        }
+    if operation == "diff":
+        if why is not None or expected_hash is not None:
+            raise ValueError(
+                "INVALID_SCHEMA_ARGUMENT: why and expected_hash apply only to "
+                f"{save_operation}"
+            )
+        candidate = load_fn(vault_root, proposal=proposal)
+        before = as_named_dict(current)
+        after = as_named_dict(candidate)
+        return {
+            "subject": subject,
+            "changed": before != after,
+            "content_hash": getattr(current, hash_attribute),
+            "before": before,
+            "after": after,
+            "findings": [dict(item) for item in candidate.findings],
+        }
+    # operation == save_operation
+    if not why or not why.strip():
+        raise ValueError(f"WHY_REQUIRED: {save_operation} requires why")
+    if not expected_hash:
+        raise ValueError(f"EXPECTED_HASH_REQUIRED: {save_operation} requires expected_hash")
+    candidate = load_fn(vault_root, proposal=proposal)
+    if candidate.findings:
+        return {
+            "subject": subject,
+            "valid": False,
+            "findings": [dict(item) for item in candidate.findings],
+            "saved": None,
+        }
+    saved = save_fn(vault_root, proposal, expected_hash=expected_hash)
+    return {
+        "subject": subject,
+        "valid": True,
+        "findings": [],
+        "why": why.strip(),
+        "saved": saved,
+    }
 
 
 def op_reclassify_source(

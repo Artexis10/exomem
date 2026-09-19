@@ -3506,6 +3506,8 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "resolve-entity-type": "structure",
         "propose-relation": "structure",
         "save-relations": "mutation",
+        "save-roles": "mutation",
+        "save-conventions": "mutation",
     },
     ("record_memory", "action"): {
         "describe": "structure",

@@ -356,10 +356,14 @@ def test_digest_changes_when_effective_conventions_change(vault: Path) -> None:
     assert changed.conventions_hash != shipped.conventions_hash
 
 
-def test_no_server_component_mutates_the_registry() -> None:
-    """Review-gated evolution: the loader exposes no writer."""
-    assert not [name for name in dir(ac) if name.startswith("save")]
-    assert not hasattr(ac, "write_conventions")
+def test_the_only_writer_is_the_governed_save(vault: Path) -> None:
+    """Review-gated evolution (design.md decision 7): the loader gained
+    exactly one writer, `save_conventions`, and it cannot be called without a
+    reviewed proposal's expected_hash -- there is no unreviewed write."""
+    writers = [name for name in dir(ac) if name.startswith(("save", "write"))]
+    assert writers == ["save_conventions"]
+    with pytest.raises(TypeError):
+        ac.save_conventions(vault, {"schema_version": 1})
 
 
 # --------------------------------------------------------------------------- #

@@ -161,10 +161,14 @@ def test_broken_override_falls_back_to_the_shipped_registry(vault: Path) -> None
     assert any(finding["code"] == "invalid_yaml" for finding in registry.findings)
 
 
-def test_no_server_component_mutates_the_registry() -> None:
-    """Review-gated evolution: the loader exposes no writer."""
-    assert not [name for name in dir(context_roles) if name.startswith("save")]
-    assert not hasattr(context_roles, "write_roles")
+def test_the_only_writer_is_the_governed_save(vault: Path) -> None:
+    """Review-gated evolution (design.md decision 7): the loader gained
+    exactly one writer, `save_roles`, and it cannot be called without a
+    reviewed proposal's expected_hash -- there is no unreviewed write."""
+    writers = [name for name in dir(context_roles) if name.startswith(("save", "write"))]
+    assert writers == ["save_roles"]
+    with pytest.raises(TypeError):
+        context_roles.save_roles(vault, {"schema_version": 1, "roles": {}})
 
 
 # --------------------------------------------------------------------------- #

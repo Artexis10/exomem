@@ -27,7 +27,9 @@ import httpx
 import pytest
 from fastmcp import FastMCP
 
+from exomem import activation_conventions as activation_conventions_module
 from exomem import commands as commands_module
+from exomem import context_roles as context_roles_module
 from exomem import hosted_gateway as gateway
 from exomem import schema
 from exomem.hosted_runtime import HostedCellConfig, HostedCellLifecycle, HostedResourceLimits
@@ -312,6 +314,11 @@ def test_hosted_v3_refuses_replace_memory_against_the_schema_tree(tmp_path: Path
         "Knowledge Base/_Schema/brand-new-doctrine.md",
         "_Schema/brand-new-doctrine.md",
         "_Governance/brand-new-policy.md",
+        # Task 4.3: the two new vault-owned registry override files, before an
+        # owner has ever saved one -- the guard must refuse the PATH, not wait
+        # for `schema_memory` to have written something there first.
+        "Knowledge Base/_Schema/context-roles.yaml",
+        "Knowledge Base/_Schema/activation-conventions.yaml",
     ],
 )
 def test_hosted_v3_protected_tree_refusal_is_not_bypassable(
@@ -1409,3 +1416,139 @@ def test_v5_curation_refuses_a_plan_step_that_relocates_into_a_protected_tree(
     assert code not in {"UNKNOWN_PARAM", "INVALID_MODE"}, response.text
     assert "HOSTED_PROTECTED_TREE_MUTATION" not in response.text
     assert _protected_tree_state(config.vault_root) == trees_before
+
+
+# --- Task 4.3: the two new `schema_memory` registry subjects -----------------
+#
+# `schema_memory` is not in `PROTECTED_TREE_PATH_ARGUMENTS` -- it declares no
+# caller-chosen path role at all (see the comment on
+# `TARGET_CONSTRAINED_MUTATIONS` above), because it OWNS the fixed-path writes
+# under `_Schema/`. Adding `context-roles`/`activation-conventions` as two more
+# subjects therefore needs no gateway change to the protected-tree control;
+# what needs proof is that classification and the other half of design.md
+# decision 7: `edit_memory`/`manage_memory_file` still refuse the two new
+# override files by the same guard as every other doctrine document.
+#
+# A full round trip THROUGH this file's `_call` harness -- the one this suite
+# otherwise always drives -- is not exercised for a `subject`-bearing
+# `schema_memory` call. `server_hosted._json_body` refuses ANY body carrying a
+# top-level `subject` key (`HOSTED_SELECTOR_REJECTED`, from `_RESERVED_FIELDS`
+# in `server_hosted.py`) before the command even resolves, on every profile
+# that routes `schema_memory`. That collision is pre-existing -- confirmed
+# against the ALREADY-SHIPPED `categories` subject, unrelated to this change
+# -- and blocks every `schema_memory` subject that is not the default
+# `contract` (`categories`, `relations`, `traversal-profiles`, and now
+# `context-roles`/`activation-conventions` alike); `save-entity-types` and
+# `infer` are unaffected only because they never need to name `subject`
+# explicitly. Fixing that collision is out of this task's scope (it is a
+# `server_hosted.py` routing-metadata rule with no relation to the protected
+# tree, and touches every existing subject, not just the two this change
+# adds), so it is reported rather than patched here. The claim this task
+# actually owns -- the protected-tree classification -- is proven at the
+# classification level below instead of through a route that cannot carry a
+# `subject` today.
+
+
+def test_schema_memory_stays_unguarded_by_the_protected_tree_control(tmp_path: Path) -> None:
+    """`schema_memory` keeps writing under `_Schema/` through the classification
+    that already covers `categories`/`relations`/`traversal-profiles`: no path
+    role, so no entry in `PROTECTED_TREE_PATH_ARGUMENTS`, so the guard never
+    reaches it. Gaining two subjects changes none of that.
+    """
+    assert "schema_memory" in gateway.TARGET_CONSTRAINED_MUTATIONS
+    assert "schema_memory" not in gateway.PROTECTED_TREE_PATH_ARGUMENTS
+
+
+def test_the_governed_save_writes_only_the_override_file_a_hosted_cell_would_see(
+    tmp_path: Path,
+) -> None:
+    """The write side of decision 7, proven at the entry point `schema_memory`
+    itself dispatches to (the same leaf a hosted cell's command forwarding
+    would call once routed) -- a hosted-shaped vault, seeded the way `_cell`
+    seeds one, ends up with exactly the two override files and nothing else
+    inside the protected trees."""
+
+    app, config = _cell(tmp_path, profile=_profile_exposing("schema_memory"))
+    root = Path(config.vault_root)
+    trees_before = _protected_tree_state(root)
+
+    roles_before = context_roles_module.load_roles(root).roles_hash
+    saved_roles = commands_module.op_schema_memory(
+        root,
+        subject="context-roles",
+        operation="save-roles",
+        proposal={"schema_version": 1, "roles": {"constraints": {"add_cues": ["ceiling"]}}},
+        why="hosted agent promotes a shipped cue to a narrower one",
+        expected_hash=roles_before,
+    )
+    assert saved_roles["valid"] is True
+    assert context_roles_module.override_path(root).is_file()
+
+    conventions_before = activation_conventions_module.load_conventions(root).conventions_hash
+    saved_conventions = commands_module.op_schema_memory(
+        root,
+        subject="activation-conventions",
+        operation="save-conventions",
+        proposal={"schema_version": 1, "anchors": {"add_skip_folders": ["Vorlagen"]}},
+        why="hosted agent adds its own draft-folder spelling",
+        expected_hash=conventions_before,
+    )
+    assert saved_conventions["valid"] is True
+    assert activation_conventions_module.override_path(root).is_file()
+
+    # `_cell` already seeds a starter copy of both files (mirroring every other
+    # scaffolded `_Schema` document, as a customisation starting point), so the
+    # governed save changes their CONTENT rather than adding new paths -- the
+    # claim is exactly the two expected keys changed and nothing else moved.
+    trees_after = _protected_tree_state(root)
+    assert set(trees_after) == set(trees_before)
+    changed = {key for key in trees_before if trees_after[key] != trees_before[key]}
+    assert changed == {
+        f"{_kb()}/_Schema/{context_roles_module.REGISTRY_FILENAME}",
+        f"{_kb()}/_Schema/{activation_conventions_module.REGISTRY_FILENAME}",
+    }
+
+    # The same cell's direct file tools remain refused for both new files.
+    for target in (
+        context_roles_module.override_path(root).relative_to(root).as_posix(),
+        activation_conventions_module.override_path(root).relative_to(root).as_posix(),
+    ):
+        refused = _call(app, config, "edit_memory", _guarded_body("edit_memory", target))
+        assert refused.status_code == 403, refused.text
+        assert "HOSTED_PROTECTED_TREE_MUTATION" in refused.text
+
+        refused_file_tool = _call(
+            app, config, "manage_memory_file", _guarded_body("manage_memory_file", target)
+        )
+        assert refused_file_tool.status_code == 403, refused_file_tool.text
+        assert "HOSTED_PROTECTED_TREE_MUTATION" in refused_file_tool.text
+
+
+@pytest.mark.parametrize(
+    "override_filename",
+    [
+        context_roles_module.REGISTRY_FILENAME,
+        activation_conventions_module.REGISTRY_FILENAME,
+    ],
+)
+@pytest.mark.parametrize("command", ["edit_memory", "manage_memory_file"])
+def test_hosted_generic_file_tools_refuse_the_new_registry_files(
+    tmp_path: Path, command: str, override_filename: str
+) -> None:
+    """The refusal holds on a hosted cell as `_cell` builds one -- which
+    already seeds a starter copy of every scaffolded `_Schema` file, mirroring
+    the shipped registry, as a vault's own customisation starting point. The
+    not-yet-existing-page case for these same two filenames is covered by
+    `test_hosted_v3_protected_tree_refusal_is_not_bypassable`'s own candidate
+    list, which is the harness built for that exact claim."""
+
+    profile = _profile_exposing(command)
+    app, config = _cell(tmp_path, profile=profile)
+    target = f"{_kb()}/_Schema/{override_filename}"
+
+    response = _call(app, config, command, _guarded_body(command, target))
+
+    assert response.status_code == 403, response.text
+    assert "HOSTED_PROTECTED_TREE_MUTATION" in response.text
+
+

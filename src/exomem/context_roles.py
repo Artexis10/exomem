@@ -250,6 +250,55 @@ def load_roles(vault_root: Path | None = None, *, proposal: Any | None = None) -
     return registry
 
 
+def save_roles(vault_root: Path, proposal: Any, *, expected_hash: str) -> dict[str, Any]:
+    """Save one reviewed, complete context-role override document.
+
+    The proposal is the raw override document -- the same shape as the file
+    on disk -- never a delta (mirrors `traversal_profiles.save_profiles`).
+    `expected_hash` is unconditionally required (design.md decision 7's
+    `save-relations` pattern: no separate create/update branching, because
+    the shipped registry always has a `roles_hash`, even with no override
+    file yet) and is checked against the CURRENT effective registry's
+    `roles_hash`.
+
+    The rendered text uses the exact same `yaml.safe_dump(proposal,
+    sort_keys=True)` call `load_roles`'s `proposal=` path hashes, so the
+    round trip through disk reproduces the same `roles_hash` a caller who
+    just validated this proposal already saw -- diverging here (say, by
+    adding `allow_unicode=True`) would change the file's bytes without
+    changing the caller's proposal, and the next load would report a
+    DIFFERENT hash than the one just returned.
+
+    Callers are expected to have already rejected a proposal with any
+    finding (`op_schema_memory` does, before calling this); the check here
+    is defence in depth, matching `semantic_language_registry.save_registry`.
+    """
+    current = load_roles(vault_root)
+    if current.roles_hash != expected_hash:
+        raise ValueError(
+            "STALE_CONTEXT_ROLE_REGISTRY: expected_hash does not match current hash"
+        )
+    candidate = load_roles(vault_root, proposal=proposal)
+    if candidate.findings:
+        raise ValueError(
+            f"INVALID_CONTEXT_ROLE_REGISTRY: {[dict(item) for item in candidate.findings]!r}"
+        )
+    path = override_path(vault_root)
+    rendered = yaml.safe_dump(proposal, sort_keys=True)
+    from . import vault as vault_module
+
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(path=path, content=rendered)], vault_root=Path(vault_root)
+    )
+    _CACHE.pop(path, None)
+    return {
+        "path": path.relative_to(vault_root).as_posix(),
+        "content_hash": candidate.roles_hash,
+        "previous_hash": current.roles_hash,
+        "created": current.source == "shipped",
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Parsing
 # --------------------------------------------------------------------------- #

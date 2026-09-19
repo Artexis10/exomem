@@ -153,14 +153,14 @@ def _hash(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def _conventions_digest(conventions: Conventions) -> str:
-    """The digest of record: over EFFECTIVE values, never file bytes.
+def conventions_payload(conventions: Conventions) -> dict[str, Any]:
+    """The JSON-safe view of EFFECTIVE values the digest (and a `diff`) reads.
 
-    Two override files that resolve to the same conventions therefore share a
-    digest, and a whitespace-only or key-reordering edit that changes nothing
-    the compiler reads does not rebuild the sidecar.
+    Factored out of `_conventions_digest` so `schema_memory`'s `diff`
+    operation can compare two registries' effective values without
+    duplicating this shape.
     """
-    payload = {
+    return {
         "anchors": {
             kind: {
                 "folders": sorted(rule.folders),
@@ -175,7 +175,16 @@ def _conventions_digest(conventions: Conventions) -> str:
         "stopwords": sorted(conventions.stopwords),
         "rare_term_max_anchors": conventions.rare_term_max_anchors,
     }
-    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _conventions_digest(conventions: Conventions) -> str:
+    """The digest of record: over EFFECTIVE values, never file bytes.
+
+    Two override files that resolve to the same conventions therefore share a
+    digest, and a whitespace-only or key-reordering edit that changes nothing
+    the compiler reads does not rebuild the sidecar.
+    """
+    raw = json.dumps(conventions_payload(conventions), sort_keys=True, separators=(",", ":"))
     return _hash(raw)
 
 
@@ -213,9 +222,23 @@ def shipped_conventions() -> ConventionsRegistry:
     return _SHIPPED
 
 
-def load_conventions(vault_root: Path) -> ConventionsRegistry:
-    """Return the effective registry: shipped, or shipped plus a vault override."""
+def load_conventions(
+    vault_root: Path | None = None, *, proposal: Any | None = None
+) -> ConventionsRegistry:
+    """Return the effective registry: shipped, or shipped plus a vault override.
+
+    `proposal=` mirrors `context_roles.load_roles`'s stateless-validation
+    seam: merge a proposed override WITHOUT touching the filesystem, for
+    `schema_memory`'s `validate`/`diff`/`save-conventions` operations. Unlike
+    `context_roles`, this needs no digest parameter -- `conventions_hash` is
+    always taken over the EFFECTIVE values (decision 5), so it is identical
+    whether those values came from a file on disk or a proposal in memory.
+    """
     shipped = shipped_conventions()
+    if proposal is not None:
+        return _merge(shipped.conventions, proposal)
+    if vault_root is None:
+        return shipped
     path = override_path(vault_root)
     try:
         raw = path.read_text(encoding="utf-8")
@@ -246,6 +269,45 @@ def load_conventions(vault_root: Path) -> ConventionsRegistry:
         registry = _merge(shipped.conventions, data)
     _CACHE[path] = (file_digest, registry)
     return registry
+
+
+def save_conventions(vault_root: Path, proposal: Any, *, expected_hash: str) -> dict[str, Any]:
+    """Save one reviewed, complete activation-conventions override document.
+
+    The proposal is the raw override document -- the same override grammar as
+    the file on disk -- never a delta. `expected_hash` is unconditionally
+    required (design.md decision 7's `save-relations` pattern) and is checked
+    against the CURRENT effective registry's `conventions_hash`, which is
+    always defined (the shipped registry has one even with no override file).
+
+    Callers are expected to have already rejected a proposal with any
+    finding (`op_schema_memory` does, before calling this); the check here
+    is defence in depth, matching `context_roles.save_roles`.
+    """
+    current = load_conventions(vault_root)
+    if current.conventions_hash != expected_hash:
+        raise ValueError(
+            "STALE_ACTIVATION_CONVENTIONS_REGISTRY: expected_hash does not match current hash"
+        )
+    candidate = load_conventions(proposal=proposal)
+    if candidate.findings:
+        raise ValueError(
+            f"INVALID_ACTIVATION_CONVENTIONS_REGISTRY: {[dict(item) for item in candidate.findings]!r}"
+        )
+    path = override_path(vault_root)
+    rendered = yaml.safe_dump(proposal, sort_keys=True, allow_unicode=True)
+    from . import vault as vault_module
+
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(path=path, content=rendered)], vault_root=Path(vault_root)
+    )
+    _CACHE.pop(path, None)
+    return {
+        "path": path.relative_to(vault_root).as_posix(),
+        "content_hash": candidate.conventions_hash,
+        "previous_hash": current.conventions_hash,
+        "created": current.source == "shipped",
+    }
 
 
 # --------------------------------------------------------------------------- #
