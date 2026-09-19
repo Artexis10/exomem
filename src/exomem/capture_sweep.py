@@ -65,6 +65,26 @@ BOUNDARIES = frozenset({BOUNDARY_QUIET_INTERVAL})
 MAX_WRITTEN_RECENTLY = 8
 MAX_UNPAGED_MENTIONS = 5
 MAX_MENTION_CHARS = 64
+
+#: Bounds on the write-time `entity_candidate` block
+#: (`write-time-identity-candidates` spec, design D5): at most three
+#: identities, each with at most eight linking pages. `MAX_DEPENDENCY_ROWS` is
+#: how many rows the graph's link-dependency index returns are evaluated for
+#: eligibility per name -- a wide fan-out costs a bounded read, never an
+#: unbounded one.
+MAX_CANDIDATE_IDENTITIES = 3
+MAX_CANDIDATE_LINKING_PAGES = 8
+MAX_DEPENDENCY_ROWS = 16
+
+#: The one fixed sentence of guidance the `entity_candidate` block itself
+#: carries (`write-time-identity-candidates` spec, task 2.4; design D2's
+#: "resolve before you create and hydrate an existing Entity before you make
+#: a second one"). Block-level, not per identity: it reaches exactly the
+#: client that has no skill and no hook, at the moment it holds the block.
+ENTITY_CANDIDATE_GUIDANCE = (
+    "Resolve before you create an Entity, and hydrate an existing Entity "
+    "before you make a second one."
+)
 #: Bounded rather than unbounded: a long-lived server must not accumulate one
 #: entry per caller it has ever seen. Evicting the least recently written costs
 #: at worst one extra advisory for a caller who had gone quiet anyway.
@@ -309,6 +329,232 @@ def hints(page_state: Any, corpus: Any = None) -> dict[str, list[str]]:
     except Exception:  # noqa: BLE001 -- a hint never breaks a commit or a block
         log.debug("capture-sweep hint extraction failed (non-fatal)", exc_info=True)
         return {}
+
+
+def entity_candidate(
+    vault_root: Path | None,
+    *,
+    page_state: Any = None,
+    corpus: Any = None,
+    previous_page_state: Any = None,
+) -> dict[str, Any] | None:
+    """The write-time `entity_candidate` block this write may carry, or None.
+
+    (`write-time-identity-candidates` spec; design D5.) Computed beside
+    `hints()`, reusing its link parsing, `identity_key`, and registry
+    resolution: a bare name is a candidate identity only when it is unresolved
+    (no page, checked through the same `semantic_contract` resolution `hints`
+    uses), unregistered (no active Entity title or alias), and NEW to this
+    write -- not already linked by this exact page before this edit, checked
+    against `previous_page_state` (the page's pre-write state; `None` for a
+    creation, where every link is new by construction). That last check is
+    load-bearing rather than a courtesy: the graph's dependency row for this
+    page can already reflect this exact commit by the time this runs, so
+    "was this page already among the returned sources" cannot distinguish a
+    first-time link from a no-op re-edit.
+
+    For each new name, the graph's link-dependency index
+    (`EpistemicGraphIndex.dependency_sources_for_bare_name`) answers "which
+    pages link this exact bare spelling" without a vault walk. This write's
+    own page is evaluated for eligibility like any other returned row (never
+    assumed present or absent), and separately from up to `MAX_DEPENDENCY_ROWS`
+    of the OTHER returned sources, each run through the family's page-level
+    exclusions -- ineligible evidence, navigation pages, the `Entities/`
+    subtree, a page whose own title or stem is the name -- via the page state
+    `corpus.pages` already holds. The block fires only on the exact transition
+    one eligible page -> two: exactly one other eligible page, and this write's
+    own page eligible too. Zero other eligible pages is still only one page
+    total after this write; two or more is already at or past the gate the
+    `entity_recurrence` audit family owns.
+
+    A `structural_suggestions` owner-off disposition, an active mutation
+    batch, or anything but an `available` graph status withholds the block
+    silently -- the family remains the authority either way. Never raises: a
+    fault here costs the caller a candidate, never the write.
+    """
+    if vault_root is None or page_state is None or corpus is None:
+        return None
+    try:
+        from . import envelope
+
+        if envelope.active().get("structural_suggestions") == "off":
+            return None
+        if _batch_active(vault_root):
+            return None
+        links = tuple(getattr(page_state, "body_wikilinks", ()) or ())
+        if not links:
+            return None
+        from . import entity_recurrence, epistemic_graph, semantic_contract
+
+        registry = _registry_index(corpus)
+        self_path = str(getattr(page_state, "path", "") or "")
+        previous_identities = _linked_identities(previous_page_state)
+        candidates: list[tuple[str, entity_recurrence.Wikilink]] = []
+        seen: set[str] = set()
+        for raw_target, _line in links:
+            link = entity_recurrence.parse_link(raw_target)
+            if link is None or not 0 < len(link.name) <= MAX_MENTION_CHARS:
+                continue
+            identity = entity_recurrence.identity_key(link.name)
+            if not identity or identity in seen:
+                continue
+            seen.add(identity)
+            if identity in previous_identities:
+                # Already linked before this write: no new transition, however
+                # the graph's own dependency row for this page reads right now.
+                continue
+            resolution = semantic_contract._resolve_reference_wikilink_from_context(
+                corpus, raw_target
+            )
+            if resolution.status != "unresolved":
+                continue
+            if registry is not None and registry.resolves(identity):
+                continue
+            candidates.append((identity, link))
+        if not candidates:
+            return None
+
+        root = Path(vault_root)
+        graph_index = epistemic_graph.EpistemicGraphIndex(root)
+        identities: list[dict[str, Any]] = []
+        for identity, link in candidates:
+            if len(identities) >= MAX_CANDIDATE_IDENTITIES:
+                break
+            result = graph_index.dependency_sources_for_bare_name(link.name)
+            if result.status != "available":
+                continue
+            if link.suffix and _attachment_exists(root, link.target):
+                continue
+            # This write's own page may already be among the returned sources
+            # -- the dependency index can be updated synchronously with the
+            # canonical commit -- so it is evaluated for eligibility exactly
+            # like any other row rather than assumed present or absent.
+            others = sorted(source for source in result.sources if source != self_path)
+            eligible_others = [
+                source
+                for source in others[:MAX_DEPENDENCY_ROWS]
+                if _linking_page_eligible(source, corpus=corpus, root=root, identity=identity)
+            ]
+            if len(eligible_others) != 1:
+                continue
+            # This write's own page state is already in hand -- passed
+            # directly rather than resolved through `corpus.pages`, which for
+            # a creation may not yet carry the just-created page at all.
+            if not _eligible_page(self_path, page_state, root=root, identity=identity):
+                continue
+            pages = tuple(sorted({self_path, *eligible_others}))[:MAX_CANDIDATE_LINKING_PAGES]
+            identities.append(
+                {
+                    "name": link.name,
+                    "pages": list(pages),
+                    "near_matches": (
+                        [dict(match) for match in registry.near_matches(identity)]
+                        if registry is not None
+                        else []
+                    ),
+                    "routes": ["resolve-entity", "create-entity"],
+                }
+            )
+        if not identities:
+            return None
+        return {"identities": identities, "guidance": ENTITY_CANDIDATE_GUIDANCE}
+    except Exception:  # noqa: BLE001 -- a candidate never breaks a commit or a block
+        log.debug("entity-candidate advisory failed (non-fatal)", exc_info=True)
+        return None
+
+
+def _linked_identities(page_state: Any) -> frozenset[str]:
+    """The `identity_key` of every bare wikilink one page state's body carries.
+
+    Used to tell "this write's link is new" from "this page already linked
+    it": comparing identities rather than raw target text, so a display
+    alias, heading anchor or `.md` suffix change on an unchanged link is still
+    the SAME identity and never looks new.
+    """
+    if page_state is None:
+        return frozenset()
+    from . import entity_recurrence
+
+    links = getattr(page_state, "body_wikilinks", ()) or ()
+    found: set[str] = set()
+    for raw_target, _line in links:
+        link = entity_recurrence.parse_link(raw_target)
+        if link is None:
+            continue
+        identity = entity_recurrence.identity_key(link.name)
+        if identity:
+            found.add(identity)
+    return frozenset(found)
+
+
+def _eligible_page(source: str, page: Any, *, root: Path, identity: str) -> bool:
+    """Whether one page, already resolved to its state, is eligible evidence.
+
+    Mirrors the `entity_recurrence` wikilink lane's own exclusions: ineligible
+    evidence (retired status, excluded access tier), a navigation page, the
+    `Entities/` subtree, and a page whose own title or filename stem is the
+    identity. `page` is `None` when no state could be found for `source`, in
+    which case it is never eligible -- a page this advisory cannot see is a
+    page it must not name.
+    """
+    if page is None:
+        return False
+    from . import access
+    from .entity_recurrence import counts_as_evidence, entities_prefix, identity_key
+    from .find_corpus import NAVIGATION_BASENAMES
+
+    if Path(source).name in NAVIGATION_BASENAMES:
+        return False
+    if source.startswith(entities_prefix()):
+        return False
+    if identity_key(str(getattr(page, "title", "") or "")) == identity:
+        return False
+    if identity_key(Path(source).stem) == identity:
+        return False
+    return counts_as_evidence(page, indexable=access.is_indexable(root, source))
+
+
+def _linking_page_eligible(
+    source: str, *, corpus: Any, root: Path, identity: str
+) -> bool:
+    """`_eligible_page`, resolving `source`'s state from `corpus.pages`.
+
+    For every OTHER page the dependency index named: the raw dependency row
+    carries no page state of its own, so this write's already-built corpus is
+    where that state comes from.
+    """
+    pages = getattr(corpus, "pages", None) or {}
+    page = pages.get(source) if hasattr(pages, "get") else None
+    return _eligible_page(source, page, root=root, identity=identity)
+
+
+def _attachment_exists(vault_root: Path, target: str) -> bool:
+    """Whether an ordinary file, not a page, stands at a suffixed target.
+
+    The same two spellings `audit._check_wikilinks`' probe checks -- vault-
+    rooted and KB-relative -- so this agrees with the audit family on what an
+    attachment is.
+    """
+    from .kbdir import kb_dirname, kb_prefix
+
+    try:
+        normalized = target.removeprefix(kb_prefix()).lstrip("/")
+        return _ordinary_file_exists(vault_root, vault_root / target.lstrip("/")) or (
+            _ordinary_file_exists(vault_root, vault_root / kb_dirname() / normalized)
+        )
+    except Exception:  # noqa: BLE001 -- a probe failure is never an attachment
+        return False
+
+
+def _ordinary_file_exists(vault_root: Path, candidate: Path) -> bool:
+    from . import reserved_paths
+
+    try:
+        rel = candidate.relative_to(vault_root).as_posix()
+        reserved_paths.inspect_generic_file(vault_root, rel)
+        return True
+    except (OSError, ValueError, reserved_paths.ReservedPathLeafError):
+        return False
 
 
 def block(

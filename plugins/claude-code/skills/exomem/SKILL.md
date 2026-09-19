@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: d7def9c54b1a2df5c12b6a4daa50b326eba6fd3870df16b8d7d86ef510e24620
+  skill_contract: b279154027f35bd09334654736c6c0f0d8c4f9ef73c8b6dab8b8e904ce6c563c
   version: "0.32.0"
 ---
 
@@ -111,7 +111,7 @@ required by the envelope. Raw capture is not automatic compilation.
 
 At `balanced` or `maximal`:
 
-Call `activate_context` with the user's turn verbatim before answering a substantive turn that has no prior context; resolve an `ambiguous` packet by calling again with `anchor` set.
+Before a substantive turn with no prior context, call `activate_context` with the turn verbatim; on `ambiguous`, call again with `anchor`.
 
 What comes back is bounded working memory, or an abstention with its reason; an
 `ambiguous` packet names the competing senses and runs no lane, so choosing one
@@ -138,6 +138,14 @@ current evidence instead of repeating discovery; accept only reviewed, meaningfu
 connections under the envelope. Never fabricate an edge to satisfy a quota.
 Keep the full semantic grammar below visible when authoring; use `observe_memory`
 for one semantic unit rather than fragile whole-page string edits.
+
+Wikilink every person, organisation, place, piece of equipment or product a
+durable write names, whether or not a page exists yet — an unresolved link is
+the editor's own way of marking a thing that should exist; a passing name needs
+no link. When the note is about an identity that has no Entity, resolve it and
+create the Entity in the same turn, within your confirmation rules. When a write
+returns `entity_candidate`, resolve before you create, and hydrate an existing
+Entity before you make a second one.
 
 ### Vocabulary consideration
 

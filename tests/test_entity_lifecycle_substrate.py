@@ -109,6 +109,28 @@ def test_reusable_plain_text_facets_surface_while_frequency_twin_stays_quiet(
     assert "river passage" not in repr(item.meta).casefold()
 
 
+def test_grammar_lane_still_needs_three_pages_after_the_wikilink_split(
+    tmp_path: Path,
+) -> None:
+    """`capture-identities-at-write-time` moves the wikilink lane's gate to two
+    and leaves the ordinary-text grammar lane's `SPREAD_MIN_PAGES` (3) untouched.
+
+    Two pages, two distinct facets, two origins -- everything the positive
+    fixture above has except a third page -- must stay quiet. If the split had
+    lowered the shared constant instead of adding a wikilink-only one, this
+    would wrongly fire at two.
+    """
+    positive = (
+        "juniper circle is an organization.",
+        "organization: juniper circle.",
+    )
+    for index, signal in enumerate(positive):
+        _note(tmp_path, index, signal)
+
+    assert entity_recurrence.SPREAD_MIN_PAGES == 3
+    assert _findings(tmp_path) == []
+
+
 def test_origin_and_facet_gates_are_independent(tmp_path: Path) -> None:
     for index, body in enumerate(
         (

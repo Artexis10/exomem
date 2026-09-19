@@ -181,7 +181,7 @@ def test_below_spread_stays_quiet(tmp_path: Path) -> None:
     """D6.4 — one page short of the gate says nothing, however emphatic it is."""
     from exomem import entity_recurrence as sensor
 
-    for index in range(sensor.SPREAD_MIN_PAGES - 1):
+    for index in range(sensor.WIKILINK_SPREAD_MIN_PAGES - 1):
         _note(
             tmp_path,
             f"Knowledge Base/Notes/note-{index}.md",
@@ -193,7 +193,7 @@ def test_below_spread_stays_quiet(tmp_path: Path) -> None:
 
 
 def test_spread_gate_fires_exactly_at_the_constant(tmp_path: Path) -> None:
-    """The gate is pinned AT `SPREAD_MIN_PAGES`, in both directions.
+    """The gate is pinned AT `WIKILINK_SPREAD_MIN_PAGES`, in both directions.
 
     Frequency inside one page is never spread (the spec's second scenario): the
     below-gate corpus links the identity repeatedly on every page it has and is
@@ -212,28 +212,22 @@ def test_spread_gate_fires_exactly_at_the_constant(tmp_path: Path) -> None:
             )
         return root
 
-    assert _findings(corpus(sensor.SPREAD_MIN_PAGES - 1)) == []
-    assert len(_findings(corpus(sensor.SPREAD_MIN_PAGES))) == 1
+    assert _findings(corpus(sensor.WIKILINK_SPREAD_MIN_PAGES - 1)) == []
+    assert len(_findings(corpus(sensor.WIKILINK_SPREAD_MIN_PAGES))) == 1
 
 
 def test_frequency_inside_one_page_is_not_spread(tmp_path: Path) -> None:
     """The spec's second scenario, and the per-page dedup rule it exists for.
 
-    Five links on one page and one on another is six mentions and TWO pages. If
+    Five links on the ONE page this corpus has is five mentions and one page. If
     dedup is what is holding this quiet rather than the spread gate, deleting it
-    makes six clear a gate of three and this fires.
+    makes five clear the two-page wikilink gate and this fires.
     """
     _note(
         tmp_path,
         "Knowledge Base/Notes/emphatic.md",
         title="Emphatic",
         body=" ".join(f"[[{_RECURRING}]]" for _ in range(5)),
-    )
-    _note(
-        tmp_path,
-        "Knowledge Base/Notes/passing.md",
-        title="Passing",
-        body=f"Also [[{_RECURRING}]].",
     )
 
     assert _findings(tmp_path) == []
@@ -342,11 +336,13 @@ def test_a_dot_in_a_name_is_punctuation_when_no_file_is_there(tmp_path: Path) ->
 def test_links_from_inside_entities_count_nothing(tmp_path: Path) -> None:
     """D2.4 — the registry's own cross-links measure the registry, not attention.
 
-    Two notes and one entity profile reach for the same unwritten name. Only the
-    notes are the corpus paying attention, so this stays one page short of the
+    One note and one entity profile reach for the same unwritten name. Only the
+    note is the corpus paying attention, so this stays one page short of the
     gate; counting the profile would push it over.
     """
-    for index in range(2):
+    from exomem import entity_recurrence as sensor
+
+    for index in range(sensor.WIKILINK_SPREAD_MIN_PAGES - 1):
         _note(
             tmp_path,
             f"Knowledge Base/Notes/note-{index}.md",
@@ -369,13 +365,15 @@ def test_a_page_reaching_for_its_own_name_counts_nothing(tmp_path: Path) -> None
     The link is the full-width spelling of the page's own title. NFKC folds the
     two together, so it IS the page's own identity; the resolver's exact-title
     map does not fold, so the link is genuinely unresolved and would otherwise be
-    counted. Two ordinary notes carry the same spelling, leaving the corpus one
+    counted. One ordinary note carries the same spelling, leaving the corpus one
     page short of the gate unless the self-link is counted too.
     """
+    from exomem import entity_recurrence as sensor
+
     wide = "Ｚｅｔａ"  # "Zeta", full-width
     _note(tmp_path, "Knowledge Base/Notes/zeta-note.md", title="Zeta",
           body=f"See [[{wide}]].")
-    for index in range(2):
+    for index in range(sensor.WIKILINK_SPREAD_MIN_PAGES - 1):
         _note(
             tmp_path,
             f"Knowledge Base/Notes/other-{index}.md",
@@ -711,11 +709,13 @@ def test_a_dismissed_candidate_stays_dismissed_across_incidental_edits(
 def test_a_retired_page_neither_supplies_spread_nor_anchors(tmp_path: Path) -> None:
     """D2.5 — a superseded note records what the vault USED to reach for.
 
-    Two live notes and one superseded one, and the superseded one sorts first, so
+    One live note and one superseded one, and the superseded one sorts first, so
     without the rule it would both push the corpus over the gate AND become the
     page the finding names.
     """
-    for index in range(2):
+    from exomem import entity_recurrence as sensor
+
+    for index in range(sensor.WIKILINK_SPREAD_MIN_PAGES - 1):
         _note(
             tmp_path,
             f"Knowledge Base/Notes/n{index}.md",
@@ -747,8 +747,10 @@ def test_an_excluded_page_neither_supplies_spread_nor_anchors(tmp_path: Path) ->
     and the moment it stops being excluded the anchor must land on it --
     pinning the spread half and the anchor half separately.
     """
+    from exomem import entity_recurrence as sensor
+
     _write(tmp_path, "Knowledge Base/_access.yaml", "excluded:\n  - Aaa-private\n")
-    for index in range(2):
+    for index in range(sensor.WIKILINK_SPREAD_MIN_PAGES - 1):
         _note(
             tmp_path,
             f"Knowledge Base/Notes/n{index}.md",
@@ -765,6 +767,46 @@ def test_an_excluded_page_neither_supplies_spread_nor_anchors(tmp_path: Path) ->
     findings = _findings(tmp_path)
     assert len(findings) == 1
     assert findings[0].path == "Knowledge Base/Aaa-private/aaa-diary.md"
+
+
+def test_navigation_pages_supply_no_spread_to_the_wikilink_lane(tmp_path: Path) -> None:
+    """`capture-identities-at-write-time` D4 — `index.md` and `log.md` list
+    things; they do not reach for them.
+
+    One ordinary page plus one `index.md` and one `log.md` page linking the same
+    unwritten identity is three raw mentions but only one page the wikilink lane
+    may count, one short of its two-page gate.
+    """
+    _note(tmp_path, "Knowledge Base/Notes/n0.md", title="N0",
+          body=f"Met [[{_RECURRING}]].")
+    _note(tmp_path, "Knowledge Base/Notes/index.md", title="Notes",
+          body=f"See also [[{_RECURRING}]].")
+    _note(tmp_path, "Knowledge Base/log.md", title="Log",
+          body=f"Logged [[{_RECURRING}]].")
+
+    assert _findings(tmp_path) == []
+
+
+def test_navigation_pages_never_anchor_a_finding(tmp_path: Path) -> None:
+    """A navigation page that sorts first must not become the anchor.
+
+    `Knowledge Base/Aaa/index.md` sorts before both ordinary notes below; without
+    the exclusion it would both supply spread and be named as the finding's page.
+    """
+    _note(tmp_path, "Knowledge Base/Aaa/index.md", title="Aaa",
+          body=f"See [[{_RECURRING}]].")
+    _note(tmp_path, "Knowledge Base/Notes/n0.md", title="N0",
+          body=f"Met [[{_RECURRING}]].")
+    _note(tmp_path, "Knowledge Base/Notes/n1.md", title="N1",
+          body=f"Met [[{_RECURRING}]] too.")
+
+    findings = _findings(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].path == "Knowledge Base/Notes/n0.md"
+    assert findings[0].meta["pages"] == [
+        "Knowledge Base/Notes/n0.md",
+        "Knowledge Base/Notes/n1.md",
+    ]
 
 
 # ------------------------------------------ 3.2 one review item per identity
@@ -1013,7 +1055,7 @@ def test_a_below_gate_dotted_name_is_never_probed(tmp_path: Path, monkeypatch) -
     from exomem import vault as vault_module
 
     root = tmp_path / "v"
-    for index in range(sensor.SPREAD_MIN_PAGES - 1):
+    for index in range(sensor.WIKILINK_SPREAD_MIN_PAGES - 1):
         _note(root, f"Knowledge Base/Notes/n{index}.md", title=f"N{index}",
               body="Shipped [[Node.js]].")
     pages = audit_module._parse_all(vault_module.kb_root(root), root)

@@ -73,8 +73,8 @@ REMINDER = (
     "narrow Entity facet, else compiled observation/proactive_capture; "
     "affiliation relation/link_acceptance; Records only if compatible. Hydrate with "
     "edit_memory an active match before duplicating; else "
-    'connect_memory(operation="create-entity") only for a stable recurring identity '
-    "useful beyond this source. Entity creation/substantial curation: confirmed "
+    'connect_memory(operation="create-entity") only for an identity that is stable, '
+    "and central or recurring, useful beyond this source. Entity creation/substantial curation: confirmed "
     "restructure_execution. Recheck that review ref only after a confirmed batch terminal receipt; "
     "stop at the closure-only eighth recheck. Distilled notes, not transcripts. replace_memory "
     "supersedes a contradicted conclusion, not a correction beside it. Stated intent -> "
