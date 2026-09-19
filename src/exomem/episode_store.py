@@ -116,15 +116,28 @@ def _apply_event(state: Mapping[str, Any], event: Mapping[str, Any]) -> dict[str
 class EpisodeStore:
     """Persist bounded accepted history; callers never supply materialized state."""
 
-    def __init__(self, vault_root: Path):
+    def __init__(self, vault_root: Path, *, owner_audience_id: str | None = None):
         self.vault_root = Path(vault_root)
         self.curation = curation.CurationStore(self.vault_root)
         self.root = self.curation.root.parent / "episodes"
+        if owner_audience_id is not None and (
+            not isinstance(owner_audience_id, str)
+            or not owner_audience_id.strip()
+            or "\x00" in owner_audience_id
+        ):
+            raise _error("EPISODE_OWNER_INVALID", "episode owner is invalid")
+        self.owner_audience_id = owner_audience_id
+
+    def _owner_directory(self) -> str:
+        assert self.owner_audience_id is not None
+        return model._hash("exomem-episode-owner-directory-v2", self.owner_audience_id)
 
     def path(self, identity: str) -> Path:
         if not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{64}", identity):
             raise _error("EPISODE_ID_INVALID", "episode identity is invalid")
-        return self.root / f"{identity}.json"
+        if self.owner_audience_id is None:
+            return self.root / f"{identity}.json"
+        return self.root / self._owner_directory() / f"{identity}.json"
 
     def _guard(self):
         return active_manager().consistency_guard(
@@ -140,12 +153,34 @@ class EpisodeStore:
 
     def _reconstruct(self, identity: str, journal: Any) -> dict[str, Any]:
         try:
+            if not isinstance(journal, dict) or type(journal.get("version")) is not int:
+                raise ValueError("invalid envelope")
+            version = journal["version"]
+            expected_fields = (
+                {"version", "episode_key", "input_evidence", "root_hash", "transitions"}
+                if version == 1
+                else {
+                    "version",
+                    "owner_audience_id",
+                    "episode_key",
+                    "input_evidence",
+                    "root_hash",
+                    "transitions",
+                }
+            )
             if (
-                not isinstance(journal, dict)
-                or set(journal)
-                != {"version", "episode_key", "input_evidence", "root_hash", "transitions"}
-                or type(journal["version"]) is not int
-                or journal["version"] != 1
+                version not in {1, 2}
+                or set(journal) != expected_fields
+                or (version == 1 and self.owner_audience_id is not None)
+                or (
+                    version == 2
+                    and (
+                        not isinstance(journal["owner_audience_id"], str)
+                        or not journal["owner_audience_id"].strip()
+                        or "\x00" in journal["owner_audience_id"]
+                        or journal["owner_audience_id"] != self.owner_audience_id
+                    )
+                )
                 or not isinstance(journal["transitions"], list)
                 or len(journal["transitions"]) > MAX_TRANSITIONS
             ):
@@ -155,7 +190,7 @@ class EpisodeStore:
             if state["episode_id"] != identity:
                 raise ValueError("wrong episode")
             digest = model._hash(
-                "exomem-episode-journal-v1",
+                f"exomem-episode-journal-v{version}",
                 {
                     key: value
                     for key, value in journal.items()
@@ -232,9 +267,16 @@ class EpisodeStore:
             k: v for k, v in initial["input_revisions"][0]["evidence"].items() if k != "recovery"
         }
         identity = initial["episode_id"]
-        journal = {"version": 1, "episode_key": key, "input_evidence": evidence, "transitions": []}
+        journal = {
+            "version": 2 if self.owner_audience_id is not None else 1,
+            "episode_key": key,
+            "input_evidence": evidence,
+            "transitions": [],
+        }
+        if self.owner_audience_id is not None:
+            journal["owner_audience_id"] = self.owner_audience_id
         journal["root_hash"] = model._hash(
-            "exomem-episode-journal-v1",
+            f"exomem-episode-journal-v{journal['version']}",
             {key: value for key, value in journal.items() if key != "transitions"},
         )
         with self._guard():

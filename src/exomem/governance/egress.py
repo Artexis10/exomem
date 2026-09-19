@@ -162,6 +162,51 @@ def _record_outcome(value: Mapping[str, Any]) -> None:
     collector.outcomes.append(DisclosureOutcome(dict(value)))
 
 
+def record_direct_text_release(
+    text: str,
+    *,
+    stable_ref: str,
+    representation: str,
+    principal: RequestPrincipal | None = None,
+    authorization: Mapping[str, Any] | None = None,
+) -> None:
+    """Record the exact bounded text that crossed a direct-read boundary."""
+    if representation not in {"page_body", "semantic_unit_span"}:
+        raise ValueError("invalid direct text representation")
+    who = principal if principal is not None else effective_principal()
+    raw = text.encode("utf-8")
+    value = {
+        key: item
+        for key, item in (authorization or {}).items()
+        if key
+        in {
+            "level",
+            "purpose",
+            "policy_fingerprint",
+            "confirmation",
+            "scope_ids",
+            "scope_label_digests",
+            "release_grant_id",
+            "release_dependency_digest",
+        }
+    }
+    collector = _collector()
+    if collector is not None:
+        value["command"] = collector.command_name
+    value.update(
+        {
+            "decision": "released",
+            "ref": stable_ref,
+            "content_hash": hashlib.sha256(raw).hexdigest(),
+            "size": len(raw),
+            "representation": representation,
+            "principal": who.audience_id,
+            "audience": who.audience_id,
+        }
+    )
+    _record_outcome(value)
+
+
 def _record_credential_block(count: int = 1) -> None:
     collector = _collector()
     if collector is not None:
@@ -600,6 +645,7 @@ def _serialize(payload: Any, *, compact: bool) -> dict[str, Any]:
 
 _WIKILINK_ANYWHERE = re.compile(r"\[\[([^\[\]]+)\]\]")
 _EXOMEM_PATH_PREFIXES = ("exomem://vault/", "exomem://source/")
+MAX_DIRECT_TEXT_REFERENCES = 64
 
 
 def _unwrap_reference(raw: str) -> tuple[str, bool]:
@@ -628,6 +674,91 @@ def _unwrap_reference(raw: str) -> tuple[str, bool]:
     text = text.split("#", 1)[0]
     text = text.replace("\\", "/").strip().strip("/")
     return text, explicit
+
+
+def direct_text_references_visible(
+    vault_root: Path,
+    text: str,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> bool:
+    """Prove every wikilink in returned direct-read text remains releasable.
+
+    A governed body can name a page by title or alias, neither of which is a
+    filesystem path.  The maintained working-set catalogue is the only bounded
+    authority for that mapping.  No target body is read or annotated here, so
+    this check adds no disclosure receipt for content it does not return.
+    """
+    root = Path(vault_root)
+    policy = policy_module.load(root)
+    who = principal if principal is not None else effective_principal()
+    if policy.empty:
+        return True
+    if policy.blocked or not who.resolved:
+        _record_blocked_outcome(who.audience_id)
+        return False
+
+    paths: set[str] = set()
+    names: set[str] = set()
+    for raw in _WIKILINK_ANYWHERE.findall(text):
+        target, _explicit = _unwrap_reference(raw)
+        if not target:
+            return False
+        if target.endswith(".md"):
+            paths.add(target)
+        else:
+            names.add(target)
+    if len(paths) + len(names) > MAX_DIRECT_TEXT_REFERENCES:
+        return False
+
+    checkpoint = None
+    if names:
+        from .. import freshness, working_set_index, working_set_runtime
+
+        checkpoint = freshness.live_recall_checkpoint(root, "kb")
+        if checkpoint is None:
+            return False
+        stamp = working_set_runtime._key_text(
+            (checkpoint.triple, checkpoint.policy_version, checkpoint.access_policy_fingerprint)
+        )
+        index = working_set_index.WorkingSetIndex(root)
+        if not index.available() or index.freshness_stamp() != stamp:
+            return False
+        try:
+            resolved = _resolved_prose_names(root, names)
+        except WorkingSetResolutionUnavailable:
+            return False
+        if any(name not in resolved for name in names):
+            return False
+        resolved_paths = {path for name in names for path in resolved[name]}
+        if not resolved_paths or len(paths) + len(resolved_paths) > MAX_DIRECT_TEXT_REFERENCES:
+            return False
+        paths |= resolved_paths
+
+    grants_hash = _grants_hash(policy)
+    declared_purpose = _declared_purpose(root, who, purpose)
+    for path in paths:
+        if lifecycle.is_tombstoned(root, path):
+            return False
+        decision = _decide_path(
+            root,
+            path,
+            policy=policy,
+            audience=who.audience_id,
+            purpose=declared_purpose,
+            grants_hash=grants_hash,
+            authorization_session=who.authorization_session_id,
+            authorization_context=who.verified_authorization_session,
+        )
+        if decision is None or decision.level < RELEASE_FLOOR:
+            return False
+    if checkpoint is not None:
+        from .. import freshness
+
+        if not freshness.recall_checkpoint_is_current(root, "kb", checkpoint):
+            return False
+    return True
 
 
 def _canonical_reference(raw: str) -> tuple[str, bool] | None:

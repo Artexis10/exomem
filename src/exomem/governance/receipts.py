@@ -75,6 +75,7 @@ _EVENT_PAYLOAD_FIELDS = {
 }
 _OUTCOME_FIELDS = frozenset({
     "ref", "content_hash", "size", "level", "decision", "redaction_count", "count",
+    "representation",
     "principal", "audience", "purpose", "policy_fingerprint", "confirmation",
     "scope_ids", "scope_label_digests", "command",
     "release_grant_id", "release_dependency_digest",
@@ -818,6 +819,21 @@ def _canonical_memory_ref(value: Any) -> bool:
     return memory_id is not None and memory_refs.memory_ref(memory_id) == value
 
 
+def _canonical_memory_or_unit_ref(value: Any) -> bool:
+    if _canonical_memory_ref(value):
+        return True
+    if not isinstance(value, str):
+        return False
+    parent, marker, fragment = value.partition("#")
+    memory_id = memory_refs.parse_memory_ref(parent)
+    return bool(
+        marker
+        and memory_id is not None
+        and memory_refs.memory_ref(memory_id) == parent
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._~%-]{0,1023}", fragment)
+    )
+
+
 def _valid_event_id(event_type: str, phase: str, event_id: Any) -> bool:
     if event_type != "critical":
         return _hex32(event_id)
@@ -855,8 +871,11 @@ def _valid_outcome(value: Any) -> bool:
     if not isinstance(value, Mapping) or set(value) - _OUTCOME_FIELDS:
         return False
     for key, item in value.items():
+        if key == "ref" and not (
+            _identifier_value(item) or _canonical_memory_or_unit_ref(item)
+        ):
+            return False
         if key in {
-            "ref",
             "principal",
             "audience",
             "purpose",
@@ -884,6 +903,8 @@ def _valid_outcome(value: Any) -> bool:
         if key == "level" and (not _count(item) or item > 6):
             return False
         if key == "decision" and item not in {"released", "withheld", "blocked", "release_authorized"}:
+            return False
+        if key == "representation" and item not in {"page_body", "semantic_unit_span"}:
             return False
         if key == "confirmation" and item not in {"none", "requested", "confirmed", "not_required"}:
             return False

@@ -5,6 +5,7 @@ Ordinary conversations can leave durable facts uncaptured, identities disconnect
 ## What Changes
 
 - Establish one programme spanning pre-turn context activation, agent-led episode decomposition, canonical writes, entity hydration and typed relations, derived publication, and subsequent activation.
+- Prove temporal working continuity: resumed topics recover relevant recent developments, older dependencies and supported unfinished state; event time, knowledge acquisition and claim validity remain distinct, and a fresh edit does not renew old or superseded information.
 - Add a bounded episode contract that checks original input before selecting destinations, preserves independent provenance through multi-page fan-out, and resumes partial work without duplicate writes. A successful write is not an episode-completion signal.
 - Require active-agent destination review before committing: similarity supplies candidates, while title/scope, artifact role and independent future use determine the canonical home. Prove separately named synthesis and minor-refinement cases without rewarding needless fragmentation.
 - Support the same core operations through MCP, CLI and REST. Verify Claude Code, Codex, ChatGPT, Claude app and a generic MCP client, reporting lifecycle enforcement separately from tool-only best effort.
