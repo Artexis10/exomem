@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import hashlib
+import io
 import json
 import os
+import re
 import shutil
 import socket
 import stat
@@ -13,6 +17,8 @@ import subprocess
 import sys
 import time
 import uuid
+import zipfile
+from email.parser import BytesParser
 from pathlib import Path
 from typing import Any
 
@@ -71,12 +77,42 @@ _TARGET_PROBE = (
     "    descriptors = list(declared_descriptor_ids())\n"
     "except Exception:\n"
     "    descriptors = []\n"
-    'print(json.dumps({"version": m.version("exomem"), '
-    '"state_descriptors": descriptors}))'
+    'print(json.dumps({"version": m.version("exomem"), "state_descriptors": descriptors}))'
+)
+
+_WHEEL_TARGET_PROBE = (
+    "import base64; import csv; import hashlib; import importlib.metadata as m; import json\n"
+    "try:\n"
+    "    from exomem.state_migration import declared_descriptor_ids\n"
+    "    descriptors = list(declared_descriptor_ids())\n"
+    "except Exception:\n"
+    "    descriptors = []\n"
+    "try:\n"
+    '    distribution = m.distribution("exomem")\n'
+    '    name = distribution.metadata["Name"]\n'
+    '    raw_direct_url = distribution.read_text("direct_url.json")\n'
+    "    direct_url = json.loads(raw_direct_url) if raw_direct_url else None\n"
+    "    record_hashes = {}\n"
+    '    for row in csv.reader((distribution.read_text("RECORD") or "").splitlines()):\n'
+    "        algorithm, separator, encoded = row[1].partition(\"=\") if len(row) == 3 else (\"\", \"\", \"\")\n"
+    '        if algorithm in hashlib.algorithms_guaranteed and separator == "=" and encoded:\n'
+    "            content = hashlib.new(algorithm)\n"
+    "            if content.digest_size < hashlib.sha256().digest_size:\n"
+    "                continue\n"
+    '            with distribution.locate_file(row[0]).open("rb") as installed:\n'
+    "                while chunk := installed.read(1024 * 1024):\n"
+    "                    content.update(chunk)\n"
+    "            record_hashes[row[0]] = algorithm + \"=\" + base64.urlsafe_b64encode(content.digest()).decode().rstrip(\"=\")\n"
+    "except Exception:\n"
+    "    name = None\n"
+    "    direct_url = None\n"
+    "    record_hashes = None\n"
+    'print(json.dumps({"version": m.version("exomem"), "name": name, '
+    '"direct_url": direct_url, "record_hashes": record_hashes, "state_descriptors": descriptors}))'
 )
 
 
-def _staged_identity(python: Path) -> dict[str, object]:
+def _staged_identity(python: Path, *, wheel: bool = False) -> dict[str, object]:
     """Read the staged release's version and the state descriptors it requires.
 
     The descriptor set is the target's migration declaration: the supervisor
@@ -84,7 +120,7 @@ def _staged_identity(python: Path) -> dict[str, object]:
     migrator only when they differ (`seamless-managed-worker-handoff` D8).
     """
     result = subprocess.run(
-        [str(python), "-I", "-c", _TARGET_PROBE],
+        [str(python), "-I", "-c", _WHEEL_TARGET_PROBE if wheel else _TARGET_PROBE],
         check=True,
         capture_output=True,
         text=True,
@@ -103,7 +139,13 @@ def _staged_identity(python: Path) -> dict[str, object]:
     # An empty list is a legitimate declaration from a release that predates the
     # descriptor probe; the supervisor treats it as "declares nothing" and runs
     # the offline migrator.
-    return {"version": identity["version"].strip(), "state_descriptors": descriptors}
+    return {
+        "version": identity["version"].strip(),
+        "name": identity.get("name"),
+        "direct_url": identity.get("direct_url"),
+        "record_hashes": identity.get("record_hashes"),
+        "state_descriptors": descriptors,
+    }
 
 
 def _uv() -> str:
@@ -114,7 +156,159 @@ def _uv() -> str:
     return executable
 
 
-def stage(runtime_dir: Path, launcher_python: str, profile: str, package_version: str) -> dict[str, Any]:
+def _regular_file(path: Path) -> tuple[int, int, int, int]:
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode):
+        raise RuntimeError("candidate wheel must be a regular file")
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def _sha256_file(path: Path) -> str:
+    before = _regular_file(path)
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        opened = os.fstat(source.fileno())
+        if (opened.st_dev, opened.st_ino) != before[:2]:
+            raise RuntimeError("candidate wheel changed while staging")
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    if _regular_file(path) != before:
+        raise RuntimeError("candidate wheel changed while staging")
+    return digest.hexdigest()
+
+
+def _wheel_metadata(wheel: Path) -> tuple[str, str]:
+    if wheel.suffix != ".whl":
+        raise RuntimeError("candidate artifact must be a wheel")
+    _regular_file(wheel)
+    try:
+        with zipfile.ZipFile(wheel) as archive:
+            metadata_names = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+            if len(metadata_names) != 1 or "exomem/__init__.py" not in archive.namelist():
+                raise RuntimeError("candidate artifact is not an Exomem wheel")
+            metadata = BytesParser().parsebytes(archive.read(metadata_names[0]))
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise RuntimeError("candidate artifact is not a readable wheel") from exc
+    name = metadata.get("Name", "").strip()
+    version = metadata.get("Version", "").strip()
+    if re.sub(r"[-_.]+", "-", name).lower() != "exomem" or not version:
+        raise RuntimeError("candidate artifact is not an Exomem wheel")
+    if not wheel.name.startswith(f"exomem-{version}-"):
+        raise RuntimeError("candidate wheel filename does not match its package metadata")
+    return name, version
+
+
+def _secure_record_algorithm(algorithm: str) -> bool:
+    if algorithm not in hashlib.algorithms_guaranteed:
+        return False
+    return hashlib.new(algorithm).digest_size >= hashlib.sha256().digest_size
+
+
+def _wheel_record_hashes(wheel: Path) -> dict[str, str]:
+    try:
+        with zipfile.ZipFile(wheel) as archive:
+            record_names = [name for name in archive.namelist() if name.endswith(".dist-info/RECORD")]
+            if len(record_names) != 1:
+                raise RuntimeError("candidate wheel does not have a complete install record")
+            expected: dict[str, str] = {}
+            for row in csv.reader(io.TextIOWrapper(archive.open(record_names[0]), encoding="utf-8")):
+                if len(row) != 3 or row[0] == record_names[0]:
+                    continue
+                algorithm, separator, encoded = row[1].partition("=")
+                if separator != "=" or not _secure_record_algorithm(algorithm) or not encoded:
+                    continue
+                expected[row[0]] = row[1]
+            record_directory = record_names[0].removesuffix("RECORD")
+            excluded = {record_names[0], f"{record_directory}RECORD.jws", f"{record_directory}RECORD.p7s"}
+            names = {name for name in archive.namelist() if not name.endswith("/")} - excluded
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise RuntimeError("candidate artifact is not a readable wheel") from exc
+    if set(expected) != names:
+        raise RuntimeError("candidate wheel does not have a complete install record")
+    return expected
+
+
+def _snapshot_wheel(wheel: Path, target_dir: Path) -> tuple[Path, str, str]:
+    source_identity = _regular_file(wheel)
+    name, version = _wheel_metadata(wheel)
+    if _regular_file(wheel) != source_identity:
+        raise RuntimeError("candidate wheel changed while staging")
+    digest = _sha256_file(wheel)
+    if _regular_file(wheel) != source_identity:
+        raise RuntimeError("candidate wheel changed while staging")
+    snapshot = target_dir / wheel.name
+    temporary = target_dir / f".{uuid.uuid4().hex}.wheel"
+    try:
+        with wheel.open("rb") as source, os.fdopen(
+            os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb"
+        ) as destination:
+            while chunk := source.read(1024 * 1024):
+                destination.write(chunk)
+        os.replace(temporary, snapshot)
+    except OSError as exc:
+        raise RuntimeError("candidate wheel could not be snapshotted") from exc
+    if _regular_file(wheel) != source_identity or _sha256_file(wheel) != digest or _sha256_file(snapshot) != digest:
+        raise RuntimeError("candidate wheel changed while staging")
+    _wheel_metadata(snapshot)
+    return snapshot, name, version
+
+
+def _verify_wheel_install(identity: dict[str, object], snapshot: Path, digest: str, version: str) -> None:
+    name = identity.get("name")
+    direct_url = identity.get("direct_url")
+    if re.sub(r"[-_.]+", "-", str(name)).lower() != "exomem" or identity["version"] != version:
+        raise RuntimeError("staged candidate package identity does not match its wheel")
+    if not isinstance(direct_url, dict):
+        raise RuntimeError("staged candidate did not record wheel provenance")
+    archive_info = direct_url.get("archive_info")
+    recorded_url = direct_url.get("url")
+    if not isinstance(archive_info, dict) or not isinstance(recorded_url, str):
+        raise RuntimeError("staged candidate did not record its wheel source")
+    source_url, _, fragment = recorded_url.partition("#")
+    if source_url != snapshot.as_uri():
+        raise RuntimeError("staged candidate did not record its wheel source")
+    recorded_digests: list[str] = []
+    deprecated_hash = archive_info.get("hash")
+    if deprecated_hash is not None:
+        if not isinstance(deprecated_hash, str):
+            raise RuntimeError("staged candidate wheel digest does not match its installed provenance")
+        recorded_digests.append(deprecated_hash)
+    hashes = archive_info.get("hashes")
+    if hashes is not None:
+        if not isinstance(hashes, dict):
+            raise RuntimeError("staged candidate wheel digest does not match its installed provenance")
+        sha256 = hashes.get("sha256")
+        if sha256 is not None:
+            if not isinstance(sha256, str):
+                raise RuntimeError("staged candidate wheel digest does not match its installed provenance")
+            recorded_digests.append(f"sha256={sha256}")
+    if fragment:
+        recorded_digests.append(fragment)
+    if not recorded_digests or any(recorded != f"sha256={digest}" for recorded in recorded_digests):
+        raise RuntimeError("staged candidate wheel digest does not match its installed provenance")
+    record_hashes = identity.get("record_hashes")
+    expected_hashes = _wheel_record_hashes(snapshot)
+    if not isinstance(record_hashes, dict) or any(
+        record_hashes.get(path) != digest for path, digest in expected_hashes.items()
+    ):
+        raise RuntimeError("staged candidate files do not match its wheel")
+
+
+def _write_provenance(path: Path, provenance: dict[str, str]) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        json.dump(provenance, stream, sort_keys=True)
+        stream.write("\n")
+
+
+def stage(
+    runtime_dir: Path,
+    launcher_python: str,
+    profile: str,
+    package_version: str,
+    wheel: Path | None = None,
+    source_revision: str = "",
+) -> dict[str, Any]:
     launcher = Path(launcher_python)
     if not launcher.is_absolute() or not launcher.is_file() or not os.access(launcher, os.X_OK):
         raise RuntimeError("manager reported an invalid launcher interpreter")
@@ -125,22 +319,55 @@ def stage(runtime_dir: Path, launcher_python: str, profile: str, package_version
     if releases.stat().st_uid != os.getuid() or releases.stat().st_mode & 0o077:
         raise RuntimeError("managed releases directory is not owner-only")
     target_dir = releases / uuid.uuid4().hex
-    target_python = target_dir / "bin" / "python"
+    target_dir.mkdir(mode=0o700)
+    if target_dir.stat().st_uid != os.getuid() or target_dir.stat().st_mode & 0o077:
+        raise RuntimeError("managed release directory is not owner-only")
+    snapshot: Path | None = None
+    wheel_name = ""
+    wheel_version = ""
+    digest = ""
+    if wheel is not None:
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", source_revision):
+            raise RuntimeError("candidate wheel requires a full hexadecimal source revision")
+        wheel_path = wheel.expanduser()
+        _regular_file(wheel_path)
+        snapshot, _, wheel_version = _snapshot_wheel(wheel_path.resolve(), target_dir)
+        wheel_name = wheel_path.name
+        digest = _sha256_file(snapshot)
+    environment = target_dir / "venv" if snapshot else target_dir
+    target_python = environment / "bin" / "python"
     requirement = f"exomem[{PROFILES[profile]}]" if PROFILES[profile] else "exomem"
-    if package_version:
+    if snapshot:
+        requirement = f"{requirement} @ {snapshot.as_uri()}#sha256={digest}"
+    elif package_version:
         requirement += f"=={package_version}"
     uv = _uv()
     for command in (
-        [uv, "venv", "--python", str(launcher), str(target_dir)],
+        [uv, "venv", "--python", str(launcher), str(environment)],
         [uv, "pip", "install", "--refresh-package", "exomem", "--python", str(target_python), requirement],
     ):
         result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=900)
         if result.returncode:
             raise RuntimeError(f"release staging failed (uv exit {result.returncode})")
-    identity = _staged_identity(target_python)
+    identity = _staged_identity(target_python, wheel=snapshot is not None)
     version = identity["version"]
     if not version or (package_version and version != package_version):
         raise RuntimeError("staged release version does not match requested version")
+    if snapshot:
+        _verify_wheel_install(identity, snapshot, digest, wheel_version)
+        if _sha256_file(snapshot) != digest:
+            raise RuntimeError("candidate wheel snapshot changed while staging")
+        _write_provenance(
+            target_dir / "provenance.json",
+            {
+                "artifact_sha256": digest,
+                "source_revision": source_revision,
+                "original_artifact_name": wheel_name,
+                "installed_name": str(identity["name"]),
+                "installed_version": version,
+                "installed_python": str(target_python),
+            },
+        )
     return {
         "python": str(target_python),
         "version": version,
@@ -204,7 +431,10 @@ def main(argv: list[str] | None = None) -> int:
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--status", action="store_true", help="show the managed service state")
     action.add_argument("--resume", action="store_true", help="roll forward a recorded failed transition")
-    parser.add_argument("--package-version", default="", help="pin the staged PyPI release")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--package-version", default="", help="pin the staged PyPI release")
+    source.add_argument("--wheel", type=Path, help="stage an immutable local Exomem wheel")
+    parser.add_argument("--source-revision", default="", help="full source revision for a local wheel")
     parser.add_argument("--profile", choices=PROFILES, default="standard")
     args = parser.parse_args(argv)
     try:
@@ -215,6 +445,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.resume:
             result = control(args.runtime_dir, {"command": "resume"})
         else:
+            if args.wheel is not None and not re.fullmatch(r"[0-9a-fA-F]{40}", args.source_revision):
+                parser.error("--wheel requires a full hexadecimal source revision")
+            if args.source_revision and args.wheel is None:
+                parser.error("--source-revision requires --wheel")
             import fcntl
 
             _check_runtime_dir(args.runtime_dir)
@@ -233,6 +467,8 @@ def main(argv: list[str] | None = None) -> int:
                     str(current.get("launcher_python", "")),
                     args.profile,
                     args.package_version,
+                    args.wheel,
+                    args.source_revision,
                 )
                 result = control(args.runtime_dir, {"command": "upgrade", "target": target})
                 result = _wait_for_target(args.runtime_dir, target, result)
