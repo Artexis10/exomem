@@ -756,6 +756,9 @@ def compile_packet(
                 term_anchor_counts=index.term_anchor_counts(),
                 stopwords=conventions.stopwords,
                 rare_term_max_anchors=conventions.rare_term_max_anchors,
+                eligible_categories=working_set_resolve.eligible_categories(
+                    analysis, registry.roles.values()
+                ),
             )
             candidates = working_set_resolve.add_graph_corroboration(
                 candidates, retrieval_paths=retrieval_paths

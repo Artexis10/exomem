@@ -95,12 +95,18 @@ def test_turn_analysis_is_nfkc_casefolded_with_ngrams() -> None:
     assert analysis.text == analysis.text.casefold()
 
 
-def test_planning_cues_are_detected_deterministically() -> None:
+def test_analyze_turn_is_deterministic() -> None:
+    """`TurnAnalysis` carries no `cues` field (`make-activation-conventions-
+    vault-owned`, decision 1: the cue vocabulary now lives in the vault's
+    own `context_roles` registry, so this module stays registry-free) --
+    what must still hold, and does, is that the same turn always analyses
+    to the same tokens and n-grams."""
     first = resolve_module.analyze_turn("I'm planning to cook this")
     second = resolve_module.analyze_turn("I'm planning to cook this")
 
-    assert first.cues == second.cues
-    assert "planning" in first.cues
+    assert first.tokens == second.tokens
+    assert first.ngrams == second.ngrams
+    assert not hasattr(first, "cues")
 
 
 # --------------------------------------------------------------------------- #
@@ -270,7 +276,36 @@ def test_a_project_key_anchor_never_carries_retrieval() -> None:
     assert "retrieval" not in candidates[0].evidence
 
 
-def test_category_match_comes_from_turn_cues() -> None:
+def test_category_match_comes_from_the_callers_eligible_categories() -> None:
+    """`candidates_for` no longer derives categories from the turn itself
+    (`make-activation-conventions-vault-owned`, decision 1): the caller
+    (`working_set.compile_packet`, via `context_roles`'s registry) computes
+    which categories a turn's evidence cues make eligible and passes them
+    in through `eligible_categories`, the same pattern `stopwords` and
+    `rare_term_max_anchors` already follow."""
+    rows = (
+        resolve_module.AnchorFacts(
+            anchor_id="sled",
+            path="sled.md",
+            ref=None,
+            title="Cargo Sled",
+            kind="resource",
+            lifecycle="active",
+            aliases=(),
+            terms=("cargo", "sled"),
+            categories=("constraint",),
+            neighbourhood=frozenset(),
+        ),
+    )
+    analysis = resolve_module.analyze_turn("what are the constraints on the cargo sled")
+    candidates = resolve_module.candidates_for(
+        analysis, rows, eligible_categories=frozenset({"constraint"})
+    )
+
+    assert "category_match" in candidates[0].evidence
+
+
+def test_category_match_is_absent_without_an_eligible_category() -> None:
     rows = (
         resolve_module.AnchorFacts(
             anchor_id="sled",
@@ -288,7 +323,7 @@ def test_category_match_comes_from_turn_cues() -> None:
     analysis = resolve_module.analyze_turn("what are the constraints on the cargo sled")
     candidates = resolve_module.candidates_for(analysis, rows)
 
-    assert "category_match" in candidates[0].evidence
+    assert "category_match" not in candidates[0].evidence
 
 
 def test_vector_band_is_absent_without_vectors() -> None:

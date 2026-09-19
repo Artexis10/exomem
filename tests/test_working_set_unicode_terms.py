@@ -333,7 +333,7 @@ def test_derived_short_name_is_the_same_whichever_apostrophe_the_title_used() ->
 def test_analyze_turn_text_folds_the_typographic_apostrophe_too() -> None:
     """RED before the correction: `analyze_turn`'s `.text` field re-stated
     `normalize()`'s formula inline rather than calling it, so it never
-    folded the quote either. `.text` is what `CUE_PATTERNS` substring
+    folded the quote either. `.text` is what a role cue's substring
     matching reads directly (never through `tokens_of`), so a turn typed
     with a typographic apostrophe matched none of a cue's plain-apostrophe
     substrings, such as "i'm planning"."""

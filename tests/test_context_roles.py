@@ -256,3 +256,250 @@ def test_unknown_lane_or_category_shape_is_reported(vault: Path, field: str) -> 
 
     assert registry.findings
     assert "resources" in registry.roles
+
+
+# --------------------------------------------------------------------------- #
+# Task 3.2 — `evidence_cues` / `evidence_categories`
+# --------------------------------------------------------------------------- #
+
+#: The eight roles the deleted `CUE_PATTERNS`/`_CUE_CATEGORIES` table
+#: covered, and the roles that ship with neither field.
+EVIDENCE_BEARING_ROLES = (
+    "preferences",
+    "constraints",
+    "current_state",
+    "recent_change",
+    "active_plans",
+    "methods",
+    "precedents",
+    "open_questions",
+)
+NEITHER_FIELD_ROLES = ("identity", "resources", "people", "location", "baseline", "evidence")
+
+
+def test_shipped_evidence_bearing_roles_carry_both_fields() -> None:
+    registry = context_roles.load_roles()
+    for role_id in EVIDENCE_BEARING_ROLES:
+        role = registry.roles[role_id]
+        assert role.evidence_cues, role_id
+        assert role.evidence_categories, role_id
+
+
+def test_shipped_roles_with_neither_field_ship_empty() -> None:
+    registry = context_roles.load_roles()
+    for role_id in NEITHER_FIELD_ROLES:
+        role = registry.roles[role_id]
+        assert role.evidence_cues == ()
+        assert role.evidence_categories == frozenset()
+
+
+def test_evidence_categories_join_by_union_not_replacement(vault: Path) -> None:
+    _override(
+        vault,
+        {
+            "schema_version": context_roles.SCHEMA_VERSION,
+            "roles": {"constraints": {"evidence_categories": ["assumption"]}},
+        },
+    )
+    registry = context_roles.load_roles(vault)
+
+    assert registry.roles["constraints"].evidence_categories == frozenset(
+        {"constraint", "requirement", "assumption"}
+    )
+
+
+def test_evidence_cues_join_by_union_not_replacement(vault: Path) -> None:
+    _override(
+        vault,
+        {
+            "schema_version": context_roles.SCHEMA_VERSION,
+            "roles": {"active_plans": {"evidence_cues": ["ich plane"]}},
+        },
+    )
+    registry = context_roles.load_roles(vault)
+    cues = registry.roles["active_plans"].evidence_cues
+
+    assert "ich plane" in cues
+    assert "i'm planning" in cues  # shipped evidence cues survive the union
+
+
+def test_an_unregistered_evidence_category_is_dropped_with_a_finding(vault: Path) -> None:
+    _override(
+        vault,
+        {
+            "schema_version": context_roles.SCHEMA_VERSION,
+            "roles": {"constraints": {"evidence_categories": ["not_a_real_category"]}},
+        },
+    )
+    registry = context_roles.load_roles(vault)
+
+    assert "not_a_real_category" not in registry.roles["constraints"].evidence_categories
+    assert any(finding["code"] == "invalid_evidence_category" for finding in registry.findings)
+
+
+def test_a_new_role_may_declare_evidence_cues_and_categories_directly(vault: Path) -> None:
+    _override(
+        vault,
+        {
+            "schema_version": context_roles.SCHEMA_VERSION,
+            "roles": {
+                "logistics": {
+                    "description": "Freight and depot movement",
+                    "lane": "units",
+                    "categories": ["fact"],
+                    "anchor_defaults": ["resource"],
+                    "cues": ["freight"],
+                    "evidence_cues": ["in transit"],
+                    "evidence_categories": ["fact"],
+                }
+            },
+        },
+    )
+    registry = context_roles.load_roles(vault)
+
+    assert registry.roles["logistics"].evidence_cues == ("in transit",)
+    assert registry.roles["logistics"].evidence_categories == frozenset({"fact"})
+    assert registry.findings == ()
+
+
+# --------------------------------------------------------------------------- #
+# Task 3.2 — caps, with findings (design.md decision 6)
+# --------------------------------------------------------------------------- #
+
+
+def test_evidence_cues_cap_is_applied_with_a_finding(vault: Path) -> None:
+    _override(
+        vault,
+        {
+            "schema_version": context_roles.SCHEMA_VERSION,
+            "roles": {
+                "constraints": {"evidence_cues": [f"cue number {i}" for i in range(60)]}
+            },
+        },
+    )
+    registry = context_roles.load_roles(vault)
+
+    assert len(registry.roles["constraints"].evidence_cues) == context_roles.MAX_CUES_PER_ROLE
+    assert any(finding["code"] == "cap_exceeded" for finding in registry.findings)
+
+
+def test_cues_cap_is_applied_with_a_finding(vault: Path) -> None:
+    _override(
+        vault,
+        {
+            "schema_version": context_roles.SCHEMA_VERSION,
+            "roles": {"resources": {"cues": [f"haul thing {i}" for i in range(60)]}},
+        },
+    )
+    registry = context_roles.load_roles(vault)
+
+    assert len(registry.roles["resources"].cues) == context_roles.MAX_CUES_PER_ROLE
+    assert any(finding["code"] == "cap_exceeded" for finding in registry.findings)
+
+
+def test_evidence_categories_cap_is_applied_with_a_finding(vault: Path) -> None:
+    extra = [
+        "fact", "insight", "constraint", "requirement", "assumption", "risk", "problem",
+        "question", "action", "technique", "preference", "design", "config", "decision",
+    ]
+    _override(
+        vault,
+        {
+            "schema_version": context_roles.SCHEMA_VERSION,
+            "roles": {"constraints": {"evidence_categories": extra}},
+        },
+    )
+    registry = context_roles.load_roles(vault)
+
+    assert (
+        len(registry.roles["constraints"].evidence_categories)
+        == context_roles.MAX_EVIDENCE_CATEGORIES_PER_ROLE
+    )
+    assert any(finding["code"] == "cap_exceeded" for finding in registry.findings)
+
+
+def test_evidence_cue_over_the_character_limit_is_dropped_with_a_finding(vault: Path) -> None:
+    long_cue = "x" * (context_roles.MAX_CUE_CHARS + 1)
+    _override(
+        vault,
+        {
+            "schema_version": context_roles.SCHEMA_VERSION,
+            "roles": {"constraints": {"evidence_cues": [long_cue]}},
+        },
+    )
+    registry = context_roles.load_roles(vault)
+
+    assert long_cue not in registry.roles["constraints"].evidence_cues
+    assert any(finding["code"] == "entry_too_long" for finding in registry.findings)
+
+
+def test_a_short_evidence_cue_is_kept_for_selection_but_flagged(vault: Path) -> None:
+    """Decision 1: a cue failing the evidence bounds still SELECTS its role
+    (every cue matches as a substring); only evidence is stricter, so the
+    cue is kept, not dropped, and reported instead."""
+    _override(
+        vault,
+        {
+            "schema_version": context_roles.SCHEMA_VERSION,
+            "roles": {"constraints": {"evidence_cues": ["an"]}},
+        },
+    )
+    registry = context_roles.load_roles(vault)
+
+    assert "an" in registry.roles["constraints"].evidence_cues
+    assert any(finding["code"] == "evidence_cue_too_weak" for finding in registry.findings)
+
+
+def test_too_many_roles_in_one_override_is_capped_with_a_finding(vault: Path) -> None:
+    roles = {
+        f"extra_role_{i}": {
+            "description": "test",
+            "lane": "units",
+            "categories": ["fact"],
+            "anchor_defaults": ["resource"],
+            "cues": [f"extra cue {i}"],
+        }
+        for i in range(40)
+    }
+    _override(
+        vault, {"schema_version": context_roles.SCHEMA_VERSION, "roles": roles}
+    )
+    registry = context_roles.load_roles(vault)
+
+    new_roles = [role for role in registry.roles.values() if not role.shipped]
+    assert len(new_roles) == context_roles.MAX_ROLES_PER_OVERRIDE
+    assert any(finding["code"] == "cap_exceeded" for finding in registry.findings)
+
+
+def test_oversized_role_override_is_refused_before_parsing(vault: Path) -> None:
+    path = context_roles.override_path(vault)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("schema_version: 1\n" + ("#" * (context_roles.MAX_FILE_BYTES + 1)), encoding="utf-8")
+    context_roles.clear_cache()
+
+    registry = context_roles.load_roles(vault)
+
+    assert registry.source == "shipped"
+    assert any(finding["code"] == "file_too_large" for finding in registry.findings)
+
+
+# --------------------------------------------------------------------------- #
+# Task 3.2 — selection reads both `cues` and `evidence_cues`
+# --------------------------------------------------------------------------- #
+
+
+def test_selection_matches_evidence_cues_too(vault: Path) -> None:
+    from exomem import working_set_resolve
+
+    _override(
+        vault,
+        {
+            "schema_version": context_roles.SCHEMA_VERSION,
+            "roles": {"active_plans": {"evidence_cues": ["ich plane"]}},
+        },
+    )
+    registry = context_roles.load_roles(vault)
+    analysis = working_set_resolve.analyze_turn("ich plane etwas")
+    selected = context_roles.select_roles(registry, anchor_kinds=("hub",), analysis=analysis)
+
+    assert any(item["id"] == "active_plans" and item["source"] == "turn_cue" for item in selected)

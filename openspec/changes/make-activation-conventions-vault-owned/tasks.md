@@ -54,13 +54,13 @@
 
 ## 3. One cue vocabulary
 
-- [ ] 3.1 Red first, over the audit corpus and an adversarial turn set that includes
+- [x] 3.1 Red first, over the audit corpus and an adversarial turn set that includes
       `?`, `how much is left`, `what about`, `what is the budget`, `what is next` and
       `we already decided`: the `context-roles` scenarios; a no-new-category test; a
       no-new-trigger test (no anchor becomes `resolved` on a turn for which the deleted
       table made no category eligible); and a named-difference fixture asserting exactly
       the question-mark loss.
-- [ ] 3.2 Add `evidence_cues` and `evidence_categories` to the role model, the shipped
+- [x] 3.2 Add `evidence_cues` and `evidence_categories` to the role model, the shipped
       registry (the eight roles, with the deleted table's patterns and sets; `what about`
       added to `open_questions`) and the override grammar (both keys join
       `_OVERRIDE_FIELDS` and extend by union); a cue is evidence only when it is in the
@@ -68,7 +68,7 @@
       term, whole terms in order), otherwise a finding; an `evidence_cues` entry also
       selects its role; categories validated through
       `resolve_category`; add the roles caps and the size cap before parse.
-- [ ] 3.3 Delete `CUE_PATTERNS` and `_CUE_CATEGORIES`. Eligible categories are computed
+- [x] 3.3 Delete `CUE_PATTERNS` and `_CUE_CATEGORIES`. Eligible categories are computed
       in the runtime from the effective registry and passed into `candidates_for`;
       `analyze_turn` stays registry-free and `TurnAnalysis` drops `cues`. Update every
       reader and the tests that read `cues`.

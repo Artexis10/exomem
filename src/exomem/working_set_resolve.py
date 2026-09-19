@@ -65,19 +65,16 @@ MAX_CANDIDATES = 24
 MAX_ANCHORS = 6
 MAX_NGRAM = 4
 
-#: Turn cues. Deterministic substrings, evaluated on the same NFKC-casefolded
-#: text the anchor terms are normalised with. A cue is a lens, not a
-#: classification: it can only ADD a role or a category to look for.
-CUE_PATTERNS: Mapping[str, tuple[str, ...]] = {
-    "planning": ("i'm planning", "im planning", "planning to", "how should i", "should i"),
-    "constraint": ("constraint", "limit", "allowed to", "can i", "am i able"),
-    "preference": ("prefer", "i like", "i hate", "usually"),
-    "current_state": ("right now", "currently", "at the moment", "how much", "how many"),
-    "method": ("how do i", "how to", "what is the best way", "approach"),
-    "question": ("?", "what about", "why does"),
-    "recent_change": ("again", "still", "changed", "since"),
-    "precedent": ("last time", "before", "previously"),
-}
+#: An evidence cue must be at least this many characters long
+#: (`make-activation-conventions-vault-owned` decision 1) -- the bound a
+#: bare `?` fails, which is the one intended shipped difference from the
+#: deleted `CUE_PATTERNS` table. `context_roles.MIN_EVIDENCE_CUE_CHARS`
+#: applies the SAME bound at override-merge time (to decide whether a cue
+#: the owner just added can ever be evidence, for the finding it reports);
+#: this module has no dependency on `context_roles`, so the value is
+#: restated here rather than imported.
+MIN_EVIDENCE_CUE_CHARS = 3
+
 
 #: Worded contact: the turn's OWN WORDS reached the anchor's own names, terms
 #: or claims. Two of these together (or one plus any other kind besides
@@ -111,33 +108,22 @@ CONTACT_KINDS: frozenset[str] = WORDED_CONTACT_KINDS | RETRIEVED_CONTACT_KINDS
 #: that module has no dependency on this one.
 _STOPWORDS: frozenset[str] = STOPWORDS
 
-#: Cue → semantic-unit category, for `category_match`. Structural lookup only.
-_CUE_CATEGORIES: Mapping[str, tuple[str, ...]] = {
-    "planning": ("action",),
-    "constraint": ("constraint", "requirement"),
-    "preference": ("preference",),
-    "current_state": ("fact",),
-    "method": ("technique", "design"),
-    "question": ("question", "problem"),
-    "recent_change": ("decision", "finding"),
-    "precedent": ("decision", "insight"),
-}
-
-
 @dataclass(frozen=True, slots=True)
 class TurnAnalysis:
-    """One normalised turn. Computed once and reused by every lane."""
+    """One normalised turn. Computed once and reused by every lane.
+
+    Registry-free by design (`make-activation-conventions-vault-owned`,
+    decision 1): the deleted `CUE_PATTERNS`/`_CUE_CATEGORIES` tables lived
+    here, but a role's cue vocabulary is now the vault's own
+    `context_roles` registry, so this dataclass no longer carries a `cues`
+    field at all -- `eligible_categories()` below reads the roles and this
+    analysis's `tokens` directly, without either one needing to know about
+    the other's shape.
+    """
 
     text: str
     tokens: tuple[str, ...]
     ngrams: tuple[str, ...]
-    cues: tuple[str, ...]
-
-    @property
-    def cue_categories(self) -> frozenset[str]:
-        return frozenset(
-            category for cue in self.cues for category in _CUE_CATEGORIES.get(cue, ())
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,12 +232,12 @@ class Resolution:
 
 
 def analyze_turn(turn: str) -> TurnAnalysis:
-    """Normalise a raw turn once: NFKC + casefold, tokens, n-grams, cues."""
+    """Normalise a raw turn once: NFKC + casefold, tokens, n-grams."""
     # Calls the shared `normalize()` rather than restating its formula: a
     # hand-rolled copy here once skipped `normalize()`'s typographic-
     # apostrophe fold, so a turn spelled with a curly quote matched none of
-    # `CUE_PATTERNS`'s plain-apostrophe substrings (e.g. "i'm planning")
-    # even though every OTHER comparison in this module already folded it.
+    # a role cue's plain-apostrophe substrings (e.g. "i'm planning") even
+    # though every OTHER comparison in this module already folded it.
     text = normalize(turn)
     # Order and repetitions are kept: the n-gram window below must be able to
     # start a phrase at a word the turn has already used, or a turn naming two
@@ -266,12 +252,54 @@ def analyze_turn(turn: str) -> TurnAnalysis:
             if phrase not in seen:
                 seen.add(phrase)
                 ngrams.append(phrase)
-    cues = tuple(
-        name
-        for name, patterns in CUE_PATTERNS.items()
-        if any(pattern in text for pattern in patterns)
+    return TurnAnalysis(text=text, tokens=tokens, ngrams=tuple(ngrams))
+
+
+# --------------------------------------------------------------------------- #
+# Role-cue evidence (make-activation-conventions-vault-owned, decision 1)
+# --------------------------------------------------------------------------- #
+
+
+def _is_evidence_cue(cue: str, turn_tokens: Sequence[str]) -> bool:
+    """The three bounds, in order: long enough, tokenises, whole terms in
+    order. `tokens_of` normalises its own input (NFKC + casefold, the same
+    typographic apostrophe/hyphen fold `turn_tokens` was produced with), so
+    a cue authored either way still lines up with the turn."""
+    if len(cue) < MIN_EVIDENCE_CUE_CHARS:
+        return False
+    cue_tokens = tokens_of(cue)
+    span = len(cue_tokens)
+    if span == 0 or span > len(turn_tokens):
+        return False
+    return any(
+        tuple(turn_tokens[start : start + span]) == cue_tokens
+        for start in range(len(turn_tokens) - span + 1)
     )
-    return TurnAnalysis(text=text, tokens=tokens, ngrams=tuple(ngrams), cues=cues)
+
+
+def eligible_categories(analysis: TurnAnalysis, roles: Iterable[Any]) -> frozenset[str]:
+    """Categories `category_match` may draw on for this turn: the union of
+    `evidence_categories` over every role with an EVIDENCE cue in the turn
+    (design `make-activation-conventions-vault-owned`, decision 1).
+
+    `roles` is whatever iterable of role-like objects the caller's registry
+    exposes (`context_roles.RoleRegistry.roles.values()` in production) --
+    each read only for `.evidence_cues` and `.evidence_categories`, so this
+    function stays free of any dependency on `context_roles`'s own types.
+    A cue failing a bound (a bare `?`, for instance) can still SELECT its
+    role -- `context_roles.select_roles` matches every cue as a plain
+    substring -- but never contributes a category here.
+    """
+    categories: set[str] = set()
+    turn_tokens = analysis.tokens
+    for role in roles:
+        role_categories = getattr(role, "evidence_categories", None)
+        role_cues = getattr(role, "evidence_cues", None)
+        if not role_categories or not role_cues:
+            continue
+        if any(_is_evidence_cue(cue, turn_tokens) for cue in role_cues):
+            categories.update(role_categories)
+    return frozenset(categories)
 
 
 # --------------------------------------------------------------------------- #
@@ -292,6 +320,7 @@ def candidates_for(
     config: RankingConfig | None = None,
     stopwords: frozenset[str] = _STOPWORDS,
     rare_term_max_anchors: int = RARE_TERM_MAX_ANCHORS,
+    eligible_categories: frozenset[str] = frozenset(),
 ) -> tuple[CandidateFacts, ...]:
     """Assemble categorical evidence for every anchor this turn can reach.
 
@@ -306,13 +335,21 @@ def candidates_for(
     build in `working_set.compile_packet` and passed to both this function
     and the index's own derived-short-name admission, so a turn's own words
     and an anchor's derived alias are measured against the same list.
+
+    `eligible_categories` defaults to none: this function stays registry-free
+    (`analysis` carries no cues of its own), so `category_match` is only ever
+    considered when the caller passes the categories the vault's roles
+    registry made eligible for THIS turn -- `working_set.compile_packet`
+    computes it once per build via `eligible_categories()` above and passes
+    it through, the same pattern `stopwords`/`rare_term_max_anchors` already
+    follow.
     """
     config = config or DEFAULT_RANKING
     term_counts = term_anchor_counts or {}
     turn_terms = frozenset(analysis.tokens) - stopwords
     turn_terms_folded = frozenset(fold_plural(term) for term in turn_terms)
     phrases = frozenset(analysis.ngrams) | frozenset(analysis.tokens)
-    cue_categories = analysis.cue_categories
+    cue_categories = eligible_categories
     claims_winner = _claims_winner(analysis, routing_targets)
     bands = _vector_bands(rows, vectors, query_vector, config) if query_vector is not None else {}
     # A floor of 2, whatever `RankingConfig` says (design.md decision 2a):
