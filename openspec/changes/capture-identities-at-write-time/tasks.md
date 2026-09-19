@@ -29,7 +29,7 @@
 
 ## 2. The candidate on the write response
 
-- [ ] 2.1 Red first: the crossing write carries the block; a third page does not; an edit
+- [x] 2.1 Red first: the crossing write carries the block; a third page does not; an edit
       of an already-linking page does not; a link to an active Entity yields an edge and
       no block; two notes in one mutation batch count once and the identity gets no later
       block; the block is withheld when `structural_suggestions` is `off` and when the
@@ -40,10 +40,10 @@
       evaluated; a folder-qualified second link yields no block while the audit
       lane still fires; stateless HTTP gets the same block; `legacy` detail drops it and
       compact keeps it.
-- [ ] 2.2 Compute the candidate beside `capture_sweep`'s page-less-link hint, reusing its
+- [x] 2.2 Compute the candidate beside `capture_sweep`'s page-less-link hint, reusing its
       link parsing, identity key, registry resolution and bounds, and the dependency
       index for the cross-page count.
-- [ ] 2.3 Carry `entity_candidate` through the mutation terminal like
+- [x] 2.3 Carry `entity_candidate` through the mutation terminal like
       `structure_suggestion`; MCP, CLI and REST parity.
 
 ## 3. Doctrine
