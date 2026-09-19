@@ -72,6 +72,8 @@ state:
   state_fields: [state, status, condition, location, value, balance, remaining]
   date_fields:  [observed_on, occurred_on, as_of, date, updated]
 stopwords: [a, an, and, ...]
+resolution:
+  rare_term_max_anchors: 3
 ```
 
 Override grammar:
@@ -89,12 +91,30 @@ state:
 stopwords:
   add: [der, die, das]
   drop: [left]
+resolution:
+  rare_term_max_anchors: 2
 ```
 
 Unlike roles, entries may be dropped. The role registry forbids removal because a packet
 that silently lost `constraints` reads as "there are none". Dropping a folder from anchor
 membership has no such reading: those pages stop being anchors because the owner said so,
 and they remain reachable through recall.
+
+### 2a. One stopword list and one rarity threshold, each used twice
+
+The effective stopword list feeds the resolver's turn matching and the index's admission
+of derived short names. The effective `rare_term_max_anchors` feeds the resolver's
+`rare_term` contact and the same admission step. Each is read once per build from the
+effective conventions and passed to both users, so the two can never disagree. Because
+both shape what the index holds, both are covered by the conventions digest in the index
+identity (decision 5).
+
+`rare_term_max_anchors` is an integer from 1 to 10. A value outside that range, or not an
+integer, is ignored with a finding and the shipped value applies. It is a count of
+anchors the server compares against, never a score. The evidence rules themselves (which
+kinds establish contact, which combinations resolve) stay in code: they are the
+soundness argument, and an override that could weaken them would let a file re-create
+the over-activation `make-anchor-resolution-sound` removed.
 
 ### 3. Membership rules are narrow and cannot claim raw material
 

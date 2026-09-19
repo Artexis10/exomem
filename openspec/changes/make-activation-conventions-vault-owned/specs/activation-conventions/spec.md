@@ -5,9 +5,10 @@ The product SHALL ship a versioned registry `activation-conventions.yaml` in the
 scaffold and the Claude Code plugin, loaded by the server, declaring the anchor
 membership rules for the `resource` and `hub` anchor kinds (folders, tags and frontmatter
 `type` values), the ordered state-field and date-field names the current-state resolver
-reads, and the stopwords the lexical band ignores. A vault MAY override it at
+reads, the stopwords the lexical band and derived-name admission ignore, and the
+structural resolution threshold `rare_term_max_anchors`. A vault MAY override it at
 `<Knowledge Base>/_Schema/activation-conventions.yaml`, adding or dropping entries in
-every section. The shipped registry SHALL reproduce the conventions the compiler used
+every list section and replacing the threshold. The shipped registry SHALL reproduce the conventions the compiler used
 before this registry existed, so a vault without an override behaves as before. No
 server component SHALL write the registry.
 
@@ -29,8 +30,24 @@ server component SHALL write the registry.
 
 #### Scenario: No override, no change
 - **WHEN** a vault has no override
-- **THEN** anchor membership, state-field order, date-field order and the stopword set
-  equal the values the compiler used before the registry existed
+- **THEN** anchor membership, state-field order, date-field order, the stopword set and
+  the rare-term threshold equal the values the compiler used before the registry existed
+
+#### Scenario: A denser vault tightens the rare-term threshold
+- **WHEN** a vault override declares `resolution.rare_term_max_anchors: 1` and a turn
+  shares one name word with two anchors
+- **THEN** neither anchor earns `rare_term` from that word, and the index admits no
+  derived short name whose words name more than one anchor
+
+#### Scenario: The threshold cannot be set out of range
+- **WHEN** an override declares `resolution.rare_term_max_anchors: 0` or a non-integer
+- **THEN** the shipped value applies and `generation.conventions_findings` reports the
+  rejected value
+
+#### Scenario: The evidence rules are not configurable
+- **WHEN** an override declares any key under `resolution` other than the thresholds the
+  shipped registry names
+- **THEN** the key is ignored with a finding and resolution behaves as shipped
 
 ### Requirement: Membership rules cannot claim reserved or raw-material folders
 A folder rule SHALL be a knowledge-base-relative path prefix of at most three segments.

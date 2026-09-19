@@ -1,7 +1,7 @@
 ## 0. Preconditions
 
-- [ ] 0.1 `activate-context-on-host-turns` is merged (both changes edit
-      `working_set_runtime.py`); rebase this branch onto it.
+- [x] 0.1 `activate-context-on-host-turns` (169e6deb) and `make-anchor-resolution-sound`
+      (6cb28cfa) are merged; this branch carries main.
 - [ ] 0.2 Record the deterministic activation audit on the seeded corpus at the base
       commit: per-case anchor recall and precision, twin false activation, hedged-twin
       count. This is the before-image for 4.2.
@@ -9,8 +9,8 @@
 ## 1. Conventions registry
 
 - [ ] 1.1 Red first: tests for shipped-equals-previous-constants (folders, tags,
-      state-field order, date-field order, stopword set), override add and drop in every
-      section, the five rejected folder-rule shapes, caps with findings, invalid YAML
+      state-field order, date-field order, stopword set, rare-term threshold), override
+      add and drop in every list section, the threshold's range and unknown-key findings, the five rejected folder-rule shapes, caps with findings, invalid YAML
       fallback, one bad rule not voiding the file.
 - [ ] 1.2 Add `src/exomem/activation_conventions.py` on the `context_roles` load
       contract (shipped text from the scaffold, override path, digest memo, findings).
@@ -26,7 +26,10 @@
       diff the directories skipped today against the shared lists and report any
       difference instead of absorbing it.
 - [ ] 2.2 `working_set_state`: state and date fields from the conventions.
-- [ ] 2.3 `working_set_resolve`: stopwords from the conventions.
+- [ ] 2.3 Stopwords and `rare_term_max_anchors` from the conventions, read once per build
+      and passed to both users (turn matching and `rare_term` in `working_set_resolve`;
+      derived short-name admission in `working_set_index`). Red first: an override that
+      changes either one changes both uses, and the index identity.
 - [ ] 2.4 Conventions digest joins the index identity, the packet cache key and
       `generation` (`conventions_source`, `conventions_hash`, `conventions_findings`).
       Red first: edit the override, activate the same turn, assert a rebuilt index and a

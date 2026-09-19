@@ -5,7 +5,7 @@ server. A vault that names its gear folder `Equipment/`, tracks state in a field
 `stock`, or is written in a language other than English gets a compiler that quietly
 finds nothing, with no file to edit and no finding that says why.
 
-Measured on `83e6d5b2`:
+Measured on main at `169e6deb`:
 
 - `working_set_resolve.CUE_PATTERNS` and `_CUE_CATEGORIES` are a second cue vocabulary
   held in code. It restates eight of the fourteen roles in `context-roles.yaml` with
@@ -21,7 +21,12 @@ Measured on `83e6d5b2`:
   the product's layout authority would leave the compiler behind.
 - `working_set_state._STATE_FIELDS` and `_DATE_FIELDS` decide which Records fields state
   an anchor's current condition. They are English field names chosen from one vault.
-- `working_set_resolve._STOPWORDS` is an English function-word list.
+- `working_set_index.STOPWORDS` is an English function-word list. It decides two things:
+  which turn words the lexical band ignores, and which derived short names the index
+  admits. Both must read the same list, or a name the index admits could never be matched.
+- `working_set_index.RARE_TERM_MAX_ANCHORS = 3` decides when one shared name word is rare
+  enough to count as contact, and which derived short names are distinctive enough to
+  admit. Three is right for a vault of a few thousand pages and is a guess for any other.
 
 Exomem's other vocabularies (relations, traversal profiles, source taxonomy, semantic
 language, context roles) are reviewed registries the owner extends. Activation
@@ -92,5 +97,6 @@ belong to a product-level change if wanted).
   fixture digest freezes.
 - Existing `.working-set.sqlite` sidecars rebuild once (index identity now includes the
   conventions digest).
-- Sequenced after `activate-context-on-host-turns` merges: both touch
-  `working_set_runtime.py`.
+- Builds on `activate-context-on-host-turns` and `make-anchor-resolution-sound`, both
+  merged: the continuity token already validates against index identity, and the
+  resolver's evidence rules are unchanged by this change.
