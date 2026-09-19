@@ -11,8 +11,16 @@ unchanged, as a fast path so Basic Latin text tokenises exactly as before.
 
 Found while implementing 4a: the same tokeniser also let a typographic right
 single quote (`’`, U+2019) and the plain apostrophe (`'`) tokenise as
-different words — NFKC does not fold one to the other. `tokens_of` now folds
-`’` to `'` before either path runs; the tests below pin that too.
+different words — NFKC does not fold one to the other.
+
+Correction round: folding the quote inside `tokens_of` alone fixed only the
+TURN's side of a comparison. An anchor's title or stored alias goes through
+`normalize()` directly (never through `tokens_of`), so a title or alias
+itself AUTHORED with a typographic apostrophe (phone autocorrect, smart
+quotes) could never earn `exact_alias` — the turn's side folded, the
+anchor's side did not. The fold now lives in `normalize()` itself, the one
+normalisation both sides share, and `tokens_of` calls it rather than folding
+separately. The tests below pin both directions.
 """
 
 from __future__ import annotations
@@ -234,3 +242,70 @@ def test_fold_plural_on_non_ascii_input_never_raises_and_is_a_no_op() -> None:
     for word in ("ausrüstung", "лагерь", "किताबें", "你好世界", "καλημέρα"):
         folded = wsi.fold_plural(word)
         assert folded == word
+
+
+# --------------------------------------------------------------------------- #
+# Correction round: the fold has to be in `normalize()`, not `tokens_of`
+# alone, or an anchor's OWN authored apostrophe never earns `exact_alias`.
+# --------------------------------------------------------------------------- #
+
+
+def test_an_authored_typographic_alias_is_reached_by_either_apostrophe_style() -> None:
+    """RED before the correction: `candidates_for`'s `names` set is built
+    from `normalize(row.title)` and the anchor's already-`normalize`d stored
+    aliases, never from `tokens_of`. When only `tokens_of` folded the quote,
+    an alias itself AUTHORED with a typographic apostrophe stayed curly in
+    `names` while `phrases` (built from the turn via `tokens_of`) was always
+    plain — so this alias could never earn `exact_alias`, from a turn typed
+    either way."""
+    rows = (_row("i.md", "Plan", aliases=("i’d rather",)),)
+
+    plain_turn = resolve_module.analyze_turn("well, I'd rather not")
+    typographic_turn = resolve_module.analyze_turn("well, I’d rather not")
+
+    plain_candidates = resolve_module.candidates_for(plain_turn, rows)
+    typographic_candidates = resolve_module.candidates_for(typographic_turn, rows)
+
+    assert len(plain_candidates) == 1
+    assert "exact_alias" in plain_candidates[0].evidence
+    assert len(typographic_candidates) == 1
+    assert "exact_alias" in typographic_candidates[0].evidence
+
+
+def test_an_authored_typographic_title_is_reached_by_either_apostrophe_style() -> None:
+    """Same defect, title side: `normalize(row.title)` alone built `names`
+    for a title with no alias at all, so the same asymmetry applied to a
+    title itself authored with a typographic apostrophe."""
+    rows = (_row("j.md", "I’d Rather Not"),)
+
+    plain_turn = resolve_module.analyze_turn("I'd rather not go")
+    typographic_turn = resolve_module.analyze_turn("I’d rather not go")
+
+    plain_candidates = resolve_module.candidates_for(plain_turn, rows)
+    typographic_candidates = resolve_module.candidates_for(typographic_turn, rows)
+
+    assert len(plain_candidates) == 1
+    assert "exact_alias" in plain_candidates[0].evidence
+    assert len(typographic_candidates) == 1
+    assert "exact_alias" in typographic_candidates[0].evidence
+
+
+def test_derived_short_name_is_the_same_whichever_apostrophe_the_title_used() -> None:
+    """A derived short name must not depend on which apostrophe style the
+    title's own qualifier was typed with — both must derive the identical
+    plain-apostrophe name."""
+    typographic = wsi.derived_short_name("Don’t Panic — field guide")
+    plain = wsi.derived_short_name("Don't Panic — field guide")
+
+    assert typographic == plain == "don't panic"
+
+
+def test_analyze_turn_text_folds_the_typographic_apostrophe_too() -> None:
+    """RED before the correction: `analyze_turn`'s `.text` field re-stated
+    `normalize()`'s formula inline rather than calling it, so it never
+    folded the quote either. `.text` is what `CUE_PATTERNS` substring
+    matching reads directly (never through `tokens_of`), so a turn typed
+    with a typographic apostrophe matched none of a cue's plain-apostrophe
+    substrings, such as "i'm planning"."""
+    analysis = resolve_module.analyze_turn("I’m planning a trip")
+    assert "i'm planning" in analysis.text

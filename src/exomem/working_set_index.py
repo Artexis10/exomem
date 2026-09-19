@@ -112,10 +112,16 @@ _HEADING = re.compile(r"^#{2,3}\s+(.+?)\s*$", re.MULTILINE)
 #: Latin) instead goes through `_unicode_tokens`, below.
 _TOKEN = re.compile(r"[a-z0-9][a-z0-9'’\-]*")
 
-#: The typographic (curly) right single quote. `tokens_of` folds it to the
-#: plain ASCII apostrophe before either path runs, so "i'd" and "i’d" are the
-#: same term: NFKC does not fold it (both are valid, distinct codepoints to
-#: Unicode), and left unfolded it would tokenise as a different word.
+#: The typographic (curly) right single quote. `normalize()` folds it to the
+#: plain ASCII apostrophe, so "i'd" and "i’d" are the same word EVERYWHERE a
+#: working-set comparison key is built from `normalize()` — a turn's tokens
+#: (via `tokens_of`), an anchor's title and stored aliases, a derived short
+#: name, a wikilink spelling. NFKC does not fold it on its own (both are
+#: valid, distinct codepoints to Unicode), and folding it in only one of
+#: those call sites (`tokens_of` alone, say) would leave a title or alias
+#: AUTHORED with the typographic quote unable to ever earn `exact_alias`:
+#: the turn's side and the anchor's side would each be folding, or not,
+#: independently, on the exact defect this constant exists to close.
 _TYPOGRAPHIC_APOSTROPHE = "’"
 
 #: Continuation punctuation a term may carry after its first character — an
@@ -229,8 +235,23 @@ def sidecar_path(vault_root: Path) -> Path:
 
 
 def normalize(value: object) -> str:
-    """NFKC + casefold, the one normalisation anchors and turns share."""
-    return unicodedata.normalize("NFKC", str(value)).strip().casefold()
+    """NFKC + casefold + the typographic-apostrophe fold: the ONE
+    normalisation every working-set comparison key shares.
+
+    This is the single fold site (correction round, task 4a): every caller
+    that builds a comparison key from an anchor's title or stored aliases,
+    a turn's tokens, a derived short name, or a wikilink spelling goes
+    through this function, so a typographic apostrophe reads as the plain
+    one on BOTH sides of every comparison, not just the turn's. Folding it
+    only where a turn is tokenised left a title or alias itself AUTHORED
+    with a typographic apostrophe unable to ever earn `exact_alias`.
+    """
+    return (
+        unicodedata.normalize("NFKC", str(value))
+        .strip()
+        .casefold()
+        .replace(_TYPOGRAPHIC_APOSTROPHE, "'")
+    )
 
 
 def tokens_of(text: str) -> tuple[str, ...]:
@@ -243,19 +264,18 @@ def tokens_of(text: str) -> tuple[str, ...]:
 
     A term is a maximal run of letters, digits and combining marks in any
     script, which may carry an apostrophe or a hyphen after its first
-    character; the first character itself must be a letter or a number. The
-    typographic right single quote (`’`) is folded to the plain apostrophe
-    (`'`) right here, before either path runs, so "i'd" and "i’d" are the
-    same term regardless of which apostrophe a turn or a title happened to be
-    typed with — NFKC does not fold the two together on its own. Basic Latin
-    text (once normalised and quote-folded) takes the FAST PATH — the
-    original compiled regex, unchanged, so ASCII tokenisation is
-    byte-identical to before task 4a; anything else takes the explicit
-    Unicode scanner in `_unicode_tokens`, because a non-Latin letter must
-    never split a word and a script the basic Latin alphabet does not cover
-    must still yield terms.
+    character; the first character itself must be a letter or a number.
+    `normalize()` already folds a typographic apostrophe to the plain one
+    (the single fold site — see its docstring), so "i'd" and "i’d" tokenise
+    identically without this function doing anything of its own for it.
+    Basic Latin text (once normalised) takes the FAST PATH — the original
+    compiled regex, unchanged, so ASCII tokenisation is byte-identical to
+    before task 4a; anything else takes the explicit Unicode scanner in
+    `_unicode_tokens`, because a non-Latin letter must never split a word
+    and a script the basic Latin alphabet does not cover must still yield
+    terms.
     """
-    normalized = normalize(text).replace(_TYPOGRAPHIC_APOSTROPHE, "'")
+    normalized = normalize(text)
     if normalized.isascii():
         return tuple(match.group(0) for match in _TOKEN.finditer(normalized))
     return _unicode_tokens(normalized)
