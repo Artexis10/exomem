@@ -304,6 +304,35 @@ def mutation_from_planned_write(
     return MarkdownCatalogMutation(relative, write.content, expected)
 
 
+def _planned_navigation_adoptions(
+    writes: tuple[vault.PlannedWrite, ...],
+    mutations: tuple[MarkdownCatalogMutation, ...],
+) -> frozenset[str]:
+    """Return only guarded legacy navigation rows eligible for catalog adoption."""
+
+    by_path = {mutation.path: mutation for mutation in mutations}
+    adopted: set[str] = set()
+    for write in writes:
+        guard = write.guard
+        if guard is None:
+            continue
+        mutation = by_path.get(guard.target)
+        if (
+            mutation is not None
+            and PurePosixPath(mutation.path).name.casefold()
+            in find_corpus.NAVIGATION_BASENAMES
+            and guard.leaf_policy == "content"
+            and mutation.expected_before_hash is not None
+            and (
+                write.expected_hash is None
+                or write.expected_hash == mutation.expected_before_hash
+            )
+            and guard.expected_content_hash == mutation.expected_before_hash
+        ):
+            adopted.add(mutation.path)
+    return frozenset(adopted)
+
+
 def _search_fields(page: find_corpus.ParsedPage) -> dict[str, str]:
     fields = {"title": page.title}
     for name, value in (
@@ -1243,6 +1272,7 @@ def _prepare_markdown_batch(
         connection.close()
 
     _validate_catalog_content_paths(content_paths)
+    navigation_adoptions: frozenset[str] = frozenset()
     if normalized is None:
         assert planned_writes is not None
         if type(planned_writes) is not tuple:
@@ -1258,6 +1288,7 @@ def _prepare_markdown_batch(
             for write in planned_writes
             if (mutation := mutation_from_planned_write(root, write)) is not None
         )
+        navigation_adoptions = _planned_navigation_adoptions(planned_writes, mutations)
         normalized = _normalize_markdown_mutations(root, mutations)
     normalized_removals = _normalize_catalog_removals(root, removals)
     membership_aliases = [
@@ -1290,10 +1321,11 @@ def _prepare_markdown_batch(
         if mutation.expected_before_hash is None:
             if predecessor is not None:
                 raise CatalogPublicationError("catalog creation target already exists")
-        elif (
-            predecessor is None
-            or predecessor.content_hash != mutation.expected_before_hash
-        ):
+        elif predecessor is None and relative not in navigation_adoptions:
+            raise CatalogPublicationError(
+                "catalog content identity no longer matches the reviewed predecessor"
+            )
+        elif predecessor is not None and predecessor.content_hash != mutation.expected_before_hash:
             raise CatalogPublicationError(
                 "catalog content identity no longer matches the reviewed predecessor"
             )
