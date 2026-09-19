@@ -63,7 +63,17 @@ log = logging.getLogger(__name__)
 #: only, stopwords-only, four-or-more-word, or under-three-character lead). A
 #: v5 sidecar's stored aliases and counts were computed by the pre-fix rules
 #: and would otherwise survive unrebuilt until an unrelated vault edit.
-SCHEMA_VERSION = 6
+#: v7 (task 4a, found after merge) replaced the ASCII-only `[a-z0-9]`
+#: tokeniser with a Unicode-aware one: a term is now a maximal run of
+#: letters, digits and combining marks in any script, not just basic Latin,
+#: and the typographic right single quote (`’`) folds to the plain
+#: apostrophe (`'`) so the two spellings of a contraction are one term. A v6
+#: sidecar's title/alias terms, derived short names and term->anchor counts
+#: were all computed by the fragmenting, non-Latin-blind, quote-splitting
+#: rule (an accented word split into fragments, a non-Latin script produced
+#: no terms at all, "i'd" and "i’d" tokenised as different words) and must
+#: rebuild rather than answer from those stale rows.
+SCHEMA_VERSION = 7
 SIDECAR_NAME = ".working-set.sqlite"
 DISABLE_ENV = "EXOMEM_DISABLE_WORKING_SET"
 _TRUE = frozenset({"1", "true", "yes", "on"})
@@ -94,7 +104,71 @@ _RAW_MATERIAL_FOLDERS = frozenset({"Sources", "Evidence"})
 _SKIP_DIR_NAMES = frozenset({"_trash", "_attachments", "_Staging", "Templates"})
 _WIKILINK = re.compile(r"\[\[([^\]|\n]+)(?:\|[^\]\n]*)?\]\]")
 _HEADING = re.compile(r"^#{2,3}\s+(.+?)\s*$", re.MULTILINE)
+
+#: The FAST PATH: basic-Latin terms only. Kept byte-for-byte as it always
+#: was — every ASCII turn and title must tokenise exactly as it did before
+#: task 4a — and used only when the whole normalised string `.isascii()`.
+#: Non-ASCII text (a turn or a title with even one letter outside basic
+#: Latin) instead goes through `_unicode_tokens`, below.
 _TOKEN = re.compile(r"[a-z0-9][a-z0-9'’\-]*")
+
+#: The typographic (curly) right single quote. `tokens_of` folds it to the
+#: plain ASCII apostrophe before either path runs, so "i'd" and "i’d" are the
+#: same term: NFKC does not fold it (both are valid, distinct codepoints to
+#: Unicode), and left unfolded it would tokenise as a different word.
+_TYPOGRAPHIC_APOSTROPHE = "’"
+
+#: Continuation punctuation a term may carry after its first character — an
+#: apostrophe or a hyphen — mirroring the fast path's `[a-z0-9'’\-]*` tail so
+#: a term built by either path reads the same shape. No `’` here: by the
+#: time text reaches this scanner, `tokens_of` has already folded it to `'`.
+_TOKEN_JOINERS = frozenset({"'", "-"})
+
+
+def _is_term_start(category: str) -> bool:
+    """A term's first character: a letter or a number, never a mark or a
+    punctuation mark — a combining mark has no base of its own to start a
+    term with, per the spec's "the first character must be a letter or a
+    number"."""
+    return category[0] in ("L", "N")
+
+
+def _is_term_continuation(category: str) -> bool:
+    """A term's later characters: a letter, a number, or a combining mark.
+
+    `\\w` is not a substitute for this: it excludes spacing combining marks,
+    so a Devanagari vowel sign would still split its base letter from the
+    rest of the word even under `\\w`.
+    """
+    return category[0] in ("L", "N", "M")
+
+
+def _unicode_tokens(text: str) -> tuple[str, ...]:
+    """The SLOW PATH: an explicit maximal-run scanner over
+    `unicodedata.category`, for text the ASCII fast path cannot handle.
+
+    Python's `re` module has no `\\p{L}` / `\\p{M}` Unicode property classes
+    — that needs the third-party `regex` package, which this project does
+    not depend on — so a term (the spec's "maximal run of letters, digits
+    and combining marks in any script") is scanned character by character
+    instead. Called only from `tokens_of`, and only for text that already
+    failed `str.isascii()`.
+    """
+    tokens: list[str] = []
+    current: list[str] = []
+    for character in text:
+        category = unicodedata.category(character)
+        if current:
+            if _is_term_continuation(category) or character in _TOKEN_JOINERS:
+                current.append(character)
+                continue
+            tokens.append("".join(current))
+            current = []
+        if _is_term_start(category):
+            current.append(character)
+    if current:
+        tokens.append("".join(current))
+    return tuple(tokens)
 
 #: Section/tag names that structurally imply a semantic-unit category. The map
 #: is the shipped core category vocabulary plus its plural section spellings; it
@@ -165,8 +239,25 @@ def tokens_of(text: str) -> tuple[str, ...]:
     dropping the second `initiative` of "Alpha Initiative and Beta Initiative"
     destroys the phrase "beta initiative" entirely. Callers that want a term SET
     use `terms_of`.
+
+    A term is a maximal run of letters, digits and combining marks in any
+    script, which may carry an apostrophe or a hyphen after its first
+    character; the first character itself must be a letter or a number. The
+    typographic right single quote (`’`) is folded to the plain apostrophe
+    (`'`) right here, before either path runs, so "i'd" and "i’d" are the
+    same term regardless of which apostrophe a turn or a title happened to be
+    typed with — NFKC does not fold the two together on its own. Basic Latin
+    text (once normalised and quote-folded) takes the FAST PATH — the
+    original compiled regex, unchanged, so ASCII tokenisation is
+    byte-identical to before task 4a; anything else takes the explicit
+    Unicode scanner in `_unicode_tokens`, because a non-Latin letter must
+    never split a word and a script the basic Latin alphabet does not cover
+    must still yield terms.
     """
-    return tuple(match.group(0) for match in _TOKEN.finditer(normalize(text)))
+    normalized = normalize(text).replace(_TYPOGRAPHIC_APOSTROPHE, "'")
+    if normalized.isascii():
+        return tuple(match.group(0) for match in _TOKEN.finditer(normalized))
+    return _unicode_tokens(normalized)
 
 
 def terms_of(text: str) -> tuple[str, ...]:
@@ -325,10 +416,12 @@ def derived_short_name(title: str) -> str | None:
     # Per-token, not just the joined whole (review round 4, MINOR): "a" + "b"
     # joins to "a b", three characters, past the whole-name floor below, even
     # though neither token is a name fragment; "2026" + "q3" joins to "2026
-    # q3" even though "q3" is one letter with a digit stapled on; an accented
-    # word this tokeniser's `[a-z0-9]` alphabet cannot see fragments into
-    # single letters ("élève" -> "l", "ve"). A token needs at least two
-    # LETTERS to be a name fragment at all.
+    # q3" even though "q3" is one letter with a digit stapled on. A token
+    # needs at least two LETTERS to be a name fragment at all. (Before task
+    # 4a's Unicode-aware tokeniser, an accented word such as "élève" could
+    # not stay whole under the old `[a-z0-9]` alphabet and fragmented into
+    # single letters here too; `tokens_of` now reads it as one term, so this
+    # check no longer needs to catch that case, only the two above.)
     if any(sum(1 for ch in token if ch.isalpha()) < 2 for token in tokens):
         return None
     name = " ".join(tokens)

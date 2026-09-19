@@ -34,6 +34,18 @@
       owner's knowledge base, not the repository.
 - [x] 4.3 Latency gate at 2k and 8k notes; egress suite unchanged and green.
 
+## 4a. Words in every script (found after merge)
+
+- [x] 4a.1 Red first: the tokeniser splits accented words ("Ausrüstung" gives two
+      fragments), drops non-Latin scripts entirely, and lets two unrelated titles
+      overlap on a shared word ending. Tests for the four new scenarios, plus a
+      property test that basic Latin input tokenises exactly as before.
+- [x] 4a.2 Tokenise maximal runs of letters, digits and combining marks in any script,
+      keeping the existing fast path for basic Latin text; bump the activation index
+      `SCHEMA_VERSION` so stored terms and aliases rebuild.
+- [ ] 4a.3 Probe corpus, deterministic activation audit and latency gate unchanged and
+      green; real-turn run on the owner's snapshot shows no negative turn resolving.
+
 ## 5. Delivery
 
 - [ ] 5.1 Derived artifacts, `openspec validate --all --strict`, privacy gate, full

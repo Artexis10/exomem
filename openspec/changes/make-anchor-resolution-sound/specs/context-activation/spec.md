@@ -33,7 +33,15 @@ have no page, so they can neither bridge two anchors nor be anyone's neighbour, 
 resolved project anchors are therefore trivially competing); otherwise,
 when no anchor is `resolved`, the turn SHALL be `unresolved` and the operation SHALL
 abstain with an empty packet that still lists its `partial` candidates and their
-evidence. Lexical comparison SHALL ignore stopwords and SHALL compare terms with
+evidence. A term SHALL be a maximal run of letters, digits and combining marks in any
+script, which may contain an apostrophe or a hyphen after its first character, taken
+after compatibility normalisation and case folding, with a typographic apostrophe read
+as the plain one so that a word typed on a phone equals the same word typed on a
+keyboard; a letter outside the basic Latin
+alphabet SHALL never split a word, and a turn in a script the basic Latin alphabet
+does not cover SHALL still yield terms. A script written without word separators
+yields one term per unbroken run, which the product does not segment. Lexical
+comparison SHALL ignore stopwords and SHALL compare terms with
 regular plural and singular forms folded together (`-s`; `-es` when the word ends `-ses`, `-xes`, `-zes`, `-ches` or `-shes`;
 `-ies` to `-y`), never folding a word of three characters or fewer and never a word
 ending in `ss`, `us` or `is`. The fold is a suffix rule, not a dictionary: plurals whose
@@ -185,6 +193,33 @@ routing.
 - **WHEN** a turn says "notes" and "files" and an anchor's terms include "note" and
   "file"
 - **THEN** the anchor carries `lexical_overlap`
+
+#### Scenario: An accented word is one term
+- **WHEN** an anchor is titled "Ausrüstung Lager" and a turn says "wo ist die
+  Ausrüstung im Lager"
+- **THEN** the turn and the anchor share the terms `ausrüstung` and `lager`, and no term
+  is a fragment of either word
+
+#### Scenario: Word fragments never make two unrelated pages overlap
+- **WHEN** a turn says "la duración de la sesión" and an unrelated anchor is titled
+  "Declaración de Impuestos"
+- **THEN** the anchor earns no `lexical_overlap` from the shared ending of the two
+  nouns
+
+#### Scenario: A turn in a non-Latin script can reach an anchor
+- **WHEN** an anchor's alias is a two-word name written in Cyrillic and a turn written
+  in Cyrillic contains that name
+- **THEN** the anchor carries `exact_alias`
+
+#### Scenario: A curly apostrophe is the same word
+- **WHEN** an anchor's alias is written with a plain apostrophe and a turn writes the
+  same words with a typographic apostrophe
+- **THEN** the turn's terms equal the alias's terms and the anchor carries `exact_alias`
+
+#### Scenario: Basic Latin text is unchanged
+- **WHEN** a turn and every anchor name are written in unaccented basic Latin letters
+- **THEN** the terms, the evidence and the resolution equal those produced before
+  words in other scripts were recognised
 
 ### Requirement: Bounded role lanes and the working-memory packet
 For each resolved anchor the operation SHALL select context roles per the
