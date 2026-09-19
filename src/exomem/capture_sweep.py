@@ -65,6 +65,16 @@ BOUNDARIES = frozenset({BOUNDARY_QUIET_INTERVAL})
 MAX_WRITTEN_RECENTLY = 8
 MAX_UNPAGED_MENTIONS = 5
 MAX_MENTION_CHARS = 64
+
+#: Bounds on the write-time `entity_candidate` block
+#: (`write-time-identity-candidates` spec, design D5): at most three
+#: identities, each with at most eight linking pages. `MAX_DEPENDENCY_ROWS` is
+#: how many rows the graph's link-dependency index returns are evaluated for
+#: eligibility per name -- a wide fan-out costs a bounded read, never an
+#: unbounded one.
+MAX_CANDIDATE_IDENTITIES = 3
+MAX_CANDIDATE_LINKING_PAGES = 8
+MAX_DEPENDENCY_ROWS = 16
 #: Bounded rather than unbounded: a long-lived server must not accumulate one
 #: entry per caller it has ever seen. Evicting the least recently written costs
 #: at worst one extra advisory for a caller who had gone quiet anyway.
@@ -309,6 +319,177 @@ def hints(page_state: Any, corpus: Any = None) -> dict[str, list[str]]:
     except Exception:  # noqa: BLE001 -- a hint never breaks a commit or a block
         log.debug("capture-sweep hint extraction failed (non-fatal)", exc_info=True)
         return {}
+
+
+def entity_candidate(
+    vault_root: Path | None,
+    *,
+    page_state: Any = None,
+    corpus: Any = None,
+) -> dict[str, Any] | None:
+    """The write-time `entity_candidate` block this write may carry, or None.
+
+    (`write-time-identity-candidates` spec; design D5.) Computed beside
+    `hints()`, reusing its link parsing, `identity_key`, and registry
+    resolution: a bare name is a candidate identity only when it is unresolved
+    (no page, checked through the same `semantic_contract` resolution `hints`
+    uses) and unregistered (no active Entity title or alias).
+
+    For each such name, the graph's link-dependency index
+    (`EpistemicGraphIndex.dependency_sources_for_bare_name`) answers "which
+    OTHER pages already link this exact bare spelling" without a vault walk.
+    This write's own page is added to that count once: if it was already among
+    the returned sources, this write is an edit of an already-linking page and
+    carries no block (no new transition). Otherwise, the family's page-level
+    exclusions -- ineligible evidence, navigation pages, the `Entities/`
+    subtree, a page whose own title or stem is the name -- are applied to at
+    most `MAX_DEPENDENCY_ROWS` of the returned sources, through the page state
+    `corpus.pages` already holds. The block fires only on the exact transition
+    one eligible page -> two: zero eligible prior pages is still only one page
+    total after this write, and two or more is already at or past the gate the
+    `entity_recurrence` audit family owns.
+
+    A `structural_suggestions` owner-off disposition, an active mutation
+    batch, or anything but an `available` graph status withholds the block
+    silently -- the family remains the authority either way. Never raises: a
+    fault here costs the caller a candidate, never the write.
+    """
+    if vault_root is None or page_state is None or corpus is None:
+        return None
+    try:
+        from . import envelope
+
+        if envelope.active().get("structural_suggestions") == "off":
+            return None
+        if _batch_active(vault_root):
+            return None
+        links = tuple(getattr(page_state, "body_wikilinks", ()) or ())
+        if not links:
+            return None
+        from . import entity_recurrence, epistemic_graph, semantic_contract
+
+        registry = _registry_index(corpus)
+        self_path = str(getattr(page_state, "path", "") or "")
+        candidates: list[tuple[str, entity_recurrence.Wikilink]] = []
+        seen: set[str] = set()
+        for raw_target, _line in links:
+            link = entity_recurrence.parse_link(raw_target)
+            if link is None or not 0 < len(link.name) <= MAX_MENTION_CHARS:
+                continue
+            identity = entity_recurrence.identity_key(link.name)
+            if not identity or identity in seen:
+                continue
+            seen.add(identity)
+            resolution = semantic_contract._resolve_reference_wikilink_from_context(
+                corpus, raw_target
+            )
+            if resolution.status != "unresolved":
+                continue
+            if registry is not None and registry.resolves(identity):
+                continue
+            candidates.append((identity, link))
+        if not candidates:
+            return None
+
+        root = Path(vault_root)
+        graph_index = epistemic_graph.EpistemicGraphIndex(root)
+        identities: list[dict[str, Any]] = []
+        for identity, link in candidates:
+            if len(identities) >= MAX_CANDIDATE_IDENTITIES:
+                break
+            result = graph_index.dependency_sources_for_bare_name(link.name)
+            if result.status != "available":
+                continue
+            if self_path in result.sources:
+                # This page already linked the name: no new transition.
+                continue
+            if link.suffix and _attachment_exists(root, link.target):
+                continue
+            eligible = sorted(
+                source
+                for source in sorted(result.sources)[:MAX_DEPENDENCY_ROWS]
+                if _linking_page_eligible(source, corpus=corpus, root=root, identity=identity)
+            )
+            if len(eligible) != 1:
+                continue
+            pages = tuple(sorted({self_path, *eligible}))[:MAX_CANDIDATE_LINKING_PAGES]
+            identities.append(
+                {
+                    "name": link.name,
+                    "pages": list(pages),
+                    "near_matches": (
+                        [dict(match) for match in registry.near_matches(identity)]
+                        if registry is not None
+                        else []
+                    ),
+                    "routes": ["resolve-entity", "create-entity"],
+                }
+            )
+        if not identities:
+            return None
+        return {"identities": identities}
+    except Exception:  # noqa: BLE001 -- a candidate never breaks a commit or a block
+        log.debug("entity-candidate advisory failed (non-fatal)", exc_info=True)
+        return None
+
+
+def _linking_page_eligible(
+    source: str, *, corpus: Any, root: Path, identity: str
+) -> bool:
+    """Whether one page the dependency index named is eligible evidence.
+
+    Mirrors the `entity_recurrence` wikilink lane's own exclusions, applied
+    here because the raw dependency row carries no page state of its own:
+    ineligible evidence (retired status, excluded access tier), a navigation
+    page, the `Entities/` subtree, and a page whose own title or filename stem
+    is the identity.
+    """
+    from . import access
+    from .entity_recurrence import counts_as_evidence, entities_prefix, identity_key
+    from .find_corpus import NAVIGATION_BASENAMES
+
+    if Path(source).name in NAVIGATION_BASENAMES:
+        return False
+    if source.startswith(entities_prefix()):
+        return False
+    pages = getattr(corpus, "pages", None) or {}
+    page = pages.get(source) if hasattr(pages, "get") else None
+    if page is None:
+        return False
+    if identity_key(str(getattr(page, "title", "") or "")) == identity:
+        return False
+    if identity_key(Path(source).stem) == identity:
+        return False
+    return counts_as_evidence(page, indexable=access.is_indexable(root, source))
+
+
+def _attachment_exists(vault_root: Path, target: str) -> bool:
+    """Whether an ordinary file, not a page, stands at a suffixed target.
+
+    The same two spellings `audit._check_wikilinks`' probe checks -- vault-
+    rooted and KB-relative -- so this agrees with the audit family on what an
+    attachment is.
+    """
+    from .kbdir import kb_dirname, kb_prefix
+
+    try:
+        normalized = target.removeprefix(kb_prefix()).lstrip("/")
+        return _ordinary_file_exists(vault_root, vault_root / target.lstrip("/")) or (
+            _ordinary_file_exists(vault_root, vault_root / kb_dirname() / normalized)
+        )
+    except Exception:  # noqa: BLE001 -- a probe failure is never an attachment
+        return False
+
+
+def _ordinary_file_exists(vault_root: Path, candidate: Path) -> bool:
+    from . import reserved_paths
+
+    try:
+        rel = candidate.relative_to(vault_root).as_posix()
+        reserved_paths.inspect_generic_file(vault_root, rel)
+        return True
+    except (OSError, ValueError, reserved_paths.ReservedPathLeafError):
+        return False
 
 
 def block(
