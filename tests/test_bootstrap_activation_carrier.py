@@ -134,6 +134,57 @@ def test_bootstrap_serves_the_engagement_policy_for_every_level(
 
 
 # --------------------------------------------------------------------------- #
+# The link instruction (`capture-identities-at-write-time`, task 3.1)
+# --------------------------------------------------------------------------- #
+#: The ceiling the ruling set for this line: at least 70 bytes (it must
+#: actually carry the doctrine, not shrink to a content-free stub), and it
+#: keeps all five kinds and "even with no page" the ruling named.
+LINK_LINE_MIN_BYTES = 70
+
+
+@pytest.mark.parametrize("level", CARRYING_LEVELS)
+def test_the_link_instruction_is_in_capture_at_balanced_and_maximal(level: str) -> None:
+    assert prominence.LINK_NAMED_IDENTITIES_LINE in prominence.CONTRACTS[level].capture
+
+
+@pytest.mark.parametrize("level", SILENT_LEVELS)
+def test_the_link_instruction_is_absent_at_light_and_off(level: str) -> None:
+    assert prominence.LINK_NAMED_IDENTITIES_LINE not in prominence.CONTRACTS[level].capture
+
+
+def test_the_link_instruction_names_all_five_kinds_and_no_page_yet() -> None:
+    line = prominence.LINK_NAMED_IDENTITIES_LINE
+
+    for kind in ("people", "places", "organisations", "equipment", "products"):
+        assert kind in line
+    assert "no page" in line
+    assert "wikilink" in line.lower()
+    assert "\n" not in line
+
+
+def test_the_link_instruction_clears_its_floor_and_stays_ascii() -> None:
+    """A stub that clears the byte margin is not acceptable (the ruling): the
+    line must cost at least LINK_LINE_MIN_BYTES of served JSON."""
+    cost = len(json.dumps(prominence.LINK_NAMED_IDENTITIES_LINE)) - 2
+
+    assert cost >= LINK_LINE_MIN_BYTES, (
+        f"the link instruction costs only {cost} bytes, under the "
+        f"{LINK_LINE_MIN_BYTES}-byte floor a content-free stub would clear"
+    )
+    assert prominence.LINK_NAMED_IDENTITIES_LINE.isascii()
+
+
+@pytest.mark.parametrize("level", CARRYING_LEVELS)
+def test_a_central_identity_needs_no_second_mention(level: str) -> None:
+    """Balanced and maximal each name a central entity beside a recurring
+    one, so recurrence is never a condition of creating an Entity."""
+    capture = prominence.CONTRACTS[level].capture.lower()
+
+    assert "central or recurring entity" in capture
+    assert "only a recurring entity" not in capture
+
+
+# --------------------------------------------------------------------------- #
 # The budget
 # --------------------------------------------------------------------------- #
 
@@ -155,6 +206,13 @@ def test_the_line_costs_at_most_its_budget_in_served_json() -> None:
 #: level. Measured 2026-09-18 with the carrier line in place, `(default surface,
 #: claude-code)` headroom: off 2,755/2,746 · light 2,471/2,462 ·
 #: balanced 557/548 · maximal 192/183.
+#:
+#: Re-measured 2026-09-19, `capture-identities-at-write-time` task 3.1, after
+#: adding `LINK_NAMED_IDENTITIES_LINE` and "central or " to `balanced` and
+#: `maximal` capture (paid for by tightening `ACTIVATION_CARRIER_LINE` and
+#: `_EPISODE_SWEEP_CAPTURE`; see `test_bootstrap_compact_budget.py`'s own entry
+#: for the full accounting): off 2,755/2,746 · light 2,471/2,462 ·
+#: balanced 527/518 · maximal 162/153.
 #:
 #: The two assertions below are deliberately not the same assertion. The HARD
 #: ceiling is a claim about every level, because a payload over it is a payload a

@@ -459,7 +459,11 @@ def test_a_batch_that_committed_nothing_carries_no_block(
 # ------------------------------------------------------------- contract bytes
 
 
-CLAUSE_MARKERS = ("episode", "for example", "written recently", "silent")
+#: `"for example"` -> `"e.g."` 2026-09-19 (`capture-identities-at-write-time`
+#: task 3.1): `_EPISODE_SWEEP_CAPTURE` was tightened to pay for the bootstrap
+#: link instruction; the em-dash "for example" became a plain-ASCII "e.g.",
+#: which costs less served JSON and instructs exactly the same thing.
+CLAUSE_MARKERS = ("episode", "e.g.", "written recently", "silent")
 
 
 @pytest.mark.parametrize("level", ("balanced", "maximal"))

@@ -370,6 +370,22 @@ from exomem import commands
 #: 192 bytes is not a budget, and the next addition at `maximal` trips the
 #: ceiling. The two redundancies above are still the place to get them from; do
 #: not raise this to buy room for one more sentence.
+#:
+#: 2026-09-19, `capture-identities-at-write-time`, PAID rather than spent. Added
+#: `LINK_NAMED_IDENTITIES_LINE` (91 B) to `balanced` and `maximal` capture, and
+#: "central or " into the "recurring entity" phrase each already carried (+11 B
+#: each) -- +102 B total, at both levels. Paid for by tightening two existing
+#: sentences without changing what they instruct: `ACTIVATION_CARRIER_LINE`
+#: 182 B -> 138 B (-44 B; reordered its two clauses and dropped words the
+#: reordering made redundant) and `_EPISODE_SWEEP_CAPTURE` 421 B -> 392 B (-29 B;
+#: an em-dash "for example" became a plain-ASCII "e.g.", and two adjectives came
+#: off two of five already-non-exhaustive examples). No ceiling raise. New
+#: `(default surface, claude-code)` headroom:
+#:
+#:     off       2,755 / 2,746   (unchanged; the line is balanced/maximal only)
+#:     light     2,471 / 2,462   (unchanged)
+#:     balanced    527 /   518   <- was 557/548; still clear of the 512 margin
+#:     maximal     162 /   153   <- was 192/183; margin not claimed here either
 COMPACT_BYTE_CEILING = 63_300
 
 #: The defect was compact and full being near-identical. A profile that does not

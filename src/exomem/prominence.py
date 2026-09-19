@@ -170,9 +170,19 @@ _CONFIG_KEY = "prominence"
 #: runs within a few hundred bytes of a hard ceiling, so it stays ASCII (a
 #: non-ASCII dash costs six JSON bytes) and inside 220.
 ACTIVATION_CARRIER_LINE = (
-    "Call `activate_context` with the user's turn verbatim before answering a "
-    "substantive turn that has no prior context; resolve an `ambiguous` packet by "
-    "calling again with `anchor` set."
+    "Before a substantive turn with no prior context, call `activate_context` "
+    "with the turn verbatim; on `ambiguous`, call again with `anchor`."
+)
+
+#: The link instruction (`capture-identities-at-write-time` design D2, task
+#: 3.1), appended to `balanced` and `maximal` only -- a level that captures
+#: only when asked must not be told to link unprompted either. Sized to what
+#: was left after paying for it (91 B): all five kinds design D2 names, and
+#: "even with no page yet" so the instruction covers the identity that has
+#: none, not only the one that already has a page.
+LINK_NAMED_IDENTITIES_LINE = (
+    "Wikilink named people, places, organisations, equipment and products "
+    "even with no page yet."
 )
 
 _ARTIFACT_ADOPTION_CAPTURE = (
@@ -198,11 +208,10 @@ _ARTIFACT_ADOPTION_CAPTURE = (
 #: on its next durable write. What must survive here is the rule, not the roster.
 _EPISODE_SWEEP_CAPTURE = (
     " After any capture, make one bounded episode pass over the recent exchange for "
-    "anything else that would materially improve a later decision, lookup, repeated "
-    "task, comparison or continuation — for example an outcome, a stable preference, "
-    "a method, an entity facet or an operational quirk; examples, not a closed set. "
-    "Never re-write what the response lists as written recently, and stay silent "
-    "when nothing qualifies."
+    "anything else that would materially improve a later decision, lookup, task, "
+    "comparison or continuation, e.g. an outcome, a preference, a method, an entity "
+    "facet or an operational quirk; examples, not a closed set. Never re-write what "
+    "the response lists as written recently, and stay silent when nothing qualifies."
 )
 
 _CAPTURE_EFFECTIVE_TEMPLATE = MappingProxyType(
@@ -352,8 +361,10 @@ CONTRACTS: dict[str, ProminenceContract] = {
             "Skip chit-chat, control messages, and context-free fresh tasks."
         ),
         capture=(
-            "Capture at a stepping stone: a durable conclusion, recurring entity with "
-            "reusable facts, or method that was carried out with a reported result. Not "
+            LINK_NAMED_IDENTITIES_LINE + " "
+            "Capture at a stepping stone: a durable conclusion, central or recurring "
+            "entity with reusable facts, or method that was carried out with a reported "
+            "result. Not "
             "mid-thought exploration, tangents, or unresolved questions. Capture stable "
             "preferences, recurring routines, historical baselines, or durable affiliations "
             "only when stability or recurrence and reusable comparison, interpretation, or "
@@ -385,10 +396,12 @@ CONTRACTS: dict[str, ProminenceContract] = {
             "chit-chat and control messages."
         ),
         capture=(
+            LINK_NAMED_IDENTITIES_LINE + " "
             "Capture at every stepping stone, and treat the bar for 'durable' as low: "
             "a decision, a resolved problem, a diagnosed failure, a reusable pattern, "
-            "a fact about a recurring entity, or a method you actually ran and how it "
-            "turned out. Capture stable preferences, recurring routines, historical baselines, "
+            "a fact about a central or recurring entity, or a method you actually ran and "
+            "how it turned out. Capture stable preferences, recurring routines, historical "
+            "baselines, "
             "or durable affiliations only when stability or recurrence and reusable comparison, "
             "interpretation, or decision value are clear. Route a uniquely resolved Entity "
             "facet or affiliation there; otherwise use one concise compiled observation; use "

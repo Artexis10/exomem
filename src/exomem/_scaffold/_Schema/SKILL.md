@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: d7def9c54b1a2df5c12b6a4daa50b326eba6fd3870df16b8d7d86ef510e24620
+  skill_contract: f83e5ef4c839abe480016a870769cfa8ea21284519f5eae0a03301a7595744d7
   version: "0.32.0"
 ---
 
@@ -111,7 +111,7 @@ required by the envelope. Raw capture is not automatic compilation.
 
 At `balanced` or `maximal`:
 
-Call `activate_context` with the user's turn verbatim before answering a substantive turn that has no prior context; resolve an `ambiguous` packet by calling again with `anchor` set.
+Before a substantive turn with no prior context, call `activate_context` with the turn verbatim; on `ambiguous`, call again with `anchor`.
 
 What comes back is bounded working memory, or an abstention with its reason; an
 `ambiguous` packet names the competing senses and runs no lane, so choosing one
