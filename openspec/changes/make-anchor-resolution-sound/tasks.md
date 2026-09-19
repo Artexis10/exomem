@@ -51,7 +51,7 @@
       Recorded limit, not fixed here: `collection_claims` and `structure_promotion` keep a
       basic-Latin splitter, so `claims_match` and Records current state cannot be reached
       by a non-Latin turn; that is its own change.
-- [ ] 4a.3 Probe corpus, deterministic activation audit and latency gate unchanged and
+- [x] 4a.3 Probe corpus, deterministic activation audit and latency gate unchanged and
       green; real-turn run on the owner's snapshot shows no negative turn resolving.
 
 ## 5. Delivery
