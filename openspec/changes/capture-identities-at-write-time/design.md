@@ -67,8 +67,17 @@ declaration argument returns as its own change with that measurement as its case
 > create and hydrate an existing Entity before you make a second one. A passing name
 > needs no link.
 
-Carried in four places, because no single one reaches every client: bootstrap guidance
-at `balanced` and `maximal`; the scaffold skill; the `body` argument description of
+Carried in four places, because no single one reaches every client, and sized to what
+each can hold. Compact bootstrap guidance has 36 bytes of warning margin left at the
+default level (measured: 548 bytes of headroom on the tightest surface against a
+512-byte margin), so it carries only the link instruction, in about ninety bytes, and
+names a central entity beside a recurring one; those words are paid for by tightening
+two existing sentences (the activation line and the episode-sweep sentence) without
+changing what they instruct. What to do with a candidate rides the candidate: the
+`entity_candidate` block carries one fixed sentence (resolve before creating, hydrate
+before duplicating), which reaches exactly the agent that needs it at the moment it
+needs it. The full doctrine lives in the scaffold skill. So: bootstrap guidance at
+`balanced` and `maximal`; the scaffold skill; the `body` argument description of
 `remember` and `replace_memory` (the only text every connected client is certain to
 read), in one sentence; and the capture texts that today forbid exactly the
 first-mention case the owner asked for. The capture hook allows `create-entity` "only

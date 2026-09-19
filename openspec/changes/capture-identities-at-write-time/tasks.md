@@ -46,10 +46,18 @@
 - [x] 2.3 Carry `entity_candidate` through the mutation terminal like
       `structure_suggestion`; MCP, CLI and REST parity.
 
+- [ ] 2.4 The block carries one fixed sentence of guidance (resolve before creating,
+      hydrate before duplicating), inside the block's existing bounds. Red first.
+
 ## 3. Doctrine
 
-- [ ] 3.1 Bootstrap guidance line at `balanced` and `maximal`; re-measure the compact byte
-      budget at every level and surface.
+- [ ] 3.1 Bootstrap guidance at `balanced` and `maximal`: one link instruction of about
+      ninety bytes, and "central or recurring entity" where the capture text says
+      "recurring entity". Pay for it by tightening `ACTIVATION_CARRIER_LINE` and
+      `_EPISODE_SWEEP_CAPTURE` without changing what they instruct (keep the scaffold's
+      served projection byte-identical). Re-measure every level and surface: under the
+      ceiling everywhere, and at least 512 bytes of headroom at `balanced` on every
+      surface. Report the matrix.
 - [x] 3.2 Scaffold skill reference for linking; keep it generic
       (`tests/test_scaffold_no_leak.py`).
 - [x] 3.3 One sentence in the `body` argument description of `remember` and
@@ -79,6 +87,12 @@
 
 ## 5. Delivery
 
+- [ ] 5.0 `test_epistemic_commands_are_registry_identical_between_profiles_and_local_surface`
+      compares the PINNED historical profile with the live schema fixture, which the pin
+      doctrine in `hosted_legacy_schemas.py` makes false the first time a live
+      description changes. Compare the historical profile with its own pin instead, and
+      assert the live-fixture identity for the current, unpinned profile. Never edit the
+      pin file.
 - [ ] 5.1 Regenerate derived artifacts (tool schemas and fingerprint, capabilities doc,
       plugin tree, hosted render, harness modules pin); `openspec validate --all
       --strict`; privacy gate; full sharded corpus at the delivery boundary.

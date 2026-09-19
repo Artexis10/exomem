@@ -6,7 +6,8 @@ vault page and no active Entity, and that write takes the set of eligible pages 
 that same bare name from one page to two, the committed response SHALL carry an
 `entity_candidate` block of at most three identities, each with its name, at most eight
 linking pages, registry near matches, and the routes to `resolve-entity` and
-`create-entity`. The set SHALL be read from the graph's link-dependency index, without a
+`create-entity`, together with one fixed sentence of guidance telling the agent to
+resolve before creating and to hydrate an existing Entity before making a second one. The set SHALL be read from the graph's link-dependency index, without a
 vault walk and without any per-caller record, SHALL evaluate at most sixteen returned
 rows, and SHALL apply the family's page-level exclusions: ineligible evidence, navigation
 pages, pages in the `Entities` subtree, and a page whose own title or filename stem is
@@ -23,6 +24,11 @@ Entity.
 - **WHEN** one eligible page already links an unresolved identity and a second page that
   links it is written
 - **THEN** that write's response carries the identity with both pages and the two routes
+
+#### Scenario: The block says what to do with it
+- **WHEN** a client with no skill and no hook receives the block
+- **THEN** the block's own guidance tells it to resolve before creating and to hydrate
+  before duplicating
 
 #### Scenario: A third page does not repeat the prompt
 - **WHEN** two eligible pages already link an unresolved identity and a third is written
