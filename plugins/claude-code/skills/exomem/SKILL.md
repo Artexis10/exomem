@@ -139,6 +139,14 @@ connections under the envelope. Never fabricate an edge to satisfy a quota.
 Keep the full semantic grammar below visible when authoring; use `observe_memory`
 for one semantic unit rather than fragile whole-page string edits.
 
+Wikilink every person, organisation, place, piece of equipment or product a
+durable write names, whether or not a page exists yet — an unresolved link is
+the editor's own way of marking a thing that should exist; a passing name needs
+no link. When the note is about an identity that has no Entity, resolve it and
+create the Entity in the same turn, within your confirmation rules. When a write
+returns `entity_candidate`, resolve before you create, and hydrate an existing
+Entity before you make a second one.
+
 ### Vocabulary consideration
 
 Before saving durable knowledge, consider whether the material calls for reuse,

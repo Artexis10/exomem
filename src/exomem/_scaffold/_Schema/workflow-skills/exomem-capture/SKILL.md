@@ -60,8 +60,8 @@ substantial curation uses confirmed `restructure_execution`.
    then call `connect_memory(operation="resolve-entity", name=...)` before writing.
 7. When one active entity matches, use `edit_memory` for a small stable-fact
    correction or the canonical relation workflow for a new connection.
-8. Only when no entity matches and the identity is stable, recurring, central,
-   and useful beyond this source, use `connect_memory(operation="create-entity")`.
+8. Only when no entity matches and the identity is stable, and central or
+   recurring, and useful beyond this source, use `connect_memory(operation="create-entity")`.
 
 ## Lifecycle
 Two more classes land here. A **stated intent or commitment** routes to Planning after resolving workflow posture and inspecting for an existing item to update before creating one. An **observed outcome or event** routes only to one compatible Records collection with `record_memory(action="append")`; when collections compete ask one focused question, and when none fits propose one rather than creating it silently. Records never transition Planning: only explicit user intent may request a guarded transition, while a `propose-after-outcome` posture may only propose one. A tentative claim is never written as an event, and elapsed time is never an outcome.
