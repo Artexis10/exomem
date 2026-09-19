@@ -35,8 +35,17 @@ def _link_body(name: str = NAME) -> str:
     return f"---\ntype: insight\nstatus: active\n---\n# Note\n\nMet [[{name}]].\n"
 
 
-def _page(path: str, wikilinks: tuple[tuple[str, int], ...]) -> SimpleNamespace:
-    return SimpleNamespace(path=path, frontmatter={}, body_wikilinks=wikilinks)
+def _page(
+    path: str,
+    wikilinks: tuple[tuple[str, int], ...],
+    *,
+    title: str = "New",
+    status: str | None = "active",
+) -> SimpleNamespace:
+    """The write's own page state -- also evaluated for self-eligibility."""
+    return SimpleNamespace(
+        path=path, frontmatter={}, body_wikilinks=wikilinks, title=title, status=status
+    )
 
 
 def _page_state(path: str, *, title: str = "", status: str | None = "active") -> SimpleNamespace:
@@ -83,6 +92,27 @@ def test_the_second_page_carries_the_block(tmp_path: Path) -> None:
     }
 
 
+def test_an_edit_that_newly_adds_the_link_is_still_the_second_page(tmp_path: Path) -> None:
+    """An EDIT can be the crossing write too, not only a creation.
+
+    B previously carried no link to the name; this edit adds one, with A
+    already linking it -- the same transition a brand-new page would produce.
+    """
+    _seed(tmp_path, {A: _link_body(), B: _link_body("Somewhere Else")})
+    page = _page(B, ((NAME, 3),))
+    previous = _page(B, ())  # B carried no link to NAME before this edit
+    corpus = _corpus(
+        tmp_path, pages={A: _page_state(A, title="A"), B: _page_state(B, title="B")}
+    )
+
+    result = capture_sweep.entity_candidate(
+        tmp_path, page_state=page, corpus=corpus, previous_page_state=previous
+    )
+
+    assert result is not None
+    assert result["identities"][0]["pages"] == sorted([A, B])
+
+
 def test_a_third_page_does_not_repeat_the_prompt(tmp_path: Path) -> None:
     """Two eligible pages already link it; this write is the third."""
     _seed(tmp_path, {A: _link_body(), B: _link_body()})
@@ -95,12 +125,25 @@ def test_a_third_page_does_not_repeat_the_prompt(tmp_path: Path) -> None:
 
 
 def test_editing_a_page_that_already_linked_it_does_not_fire(tmp_path: Path) -> None:
-    """The write's OWN page is already among the indexed sources for this name."""
-    _seed(tmp_path, {A: _link_body()})
-    page = _page(A, ((NAME, 3),))  # same path the graph already indexed
-    corpus = _corpus(tmp_path, pages={A: _page_state(A, title="A")})
+    """This edit's link was already there before the edit: not a new transition.
 
-    assert capture_sweep.entity_candidate(tmp_path, page_state=page, corpus=corpus) is None
+    Even with a second eligible page (B) that would otherwise make this the
+    crossing write, a link the page already carried before this exact edit
+    never fires -- checked against `previous_page_state`, not against
+    whatever the graph's own dependency row for this page happens to read.
+    """
+    _seed(tmp_path, {A: _link_body(), B: _link_body()})
+    page = _page(A, ((NAME, 3),))  # A, still linking the name after this edit
+    previous = _page(A, ((NAME, 3),))  # A, already linking it before this edit
+    corpus = _corpus(
+        tmp_path, pages={A: _page_state(A, title="A"), B: _page_state(B, title="B")}
+    )
+
+    result = capture_sweep.entity_candidate(
+        tmp_path, page_state=page, corpus=corpus, previous_page_state=previous
+    )
+
+    assert result is None
 
 
 def test_no_prior_eligible_page_is_still_only_one_page_total(tmp_path: Path) -> None:

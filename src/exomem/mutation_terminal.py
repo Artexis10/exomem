@@ -815,6 +815,112 @@ def _records_routing_projection(leaf: Any) -> dict[str, Any] | None:
     return None
 
 
+#: Wire bounds on the advisory `entity_candidate` block
+#: (`write-time-identity-candidates` spec): at most three identities, each with
+#: at most eight linking pages and at most three registry near matches. This
+#: module's own numbers, for the same reason the structure-suggestion and
+#: due-state bounds above are its own: the terminal re-validates what a leaf
+#: attached instead of trusting it. `_ENTITY_CANDIDATE_ROUTES` is the closed,
+#: ordered pair every identity carries; a leaf naming anything else is dropped.
+_MAX_ENTITY_CANDIDATE_IDENTITIES = 3
+_MAX_ENTITY_CANDIDATE_NAME_CHARS = 64
+_MAX_ENTITY_CANDIDATE_PAGES = 8
+_MAX_ENTITY_CANDIDATE_PAGE_CHARS = 512
+_MAX_ENTITY_CANDIDATE_NEAR_MATCHES = 3
+_MAX_ENTITY_CANDIDATE_MATCH_PATH_CHARS = 512
+_MAX_ENTITY_CANDIDATE_MATCH_TITLE_CHARS = 200
+_MAX_ENTITY_CANDIDATE_SHARED_TOKENS = 8
+_ENTITY_CANDIDATE_ROUTES = ("resolve-entity", "create-entity")
+
+
+def _entity_candidate_near_match(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    path = value.get("path")
+    title = value.get("title")
+    shared = value.get("shared_tokens")
+    if (
+        not isinstance(path, str)
+        or not 0 < len(path) <= _MAX_ENTITY_CANDIDATE_MATCH_PATH_CHARS
+    ):
+        return None
+    if (
+        not isinstance(title, str)
+        or not 0 < len(title) <= _MAX_ENTITY_CANDIDATE_MATCH_TITLE_CHARS
+    ):
+        return None
+    if not _bounded_tokens(shared, _MAX_ENTITY_CANDIDATE_SHARED_TOKENS):
+        return None
+    return {"path": path, "title": title, "shared_tokens": list(shared)}
+
+
+def _entity_candidate_identity(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    name = value.get("name")
+    pages = value.get("pages")
+    near_matches = value.get("near_matches")
+    routes = value.get("routes")
+    if not isinstance(name, str) or not 0 < len(name) <= _MAX_ENTITY_CANDIDATE_NAME_CHARS:
+        return None
+    if not isinstance(pages, (list, tuple)) or not (
+        0 < len(pages) <= _MAX_ENTITY_CANDIDATE_PAGES
+    ):
+        return None
+    if not all(
+        isinstance(page, str) and 0 < len(page) <= _MAX_ENTITY_CANDIDATE_PAGE_CHARS
+        for page in pages
+    ):
+        return None
+    if not isinstance(near_matches, (list, tuple)) or len(near_matches) > (
+        _MAX_ENTITY_CANDIDATE_NEAR_MATCHES
+    ):
+        return None
+    matches: list[dict[str, Any]] = []
+    for match in near_matches:
+        projected = _entity_candidate_near_match(match)
+        if projected is None:
+            return None
+        matches.append(projected)
+    if not isinstance(routes, (list, tuple)) or list(routes) != list(_ENTITY_CANDIDATE_ROUTES):
+        return None
+    return {
+        "name": name,
+        "pages": list(pages),
+        "near_matches": matches,
+        "routes": list(_ENTITY_CANDIDATE_ROUTES),
+    }
+
+
+def _entity_candidate_projection(leaf: Any) -> dict[str, Any] | None:
+    """Lift one advisory `entity_candidate` block out of a write leaf.
+
+    Same posture as `_structure_suggestion_projection`, and carried the same
+    way: kept at compact detail, dropped (as a top-level key; the raw leaf is
+    untouched) at `legacy`. A malformed or oversized advisory is DROPPED
+    rather than allowed to widen the wire contract.
+    """
+    if not isinstance(leaf, Mapping):
+        return None
+    for container_key in ("creation", "semantic", "source", None):
+        container = leaf if container_key is None else leaf.get(container_key)
+        if not isinstance(container, Mapping):
+            continue
+        value = container.get("entity_candidate")
+        if not isinstance(value, Mapping):
+            continue
+        identities = value.get("identities")
+        if not isinstance(identities, (list, tuple)) or not (
+            0 < len(identities) <= _MAX_ENTITY_CANDIDATE_IDENTITIES
+        ):
+            continue
+        projected = [_entity_candidate_identity(item) for item in identities]
+        if any(item is None for item in projected):
+            continue
+        return {"identities": projected}
+    return None
+
+
 #: Wire bounds on the advisory due-state block. Deliberately this module's own
 #: numbers rather than an import of the producer's: the terminal re-validates what
 #: a leaf attached instead of trusting it, and a bound that came from the producer
@@ -1672,6 +1778,9 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
     records_routing = _records_routing_projection(leaf)
     if records_routing is not None:
         compact["records_routing"] = records_routing
+    entity_candidate = _entity_candidate_projection(leaf)
+    if entity_candidate is not None:
+        compact["entity_candidate"] = entity_candidate
     if due_state is not None and _admit_due_state(due_state, due_state_vault):
         compact["due_state"] = due_state
     if capture_sweep is not None:
