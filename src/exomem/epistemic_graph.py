@@ -2873,6 +2873,13 @@ class EpistemicGraphIndex:
     def _reconcile_recall_publication(self) -> None:
         """Seed/reconcile recall outside publication authority, then rebuild fresh."""
         pending = freshness.external_pending_epoch(self.vault_root)
+        if pending is not None:
+            # The reconciliation replaces the recall projection that the graph
+            # publication will prove.  Drop dependent resident projections
+            # before its sampled external epoch can be retired, so a newly live
+            # graph cannot retain resolver or inbound answers from before it.
+            find_module.evict_resolver_caches(self.vault_root)
+            vault_module.evict_inbound_index(self.vault_root)
         entries = (
             (str(path), freshness.stat_signature(path))
             for path in vault_module.walk_vault_md(self.vault_root)
