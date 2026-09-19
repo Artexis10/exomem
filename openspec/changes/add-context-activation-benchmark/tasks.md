@@ -16,9 +16,11 @@ Checked tasks record the delivered instrument, not proof that the corpus exercis
 - [x] 1.3 Author the private snapshot builder (local only): digest-pinned copy of a
       vault with meta-note exclusion listed in the snapshot manifest; never committed;
       privacy gate passes on the repository.
-- [ ] 1.4 Rebuild fixtures through normal supported writers with canonical entity/hub/Records/Planning structure; verify structural prerequisites, isolated state and new corpus digests before retrieval.
+- [x] 1.4 Rebuild fixtures through normal supported writers with canonical entity/hub/Records/Planning structure; verify structural prerequisites, isolated state and new corpus digests before retrieval. Delivered in PR #1312 with independent review and required CI; this establishes corpus construction, not complete topology or compiler acceptance.
 - [ ] 1.5 Publish the real graph/index and call the actual compiler for all eighteen fixtures; verify existing recall/precision/poison/budget thresholds and a failing mechanism-removal run, keeping oracle-packet tests separate.
 - [ ] 1.6 Add capture-to-activation integration with same-origin fan-out and interrupted resume from `close-memory-loop`; verify canonical readback and later fresh-session context without fixture-specific product rules.
+- [ ] 1.7 Freeze and digest-bind canonical current-state projection eligibility and reference identities; verify precision retains every surfaced reference, poison cannot be hidden, fabricated projections earn no credit, and stale/missing bindings void product runs.
+- [ ] 1.8 Audit the distinct Planning collection/item identity mismatch and missing topology/continuity prerequisites before interpreting the eighteen-case report as compiler quality evidence.
 
 ## 2. Deterministic scorer
 
@@ -46,6 +48,7 @@ Checked tasks record the delivered instrument, not proof that the corpus exercis
 - [x] 3.3 Implement the reminder-turn test, the blind extraction prompt with the
       model-free gold/poison intersection, and the blind rubric input; document the
       grader blinding.
+- [ ] 3.4 Add subscription Codex execution and usage telemetry through the existing agent-arm seams; verify configured model/effort, bounded execution, token-counter provenance, incomplete attempts, unknown charges and no metered fallback, then perform a bounded authorized smoke run.
 
 ## 4. Baseline runbook and measurements
 

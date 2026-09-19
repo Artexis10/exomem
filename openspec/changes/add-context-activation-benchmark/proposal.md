@@ -18,6 +18,10 @@ acknowledged.
 
 The `close-memory-loop` programme makes product-shaped deterministic capture/index/compiler acceptance and observed ordinary-use evidence the required delivery path. Paid multi-arm comparisons remain available, explicitly deferred and separately opt-in. Passing scorer/oracle-packet tests alone does not establish real compiler acceptance; the corpus must use canonical entity, hub, Records and Planning shapes through normal writers and publication.
 
+Derived current-state references retain their own scoring identity and earn relevance
+through frozen canonical-source bindings. Subscription agent runs preserve usage
+telemetry separately from metered API charges or optional price estimates.
+
 - A **deterministic activation audit** instrument: a seeded synthetic corpus shaped
   like nine real cold-start cases (C1–C9) with nine negative twins (T1–T9), gold and
   poison anchor lists authored before any retrieval runs, a model-free scorer reporting

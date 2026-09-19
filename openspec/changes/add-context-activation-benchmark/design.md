@@ -79,6 +79,30 @@ The corpus must be built through normal supported writers into actual canonical 
   cases) → A1 floor → A2/A4 (if A4 already clears the bar, that is the cheapest
   falsification) → deterministic baseline from `ask_memory` output labelled against
   gold/poison.
+- **D9 — Reference identity and derived state.** Keep producer references intact.
+  Freeze benchmark-owned current-state bindings from authored fixture relationships
+  and canonical readback before activation. Bind the table and reference map to the
+  exact and logical corpus identities. Validate projection role and state-entry
+  consistency, including the unit's `updated` date, before awarding relevance;
+  never trust a packet's provenance to create
+  a binding. Every distinct surfaced reference stays in the precision denominator,
+  while recall counts canonical gold identities once. Known poison bindings cannot
+  be escaped through malformed metadata or supersession claims. Identity-only
+  oracle calls retain their existing interface. Only `oracle_packet` and legacy
+  `unknown` mechanisms allow missing bindings; all other mechanism labels require
+  both the binding and its digest. Binding-optional runs cannot establish product
+  acceptance. The Planning collection/item identity
+  mismatch is a separate product-contract question, not a current-state projection
+  or a reason to collapse arbitrary fragments. New scoring reports carry the binding
+  digest; prior reports are not rewritten.
+- **D10 — Subscription telemetry.** Reuse existing token accounting where its
+  semantics fit, but keep subscription runs outside the metered API billing ledger.
+  Preserve CLI usage counters, model/effort/version identity, timings and failure
+  attempts. Unknown counters, quota deductions and charges remain explicitly
+  unknown. Optional API-equivalent estimates need separate labelled provenance.
+  Model and effort are run configuration, not fixture-specific product logic.
+  Respect the authorized inexpensive subscription model and bounded run budget;
+  never silently fall back to API billing.
 
 ## Risks / Trade-offs
 
