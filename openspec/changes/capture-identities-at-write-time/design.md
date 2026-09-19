@@ -73,7 +73,8 @@ default level (measured: 548 bytes of headroom on the tightest surface against a
 512-byte margin), so it carries only the link instruction, in about ninety bytes, and
 names a central entity beside a recurring one; those words are paid for by tightening
 two existing sentences (the activation line and the episode-sweep sentence) without
-changing what they instruct. What to do with a candidate rides the candidate: the
+changing what they instruct. After the change the tightest surface keeps 518 bytes of
+headroom at the default level and 153 at `maximal`. What to do with a candidate rides the candidate: the
 `entity_candidate` block carries one fixed sentence (resolve before creating, hydrate
 before duplicating), which reaches exactly the agent that needs it at the moment it
 needs it. The full doctrine lives in the scaffold skill. So: bootstrap guidance at
