@@ -2,8 +2,8 @@
 
 - [x] 0.1 `activate-context-on-host-turns` (169e6deb) and `make-anchor-resolution-sound`
       (6cb28cfa) are merged; this branch carries main.
-- [ ] 0.2 The tokeniser fix (`make-anchor-resolution-sound` tasks 4a) is merged and this
-      branch carries it.
+- [x] 0.2 The tokeniser fix (`make-anchor-resolution-sound` tasks 4a) is merged (c5712f02)
+      and this branch carries it.
 - [ ] 0.3 Record the deterministic activation audit on the seeded corpus at the base
       commit: per-case anchor recall and precision, twin false activation, hedged-twin
       count. This is the before-image for 5.2.
