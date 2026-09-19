@@ -39,6 +39,30 @@ The system SHALL resolve and enrich existing entities before creating duplicates
 - **THEN** the agent proposes or applies permitted hydration of that identity instead of creating a duplicate
 - **AND** ambiguous or incidental mentions do not cause automatic identity assignment
 
+#### Scenario: A useful reusable relationship is missing
+
+- **WHEN** no current registered relation truthfully expresses a supported reusable distinction
+- **THEN** the active agent may propose a governed namespaced extension with precise semantics, core parent/family and directionality/symmetry, validate it and publish it through the existing vocabulary workflow before ordinary use
+- **AND** pending or failed publication is not presented as an active definition
+- **AND** generic or absent edges remain legitimate when greater precision lacks evidence
+
+### Requirement: Destination acceptance observes ordinary-agent decisions
+
+The existing capture-to-activation benchmark SHALL include a separately named synthesis and a paired minor-refinement negative. Original input and the pre-capture vault snapshot SHALL be frozen before execution, with evaluator expectations withheld from the actor. The run SHALL observe relevant antecedent retrieval, destination decisions before effects, actual public-writer receipts, graph/index publication and subsequent useful activation. Scripted correct writes and repaired post-capture state SHALL NOT establish no-nudge success. Exact private replay SHALL require recoverable original input and the appropriate snapshot; reconstructed fixtures SHALL be labelled separately.
+
+#### Scenario: An agent chooses the focused destination without a correction
+
+- **WHEN** a synthetic ordinary product discussion synthesizes five narrower antecedents into an independently useful named thesis
+- **THEN** the first capture pass creates its focused home and truthful typed links without a save, routing or page-creation instruction
+- **AND** a later context activation retrieves the thesis with provenance
+- **AND** the matched refinement case stays on its existing page without fragmentation
+
+#### Scenario: Only the corrected note survives
+
+- **WHEN** the original private episode or its pre-capture snapshot is unavailable
+- **THEN** exact replay remains unmeasured
+- **AND** a reconstruction from the corrected note cannot be reported as a passing original no-nudge replay
+
 ### Requirement: Independent referents remain distinct from roles
 
 The system SHALL support separately evidenced operator organizations, physical sites and independently useful brands without conflating their identities. One entity MAY carry several governed roles/facets without duplicate identities per role. Canonical types and optional parent families SHALL use the existing dynamic registry; filesystem paths SHALL remain projections. The possibility of independent change SHALL inform active-agent consideration but SHALL NOT alone justify entity creation. Existing identity and alias resolution, hydration, authority and provenance rules SHALL apply before creation or restructuring.
@@ -190,3 +214,47 @@ The existing benchmark SHALL retain its thresholds and negative controls while e
 
 - **WHEN** a hand-built packet passes scoring while the corpus has not produced the expected entities, collections and graph state through the product path
 - **THEN** scorer correctness may pass but compiler and integrated-loop acceptance fail
+
+### Requirement: Cross-client activity is a deferred bounded context input
+
+The programme SHALL retain shared activity awareness as a follow-on after the existing compiler, client acceptance, adaptation and consolidation tranches. Earlier compiler deliveries, candidate iteration and hosted launch SHALL NOT depend on enabling it. Its implementation SHALL first assess reuse of current host/harness activity, session, handoff and continuity mechanisms rather than assume a new channel is necessary. Native clients SHALL retain execution ownership.
+
+When available, relevant activity SHALL be a separately labelled, bounded operational input to context activation. Records SHALL carry a scoped activity identity, bounded subject/action, authenticated reporter with attributable client/session identity, report revision, reported status, service-observed contact time and authorized result/handoff references. The implementation SHALL define finite publication, retention and read budgets. Both reports and linked references SHALL obey current user/workspace/audience disclosure boundaries. Activity SHALL remain within the existing total activation token/latency limits and a finite activity sub-budget, with explicit omission and availability information. Disabled or unavailable activity SHALL NOT prevent normal capture or activation.
+
+#### Scenario: Another participating client reports related work
+
+- **WHEN** a supported client begins a coding or non-coding task overlapping a current authorized activity report
+- **THEN** activation supplies the relevant attributed report within its existing total budget without requiring a coordination reminder
+- **AND** the active agent can distinguish reported overlap from verified external state and from similar but independent tasks
+- **AND** the report grants no permission to contact, stop or take over the other session
+
+#### Scenario: The feed is absent or outside the reader's scope
+
+- **WHEN** the activity feed is disabled, unavailable, truncated or lacks participation from another client
+- **THEN** activation reports the applicable limitation without claiming that no work exists
+- **AND** capture and durable context activation remain usable
+- **AND** unauthorized activity and linked-result contents are not disclosed, including after access revocation
+
+### Requirement: Activity freshness does not establish progress or exclusivity
+
+Activity reports SHALL distinguish reported status, contact freshness and independently verified result evidence. Expired contact SHALL mean stale or unknown, never completion or permission to assume ownership. Replayed or out-of-order updates SHALL NOT refresh or resurrect stale or terminal reports. A heartbeat SHALL NOT establish progress. Conflicting advisory claims SHALL remain attributable and SHALL NOT be silently resolved by arrival order or semantic similarity. The system SHALL expose participation coverage rather than assume every MCP client reports activity.
+
+Presence and advisory ownership SHALL remain transient operational state. Supported durable outcomes MAY enter the episode compiler through existing governed writers and evidence rules; presence SHALL NOT count as independent knowledge evidence or episode completion. Advisory activity SHALL NOT authorize effects or guarantee duplicate-effect prevention. Any exclusive-action claim SHALL require a separately reviewed atomic ownership and execution-side fencing/idempotency contract at the side-effect owner, rather than treating the storage writer lease as task ownership.
+
+#### Scenario: A client stops reporting midway through work
+
+- **WHEN** the last contact expires or an old active update arrives after expiry or a terminal report
+- **THEN** the view preserves stale/unknown or the newer terminal report as applicable instead of inventing progress or completion
+- **AND** neither expiry nor replay authorizes a retry, takeover or duplicate side effect
+
+#### Scenario: Completion is reported without a verified result
+
+- **WHEN** a client marks work complete but its result evidence is unavailable or unverified
+- **THEN** context labels completion as the client's report and retains the evidence limitation
+- **AND** neither an episode's reconciled completion nor a verified durable outcome is inferred from that report
+
+#### Scenario: Two clients claim the same action
+
+- **WHEN** two attributable activity records claim responsibility for overlapping work
+- **THEN** bounded context exposes the advisory conflict without choosing an exclusive owner or automatically suppressing either task
+- **AND** any actual side effect remains subject to its existing authorization, idempotency and execution boundaries

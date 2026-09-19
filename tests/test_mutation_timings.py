@@ -776,54 +776,6 @@ def test_publish_after_an_eviction_leaves_the_next_preflight_warm(
 # is accounted for.
 # ---------------------------------------------------------------------------
 
-#: The spans that do the work inside `derived.canonical_to_committed`, with no
-#: two of them nested in each other. Summing a parent and its child would count
-#: the child twice and make the coverage below look better than it is, so
-#: `index.upsert_after_write` (the parent of the components) and
-#: `graph.refresh_paths` (a child of `index.epistemic_graph`) are deliberately
-#: absent. `derived.fanout` and `derived.terminal_persist` are absent for the
-#: opposite reason: they *partition* the window by construction, so summing
-#: them would prove nothing about whether the work inside is attributed.
-_UMBRELLA_LEAF_SPANS = frozenset(
-    {
-        "index.memory_refs",
-        "index.resolver",
-        "index.lexstore",
-        "index.epistemic_graph",
-        "index.embeddings",
-        "index.path_partition",
-        "index.semantic_states",
-        "index.policy_revalidate",
-        "index.corpus_publish",
-        "index.semantic_purge",
-        "index.path_custody",
-        "index.self_write_registration",
-        "index.graph_epoch_handoff",
-        "derived.deferred_index_store",
-        "derived.terminal_persist",
-    }
-)
-
-#: What the leaf spans must account for of `derived.canonical_to_committed` on
-#: THIS fixture, which is not the same number as on a real write and is
-#: deliberately not stated as if it were. One governed write over one path
-#: completes in 70-200 ms here and varies by about a third run to run -- the
-#: same 20-40 ms of SQLite and interpreter cost lands in a different span each
-#: time -- so a high bar would be a flaky test rather than a stronger guarantee.
-#: What the bar is for is the failure this suite exists to prevent: a step
-#: inside the window with NO span at all, which is what left 46 s of a 78 s
-#: write unattributed on 0.84.1. The names below are pinned individually for
-#: that, and the ratio is the backstop that catches a newly-added unnamed step
-#: large enough to matter.
-#:
-#: Read the backstop for exactly what it is: at 0.5 it only catches an unnamed
-#: step worth more than half the window. It is sized to this fixture's variance,
-#: not to the guarantee, and should be raised on a larger fixture -- one whose
-#: window is seconds rather than tens of milliseconds -- where the fixed costs
-#: stop dominating and a real ratio becomes a stable assertion.
-_LEAF_COVERAGE_FLOOR = 0.5
-
-
 @contextmanager
 def _call_token(name: str):
     from exomem import call_spans
@@ -934,7 +886,9 @@ def test_the_leaf_spans_account_for_the_canonical_to_committed_window(
     `derived.canonical_to_committed` was an umbrella with 46 s of a 78 s write
     inside it and no span underneath. A span that only says how long something
     took, with nothing accounting for it, is the shape of the defect this
-    instrumentation exists to remove -- so the leaves have to add up.
+    instrumentation exists to remove. Pin the phase inventory here and the
+    duration of fallback work with a controlled clock below; real wall-clock
+    coverage ratios include uninstrumented scheduler pauses between phases.
     """
     from types import SimpleNamespace
 
@@ -999,8 +953,7 @@ def test_the_leaf_spans_account_for_the_canonical_to_committed_window(
         f"the two halves do not partition the umbrella: {halves} vs {umbrella['ms']}"
     )
 
-    # Every step inside the window is named. This is the guarantee; the ratio
-    # below is only its backstop.
+    # Every expected step inside this fixture's window is named.
     for name in (
         "index.upsert_after_write",
         "index.self_write_registration",
@@ -1011,18 +964,70 @@ def test_the_leaf_spans_account_for_the_canonical_to_committed_window(
         "index.corpus_publish",
         "index.semantic_purge",
         "index.path_custody",
+        "index.completion_check",
     ):
         assert name in spans, (
             f"{name!r} is a step inside the fan-out with no span, which is the "
             f"shape of the 0.84.1 defect: {sorted(spans)}"
         )
 
-    covered = sum(
-        span["ms"] for name, span in spans.items() if name in _UMBRELLA_LEAF_SPANS
+
+@pytest.mark.parametrize("dispatch_fails", [False, True])
+def test_completion_and_fallback_work_have_exact_timing_spans(
+    tmp_path: Path, monkeypatch, dispatch_fails: bool
+) -> None:
+    from types import SimpleNamespace
+
+    from exomem import call_spans, file_watcher, graph_sync, index_sync
+    from exomem import vault as vault_module
+
+    clock = [100.0]
+    monkeypatch.setattr(
+        call_spans, "time",
+        SimpleNamespace(perf_counter=lambda: clock[0], monotonic=lambda: clock[0]),
     )
-    assert covered >= umbrella["ms"] * _LEAF_COVERAGE_FLOOR, (
-        "the leaf spans inside the window account for "
-        f"{covered:.1f} ms of {umbrella['ms']:.1f} ms. Whatever is missing is a "
-        "step with no span, which is exactly what left 46 s of a 78 s write "
-        f"unattributed on 0.84.1. Spans seen: {sorted(spans)}"
+    monkeypatch.setattr(file_watcher, "register_self_write", lambda *a, **kw: ([], False))
+    monkeypatch.setattr(graph_sync, "register_outer_fanout_failure", lambda *a: None)
+    report = index_sync.IndexSyncReport(
+        "upsert", (PAGE,), (PAGE,),
+        tuple(
+            index_sync.IndexComponentOutcome(name, "not_required", "NOT_REQUIRED")
+            for name in ("lexstore", "memory_refs", "resolver", "epistemic_graph", "embeddings", "watcher")
+        ),
     )
+    calls = []
+
+    def dispatch(*args, **kwargs):
+        if dispatch_fails:
+            raise RuntimeError("injected dispatch failure")
+        return report
+
+    def completion(root, paths, observed):
+        assert (root, paths, observed) == (tmp_path, [tmp_path / PAGE], report)
+        calls.append("check")
+        clock[0] += 0.020
+        return False
+
+    def persist(root, paths):
+        assert (root, paths) == (tmp_path, [tmp_path / PAGE])
+        calls.append("store")
+        clock[0] += 0.030
+        return 1
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", dispatch)
+    monkeypatch.setattr(index_sync, "full_upsert_succeeded", completion)
+    monkeypatch.setattr(index_sync, "record_failed_refresh", persist)
+    with _call_token("fallback-attribution") as token:
+        assert vault_module.post_commit_batch_fanout(
+            tmp_path, [tmp_path / PAGE], None, None
+        ) is False
+        spans = {item["name"]: item for item in call_spans.pop_call_spans(token)}
+
+    assert calls == (["store"] if dispatch_fails else ["check", "store"])
+    assert spans["index.full_refresh_store"]["ms"] == 30.0
+    assert spans["index.full_refresh_store"]["count"] == 1
+    assert spans["index.full_refresh_store"]["fields"]["paths"] == 1
+    if dispatch_fails:
+        assert "index.completion_check" not in spans
+    else:
+        assert spans["index.completion_check"]["ms"] == 20.0
