@@ -46,12 +46,12 @@
 - [x] 2.3 Carry `entity_candidate` through the mutation terminal like
       `structure_suggestion`; MCP, CLI and REST parity.
 
-- [ ] 2.4 The block carries one fixed sentence of guidance (resolve before creating,
+- [x] 2.4 The block carries one fixed sentence of guidance (resolve before creating,
       hydrate before duplicating), inside the block's existing bounds. Red first.
 
 ## 3. Doctrine
 
-- [ ] 3.1 Bootstrap guidance at `balanced` and `maximal`: one link instruction of about
+- [x] 3.1 Bootstrap guidance at `balanced` and `maximal`: one link instruction of about
       ninety bytes, and "central or recurring entity" where the capture text says
       "recurring entity". Pay for it by tightening `ACTIVATION_CARRIER_LINE` and
       `_EPISODE_SWEEP_CAPTURE` without changing what they instruct (keep the scaffold's
@@ -87,7 +87,7 @@
 
 ## 5. Delivery
 
-- [ ] 5.0 `test_epistemic_commands_are_registry_identical_between_profiles_and_local_surface`
+- [x] 5.0 `test_epistemic_commands_are_registry_identical_between_profiles_and_local_surface`
       compares the PINNED historical profile with the live schema fixture, which the pin
       doctrine in `hosted_legacy_schemas.py` makes false the first time a live
       description changes. Compare the historical profile with its own pin instead, and
