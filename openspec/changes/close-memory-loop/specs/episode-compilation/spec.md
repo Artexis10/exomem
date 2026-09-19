@@ -69,6 +69,20 @@ Candidate identity SHALL remain stable across destination re-resolution, proposa
 - **THEN** its committed effect resolves to the original receipt and is not executed again
 - **AND** only remaining currently authorized effects may proceed
 
+#### Scenario: A leaf result is reconciled from stored evidence
+
+- **WHEN** an owner-held episode leaf has an uncertain attempted outcome
+- **THEN** the recovery adapter verifies its exact stored plan, approval, operation, receipt, atomic witness and applicable current readback before recording a verified committed outcome
+- **AND** caller-supplied success flags, mutable progress projections and unmatched evidence cannot substitute for that proof
+- **AND** reconciliation itself performs no canonical write or leaf execution
+- **AND** the existing consistency boundary excludes canonical mutations throughout the evidence read without granting writer authority
+
+#### Scenario: A missing or historical result cannot authorize a retry
+
+- **WHEN** a terminal receipt is missing, a committed postimage has changed, or only an earlier failed attempt is evidenced
+- **THEN** the episode remains uncertain until the existing execution owner and appropriate evidence contract reconcile the result
+- **AND** absence, failure or stale readback is never treated as proof that the current attempt did not commit
+
 ### Requirement: Completion attests coverage of original input
 
 The episode ledger SHALL distinguish attempted work, pending continuation and coverage through an input revision. Completion SHALL require an active-agent pass against that original revision, including corrections, plus receipt/readback reconciliation of claimed effects. A successful write, saved marker, short assistant response or cooldown SHALL NOT independently establish completeness. The server SHALL validate recorded state transitions without claiming it can prove semantic exhaustiveness.
