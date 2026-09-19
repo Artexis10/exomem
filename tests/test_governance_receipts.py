@@ -817,6 +817,28 @@ def test_receipt_schemas_reject_plaintext_and_unknown_fields(vault: Path, payloa
         receipts.append_event(vault, event_type="disclosure", payload=payload)
 
 
+@pytest.mark.parametrize("fragment", ("a%2F..", "a_b", "a" * 1024))
+def test_disclosure_receipts_reject_noncanonical_semantic_unit_refs(
+    vault: Path, fragment: str
+) -> None:
+    with pytest.raises(receipts.ReceiptError):
+        receipts.append_event(
+            vault,
+            event_type="disclosure",
+            payload={
+                "outcomes": [
+                    {
+                        "decision": "released",
+                        "ref": f"{_MEMORY_REF}#{fragment}",
+                        "content_hash": "a" * 64,
+                        "size": 1,
+                        "representation": "semantic_unit_span",
+                    }
+                ]
+            },
+        )
+
+
 @pytest.mark.parametrize("timestamp", ["../../outside", "2026-13-01T00:00:00Z", "2026-02-30T00:00:00Z"])
 def test_receipt_timestamp_cannot_escape_its_month_directory(vault: Path, timestamp: str) -> None:
     with pytest.raises(receipts.ReceiptError):

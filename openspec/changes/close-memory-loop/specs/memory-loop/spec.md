@@ -14,6 +14,25 @@ The system SHALL support pre-turn activation, active-agent reasoning, episode de
 - **THEN** the agent routes those changes to their canonical homes and the later activation supplies the relevant provenance-bearing facts without a save or recall reminder
 - **AND** the record distinguishes observed agent behaviour from forced-call infrastructure tests
 
+### Requirement: Working continuity preserves temporal meaning
+
+Activation and episode recovery SHALL reconnect a resumed topic with relevant recent changes, supported current state, unresolved work and older dependencies within existing context budgets. They SHALL use the existing continuity and canonical evidence carriers without depending on the later live-activity feed. An unfinished episode SHALL NOT itself establish an unexpressed Planning commitment.
+
+Where evidence supplies them, event occurrence, knowledge acquisition and claim validity SHALL remain distinguishable. Missing times or validity SHALL remain unknown. Capture time, file modification time, repetition and recent retrieval SHALL NOT independently establish event recency, continuing validity or task relevance. Corrections and supersession SHALL qualify current claims, while an older relevant dependency SHALL remain eligible beside recent developments.
+
+#### Scenario: A topic resumes after an intervening development
+
+- **WHEN** a supported session resumes an interrupted topic after a relevant development and an unrelated newer event
+- **THEN** activation supplies the relevant development, older dependency and supported unfinished state without the user identifying their earlier conversations
+- **AND** unrelated freshness cannot crowd out that context or manufacture a new user commitment
+- **AND** acceptance observes the later agent response using those connections, separately from scripted tool calls
+
+#### Scenario: Old information is saved again after a correction
+
+- **WHEN** an old event or superseded claim receives a recent capture or file edit without new event evidence
+- **THEN** the system preserves its historical timing and applies the supported correction when presenting current state
+- **AND** the fresh write timestamp does not make the old event new or the superseded claim current
+
 ### Requirement: Canonical ownership and provenance survive routing
 
 Stable identity/facets SHALL belong to entities, mutable state/events to Records or appropriate domain stores, and original provenance to Sources/Evidence. Hubs SHALL be navigation/projections. Markdown semantic units and supported structured collections SHALL remain canonical; graph/search/profile stores SHALL be rebuildable with explicit currency. Routing SHALL preserve direct verification, reported claims, inferences and uncertainty distinctly and SHALL NOT invent user Planning commitments.

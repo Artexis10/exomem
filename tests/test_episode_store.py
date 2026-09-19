@@ -176,6 +176,26 @@ def test_symlinked_episode_storage_cannot_read_or_write_outside(vault: Path, tmp
     assert list(outside.iterdir()) == []
 
 
+def test_v2_owner_directory_is_hashed_and_cannot_follow_a_symlink(vault: Path, tmp_path: Path):
+    store = _store(vault)
+    from exomem.episode_store import EpisodeStore
+
+    owner = "client-a"
+    bounded = EpisodeStore(vault, owner_audience_id=owner)
+    identity = model.episode_id("owner-directory")
+    owner_hash = model._hash("exomem-episode-owner-directory-v2", owner)
+    assert bounded.path(identity) == bounded.root / owner_hash / f"{identity}.json"
+
+    outside = tmp_path / "outside-owner"
+    outside.mkdir()
+    bounded.root.mkdir(parents=True, exist_ok=True)
+    (bounded.root / owner_hash).symlink_to(outside, target_is_directory=True)
+    with pytest.raises((curation.CurationError, model.EpisodeError), match="UNSAFE"):
+        bounded.create("owner-directory", {"digest": "a" * 64})
+    assert list(outside.iterdir()) == []
+    assert store.root == bounded.root
+
+
 @pytest.mark.parametrize("identity", ["../escape", "A" * 64, "x", "a" * 65])
 def test_invalid_storage_identity_refuses(vault: Path, identity):
     with pytest.raises(model.EpisodeError, match="EPISODE_ID_INVALID"):

@@ -65,6 +65,35 @@ Episode state SHALL bind a logical episode identity, input revision and original
 - **THEN** only one can advance that revision and the other must reload the accepted history
 - **AND** persisted intent is bounded, reconstructed through validated transitions and cannot accept arbitrary executable payloads or caller-supplied completion proofs
 
+#### Scenario: One owner resumes through a different client
+
+- **WHEN** the same resolved canonical audience resumes an episode through another supported transport or session
+- **THEN** its logical episode and accepted history remain available subject to current evidence authorization
+- **AND** a different audience using the same episode key cannot read or change that history
+- **AND** absent identity fails closed and ownerless legacy history is not adopted implicitly
+
+#### Scenario: A retained input changes or becomes inaccessible
+
+- **WHEN** recovery resolves a stored page or exact semantic-unit reference
+- **THEN** it binds disclosure and the recorded version to the same immutable current snapshot
+- **AND** changed evidence is stale, while missing, ambiguous, withheld or superseded evidence is unavailable, without returning replacement text
+- **AND** a response budget cannot silently truncate input and still classify it as complete recovery
+- **AND** the response excludes raw journal events, sealed execution plans and unrestricted candidate payloads
+
+#### Scenario: Conversation input was not retained canonically
+
+- **WHEN** the host has only a digest of vanished conversation input
+- **THEN** recovery remains unavailable and the episode layer does not implicitly persist a transcript
+- **AND** canonical Source/Evidence retention continues through its existing authorized writer without a new confirmation or permission grant
+- **AND** recovering an artifact companion page alone never claims recovery of the original artifact bytes
+
+#### Scenario: Input prose names a target through its title or alias
+
+- **WHEN** recovered input references another page through a title, alias or equivalent normalized spelling
+- **THEN** recovery checks every resolved binding against current disclosure policy using current maintained lookup evidence
+- **AND** a withheld binding or unavailable lookup leaves recovery unavailable without exposing the input text
+- **AND** merely checking a linked target does not record its unreturned content as disclosed
+
 #### Scenario: Accepted commitment survives later content changes
 
 - **WHEN** an episode has durably recorded a receipt-verified commit and its note is subsequently edited
