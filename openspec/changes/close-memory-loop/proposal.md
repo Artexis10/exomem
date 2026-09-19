@@ -14,6 +14,7 @@ Ordinary conversations can leave durable facts uncaptured, identities disconnect
 - Include hot profile, activation priors, vault-derived conventions and the deterministic consolidation dreamer as required programme milestones. Optional frozen-verifier assistance is default-off and soft-fails; it labels review candidates only and never authors knowledge or controls retrieval.
 - Separate development and personal candidate testing from public release publication, using immutable local wheels and the existing managed-service handoff and state-migration checks.
 - Repair the existing activation benchmark and prove capture-to-activation journeys with positive and negative cases, interruption recovery, adapter parity and ordinary-agent initiation. Paid comparative runs remain explicitly deferred.
+- Record cross-client live activity as a later compiler integration milestone: bounded, scoped reports of related work with freshness, participation limits and result references. Deliver the existing compiler milestones first; activity is advisory operational state, not completion proof, execution authority or a hosted-launch prerequisite.
 
 ## Capabilities
 
