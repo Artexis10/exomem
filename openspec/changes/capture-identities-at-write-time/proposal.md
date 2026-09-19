@@ -2,84 +2,80 @@
 
 People, equipment, organisations and places stay scattered through notes as prose. They
 rarely become Entity pages or graph edges unless the owner asks, so the graph cannot
-answer "what do I know about this supplier" and the context compiler has few anchors to
+answer "what do I know about this supplier", and the context compiler has few anchors to
 resolve: its anchors are entities, hubs and resources, and a vault whose identities live
 only in sentences offers it almost none.
 
-The shipped recurrence detector cannot close this. It recognises five closed sentence
-shapes (`identity-frames-v1`: "X is a <type noun>", "<Type>: X", relation frames around
-an already-registered entity) and asks for three pages, three independent origins and two
-facets. Measured on a 4,100-page personal vault on main at `169e6deb`:
+Measured on a personal vault on main at `169e6deb`. The recurrence sweep saw 4,100
+eligible pages; the vault holds 142 Entity pages and yields 255 activation anchors.
 
-- the grammar found 30 identities in total;
-- 29 appear on one page, one appears on two, none on three;
-- the attention queue surfaces two candidates, both unresolved wikilinks in index pages,
-  neither a person, a thing or an organisation.
+- The sentence grammar (`identity-frames-v1`) found 30 identities in total, 29 of them on
+  one page and one on two. Its gate needs three pages, three independent origins and two
+  facets, so lowering any one of them surfaces nothing.
+- The wikilink lane found 34 unresolved identities: 27 linked from one page, five from
+  two, two from three or more. Ten of the 34 are linked only from `index.md` pages,
+  including both candidates the queue surfaces today.
 
-Lowering the threshold from three to two would surface one more candidate. The detector
-is not too strict; it cannot see. Ordinary notes do not name things in copula sentences,
-and no closed grammar will, in any language or domain.
-
-The component that can see is already present at every write: the agent composing the
-note has read the material and knows which identities it names. Exomem's constitution is
-that the server measures and the agent reasons. Today the agent's knowledge of who and
-what a note mentions is discarded at the write boundary.
+Both lanes are nearly empty for the same reason: nothing at write time marks the
+identities a note names. No closed grammar will find them in ordinary prose, in any
+language, and the server does not read prose for meaning. The agent composing the note
+does, and already has a Markdown-native way to say "this is a thing": a wikilink, which
+the owner's editor shows as an unresolved node until the page exists. The product
+already counts unresolved wikilinks across pages, already re-derives a page's edges when
+the linked page is created later, and already reports a write's page-less links on the
+write response. What is missing is the instruction to link, a gate that fires on the
+second page instead of the third, and a candidate delivered at the moment it appears.
 
 ## What Changes
 
-- **Declared mentions.** The compiled-write tools accept an optional `mentions` list:
-  the identities the note names, each with a name, an optional entity type and an
-  optional `central` flag. The server stores it as `mentions:` frontmatter on the page,
-  so it is Markdown-native, visible in the owner's editor and rebuildable without the
-  server. `connect_memory(operation="declare-mentions")` sets it on an existing page.
-- **Resolved mentions become graph edges at once.** Each declared name is resolved
-  against the entity registry with the existing exact and alias resolver. A resolved
-  non-central mention yields a `mentions` edge to the Entity page; a resolved central one
-  yields `about_entity`. An ambiguous name yields no edge and is reported. Nothing is
-  guessed.
-- **Unresolved mentions are counted, not created.** The server keeps a derived count of
-  independent pages declaring each unresolved identity. An identity becomes a promotion
-  candidate when it is declared on a second independent page, or on its first page when
-  declared `central`. The thresholds ship as defaults in the vault-extensible entity-type
-  registry and the owner may change them.
-- **The candidate rides the write response.** The write that crosses the threshold
-  returns a bounded `entity_candidate` block (name, declared types, the pages that
-  declared it, near matches, the route to `resolve-entity` then `create-entity`), so the
-  agent that holds the context acts in the same turn, on every client, hookless or not.
-  The same candidate appears in the `entity_recurrence` attention family for later.
-- **The server still never creates an Entity.** Creation stays an agent decision inside
-  the existing delegation envelope and confirmation ceiling.
-- **Doctrine.** Bootstrap guidance and the skill scaffold change from "create an Entity
-  only when stable, recurring and central" to: declare the identities a durable write
-  names; promote on the second independent mention, or on the first when the identity is
-  central to the note; resolve before create; hydrate before duplicate.
-- **Backlog.** A read-only queue lists active compiled pages with no `mentions`
-  declaration, newest first, so an owner-started agent sweep can declare them in bounded
-  batches. The closed-grammar detector stays as a secondary signal; it is not extended.
+- **Doctrine: link what you name.** Bootstrap guidance, the scaffold skill, the `body`
+  argument description of `remember` and `replace_memory`, and the capture hook's text
+  tell the agent to wikilink the people, organisations, places, equipment and products a
+  durable write names, whether or not a page exists yet, and to create the Entity in the
+  same turn when the note is about an identity that has none. A count is a prompt to
+  consider promotion; the agent still judges whether the identity is stable and useful.
+- **The wikilink lane fires on the second page.** Its spread gate moves from three
+  distinct eligible pages to two. The sentence-grammar lane keeps its gates.
+- **Navigation pages are not evidence.** `index.md` and `log.md` pages no longer supply
+  spread, which removes the only candidates the vault surfaces today, both noise.
+- **The candidate rides the write that creates it.** When a committed write adds a link
+  that brings an unresolved identity to the gate, the response carries a bounded
+  `entity_candidate` block: the name, the linking pages, near matches from the registry
+  and the routes to `resolve-entity` and `create-entity`. It is derived from vault state,
+  so it needs no per-caller ledger, and it belongs to the `structural_suggestions`
+  authority class, so an owner who turned that class off is not prompted.
+- **The server still never creates an Entity**, and no tool gains an argument.
 
-Not in this change: server-side extraction of any kind, a background writer, confidence
-scores, new entity types, or changes to how recall ranks.
+Not in this change: a `mentions` declaration argument or frontmatter key (the first
+draft; see the design for why it was withdrawn), server-side extraction of any kind, a
+background writer, changes to the sentence-grammar lane, a new backlog queue, or a
+vault-owned threshold.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `declared-identity-mentions`: the write-time declaration, its storage, resolution into
-  edges, the derived recurrence count, promotion candidates and the backlog queue.
+- `write-time-identity-candidates`: the candidate block on the committed write response
+  and the write-surface text that teaches linking.
 
 ### Modified Capabilities
 
-- `agent-bootstrap-contract`: the identity-capture doctrine every agent receives.
+- `action-first-audit`: the wikilink lane's spread gate and its evidence pages.
+- `agent-bootstrap-contract`: the link-what-you-name guidance.
 
 ## Impact
 
-- Tool surface: `remember` and `replace_memory` gain one optional argument;
-  `connect_memory` gains one operation. Schema fixtures, digests, capabilities and the
-  plugin trees are regenerated; connector clients need an action-schema refresh.
-- Code: write path (`commands.py`, the add/replace leaves), a new
-  `declared_mentions.py`, `entity_recurrence.py` and `attention.py` (candidate source),
-  the entity-type registry (thresholds), graph edge origins for `mentions` and
-  `about_entity`, scaffold skill references and bootstrap guidance.
-- Context compiler: every promoted identity is a new `entity` anchor, and every resolved
-  mention is a typed link summary on an anchor row. No compiler code changes.
-- Pages without `mentions` behave exactly as today.
+- Tool surface: no new argument or operation. Two argument descriptions change, so the
+  schema fingerprint, capabilities doc and plugin trees are regenerated; a stale client
+  schema keeps working.
+- Code: `entity_recurrence.py` (gate, evidence pages), a candidate computation beside
+  `capture_sweep.py`'s page-less-link hint, the mutation terminal (one more advisory
+  carrier), bootstrap guidance in `commands.py`, the scaffold skill, the capture hook and
+  its packaged copy.
+- Context compiler: every Entity created from a candidate is a new `entity` anchor, and
+  every link that resolves is a typed link summary on an anchor row. No compiler change.
+- Existing vaults: the wikilink lane surfaces a few more candidates at once (four on the
+  measured vault) and stops surfacing index-page noise.
+- Spec ordering: `complete-recurring-entity-lifecycle` is still active and modifies the
+  same `action-first-audit` requirement. This change archives after it, and its
+  `MODIFIED` block is refreshed onto that change's text at that point.

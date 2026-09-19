@@ -1,19 +1,25 @@
 ## ADDED Requirements
 
-### Requirement: Guidance carries the identity-declaration doctrine
+### Requirement: Guidance teaches linking the identities a write names
 Bootstrap guidance at the `balanced` and `maximal` levels, and the shipped skill scaffold,
-SHALL instruct the agent to declare in `mentions` the identities a durable write names, to
-mark one `central` when the note is about it, to resolve before creating when a write
-returns `entity_candidate`, and to hydrate an existing Entity before creating a second
-one. The guidance SHALL NOT require an identity to be recurring before it may be
-declared. Compact guidance SHALL stay under its byte ceiling at every level.
+SHALL instruct the agent to wikilink the identities a durable write names whether or not
+a page exists yet, to resolve and create an Entity in the same turn when a note is about
+an identity that has none, and to treat a returned `entity_candidate` as a prompt to
+resolve before creating and to hydrate before duplicating. The guidance SHALL NOT make
+recurrence a condition of creating an Entity, and SHALL leave the judgement that an
+identity is stable and useful with the agent. Compact guidance SHALL stay under its byte
+ceiling at every level.
 
-#### Scenario: A hookless agent declares without being asked
+#### Scenario: A hookless agent links without being asked
 - **WHEN** an agent with only the bootstrap guidance and the tool schema writes a note
-  that names an organisation
-- **THEN** the guidance and the `mentions` argument description together tell it to
-  declare that organisation, with no user instruction
+  that names an organisation with no page
+- **THEN** the guidance tells it to wikilink that organisation, with no user instruction
+
+#### Scenario: A note about a new identity creates it at once
+- **WHEN** an agent writes a note that is about a piece of equipment with no Entity
+- **THEN** the guidance directs it to resolve and then create the Entity in that turn,
+  within its confirmation rules, without waiting for a second mention
 
 #### Scenario: Guidance stays inside its budget
-- **WHEN** compact guidance is rendered at any level and surface with the doctrine line
+- **WHEN** compact guidance is rendered at any level and surface with the added line
 - **THEN** it is under the compact byte ceiling

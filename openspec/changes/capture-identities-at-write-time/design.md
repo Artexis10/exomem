@@ -1,155 +1,165 @@
 ## Context
 
 `complete-recurring-entity-lifecycle` built the candidate lifecycle: bounded promotion and
-hydration candidates, ambiguity stops, resolve-before-create, state-resolved closure. Its
-evidence source is a closed sentence grammar over page bodies. On a real vault that source
-is nearly empty (see the proposal's measurement), so the lifecycle it feeds is idle.
+hydration candidates, ambiguity stops, resolve-before-create, state-resolved closure, and
+a once-per-session read of the `entity_recurrence` family at the balanced and maximal
+levels. Its evidence comes from two lanes: unresolved wikilinks and a closed sentence
+grammar. On a real vault both are nearly empty (see the proposal), so the lifecycle idles.
 
-This change adds a second evidence source and leaves the lifecycle alone.
+This change feeds the wikilink lane and delivers its candidates sooner. It leaves the
+lifecycle, the grammar lane and the tool surface alone.
+
+A first draft proposed an optional `mentions` argument stored as frontmatter. An
+independent critique (2026-09-19) showed that the alternative it dismissed in two
+sentences, wikilinks, is already implemented end to end, including the rebuild trigger
+the draft lacked. Decision 1 records that.
 
 ## Goals / Non-Goals
 
 **Goals**
 
-- An identity a note names reaches the graph on the write that names it, when an Entity
-  exists, and becomes a promotion candidate on its second independent mention, or its
-  first when central.
+- An identity a note names reaches the graph on the write that names it when its page
+  exists, and becomes a promotion candidate when a second page names it.
+- An identity a note is about becomes an Entity in the same turn, by the agent's
+  decision, without waiting to recur.
 - Works for any domain, entity type and language, because no server component reads
-  prose.
-- Reaches the agent on every client without a hook, a skill or a user nudge: the tool
-  schema asks, and the write response answers.
+  prose for meaning.
+- Reaches the agent without a user nudge on clients with no hook or skill.
 
 **Non-Goals**
 
-- The server extracting names from text. Rejected on constitution (the server measures)
-  and on evidence (a closed grammar found 30 identities in 4,100 pages; an open one needs
-  a model).
+- The server extracting names from text.
 - Automatic Entity creation. A wrong Entity is a durable page that misleads recall and
-  the compiler; a missed one costs a later candidate. The agent decides.
+  the compiler; a missed one costs a later candidate.
+- A queue of pages that "lack declarations". A page that links nothing may simply name
+  nothing, so no such queue can be derived without reading prose.
 
 ## Decisions
 
-### 1. The declaration is an argument, stored as frontmatter
+### 1. The mark is a wikilink, not a new argument
 
-`mentions` is a list of at most 24 items. An item is a string (the name) or a mapping
-`{name, type?, central?}`. Names are 1 to 96 characters after trimming; `type` is a key or
-alias the entity-type registry resolves, else it is kept as an unresolved type cue and
-reported; `central` is a boolean, default false.
+Both designs depend on the same unproven behaviour: the agent marking the identities it
+names. They differ in what already exists.
 
-Stored form on the page:
+| | wikilink | `mentions` argument (withdrawn) |
+|---|---|---|
+| agent already knows the affordance | yes | no |
+| visible in the owner's editor, in place | yes, as an unresolved node | a frontmatter list |
+| cross-page counting | shipped (`entity_recurrence` wikilink lane) | new derived count |
+| edges appear when the page is created later | shipped (graph dependency index re-derives the linking pages) | needed a new trigger, absent from the draft |
+| page-less links reported on the write response | shipped (`capture_sweep` hint) | new carrier |
+| tool-surface change | none | one argument, one operation |
+| new egress surface | none; a link is body text, governed as body text | personal names in a frontmatter block released wholesale |
 
-```yaml
-mentions:
-  - Field Recorder
-  - {name: Harbour Studio, type: organisation, central: true}
-```
+What the wikilink cannot carry is a type cue and a "this note is about it" flag. Neither
+needs a channel: the agent supplies the type when it creates the Entity, and an identity
+a note is about is handled by decision 2.
 
-Frontmatter, not a sidecar, because the vault is the source of truth and every derived
-index must be rebuildable from it. An owner editing the list by hand in their editor is a
-first-class path.
+If, some weeks after release, the measured wikilink yield is still near zero, a
+declaration argument returns as its own change with that measurement as its case.
 
-What the caps prevent: an unbounded list turning one write into an unbounded number of
-registry resolutions under the mutation boundary. What they cost when they bind: items
-past the cap are dropped from the declaration and named in the response. Who pays: the
-agent, which can split the note.
+### 2. Doctrine, and where it is carried
 
-*Alternative considered:* inferring mentions from wikilinks. Rejected as the only source:
-agents link pages that exist, and the identities this change is after are exactly the
-ones with no page yet. A wikilink to an Entity page already produces its edge today.
+> When you write something durable, wikilink the people, organisations, places, equipment
+> and products it names, whether or not a page exists yet. When the note is about an
+> identity that has no Entity, resolve it and create the Entity in the same turn, within
+> your confirmation rules. When a write returns `entity_candidate`, resolve before you
+> create and hydrate an existing Entity before you make a second one. A passing name
+> needs no link.
 
-### 2. Resolution at write time reuses the entity resolver, exact and alias only
+Carried in four places, because no single one reaches every client: bootstrap guidance
+at `balanced` and `maximal`; the scaffold skill; the `body` argument description of
+`remember` and `replace_memory` (the only text every connected client is certain to
+read), in one sentence; and the capture hook, whose current wording allows creation only
+for an identity that is "stable, recurring, central" and therefore forbids exactly the
+first-mention case the owner asked for. It becomes "stable, and central or recurring".
 
-Each name goes through the resolver `connect_memory(operation="resolve-entity")` uses,
-restricted to exact-name and alias matches. One match: an edge. No match: counted as
-unresolved. More than one: no edge, reported as ambiguous with the competing refs, and
-not counted, because two people sharing a first name must not merge into one candidate.
+This is compatible with the creation criterion `complete-recurring-entity-lifecycle`
+teaches (create only when no active Entity resolves and the agent judges the identity
+stable, reusable and useful). A count never replaces that judgement; it prompts it.
 
-Edges carry a new origin `declared_mention` so they are distinguishable from authored
-semantic relations, are rebuilt from frontmatter like any derived edge, and disappear
-when the declaration does.
+### 3. The wikilink lane fires on two pages
 
-Resolution failure never fails the write. The note is the durable thing; the declaration
-is an enrichment.
+`SPREAD_MIN_PAGES` for the wikilink lane becomes 2. The grammar lane's three gates are
+untouched: its measured population has one identity on two pages, so nothing is gained,
+and its gates carry their own precision argument.
 
-### 3. Independence is by origin, as the existing detector defines it
+What two prevents compared with three: on the measured vault, four identities sit on
+exactly two pages and would wait indefinitely for a third. What it costs when it fires
+wrongly: one candidate the agent declines or the owner dismisses through
+`triage_memory`; the family can also be set quiet. Who pays: the agent, a few hundred
+bytes, once.
 
-Two declarations count as two when their pages have different origins under
-`entity_recurrence._origin_refs`: pages compiled from the same Source or session are one
-origin. This keeps one long session that produces four notes from promoting a passing
-name. Pages in `Sources/` and `Evidence/` never carry declarations; they are immutable.
+Independence stays what the lane already uses: distinct eligible pages. Two notes written
+in one conversation about one linked name are two pages and do fire. That is accepted:
+an agent that deliberately links a page-less name in two separate notes has said twice
+that it is a thing. A session stamp that could collapse them does not exist on written
+pages today and cannot exist on stateless HTTP, so the guard would cost a frontmatter
+field and a degraded mode to prevent a cheap, dismissible prompt.
 
-### 4. Thresholds are vault-owned
+### 4. Navigation pages are not evidence
 
-Defaults: `promote_at_independent_mentions: 2`, `promote_central_at: 1`. They live in the
-entity-type registry's vault override, beside the types they govern, with the same load
-contract and findings. Bounds: integers 1 to 5; a value outside them is ignored with a
-finding. `promote_central_at` above 1 is how an owner turns the single-mention path off.
+Pages named `index.md` or `log.md` do not supply spread and never anchor a finding. The
+product already sets these pages aside in its link and index audits; they list things,
+they do not reach for them. On the measured vault this removes ten of 34 identities and
+both surfaced candidates, all noise.
 
-These are counts the server compares against. They are not confidence scores and nothing
-is ranked by them.
+### 5. The candidate rides the write that creates it
 
-### 5. The candidate rides the write response, once
+When a committed durable write adds a body wikilink to an identity that resolves to no
+page and no active Entity, the server counts the other eligible pages already linking
+that identity through the graph's dependency index, which is keyed by link target and
+needs no vault walk. If the count of distinct eligible pages reaches the gate because of
+this write, the committed response carries `entity_candidate`: at most three identities,
+each with its name, at most eight linking pages, near matches from the registry, and the
+routes to `resolve-entity` and `create-entity`.
 
-When a write makes an unresolved identity cross its threshold, the committed response
-carries `entity_candidate`: at most three candidates, each with the normalised name, the
-declared type cues, up to eight declaring pages, near matches from the registry, and the
-two routes (`resolve-entity`, then `create-entity` or a hydration target). It is the same
-class of carrier as `structure_suggestion` and `records_routing`, and follows their
-delivery rules (compact detail keeps it; `legacy` detail drops it).
+- It fires on the transition only: a page that already linked the identity, or an
+  identity already at or past the gate, produces no block. The fact is derived from
+  vault state, so it is the same for every caller and needs no ledger, which matters
+  because remote HTTP is stateless and a per-caller ledger there either repeats or
+  never fires.
+- Pages committed inside one mutation batch count once for the block, as the capture
+  sweep already treats a multi-write command as one episode.
+- It is a `structural_suggestions` disclosure and is withheld when that class is `off`.
+- If derived sync is deferred, the dependency index is behind and no block is sent. The
+  candidate is still in the `entity_recurrence` family, which balanced and maximal agents
+  read once per session.
+- It travels through the mutation terminal like `structure_suggestion` and
+  `records_routing`: kept at compact detail, dropped at `legacy`.
 
-An identity is delivered on a write response once per threshold crossing. It stays in the
-`entity_recurrence` attention family until the candidate's state resolves: an Entity now
-resolves the name, or the owner dismissed it through `triage_memory`.
-
-What this carrier prevents: the candidate sitting in a queue no agent reads, which is
-what happens to the two candidates the vault has today. What it costs when it fires
-wrongly: a few hundred bytes on one write response and an agent declining to create.
+What the carrier prevents: a candidate waiting in a family that is read once per
+session, three at a time, by whichever agent happens to be there, instead of reaching
+the agent that holds the context. What it costs when it fires wrongly: `create-entity`
+is confirm-required, so an agent that acts on the block may ask the owner one question
+mid-task. Who pays: the owner. That cost is why the block fires once, on the transition,
+and why the doctrine says a passing name needs no link.
 
 ### 6. Backlog
 
-`review_memory(mode="audit", categories=["undeclared_mentions"])` lists active compiled
-pages whose frontmatter has no `mentions` key, newest first, bounded like every audit
-family. An empty list (`mentions: []`) is a declaration that the page names nothing and
-removes the page from the queue. The family is opt-in and never enters due-state: a vault
-adopted with 4,000 undeclared pages must not open with 4,000 items of debt.
-
-The sweep itself is an agent reading pages and calling `declare-mentions`. It costs model
-tokens, so the owner starts it and chooses its size.
-
-### 7. Doctrine
-
-One paragraph replaces the conjunction "stable, recurring, central" in bootstrap guidance
-and the scaffold skill:
-
-> When you write something durable, declare the people, organisations, places, equipment,
-> products and other identities it names in `mentions`. Mark one `central` when the note
-> is about it. When a write returns `entity_candidate`, resolve before you create, and
-> hydrate an existing Entity before you make a second one. A passing name needs no
-> declaration.
-
-The tool schema's own description of `mentions` carries the same sentence in short form,
-because the schema is the only text every client is certain to read.
+Existing prose stays unlinked until someone links it. An owner-started agent sweep does
+that with the tools that exist: read a folder's pages, add links with `edit_memory`. It
+costs model tokens, so the owner chooses its size. The pages that already link something
+are measured at no cost the moment the gate moves.
 
 ## Risks / Trade-offs
 
-- **Agents ignore an optional argument.** Mitigation: the schema description, bootstrap
-  doctrine and the capture-sweep advisory all name it; the backlog queue makes omission
-  visible. It is not made required: a required argument would fail writes from older
-  clients and cached connector schemas, and a failed durable write costs more than a
-  missing declaration.
-- **Agents over-declare.** A declaration creates nothing by itself. Over-declaration
-  raises candidate volume; the threshold, the origin rule and the ambiguity stop bound it,
-  and the owner can raise the threshold.
-- **Name variants split a count** ("Harbour Studio" / "Harbour Studios"). Normalisation is
-  the identity key the registry already uses; near matches are shown on the candidate so
-  the agent can merge by declaring an alias at creation. No fuzzy merging in the server.
-- **Frontmatter growth.** 24 short strings at most.
+- **Agents do not link.** Mitigation: four carriers, the block that rewards linking with
+  an immediate result, and the measurement named in decision 1.
+- **Unresolved links clutter the editor.** They are the editor's native way of showing a
+  page that should exist, and they resolve when the Entity is created.
+- **Two lanes, two gates.** The wikilink lane fires at two, the grammar lane at three.
+  Stated in the spec so the difference is a decision and not drift.
+- **Ambiguous names.** A link resolves by the editor's own rules; a candidate lists near
+  matches and the lifecycle's ambiguity stop applies unchanged.
 
 ## Migration
 
-None. Pages without `mentions` are unchanged. Derived counts rebuild from frontmatter.
+None. A few more candidates appear at once on existing vaults and index-page noise
+disappears.
 
 ## Open Questions
 
-- Whether `observe_memory` should also accept `mentions` for a single unit. Deferred: a
-  unit lives on a page whose declaration already covers it.
+- Whether the wikilink gate should be vault-owned. Deferred: the owner's controls today
+  are the family's disposition and the `structural_suggestions` class, and the number is
+  the owner's own.
