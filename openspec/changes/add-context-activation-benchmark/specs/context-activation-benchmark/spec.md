@@ -39,6 +39,24 @@ compiler is disabled.
 - **WHEN** the audit runs with `EXOMEM_DISABLE_WORKING_SET` set
 - **THEN** every positive case reports failed activation and the audit exits red
 
+### Requirement: Compiler acceptance uses product-shaped capture and publication
+
+Required CI acceptance SHALL create the synthetic corpus through supported writers in isolated state with real canonical entity, hub, Records and Planning structure, publish its graph/index and score output from the actual `activate_context` compiler. It SHALL assert structural and publication prerequisites before scoring. Hand-built or oracle packets SHALL establish scorer correctness only. Corpus repairs SHALL produce new digests and new reports without weakening the pre-registered thresholds or recycling earlier results. Integration SHALL include capture-to-fresh-session activation, same-origin fan-out and interruption recovery.
+
+#### Scenario: A packet scorer masks an invalid corpus
+
+- **WHEN** an oracle packet passes but real canonical entity or collection prerequisites are absent from the generated corpus
+- **THEN** product-path acceptance fails before a compiler success can be reported
+
+### Requirement: Paid comparisons are optional and separately authorized
+
+Required delivery SHALL use deterministic product-path acceptance and observed ordinary-use evidence, with explicit distinction between forced tool invocation and ordinary-agent initiation. Paid multi-arm experiments SHALL remain deferred until separately authorized and SHALL NOT gate that delivery. The agent-arm, agent-layer scoring and comparative run-protocol requirements below SHALL apply when such an experiment runs. Without it, reports SHALL make no comparative efficacy verdict and SHALL not describe a deterministic pass as the original A3-versus-A4 acceptance verdict.
+
+#### Scenario: Deterministic acceptance passes before a paid comparison
+
+- **WHEN** all required compiler and ordinary-use evidence is available but the optional comparison has not been authorized
+- **THEN** the instrument may be delivered with the comparison explicitly unrun and no comparative verdict
+
 ### Requirement: Pre-registered thresholds
 The audit SHALL pin, per case and per anchor kind: activation recall on gold at least
 0.90; activation precision at least 0.80, computed over every ref the packet surfaces
@@ -118,7 +136,7 @@ denominator.
   are applied afterwards by the deterministic intersection
 
 ### Requirement: Run protocol, stopping criteria and manifests
-Pre-implementation baselines SHALL run at n = 1 per arm per case for A1, A2, A4 and
+For a separately authorized comparative experiment, pre-implementation baselines SHALL run at n = 1 per arm per case for A1, A2, A4 and
 A5; the A3 comparison SHALL run at n = 5 per arm per case reporting individual and
 modal outcomes and never a mean across cases; arm order SHALL rotate by seed and case
 index; the total paid budget SHALL be capped and reserved per episode before launch.

@@ -1,5 +1,7 @@
 # Tasks: add-context-activation-benchmark
 
+Checked tasks record the delivered instrument, not proof that the corpus exercised the real compiler. The required completion path now includes product-shaped fixture/publication tasks and observed ordinary use. Paid comparative runs are explicitly deferred; they require a separate future authorization and do not block delivery.
+
 ## 1. Fixtures and corpus
 
 - [x] 1.1 Red: `tests/test_context_activation_fixtures.py` — the fixture manifest
@@ -14,6 +16,9 @@
 - [x] 1.3 Author the private snapshot builder (local only): digest-pinned copy of a
       vault with meta-note exclusion listed in the snapshot manifest; never committed;
       privacy gate passes on the repository.
+- [ ] 1.4 Rebuild fixtures through normal supported writers with canonical entity/hub/Records/Planning structure; verify structural prerequisites, isolated state and new corpus digests before retrieval.
+- [ ] 1.5 Publish the real graph/index and call the actual compiler for all eighteen fixtures; verify existing recall/precision/poison/budget thresholds and a failing mechanism-removal run, keeping oracle-packet tests separate.
+- [ ] 1.6 Add capture-to-activation integration with same-origin fan-out and interrupted resume from `close-memory-loop`; verify canonical readback and later fresh-session context without fixture-specific product rules.
 
 ## 2. Deterministic scorer
 
@@ -47,16 +52,11 @@
 - [x] 4.1 Write `docs/benchmarks/context-activation.md`: order of measurement
       (naive latency → A5 → A1 → A2/A4 → deterministic baseline), quiesced-cell and
       nonce rules, n = 1 baselines, n = 5 comparison, stopping criteria verbatim.
-- [ ] 4.2 Run the pre-implementation measurements on the personal cell (A1, A2, A4,
-      A5 at n = 1; deterministic baseline from `ask_memory` output; naive latency) and
-      preserve the report as Evidence in the owner's knowledge base; record the
-      measured latency constant in the fixture manifest. The run report this task
-      produces must call `context_activation_arms.c6_win_for_a3` (the no-memory case's
-      narrower win rule) and `context_activation_arms.effective_bar_reading` (the
-      grill-query-aware reading beside the raw count) — both exist and are tested, not
-      yet wired into any report writer.
+- [ ] 4.2 Record the corrected product-path deterministic report with fixture/corpus/threshold digests and per-case duals; verify no oracle packet substitutes for compiler output and no earlier broken-corpus result is presented as current acceptance.
+- [ ] 4.3 Record ordinary own-use or authorized replay evidence for first-response usefulness and no user reminder, with private evidence retained outside the repository; verify forced-call transport success is distinguished from agent initiation.
+- [ ] 4.4 Update the existing runbook to label paid A1–A5 measurements deferred and optional; verify any later comparative report still uses `c6_win_for_a3` and `effective_bar_reading`, all controls, cost reservations and the original stopping criteria, without making that future run a delivery prerequisite.
 
 ## 5. Delivery
 
 - [ ] 5.1 `openspec validate --all --strict`; scoped suites green; privacy gate green;
-      PR with the baseline evidence pointer.
+      PR with actual compiler and ordinary-use evidence pointers; synchronize/archive only when required tasks are evidenced as delivered.
