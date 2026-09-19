@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.89.0](https://github.com/Artexis10/exomem/compare/v0.88.0...v0.89.0) (2026-09-19)
+
+
+### Features
+
+* define the closed memory loop and stage local candidates ([#1309](https://github.com/Artexis10/exomem/issues/1309)) ([7073584](https://github.com/Artexis10/exomem/commit/70735844fee79cccc079adc3b6963e2b54a414c0))
+* model episode capture identity and retry history ([#1317](https://github.com/Artexis10/exomem/issues/1317)) ([7fbd9a3](https://github.com/Artexis10/exomem/commit/7fbd9a36072c5526f245900f8f66d96f69601487))
+* persist episode capture history through curation ([#1322](https://github.com/Artexis10/exomem/issues/1322)) ([28871ff](https://github.com/Artexis10/exomem/commit/28871ff6f1f3d797b2cd5716e26b7dc4e0067d79))
+* verify episode commits from curation evidence ([#1321](https://github.com/Artexis10/exomem/issues/1321)) ([633234e](https://github.com/Artexis10/exomem/commit/633234e6ccbdb969007cea46e9b6a4df1fa77957))
+
+
+### Bug Fixes
+
+* **benchmarks:** bind activation scoring to canonical state ([#1314](https://github.com/Artexis10/exomem/issues/1314)) ([7080dd1](https://github.com/Artexis10/exomem/commit/7080dd1e9ad1d27c7aa9819c3b65cf367200ceba))
+* **benchmarks:** use product-shaped activation data and packets ([#1312](https://github.com/Artexis10/exomem/issues/1312)) ([bfa3c40](https://github.com/Artexis10/exomem/commit/bfa3c409f06ef8d4b23b846d7896d8cf95251cbd))
+* **graph:** recover externally fenced barriers without stale cache publication ([#1311](https://github.com/Artexis10/exomem/issues/1311)) ([1219bd6](https://github.com/Artexis10/exomem/commit/1219bd6434ba26dcd4debd145960fb4644e14c50))
+* preserve canonical domain identity across note writes ([#1315](https://github.com/Artexis10/exomem/issues/1315)) ([bcf6827](https://github.com/Artexis10/exomem/commit/bcf6827d97cd8482e642f13ea6bdc47c455ffcda))
+* publish guarded navigation after governance enrollment ([#1324](https://github.com/Artexis10/exomem/issues/1324)) ([7993521](https://github.com/Artexis10/exomem/commit/799352107558dffb750bb20ed70107bcfab64a5b))
+* **recall:** recognise words in every script and close the egress gap behind it ([#1307](https://github.com/Artexis10/exomem/issues/1307)) ([c5712f0](https://github.com/Artexis10/exomem/commit/c5712f025dfd800859574e16d137506c6cf22ade))
+* retain safe hosted capture failure diagnostics ([#1323](https://github.com/Artexis10/exomem/issues/1323)) ([97dba64](https://github.com/Artexis10/exomem/commit/97dba6471cdb819b663b849848eb8393557cb3c8))
+
 ## [0.88.0](https://github.com/Artexis10/exomem/compare/v0.87.1...v0.88.0) (2026-09-19)
 
 
