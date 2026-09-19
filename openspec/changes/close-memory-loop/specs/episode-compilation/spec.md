@@ -59,6 +59,19 @@ Episode state SHALL bind a logical episode identity, input revision and original
 - **THEN** retained authorized evidence supports the remaining decisions or recovery reports unavailable
 - **AND** the system does not reconstruct purported original facts from an unsupported summary or hash
 
+#### Scenario: Two sessions advance the same episode
+
+- **WHEN** two authorized episode owners submit transitions from the same stored revision and digest
+- **THEN** only one can advance that revision and the other must reload the accepted history
+- **AND** persisted intent is bounded, reconstructed through validated transitions and cannot accept arbitrary executable payloads or caller-supplied completion proofs
+
+#### Scenario: Accepted commitment survives later content changes
+
+- **WHEN** an episode has durably recorded a receipt-verified commit and its note is subsequently edited
+- **THEN** reconstruction retains that historical commitment without rerunning a writer or treating it as permission to retry
+- **AND** historical coverage is distinguished from current coverage, which requires fresh verification before another postcommit attestation
+- **AND** a current readback mismatch does not erase independent pending candidates
+
 ### Requirement: Candidate identity is independent of proposal revision
 
 Candidate identity SHALL remain stable across destination re-resolution, proposal revisions and reordered plans. Existing mutation receipts and curation execution SHALL remain the leaf execution authority. The episode coordinator SHALL retain candidate-to-operation mappings and reconcile prior attempted effects before assigning or retrying equivalent work. A changed semantic effect SHALL require a recorded revision and current validation/authority. Uncertain outcomes SHALL remain bound pending reconciliation rather than being retried with a fresh identity.
