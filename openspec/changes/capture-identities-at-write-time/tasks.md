@@ -50,11 +50,11 @@
 
 - [ ] 3.1 Bootstrap guidance line at `balanced` and `maximal`; re-measure the compact byte
       budget at every level and surface.
-- [ ] 3.2 Scaffold skill reference for linking; keep it generic
+- [x] 3.2 Scaffold skill reference for linking; keep it generic
       (`tests/test_scaffold_no_leak.py`).
-- [ ] 3.3 One sentence in the `body` argument description of `remember` and
+- [x] 3.3 One sentence in the `body` argument description of `remember` and
       `replace_memory`.
-- [ ] 3.4 "Stable, and central or recurring" in all six capture texts, each pair
+- [x] 3.4 "Stable, and central or recurring" in all six capture texts, each pair
       byte-identical: `src/exomem/_hooks/exomem_capture_nudge.py` and
       `plugins/claude-code/hooks/exomem_capture_nudge.py` (today: "only for a stable
       recurring identity"); `src/exomem/_scaffold/_Schema/workflow-skills/exomem-capture/SKILL.md`
