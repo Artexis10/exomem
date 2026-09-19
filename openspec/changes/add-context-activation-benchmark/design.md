@@ -30,13 +30,17 @@ Non-goals: a new amendment family in v0; a model judge inside `f32`; coding-task
 
 ## Decisions
 
+The current delivery decision is deterministic product-path acceptance plus observed ordinary use under `close-memory-loop`. Paid A1–A5 experiments are explicitly deferred and require separate authorization. D2, D6 and D8 specify the protocol only if that comparative experiment is later run; its results and thresholds are not replaced by a claim from deterministic CI. Scorer unit tests remain instrument tests.
+
+The corpus must be built through normal supported writers into actual canonical entity/hub/Records/Planning structure, then indexed/published and consumed by the real `activate_context` path. Assert those structural prerequisites before scoring. Include capture-to-fresh-session integration, source-origin fan-out and interruption recovery. Repairing corpus shape changes its digest and requires a fresh deterministic result; do not recycle earlier packet scores or weaken gold/poison thresholds. Keep private episode replays local and publish synthetic fixtures only.
+
 - **D1 — Two layers, no new family.** Layer A (deterministic audit) is an
   unregistered instrument with no claim standing so it can run today; Layer B rides
   `f32` as new variants (code tuple) so it runs and scores today. Judged conversational
   cases (C1, C7) are labelled findings, never claims, per the f27 precedent. A sequence-7
   amendment converting findings into claims may be filed later and is expected to sit
   pending.
-- **D2 — Five arms.** A4 (nudged recall) is mandatory: without it any A3 gain is
+- **D2 — Five arms when the optional comparison runs.** A4 (nudged recall) is mandatory within that experiment: without it any A3 gain is
   attributable to "we told it to look". A5 (oracle packet) is mandatory: a case A5
   cannot win against A1 is void and is never scored against the compiler; A5 is
   instrument evidence, never product performance.
@@ -63,7 +67,7 @@ Non-goals: a new amendment family in v0; a model judge inside `f32`; coding-task
   counted costs. No aggregate.
 - **D5 — Thresholds and stopping criteria** as pinned in the spec; the latency bound
   is replaced by a measured constant from the naive-path baseline before freezing.
-- **D6 — Protocol.** Reuse `f27_replay.py` wholesale; pin model, provider, effort, CLI
+- **D6 — Optional comparative protocol.** Reuse `f27_replay.py` wholesale; pin model, provider, effort, CLI
   and exomem versions, prominence, corpus and fixture digests on the manifest; n = 1
   for pre-implementation baselines, n = 5 for the A3 comparison; rotated arm order; the
   same person authors fixtures and gold but does not grade; hard cost cap with
@@ -71,7 +75,7 @@ Non-goals: a new amendment family in v0; a model judge inside `f32`; coding-task
 - **D7 — Privacy.** CI uses only the synthetic corpus; the real-vault snapshot is local,
   digest-pinned, contamination-filtered, and its report is preserved as Evidence in the
   owner's knowledge base.
-- **D8 — Order of measurement.** Naive-path latency → A5 ceilings (strike unwinnable
+- **D8 — Order within an authorized comparative experiment.** Naive-path latency → A5 ceilings (strike unwinnable
   cases) → A1 floor → A2/A4 (if A4 already clears the bar, that is the cheapest
   falsification) → deterministic baseline from `ask_memory` output labelled against
   gold/poison.
@@ -89,8 +93,7 @@ Non-goals: a new amendment family in v0; a model judge inside `f32`; coding-task
 
 ## Migration Plan
 
-Additive: new fixtures, scorer, variants and a runbook. No product code, no vault
-writes. Existing variants and receipts are untouched, asserted by a byte-identity test.
+Additive: corrected fixtures, real product-path CI, scorer, variants and a runbook. Fixture writers operate in isolated synthetic state, never a live vault. Existing variant identities and receipts are untouched, asserted by a byte-identity test. Corrected corpus bytes receive new digests; earlier reports remain historical rather than silently rescored.
 
 ## Open Questions
 

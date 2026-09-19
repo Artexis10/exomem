@@ -16,6 +16,8 @@ acknowledged.
 
 ## What Changes
 
+The `close-memory-loop` programme makes product-shaped deterministic capture/index/compiler acceptance and observed ordinary-use evidence the required delivery path. Paid multi-arm comparisons remain available, explicitly deferred and separately opt-in. Passing scorer/oracle-packet tests alone does not establish real compiler acceptance; the corpus must use canonical entity, hub, Records and Planning shapes through normal writers and publication.
+
 - A **deterministic activation audit** instrument: a seeded synthetic corpus shaped
   like nine real cold-start cases (C1–C9) with nine negative twins (T1–T9), gold and
   poison anchor lists authored before any retrieval runs, a model-free scorer reporting
@@ -39,7 +41,7 @@ acknowledged.
   snapshot of the owner's vault (meta-notes about the benchmark excluded), run locally
   on a quiesced cell with nonces; results are preserved in Exomem as Evidence and never
   committed.
-- A baseline runbook that measures the naive path, the A5 ceilings, the A1 floor and
+- An optional comparative runbook that measures the naive path, the A5 ceilings, the A1 floor and
   the A2/A4 arms before the compiler exists, so the compiler has a number to beat.
 
 ## Capabilities
@@ -59,7 +61,7 @@ acknowledged.
   packets, gold/poison manifests) and a synthetic corpus generator beside
   `benchmarks/epistemic/corpora/`; CI test for the deterministic layer; a runbook under
   `docs/benchmarks/`.
-- No product code; no vault writes; `claude -p` replays consume the owner's
+- Fixture generation writes only to isolated synthetic state through product APIs; no live vault writes. `claude -p` replays consume the owner's
   subscription window and are opt-in per the existing paid-probe rule.
 - The A3 arm depends on `add-context-activation`; arms A1, A2, A4, A5 and the
   deterministic baseline run without it.

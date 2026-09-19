@@ -47,6 +47,25 @@ bash scripts/upgrade.sh --profile standard
 bash scripts/upgrade.sh --package-version 0.80.0 --cli-sync always
 ```
 
+For a personal candidate that has not been published, the staging module also
+accepts a local wheel directly. Supply the full source commit that produced the
+wheel; staging copies the artifact into its owner-only release directory and
+records the declared revision, artifact digest, original filename, and verified
+installed interpreter/package identity in `provenance.json` beside it.
+
+```sh
+<operator-python> -m exomem.service_upgrade --runtime-dir <runtime-dir> \
+  --wheel /absolute/path/to/exomem-0.80.0-py3-none-any.whl \
+  --source-revision <40-hex-commit> --profile standard
+```
+
+`<operator-python>` must come from a tested checkout or newly installed
+interpreter that contains this staging feature; the manager's existing launcher
+interpreter stays unchanged and is used only to create the release environment.
+`--wheel` and `--package-version` are mutually exclusive. A local wheel is a
+candidate, not a public release; it uses the same managed handoff once staging
+has verified it. `scripts/upgrade.sh` does not forward wheel sources yet.
+
 The script discovers the managed unit, asks its private control socket to
 switch to the staged version, verifies the reported active release, then uses
 the existing CLI sync and managed-install manifest helpers. `--cli-sync auto`

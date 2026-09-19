@@ -1,0 +1,74 @@
+## Purpose
+
+Compile substantive conversational episodes into complete, supported durable changes with canonical routing, bounded execution and truthful interruption recovery.
+
+## ADDED Requirements
+
+### Requirement: Episode decomposition precedes destination selection
+
+At a supported substantive episode boundary the active agent SHALL consider the original input for durable observations, outcomes, entity creation/hydration, facets, relationships, Records events, expressed Planning changes, Source/Evidence preservation and structural-routing candidates before choosing write destinations. Each candidate SHALL be resolved against current knowledge and receive an attributable disposition. Capture sweep SHALL NOT be the sole trigger or completeness check. No-op, uncertain, rejected, deferred and awaiting-authority outcomes SHALL be legitimate and distinct.
+
+#### Scenario: A rich episode exceeds the first note's scope
+
+- **WHEN** the initial note can hold only part of an episode's supported durable changes
+- **THEN** decomposition still considers the remaining changes and resolves their separate destinations
+- **AND** an incidental name or uncertain ownership claim may be rejected or deferred without manufacturing an entity or edge
+
+### Requirement: Input evidence and revisions support recovery
+
+Episode state SHALL bind a logical episode identity, input revision and original evidence references or minimal authorized excerpts sufficient to resume the candidate decisions. It SHALL obey disclosure and retention policy and SHALL NOT require full-transcript persistence by default. A digest without recoverable evidence SHALL NOT count as preserved original input. Missing evidence SHALL produce an explicit unavailable recovery state. User corrections SHALL create a new input revision requiring reconsideration of affected candidates.
+
+#### Scenario: Conversation context disappears after a partial write
+
+- **WHEN** an episode resumes after context loss
+- **THEN** retained authorized evidence supports the remaining decisions or recovery reports unavailable
+- **AND** the system does not reconstruct purported original facts from an unsupported summary or hash
+
+### Requirement: Candidate identity is independent of proposal revision
+
+Candidate identity SHALL remain stable across destination re-resolution, proposal revisions and reordered plans. Existing mutation receipts and curation execution SHALL remain the leaf execution authority. The episode coordinator SHALL retain candidate-to-operation mappings and reconcile prior attempted effects before assigning or retrying equivalent work. A changed semantic effect SHALL require a recorded revision and current validation/authority. Uncertain outcomes SHALL remain bound pending reconciliation rather than being retried with a fresh identity.
+
+#### Scenario: A plan is reordered after one committed leaf
+
+- **WHEN** an interrupted episode is re-planned with a different step order or proposal identity
+- **THEN** its committed effect resolves to the original receipt and is not executed again
+- **AND** only remaining currently authorized effects may proceed
+
+### Requirement: Completion attests coverage of original input
+
+The episode ledger SHALL distinguish attempted work, pending continuation and coverage through an input revision. Completion SHALL require an active-agent pass against that original revision, including corrections, plus receipt/readback reconciliation of claimed effects. A successful write, saved marker, short assistant response or cooldown SHALL NOT independently establish completeness. The server SHALL validate recorded state transitions without claiming it can prove semantic exhaustiveness.
+
+#### Scenario: One write succeeds while other candidates remain
+
+- **WHEN** a capture write commits but the original episode contains unresolved durable changes
+- **THEN** the episode remains pending and its host checkpoint cannot classify it complete solely because a write succeeded
+
+#### Scenario: A correction arrives after coverage was recorded
+
+- **WHEN** the user changes the evidence or a claim in a later episode input revision
+- **THEN** prior coverage remains historical and affected candidates require reconciliation before coverage advances
+
+### Requirement: Fan-out does not manufacture independent recurrence
+
+Source/episode/span origin identity SHALL propagate through every compiled destination, recurrence detector, write-time carrier and relevant relation/hydration evidence. Compilation SHALL NOT increase the number of independently established input origins. Conversation-only fan-out SHALL inherit one episode origin; independently established original sources discussed in that episode SHALL retain their distinct identities. Copy-equivalent projections SHALL add no independent origin. If independence cannot be determined, evidence SHALL be labelled unassessed rather than treated as independent page mentions. Supported important first mentions SHALL remain independently eligible for semantic promotion.
+
+#### Scenario: One turn becomes four pages
+
+- **WHEN** a single episode is preserved as a Source, entity facet, focused note and Records item
+- **THEN** those four destinations contribute one origin to recurrence pressure rather than four independent mentions
+
+#### Scenario: One episode discusses two independent original sources
+
+- **WHEN** an episode uses two sources whose independence is established by provenance
+- **THEN** their compiled outputs retain those two source origins
+- **AND** copying either source into additional destinations contributes no further independent origin
+
+### Requirement: Bounded partial work resumes honestly
+
+Episode work SHALL have explicit per-pass resource bounds, durable continuation and publication status. At the next eligible lifecycle boundary, supported hosts SHALL offer pending work to the active agent without reapplying committed leaves. Tool-only clients SHALL expose the same resume contract with best-effort initiation. Expired authority, unavailable evidence or stale targets SHALL pause affected steps with a reason; unrelated committed effects remain durable. The product SHALL state that unseen or unpersisted pre-crash input is outside recovery coverage.
+
+#### Scenario: The budget expires before graph publication
+
+- **WHEN** canonical writes commit but projection publication or remaining candidates exceed the pass budget
+- **THEN** the receipt reports durable effects and explicit pending work/publication
+- **AND** the next eligible pass resumes within bounds rather than claiming a fully current graph

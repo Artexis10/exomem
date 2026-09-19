@@ -1,0 +1,108 @@
+## Context
+
+Read-side activation, recurring-entity maintenance, governed vocabulary, curation receipts and host hooks already exist in separate tranches. They do not yet demonstrate that an ordinary rich episode becomes complete durable state and improves the next conversation. A post-write sweep inherits the first write's omissions; a hook that treats any successful write as completion cannot detect them. The synthetic activation corpus also needs actual product structure and publication before scorer results establish compiler behaviour.
+
+This change is the integration owner. OpenSpec is the engineering specification; Exomem Planning records intent, status and pointers here. Checked tasks, merged code, installed versions and live enabled behaviour are separate facts. Implementation starts by checking each dependency at the current revision, including concurrently developed identity, anchor and convention corrections.
+
+## Goals / Non-Goals
+
+**Goals:** ordinary use reliably captures supported durable changes, enriches canonical identities and typed relationships, and supplies useful bounded context later. Achieve this across supported clients without routine user nudges, vocabulary hardcoding or release publication on every development iteration. Include adaptation, hot profile, activation priors and consolidation in the delivery programme.
+
+**Non-goals:** a replacement storage engine, a second mutation executor, a server semantic author, mandatory full-transcript retention, automatic user commitments, relationship quotas, a fixed domain ontology or guaranteed lifecycle interception in hosts that provide none. This plan neither activates authority nor enables live background work.
+
+## Decisions
+
+### 1. One loop, separate decision and execution responsibilities
+
+`turn -> activate -> active agent reasons -> decompose episode -> resolve homes and identities -> permitted canonical writes -> publish projections -> future activation`
+
+The active agent decides meaning, importance, equivalence, candidate disposition and whether a specific relationship is truthful. Deterministic server code supplies bounded evidence, validates structure/identity/authority, runs existing writers and reconciles receipts. Episode compilation extends existing review/curation coordination, not a generic executable-plan payload or autonomous server LLM. Capture sweep remains useful after writes but is not the decomposition trigger or completion authority.
+
+### 2. Decompose before selecting destinations
+
+At a substantive episode boundary, the agent enumerates supported durable changes from the original input: observations, outcomes, entity candidates/facets, relations, Records events, expressed Planning changes, provenance and structural routing. It resolves each against current knowledge before writing. One episode may produce several destinations or none; every candidate receives a disposition with a reason. Importance may justify first-mention promotion; recurrence is supporting pressure, never a name-count quota. Incidental names and uncertain identity remain unresolved.
+
+Preserve epistemic distinctions: direct user verification, hearsay, agent inference and comparison are different claims. An exposure during an experiment is an event, not evidence of causal effect. Planning writes require expressed intent; a mentioned possibility is not an automatic commitment. Completeness is an agent attestation against an input revision, not a server proof of semantic exhaustiveness.
+
+### 3. Recoverable episode identity and evidence
+
+Use the existing curation/review persistence boundary for a versioned episode ledger. The ledger records logical episode identity, input revisions, minimal authorized source/excerpt references, candidate identities, proposal revisions, leaf operation identities, dispositions and receipts. Preserve enough original evidence to resume without reconstructing facts from summaries; a hash alone cannot recover vanished conversation. Follow disclosure/retention policy and do not persist complete transcripts by default. If the host cannot retain required evidence, expose unavailable recovery rather than inventing it.
+
+Candidate identity remains stable across re-planning. Proposal revisions may change targets, ordering or remaining actions, but cannot silently assign a new operation identity to an already attempted equivalent leaf. Before retry, reconcile a committed, proven-uncommitted or uncertain outcome. A changed semantic effect is an explicitly revised candidate requiring fresh validation and authority. Existing curation operation IDs currently derive from plan identity and position; integration must add stable candidate-to-leaf mapping rather than assuming a rewritten plan is idempotent.
+
+Completion records `attempted`, `pending` and `covered_through_input_revision` separately. A final pass compares dispositions to the original episode revision, including corrections, and reads committed results. A successful tool write or a "Saved" marker cannot skip that pass. Bounded pending continuations resume at the next eligible host boundary; resource limits defer work visibly instead of dropping it. Hosts cannot recover an episode they never received or persisted, and crash coverage must state that boundary.
+
+### 4. Canonical knowledge remains readable and rebuildable
+
+Keep Markdown semantic units and supported structured collections canonical. Entity pages hold stable identity and facets; mutable events/state belong to Records or domain stores; Sources/Evidence preserve original provenance. Hubs expose navigation and projections. Graph, search, hot profile and priors are derived and rebuildable, with explicit publication currency.
+
+Resolve aliases and existing identities before creating another page; hydrate existing entities when supported facts accumulate elsewhere. Use registered relations where accurate and propose governed extensions for reusable missing meanings. Dynamic types, including newly registered kinds, must create, inspect, retrieve and traverse through normal MCP/CLI/REST operations. No product-specific branches or fallback to generic file writing as the normal dynamic-type route.
+
+Every fan-out destination retains its originating episode/source/span identity. Compilation cannot increase the number of independently established input origins: conversation-only fan-out inherits one episode origin, while independently established original sources discussed together retain their distinct identities. Copying either source into more pages adds no independent evidence. The write-time carrier and background detector must agree; where independence cannot be established, report it as unassessed rather than count pages as independent mentions.
+
+### 5. Reuse versioned authority and typed tools
+
+`activate-agent-led-vocabulary-evolution` owns approval and enforcement. Extend its explicit opt-in contract with a vault-scoped `edge.add` grant that can cover existing and subsequently committed canonical endpoints in the same logical vault. Keep project-edge grants narrow; do not widen existing grants during upgrade. Entity/type/edge actions remain separately named. New targets must resolve to authenticated vault identity, never caller labels. The episode coordinator cannot mint a grant or bypass leaf validation.
+
+Existing-fact replacement, alias edits, merges, deletion, meaning changes and Planning commitments do not inherit additive grants. Ordinary note/facet updates continue under their own current write policies. New role/convention editing must identify and validate its own existing authority; this programme adds no wildcard future action. Quiet operation concerns notification, not permission.
+
+### 6. A shared core with truthful host guarantees
+
+Canonical commands and generated schemas own the same episode and activation semantics on MCP, CLI and REST. Adapters discover actual capabilities and versions. Verify Claude Code, Codex, ChatGPT, Claude app and a generic MCP client; record installed adapter/version and what was exercised instead of assuming a brand implies hooks.
+
+Where a host exposes pre-turn/post-turn hooks or equivalent middleware, enforce a bounded activation/decomposition checkpoint and pending continuation. Where only MCP tools and instructions are available, offer the same complete workflow through bootstrap/skill guidance and report initiation as best effort. A capable tool schema alone proves neither ordinary-agent use nor interception of tool-free turns. Keep a capability matrix separating tool parity, lifecycle enforcement, recovery and observed no-nudge behaviour.
+
+### 7. Activation quality is downstream usefulness
+
+Task-conditioned roles, anchor resolution, bounded typed expansion and current-state qualification produce provenance-bearing packets. Partial or ambiguous anchor resolution cannot masquerade as a complete current context. Evaluate rare anchors, unfamiliar vocabulary, multilingual names, cross-kind relationships, supersession, Records state, distractor padding, negative twins and unavailable publication. Keep existing budgets and false-positive thresholds; embeddings-on smoke is required in addition to deterministic lexical fixtures.
+
+The primary integration observation is an ordinary later response using the right durable facts without a reminder. Forced tool calls test transport/compiler correctness separately. Public fixtures use synthetic identities; private episodes remain local, provenance-preserving and digest-pinned. Repair the existing benchmark instead of creating a second scorer. Paid comparative arms remain an optional, separately authorized experiment and do not block delivery.
+
+### 8. Adaptation, hot profile, priors and dreamer are committed milestones
+
+User corrections and observed misses create bounded review candidates tied to evidence. The active agent can propose revisions to registered context roles, cues, aliases or vault conventions; application follows each family's applicable authority, with versions and reversible history. The current `context-roles` owner-authored override gate remains in force: agent proposals do not independently grant role-edit authority. A fresh session must consume the accepted result. Do not encode one user's equipment, suppliers or language into product source. Hard identity, provenance, authority and abstention invariants remain stable.
+
+The hot profile is a compact, derived, provenance-bearing projection with invalidation for correction, expiry, deletion and access changes. Priors affect bounded candidate ordering only; they cannot invent facts, resolve ambiguity, resurrect superseded state or override explicit task anchors. Test stale-profile and popularity-trap negatives alongside latency and usefulness.
+
+The dreamer is bounded deterministic consolidation over changed material and indexed evidence, scheduled off the interactive path. It proposes alias/anchor, category/convention, link, hydration and profile work for the active agent. It never writes canonical knowledge autonomously. Default-off background execution, pause/quiet controls, time/memory/work budgets, checkpointed continuation, deduplication and source-version invalidation are required. Quiet optional advice cannot hide integrity failures. Online recall and capture remain usable with the dreamer disabled or failed.
+
+Eligible proposals enter the existing bounded review/activation carrier at an ordinary supported lifecycle boundary, with evidence and current disposition, so an agent can consider them without a user review reminder. Respect quiet/defer settings and existing delivery budgets; tool-only clients retain best-effort initiation. Creating an ignored queue is not dreamer acceptance: verify next-session delivery and authorized disposition.
+
+Frozen verifiers reuse the stricter canonical `frozen-verifiers` admission and effects contract: optional, default-off, version-pinned review labels with abstention. They cannot author canon, select entities, rank retrieval, gate capture or define policy. A verifier-admission evaluation is a programme task; enabling a model is not an acceptance prerequisite. Failure or resource pressure removes the label without changing online semantics. CPU-first evaluation precedes any separately evidenced GPU/co-tenant admission.
+
+### 9. Three iteration loops
+
+Development uses isolated state and affected tests. Personal candidate testing uses an immutable local wheel with recorded digest/source commit, a dedicated interpreter and the existing managed standby/admission/cutover mechanism. Public releases retain full completion checks and are batched when a tranche is ready. Neither new code iteration nor candidate source admission needs a PyPI publication; a candidate is not a released version.
+
+The existing manager already admits interpreter/protocol/state descriptors; the staging installer currently selects only a published version and needs an explicit local-wheel source. Preserve service-manager ownership and single-writer state. Compatible descriptors can reuse completed migrations. Descriptor-changing experiments use disposable state or explicit forward-migration/recovery evidence. Never promise arbitrary rollback after a state migration. Required full-suite and release checks are completion gates, not every-edit development gates; do not rerun known failing full jobs simply to wait for a release.
+
+## Ownership and delivery order
+
+| Contract | Owner | Programme integration |
+| --- | --- | --- |
+| Activation, roles, host continuity | Canonical `context-activation`, `context-roles`, `context-activation-continuity`; active `make-anchor-resolution-sound` | Reconcile current merges and convention work before wiring activation; preserve their requirements |
+| Recurrence, promotion, hydration, dynamic entity types | `complete-recurring-entity-lifecycle` | Original-origin accounting and normal-surface parity |
+| Vocabulary decisions and additive grants | `activate-agent-led-vocabulary-evolution` | Future-endpoint vault edge scope, trusted owner integration and independent security review |
+| Ordered writes and receipts | Existing governed curation contract | Stable episode/candidate mapping and partial recovery; no second executor |
+| Corpus/scoring and optional comparison | `add-context-activation-benchmark` | Product-shaped writers/index/compiler path and no-nudge observations |
+| Optional verifier admission and effects | Canonical `frozen-verifiers`; resource-governance and co-tenant admission contracts | Evaluate the existing seam without duplicating model selection or weakening queue-only output |
+| Integrated episode, adaptation and local candidates | `close-memory-loop` | Acceptance and bounded work packets below |
+
+First repair the test truth and add the candidate install path as independent bounded lanes. Then prove one vertical slice: an ordinary rich turn hydrates an existing supplier, resolves/creates equipment through a registered type, records supported state/provenance and a truthful relation, abstains on an ambiguous owner, publishes projections, and supplies the useful facts in a fresh session. Interrupt after one committed leaf and resume without duplicates. Extend that slice to the complete no-nudge cohort, dynamic vocabulary, client coverage and authority integration. Deliver hot profile, priors, adaptation and dreamer as subsequent required tranches; a successful first slice is not programme completion.
+
+Each implementation packet gets current-state verification, a narrow owner, independent review proportional to its boundary, affected tests while iterating and full required checks at the finished tranche. This session remains the programme orchestrator; delegation supplies bounded implementation or independent review, not a parallel architecture authority.
+
+## Risks / Trade-offs
+
+- Decomposition can overcapture: require supported evidence, explicit uncertainty, incidental-name negatives and no quota for entities/edges.
+- Multi-write episodes can partially commit: reuse receipts and stable identities; report pending and publication state honestly.
+- Adaptation can accumulate stale guidance: tie every derived item to source versions and demonstrate correction/invalidation in fresh sessions.
+- Host reach differs: publish observed guarantees, keep full tool parity, and never call best effort lifecycle enforcement.
+- Broader grants increase scope: deliberate opt-in, authenticated same-vault endpoints, independent security review and no silent grant migration.
+- Local candidates can migrate shared state: preserve managed admission and use disposable state unless recovery is evidenced.
+
+## Migration Plan
+
+Ship additive contracts and adapter discovery first with no live authority activation. Introduce episode state through versioned existing persistence; missing legacy episode metadata is unknown coverage, never assumed complete. Thread origin identity through new writes; do not infer historical independence from page count. Publish derived schema/index migrations under existing compatibility fences. Roll out no-nudge workflow per adapter with evidence, then enable optional background consolidation only under its own configuration. Preserve the old read/write paths throughout partial rollout and report unavailable features explicitly.
+
+Archive this umbrella only when every required tranche is implemented, verified, merged and reconciled with canonical specs. Optional paid comparisons and optional verifier enablement remain explicitly deferred without falsely claiming they ran.
