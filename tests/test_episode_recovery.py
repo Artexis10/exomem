@@ -405,6 +405,38 @@ def test_recovery_catalogue_check_does_not_record_unreturned_target_content(
     assert emitted[-1]["outcomes"] == released
 
 
+@pytest.mark.parametrize(
+    "link",
+    ("visible-link", "Knowledge Base/Sources/visible-link.md"),
+)
+def test_recovery_link_gate_does_not_receipt_unreturned_target_content(
+    vault: Path, warm_managed_cell, link: str
+) -> None:
+    target = vault / "Knowledge Base" / "Sources" / "visible-link.md"
+    target.write_text(
+        "---\ntype: source\nexomem_id: 42345678-1234-5678-1234-567812345678\n"
+        "title: Visible link\nstatus: active\n---\n\nTarget body is never returned.\n",
+        encoding="utf-8",
+    )
+    reference = _write_page(vault, f"See [[{link}]].\n")
+    _write_source_rule(vault, ceiling=6)
+    _warm_prose_catalogue(vault, warm_managed_cell)
+    with request_scope(_owner("client-a")):
+        created = _owner_store(vault).create("link-receipt", reference=reference)
+        with egress.disclosure_boundary(vault, "episode-recovery") as collector:
+            recovered = _owner_store(vault).recover_input(created["episode_id"])
+            egress.emit_boundary_receipt(collector)
+
+    assert recovered["status"] == "available"
+    released = [item.value for item in collector.outcomes if item.value.get("decision") == "released"]
+    assert len(released) == 1
+    assert released[0]["ref"] == reference
+    assert released[0]["content_hash"] == hashlib.sha256(
+        recovered["body"].encode()
+    ).hexdigest()
+    assert released[0]["size"] == len(recovered["body"].encode())
+
+
 def test_create_and_append_do_not_receipt_retained_input(vault: Path) -> None:
     reference = _write_page(vault, "Retained input is not a response body.\n")
     _write_source_rule(vault, ceiling=6)

@@ -687,8 +687,8 @@ def direct_text_references_visible(
 
     A governed body can name a page by title or alias, neither of which is a
     filesystem path.  The maintained working-set catalogue is the only bounded
-    authority for that mapping.  No target body is read or annotated here, so
-    this check adds no disclosure receipt for content it does not return.
+    authority for that mapping.  Target checks never record a disclosure of
+    content this direct read does not return.
     """
     root = Path(vault_root)
     policy = policy_module.load(root)

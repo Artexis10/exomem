@@ -265,10 +265,20 @@ class EpisodeInputOwner:
                     self.vault_root, value, principal=effective_principal()
                 ):
                     return {"status": "unavailable", "input_revision": revision["revision"]}
-                redacted = egress.redact_withheld_references(
-                    self.vault_root, value, principal=effective_principal()
-                )
-                scrubbed = egress.postfilter("get", redacted, self.vault_root)
+                # The legacy reference gate records every target it examines.
+                # It only proves that this representation is safe; its target
+                # outcomes cannot be receipts for content this facade returns.
+                with egress.disclosure_boundary(
+                    self.vault_root, "episode-input-reference-validation"
+                ) as redaction_collector:
+                    redacted = egress.redact_withheld_references(
+                        self.vault_root, value, principal=effective_principal()
+                    )
+                    scrubbed = egress.postfilter("get", redacted, self.vault_root)
+                if redaction_collector.credential_redactions:
+                    egress._record_credential_block(  # noqa: SLF001
+                        redaction_collector.credential_redactions
+                    )
                 if redacted != value or scrubbed != value:
                     return {"status": "unavailable", "input_revision": revision["revision"]}
                 representation = (

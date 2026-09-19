@@ -826,11 +826,16 @@ def _canonical_memory_or_unit_ref(value: Any) -> bool:
         return False
     parent, marker, fragment = value.partition("#")
     memory_id = memory_refs.parse_memory_ref(parent)
+    from .. import semantic_units
+
     return bool(
         marker
         and memory_id is not None
         and memory_refs.memory_ref(memory_id) == parent
-        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._~%-]{0,1023}", fragment)
+        and (
+            semantic_units._ANCHOR_RE.fullmatch(f"^{fragment}")  # noqa: SLF001
+            or re.fullmatch(r"unit-[0-9a-f]{64}", fragment)
+        )
     )
 
 
