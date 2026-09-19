@@ -56,4 +56,4 @@
       follow-up carrying the persisted continuity token), asserting the injected block,
       the token round-trip and the lifecycle clear. The owner's own use is the live
       acceptance; a paid `claude -p` run is not wanted.
-- [ ] 5.2 `openspec validate --all --strict`; scoped suites; privacy gate; PR.
+- [x] 5.2 `openspec validate --all --strict`; scoped suites; privacy gate; PR.
