@@ -69,8 +69,10 @@ log = logging.getLogger(__name__)
 #: `normalize()` — the one fold site every lexical comparison key in this
 #: module shares, including `resolve_names`'s egress-guard lookups — folds
 #: a typographic apostrophe (`’`) and a typographic or non-breaking hyphen
-#: to the plain one, drops a soft hyphen, and a derived short name longer
-#: than 48 characters is no longer admitted. A v6 sidecar's title/alias
+#: to the plain one, drops a soft hyphen, and a derived short name is no
+#: longer admitted when it CONTAINS A WORD longer than 48 code points (not
+#: when the joined name is — three ordinary compound words are still a
+#: name). A v6 sidecar's title/alias
 #: terms, derived short names and term->anchor counts were all computed by
 #: the fragmenting, non-Latin-blind, quote- and hyphen-splitting rule (an
 #: accented word split into fragments, a non-Latin script produced no terms
@@ -449,18 +451,22 @@ def derived_short_name(title: str) -> str | None:
     with `_` — a stray extension or a private note, never a name a turn would
     say); tokenises to nothing, to more than three words, to only stopwords
     (the resolver's own list, `STOPWORDS`) or to only digits (a bare year is a
-    date, not a name); or joins to fewer than three or more than 48
-    characters (a single letter or two occupies a name slot it can never
-    fill, since a turn that short is dropped by the resolver's own stopword
-    filtering before it could ever match; a script without word separators
-    caps a "word count" of one at three TOKENS per the check above but not at
-    any character count, so an unbroken CJK run of a whole sentence's length
-    would otherwise read as a "three-or-fewer-word" name). The name itself is
-    the lead's tokens, JOINED BY SINGLE SPACES the way the resolver's own
-    tokeniser would read it back — never the raw substring — so a multi-space
-    or emoji-led title ("Multi   Spaces - qualifier", "🎯 Goal - notes")
-    derives a name a turn can actually produce, instead of one that can never
-    match and only occupies a name slot.
+    date, not a name); contains a word longer than 48 CODE POINTS (a script
+    without word separators caps a "word count" of one at three TOKENS per
+    the check above, never at any length, so an unbroken CJK run of a whole
+    sentence would otherwise read as a valid "three-or-fewer-word" name —
+    but three ordinary compound words, German-length or longer, are still a
+    name: the cap is per WORD, not on the joined whole, precisely so a
+    lead of long compound words is not refused for the same reason a
+    sentence is); or joins to fewer than three code points (a single letter
+    or two occupies a name slot it can never fill, since a turn that short
+    is dropped by the resolver's own stopword filtering before it could ever
+    match). The name itself is the lead's tokens, JOINED BY SINGLE SPACES
+    the way the resolver's own tokeniser would read it back — never the raw
+    substring — so a multi-space or emoji-led title ("Multi   Spaces -
+    qualifier", "🎯 Goal - notes") derives a name a turn can actually
+    produce, instead of one that can never match and only occupies a name
+    slot.
     """
     stripped = str(title).strip()
     match = _TRAILING_PAREN.match(stripped) or _TRAILING_DASH.match(stripped)
@@ -471,6 +477,13 @@ def derived_short_name(title: str) -> str | None:
         return None
     tokens = tokens_of(lead)
     if not tokens or len(tokens) > 3:
+        return None
+    # Per WORD, not on the joined whole (correction round 3): three ordinary
+    # compound words ("Ausrüstungsverwaltungssystem Lagerverwaltung
+    # Übersicht", 28+15+9 code points, 54 joined) are still a name; only a
+    # single unbroken run longer than this — the shape a sentence in a
+    # script without word separators takes — is refused.
+    if max(len(token) for token in tokens) > 48:
         return None
     if all(token in STOPWORDS for token in tokens):
         return None
@@ -488,7 +501,7 @@ def derived_short_name(title: str) -> str | None:
     if any(sum(1 for ch in token if ch.isalpha()) < 2 for token in tokens):
         return None
     name = " ".join(tokens)
-    return name if 3 <= len(name) <= 48 else None
+    return name if len(name) >= 3 else None
 
 
 class WorkingSetIndexUnavailable(RuntimeError):

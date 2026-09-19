@@ -425,12 +425,25 @@ def test_a_prose_wikilink_to_a_nonexistent_page_keeps_the_unit_unchanged(
 _PLAIN_APOSTROPHE_TITLE = "Kill switch's risky releases"
 _TYPOGRAPHIC_APOSTROPHE_TITLE = "Kill switch’s risky releases"
 
+#: Hyphen cells (correction round 3): a DIFFERENT name pair than the
+#: apostrophe one, because the fold in question is different in kind. The
+#: ASCII/non-breaking pair is a hyphenated compound word, folded to the
+#: same VISIBLE hyphen either way. The soft-hyphen pair is deliberately
+#: NOT hyphenated at all: U+00AD is an invisible optional break point
+#: INSIDE one word, dropped by `normalize()` rather than folded to a
+#: visible hyphen, so "Killswitch" and "Kill­switch" must read as the
+#: same one-word name, never as "kill-switch" or two words.
+_ASCII_HYPHEN_TITLE = "Kill-switch for risky releases"
+_NON_BREAKING_HYPHEN_TITLE = "Kill‑switch for risky releases"
+_NO_HYPHEN_TITLE = "Killswitch for risky releases"
+_SOFT_HYPHEN_TITLE = "Kill­switch for risky releases"
+
 
 def _retitled(vault: Path, title: str) -> None:
     """Give the restricted fixture page its own frontmatter `title:` —
     exactly the spelling the activation index records as a page name — so
-    the TITLE's own apostrophe style, not the fixture's unrelated H1, is
-    what a prose wikilink has to resolve against."""
+    the TITLE's own apostrophe or hyphen style, not the fixture's unrelated
+    H1, is what a prose wikilink has to resolve against."""
     page = vault / RESTRICTED_PATH
     text = page.read_text(encoding="utf-8")
     assert text.startswith("---\n")
@@ -445,34 +458,43 @@ def _retitled(vault: Path, title: str) -> None:
         (_PLAIN_APOSTROPHE_TITLE, _TYPOGRAPHIC_APOSTROPHE_TITLE),
         (_TYPOGRAPHIC_APOSTROPHE_TITLE, _PLAIN_APOSTROPHE_TITLE),
         (_TYPOGRAPHIC_APOSTROPHE_TITLE, _TYPOGRAPHIC_APOSTROPHE_TITLE),
+        (_ASCII_HYPHEN_TITLE, _NON_BREAKING_HYPHEN_TITLE),
+        (_NON_BREAKING_HYPHEN_TITLE, _ASCII_HYPHEN_TITLE),
+        (_NO_HYPHEN_TITLE, _SOFT_HYPHEN_TITLE),
+        (_SOFT_HYPHEN_TITLE, _NO_HYPHEN_TITLE),
     ],
     ids=[
-        "plain-title/plain-prose",
-        "plain-title/typographic-prose",
-        "typographic-title/plain-prose",
-        "typographic-title/typographic-prose",
+        "plain-apostrophe-title/plain-apostrophe-prose",
+        "plain-apostrophe-title/typographic-apostrophe-prose",
+        "typographic-apostrophe-title/plain-apostrophe-prose",
+        "typographic-apostrophe-title/typographic-apostrophe-prose",
+        "ascii-hyphen-title/non-breaking-hyphen-prose",
+        "non-breaking-hyphen-title/ascii-hyphen-prose",
+        "no-hyphen-title/soft-hyphen-prose",
+        "soft-hyphen-title/no-hyphen-prose",
     ],
 )
-def test_a_withheld_page_stays_withheld_however_its_apostrophe_was_typed(
+def test_a_withheld_page_stays_withheld_however_its_apostrophe_or_hyphen_was_typed(
     vault: Path, title: str, prose: str
 ) -> None:
     """Independent review, task 4a.2b: `_resolved_prose_names` resolves a
     prose wikilink NAME to a path through the activation index's
     `page_names` map, keyed by `working_set_index.normalize()` on both the
     index-build side (the title) and the query side (the prose spelling).
-    Before the apostrophe fold moved into `normalize()` itself, a title
-    authored with one apostrophe style and prose written with the other
-    normalised to two DIFFERENT keys, so resolution found nothing at all —
-    not a matching failure downstream, a resolution failure — and the unit
-    was served in full. All four spelling combinations must resolve to the
-    SAME restricted page and withhold the unit that names it."""
+    Before the apostrophe and hyphen folds moved into `normalize()` itself,
+    a title authored with one apostrophe or hyphen style and prose written
+    with the other normalised to two DIFFERENT keys, so resolution found
+    nothing at all — not a matching failure downstream, a resolution
+    failure — and the unit was served in full. Every spelling combination
+    here must resolve to the SAME restricted page and withhold the unit
+    that names it."""
     write_scope(vault)
     write_rule(vault, ceiling=0)
     _retitled(vault, title)
     _indexed(vault)
 
     packet = _packet()
-    packet["units"] = [_prose_unit(prose, ref="unit-apostrophe-link")]
+    packet["units"] = [_prose_unit(prose, ref="unit-apostrophe-or-hyphen-link")]
 
     with request_scope(_external()):
         guarded = egress.guard_working_set(vault, packet, _prose_release())

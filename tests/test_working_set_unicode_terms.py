@@ -388,14 +388,17 @@ def test_a_non_breaking_hyphen_reaches_an_anchor_through_the_real_resolver() -> 
     assert wsi.terms_of("well‑known plan") == wsi.terms_of("well-known plan")
 
 
-def test_a_derived_name_longer_than_48_characters_is_not_admitted() -> None:
+def test_a_derived_name_containing_a_word_longer_than_48_code_points_is_not_admitted() -> None:
     """Spec scenario "A sentence is not a name": a script without word
     separators caps a "word count" of one at three TOKENS (the existing
-    `len(tokens) > 3` check), never at any character count, so an unbroken
-    CJK run the length of a whole sentence would otherwise read as a valid
-    "three-or-fewer-word" name. A 60-character unbroken lead before a
-    parenthetical must be refused; a 16-character one is still a name and
-    stays admitted."""
+    `len(tokens) > 3` check), never at any length, so an unbroken CJK run
+    the length of a whole sentence would otherwise read as a valid
+    "three-or-fewer-word" name. A 60-code-point unbroken lead before a
+    parenthetical must be refused; a 16-code-point one is still a name and
+    stays admitted. (Correction round 3: the ceiling is per WORD, not on
+    the joined name — see
+    `test_three_long_compound_words_are_still_a_name` for why that
+    distinction matters.)"""
     too_long = "你" * 60
     assert wsi.derived_short_name(f"{too_long} (note)") is None
 
@@ -403,10 +406,29 @@ def test_a_derived_name_longer_than_48_characters_is_not_admitted() -> None:
     assert wsi.derived_short_name(f"{fine} (note)") == fine
 
 
-def test_a_derived_name_at_exactly_48_characters_is_the_ceiling() -> None:
-    """The ceiling is inclusive: exactly 48 characters is still admitted,
-    49 is not."""
+def test_a_single_word_at_exactly_48_code_points_is_the_ceiling() -> None:
+    """The ceiling is inclusive: a single word of exactly 48 code points is
+    still admitted, 49 is not."""
     at_ceiling = "你" * 48
     over_ceiling = "你" * 49
     assert wsi.derived_short_name(f"{at_ceiling} (note)") == at_ceiling
     assert wsi.derived_short_name(f"{over_ceiling} (note)") is None
+
+
+def test_three_long_compound_words_are_still_a_name() -> None:
+    """Spec scenario "Long compound words are still a name": RED before
+    correction round 3, when the ceiling capped the JOINED name at 48 code
+    points rather than each WORD. "Ausrüstungsverwaltungssystem
+    Lagerverwaltung Übersicht" is an ordinary three-word German lead — 28,
+    15 and 9 code points, none over the per-word ceiling — but joins to 54,
+    over the old joined-name cap, which refused it for the same reason a
+    60-code-point CJK sentence is refused: exactly the false positive this
+    round's fix exists to remove."""
+    title = "Ausrüstungsverwaltungssystem Lagerverwaltung Übersicht (2026)"
+
+    name = wsi.derived_short_name(title)
+
+    assert name == "ausrüstungsverwaltungssystem lagerverwaltung übersicht"
+    assert len(name) == 54
+    tokens = wsi.tokens_of(name)
+    assert [len(token) for token in tokens] == [28, 15, 9]
