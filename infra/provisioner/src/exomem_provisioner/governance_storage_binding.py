@@ -323,7 +323,13 @@ class KubernetesGovernanceStorageBindingAdapter(KubernetesGovernanceStorageInitA
             current_uid, current_rv, _ = self._prove_job(
                 current, metadata, recovery_envelope, allow_deleting=False
             )
-            self._same((current_uid, current_rv), (uid, rv))
+            if current_uid != uid:
+                raise _refuse()
+            if current_rv != rv:
+                # The Job controller can publish status between these reads.
+                # Re-prove a stable revision on the next pass before deleting;
+                # a valid same-UID update is not a foreign successor.
+                raise _retry()
             await self._prove_binding_pods(metadata, uid)
             await effect_guard()
             try:

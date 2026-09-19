@@ -27,6 +27,70 @@ from exomem_provisioner.wire_protocol import WIRE_PROTOCOL_V2
 IMAGE = "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
 
 
+@pytest.mark.parametrize("change", ["status", "replacement", "foreign-annotation"])
+async def test_binder_second_read_distinguishes_status_progress_from_foreign_job(change):
+    class Missing(Exception):
+        status = 404
+
+    class Batch:
+        reads = 0
+        deleted = []
+
+        def read_namespaced_job(self, *_args):
+            self.reads += 1
+            if self.job is None:
+                raise Missing()
+            observed = copy.deepcopy(self.job)
+            if self.reads == 2:
+                observed["metadata"]["resourceVersion"] = "13"
+                observed["status"] = {"succeeded": 1}
+                if change == "replacement":
+                    observed["metadata"]["uid"] = "replacement-uid"
+                elif change == "foreign-annotation":
+                    observed["metadata"]["annotations"]["exomem.io/recovery-envelope"] = "foreign"
+                self.job = observed
+            return observed
+
+        def delete_namespaced_job(self, *_args, body):
+            self.deleted.append(body)
+            self.job = None
+
+    class Cell:
+        async def authenticated_volume_state(self, _metadata):
+            return "pvc-alpha", "Bound"
+
+    batch = Batch()
+    adapter = KubernetesGovernanceStorageBindingAdapter(
+        core_v1=SimpleNamespace(list_namespaced_pod=lambda *_args: {"items": []}),
+        batch_v1=batch,
+        apps_v1=SimpleNamespace(),
+        identity_verifier=CODEC.verifier(),
+        runtime_image=IMAGE,
+        cell=Cell(),
+    )
+    batch.job = adapter._job_body(METADATA, _envelope())
+    batch.job["metadata"].update(uid="binder-uid", resourceVersion="12")
+
+    async def guard():
+        return None
+
+    with pytest.raises(DriverRetryable if change == "status" else MetadataConflict):
+        await adapter.reconcile(
+            METADATA, pvc_uid="pvc-alpha", recovery_envelope=_envelope(), effect_guard=guard
+        )
+    assert batch.deleted == []
+    if change == "status":
+        assert await adapter.reconcile(
+            METADATA, pvc_uid="pvc-alpha", recovery_envelope=_envelope(), effect_guard=guard
+        )
+        assert batch.deleted == [
+            {
+                "propagationPolicy": "Foreground",
+                "preconditions": {"uid": "binder-uid", "resourceVersion": "13"},
+            }
+        ]
+
+
 def _envelope() -> str:
     name = METADATA.resource_name + "-init"
     return CODEC.seal(

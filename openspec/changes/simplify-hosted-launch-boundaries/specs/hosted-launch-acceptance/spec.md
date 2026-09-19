@@ -99,6 +99,13 @@ Service acceptance SHALL require the actual governance schema, authenticated pro
 - **AND** Job absence is insufficient until a namespace-wide observation proves no remaining bound-PVC or fixed-slot pods, including pods with missing labels
 - **AND** the same absence proof precedes any replacement submission, while failed API observations never count as absence
 
+#### Scenario: Storage binder status changes during its cleanup proof
+
+- **WHEN** the authenticated same-UID storage-binding Job changes resource version between two cleanup observations
+- **THEN** the operation retries its existing checkpoint before any deletion effect
+- **AND** a later stable observation still requires exact ownership and UID/resource-version deletion preconditions
+- **AND** a replaced Job or invalid ownership proof remains refused
+
 ### Requirement: Acceptance is resumable and normally agent operated
 
 The acceptance workflow SHALL execute independent checks without continuous operator attendance and persist a content-safe run report with immutable release/contract identity, stage outcomes, rerunnable commands and exact blocked actions. It MUST distinguish passed, failed, pending and blocked stages. It MUST use the ordinary customer security boundary, not a production authorization bypass.
