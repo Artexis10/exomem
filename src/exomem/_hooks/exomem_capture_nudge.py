@@ -3,20 +3,21 @@
 
 The KB skill already says to auto-capture at stepping-stones, but skill prose is
 *passive* — over a long thread the model forgets to check, so "auto-save" quietly
-never fires. This hook re-arms the check: when Claude finishes a substantial turn
+never fires. This hook re-arms the check: when an agent finishes a substantial turn
 that hasn't already written to the KB, it blocks the stop with a one-line reminder
-so Claude evaluates a capture before ending.
+so the agent evaluates whether a capture is warranted before ending. A substantial
+turn alone does not require a write.
 
 LANGUAGE-AGNOSTIC by design. It does NOT gate on English keywords — that would
 miss Japanese and every other language. The gate is structural: a turn is a
 candidate if the assistant's reply is substantial (>= a char threshold) and the
 KB wasn't already written this turn. A per-session cooldown bounds how often it
-can fire, so cost stays low while Claude — which judges "is this really a
+can fire, so cost stays low while the agent — which judges "is this really a
 stepping-stone?" well in any language — makes the actual call (the reminder tells
 it to do nothing if it isn't one).
 
-Cheap and safe: the script itself is free (stdlib only); the only token cost is a
-real capture (the feature). Self-disarms via `stop_hook_active` (no loops); the
+Cheap and safe: the script itself is free (stdlib only), but reminder context also
+consumes tokens. Self-disarms via `stop_hook_active` (no loops); the
 cooldown caps frequency; every trigger is logged under the active client home for
 tuning.
 
@@ -60,28 +61,29 @@ _KB_WRITE = re.compile(
 )
 
 REMINDER = (
-    "[Exomem capture check] After substantial work the active agent checks for a durable "
-    "conclusion, recurring entity or baseline. "
-    "Stable preference/recurring routine/historical baseline/durable affiliation needs "
-    "stability or recurrence plus reusable comparison/interpretation/decision value. "
-    "Fleeting/one-off/incidental/trivial/tentative stays quiet. "
-    "At balanced/maximal, after primary work, before the final response, "
-    'review_memory(mode="attention", categories=["entity_recurrence"], limit=3) once per session; '
-    "no local scan, no model. Resolve in the active entity registry/selected knowledge packs: "
-    'connect_memory(operation="resolve-entity"); stop on ambiguity; single incidental mention '
-    "stays in context. Uniquely resolved Entity: "
-    "narrow Entity facet, else compiled observation/proactive_capture; "
-    "affiliation relation/link_acceptance; Records only if compatible. Hydrate with "
-    "edit_memory an active match before duplicating; else "
-    'connect_memory(operation="create-entity") only for a stable recurring identity '
-    "useful beyond this source. Entity creation/substantial curation: confirmed "
-    "restructure_execution. Recheck that review ref only after a confirmed batch terminal receipt; "
-    "stop at the closure-only eighth recheck. Distilled notes, not transcripts. replace_memory "
-    "supersedes a contradicted conclusion, not a correction beside it. Stated intent -> "
+    "[Exomem capture check] Reuse evidence; skip transient code/test/CI. "
+    "Capture new durable outcomes under live policy. "
+    "Decompose before routing; open notes have no priority. Keep hypotheses attributed/uncertain. "
+    "Check coverage once/episode. Stable preference/recurring routine/historical baseline/"
+    "durable affiliation needs stability or recurrence plus reusable comparison/interpretation/"
+    "decision value; "
+    "fleeting/one-off/incidental/trivial/tentative events stay quiet. At balanced/maximal, "
+    "after primary work, before the final response, "
+    'review_memory(mode="attention", categories=["entity_recurrence"], limit=3) once/session; '
+    "no scan/model. Resolve active entity registry/selected knowledge packs: "
+    'connect_memory(operation="resolve-entity"); stop on ambiguity; incidental mention stays '
+    "in context. Uniquely resolved Entity: narrow Entity facet, else compiled observation/proactive_capture; "
+    "affiliation relation/link_acceptance; compatible Records only. Hydrate via edit_memory before "
+    "duplicating; else "
+    'connect_memory(operation="create-entity") only for stable recurring identity beyond source. '
+    "Entity creation/substantial curation: confirmed "
+    "restructure_execution. Recheck on confirmed terminal batch receipt; eighth recheck is "
+    "closure-only. Distilled notes, not transcripts. replace_memory supersedes contradicted "
+    "conclusions, not corrections beside them. Stated intent -> "
     "Planning/plan_memory; observed outcome -> Records/record_memory. Generated draft stays "
-    "ephemeral; selected is not write consent: proactive_capture keeps exact bytes as "
-    "Source/Evidence by role, not MIME. No handle: non-committing handoff; delivery needs Evidence "
-    "receipt/Record; no remote byte inference. Missing schema: "
+    "ephemeral; selected is not write consent: proactive_capture keeps exact Source/Evidence bytes "
+    "by role, not MIME. No handle: non-committing handoff; delivery needs Evidence receipt/Record; "
+    "no remote byte inference. Missing schema: "
     "structural_suggestions/restructure_execution; relations: link_acceptance. Else/no "
     "Knowledge Base: stop."
 )

@@ -40,8 +40,13 @@ or generic connection as authority to create an entity, type, or edge.
 
 Use this loop whenever a durable conclusion should enter Exomem:
 
-1. `ask_memory` for relevant prior notes and sources.
-2. `read_memory` for chosen pages, or use `ask_memory(deep=true)` when synthesis needs bounded context.
+1. Partition durable candidates by retrieval question, subject/domain, episode,
+   and epistemic role before choosing destinations. Reuse current relevant
+   recall; call `ask_memory` only for missing prior notes or sources.
+2. Assess scope/title fit for each candidate home. An open or similar page has
+   no automatic priority. Read selected exact units/pages only as needed; keep
+   coherent details together and route independently reusable clusters separately.
+   Preserve durable hypotheses with speaker/source attribution and uncertainty.
 3. Identify the provenance: which governed `Sources/` or `Evidence/` pages this
    conclusion draws from. Those become `sources:` on the write call. Capture
    external material first: a URL, connector/message ID, remote file ID, working

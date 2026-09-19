@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: d7def9c54b1a2df5c12b6a4daa50b326eba6fd3870df16b8d7d86ef510e24620
+  skill_contract: 448b85db9fbe5ff0563e32fb9559e05c1cc7c594da57d3f648fec77d55d2c408
   version: "0.1.0"
 ---
 
@@ -39,12 +39,22 @@ interpretation, or decision value are clear. Attach a facet or affiliation to a
 uniquely resolved Entity; otherwise write one concise compiled observation. Use
 Records only for an observed measurement accepted by a compatible existing
 collection. Fleeting preferences, one-off activity, incidental associations, trivial
-metrics, and tentative claims stay quiet. Eligibility never creates an Entity,
+metrics, and tentative events stay quiet. Durable interpretations retain explicit
+attribution and uncertainty rather than becoming established facts. Eligibility never creates an Entity,
 collection, or schema. Concise observations and narrow additive facts follow
 `proactive_capture`; affiliation relations use `link_acceptance`; Entity creation or
 substantial curation uses confirmed `restructure_execution`.
 
 ## Workflow
+Before choosing a destination, partition the exchange into independently reusable
+objects by retrieval question, subject/domain, temporal episode, and epistemic
+role. Reuse current relevant recall and resolve each meaningful cluster against
+canonical homes. The open note has no priority; keep details within one coherent
+scope together. Preserve durable hypotheses as attributed, uncertain claims.
+Perform one completeness/destination review for the whole write plan, not a new
+review after every write. During development, repository/specification artifacts
+carry transient progress; capture reusable decisions and verified milestones.
+
 1. Decide whether the material is raw evidence or a compiled conclusion.
 2. Use `capture_source` for raw captured text or source material. Classify it on
    two open axes when you can: `source_kind` (what it is) and `domain` (what it

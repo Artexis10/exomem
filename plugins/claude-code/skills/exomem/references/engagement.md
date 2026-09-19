@@ -35,8 +35,17 @@ entity, or phrasings like "what did I conclude about X," "have I looked at Y,"
 "where did we land on Z" — run a quiet `ask_memory` **first** and fold what you find
 into the answer. Don't narrate the search; mention the KB only when it returned
 something relevant, and cite the page(s) you used. A miss means "not found in
-what I searched," never "it doesn't exist" — an empty `ask_memory` result means *no coverage
-yet*, which is a reason to consider capturing, not to disengage.
+what I searched," never "it doesn't exist." An empty result does not itself
+create a reason to write.
+
+**Development cadence.** Reuse relevant context already retrieved for the current
+task. Refresh when a dependency, decision, topic, or source version changes, or
+when the user asks for recall. Expand exact units before whole programme pages.
+Keep implementation steps, test logs, and transient PR/CI status in the repository
+and its specification system. Capture reusable decisions, constraints, diagnosed
+failures, and verified milestone outcomes in one consolidated pass at a meaningful
+boundary. A checkpoint or tool call alone is not a capture trigger. This cadence
+does not suppress an explicit save request or a substantive durable landing.
 
 **Stepping-stone capture (write) — then report.** When the conversation reaches
 a **stepping-stone** — a durable conclusion lands, a durable recurring entity
@@ -51,7 +60,9 @@ is made**, or **an observed outcome or event is reported** — capture it:
   Entity; otherwise save one concise compiled observation. Use Records only for an
   observed measurement accepted by a compatible existing collection. Fleeting
   preferences, one-off activity, incidental associations, trivial metrics, and
-  tentative claims stay quiet. Eligibility never creates an Entity, collection, or
+  tentative events stay quiet. Durable interpretations may be preserved with
+  explicit attribution and uncertainty; they are not established facts or
+  observed events. Eligibility never creates an Entity, collection, or
   schema: an affiliation relation uses `link_acceptance`; entity creation or substantial curation
   uses confirmed `restructure_execution`; concise observations and narrow additive
   facts follow `proactive_capture` and its active disposition.
@@ -130,17 +141,28 @@ landing, not during the flight.
 Do not wait to be asked. "Did you save that?" arriving after a result already
 landed is the failure, not the prompt.
 
-**One capture is rarely the whole episode.** After any capture, make one bounded
-episode-completeness pass over the recent exchange for anything else that passes
+**Decompose before choosing destinations.** Before the first compiled write,
+partition durable candidates by retrieval question, subject/domain, temporal
+episode, and epistemic role. Inspect canonical destination fitness for each
+meaningful cluster; neither an open page nor semantic similarity establishes
+ownership. Keep coherent details together, and fan out independently reusable
+objects only where that improves future use. Preserve source/speaker attribution
+and uncertainty for durable hypotheses and interpretations. Uncertainty changes
+their representation; it does not automatically make them disposable.
+
+**Review the episode once.** Include a bounded completeness and destination
+review in that write plan for anything else that passes
 the same reuse-value test — would it materially improve a later decision, lookup,
 repeated task, comparison or continuation? For example: a conclusion, an outcome
 or state change, a stable preference, a method or parameter, an entity facet, an
 operational or vendor quirk, evidence worth preserving, a relation, a planning
 implication, a record implication. That list is examples rather than a boundary.
-One pass, not a loop: never re-write what a write response lists as written
-recently, and stay silent when nothing qualifies. A write response may carry a
+Do not repeat a completed review after every destination write. Never re-write
+what a write response lists as written recently, and stay silent when nothing
+qualifies. A write response may carry a
 `capture_sweep` block saying this is the first write after a quiet interval; it
-is the prompt for the pass, never a demand that something be written.
+prompts a pass if one has not already been completed for that episode, never a
+demand that something be written.
 
 ## Generated artifact adoption
 
