@@ -44,7 +44,8 @@ hyphen was typed; a letter outside the basic Latin
 alphabet SHALL never split a word, and a turn in a script the basic Latin alphabet
 does not cover SHALL still yield terms. A script written without word separators
 yields one term per unbroken run, which the product does not segment, and a derived
-name longer than 48 characters SHALL NOT be admitted. Locale-specific case rules are
+name containing a word longer than 48 code points SHALL NOT be admitted, so that a
+sentence is never taken for a name while a lead of long compound words still is. Locale-specific case rules are
 not applied: a Turkish dotted capital I and a plain I are different terms. Collection
 claims routing keeps its own basic-Latin term splitter, so `claims_match` and Records
 current state do not yet follow this rule. Lexical
@@ -235,8 +236,18 @@ routing.
 
 #### Scenario: A sentence is not a name
 - **WHEN** a title in a script without word separators leads with an unbroken run longer
-  than 48 characters before its qualifier
+  than 48 code points before its qualifier
 - **THEN** no derived name is admitted for it
+
+#### Scenario: Long compound words are still a name
+- **WHEN** a title leads with three compound words of 28, 15 and 9 letters before its
+  qualifier and the lead is unique
+- **THEN** the three-word lead is admitted as a derived name
+
+#### Scenario: A withheld page stays withheld however its hyphen was typed
+- **WHEN** a withheld page's title is written with a plain hyphen and a unit on a
+  permitted page names it in prose with a non-breaking hyphen, or the reverse
+- **THEN** the unit is withheld from the packet exactly as when both spellings agree
 
 #### Scenario: Basic Latin text is unchanged
 - **WHEN** a turn and every anchor name are written in unaccented basic Latin letters

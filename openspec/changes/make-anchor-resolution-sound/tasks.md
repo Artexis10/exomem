@@ -38,7 +38,7 @@
 
 - [x] 4a.1 Red first: the tokeniser splits accented words ("Ausrüstung" gives two
       fragments), drops non-Latin scripts entirely, and lets two unrelated titles
-      overlap on a shared word ending. Tests for the eight new scenarios, plus a
+      overlap on a shared word ending. Tests for the ten new scenarios, plus a
       property test that basic Latin input tokenises exactly as before.
 - [x] 4a.2 Tokenise maximal runs of letters, digits and combining marks in any script,
       keeping the existing fast path for basic Latin text; bump the activation index
@@ -47,7 +47,8 @@
       guard also uses, and closes a leak the old code had (a withheld page named in prose
       with the other apostrophe style was served). Pin it with a regression test in
       `tests/test_working_set_egress.py`; fold typographic and non-breaking hyphens and
-      drop the soft hyphen in the same place; cap a derived name at 48 characters.
+      drop the soft hyphen in the same place, pinned on the guard as well; refuse a derived
+      name containing a word longer than 48 code points.
       Recorded limit, not fixed here: `collection_claims` and `structure_promotion` keep a
       basic-Latin splitter, so `claims_match` and Records current state cannot be reached
       by a non-Latin turn; that is its own change.
