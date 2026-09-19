@@ -53,6 +53,7 @@ from . import markdown_relations
 from .entity_candidates import _aliases as alias_values
 from .entity_candidates import identity_key
 from .entity_types import EntityTypeRegistry
+from .find_corpus import NAVIGATION_BASENAMES
 from .kbdir import kb_prefix
 from .vault import (
     AmbiguousWikilinkError,
@@ -240,11 +241,21 @@ _EXACT_DATETIME_SHAPES = (
 # literal, and a threshold can move without rewriting what a test means.
 # ---------------------------------------------------------------------------
 
-#: How many DISTINCT pages must reach for one identity before it is a candidate.
-#: Distinct pages, never mentions: frequency inside one note is emphasis, not
-#: recurrence, and treating it as recurrence is exactly the incidental-mention
-#: false positive f21 freezes budgets against.
+#: How many DISTINCT pages must reach for one identity before it is a candidate,
+#: for the closed ordinary-text grammar lane (`identity-frames-v1`). Distinct
+#: pages, never mentions: frequency inside one note is emphasis, not recurrence,
+#: and treating it as recurrence is exactly the incidental-mention false
+#: positive f21 freezes budgets against. The grammar lane's measured population
+#: has one identity on two pages, so this gate carries its own precision
+#: argument and stays untouched by `capture-identities-at-write-time` (design D3).
 SPREAD_MIN_PAGES = 3  # PROVISIONAL
+
+#: The unresolved-wikilink lane's own spread gate, split from `SPREAD_MIN_PAGES`
+#: (`capture-identities-at-write-time` design D3): on the measured vault, four
+#: identities sit on exactly two pages and would wait indefinitely for a third,
+#: and the wikilink lane's independence argument -- distinct eligible pages,
+#: nothing about mention frequency or origin -- holds just as well at two.
+WIKILINK_SPREAD_MIN_PAGES = 2
 
 #: How many registry near-matches ride one finding. A bounded, ordered list is
 #: advice; an unbounded one is a second search result the agent has to triage.
@@ -1252,6 +1263,13 @@ def collect(
             if context.identity and context.identity not in self_identities:
                 ordinary.setdefault(context.identity, []).append(context)
 
+        if Path(rel_path).name in NAVIGATION_BASENAMES:
+            # A navigation page (design D4, `capture-identities-at-write-time`)
+            # lists things; it does not reach for them. Excluded from the
+            # wikilink lane's evidence only -- it never supplies spread and
+            # never anchors a finding -- and left alone for the ordinary-text
+            # grammar lane above, whose gates this change does not touch.
+            continue
         for match in find_body_wikilinks(page.body):
             link = parse_link(match.group(1))
             if link is None:
@@ -1274,7 +1292,7 @@ def collect(
     all_identities = set(mentions) | set(ordinary)
     for identity in sorted(all_identities):
         by_page = mentions.get(identity, {})
-        legacy_qualifies = len(by_page) >= SPREAD_MIN_PAGES
+        legacy_qualifies = len(by_page) >= WIKILINK_SPREAD_MIN_PAGES
         if legacy_qualifies and any(
             attachment_probe(target) for target in sorted(suffixed.get(identity, ()))
         ):

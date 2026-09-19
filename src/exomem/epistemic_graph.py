@@ -345,6 +345,26 @@ class RelationEdgeResult:
     reason: str | None = None
 
 
+@dataclass(frozen=True)
+class DependencySourcesResult:
+    """Outcome of a bare-name link-dependency lookup.
+
+    `status` carries the same never-false-empty contract as
+    `RelationFilterResult`/`RelationEdgeResult`: "available" is authoritative (an
+    empty `sources` is a real "no page links this bare spelling"), "warming"
+    means the sidecar is missing or stale, "temporarily_unavailable" means the
+    graph index is disabled. `sources` is exact for the queried spelling and
+    conservative by construction (`capture-identities-at-write-time` design D5):
+    it sees only pages that wrote the SAME bare, unfoldered target, casefolded,
+    and misses a folder-qualified or differently-normalised spelling of the same
+    identity, which the `entity_recurrence` audit family still covers.
+    """
+
+    status: str
+    sources: frozenset[str] = frozenset()
+    reason: str | None = None
+
+
 def graph_enabled() -> bool:
     return os.environ.get("EXOMEM_DISABLE_GRAPH_INDEX", "").strip().lower() not in {
         "1",
@@ -6061,6 +6081,41 @@ class EpistemicGraphIndex:
             seen.add(edge)
             edges.append(edge)
         return RelationEdgeResult(status="available", edges=tuple(edges))
+
+    def dependency_sources_for_bare_name(self, name: str) -> DependencySourcesResult:
+        """Pages whose body links this bare (unfoldered) name, via the raw
+        dependency index (`capture-identities-at-write-time` design D5).
+
+        `name` is a wikilink's last path segment, never a folder-qualified
+        target — the same conservative lookup keys `_dependency_lookup_keys`
+        would derive for a raw target with no folder, so this answers exactly
+        the question "which pages wrote `[[name]]` or `[[<kb-folder>/name]]`",
+        nothing deeper. It is a single keyed read over the already-maintained
+        `graph_dependencies` table, never a vault walk, and shares the
+        never-false-empty status contract `relation_participants` and
+        `relation_edges` use.
+        """
+        keys = _dependency_lookup_keys(name)
+        if not keys:
+            return DependencySourcesResult(status="available")
+        if not graph_enabled():
+            return DependencySourcesResult(
+                status="temporarily_unavailable", reason="graph_index_disabled"
+            )
+        if not self.path.exists():
+            return DependencySourcesResult(status="warming")
+        conn = self._open_read_snapshot()
+        if conn is None:
+            return DependencySourcesResult(status="warming")
+        try:
+            rows = self._dependency_sources_for_keys(conn, keys)
+        except sqlite3.Error:
+            return DependencySourcesResult(status="warming")
+        finally:
+            conn.close()
+        return DependencySourcesResult(
+            status="available", sources=frozenset(source for source, _raw in rows)
+        )
 
     def relation_review_batch(
         self,

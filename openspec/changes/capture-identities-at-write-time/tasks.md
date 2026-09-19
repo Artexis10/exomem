@@ -1,6 +1,6 @@
 ## 0. Preconditions
 
-- [ ] 0.1 Confirm the graph's link-dependency index returns, for a casefolded bare name,
+- [x] 0.1 Confirm the graph's link-dependency index returns, for a casefolded bare name,
       the pages whose body links that bare name, and that the write's preflight holds
       enough page state to evaluate `counts_as_evidence` for up to sixteen of them. The
       block is allowed to miss folder-qualified and differently normalised spellings. If
@@ -11,14 +11,14 @@
 
 ## 1. The wikilink lane
 
-- [ ] 1.1 Red first: two distinct eligible pages fire; one page linking five times does
+- [x] 1.1 Red first: two distinct eligible pages fire; one page linking five times does
       not; `index.md` and `log.md` pages supply no spread and never anchor a finding; one
       eligible page plus one retired page does not fire; the grammar lane's gates are
       unchanged.
-- [ ] 1.2 `SPREAD_MIN_PAGES` is shared by both lanes today. Give the wikilink lane its own
+- [x] 1.2 `SPREAD_MIN_PAGES` is shared by both lanes today. Give the wikilink lane its own
       constant, 2, leaving the grammar lane at 3; exclude navigation pages from the
       wikilink lane's evidence through `find_corpus.NAVIGATION_BASENAMES`.
-- [ ] 1.3 The recurrence requirement is amended inside
+- [x] 1.3 The recurrence requirement is amended inside
       `complete-recurring-entity-lifecycle`'s `action-first-audit` delta (gate of two,
       navigation pages, the write-time clause, four scenarios). Verify at delivery that
       those sentences still say so; if that change was archived first, move the edits
