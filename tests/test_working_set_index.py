@@ -948,14 +948,19 @@ def test_derived_short_name_rejects_a_lead_with_any_under_length_token() -> None
     the joined name overall. "A (b) — c" joined to "a b" (3 characters, past
     the whole-name floor) even though neither "a" nor "b" is a name
     fragment; "2026 Q3 — tail" joined to "2026 q3" even though "q3" is barely
-    a letter with a digit stapled on; "élève (note)" joined to "l ve" once
-    the accented letters -- outside this tokeniser's `[a-z0-9]` alphabet --
-    fragment the word into unmatchable pieces. None of the three is a name a
-    turn could ever say.
+    a letter with a digit stapled on. Neither is a name a turn could ever
+    say.
+
+    A third example used to live here: "élève (note)" joined to "l ve" once
+    the accented letters -- outside the pre-task-4a tokeniser's `[a-z0-9]`
+    alphabet -- fragmented the word into unmatchable single letters. Task
+    4a's Unicode-aware `tokens_of` now reads "élève" as one five-letter
+    term, so it no longer belongs to this under-length-token case at all —
+    see `test_a_derived_short_name_from_an_accented_title_is_the_accented_lead`
+    in `test_working_set_unicode_terms.py` for its new expected result.
     """
     assert working_set_index.derived_short_name("A (b) — c") is None
     assert working_set_index.derived_short_name("2026 Q3 — tail") is None
-    assert working_set_index.derived_short_name("élève (note)") is None
 
 
 def test_derived_short_name_collapses_multiple_spaces_and_drops_unmatchable_glyphs() -> None:
