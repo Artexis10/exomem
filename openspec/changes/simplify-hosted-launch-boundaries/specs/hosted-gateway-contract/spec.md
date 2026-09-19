@@ -29,3 +29,12 @@ Both private agent route versions SHALL use the same registry leaves, governed e
 
 - **WHEN** the same authenticated principal and cell retry a mutation with identical canonical input and idempotency key through a supported adapter
 - **THEN** the existing committed result is replayed without a second mutation regardless of private route version
+
+### Requirement: Gateway relocation does not gate private-alpha admission
+
+The existing public gateway SHALL remain a supported private-alpha transport while the nearby-gateway rollout is pending. All existing authorization, contract, isolation and recovery requirements MUST apply on that transport. Relocation acceptance and optimization targets SHALL be evaluated at the later infrastructure milestone, without claiming they passed during owner or friends acceptance.
+
+#### Scenario: Owner acceptance precedes gateway cutover
+
+- **WHEN** the selected runtime and current gateway pass the required private-alpha service checks
+- **THEN** the owner can use the vault and the friends milestone can proceed without a new gateway deployment or marketplace publication

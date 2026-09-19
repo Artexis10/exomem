@@ -46,3 +46,17 @@ A provision interrupted before it registers ownership beyond its namespace SHALL
 
 - **WHEN** any single reopen precondition does not hold
 - **THEN** the reopen refuses, changes nothing, and leaves its one-shot unconsumed
+
+### Requirement: Asynchronous convergence preserves lifecycle identity
+
+Expected progress of an owned storage claim, pod, provider job or governance transition SHALL remain pending within a bounded configured window. Retries MUST preserve the operation identity, fence, selected target and owned resources. Exhausted observation windows MUST retain a supported recovery path rather than require a new invitation or manually edited state. Ownership conflicts, changed fences, incompatible runtime identity and explicit revocation MUST continue to deny effects and serving.
+
+#### Scenario: Stop waits for a terminating pod
+
+- **WHEN** the selected owned pod is terminating and its stop deadline has not elapsed
+- **THEN** the lifecycle observes again without claiming stop completion, consuming a terminal-failure budget or releasing capacity prematurely
+
+#### Scenario: Resource is replaced during a wait
+
+- **WHEN** an observed resource UID, fence or ownership no longer matches the frozen operation
+- **THEN** the next effect is denied and the conflicting resource remains untouched

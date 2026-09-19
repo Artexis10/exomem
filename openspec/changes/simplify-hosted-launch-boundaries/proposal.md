@@ -26,3 +26,11 @@ The hosted alpha needs a stable, fast service path whose runtime safety does not
 Touches the hosted server and contract publisher, hosted tests, infrastructure charts and foundation edge routing, acceptance scripts and runbooks. The governance migration engine and authenticated provisioner also need the hosted custody-aware coordinator already required by the canonical authorization-session-binding and governance-authoring contracts. The companion Substrate change with this same name owns service authorization, runtime activation, client certification and the shared gateway executable. Planning artifacts do not authorize an unverified live migration.
 
 Existing private-alpha infrastructure, tenant isolation and signed-release work remain authoritative. This change does not replace billing, add a reasoning model, broaden generic client registration or make marketplace publication a prerequisite for invite-only access.
+
+## Delivery phases
+
+The supported sequence is **owner alpha → invited friends → operational redesign → public launch**. Owner and friends acceptance use the existing public gateway. Gateway relocation, its latency targets, marketplace certification, additional client hosts and public self-service are later milestones, not dependencies of the first private vault. Security, durable storage, useful memory, bounded convergence, recovery and supported-client continuity remain required.
+
+A launch is one durable attempt: the runner owns ordinary waiting, retries and restart recovery. A repeated invocation resumes that attempt. It must not mint replacement invites, aliases, clients or tenants to recover progress. Unexpected faults remain visible and recoverable; no component promises that a cloud provider cannot fail.
+
+This phase order replaces earlier wording that makes the gateway cutover, both client hosts, performance targets or recovery of a particular historic tenant prerequisites of private-alpha admission. Preserve their contracts and evidence as later work. The retained-operation recovery sections are conditional procedures, not instructions to recreate an operation or cell that has since been deleted.
