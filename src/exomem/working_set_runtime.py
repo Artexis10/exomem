@@ -424,6 +424,8 @@ def ensure_index(
     index = working_set_index.WorkingSetIndex(root)
     if not index.available():
         return DISABLED, None, False
+    if not index.readable():
+        return UNAVAILABLE, None, False
     if not index.anchors():
         if _managed():
             _schedule_build(root)

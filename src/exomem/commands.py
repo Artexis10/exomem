@@ -5989,6 +5989,26 @@ def op_activate_context(
             reason="disabled", max_chars=budget, generation=generation_stub
         )
 
+    # A cold managed index can only return an empty warming packet. Check it
+    # before optional retrieval evidence loads the hybrid corpus and models.
+    # The serving path still checks freshness after retrieval; readiness here
+    # grants neither a cached packet nor a disclosure decision.
+    with find_types.timing_span(timings, "working_set.readiness"):
+        try:
+            state, index, _stale = working_set_runtime_module.ensure_index(vault_root)
+        except Exception:  # noqa: BLE001 - unreadable derived state abstains
+            log.warning("activation index readiness unavailable", exc_info=True)
+            state, index = working_set_runtime_module.UNAVAILABLE, None
+    if index is not None:
+        index.close()
+    if state != working_set_runtime_module.READY or index is None:
+        packet = working_set_module.abstained_packet(
+            reason=state, max_chars=budget, generation=generation_stub
+        )
+        if timings is not None:
+            packet["timings"] = timings.as_dict()
+        return packet
+
     # Release gate first, in `op_find`'s shape (see the release-gate comment in
     # `op_find`): the pool is widened only when a policy is active, and decisions
     # are computed strictly after `find()` has returned.

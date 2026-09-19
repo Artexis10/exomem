@@ -35,13 +35,19 @@ Where evidence supplies them, event occurrence, knowledge acquisition and claim 
 
 ### Requirement: Canonical ownership and provenance survive routing
 
-Stable identity/facets SHALL belong to entities, mutable state/events to Records or appropriate domain stores, and original provenance to Sources/Evidence. Hubs SHALL be navigation/projections. Markdown semantic units and supported structured collections SHALL remain canonical; graph/search/profile stores SHALL be rebuildable with explicit currency. Routing SHALL preserve direct verification, reported claims, inferences and uncertainty distinctly and SHALL NOT invent user Planning commitments.
+Stable identity/facets SHALL belong to entities, mutable state/events to Records or appropriate domain stores, and original provenance to Sources/Evidence. Hubs SHALL be navigation/projections. Markdown semantic units and supported structured collections SHALL remain canonical; graph/search/profile stores SHALL be rebuildable with explicit currency. Routing SHALL preserve direct verification, reported claims, user hypotheses, attributed interpretations, inferences and uncertainty distinctly and SHALL NOT invent user Planning commitments. A durable user hypothesis or interpretation SHALL retain speaker or source attribution and uncertainty and SHALL NOT be silently omitted or represented as a direct fact.
 
 #### Scenario: One conversation creates several destinations
 
 - **WHEN** a supplier discussion includes a direct label observation, a reported formulation and an experiment exposure
 - **THEN** their provenance and epistemic status remain distinct across entity knowledge and Records events
 - **AND** an exposure is not upgraded into a causal conclusion or an unexpressed plan
+
+#### Scenario: An attributed interpretation remains distinct from observation
+
+- **WHEN** an episode preserves direct observations alongside a user-attributed family interpretation
+- **THEN** the interpretation retains its source and uncertainty through canonical routing and later activation
+- **AND** activation does not present it as a direct observation or silently drop it from the durable episode account
 
 ### Requirement: Dynamic identities and relations use normal public surfaces
 

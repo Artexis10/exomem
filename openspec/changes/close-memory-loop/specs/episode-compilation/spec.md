@@ -6,13 +6,21 @@ Compile substantive conversational episodes into complete, supported durable cha
 
 ### Requirement: Episode decomposition precedes destination selection
 
-At a supported substantive episode boundary the active agent SHALL consider the original input for durable observations, outcomes, entity creation/hydration, facets, relationships, Records events, expressed Planning changes, Source/Evidence preservation and structural-routing candidates before choosing write destinations. Each candidate SHALL be resolved against current knowledge and receive an attributable disposition. Capture sweep SHALL NOT be the sole trigger or completeness check. No-op, uncertain, rejected, deferred and awaiting-authority outcomes SHALL be legitimate and distinct.
+At a supported substantive episode boundary the active agent SHALL consider the original input for durable observations, outcomes, entity creation/hydration, facets, relationships, Records events, expressed Planning changes, Source/Evidence preservation and structural-routing candidates before choosing write destinations. It SHALL first partition independently reusable objects by retrieval question, subject/domain, temporal episode and epistemic role. A currently open note is an inspected alternative, not a preferred default. A meaningful stable cluster SHALL receive a canonical home when it answers a distinct future question or supports independent continuation, while details within an existing cluster SHALL remain in scope rather than manufacture a new destination. Each candidate SHALL be resolved against current knowledge and receive an attributable disposition. Capture sweep SHALL NOT be the sole trigger or completeness check. No-op, uncertain, rejected, deferred and awaiting-authority outcomes SHALL be legitimate and distinct.
 
 #### Scenario: A rich episode exceeds the first note's scope
 
 - **WHEN** the initial note can hold only part of an episode's supported durable changes
 - **THEN** decomposition still considers the remaining changes and resolves their separate destinations
 - **AND** an incidental name or uncertain ownership claim may be rejected or deferred without manufacturing an entity or edge
+
+#### Scenario: A generic replay contains different reusable objects
+
+- **WHEN** a synthetic episode contains a preference or product observation, repeated personal sensory observations, a historical recovery episode, a baseline ability and an attributed family interpretation
+- **THEN** decomposition keeps their retrieval questions, subjects, temporal episodes and epistemic roles distinct before selecting destinations
+- **AND** a currently open note is not preferred, meaningful stable clusters receive canonical homes, and in-scope details do not fragment into separate pages
+- **AND** the attributed interpretation retains its speaker or source and uncertainty rather than being omitted or represented as a direct fact
+- **AND** public fixture material contains no private names, medical conclusions or private source paths
 
 ### Requirement: Canonical destination fitness is distinct from similarity
 

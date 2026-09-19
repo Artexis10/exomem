@@ -1083,6 +1083,10 @@ class WorkingSetIndex:
         """False under the kill switch. Nothing is created or opened."""
         return not disabled()
 
+    def readable(self) -> bool:
+        """Whether the sidecar can be opened, even when it has no anchors yet."""
+        return self._connect() is not None
+
     def close(self) -> None:
         if self._conn is not None:
             try:
