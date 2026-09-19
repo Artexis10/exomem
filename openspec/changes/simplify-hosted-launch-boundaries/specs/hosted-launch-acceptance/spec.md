@@ -144,7 +144,7 @@ The acceptance suite SHALL exercise revoked families, refresh replay, wrong audi
 
 ### Requirement: Performance claims include authenticated measured evidence
 
-Alpha performance acceptance SHALL report cold/warm latency separately from a declared vantage point and fixed corpus, with at least 100 warm samples per operation and 20 declared cold runs. At five concurrent clients across two reserved synthetic tenants, the initial targets SHALL be warm p95 initialization/tool listing at most 500 ms, small durable capture and citation-bearing recall at most one second, and cold authenticated initialization at most two seconds. Model thinking and human consent time MUST be excluded explicitly, not hidden. A missed target MUST remain a failed performance stage with measured attribution. This workload MUST NOT be represented as a five-cell capacity test.
+The post-friends infrastructure/performance milestone SHALL report cold/warm latency separately from a declared vantage point and fixed corpus, with at least 100 warm samples per operation and 20 declared cold runs. At five concurrent clients across two reserved synthetic tenants, the initial targets SHALL be warm p95 initialization/tool listing at most 500 ms, small durable capture and citation-bearing recall at most one second, and cold authenticated initialization at most two seconds. Model thinking and human consent time MUST be excluded explicitly, not hidden. A missed target MUST remain a failed performance stage with measured attribution. Owner and friends milestones MUST report measured usability within existing operation deadlines but MUST NOT depend on the later optimization targets or gateway relocation. This workload MUST NOT be represented as a five-cell capacity test.
 
 #### Scenario: Gateway placement reduces network work
 
@@ -160,3 +160,54 @@ Repeated acceptance SHALL reuse designated synthetic tenants and isolate fixture
 
 - **WHEN** a prior run left resources or completed mutations
 - **THEN** the next run resumes or reconciles its owned manifest without deleting an owner vault or allocating unbounded replacement tenants or branches
+
+### Requirement: Launch progresses from owner to friends to public readiness
+
+The launch workflow SHALL expose separate owner, friends, infrastructure and public-readiness outcomes. Owner acceptance MUST prove the selected real host, useful capture and cited semantic recall, durable data and access continuity. Friends expansion MUST wait for owner confirmation and paid-path, isolation, capacity and recovery evidence. Marketplace publication, an additional host and the later gateway/performance work MUST NOT gate the first private vault. Deferred work MUST remain explicitly incomplete.
+
+#### Scenario: Owner begins with an empty installation
+
+- **WHEN** the owner starts a launch attempt against an empty verified installation
+- **THEN** the workflow approves the exact provisioning target, uses ordinary invitation admission and waits through actual cell readiness before testing memory use
+- **AND** it requires neither a reviewer tenant nor a preexisting live cell nor a certified marketplace artifact
+
+#### Scenario: Owner works but friends are not ready
+
+- **WHEN** owner acceptance passes but paid checkout, capacity or live isolation/restore evidence is incomplete
+- **THEN** owner access remains usable and the report identifies only the remaining friends-stage work
+- **AND** no friend is invited or charged by the acceptance result itself
+
+### Requirement: Launch retries preserve one attempt and converge without manual rescue
+
+A supported launch command SHALL preflight or execute an explicit environment and milestone using a durable run identity. Reinvocation SHALL resume the same attempt, reconcile ambiguous effects and reuse existing invitations, tenant/client identities, reservations and operation checkpoints. Expected asynchronous progress MUST be polled with bounded backoff and stage deadlines without exhausting failure budgets. Deadline exhaustion MUST preserve recoverable state and name the required action. Unknown identity, authorization or ownership MUST never be accepted as success.
+
+#### Scenario: Controller or network stops after a committed effect
+
+- **WHEN** the controller restarts or loses a response after invitation consumption, allocation, binding or a memory write
+- **THEN** it observes or replays the same committed effect and continues without another invite, alias, tenant, volume or duplicate write
+
+#### Scenario: Infrastructure is still converging
+
+- **WHEN** an owned PVC, terminating pod, governance activation, provider job or index is progressing within its configured deadline
+- **THEN** the attempt remains pending and the controller schedules the next observation automatically
+- **AND** stale authority or a mismatched resource remains denied rather than being classified as harmless waiting
+
+#### Scenario: Progress deadline expires
+
+- **WHEN** a stage reaches its deadline without proving completion
+- **THEN** the report is needs-attention with the preserved attempt, bounded diagnostic evidence and one next action
+- **AND** rerunning after resolution resumes that attempt without a checkpoint reset or replacement allocation
+
+### Requirement: Local launch proof begins before the first admission
+
+The default integration proof SHALL begin with no cells, tenants or active candidate and exercise normal target import, activation, invitation, OAuth and lifecycle boundaries under v2 issuance. It MUST NOT seed a live candidate, bound cell or successful grant to satisfy the journey under test. Deterministic provider faults SHALL test timing and recovery separately from a real-cluster path through actual serving readiness. No required test lane may report success because its database, runtime or cluster tests were skipped.
+
+#### Scenario: Seeded healthy fleet hides the defect
+
+- **WHEN** an existing acceptance fixture creates a live candidate or bound cell before admission
+- **THEN** it remains useful post-admission coverage but cannot satisfy the empty-installation launch requirement
+
+#### Scenario: Real-cluster drill stops before serving
+
+- **WHEN** a drill ends at a pending migration, uses a pre-bound volume or stubs public/private readiness
+- **THEN** it cannot satisfy the fresh provisioning-to-MCP acceptance stage
