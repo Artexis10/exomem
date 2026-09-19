@@ -213,7 +213,9 @@ def test_collect_caps_to_distinct_anchor_ids_not_list_positions(
     r2["title"] = "R Two"
 
     monkeypatch.setattr(
-        working_set_index, "_walk_page_entries", lambda vault_root: ([r0_dup, r1, r2], outbound, names)
+        working_set_index,
+        "_walk_page_entries",
+        lambda vault_root, **_kwargs: ([r0_dup, r1, r2], outbound, names),
     )
     monkeypatch.setattr(working_set_index, "_collection_candidates", lambda vault_root: ([], []))
     monkeypatch.setattr(working_set_index, "_project_candidates", lambda vault_root: [])

@@ -29,7 +29,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from . import context_roles, working_set_index, working_set_resolve, working_set_state
+from . import (
+    activation_conventions,
+    context_roles,
+    working_set_index,
+    working_set_resolve,
+    working_set_state,
+)
 
 log = logging.getLogger(__name__)
 
@@ -714,10 +720,13 @@ def compile_packet(
     limit = clamp_budget(max_chars)
     index = index or working_set_index.WorkingSetIndex(root)
     registry = context_roles.load_roles(root)
+    conventions_registry = activation_conventions.load_conventions(root)
+    conventions = conventions_registry.conventions
     generation: dict[str, Any] = {
         "freshness_key": freshness_key,
         "index_generation": index.generation(),
         **registry.generation_block(),
+        **conventions_registry.generation_block(),
     }
 
     with _span(timings, "working_set.resolve"):
@@ -745,6 +754,8 @@ def compile_packet(
                 routing_targets=_routing_targets(root),
                 used_paths=_used_paths(root, rows),
                 term_anchor_counts=index.term_anchor_counts(),
+                stopwords=conventions.stopwords,
+                rare_term_max_anchors=conventions.rare_term_max_anchors,
             )
             candidates = working_set_resolve.add_graph_corroboration(
                 candidates, retrieval_paths=retrieval_paths
@@ -780,7 +791,11 @@ def compile_packet(
     # Resolved ONCE: the Records lane and the packet's `current_state[]` block are
     # two views of the same collection reads.
     current_state = working_set_state.current_state_for(
-        root, anchors=resolution.resolved_anchors, purpose=purpose
+        root,
+        anchors=resolution.resolved_anchors,
+        purpose=purpose,
+        state_fields=conventions.state_fields,
+        date_fields=conventions.date_fields,
     )
     items, missing = run_lanes(
         root,

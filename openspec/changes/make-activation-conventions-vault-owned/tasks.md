@@ -4,13 +4,13 @@
       (6cb28cfa) are merged; this branch carries main.
 - [x] 0.2 The tokeniser fix (`make-anchor-resolution-sound` tasks 4a) is merged (c5712f02)
       and this branch carries it.
-- [ ] 0.3 Record the deterministic activation audit on the seeded corpus at the base
+- [x] 0.3 Record the deterministic activation audit on the seeded corpus at the base
       commit: per-case anchor recall and precision, twin false activation, hedged-twin
       count. This is the before-image for 5.2.
 
 ## 1. Conventions registry
 
-- [ ] 1.1 Red first: shipped-equals-previous-constants (folders, tags, skip folders,
+- [x] 1.1 Red first: shipped-equals-previous-constants (folders, tags, skip folders,
       state-field order, date-field order, stopword set, rare-term threshold); override
       add and drop where dropping is allowed; `stopwords.drop` and skip-folder drop
       ignored with a finding; the rejected folder-rule shapes (absolute, `..`, leading
@@ -20,32 +20,32 @@
       YAML fallback; one bad rule not voiding the file; threshold range 1 to 3 and
       unknown `resolution` keys; the digest taken over effective values, so two files
       that resolve to the same conventions share a digest.
-- [ ] 1.2 Add `src/exomem/activation_conventions.py` on the `context_roles` load
+- [x] 1.2 Add `src/exomem/activation_conventions.py` on the `context_roles` load
       contract (shipped text from the scaffold, override path, digest memo, findings,
       size cap before parse).
-- [ ] 1.3 Ship `activation-conventions.yaml` in `src/exomem/_scaffold/_Schema/` with a
+- [x] 1.3 Ship `activation-conventions.yaml` in `src/exomem/_scaffold/_Schema/` with a
       commented override example that includes template headings under `stopwords.add`; regenerate the plugin copy. Keep it generic:
       `tests/test_scaffold_no_leak.py` must pass.
 
 ## 2. Compiler reads the registry
 
-- [ ] 2.1 `working_set_index`: `_page_anchor_kind` takes membership from the effective
+- [x] 2.1 `working_set_index`: `_page_anchor_kind` takes membership from the effective
       conventions and never evaluates a page the Planning or Records passes admitted;
       the walk skips `anchors.skip_folders`; `_RAW_MATERIAL_FOLDERS` gives way to
       `vault.in_append_only_tree` plus the governance trees; `_archive` stays walked.
       Red first: a staged upload and a template tagged `hub` are not anchors; an
       archived entity stays an anchor; a `Planning` folder rule is refused.
-- [ ] 2.2 `_categories` consults `semantic_language_registry.resolve_category` first,
+- [x] 2.2 `_categories` consults `semantic_language_registry.resolve_category` first,
       taking its result only when the status is not `unregistered`, and the built-in map
       second. Red first: a category alias added in the vault's semantic-language override
       earns its category; "Next Steps" still maps to `action`; no category earned on the
       scaffold vault or the audit corpus is lost.
-- [ ] 2.3 `working_set_state`: state and date fields from the conventions.
-- [ ] 2.4 Stopwords and `rare_term_max_anchors` from the conventions, read once per build
+- [x] 2.3 `working_set_state`: state and date fields from the conventions.
+- [x] 2.4 Stopwords and `rare_term_max_anchors` from the conventions, read once per build
       and passed to both users (turn matching and `rare_term` in `working_set_resolve`;
       derived short-name admission in `working_set_index`). The resolver enforces a floor
       of 2 on `working_set_lexical_min_terms`.
-- [ ] 2.5 The conventions digest is stored in the sidecar `meta` table; a mismatch wipes
+- [x] 2.5 The conventions digest is stored in the sidecar `meta` table; a mismatch wipes
       the sidecar like a `SCHEMA_VERSION` mismatch; bump `SCHEMA_VERSION`. The digest
       joins the packet cache key, `generation` (`conventions_source`,
       `conventions_hash`, `conventions_findings`) and the continuity payload. Red first:

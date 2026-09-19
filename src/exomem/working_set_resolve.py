@@ -290,6 +290,8 @@ def candidates_for(
     used_paths: frozenset[str] = frozenset(),
     term_anchor_counts: Mapping[str, int] | None = None,
     config: RankingConfig | None = None,
+    stopwords: frozenset[str] = _STOPWORDS,
+    rare_term_max_anchors: int = RARE_TERM_MAX_ANCHORS,
 ) -> tuple[CandidateFacts, ...]:
     """Assemble categorical evidence for every anchor this turn can reach.
 
@@ -297,16 +299,27 @@ def candidates_for(
     (`WorkingSetIndex.term_anchor_counts()`), the structure `rare_term`'s
     rarity check is measured against. Absent (`None`) simply means no anchor
     can earn `rare_term` this call — never a fabricated rarity.
+
+    `stopwords` and `rare_term_max_anchors` default to the shipped values;
+    the real build passes the vault's EFFECTIVE activation-conventions
+    registry (`make-activation-conventions-vault-owned`), read once per
+    build in `working_set.compile_packet` and passed to both this function
+    and the index's own derived-short-name admission, so a turn's own words
+    and an anchor's derived alias are measured against the same list.
     """
     config = config or DEFAULT_RANKING
     term_counts = term_anchor_counts or {}
-    turn_terms = frozenset(analysis.tokens) - _STOPWORDS
+    turn_terms = frozenset(analysis.tokens) - stopwords
     turn_terms_folded = frozenset(fold_plural(term) for term in turn_terms)
     phrases = frozenset(analysis.ngrams) | frozenset(analysis.tokens)
     cue_categories = analysis.cue_categories
     claims_winner = _claims_winner(analysis, routing_targets)
     bands = _vector_bands(rows, vectors, query_vector, config) if query_vector is not None else {}
-    min_terms = max(1, int(config.working_set_lexical_min_terms))
+    # A floor of 2, whatever `RankingConfig` says (design.md decision 2a):
+    # the two-shared-terms minimum is part of the soundness argument, so it
+    # lives in code, not in an operator-tunable file. The shipped default is
+    # already 2, so this never changes shipped behaviour.
+    min_terms = max(2, int(config.working_set_lexical_min_terms))
 
     out: list[CandidateFacts] = []
     for row in rows:
@@ -339,7 +352,7 @@ def candidates_for(
         elif len(shared_name) == 1:
             (term,) = shared_name
             count = term_counts.get(term)
-            if count is not None and count <= RARE_TERM_MAX_ANCHORS:
+            if count is not None and count <= rare_term_max_anchors:
                 evidence.add("rare_term")
         if bands.get(row.anchor_id):
             evidence.add("vector_band")

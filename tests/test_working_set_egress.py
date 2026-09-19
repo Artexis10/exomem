@@ -192,7 +192,12 @@ def test_purpose_never_enters_the_packet_cache_key() -> None:
     from exomem import working_set_runtime
 
     first = working_set_runtime.cache_key(
-        freshness_key="k", index_generation=3, roles_hash="abc", turn="t", max_chars=4000
+        freshness_key="k",
+        index_generation=3,
+        roles_hash="abc",
+        conventions_hash="conv0",
+        turn="t",
+        max_chars=4000,
     )
     assert "audit" not in str(first)
     assert working_set_runtime.cache_key.__doc__
@@ -556,7 +561,12 @@ def test_retrieval_refs_enter_the_cache_key_but_purpose_never_does() -> None:
     from exomem import working_set_runtime
 
     base = dict(
-        freshness_key="k", index_generation=3, roles_hash="abc", turn="t", max_chars=4000
+        freshness_key="k",
+        index_generation=3,
+        roles_hash="abc",
+        conventions_hash="conv0",
+        turn="t",
+        max_chars=4000,
     )
     one = working_set_runtime.cache_key(**base, retrieval_paths=frozenset({"a.md"}))
     two = working_set_runtime.cache_key(**base, retrieval_paths=frozenset({"b.md"}))
