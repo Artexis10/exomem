@@ -1056,3 +1056,32 @@ def test_score_case_resolves_through_a_corpus_key_to_path_mapping(tmp_path) -> N
     )
     score = score_case(ActivationPacket(anchors=anchors), c2, key_to_ref=corpus_manifest.key_to_path)
     assert score.gold_hit == score.gold_total
+
+
+def test_legacy_identity_only_oracle_scoring_is_unchanged() -> None:
+    score = score_case(_good_c1_packet(), fixture_by_id("C1"))
+    assert score.gold_hit == score.gold_total == 3
+    assert score.poison_hit == 0
+    assert score.precision == 1.0
+
+
+@pytest.mark.parametrize(
+    "mechanism",
+    ("product", "product-op-activate-context", "actual-activate-context"),
+)
+def test_product_mechanisms_require_a_reference_binding_even_for_an_empty_subset(
+    mechanism: str,
+) -> None:
+    manifest = validate_manifest({**MANIFEST, "mechanism": mechanism})
+
+    with pytest.raises(ManifestVoidError, match="reference_binding"):
+        run_audit({}, manifest=manifest, fixtures=())
+
+
+@pytest.mark.parametrize("mechanism", ("oracle_packet", "unknown"))
+def test_explicit_identity_only_mechanisms_remain_binding_optional(mechanism: str) -> None:
+    manifest = validate_manifest({**MANIFEST, "mechanism": mechanism})
+
+    report = run_audit({}, manifest=manifest, fixtures=())
+
+    assert report.verdict == "no_verdict"

@@ -865,7 +865,7 @@ def test_metadata_free_hold_is_reserved_for_internal_identity_coordination(
 
 
 def test_status_waits_out_acquire_to_publish_generation_transition(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     context = multiprocessing.get_context("spawn")
     state_root = tmp_path / "state"
@@ -887,6 +887,21 @@ def test_status_waits_out_acquire_to_publish_generation_transition(
         ),
     )
     holder.start()
+    metadata_contention_seen = threading.Event()
+    original_try_os_lock = mutation_lock_module._try_os_lock
+
+    def publish_after_contended_probe(handle) -> bool:  # noqa: ANN001
+        locked = original_try_os_lock(handle)
+        if not locked and not metadata_contention_seen.is_set():
+            metadata_contention_seen.set()
+            publish.set()
+        return locked
+
+    # Trigger publication from the observer that actually sees the metadata
+    # mutex contended. The old parent-side sleep/publish sequence could be
+    # descheduled beyond the product's intentional 250 ms status deadline,
+    # turning a scheduling delay into an unverified-holder result.
+    monkeypatch.setattr(mutation_lock_module, "_try_os_lock", publish_after_contended_probe)
     result: list[dict[str, object]] = []
     status_thread = threading.Thread(
         target=lambda: result.append(
@@ -896,9 +911,11 @@ def test_status_waits_out_acquire_to_publish_generation_transition(
     try:
         assert acquired.wait(_OBSERVE_SECONDS)
         status_thread.start()
-        time.sleep(0.05)
-        assert not result
-        publish.set()
+        assert metadata_contention_seen.wait(_OBSERVE_SECONDS)
+        # A delayed parent no longer controls when the child publishes. This
+        # exceeds the production status deadline and deterministically covers
+        # the former CI scheduling failure without relaxing that deadline.
+        time.sleep(mutation_lock_module._STATUS_TIMEOUT_SECONDS + 0.10)
         assert entered.wait(_OBSERVE_SECONDS)
         status_thread.join(timeout=_HOLD_SECONDS)
         assert result

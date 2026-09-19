@@ -61,13 +61,13 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
 
 FIXTURE_SET_ID = "context-activation-fixtures-v1"
-CORPUS_ID = "context-activation-corpus-v2"
+CORPUS_ID = "context-activation-corpus-v3"
 
 CASE_IDS: tuple[str, ...] = tuple(f"C{i}" for i in range(1, 10))
 TWIN_IDS: tuple[str, ...] = tuple(f"T{i}" for i in range(1, 10))
@@ -745,6 +745,32 @@ def _page(
 
 
 @dataclass(frozen=True)
+class StateSourceDeclaration:
+    """Fixture-authored permission for one canonical ``#current`` projection."""
+
+    anchor_key: str
+    source_key: str
+    source_kind: str
+    state_field: str
+    projection_suffix: str = "#current"
+
+
+# These are benchmark facts, not a generic product ontology.  Each declaration
+# is checked against the freshly written canonical pages before it can become a
+# scoring binding.
+STATE_SOURCE_DECLARATIONS: tuple[StateSourceDeclaration, ...] = (
+    StateSourceDeclaration("c1_subscriptions_collection", "c1_subscriptions_collection", "records", "state"),
+    StateSourceDeclaration("c2_grill_equipment_page", "c2_grill_equipment_page", "profile", "status"),
+    StateSourceDeclaration("t2_camera_gear_note", "t2_camera_gear_note", "profile", "status"),
+    StateSourceDeclaration("c5_resource_profile", "c5_records_latest_unavailable", "records", "status"),
+    StateSourceDeclaration(
+        "c5_records_latest_unavailable", "c5_records_latest_unavailable", "records", "status"
+    ),
+    StateSourceDeclaration("t5_available_resource", "t5_available_resource", "profile", "status"),
+)
+
+
+@dataclass(frozen=True)
 class CorpusManifest:
     corpus_id: str
     seed: int
@@ -752,6 +778,36 @@ class CorpusManifest:
     key_to_path: dict[str, str]
     corpus_hash: str
     logical_hash: str
+    state_sources: tuple[StateSourceDeclaration, ...]
+
+
+@dataclass(frozen=True)
+class ProjectionBinding:
+    """One canonically read projection and its independent packet identity."""
+
+    anchor_key: str
+    anchor_ref: str
+    source_key: str
+    source_ref: str
+    source_kind: str
+    state_field: str
+    projection_ref: str
+    statement: str
+    as_of: str
+    source_path: str
+    source_snapshot_digest: str
+
+
+@dataclass(frozen=True)
+class ReferenceBinding:
+    """Frozen benchmark reference map and verified current-state projections."""
+
+    corpus_digest: str
+    logical_corpus_digest: str
+    key_to_ref: tuple[tuple[str, str], ...]
+    mapping_digest: str
+    projections: tuple[ProjectionBinding, ...]
+    digest: str
 
 
 def _corpus_hash(root: Path) -> str:
@@ -778,6 +834,7 @@ def _logical_corpus_hash(
     seed: int,
     distractor_count: int,
     key_to_path: dict[str, str],
+    state_sources: tuple[StateSourceDeclaration, ...] = STATE_SOURCE_DECLARATIONS,
 ) -> str:
     """Digest stable fixture semantics separately from concrete write receipts.
 
@@ -822,10 +879,239 @@ def _logical_corpus_hash(
         "seed": seed,
         "distractor_count": distractor_count,
         "key_to_path": dict(sorted(key_to_path.items())),
+        "state_sources": [asdict(item) for item in state_sources],
         "pages": pages,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _json_digest(value: object) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _source_snapshot_digest(root: Path, paths: Iterable[str]) -> str:
+    digest = hashlib.sha256()
+    for relative in sorted(set(paths)):
+        path = root / relative
+        if not path.is_file():
+            raise FixtureError(f"declared state source is missing canonical file {relative}")
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _page_frontmatter(root: Path, relative: str) -> dict[str, object]:
+    from exomem import vault
+
+    path = root / relative
+    try:
+        frontmatter, _body, marker = vault.parse_frontmatter(
+            path.read_text(encoding="utf-8"), strict=True
+        )
+    except (OSError, vault.FrontmatterError) as error:
+        raise FixtureError(f"cannot read declared state page {relative}: {error}") from error
+    if marker is None or not isinstance(frontmatter, dict):
+        raise FixtureError(f"declared state page has no canonical frontmatter: {relative}")
+    return frontmatter
+
+
+def _page_title(root: Path, relative: str, frontmatter: Mapping[str, object]) -> str:
+    title = str(frontmatter.get("title") or "").strip()
+    if title:
+        return title
+    text = (root / relative).read_text(encoding="utf-8")
+    match = re.search(r"(?m)^#\s+(.+?)\s*$", text)
+    if not match:
+        raise FixtureError(f"declared state anchor has no authored title: {relative}")
+    return match.group(1).strip()
+
+
+def _read_declared_projection(
+    root: Path,
+    manifest: CorpusManifest,
+    declaration: StateSourceDeclaration,
+    key_to_ref: dict[str, str],
+) -> ProjectionBinding:
+    anchor_path = manifest.key_to_path[declaration.anchor_key]
+    source_path = manifest.key_to_path[declaration.source_key]
+    anchor_ref = key_to_ref[declaration.anchor_key]
+    source_ref = key_to_ref[declaration.source_key]
+
+    if declaration.projection_suffix != "#current":
+        raise FixtureError(f"unsupported projection form for {declaration.anchor_key}")
+    if declaration.source_kind == "profile":
+        if anchor_path != source_path:
+            raise FixtureError(f"profile state source must be its own anchor: {declaration.anchor_key}")
+        frontmatter = _page_frontmatter(root, source_path)
+        value = frontmatter.get(declaration.state_field)
+        if not isinstance(value, (str, int, float)) or not str(value).strip():
+            raise FixtureError(
+                f"profile state field {declaration.state_field!r} is absent for {declaration.anchor_key}"
+            )
+        statement = f"{declaration.state_field}: {str(value).strip()}"
+        as_of = str(frontmatter.get("updated") or "")
+        snapshot_paths = (source_path,)
+    elif declaration.source_kind == "records":
+        from exomem import record_governance, structured_collections
+
+        collection = structured_collections.load_manifest(root, source_path)
+        if collection.path != source_path:
+            raise FixtureError(
+                f"declared Records source resolved to a different canonical path: {collection.path}"
+            )
+        if collection.semantic_profile != "records":
+            raise FixtureError(f"declared Records source is not records: {source_path}")
+        if declaration.state_field not in collection.schema.fields:
+            raise FixtureError(
+                f"Records state field {declaration.state_field!r} is absent for {declaration.anchor_key}"
+            )
+        anchor_frontmatter = _page_frontmatter(root, anchor_path)
+        anchor_title = _page_title(root, anchor_path, anchor_frontmatter)
+        claims = {
+            _normalize_for_leak_check(term)
+            for terms in (collection.claims or {}).values()
+            for term in terms
+        }
+        if anchor_path != source_path and _normalize_for_leak_check(anchor_title) not in claims:
+            raise FixtureError(f"declared Records source does not claim {declaration.anchor_key}")
+        if "observed_on" not in collection.schema.fields:
+            raise FixtureError(f"Records source has no observed_on field: {source_path}")
+        result = record_governance.query_collection(
+            root,
+            collection,
+            semantic_profile="records",
+            sort_by="observed_on",
+            descending=True,
+            limit=1,
+        )
+        rows = tuple(result.rows)
+        if not rows or not isinstance(rows[0], Mapping):
+            raise FixtureError(f"Records source has no current authored state for {declaration.anchor_key}")
+        row = rows[0]
+        if (
+            result.collection_id != collection.collection_id
+            or row.get("collection_id") != collection.collection_id
+            or not row.get("record_id")
+            or row.get("inferred") is not False
+            or row.get("ambiguous") is not False
+        ):
+            raise FixtureError(f"Records source returned an unproven item identity for {declaration.anchor_key}")
+        value = row.get(declaration.state_field)
+        if not isinstance(value, (str, int, float)) or not str(value).strip():
+            raise FixtureError(
+                f"Records source has no authored {declaration.state_field!r} value for {declaration.anchor_key}"
+            )
+        statement = f"{declaration.state_field}: {str(value).strip()}"
+        as_of = str(row.get("observed_on") or "")
+        snapshot_paths = tuple(version.path for version in result.source_versions)
+    else:
+        raise FixtureError(f"unknown declared state source kind {declaration.source_kind!r}")
+
+    return ProjectionBinding(
+        anchor_key=declaration.anchor_key,
+        anchor_ref=anchor_ref,
+        source_key=declaration.source_key,
+        source_ref=source_ref,
+        source_kind=declaration.source_kind,
+        state_field=declaration.state_field,
+        projection_ref=f"{anchor_ref}{declaration.projection_suffix}",
+        statement=statement,
+        as_of=as_of,
+        source_path=source_path,
+        source_snapshot_digest=_source_snapshot_digest(root, snapshot_paths),
+    )
+
+
+def reference_binding_digests(
+    *,
+    corpus_digest: str,
+    logical_corpus_digest: str,
+    key_to_ref: tuple[tuple[str, str], ...],
+    projections: tuple[ProjectionBinding, ...],
+) -> tuple[str, str]:
+    """Return the mapping digest and exact frozen-binding digest."""
+
+    mapping_digest = _json_digest(dict(key_to_ref))
+    projection_rows = [
+        {
+            "anchor_key": item.anchor_key,
+            "anchor_ref": item.anchor_ref,
+            "source_key": item.source_key,
+            "source_ref": item.source_ref,
+            "source_kind": item.source_kind,
+            "state_field": item.state_field,
+            "projection_ref": item.projection_ref,
+            "statement": item.statement,
+            "source_path": item.source_path,
+        }
+        for item in projections
+    ]
+    digest = _json_digest(
+        {
+            "corpus_digest": corpus_digest,
+            "logical_corpus_digest": logical_corpus_digest,
+            "mapping_digest": mapping_digest,
+            "projections": projection_rows,
+            "source_snapshots": [
+                (item.anchor_key, item.as_of, item.source_snapshot_digest) for item in projections
+            ],
+        }
+    )
+    return mapping_digest, digest
+
+
+def freeze_reference_binding(
+    root: Path,
+    manifest: CorpusManifest,
+    key_to_ref: dict[str, str],
+) -> ReferenceBinding:
+    """Freeze trusted refs and verified authored projection state before activation."""
+
+    root = Path(root)
+    if _corpus_hash(root) != manifest.corpus_hash:
+        raise FixtureError("cannot freeze reference binding: corpus digest is stale")
+    logical_hash = _logical_corpus_hash(
+        root,
+        seed=manifest.seed,
+        distractor_count=manifest.distractor_count,
+        key_to_path=manifest.key_to_path,
+        state_sources=manifest.state_sources,
+    )
+    if logical_hash != manifest.logical_hash:
+        raise FixtureError("cannot freeze reference binding: logical corpus digest is stale")
+    if manifest.corpus_id != CORPUS_ID or manifest.state_sources != STATE_SOURCE_DECLARATIONS:
+        raise FixtureError("cannot freeze reference binding: state-source declaration set is stale")
+
+    required_keys = {key for fixture in FIXTURES for key in (*fixture.gold, *fixture.poison)}
+    required_keys.update(
+        key for declaration in manifest.state_sources for key in (declaration.anchor_key, declaration.source_key)
+    )
+    missing = sorted(key for key in required_keys if not isinstance(key_to_ref.get(key), str) or not key_to_ref[key])
+    if missing:
+        raise FixtureError(f"cannot freeze reference binding: missing trusted refs {missing}")
+    frozen_map = tuple(sorted((key, key_to_ref[key]) for key in required_keys))
+    projections = tuple(
+        _read_declared_projection(root, manifest, declaration, dict(frozen_map))
+        for declaration in manifest.state_sources
+    )
+    mapping_digest, digest = reference_binding_digests(
+        corpus_digest=manifest.corpus_hash,
+        logical_corpus_digest=manifest.logical_hash,
+        key_to_ref=frozen_map,
+        projections=projections,
+    )
+    return ReferenceBinding(
+        corpus_digest=manifest.corpus_hash,
+        logical_corpus_digest=manifest.logical_hash,
+        key_to_ref=frozen_map,
+        mapping_digest=mapping_digest,
+        projections=projections,
+        digest=digest,
+    )
 
 
 _CORPUS_DATE = date(2026, 9, 1)
@@ -1534,6 +1820,7 @@ def _build_corpus_in_process(
             distractor_count=distractor_count,
             key_to_path=sorted_paths,
         ),
+        state_sources=STATE_SOURCE_DECLARATIONS,
     )
 
 
@@ -1553,6 +1840,7 @@ def _run_isolated_build_request(request_path: str, result_path: str) -> None:
         "key_to_path": manifest.key_to_path,
         "corpus_hash": manifest.corpus_hash,
         "logical_hash": manifest.logical_hash,
+        "state_sources": [asdict(item) for item in manifest.state_sources],
     }
     Path(result_path).write_text(
         json.dumps(payload, sort_keys=True, separators=(",", ":")),
@@ -1648,7 +1936,11 @@ def build_corpus(
             )
         if not paths["result"].is_file():
             raise FixtureError("isolated corpus build returned no manifest")
-        return CorpusManifest(**json.loads(paths["result"].read_text(encoding="utf-8")))
+        payload = json.loads(paths["result"].read_text(encoding="utf-8"))
+        payload["state_sources"] = tuple(
+            StateSourceDeclaration(**item) for item in payload["state_sources"]
+        )
+        return CorpusManifest(**payload)
 
 
 def parse_records_items(page_text: str) -> list[dict[str, str]]:
@@ -1808,7 +2100,11 @@ __all__ = [
     "CorpusManifest",
     "FixtureCase",
     "FixtureError",
+    "ProjectionBinding",
+    "ReferenceBinding",
+    "STATE_SOURCE_DECLARATIONS",
     "SoundnessProbeManifest",
+    "StateSourceDeclaration",
     "anchor_kind_for",
     "assert_manifest_consistent",
     "build_corpus",
@@ -1820,7 +2116,9 @@ __all__ = [
     "find_verbatim_leaks",
     "fixture_by_id",
     "fixture_set_digest",
+    "freeze_reference_binding",
     "latest_record",
     "parse_records_items",
+    "reference_binding_digests",
     "twins",
 ]

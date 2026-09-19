@@ -63,7 +63,9 @@ from epistemic.corpora.context_activation import (
     FIXTURES,
     MEASURED_LATENCY_MS,
     FixtureCase,
+    ReferenceBinding,
     anchor_kind_for,
+    reference_binding_digests,
 )
 
 
@@ -406,8 +408,9 @@ class CaseScore:
     #: ``partial``/``ambiguous`` instead (B3): tolerated per-case, but
     #: bounded to at most :data:`HEDGED_TWINS_CEILING` per run.
     hedged: bool
-    #: ``gold_hit`` (over resolved anchors only) / total resolved-status
-    #: anchor count; ``None`` when the packet resolved nothing (M1).
+    #: Relevant precision-bearing refs / every distinct precision-bearing
+    #: ref. Bound projections retain their own numerator and denominator
+    #: identities; ``None`` when the packet surfaces none (M1/D9).
     precision: float | None
     must_include_missing: tuple[str, ...]
     must_exclude_present: tuple[str, ...]
@@ -503,11 +506,58 @@ def _credited_superseded_refs(packet: ActivationPacket) -> set[str]:
     }
 
 
+def _validate_reference_binding(binding: ReferenceBinding) -> dict[str, str]:
+    """Reject any mutation of the frozen map, projection rows, or corpus identities."""
+
+    mapping_digest, digest = reference_binding_digests(
+        corpus_digest=binding.corpus_digest,
+        logical_corpus_digest=binding.logical_corpus_digest,
+        key_to_ref=binding.key_to_ref,
+        projections=binding.projections,
+    )
+    if mapping_digest != binding.mapping_digest:
+        raise ManifestVoidError("run manifest void: reference binding mapping digest mismatch")
+    if digest != binding.digest:
+        raise ManifestVoidError("run manifest void: reference binding digest mismatch")
+    return dict(binding.key_to_ref)
+
+
+def _valid_projection_refs(packet: ActivationPacket, binding: ReferenceBinding) -> dict[str, str]:
+    """Map packet projections that exactly match their pre-activation binding to canonical refs."""
+
+    valid: dict[str, str] = {}
+    for projection in binding.projections:
+        state_matches = any(
+            entry.anchor == projection.anchor_ref
+            and entry.source == projection.source_kind
+            and entry.statement == projection.statement
+            and (entry.as_of or "") == projection.as_of
+            for entry in packet.current_state
+        )
+        if not state_matches:
+            continue
+        unit_matches = any(
+            unit.ref == projection.projection_ref
+            and unit.role == "current_state"
+            and unit.lifecycle == "active"
+            and unit.text == projection.statement
+            and str(unit.updated or "") == projection.as_of
+            and unit.provenance.get("anchor") == projection.anchor_ref
+            and unit.provenance.get("source") == projection.source_kind
+            and str(unit.provenance.get("as_of") or "") == projection.as_of
+            for unit in packet.units
+        )
+        if unit_matches:
+            valid[projection.projection_ref] = projection.anchor_ref
+    return valid
+
+
 def score_case(
     packet: ActivationPacket,
     fixture: FixtureCase,
     *,
     key_to_ref: dict[str, str] | None = None,
+    reference_binding: ReferenceBinding | None = None,
 ) -> CaseScore:
     """Score one packet against its pre-registered fixture.
 
@@ -516,30 +566,72 @@ def score_case(
     or a locally-authored (never-committed) real-vault mapping for the
     private instrument. Defaults to the identity mapping, for a hand-written
     oracle packet that already speaks in the fixture's own logical keys.
+    ``reference_binding`` additionally permits only projections frozen from
+    canonical source bytes before activation; its map supersedes an equivalent
+    ``key_to_ref`` argument.
     """
 
+    binding_map: dict[str, str] | None = None
+    valid_projections: dict[str, str] = {}
+    all_bound_projections: dict[str, str] = {}
+    if reference_binding is not None:
+        binding_map = _validate_reference_binding(reference_binding)
+        if key_to_ref is not None and any(key_to_ref.get(key) != ref for key, ref in binding_map.items()):
+            raise ManifestVoidError("run manifest void: key_to_ref differs from frozen reference binding")
+        valid_projections = _valid_projection_refs(packet, reference_binding)
+        all_bound_projections = {
+            projection.projection_ref: projection.anchor_ref for projection in reference_binding.projections
+        }
+
+    effective_map = binding_map or key_to_ref
+
     def ref_for(key: str) -> str:
-        return key_to_ref.get(key, key) if key_to_ref else key
+        return effective_map.get(key, key) if effective_map else key
 
     resolved = _resolved_refs(packet)
     mentioned = _mentioned_refs(packet)
     false_activation_candidates = _false_activation_candidates(packet)
-    credited = _credited_superseded_refs(packet)
+    credited = _credited_superseded_refs(packet) - set(all_bound_projections)
 
     gold_refs = tuple(ref_for(key) for key in fixture.gold)
     poison_refs = tuple(ref_for(key) for key in fixture.poison)
-    gold_hit = sum(1 for ref in gold_refs if ref in mentioned)
-    poison_hit = sum(1 for ref in poison_refs if ref in mentioned and ref not in credited)
+    if reference_binding is None:
+        identity_mentions = mentioned
+    else:
+        # A current_state entry is evidence that validates a bound projection;
+        # it does not independently mint the anchor identity it names.
+        identity_mentions = {anchor.ref for anchor in packet.anchors}
+        identity_mentions.update(unit.ref for unit in packet.units)
+        identity_mentions.update(pointer.ref for pointer in packet.pointers)
+        identity_mentions.update(packet.ambiguity)
+        identity_mentions.update(valid_projections.values())
+
+    gold_hit = sum(1 for ref in gold_refs if ref in identity_mentions)
+    poison_hit = sum(
+        1
+        for ref in poison_refs
+        if (ref in mentioned and ref not in credited)
+        or any(
+            projection_ref in mentioned and canonical_ref == ref
+            for projection_ref, canonical_ref in all_bound_projections.items()
+        )
+    )
 
     tallies: dict[str, list[int]] = {}
     for key, ref in zip(fixture.gold, gold_refs, strict=True):
         tally = tallies.setdefault(anchor_kind_for(key), [0, 0, 0, 0])
         tally[0] += 1
-        tally[1] += int(ref in mentioned)
+        tally[1] += int(ref in identity_mentions)
     for key, ref in zip(fixture.poison, poison_refs, strict=True):
         tally = tallies.setdefault(anchor_kind_for(key), [0, 0, 0, 0])
         tally[2] += 1
-        tally[3] += int(ref in mentioned and ref not in credited)
+        tally[3] += int(
+            (ref in mentioned and ref not in credited)
+            or any(
+                projection_ref in mentioned and canonical_ref == ref
+                for projection_ref, canonical_ref in all_bound_projections.items()
+            )
+        )
     by_anchor_kind = tuple(
         AnchorKindTally(kind=kind, gold_total=g_t, gold_hit=g_h, poison_total=p_t, poison_hit=p_h)
         for kind, (g_t, g_h, p_t, p_h) in sorted(tallies.items())
@@ -552,7 +644,12 @@ def score_case(
     # a resolved anchor or any unit/pointer/current-state/ambiguity channel.
     own_gold = set(gold_refs)
     twin_false_activation = bool(
-        fixture.case_id.startswith("T") and any(ref not in own_gold for ref in false_activation_candidates)
+        fixture.case_id.startswith("T")
+        and any(
+            ref not in own_gold
+            and not (ref in valid_projections and valid_projections[ref] in own_gold)
+            for ref in false_activation_candidates
+        )
     )
 
     # Hedging (B3, spec scenario "Hedged twin activation is reported, not
@@ -587,7 +684,13 @@ def score_case(
     # padding, and must not be penalised as if it were.
     precision_denominator_refs = resolved | {unit.ref for unit in packet.units} | {p.ref for p in packet.pointers}
     precision_denominator_refs -= credited
-    gold_hit_for_precision = sum(1 for ref in gold_refs if ref in precision_denominator_refs)
+    relevant_precision_refs = set(gold_refs)
+    relevant_precision_refs.update(
+        projection_ref
+        for projection_ref, canonical_ref in valid_projections.items()
+        if canonical_ref in own_gold
+    )
+    gold_hit_for_precision = len(precision_denominator_refs & relevant_precision_refs)
     total_precision_denominator = len(precision_denominator_refs)
     precision = (gold_hit_for_precision / total_precision_denominator) if total_precision_denominator else None
 
@@ -816,6 +919,12 @@ REQUIRED_DIGEST_FIELDS: tuple[str, ...] = (
     "threshold_digest",
 )
 
+# Only these legacy instrument modes are permitted to score fixture-key
+# identities without a canonical reference binding. Every other named
+# mechanism is treated as a product path and therefore fails closed, including
+# historical spellings such as ``product-op-activate-context``.
+IDENTITY_ONLY_MECHANISMS: frozenset[str] = frozenset({"oracle_packet", "unknown"})
+
 
 @dataclass(frozen=True)
 class RunManifest:
@@ -823,6 +932,7 @@ class RunManifest:
     corpus_digest: str
     logical_corpus_digest: str
     threshold_digest: str
+    reference_binding_digest: str | None = None
     mechanism: str = "unknown"
 
 
@@ -837,7 +947,8 @@ def validate_manifest(data: dict[str, Any]) -> RunManifest:
         corpus_digest=data["corpus_digest"],
         logical_corpus_digest=data["logical_corpus_digest"],
         threshold_digest=data["threshold_digest"],
-        mechanism=str(data.get("mechanism", "unknown")),
+        reference_binding_digest=data.get("reference_binding_digest"),
+        mechanism=str(data.get("mechanism") or "unknown").strip() or "unknown",
     )
 
 
@@ -874,6 +985,7 @@ def run_audit(
     *,
     manifest: RunManifest,
     key_to_ref: dict[str, str] | None = None,
+    reference_binding: ReferenceBinding | None = None,
     fixtures: tuple[FixtureCase, ...] = FIXTURES,
 ) -> AuditReport:
     """Score every fixture against its supplied packet, or mark it blocked.
@@ -887,8 +999,33 @@ def run_audit(
     ``DISABLED_PACKET`` explicitly instead.
     """
 
+    if reference_binding is None:
+        if manifest.mechanism not in IDENTITY_ONLY_MECHANISMS:
+            raise ManifestVoidError(
+                f"run manifest void: product mechanism {manifest.mechanism!r} requires reference_binding"
+            )
+        if manifest.reference_binding_digest:
+            raise ManifestVoidError("run manifest void: reference_binding is missing")
+    else:
+        _validate_reference_binding(reference_binding)
+        if not manifest.reference_binding_digest:
+            raise ManifestVoidError("run manifest void: reference_binding_digest is missing")
+        if manifest.reference_binding_digest != reference_binding.digest:
+            raise ManifestVoidError("run manifest void: reference_binding_digest mismatch")
+        if manifest.corpus_digest != reference_binding.corpus_digest:
+            raise ManifestVoidError("run manifest void: corpus_digest differs from reference binding")
+        if manifest.logical_corpus_digest != reference_binding.logical_corpus_digest:
+            raise ManifestVoidError(
+                "run manifest void: logical_corpus_digest differs from reference binding"
+            )
+
     scores = tuple(
-        score_case(packets[fixture.case_id], fixture, key_to_ref=key_to_ref)
+        score_case(
+            packets[fixture.case_id],
+            fixture,
+            key_to_ref=key_to_ref,
+            reference_binding=reference_binding,
+        )
         if fixture.case_id in packets
         else _blocked_score(fixture)
         for fixture in fixtures
@@ -1075,6 +1212,7 @@ __all__ = [
     "DISABLED_PACKET",
     "GOLD_RECALL_FLOOR",
     "HEDGED_TWINS_CEILING",
+    "IDENTITY_ONLY_MECHANISMS",
     "PADDING_PRECISION_FLOOR",
     "PRECISION_FLOOR",
     "REQUIRED_DIGEST_FIELDS",
@@ -1094,6 +1232,7 @@ __all__ = [
     "PacketError",
     "PaddingRobustnessResult",
     "Pointer",
+    "ReferenceBinding",
     "RunManifest",
     "Unit",
     "audit_passed",
