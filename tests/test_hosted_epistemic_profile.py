@@ -149,12 +149,52 @@ def test_epistemic_profile_yields_a_deterministic_agent_contract() -> None:
             assert entry == shared[entry["name"]]
 
 
-def test_epistemic_commands_are_registry_identical_between_profiles_and_local_surface() -> None:
-    """Hosted forwards registry bytes except the MCP-only credential carrier."""
+def test_v3_epistemic_commands_are_registry_identical_with_their_own_pin() -> None:
+    """Hosted forwards registry bytes except the MCP-only credential carrier
+    -- but v3 is a PINNED, published historical profile
+    (`hosted_legacy_schemas`), so "the registry" it forwards is the one it
+    published, not whatever the live registry says today.
 
-    fixture = json.loads(MCP_SCHEMA_FIXTURE.read_text(encoding="utf-8"))
+    An earlier version of this test compared v3 directly against the live
+    `mcp_tool_schemas.json` fixture. That was the stale expectation, not v3:
+    the pin doctrine's own docstring says a released profile's schema must
+    not follow the live registry, which makes "pinned historical profile ==
+    live fixture" false the moment any live description changes for a
+    command the pin also carries -- `capture-identities-at-write-time` task
+    3.3's new sentence on `replace_memory`'s `content` was the first such
+    change. This version asserts the property against v3's own pin instead,
+    which is what a released profile actually promises to keep forwarding.
+    """
     contract = gateway.build_agent_gateway_contract(profile=V3_PROFILE)
     entries = {entry["name"]: entry for entry in contract["commands"]}
+    pinned = hosted_legacy_schemas.LEGACY_PROFILE_CONTRACTS[V3_PROFILE]
+
+    for name in EPISTEMIC_ADDITIONS:
+        published = pinned[name]
+        assert entries[name]["mcp_tool"]["inputSchema"] == hosted_legacy_schemas.json_value(
+            published.input_schema
+        )
+        assert entries[name]["mcp_tool"]["description"] == published.description
+
+
+def test_the_current_profiles_epistemic_commands_match_the_live_fixture() -> None:
+    """The CURRENT, unpinned profile has no published pin to protect -- it is
+    supposed to track the registry, so it is compared against the live
+    fixture the way v3 used to be, before v3 closed and v5 became current."""
+    current_profile = hosted_plugins.CANDIDATE_PROFILES[hosted_plugins.BASELINE_CANDIDATE]
+    assert current_profile not in hosted_legacy_schemas.LEGACY_PROFILE_CONTRACTS, (
+        f"{current_profile} is pinned; it is no longer the current profile this "
+        "test should compare against the live fixture"
+    )
+
+    fixture = json.loads(MCP_SCHEMA_FIXTURE.read_text(encoding="utf-8"))
+    contract = gateway.build_agent_gateway_contract(profile=current_profile)
+    entries = {entry["name"]: entry for entry in contract["commands"]}
+    missing = [name for name in EPISTEMIC_ADDITIONS if name not in entries]
+    assert not missing, (
+        f"{current_profile} does not expose {missing}; report this, do not force "
+        "an assertion the current profile cannot make"
+    )
 
     for name in EPISTEMIC_ADDITIONS:
         assert entries[name]["mcp_tool"]["inputSchema"] == _without_mcp_transport_credential(
