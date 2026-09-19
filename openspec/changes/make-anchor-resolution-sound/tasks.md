@@ -38,7 +38,7 @@
 
 - [x] 4a.1 Red first: the tokeniser splits accented words ("Ausrüstung" gives two
       fragments), drops non-Latin scripts entirely, and lets two unrelated titles
-      overlap on a shared word ending. Tests for the four new scenarios, plus a
+      overlap on a shared word ending. Tests for the five new scenarios, plus a
       property test that basic Latin input tokenises exactly as before.
 - [x] 4a.2 Tokenise maximal runs of letters, digits and combining marks in any script,
       keeping the existing fast path for basic Latin text; bump the activation index
