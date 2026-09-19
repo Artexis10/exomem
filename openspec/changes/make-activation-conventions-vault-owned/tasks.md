@@ -75,19 +75,19 @@
 
 ## 4. Governed write path
 
-- [ ] 4.1 Red first, through the tool entry point and never `Path.write_text`:
+- [x] 4.1 Red first, through the tool entry point and never `Path.write_text`:
       `schema_memory` subjects `context-roles` and `activation-conventions` validate a
       proposal and return findings, diff it, save through `save-roles` and
       `save-conventions` with `proposal`, `why` and `expected_hash`, refuse a stale hash,
       refuse a proposal with any finding, refuse the generic `save` flag and `infer`,
       and write only the override file.
-- [ ] 4.2 Implement on the `save-relations` pattern; CLI and REST parity.
-- [ ] 4.3 The hosted gateway allows the two subjects while `manage_memory_file` and
+- [x] 4.2 Implement on the `save-relations` pattern; CLI and REST parity.
+- [x] 4.3 The hosted gateway allows the two subjects while `manage_memory_file` and
       `edit_memory` stay refused for the schema folder. Red first on both halves.
 
 ## 5. Proof
 
-- [ ] 5.1 End-to-end through the tools on a vault with no `Products/` or `Systems/`
+- [x] 5.1 End-to-end through the tools on a vault with no `Products/` or `Systems/`
       folder: an agent saves a conventions override (custom resource folder, a custom
       state field, added stopwords) and a roles override (a non-English cue with an
       evidence category); a turn resolves, the packet carries the custom state, and
@@ -96,7 +96,7 @@
       precision and twin false activation stay inside the pre-registered bounds. If a
       role drifts, shrink its shipped `evidence_categories` and re-run; do not reinstate
       a table.
-- [ ] 5.3 Latency gate: `working_set` stages within `CEIL_WORKING_SET_MS` at 2k and 8k
+- [x] 5.3 Latency gate: `working_set` stages within `CEIL_WORKING_SET_MS` at 2k and 8k
       notes with the shipped registry, with an override at the caps, and with one rule
       admitting a large folder (reported, not gated).
 - [ ] 5.4 Three-door parity (MCP, CLI, REST) still holds; `ask_memory` and `find`
