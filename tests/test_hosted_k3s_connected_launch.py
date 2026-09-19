@@ -178,6 +178,7 @@ def test_ordinary_admission_reaches_serving_and_memory_survives_runtime_restart(
                     provider_url=provider_url,
                     provider_bearer=bearer,
                     ingress_url=ingress_url,
+                    runtime_target=provision.REVIEWED_RUNTIME_TARGET,
                 ) as node,
             ):
                 operation_id, request = await wait_for_provision(
@@ -219,6 +220,7 @@ def test_ordinary_admission_reaches_serving_and_memory_survives_runtime_restart(
                         await asyncio.sleep(0.2)
                 assert connection["tenant_id"] == owner.tenant_id
                 assert connection["cell_id"] == owner.subject_id
+                assert connection["target"]["runtime_target"] == provision.REVIEWED_RUNTIME_TARGET
                 run_id = f"cluster-{owner.subject_id[:12]}"
                 citation = await asyncio.to_thread(
                     _capture_and_recall,

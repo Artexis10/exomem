@@ -230,6 +230,7 @@ async def substrate_process(
     provider_url: str,
     provider_bearer: str,
     ingress_url: str,
+    runtime_target: dict[str, str],
 ):
     script = repo / "scripts/hosted-cluster-rehearsal.ts"
     assert script.is_file(), "Substrate connected rehearsal helper is required"
@@ -246,6 +247,8 @@ async def substrate_process(
             "EXOMEM_REHEARSAL_PROVIDER_BEARER": provider_bearer,
             "EXOMEM_REHEARSAL_INGRESS_URL": ingress_url,
             "EXOMEM_REHEARSAL_STATE_DIR": str(state_dir),
+            "EXOMEM_REHEARSAL_RELEASE": runtime_target["releaseVersion"],
+            "EXOMEM_REHEARSAL_EXPECTED_TARGET": json.dumps(runtime_target, sort_keys=True),
             "CONFIRM_ENDSTATE_CLOUD_RELEASE_A": "yes",
         }
     )
