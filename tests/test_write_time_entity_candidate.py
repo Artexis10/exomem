@@ -166,6 +166,174 @@ def test_a_link_to_an_existing_entity_yields_an_edge_not_a_block(tmp_path: Path)
     assert "entity_candidate" not in second
 
 
+# --------------------------------------------------------------------- task 4.1/4.2
+
+
+def test_create_entity_closes_the_candidate_and_both_notes_hold_their_edge(
+    tmp_path: Path,
+) -> None:
+    """The proof sequence task 4.1 asks for, end to end on one seeded vault.
+
+    A note links a page-less name (no block); a second note links it (the
+    block fires); `create-entity` closes it; both notes' links resolve to
+    the new Entity through the graph's OWN incremental maintenance -- this
+    test never calls a rebuild, so whatever resolved it is the ordinary
+    write path, not a forced reindex. Task 4.2 (context compiler) rides the
+    same fixture: the created Entity is a new anchor `activate_context`
+    resolves for a turn naming it, and no compiler code changed to make
+    that true.
+    """
+    first = _remember(
+        tmp_path, content=_content("First meeting."), title="First meeting", slug="first-meeting"
+    )
+    second = _remember(
+        tmp_path,
+        content=_content("Second meeting."),
+        title="Second meeting",
+        slug="second-meeting",
+    )
+    candidate = second["entity_candidate"]["identities"][0]
+    assert candidate["name"] == NAME
+    assert candidate["routes"] == ["resolve-entity", "create-entity"]
+
+    created = _remember_command(
+        tmp_path,
+        "connect_memory",
+        operation="create-entity",
+        entity_type="organization",
+        name=NAME,
+        summary=f"{NAME} is the venue the meetings above were coordinating with.",
+    )
+    assert created["mutated"] is True
+    entity_path = created["path"]
+
+    # No block for a THIRD note linking the same name: the identity resolves
+    # now, so it is an edge, never a candidate again.
+    third = _remember(
+        tmp_path, content=_content("Third meeting."), title="Third meeting", slug="third-meeting"
+    )
+    assert "entity_candidate" not in third
+
+    # Both original notes' links now resolve to the created Entity page --
+    # read fresh from the vault, through the product's own inbound-links
+    # surface, with no rebuild call anywhere in this test.
+    inbound = commands.op_list_inbound_links(tmp_path, target=entity_path)
+    inbound_paths = {row["path"] for row in inbound["inbound"]}
+    assert first["path"] in inbound_paths
+    assert second["path"] in inbound_paths
+
+    # 4.2: the created Entity is a new anchor, resolved without any compiler
+    # code change -- `activate_context` is the existing context-compiler
+    # entry point, unmodified by this change.
+    packet = commands.op_activate_context(tmp_path, turn=f"Tell me about {NAME}.")
+    anchor_paths = {anchor.get("path") for anchor in packet.get("anchors", ())}
+    assert entity_path in anchor_paths, packet
+
+
+def _remember_command(vault: Path, command_name: str, **kwargs) -> dict:
+    result = writer_lease.invoke_command(_command(command_name), vault, **kwargs)
+    graph_sync.await_active_rebuild(vault, timeout=10)
+    return result
+
+
+# ------------------------------------------------------------------------- 4.3
+
+
+def test_ask_memory_and_find_are_unaffected_by_a_pending_candidate(
+    tmp_path: Path,
+) -> None:
+    """`ask_memory`/`find` never carry, branch on, or read `entity_candidate`.
+
+    The block is a write-response advisory, produced inside `semantic_writes`
+    and projected only by `mutation_terminal`; neither read command imports
+    either module's new code (confirmed by grep: `entity_recurrence`,
+    `capture_sweep` and the new graph method appear in neither), so a query
+    that finds the two notes returns the same hits whether or not the OTHER
+    command's response happened to carry a candidate.
+    """
+    from exomem import find
+
+    first = _remember(
+        tmp_path, content=_content("First meeting."), title="First meeting", slug="first-meeting"
+    )
+    second = _remember(
+        tmp_path,
+        content=_content("Second meeting."),
+        title="Second meeting",
+        slug="second-meeting",
+    )
+    assert "entity_candidate" in second
+
+    after = commands.op_ask_memory(tmp_path, query=NAME, mode="keyword")
+    after_hits = find.find(tmp_path, query=NAME, mode="keyword")
+
+    assert isinstance(after, list)
+    # Neither read surface exposes the write-time key.
+    assert not any("entity_candidate" in row for row in after)
+    assert not any(hasattr(hit, "entity_candidate") for hit in after_hits)
+    # The query finds both notes -- unaffected by the other command's block.
+    ask_paths = {row["path"] for row in after}
+    find_paths = {hit.path for hit in after_hits}
+    assert first["path"] in ask_paths
+    assert second["path"] in ask_paths
+    assert first["path"] in find_paths
+    assert second["path"] in find_paths
+
+
+def test_the_crossing_write_stays_inside_the_existing_commit_budget(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The candidate computation is bounded (one keyed graph read, at most
+    sixteen already-in-hand page states, one filesystem probe at most -- task
+    0.1/2.1) rather than merely fast by luck: the crossing write's own
+    `commit_ms` -- the span `note.py` already measures and logs, which wraps
+    `semantic_writes.commit_creation` end to end and so includes
+    `_entity_candidate_block` beside `_capture_sweep_block` and the others --
+    stays the same order of magnitude whether or not this write is the one
+    that fires the block.
+    """
+    import logging
+    import re
+
+    caplog.set_level(logging.INFO, logger="exomem.note")
+
+    def _commit_ms() -> float:
+        records = [
+            record
+            for record in caplog.records
+            if record.name == "exomem.note" and "note write timings" in record.getMessage()
+        ]
+        assert len(records) == 1, records
+        match = re.search(r"commit_ms=([\d.]+)", records[0].getMessage())
+        assert match, records[0].getMessage()
+        return float(match.group(1))
+
+    caplog.clear()
+    _remember(
+        tmp_path, content=_content("First meeting."), title="First meeting", slug="first-meeting"
+    )
+    no_candidate_ms = _commit_ms()
+
+    caplog.clear()
+    second = _remember(
+        tmp_path,
+        content=_content("Second meeting."),
+        title="Second meeting",
+        slug="second-meeting",
+    )
+    assert "entity_candidate" in second
+    with_candidate_ms = _commit_ms()
+
+    # A generous sanity ceiling, not a perf benchmark: it exists to catch a
+    # gross regression (an accidental vault-wide walk), not to pin a number
+    # this sandboxed environment's own variance would make flaky.
+    assert with_candidate_ms < 2_000, with_candidate_ms
+    assert with_candidate_ms < no_candidate_ms * 20 + 500, (
+        with_candidate_ms,
+        no_candidate_ms,
+    )
+
+
 def test_project_terminal_carries_it_at_compact_and_drops_it_at_legacy() -> None:
     """The terminal-level contract, independent of any one command's fixture."""
     leaf = {
