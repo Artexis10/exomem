@@ -443,8 +443,6 @@ def _catalog_items(
         raise ForwardMigrationUnavailable
     items: list[projection_store.ProjectionItemVariants] = []
     for path in sorted(find_corpus.walk_md(kb)):
-        if path.name.casefold() in find_corpus.NAVIGATION_BASENAMES:
-            continue
         try:
             relative = path.relative_to(vault_root).as_posix()
             snapshot = reserved_paths.read_generic_bytes(vault_root, relative)
