@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Run resumable, non-destructive hosted-service acceptance.
+"""Run resumable hosted-service acceptance and launch checkpoints.
 
-The command never allocates a tenant, database branch, preview deployment, or
-cloud resource.  Its configuration names two already reserved synthetic
-tenants; OAuth material is generated through the ordinary authorization-code
-flow and is stored only in the task-owned state directory.
+Legacy acceptance actions never allocate resources and name two already
+reserved synthetic tenants. The launch action advances one bounded existing
+invitation through public control effects. OAuth material remains private.
 """
 
 from __future__ import annotations
@@ -13,6 +12,7 @@ import argparse
 import base64
 import concurrent.futures
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -26,14 +26,22 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - exercised by import compatibility checks
+    fcntl = None  # type: ignore[assignment]
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IMAGE = re.compile(r"^ghcr\.io/artexis10/exomem@sha256:[0-9a-f]{64}$")
 _RUN_ID = re.compile(r"^[a-z][a-z0-9-]{2,127}$")
 _TENANT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$")
+_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
+_SECRET_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
 _STAGES = ("oauth", "protocol", "continuity", "isolation", "restore", "performance", "claude-host", "openai-host")
 _STATUSES = {"pending", "passed", "failed", "blocked"}
 _MAX_RESPONSE_BYTES = 1_048_576
@@ -61,6 +69,14 @@ def _open(request: str | urllib.request.Request, *, timeout: int) -> Any:
 
 class AcceptanceError(ValueError):
     """An unsafe or incomplete acceptance action."""
+
+
+class AmbiguousLaunchEffect(AcceptanceError):
+    """A launch mutation may have committed but its response was not observed."""
+
+
+class LaunchAuthorizationExpired(AcceptanceError):
+    """The configured operator authorization is absent or no longer accepted."""
 
 
 def canonical_json(value: object) -> bytes:
@@ -166,6 +182,208 @@ def validate_config(value: object, *, allow_loopback_fixture: bool = False) -> d
         "mcp_endpoint": mcp_endpoint,
         "runtime": _runtime(value["runtime"]),
         "tenants": _tenants(value["tenants"]),
+    }
+
+
+def _closed_mapping(value: object, keys: set[str], *, label: str) -> Mapping[str, Any]:
+    if not isinstance(value, dict) or set(value) != keys:
+        raise AcceptanceError(f"{label} fields are incomplete or unknown")
+    return value
+
+
+def _bounded_string(value: object, *, label: str, maximum: int = 256) -> str:
+    if not isinstance(value, str) or not value or len(value) > maximum or any(ord(char) < 32 for char in value):
+        raise AcceptanceError(f"{label} is invalid")
+    return value
+
+
+def _secret_reference(value: object, *, label: str) -> dict[str, str]:
+    reference = _closed_mapping(value, {"source", "name"}, label=label)
+    if reference.get("source") != "env" or not isinstance(reference.get("name"), str) or not _SECRET_NAME.fullmatch(reference["name"]):
+        raise AcceptanceError(f"{label} is invalid")
+    return {"source": "env", "name": reference["name"]}
+
+
+def _positive_integer(value: object, *, label: str, maximum: int) -> int:
+    if type(value) is not int or value < 1 or value > maximum:
+        raise AcceptanceError(f"{label} is invalid")
+    return value
+
+
+def validate_launch_config(
+    value: object,
+    *,
+    mode: str,
+    milestone: str,
+    allow_loopback_fixture: bool = False,
+) -> dict[str, Any]:
+    if mode not in {"local", "cluster", "live"} or milestone not in {"owner", "friends"}:
+        raise AcceptanceError("launch mode and milestone are required")
+    config = _closed_mapping(
+        value,
+        {
+            "schema_version",
+            "environment",
+            "control_base_url",
+            "invitation",
+            "selected_host",
+            "oauth",
+            "release",
+            "deployment",
+            "resource_maximum",
+            "deadlines_seconds",
+            "polling",
+        },
+        label="launch configuration",
+    )
+    if config.get("schema_version") != 1:
+        raise AcceptanceError("unsupported launch configuration schema")
+    invitation = _closed_mapping(config["invitation"], {"reference", "token"}, label="launch invitation")
+    oauth = _closed_mapping(
+        config["oauth"],
+        {"authorization_server_metadata", "resource", "client_id", "redirect_uri", "owner_session"},
+        label="launch OAuth configuration",
+    )
+    release = _closed_mapping(
+        config["release"],
+        {"candidate_id", "runtime_target", "runtime_target_digest"},
+        label="launch release",
+    )
+    target_fields = {
+        "releaseVersion",
+        "sourceCommit",
+        "runtimeImage",
+        "runtimeCandidateSha256",
+        "protocolVersion",
+        "agentProfile",
+        "gatewayContractDigest",
+        "commandFingerprint",
+        "schemaDigest",
+        "compatibilityDigest",
+    }
+    runtime_target = _closed_mapping(release["runtime_target"], target_fields, label="launch runtime target")
+    deployment = _closed_mapping(
+        config["deployment"],
+        {"source_commit", "lock_digest", "revision", "operator_credential"},
+        label="launch deployment",
+    )
+    resources = _closed_mapping(
+        config["resource_maximum"],
+        {"tenants", "storage_bytes", "runtime_slots", "provision_claims"},
+        label="launch resource maximum",
+    )
+    deadlines = _closed_mapping(
+        config["deadlines_seconds"],
+        {"preflight", "runtime_target", "runtime_activation", "consent", "service_ready", "milestone"},
+        label="launch deadlines",
+    )
+    polling = _closed_mapping(config["polling"], {"initial_seconds", "maximum_seconds"}, label="launch polling")
+    candidate_id = release.get("candidate_id")
+    if not isinstance(candidate_id, str) or not _UUID.fullmatch(candidate_id):
+        raise AcceptanceError("launch candidate id is invalid")
+    version = runtime_target.get("releaseVersion")
+    if not isinstance(version, str) or not re.fullmatch(r"(?:0|[1-9][0-9]{0,3})\.(?:0|[1-9][0-9]{0,3})\.(?:0|[1-9][0-9]{0,3})", version):
+        raise AcceptanceError("launch release version is invalid")
+    digest_names = (
+        "runtimeCandidateSha256",
+        "gatewayContractDigest",
+        "commandFingerprint",
+        "schemaDigest",
+        "compatibilityDigest",
+    )
+    if any(not isinstance(runtime_target.get(name), str) or not _SHA256.fullmatch(runtime_target[name]) for name in digest_names):
+        raise AcceptanceError("launch release digest is invalid")
+    source_commit = runtime_target.get("sourceCommit")
+    if not isinstance(source_commit, str) or not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", source_commit):
+        raise AcceptanceError("launch deployment source commit is invalid")
+    if deployment.get("source_commit") != source_commit:
+        raise AcceptanceError("launch deployment source commit differs from runtime target")
+    lock_digest = deployment.get("lock_digest")
+    if not isinstance(lock_digest, str) or not _SHA256.fullmatch(lock_digest):
+        raise AcceptanceError("launch deployment lock digest is invalid")
+    resource_maximum = {
+        "tenants": _positive_integer(resources["tenants"], label="launch tenant maximum", maximum=100),
+        "storage_bytes": _positive_integer(resources["storage_bytes"], label="launch storage maximum", maximum=1 << 60),
+        "runtime_slots": _positive_integer(resources["runtime_slots"], label="launch runtime-slot maximum", maximum=100),
+        "provision_claims": _positive_integer(resources["provision_claims"], label="launch provision-claim maximum", maximum=100),
+    }
+    if milestone == "owner" and resource_maximum["tenants"] != 1:
+        raise AcceptanceError("owner launch must be bounded to one tenant")
+    launch_deadlines = {
+        name: _positive_integer(deadlines[name], label=f"launch {name} deadline", maximum=7 * 24 * 60 * 60)
+        for name in deadlines
+    }
+    initial_seconds = _positive_integer(polling["initial_seconds"], label="launch initial poll", maximum=3600)
+    maximum_seconds = _positive_integer(polling["maximum_seconds"], label="launch maximum poll", maximum=3600)
+    if initial_seconds > maximum_seconds:
+        raise AcceptanceError("launch polling bounds are invalid")
+    local_mode = mode in {"local", "cluster"}
+    control_base_url = _https(config["control_base_url"], label="launch control base URL", allow_loopback_fixture=local_mode)
+    if urllib.parse.urlsplit(control_base_url).path not in {"", "/"}:
+        raise AcceptanceError("launch control base URL must not contain a path")
+    host = urllib.parse.urlsplit(control_base_url).hostname
+    try:
+        loopback = host == "localhost" or (host is not None and ipaddress.ip_address(host).is_loopback)
+    except ValueError:
+        loopback = False
+    if local_mode != loopback:
+        raise AcceptanceError("local and cluster launches require loopback control; live launches require a non-loopback control")
+    resource = _https(oauth["resource"], label="launch OAuth resource", allow_loopback_fixture=local_mode)
+    if resource != control_base_url + "/api/exomem/mcp/v1":
+        raise AcceptanceError("launch OAuth resource does not match the control endpoint")
+    metadata = _https(oauth["authorization_server_metadata"], label="launch OAuth metadata", allow_loopback_fixture=local_mode)
+    if urllib.parse.urlsplit(metadata).netloc != urllib.parse.urlsplit(control_base_url).netloc:
+        raise AcceptanceError("launch OAuth metadata does not match the control origin")
+    selected_host = config.get("selected_host")
+    if selected_host not in {"claude", "openai"}:
+        raise AcceptanceError("launch selected host is invalid")
+    runtime_image = runtime_target.get("runtimeImage")
+    if not isinstance(runtime_image, str) or not _IMAGE.fullmatch(runtime_image):
+        raise AcceptanceError("launch runtime image is invalid")
+    for name in ("protocolVersion", "agentProfile"):
+        _bounded_string(runtime_target.get(name), label=f"launch runtime target {name}", maximum=128)
+    runtime_target_digest = release.get("runtime_target_digest")
+    calculated_target_digest = hashlib.sha256(canonical_json(runtime_target)).hexdigest()
+    if runtime_target_digest != calculated_target_digest:
+        raise AcceptanceError("launch runtime target digest does not match its canonical identity")
+    return {
+        "schema_version": 1,
+        "environment": _bounded_string(config["environment"], label="launch environment", maximum=128),
+        "control_base_url": control_base_url,
+        "invitation": {
+            "reference": _bounded_string(invitation["reference"], label="launch invitation reference", maximum=256),
+            "token": _secret_reference(invitation["token"], label="launch invitation token reference"),
+        },
+        "selected_host": selected_host,
+        "oauth": {
+            "authorization_server_metadata": metadata,
+            "resource": resource,
+            "client_id": _bounded_string(oauth["client_id"], label="launch OAuth client id", maximum=256),
+            "redirect_uri": _https(oauth["redirect_uri"], label="launch OAuth redirect URI", allow_loopback_fixture=True),
+            "owner_session": _secret_reference(oauth["owner_session"], label="launch owner session reference"),
+        },
+        "release": {
+            "candidate_id": candidate_id,
+            "runtime_target": dict(runtime_target),
+            "runtime_target_digest": runtime_target_digest,
+            "version": version,
+            "profile": runtime_target["agentProfile"],
+            "protocol_version": runtime_target["protocolVersion"],
+            "gateway_contract_digest": runtime_target["gatewayContractDigest"],
+            "command_fingerprint": runtime_target["commandFingerprint"],
+            "schema_digest": runtime_target["schemaDigest"],
+            "compatibility_digest": runtime_target["compatibilityDigest"],
+            "runtime_image": runtime_image,
+        },
+        "deployment": {
+            "source_commit": source_commit,
+            "lock_digest": lock_digest,
+            "revision": _bounded_string(deployment["revision"], label="launch deployment revision", maximum=256),
+            "operator_credential": _secret_reference(deployment["operator_credential"], label="launch operator credential reference"),
+        },
+        "resource_maximum": resource_maximum,
+        "deadlines_seconds": launch_deadlines,
+        "polling": {"initial_seconds": initial_seconds, "maximum_seconds": maximum_seconds},
     }
 
 
@@ -349,6 +567,36 @@ def committed_tool_receipt(result: Mapping[str, Any]) -> bool:
     )
 
 
+def released_memory_receipt(
+    result: Mapping[str, Any],
+    *,
+    expected_draft_id: str | None = None,
+    expected_draft_hash: str | None = None,
+    expected_path: str | None = None,
+) -> bool:
+    """Recognize the released v4 leaf receipt used by the hosted runtime."""
+    try:
+        terminal = _tool_result(result)
+    except AcceptanceError:
+        return False
+    path = terminal.get("path")
+    creation = terminal.get("creation")
+    identity = creation.get("creation") if isinstance(creation, Mapping) else None
+    return (
+        isinstance(path, str)
+        and path.startswith("Knowledge Base/")
+        and isinstance(creation, Mapping)
+        and creation.get("mutated") is True
+        and isinstance(creation.get("written_paths"), list)
+        and path in creation["written_paths"]
+        and isinstance(identity, Mapping)
+        and all(isinstance(identity.get(name), str) and identity[name] for name in ("draft_id", "draft_hash"))
+        and (expected_draft_id is None or identity.get("draft_id") == expected_draft_id)
+        and (expected_draft_hash is None or identity.get("draft_hash") == expected_draft_hash)
+        and (expected_path is None or path == expected_path)
+    )
+
+
 class OAuthPKCEClient:
     """Standards authorization-code/PKCE client; never mints database tokens."""
 
@@ -376,7 +624,7 @@ class OAuthPKCEClient:
             raise AcceptanceError("OAuth discovery response is invalid")
         return value
 
-    def authorization_request(self, discovery: Mapping[str, Any]) -> dict[str, str]:
+    def _validated_endpoints(self, discovery: Mapping[str, Any]) -> tuple[str, str]:
         issuer = _https(discovery.get("issuer"), label="OAuth metadata issuer", allow_loopback_fixture=self.allow_loopback_fixture)
         authorization_endpoint = _https(discovery.get("authorization_endpoint"), label="OAuth authorization endpoint", allow_loopback_fixture=self.allow_loopback_fixture)
         token_endpoint = _https(discovery.get("token_endpoint"), label="OAuth token endpoint", allow_loopback_fixture=self.allow_loopback_fixture)
@@ -385,6 +633,10 @@ class OAuthPKCEClient:
             raise AcceptanceError("OAuth metadata crosses origins")
         if not {"authorization_code", "refresh_token"} <= set(discovery.get("grant_types_supported", [])) or "S256" not in discovery.get("code_challenge_methods_supported", []) or not {"exomem.read", "exomem.write", "offline_access"} <= set(discovery.get("scopes_supported", [])):
             raise AcceptanceError("OAuth metadata does not advertise the hosted PKCE contract")
+        return authorization_endpoint, token_endpoint
+
+    def authorization_request(self, discovery: Mapping[str, Any]) -> dict[str, str]:
+        authorization_endpoint, _ = self._validated_endpoints(discovery)
         verifier = secrets.token_urlsafe(48)
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
         state = secrets.token_urlsafe(24)
@@ -394,12 +646,12 @@ class OAuthPKCEClient:
     def exchange_code(self, discovery: Mapping[str, Any], *, code: str, state: str, expected_state: str, code_verifier: str) -> dict[str, Any]:
         if not secrets.compare_digest(state, expected_state):
             raise AcceptanceError("OAuth callback state does not match")
-        token_endpoint = _https(discovery.get("token_endpoint"), label="OAuth token endpoint", allow_loopback_fixture=self.allow_loopback_fixture)
+        _, token_endpoint = self._validated_endpoints(discovery)
         payload = urllib.parse.urlencode({"grant_type": "authorization_code", "code": _string(code, label="OAuth authorization code"), "redirect_uri": self.redirect_uri, "client_id": self.client_id, "resource": self.resource, "code_verifier": _string(code_verifier, label="PKCE verifier")}).encode()
         return self._post_token(token_endpoint, payload)
 
     def refresh(self, discovery: Mapping[str, Any], *, refresh_token: str) -> dict[str, Any]:
-        token_endpoint = _https(discovery.get("token_endpoint"), label="OAuth token endpoint", allow_loopback_fixture=self.allow_loopback_fixture)
+        _, token_endpoint = self._validated_endpoints(discovery)
         return self._post_token(token_endpoint, urllib.parse.urlencode({"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": self.client_id, "resource": self.resource}).encode())
 
     def _post_token(self, endpoint: str, payload: bytes) -> dict[str, Any]:
@@ -522,6 +774,997 @@ def _decode_mcp_envelope(body: bytes, content_type: str, request_id: str | int) 
     if not isinstance(value, dict):
         raise AcceptanceError("MCP response is invalid")
     return value
+
+
+class HostedLaunchControl:
+    """Strict client for the existing public Substrate launch surfaces."""
+
+    def __init__(self, config: Mapping[str, Any], *, allow_loopback_fixture: bool = False) -> None:
+        self.base_url = _https(config["control_base_url"], label="launch control base URL", allow_loopback_fixture=allow_loopback_fixture)
+        self.operator_credential = self._secret(config["deployment"]["operator_credential"], label="operator credential")
+        self.invitation_token = self._secret(config["invitation"]["token"], label="invitation token")
+        self.owner_session_reference = config["oauth"]["owner_session"]
+
+    @staticmethod
+    def _secret(reference: Mapping[str, str], *, label: str) -> str:
+        value = os.environ.get(reference["name"])
+        if not value:
+            raise LaunchAuthorizationExpired(f"configured {label} reference is unavailable")
+        return value
+
+    def _request(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        body: Mapping[str, Any] | None = None,
+        operator: bool = True,
+        effect: bool = False,
+        authorization_boundary: bool = False,
+        extra_headers: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        headers = {"accept": "application/json"}
+        if operator:
+            headers["authorization"] = "Bearer " + self.operator_credential
+        encoded = None
+        if body is not None:
+            encoded = canonical_json(body)
+            headers["content-type"] = "application/json"
+        if extra_headers:
+            headers.update(extra_headers)
+        request = urllib.request.Request(self.base_url + path, data=encoded, method=method, headers=headers)
+        try:
+            with _open(request, timeout=30) as response:  # nosec B310: base URL is validated HTTPS
+                payload = response.read(_MAX_RESPONSE_BYTES + 1)
+        except urllib.error.HTTPError as exc:
+            if exc.code in {401, 403} and (operator or authorization_boundary):
+                label = "operator credential" if operator else "owner authorization"
+                raise LaunchAuthorizationExpired(f"configured {label} was rejected") from exc
+            raise AcceptanceError(f"launch control request failed with HTTP {exc.code}") from exc
+        except OSError as exc:
+            if effect:
+                raise AmbiguousLaunchEffect(f"launch effect acknowledgement is uncertain: {type(exc).__name__}") from exc
+            raise AcceptanceError(f"launch control request failed: {type(exc).__name__}") from exc
+        if len(payload) > _MAX_RESPONSE_BYTES:
+            raise AcceptanceError("launch control response exceeds size limit")
+        try:
+            value = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            if effect:
+                raise AmbiguousLaunchEffect("launch effect returned an invalid acknowledgement") from exc
+            raise AcceptanceError("launch control response is invalid") from exc
+        if not isinstance(value, dict) or value.get("success") is not True:
+            if effect:
+                raise AmbiguousLaunchEffect("launch effect did not return a successful acknowledgement")
+            raise AcceptanceError("launch control response is unsuccessful")
+        return value
+
+    def contracts(self) -> dict[str, Any]:
+        return self._request("/api/exomem/admin/contracts")
+
+    def capacity(self) -> dict[str, Any]:
+        return self._request("/api/exomem/admin/capacity")
+
+    def fleet(self) -> dict[str, Any]:
+        return self._request("/api/exomem/admin/fleet")
+
+    def inspect_invitation(self) -> dict[str, Any]:
+        return self._request(
+            "/api/exomem/access/inspect",
+            method="POST",
+            body={"token": self.invitation_token},
+            operator=False,
+            extra_headers={"origin": self.base_url},
+        )
+
+    def lifecycle(self) -> dict[str, Any]:
+        session = self._secret(self.owner_session_reference, label="owner session")
+        return self._request(
+            "/api/exomem/status",
+            operator=False,
+            authorization_boundary=True,
+            extra_headers={"cookie": "exomem_session=" + session},
+        )
+
+    def mutate_contracts(self, body: dict[str, Any]) -> dict[str, Any]:
+        return self._request(
+            "/api/exomem/admin/contracts",
+            method="POST",
+            body=body,
+            effect=True,
+        )
+
+
+class HostedLaunchRunner:
+    """Resume one launch identity through reconciliable public effects."""
+
+    _STAGES = ("preflight", "runtime_target", "runtime_activation", "consent", "service_ready", "milestone")
+
+    def __init__(
+        self,
+        *,
+        config: dict[str, Any],
+        state_dir: Path,
+        run_id: str,
+        mode: str,
+        milestone: str,
+        allow_loopback_fixture: bool = False,
+        control: Any | None = None,
+    ) -> None:
+        if not _RUN_ID.fullmatch(run_id):
+            raise AcceptanceError("run id is invalid")
+        self.config = config
+        self.state_dir = state_dir.resolve()
+        self.run_id = run_id
+        self.mode = mode
+        self.milestone = milestone
+        self.run_dir = self.state_dir / "runs" / run_id
+        self.manifest_path = self.run_dir / "launch-manifest.json"
+        self.oauth_tokens_path = self.run_dir / "launch-oauth-tokens.json"
+        self.oauth_request_path = self.run_dir / "launch-oauth-request.json"
+        self.oauth_refresh_path = self.run_dir / "launch-oauth-refresh.json"
+        self.lock_path = self.run_dir / "launch.lock"
+        self.control = control
+        self.control_injected = control is not None
+        self.allow_loopback_fixture = allow_loopback_fixture
+
+    @classmethod
+    def from_config(
+        cls,
+        config_path: Path,
+        *,
+        state_dir: Path,
+        run_id: str,
+        mode: str,
+        milestone: str,
+        allow_loopback_fixture: bool = False,
+        control: Any | None = None,
+    ) -> HostedLaunchRunner:
+        return cls(
+            config=validate_launch_config(
+                _read_json(config_path),
+                mode=mode,
+                milestone=milestone,
+                allow_loopback_fixture=allow_loopback_fixture,
+            ),
+            state_dir=state_dir,
+            run_id=run_id,
+            mode=mode,
+            milestone=milestone,
+            allow_loopback_fixture=allow_loopback_fixture,
+            control=control,
+        )
+
+    def _identity(self) -> dict[str, Any]:
+        return {
+            "environment": self.config["environment"],
+            "mode": self.mode,
+            "milestone": self.milestone,
+            "invitation": {"reference": self.config["invitation"]["reference"]},
+            "selected_host": self.config["selected_host"],
+            "oauth_client_id": self.config["oauth"]["client_id"],
+            "release": self.config["release"],
+            "deployment": {
+                key: self.config["deployment"][key]
+                for key in ("source_commit", "lock_digest", "revision")
+            },
+            "resource_maximum": self.config["resource_maximum"],
+        }
+
+    def _config_digest(self) -> str:
+        return hashlib.sha256(canonical_json(self.config)).hexdigest()
+
+    def prepare(self, *, now: float | None = None) -> dict[str, Any]:
+        if self.manifest_path.exists():
+            return self.manifest()
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.run_dir.chmod(0o700)
+        manifest = {
+            "schema_version": 1,
+            "kind": "hosted-launch",
+            "run_id": self.run_id,
+            "config_digest": self._config_digest(),
+            "identity": self._identity(),
+            "created_at": time.time() if now is None else now,
+            "stages": {stage: {"status": "pending"} for stage in self._STAGES},
+            "effects": {},
+        }
+        self._write_manifest(manifest)
+        return manifest
+
+    def _validate_manifest(self, manifest: Mapping[str, Any]) -> None:
+        if (
+            manifest.get("schema_version") != 1
+            or manifest.get("kind") != "hosted-launch"
+            or manifest.get("run_id") != self.run_id
+            or manifest.get("config_digest") != self._config_digest()
+            or manifest.get("identity") != self._identity()
+        ):
+            raise AcceptanceError("launch identity does not match the existing run")
+        stages = manifest.get("stages")
+        effects = manifest.get("effects")
+        if not isinstance(stages, dict) or set(stages) != set(self._STAGES) or not isinstance(effects, dict):
+            raise AcceptanceError("launch state is malformed")
+        for stage in stages.values():
+            if not isinstance(stage, dict) or stage.get("status") not in {"pending", "passed", "blocked"}:
+                raise AcceptanceError("launch stage state is malformed")
+
+    def manifest(self) -> dict[str, Any]:
+        if not self.manifest_path.exists():
+            raise AcceptanceError("launch run has not been prepared")
+        manifest = _read_json(self.manifest_path)
+        self._validate_manifest(manifest)
+        return manifest
+
+    def _write_manifest(self, manifest: dict[str, Any]) -> None:
+        self._validate_manifest(manifest)
+        _atomic_json(self.manifest_path, manifest, private=True)
+
+    @contextmanager
+    def lock(self) -> Any:
+        if fcntl is None:
+            raise AcceptanceError("hosted launch locking requires Linux or WSL")
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.run_dir.chmod(0o700)
+        descriptor = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise AcceptanceError("this launch run is already running") from exc
+            yield
+        finally:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
+    def effect_id(self, name: str) -> str:
+        return "hosted-launch-" + hashlib.sha256(f"{self.run_id}:{name}".encode()).hexdigest()[:32]
+
+    def rearm_expired_stages(self, *, now: float | None = None) -> None:
+        current = time.time() if now is None else now
+        manifest = self.manifest()
+        changed = False
+        for name, stage in manifest["stages"].items():
+            if stage.get("status") != "blocked" or stage.get("reason") != "stage deadline expired with its checkpoint preserved":
+                continue
+            history = list(stage.get("deadline_history", []))
+            history.append({"started_at": stage.get("started_at"), "deadline_at": stage.get("deadline_at")})
+            manifest["stages"][name] = {
+                "status": "pending",
+                "started_at": current,
+                "deadline_at": current + self.config["deadlines_seconds"][name],
+                "deadline_history": history,
+                "observations": 0,
+                "next_check_at": current,
+                "backoff_seconds": self.config["polling"]["initial_seconds"],
+            }
+            changed = True
+        if not changed:
+            raise AcceptanceError("no expired launch stage is available to resume")
+        self._write_manifest(manifest)
+
+    def _secrets(self) -> list[str]:
+        values = []
+        for reference in (
+            self.config["invitation"]["token"],
+            self.config["deployment"]["operator_credential"],
+            self.config["oauth"]["owner_session"],
+        ):
+            value = os.environ.get(reference["name"])
+            if value:
+                values.append(value)
+        return values
+
+    def _secret_values(self) -> list[str]:
+        values = self._secrets()
+        if self.oauth_tokens_path.exists():
+            def collect(value: object) -> list[str]:
+                if isinstance(value, str):
+                    return [value]
+                if isinstance(value, dict):
+                    return [item for child in value.values() for item in collect(child)]
+                if isinstance(value, list):
+                    return [item for child in value for item in collect(child)]
+                return []
+            values.extend(collect(_read_json(self.oauth_tokens_path)))
+        return values
+
+    def save_oauth_tokens(self, tokens: Mapping[str, Any]) -> None:
+        if not isinstance(tokens.get("access_token"), str) or not isinstance(tokens.get("refresh_token"), str):
+            raise AcceptanceError("launch OAuth token state is incomplete")
+        _atomic_json(self.oauth_tokens_path, dict(tokens), private=True)
+
+    def load_oauth_tokens(self) -> dict[str, Any]:
+        if not self.oauth_tokens_path.exists():
+            raise AcceptanceError("launch OAuth token state is unavailable")
+        if stat.S_IMODE(self.oauth_tokens_path.stat().st_mode) & 0o077:
+            raise AcceptanceError("launch OAuth token state is not private")
+        tokens = _read_json(self.oauth_tokens_path)
+        if not isinstance(tokens.get("access_token"), str) or not isinstance(tokens.get("refresh_token"), str):
+            raise AcceptanceError("launch OAuth token state is incomplete")
+        return tokens
+
+    def _mcp_client(self) -> MCPClient:
+        tokens = self.load_oauth_tokens()
+        return MCPClient(
+            endpoint=self.config["oauth"]["resource"],
+            access_token=tokens["access_token"],
+            allow_loopback_fixture=self.mode in {"local", "cluster"},
+        )
+
+    def _oauth_client(self) -> OAuthPKCEClient:
+        return OAuthPKCEClient(
+            authorization_server_metadata=self.config["oauth"]["authorization_server_metadata"],
+            resource=self.config["oauth"]["resource"],
+            client_id=self.config["oauth"]["client_id"],
+            redirect_uri=self.config["oauth"]["redirect_uri"],
+            allow_loopback_fixture=self.mode in {"local", "cluster"},
+        )
+
+    def _authorize_owner(
+        self,
+        manifest: dict[str, Any],
+        *,
+        now: float,
+        authorization_code: str | None,
+        callback_state: str | None,
+    ) -> bool:
+        if self.oauth_tokens_path.exists():
+            tokens = self.load_oauth_tokens()
+            expires_at = tokens.get("expires_at")
+            if expires_at is None or (isinstance(expires_at, (int, float)) and expires_at > now):
+                return True
+            if not isinstance(expires_at, (int, float)):
+                raise AcceptanceError("launch OAuth token expiry is malformed")
+            token_hash = hashlib.sha256(tokens["refresh_token"].encode()).hexdigest()
+            journal = _read_json(self.oauth_refresh_path) if self.oauth_refresh_path.exists() else {"attempts": []}
+            attempts = journal.get("attempts")
+            if not isinstance(attempts, list) or any(not isinstance(item, dict) for item in attempts):
+                raise AcceptanceError("launch OAuth refresh state is malformed")
+            matching = next((item for item in reversed(attempts) if item.get("refresh_token_sha256") == token_hash), None)
+            if matching is None:
+                matching = {
+                    "effect_id": self.effect_id(f"oauth_refresh_{len(attempts) + 1}"),
+                    "status": "in-flight",
+                    "started_at": now,
+                    "refresh_token_sha256": token_hash,
+                }
+                attempts.append(matching)
+                _atomic_json(self.oauth_refresh_path, journal, private=True)
+                oauth = self._oauth_client()
+                try:
+                    rotated = oauth.refresh(oauth.discover(), refresh_token=tokens["refresh_token"])
+                except AcceptanceError:
+                    matching["status"] = "uncertain"
+                    _atomic_json(self.oauth_refresh_path, journal, private=True)
+                else:
+                    rotated["expires_at"] = now + float(rotated.get("expires_in", 0))
+                    self.save_oauth_tokens(rotated)
+                    matching["status"] = "confirmed"
+                    matching["rotated_refresh_token_sha256"] = hashlib.sha256(rotated["refresh_token"].encode()).hexdigest()
+                    _atomic_json(self.oauth_refresh_path, journal, private=True)
+                    return True
+            elif matching.get("status") not in {"in-flight", "uncertain", "confirmed"}:
+                raise AcceptanceError("launch OAuth refresh state is malformed")
+            elif matching.get("status") == "confirmed":
+                raise AcceptanceError("confirmed OAuth refresh returned the same rotating token generation")
+            expired_path = self.run_dir / "launch-oauth-tokens.expired.json"
+            os.replace(self.oauth_tokens_path, expired_path)
+            expired_path.chmod(0o600)
+            self._block(
+                manifest,
+                "consent",
+                now=now,
+                reason="the OAuth refresh acknowledgement is uncertain and its rotating token will not be replayed",
+                next_action="rerun without callback values to start a new authorization grant for the same owner, client and invitation identity",
+            )
+            return False
+        request = _read_json(self.oauth_request_path) if self.oauth_request_path.exists() else None
+        if authorization_code is not None or callback_state is not None:
+            if authorization_code is None or callback_state is None:
+                raise AcceptanceError("OAuth callback code and state must be supplied together")
+            if not isinstance(request, dict):
+                raise AcceptanceError("launch authorization must be started before its callback is resumed")
+            if request.get("status", "pending") != "pending":
+                self._block(
+                    manifest,
+                    "consent",
+                    now=now,
+                    reason="the prior OAuth token response cannot be recovered safely",
+                    next_action="start a new authorization grant for the same owner, client and invitation identity",
+                )
+                return False
+            if not secrets.compare_digest(callback_state, _string(request.get("state"), label="saved OAuth state")):
+                raise AcceptanceError("OAuth callback state does not match")
+            oauth = self._oauth_client()
+            request["status"] = "exchange-in-flight"
+            _atomic_json(self.oauth_request_path, request, private=True)
+            try:
+                tokens = oauth.exchange_code(
+                    oauth.discover(),
+                    code=authorization_code,
+                    state=callback_state,
+                    expected_state=request["state"],
+                    code_verifier=_string(request.get("code_verifier"), label="saved PKCE verifier"),
+                )
+            except AcceptanceError:
+                request["status"] = "exchange-uncertain"
+                _atomic_json(self.oauth_request_path, request, private=True)
+                self._block(
+                    manifest,
+                    "consent",
+                    now=now,
+                    reason="the OAuth token response is uncertain and the authorization code will not be replayed",
+                    next_action="start a new authorization grant for the same owner, client and invitation identity",
+                )
+                return False
+            tokens["expires_at"] = time.time() + float(tokens.get("expires_in", 0))
+            self.save_oauth_tokens(tokens)
+            request["status"] = "exchanged"
+            _atomic_json(self.oauth_request_path, request, private=True)
+            return True
+        if (
+            not isinstance(request, dict)
+            or request.get("status") in {"exchange-in-flight", "exchange-uncertain", "exchanged"}
+        ) and not self.control_injected:
+            oauth = self._oauth_client()
+            request = oauth.authorization_request(oauth.discover())
+            request["status"] = "pending"
+            _atomic_json(self.oauth_request_path, request, private=True)
+        location = str(self.oauth_request_path) if isinstance(request, dict) else "the ordinary host consent flow"
+        self._block(
+            manifest,
+            "consent",
+            now=now,
+            reason="the runner's registered OAuth client still requires ordinary owner authorization",
+            next_action=f"complete the authorization URL stored in {location}, then resume this same launch",
+        )
+        return False
+
+    def _client(self) -> Any:
+        if self.control is None:
+            self.control = HostedLaunchControl(
+                self.config,
+                allow_loopback_fixture=self.mode in {"local", "cluster"},
+            )
+        return self.control
+
+    def _begin_stage(self, manifest: dict[str, Any], stage: str, *, now: float) -> dict[str, Any]:
+        current = manifest["stages"][stage]
+        if "started_at" not in current:
+            current.update(
+                {
+                    "started_at": now,
+                    "deadline_at": now + self.config["deadlines_seconds"][stage],
+                    "observations": 0,
+                    "next_check_at": now,
+                    "backoff_seconds": self.config["polling"]["initial_seconds"],
+                }
+            )
+            self._write_manifest(manifest)
+        else:
+            changed = False
+            for key, value in (
+                ("observations", 0),
+                ("next_check_at", now),
+                ("backoff_seconds", self.config["polling"]["initial_seconds"]),
+            ):
+                if key not in current:
+                    current[key] = value
+                    changed = True
+            if changed:
+                self._write_manifest(manifest)
+        return current
+
+    def _pass(self, manifest: dict[str, Any], stage: str, evidence: Mapping[str, Any]) -> None:
+        prior = manifest["stages"][stage]
+        manifest["stages"][stage] = {
+            **{
+                key: prior[key]
+                for key in ("started_at", "deadline_at", "deadline_history")
+                if key in prior
+            },
+            "status": "passed",
+            "evidence": _redact(dict(evidence), self._secrets()),
+        }
+        self._write_manifest(manifest)
+
+    def _pending(self, manifest: dict[str, Any], stage: str, *, now: float, reason: str) -> None:
+        current = self._begin_stage(manifest, stage, now=now)
+        delay = current["backoff_seconds"]
+        current.update(
+            {
+                "status": "pending",
+                "reason": reason,
+                "observations": current["observations"] + 1,
+                "next_check_at": min(current["deadline_at"], now + delay),
+                "backoff_seconds": min(delay * 2, self.config["polling"]["maximum_seconds"]),
+            }
+        )
+        self._write_manifest(manifest)
+
+    def _block(self, manifest: dict[str, Any], stage: str, *, now: float, reason: str, next_action: str) -> None:
+        current = self._begin_stage(manifest, stage, now=now)
+        current.update(
+            {
+                "status": "blocked",
+                "reason": str(_redact(reason, self._secrets())),
+                "next_action": next_action,
+            }
+        )
+        self._write_manifest(manifest)
+
+    def _deadline_expired(self, manifest: dict[str, Any], stage: str, *, now: float, next_action: str) -> bool:
+        current = self._begin_stage(manifest, stage, now=now)
+        if now <= current["deadline_at"]:
+            return False
+        self._block(
+            manifest,
+            stage,
+            now=now,
+            reason="stage deadline expired with its checkpoint preserved",
+            next_action=next_action,
+        )
+        return True
+
+    def _preflight(self, *, now: float) -> tuple[dict[str, Any], dict[str, Any]]:
+        manifest = self.prepare(now=now)
+        self._begin_stage(manifest, "preflight", now=now)
+        if manifest["stages"]["preflight"]["status"] != "passed" and self._deadline_expired(
+            manifest,
+            "preflight",
+            now=now,
+            next_action="review the expired preflight checkpoint, then explicitly resume this launch",
+        ):
+            return manifest, {}
+        try:
+            client = self._client()
+            contracts = client.contracts()
+            capacity = client.capacity()
+            fleet = client.fleet()
+            consent_passed = manifest["stages"]["consent"]["status"] == "passed"
+            protected_owner_state = self.oauth_tokens_path.exists() and bool(
+                os.environ.get(self.config["oauth"]["owner_session"]["name"])
+            )
+            authorization_started = False
+            if self.oauth_request_path.exists():
+                oauth_request = _read_json(self.oauth_request_path)
+                authorization_started = (
+                    isinstance(oauth_request.get("state"), str)
+                    and isinstance(oauth_request.get("code_verifier"), str)
+                    and oauth_request.get("status") in {"pending", "exchange-in-flight", "exchange-uncertain", "exchanged"}
+                )
+                if not authorization_started:
+                    raise AcceptanceError("launch OAuth request state is malformed")
+            invitation = None if consent_passed or protected_owner_state or authorization_started else client.inspect_invitation()
+        except LaunchAuthorizationExpired as exc:
+            self._block(
+                manifest,
+                "preflight",
+                now=now,
+                reason=str(exc),
+                next_action="refresh the configured operator credential reference, then rerun this launch",
+            )
+            return manifest, {}
+        if any(not isinstance(item, dict) or item.get("success") is not True for item in (contracts, capacity, fleet)):
+            raise AcceptanceError("launch preflight response is unsuccessful")
+        if invitation is not None and (
+            not isinstance(invitation, dict)
+            or invitation.get("success") is not True
+            or not isinstance(invitation.get("expiresAt"), str)
+            or not isinstance(invitation.get("email"), str)
+        ):
+            raise AcceptanceError("launch invitation inspection is invalid")
+        release = self.config["release"]
+        agent = [item for item in contracts.get("agentContracts", []) if isinstance(item, dict) and item.get("id") == release["candidate_id"]]
+        rollout = [item for item in contracts.get("rolloutStatus", []) if isinstance(item, dict) and item.get("candidateId") == release["candidate_id"]]
+        targets = [item for item in contracts.get("runtimeTargets", []) if isinstance(item, dict) and item.get("candidateId") == release["candidate_id"]]
+        if len(agent) != 1 or len(rollout) != 1 or len(targets) != 1:
+            raise AcceptanceError("launch candidate is absent or ambiguous")
+        if agent[0].get("state") not in {"pending", "live", "retired"} or rollout[0].get("state") not in {"pending", "live", "retired"}:
+            raise AcceptanceError("launch rollout state is unknown")
+        if agent[0].get("state") == "retired" or rollout[0].get("state") == "retired":
+            raise AcceptanceError("launch candidate is retired")
+        expected_agent = {
+            "commandFingerprint": release["command_fingerprint"],
+            "schemaDigest": release["schema_digest"],
+            "compatibilityDigest": release["compatibility_digest"],
+        }
+        if any(agent[0].get(key) != value for key, value in expected_agent.items()):
+            raise AcceptanceError("launch candidate identity does not match configuration")
+        target = targets[0]
+        if target.get("sourceRelease") != release["version"] or target.get("importReady") is not True:
+            raise AcceptanceError("launch runtime target is not import-ready")
+        if target.get("runtimeTargetDigest") not in {None, release["runtime_target_digest"]}:
+            raise AcceptanceError("launch runtime target digest conflicts with configuration")
+        routable_digest = rollout[0].get("routableSetDigest")
+        if not isinstance(routable_digest, str) or not _SHA256.fullmatch(routable_digest):
+            raise AcceptanceError("launch routable-set digest is invalid")
+        capacity_value = capacity.get("capacity")
+        required_capacity_fields = {
+            "storageCapacityBytes",
+            "reservedStorageBytes",
+            "runtimeCapacitySlots",
+            "reservedRuntimeSlots",
+            "provisionReservationCapacity",
+            "reservedProvisionSlots",
+            "provisionClaimCapacity",
+            "activeProvisionClaims",
+            "outstandingPaidInvites",
+        }
+        if not isinstance(capacity_value, dict) or not required_capacity_fields <= set(capacity_value) or any(type(capacity_value[key]) is not int or capacity_value[key] < 0 for key in required_capacity_fields):
+            raise AcceptanceError("launch capacity status is invalid")
+        maximum = self.config["resource_maximum"]
+        if maximum["storage_bytes"] > capacity_value["storageCapacityBytes"] or maximum["runtime_slots"] > capacity_value["runtimeCapacitySlots"] or maximum["provision_claims"] > capacity_value["provisionClaimCapacity"]:
+            raise AcceptanceError("launch resource maximum exceeds the observed global ceiling")
+        initial_capacity_check = not (consent_passed or protected_owner_state or authorization_started)
+        if initial_capacity_check and (
+            capacity_value["storageCapacityBytes"] - capacity_value["reservedStorageBytes"] < maximum["storage_bytes"]
+            or capacity_value["runtimeCapacitySlots"] - capacity_value["reservedRuntimeSlots"] < maximum["runtime_slots"]
+            or capacity_value["provisionClaimCapacity"] - capacity_value["activeProvisionClaims"] < maximum["provision_claims"]
+        ):
+            raise AcceptanceError("launch resource maximum does not fit available capacity")
+        observation = fleet.get("observation")
+        if not isinstance(observation, dict) or observation.get("artifact") != "exomem-hosted-substrate-fleet-observation" or observation.get("schemaVersion") != 1:
+            raise AcceptanceError("launch fleet observation is invalid")
+        for field in ("routableCells", "tenantBindings", "assignments", "unfinishedOperations", "capacityClaims", "reviewerAuthorities", "reviewerTenants"):
+            if not isinstance(observation.get(field), list):
+                raise AcceptanceError("launch fleet observation is invalid")
+        if observation["reviewerAuthorities"] or observation["reviewerTenants"]:
+            raise AcceptanceError("reviewer bootstrap resources cannot satisfy launch preflight")
+        deployment_evidence = {
+            "declared": self._identity()["deployment"],
+            "observed": {
+                "runtime_cells": len(observation["routableCells"]),
+                "image": "unavailable-from-public-status",
+                "lock": "unavailable-from-public-status",
+            },
+            "status": "pending-independent-deployment-proof",
+        }
+        self._pass(
+            manifest,
+            "preflight",
+            {
+                "candidate_id": release["candidate_id"],
+                "runtime_target_imported": target["runtimeTargetDigest"] is not None,
+                "candidate_state": agent[0]["state"],
+                "routable_set_digest": routable_digest,
+                "capacity": capacity_value,
+                "capacity_check": "available-for-initial-admission" if initial_capacity_check else "global-ceiling-only-during-same-attempt-resume",
+                "invitation": {
+                    "reference": self.config["invitation"]["reference"],
+                    "status": "consumed-or-authorized" if consent_passed or protected_owner_state else "available",
+                },
+                "deployment_verification": deployment_evidence,
+            },
+        )
+        return manifest, {"contracts": contracts, "agent": agent[0], "rollout": rollout[0], "target": target}
+
+    def _record_effect_intent(self, manifest: dict[str, Any], name: str, body: Mapping[str, Any]) -> None:
+        digest = hashlib.sha256(canonical_json(body)).hexdigest()
+        existing = manifest["effects"].get(name)
+        if existing is not None and (existing.get("effect_id") != self.effect_id(name) or existing.get("request_sha256") != digest):
+            raise AcceptanceError("launch effect identity conflicts with its durable intent")
+        if existing is None:
+            manifest["effects"][name] = {
+                "effect_id": self.effect_id(name),
+                "request_sha256": digest,
+                "status": "intent",
+            }
+            self._write_manifest(manifest)
+
+    def _confirm_effect(self, manifest: dict[str, Any], name: str, evidence: Mapping[str, Any]) -> None:
+        effect = manifest["effects"].get(name)
+        if not isinstance(effect, dict):
+            raise AcceptanceError("launch effect has no durable intent")
+        effect.update({"status": "confirmed", "evidence": _redact(dict(evidence), self._secrets())})
+        self._write_manifest(manifest)
+
+    def _mark_effect_uncertain(self, manifest: dict[str, Any], name: str) -> None:
+        effect = manifest["effects"].get(name)
+        if not isinstance(effect, dict):
+            raise AcceptanceError("launch effect has no durable intent")
+        effect["status"] = "uncertain"
+        self._write_manifest(manifest)
+
+    def _report(self, manifest: Mapping[str, Any], *, preflight_only: bool = False) -> dict[str, Any]:
+        stages = manifest["stages"]
+        blocked = [name for name, stage in stages.items() if stage["status"] == "blocked"]
+        if preflight_only and not blocked:
+            outcome = "preflight-passed"
+        elif blocked:
+            outcome = "needs-attention"
+        elif all(stage["status"] == "passed" for stage in stages.values()):
+            outcome = "passed"
+        else:
+            outcome = "pending"
+        return {
+            "schema_version": 1,
+            "run_id": self.run_id,
+            "outcome": outcome,
+            "identity": manifest["identity"],
+            "stages": stages,
+            "effects": manifest["effects"],
+        }
+
+    def _run_useful_memory(self, manifest: dict[str, Any], *, now: float) -> bool:
+        client = self._mcp_client()
+        initialized = client.initialize()
+        tools = client.list_tools().get("tools")
+        names = [item.get("name") for item in tools if isinstance(item, dict)] if isinstance(tools, list) else []
+        if not initialized or not {"remember", "ask_memory", "read_memory"} <= set(names):
+            raise AcceptanceError("canonical hosted memory tools are unavailable")
+        fact = f"hosted owner launch marker for run {self.run_id}"
+        arguments = {
+            "title": f"Hosted owner launch {self.run_id}",
+            "content": f"## Observations\n- [acceptance] {fact} #hosted ^{self.run_id}-owner",
+            "note_type": "insight",
+            "sources": [],
+        }
+        self._record_effect_intent(manifest, "owner_memory", arguments)
+        try:
+            terminal = AcceptanceRunner.remember_with_review(
+                self,  # type: ignore[arg-type]
+                client,
+                mutation="owner-launch-memory",
+                arguments=arguments,
+                idempotency_key=self.effect_id("owner_memory"),
+            )
+        except AcceptanceError:
+            journal = self.run_dir / "mutations" / "owner-launch-memory.json"
+            if not journal.exists() or _read_json(journal).get("status") != "prepared":
+                raise
+            self._mark_effect_uncertain(manifest, "owner_memory")
+            self._pending(
+                manifest,
+                "service_ready",
+                now=now,
+                reason="owner memory acknowledgement is uncertain; the same reviewed write will be replayed",
+            )
+            return False
+        self._confirm_effect(manifest, "owner_memory", {"status": terminal.get("status", "committed")})
+        fresh = self._mcp_client()
+        fresh.initialize()
+        recall = _tool_result(fresh.recall(f"What owner launch marker was recorded for run {self.run_id}?"))
+        hits = recall.get("hits")
+        if not isinstance(hits, list):
+            raise AcceptanceError("owner paraphrased recall returned no hits")
+        citation = None
+        for hit in hits[:10]:
+            path = hit.get("path") if isinstance(hit, dict) else None
+            if not isinstance(path, str) or not path.startswith("Knowledge Base/"):
+                continue
+            readback = _tool_result(fresh.call("tools/call", {"name": "read_memory", "arguments": {"path": path}}))
+            if fact in json.dumps(readback):
+                citation = path
+                break
+        if citation is None:
+            self._pending(
+                manifest,
+                "service_ready",
+                now=now,
+                reason="owner memory is committed but its resolvable recall citation is not indexed yet",
+            )
+            return False
+        self._pass(
+            manifest,
+            "service_ready",
+            {
+                "lifecycle": "ready",
+                "initialize": "passed",
+                "tools": [str(name) for name in names],
+                "durable_capture": "committed",
+                "paraphrased_recall": "passed",
+                "citation": citation,
+            },
+        )
+        return True
+
+    def advance(
+        self,
+        *,
+        execute: bool,
+        now: float | None = None,
+        authorization_code: str | None = None,
+        callback_state: str | None = None,
+    ) -> dict[str, Any]:
+        current = time.time() if now is None else now
+        manifest, status = self._preflight(now=current)
+        if manifest["stages"]["preflight"]["status"] == "blocked":
+            return self._report(manifest)
+        if not execute:
+            return self._report(manifest, preflight_only=True)
+        release = self.config["release"]
+        target = status["target"]
+        target_imported = target.get("runtimeTargetDigest") == release["runtime_target_digest"]
+        if target_imported:
+            if "runtime_target" in manifest["effects"]:
+                self._confirm_effect(manifest, "runtime_target", {"runtime_target_digest": release["runtime_target_digest"], "reconciled": True})
+            self._pass(manifest, "runtime_target", {"runtime_target_digest": release["runtime_target_digest"]})
+        else:
+            if self._deadline_expired(manifest, "runtime_target", now=current, next_action="verify the imported runtime target, then rerun this launch"):
+                return self._report(manifest)
+            body = {"action": "import-runtime-target", "candidateId": release["candidate_id"]}
+            self._record_effect_intent(manifest, "runtime_target", body)
+            try:
+                response = self._client().mutate_contracts(body)
+            except AmbiguousLaunchEffect:
+                self._mark_effect_uncertain(manifest, "runtime_target")
+                self._pending(manifest, "runtime_target", now=current, reason="runtime target acknowledgement is uncertain; authoritative status will be reread")
+                return self._report(manifest)
+            if (
+                response.get("candidateId") != release["candidate_id"]
+                or response.get("runtimeTargetDigest") != release["runtime_target_digest"]
+                or response.get("outcome") not in {"imported", "unchanged"}
+            ):
+                raise AcceptanceError("runtime target acknowledgement is invalid")
+            self._confirm_effect(manifest, "runtime_target", {"runtime_target_digest": response["runtimeTargetDigest"], "outcome": response["outcome"]})
+            self._pass(manifest, "runtime_target", {"runtime_target_digest": response["runtimeTargetDigest"]})
+            status["contracts"] = self._client().contracts()
+            matching = [item for item in status["contracts"].get("rolloutStatus", []) if isinstance(item, dict) and item.get("candidateId") == release["candidate_id"]]
+            if len(matching) != 1:
+                raise AcceptanceError("launch rollout became absent or ambiguous")
+            status["rollout"] = matching[0]
+            status["agent"] = next((item for item in status["contracts"].get("agentContracts", []) if isinstance(item, dict) and item.get("id") == release["candidate_id"]), None)
+        active = isinstance(status.get("agent"), dict) and status["agent"].get("state") == "live"
+        if active:
+            if "runtime_activation" in manifest["effects"]:
+                self._confirm_effect(manifest, "runtime_activation", {"candidate_id": release["candidate_id"], "reconciled": True})
+            self._pass(manifest, "runtime_activation", {"candidate_id": release["candidate_id"]})
+        else:
+            if self._deadline_expired(manifest, "runtime_activation", now=current, next_action="verify the active runtime candidate, then rerun this launch"):
+                return self._report(manifest)
+            rollout_digest = status["rollout"].get("routableSetDigest")
+            if not isinstance(rollout_digest, str) or not _SHA256.fullmatch(rollout_digest):
+                raise AcceptanceError("launch routable-set digest is invalid")
+            live = status["contracts"].get("liveCohortCandidateId")
+            if live is not None and (not isinstance(live, str) or not _UUID.fullmatch(live)):
+                raise AcceptanceError("launch live candidate state is invalid")
+            body = {
+                "action": "activate-runtime",
+                "candidateId": release["candidate_id"],
+                "expectedLiveCandidateId": live,
+                "expectedRoutableCellDigest": rollout_digest,
+            }
+            self._record_effect_intent(manifest, "runtime_activation", body)
+            try:
+                response = self._client().mutate_contracts(body)
+            except AmbiguousLaunchEffect:
+                self._mark_effect_uncertain(manifest, "runtime_activation")
+                self._pending(manifest, "runtime_activation", now=current, reason="runtime activation acknowledgement is uncertain; authoritative status will be reread")
+                return self._report(manifest)
+            if response.get("result") not in {"activated", "already_active"}:
+                raise AcceptanceError("runtime activation was not accepted")
+            self._confirm_effect(manifest, "runtime_activation", {"candidate_id": release["candidate_id"], "outcome": response["result"]})
+            self._pass(manifest, "runtime_activation", {"candidate_id": release["candidate_id"]})
+        if manifest["stages"]["consent"]["status"] != "passed" and self._deadline_expired(
+            manifest,
+            "consent",
+            now=current,
+            next_action="start a new same-identity authorization checkpoint after reviewing the expired attempt",
+        ):
+            return self._report(manifest)
+        if not self._authorize_owner(
+            manifest,
+            now=current,
+            authorization_code=authorization_code,
+            callback_state=callback_state,
+        ):
+            return self._report(manifest)
+        owner_session = os.environ.get(self.config["oauth"]["owner_session"]["name"])
+        if not owner_session:
+            self._block(
+                manifest,
+                "consent",
+                now=current,
+                reason="the protected owner session is unavailable",
+                next_action=(
+                    f"complete {self.config['selected_host']} authorization for existing invitation "
+                    f"{self.config['invitation']['reference']}, preserve its OAuth token and owner-session state, "
+                    "then resume this same launch"
+                ),
+            )
+            return self._report(manifest)
+        self._pass(
+            manifest,
+            "consent",
+            {
+                "host": self.config["selected_host"],
+                "client_id": self.config["oauth"]["client_id"],
+                "invitation_reference": self.config["invitation"]["reference"],
+                "credential_state": "protected",
+                "owner_association": "unverified-private-operator-checkpoint",
+            },
+        )
+        if self._deadline_expired(
+            manifest,
+            "service_ready",
+            now=current,
+            next_action="inspect the preserved lifecycle operation, then rerun this launch",
+        ):
+            return self._report(manifest)
+        try:
+            lifecycle = self._client().lifecycle()
+        except LaunchAuthorizationExpired as exc:
+            self._block(
+                manifest,
+                "consent",
+                now=current,
+                reason=str(exc),
+                next_action="reauthorize the same owner, client and invitation identity, then resume this launch",
+            )
+            return self._report(manifest)
+        status_value = lifecycle.get("status") if isinstance(lifecycle, dict) and lifecycle.get("success") is True else None
+        allowed_states = {"awaiting_payment", "preparing", "ready", "degraded", "suspended", "deletion_pending", "deleted"}
+        if (
+            not isinstance(status_value, dict)
+            or status_value.get("state") not in allowed_states
+            or not isinstance(status_value.get("code"), str)
+            or type(status_value.get("retryable")) is not bool
+        ):
+            raise AcceptanceError("owner lifecycle status is invalid")
+        if status_value["state"] != "ready":
+            if status_value["retryable"] and status_value["state"] in {"preparing", "degraded"}:
+                self._pending(
+                    manifest,
+                    "service_ready",
+                    now=current,
+                    reason=f"owner lifecycle is {status_value['state']} ({status_value['code']})",
+                )
+                return self._report(manifest)
+            raise AcceptanceError(f"owner lifecycle refused launch readiness ({status_value['code']})")
+        if not self._run_useful_memory(manifest, now=current):
+            return self._report(manifest)
+        next_action = (
+            "complete owner host confirmation, continuity, governance readiness and backup/restore evidence"
+            if self.milestone == "owner"
+            else "complete friends paid-path, isolation, capacity and recovery evidence"
+        )
+        if self._deadline_expired(
+            manifest,
+            "milestone",
+            now=current,
+            next_action="review the expired milestone checkpoint, then explicitly resume this launch",
+        ):
+            return self._report(manifest)
+        self._block(
+            manifest,
+            "milestone",
+            now=current,
+            reason="the useful-memory protocol check does not complete the full milestone",
+            next_action=next_action,
+        )
+        return self._report(manifest)
+
+    def run_until_checkpoint(
+        self,
+        *,
+        execute: bool,
+        authorization_code: str | None = None,
+        callback_state: str | None = None,
+        clock: Any = time.time,
+        sleeper: Any = time.sleep,
+    ) -> dict[str, Any]:
+        report = self.advance(
+            execute=execute,
+            now=clock(),
+            authorization_code=authorization_code,
+            callback_state=callback_state,
+        )
+        while execute and report["outcome"] == "pending":
+            checks = [
+                stage["next_check_at"]
+                for stage in report["stages"].values()
+                if stage.get("status") == "pending" and isinstance(stage.get("next_check_at"), (int, float))
+            ]
+            if not checks:
+                return report
+            now = clock()
+            sleeper(max(0.0, min(checks) - now))
+            report = self.advance(execute=True, now=clock())
+        return report
 
 
 class AcceptanceRunner:
@@ -843,7 +2086,15 @@ class AcceptanceRunner:
             if status == "confirmed":
                 if (
                     not isinstance(terminal, dict)
-                    or not committed_tool_receipt({"structuredContent": terminal})
+                    or not (
+                        committed_tool_receipt({"structuredContent": terminal})
+                        or released_memory_receipt(
+                            {"structuredContent": terminal},
+                            expected_draft_id=commit_arguments["draft_id"],
+                            expected_draft_hash=commit_arguments["draft_hash"],
+                            expected_path=journal.get("destination"),
+                        )
+                    )
                 ):
                     raise AcceptanceError("confirmed mutation journal has no terminal")
                 acknowledgement_sha256 = hashlib.sha256(
@@ -864,9 +2115,10 @@ class AcceptanceRunner:
                 "validate_only": True,
             }
             validation = _tool_result(client.capture(validation_arguments))
-            diagnostics = validation.get("diagnostics")
+            diagnostics = validation.get("diagnostics", validation)
+            reviewable = validation.get("state") == "needs_review" or validation.get("mutated") is False
             if (
-                validation.get("state") != "needs_review"
+                not reviewable
                 or not isinstance(diagnostics, dict)
                 or diagnostics.get("has_non_review_blockers") is not False
             ):
@@ -911,13 +2163,22 @@ class AcceptanceRunner:
                     ).hexdigest(),
                     "idempotency_key": idempotency_key,
                     "status": "prepared",
+                    "destination": diagnostics.get("destination"),
                     "arguments": commit_arguments,
                 },
                 private=True,
             )
 
         result = client.capture(commit_arguments, idempotency_key=idempotency_key)
-        if not committed_tool_receipt(result):
+        if not (
+            committed_tool_receipt(result)
+            or released_memory_receipt(
+                result,
+                expected_draft_id=commit_arguments["draft_id"],
+                expected_draft_hash=commit_arguments["draft_hash"],
+                expected_path=(diagnostics.get("destination") if "diagnostics" in locals() else journal.get("destination")),
+            )
+        ):
             raise AcceptanceError("remember commit has no durable acknowledgement")
         terminal = dict(_tool_result(result))
         commit_arguments_sha256 = hashlib.sha256(
@@ -1200,7 +2461,7 @@ def _citation_for_fact(result: Mapping[str, Any], fact: str) -> str:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("prepare", "authorize", "status", "run", "cleanup", "corpus", "seed-corpus", "benchmark"))
+    parser.add_argument("action", choices=("prepare", "authorize", "status", "run", "cleanup", "corpus", "seed-corpus", "benchmark", "launch"))
     parser.add_argument("--config", type=Path, required=True, help="public acceptance configuration JSON")
     parser.add_argument("--state-dir", type=Path, required=True, help="private task-owned state directory")
     parser.add_argument("--run-id", required=True)
@@ -1209,12 +2470,38 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--authorization-code", help="callback code obtained through the public authorization flow")
     parser.add_argument("--callback-state", help="callback state obtained through the public authorization flow")
     parser.add_argument("--tenant", choices=("synthetic", "isolation"), default="synthetic")
+    parser.add_argument("--mode", choices=("local", "cluster", "live"))
+    parser.add_argument("--milestone", choices=("owner", "friends"))
+    parser.add_argument("--execute", action="store_true", help="allow reconciliable launch effects")
     return parser
 
 
 def main(argv: Sequence[str] | None = None, *, allow_loopback_fixture: bool = False) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.action == "launch":
+            if args.mode is None or args.milestone is None:
+                raise AcceptanceError("launch mode and milestone are required")
+            launch = HostedLaunchRunner.from_config(
+                args.config,
+                state_dir=args.state_dir,
+                run_id=args.run_id,
+                mode=args.mode,
+                milestone=args.milestone,
+                allow_loopback_fixture=allow_loopback_fixture,
+            )
+            with launch.lock():
+                if args.resume:
+                    launch.rearm_expired_stages()
+                rendered = launch.run_until_checkpoint(
+                    execute=args.execute,
+                    authorization_code=args.authorization_code,
+                    callback_state=args.callback_state,
+                )
+            if args.report:
+                _atomic_json(args.report, rendered)
+            print(canonical_json(rendered).decode("utf-8"), end="")
+            return 0
         runner = AcceptanceRunner.from_config(args.config, state_dir=args.state_dir, run_id=args.run_id, allow_loopback_fixture=allow_loopback_fixture)
         manifest = runner.prepare(resume=args.resume)
         if args.action == "authorize":

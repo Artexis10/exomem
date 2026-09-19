@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from numbers import Real
 from pathlib import Path, PurePosixPath
 
-from .. import bm25, find_policy, fusion, ranking_config
+from .. import bm25, find_corpus, find_policy, fusion, ranking_config
 from ..find_types import GraphProvenance, Hit
 from ..kbdir import kb_dirname
 from . import (
@@ -1292,6 +1292,30 @@ def _should_auto_rerank(
     return 1.0 - overlap / max(len(vector), len(lexical)) > 0.5
 
 
+def _without_navigation_candidates(
+    authorization: projected_retrieval.AuthorizationProjectionMap,
+) -> projected_retrieval.AuthorizationProjectionMap:
+    """Exclude navigation from retrieval without changing canonical membership."""
+
+    navigation = frozenset(
+        selection.item_identity
+        for selection in authorization.selections
+        if PurePosixPath(selection.item_identity).name.casefold()
+        in find_corpus.NAVIGATION_BASENAMES
+    )
+    if not navigation:
+        return authorization
+    return projected_retrieval.AuthorizationProjectionMap(
+        namespace_key=authorization.namespace_key,
+        selections=tuple(
+            selection
+            for selection in authorization.selections
+            if selection.item_identity not in navigation
+        ),
+        withheld_identities=authorization.withheld_identities.union(navigation),
+    )
+
+
 def _find_projected_hits_pinned(
     vault_root: Path,
     runtime: ActiveProjectionRuntime,
@@ -1442,15 +1466,18 @@ def _find_projected_hits_pinned(
         if not inline_withheld
         else authorization.withheld_identities.union(inline_withheld)
     )
+    # Keep policy decisions and continuation binding intact; every candidate lane
+    # shares the narrower selector so navigation cannot enter scoring or traversal.
+    retrieval_authorization = _without_navigation_candidates(authorization)
     by_identity = {
         selection.item_identity: selection
-        for selection in authorization.selections
+        for selection in retrieval_authorization.selections
         if selection.projection_variant_id is not None
     }
     selected_count = len(by_identity)
     selected_variants = {
         variant.item_identity: variant
-        for variant in runtime.catalog.select(authorization)
+        for variant in runtime.catalog.select(retrieval_authorization)
     }
     has_selected_l6 = any(
         variant.decision_level == 6 for variant in selected_variants.values()
@@ -1486,18 +1513,18 @@ def _find_projected_hits_pinned(
 
     if mode == "keyword":
         lane_hits["keyword"] = runtime.lexical_index.search_keyword(
-            authorization,
+            retrieval_authorization,
             query,
             k=lane_depth,
         )
     elif mode == "hybrid":
         lane_hits["bm25"] = runtime.lexical_index.search_bm25(
-            authorization,
+            retrieval_authorization,
             query,
             k=lane_depth,
         )
         lane_hits["keyword"] = runtime.lexical_index.search_keyword(
-            authorization,
+            retrieval_authorization,
             query,
             k=lane_depth,
         )
@@ -1531,7 +1558,7 @@ def _find_projected_hits_pinned(
                 else:
                     try:
                         lane_hits["vector"] = vector_index.search_vector(
-                            authorization,
+                            retrieval_authorization,
                             query_vector,
                             k=lane_depth,
                         )
@@ -1570,7 +1597,7 @@ def _find_projected_hits_pinned(
                 else:
                     try:
                         lane_hits["clip"] = clip_index.search_clip(
-                            authorization,
+                            retrieval_authorization,
                             clip_query,
                             k=lane_depth,
                         )
@@ -1595,7 +1622,7 @@ def _find_projected_hits_pinned(
             warming.add("graph")
         else:
             try:
-                admitted = runtime.graph_index.authorize(authorization)
+                admitted = runtime.graph_index.authorize(retrieval_authorization)
                 seeds: list[str] = []
                 seen_seeds: set[str] = set()
                 graph_seed_cap = min(
@@ -1780,7 +1807,7 @@ def _find_projected_hits_pinned(
 
         try:
             reranked = runtime.reranker.rerank_batch(
-                authorization,
+                retrieval_authorization,
                 query,
                 ordered_identities,
                 scorer=score_projected_passages,

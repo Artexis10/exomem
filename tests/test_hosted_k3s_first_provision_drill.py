@@ -148,20 +148,13 @@ RUNTIME_TARGET_FIELDS = (
 OWNER = OpaqueProviderMetadata(
     "tenant-first-provision", "cell-first-provision", "provision-first-provision", 1
 )
-RUNTIME_IMAGE = (
-    "ghcr.io/artexis10/exomem@"
-    "sha256:73ab2439e653d490b800eb810c370e297da0efcad176557756b46b89b5c82172"
-)
-RUNTIME_RELEASE = "0.77.0"
-RUNTIME_TARGET = {
-    "releaseVersion": RUNTIME_RELEASE,
-    "protocolVersion": "1",
-    "agentProfile": "hosted-alpha-agent-v4",
-    "gatewayContractDigest": "fa554d6c379d0c98aa8bf9cb31525d1b5be6ff19647afedba35f3e2058b85be1",
-    "commandFingerprint": "4b4b71280fec7915042483207b1ab0e15e916148ac1b88ef965e03671de80968",
-    "schemaDigest": "60b5aec6f872874234a214e778e26ce57fa5805af8ce744bdd68efe8ca0fcb26",
-}
-COMPATIBILITY_DIGEST = "320e75168c5f72b73551e56f43a82b8d3ee77bf39158ae42ef3292a25b576ec6"
+from hosted_rehearsal_target import load_rehearsal_target  # noqa: E402
+
+REVIEWED_RUNTIME_TARGET = load_rehearsal_target()
+RUNTIME_IMAGE = REVIEWED_RUNTIME_TARGET["runtimeImage"]
+RUNTIME_RELEASE = REVIEWED_RUNTIME_TARGET["releaseVersion"]
+RUNTIME_TARGET = {name: REVIEWED_RUNTIME_TARGET[name] for name in RUNTIME_TARGET_FIELDS}
+COMPATIBILITY_DIGEST = REVIEWED_RUNTIME_TARGET["compatibilityDigest"]
 TRAEFIK_CHART_VERSION = "41.0.2"
 # The live admission requires the pass clock to sit 0-30 s after its own
 # observation, so every pass runs slightly ahead of the wall clock.
@@ -320,7 +313,7 @@ def first_provision_k3s(
 
 @pytest.fixture(scope="module")
 def drill_images(first_provision_k3s: tuple[str, Path]) -> Iterator[DrillImages]:
-    """Import immutable runtime 0.77.0 and build the current provisioner image."""
+    """Import the selected immutable runtime and build the current provisioner image."""
 
     k3s, _kubeconfig = first_provision_k3s
     provisioner: str | None = None

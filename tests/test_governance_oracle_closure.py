@@ -182,13 +182,120 @@ _DEFAULT_VISIBLE_BODIES = (
 )
 
 
+@pytest.mark.parametrize("mode", ["keyword", "hybrid", "vector"])
+def test_catalog_navigation_never_enters_projected_retrieval_lanes(monkeypatch, tmp_path, mode):
+    hidden_path = "Knowledge Base/private/restricted-project.md"
+    navigation = (
+        "Knowledge Base/index.md",
+        "Knowledge Base/log.md",
+        "Knowledge Base/Notes/INDEX.md",
+    )
+    visible_paths = tuple(f"Knowledge Base/visible-{index}.md" for index in range(3))
+    passages_seen = []
+
+    def runtime_factory(hidden_bodies):
+        visible = Scope(id="visible", source="scopes/visible.yaml")
+        hidden = Scope(id="hidden", source="scopes/hidden.yaml", default_deny=True)
+        policy = Policy(fingerprint="9" * 64, scopes={visible.id: visible, hidden.id: hidden})
+        items = [
+            _projected_item(
+                policy,
+                path=path,
+                scope_id=visible.id,
+                body=f"catalogfixture useful item {index}",
+                media_type="image" if index == 0 else None,
+            )
+            for index, path in enumerate(visible_paths)
+        ]
+        edges = [
+            projected_graph.ProjectionGraphEdge(
+                source_item_identity=visible_paths[0],
+                target_item_identity=visible_paths[1],
+                relation_type="supports",
+            )
+        ]
+        if hidden_bodies:
+            items.append(
+                _projected_item(policy, path=hidden_path, scope_id=hidden.id, body=hidden_bodies[0])
+            )
+            for path in navigation:
+                items.append(
+                    _projected_item(
+                        policy,
+                        path=path,
+                        scope_id=visible.id,
+                        body=f"catalogfixture restricted-project secret-nav-marker [[{hidden_path}]]",
+                        media_type="image",
+                    )
+                )
+                edges.extend(
+                    (
+                        projected_graph.ProjectionGraphEdge(
+                            source_item_identity=visible_paths[0],
+                            target_item_identity=path,
+                            relation_type="supports",
+                        ),
+                        projected_graph.ProjectionGraphEdge(
+                            source_item_identity=path,
+                            target_item_identity=visible_paths[2],
+                            relation_type="supports",
+                        ),
+                    )
+                )
+        return _runtime_from_items(
+            policy,
+            tuple(items),
+            vector_for_variant=lambda _variant: (1.0, 1.0),
+            clip_samples_for_variant=lambda variant: (
+                (projected_retrieval.ProjectionClipSample(None, (1.0, 1.0)),)
+                if projected_retrieval.clip_variant_applicable(variant)
+                else None
+            ),
+            graph_edges_for_variant=lambda variant: tuple(
+                edge for edge in edges if edge.source_item_identity == variant.item_identity
+            ),
+        )
+
+    def rerank_scorer(_query, passages):
+        passages_seen.extend(passages)
+        return [1.0 for _ in passages]
+
+    request = _request(query="catalogfixture", limit=1, mode=mode)
+    request.update(graph=mode != "keyword", rerank=mode != "keyword")
+    runtimes, pages = _wire_pages(
+        monkeypatch,
+        tmp_path,
+        hidden_bodies=("owner-only restricted-project secret-nav-marker",),
+        request=request,
+        max_pages=4,
+        query_vector=(1.0, 1.0),
+        clip_query_vector=(1.0, 1.0),
+        rerank_scorer=rerank_scorer,
+        runtime_factory=runtime_factory,
+    )
+    runtime = runtimes["present"]
+    authorization = projection_authorization.build_authorization_map(
+        runtime.namespace,
+        policy=runtime.snapshot.policy,
+        audience="oracle-external",
+        catalog=runtime.catalog,
+    )
+    assert hidden_path in authorization.withheld_identities
+    assert all(path not in authorization.withheld_identities for path in navigation)
+    assert len(pages["present"]) == len(pages["absent"]) == 3
+    for present, absent in zip(pages["present"], pages["absent"], strict=True):
+        _assert_same_success_envelope({"present": present, "absent": absent})
+        assert b"restricted-project" not in present.content
+        assert b"secret-nav-marker" not in present.content
+        assert all(hit["path"] in visible_paths for hit in present.json()["data"]["hits"])
+    assert all("secret-nav-marker" not in passage for passage in passages_seen)
+
+
 def _runtime_from_items(
     policy: Policy,
     items: tuple[projection_store.ProjectionItemVariants, ...],
     *,
-    vector_for_variant: Callable[
-        [projections.ProjectionVariant], tuple[float, ...] | None
-    ]
+    vector_for_variant: Callable[[projections.ProjectionVariant], tuple[float, ...] | None]
     | None = None,
     clip_samples_for_variant: Callable[
         [projections.ProjectionVariant],

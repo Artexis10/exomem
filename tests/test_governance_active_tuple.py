@@ -8441,3 +8441,253 @@ def test_v4_policy_loader_reuses_only_exact_pinned_source_compiles(
 
     assert policy.load(vault).rules[0].ceiling == 2
     assert calls == 2
+
+
+def test_planned_navigation_write_adopts_only_exact_guarded_legacy_predecessor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    target = vault / "Knowledge Base" / "index.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Knowledge Base\n", encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    before, guard = vault_module.read_guarded_text(vault, target)
+    write = vault_module.PlannedWrite(
+        target,
+        before + "\n## Recent activity\n",
+        guard=guard,
+    )
+
+    prepared = catalog_publication.prepare_planned_markdown_batch(
+        vault, writes=(write,), now=now + 1
+    )
+
+    assert prepared is not None
+    assert {item.item_identity for item in prepared.target_items} == {"Knowledge Base/index.md"}
+
+
+def test_raw_or_unguarded_navigation_mutation_cannot_adopt_legacy_predecessor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    target = vault / "Knowledge Base" / "index.md"
+    target.parent.mkdir(parents=True)
+    before = "# Knowledge Base\n"
+    target.write_text(before, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    with pytest.raises(catalog_publication.CatalogPublicationError, match="predecessor"):
+        catalog_publication.prepare_markdown_batch(
+            vault,
+            mutations=(
+                catalog_publication.MarkdownCatalogMutation(
+                    "Knowledge Base/index.md",
+                    before + "\n## Recent activity\n",
+                    vault_module.content_hash(before),
+                ),
+            ),
+            now=now + 1,
+        )
+
+    with pytest.raises(catalog_publication.CatalogPublicationError, match="predecessor"):
+        catalog_publication.prepare_planned_markdown_batch(
+            vault,
+            writes=(
+                vault_module.PlannedWrite(
+                    target,
+                    before + "\n## Recent activity\n",
+                    expected_hash=vault_module.content_hash(before),
+                ),
+            ),
+            now=now + 1,
+        )
+
+
+def _legacy_navigation_capture_vault(tmp_path, monkeypatch, *, lane=None):
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    kb = vault / "Knowledge Base"
+    kb.mkdir(parents=True)
+    (kb / "index.md").write_text("# Knowledge Base\n\n## Recent activity\n", encoding="utf-8")
+    (kb / "log.md").write_text("# Log\n\n---\n", encoding="utf-8")
+    relative = "Knowledge Base/Notes/prior.md"
+    source = "---\ntitle: Prior\nstatus: draft\n---\n\nPrior content.\n"
+    (vault / relative).parent.mkdir()
+    (vault / relative).write_text(source, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    if lane == "vector":
+        migration, _ = _migrate_with_vector_projection_items(
+            vault, items=((relative, source),), now=now
+        )
+        monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+        monkeypatch.setattr(
+            embeddings, "embed_texts", lambda texts, *, is_query: [(9.0, 1.0) for _ in texts]
+        )
+    else:
+        migration = _migrate_with_projection_items(
+            vault, items=((relative, source),), graph_edges=() if lane == "graph" else None, now=now
+        )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    return vault, migration
+
+
+@pytest.mark.parametrize("lane", [None, "graph", "vector"])
+def test_legacy_navigation_capture_preserves_measurement_closure(tmp_path, monkeypatch, lane):
+    vault, migration = _legacy_navigation_capture_vault(tmp_path, monkeypatch, lane=lane)
+    old_active, old_manifest, old_items = _load_active_projection_items(
+        vault, activation_epoch=1, activation_state_digest=migration.activation_state_digest
+    )
+    kwargs = dict(
+        path="Knowledge Base/Notes/Insights/new.md",
+        content="New governed content.\n",
+        frontmatter={"title": "New", "status": "draft", "type": "insight"},
+        today=dt.date(2026, 9, 19),
+    )
+    draft = create_file_module.create_file(vault, validate_only=True, **kwargs)
+
+    result = create_file_module.create_file(
+        vault,
+        draft_id=draft.draft_id,
+        draft_hash=draft.draft_hash,
+        draft_token=draft.draft_token,
+        **kwargs,
+    )
+
+    assert result.path == kwargs["path"]
+    custody = authorization_custody.load_authorization_custody(vault, now=int(time.time()))
+    active, manifest, items = _load_active_projection_items(
+        vault, activation_epoch=2, activation_state_digest=custody.control.activation_state_digest
+    )
+    assert {item.item_identity for item in items} == {
+        "Knowledge Base/index.md",
+        "Knowledge Base/log.md",
+        "Knowledge Base/Notes/prior.md",
+        "Knowledge Base/Notes/Insights/new.md",
+    }
+    old_evidence = projection_store.namespace_evidence_from_snapshot(old_active)
+    assert projection_store.load_projection_catalog(
+        vault,
+        key=old_evidence.manifest.namespace_key,
+        expected_rows_digest=old_manifest.rows_digest,
+    ) == (old_manifest, old_items)
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    if lane is not None:
+        assert lane in {root.lane for root in evidence.required_measurement_roots}
+    namespace = projection_store.bind_active_projection_namespace(
+        active, manifest=manifest, items=items
+    )
+    for root in evidence.required_measurement_roots:
+        family = projection_measurement_store.MeasurementFamilyKey(
+            namespace_key=namespace.namespace_key,
+            lane=root.lane,
+            extractor_version=root.extractor_version,
+            model_version=root.model_version,
+        )
+        _, rows = projection_measurement_store.load_measurement_store(
+            vault, namespace=namespace, family=family, expected_rows_digest=root.rows_digest
+        )
+        assert {row.measurement_key.projection_variant_id for row in rows} == {
+            variant.projection_variant_id for item in items for variant in item.variants
+        }
+
+
+def test_legacy_navigation_capture_refuses_postprepare_file_drift(tmp_path, monkeypatch):
+    vault, migration = _legacy_navigation_capture_vault(tmp_path, monkeypatch)
+    target = vault / "Knowledge Base/index.md"
+    original = catalog_publication.prepare_planned_markdown_batch
+    prepared_paths = []
+
+    def change_after_prepare(*args, **kwargs):
+        prepared = original(*args, **kwargs)
+        assert prepared is not None
+        prepared_paths.extend(item.item_identity for item in prepared.target_items)
+        target.write_text("concurrent navigation change\n", encoding="utf-8")
+        return prepared
+
+    kwargs = dict(
+        path="Knowledge Base/Notes/Insights/new.md",
+        content="New governed content.\n",
+        frontmatter={"title": "New", "status": "draft", "type": "insight"},
+        today=dt.date(2026, 9, 19),
+    )
+    draft = create_file_module.create_file(vault, validate_only=True, **kwargs)
+    monkeypatch.setattr(catalog_publication, "prepare_planned_markdown_batch", change_after_prepare)
+    with pytest.raises(create_file_module.CreateFileError):
+        create_file_module.create_file(
+            vault,
+            draft_id=draft.draft_id,
+            draft_hash=draft.draft_hash,
+            draft_token=draft.draft_token,
+            **kwargs,
+        )
+    assert "Knowledge Base/index.md" in prepared_paths
+    assert target.read_text(encoding="utf-8") == "concurrent navigation change\n"
+    assert not (vault / "Knowledge Base/Notes/Insights/new.md").exists()
+    custody = authorization_custody.load_authorization_custody(vault, now=int(time.time()))
+    assert custody.control.activation_epoch == 1
+    assert custody.control.activation_state_digest == migration.activation_state_digest
+
+
+@pytest.mark.parametrize("mode", ["missing-content", "changed-navigation"])
+def test_navigation_adoption_keeps_other_catalog_predecessors_strict(tmp_path, monkeypatch, mode):
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    relative = (
+        "Knowledge Base/Notes/unlisted.md"
+        if mode == "missing-content"
+        else "Knowledge Base/index.md"
+    )
+    target = vault / relative
+    target.parent.mkdir(parents=True)
+    before = "# Original content\n"
+    target.write_text(before, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault, items=() if mode == "missing-content" else ((relative, before),), now=now
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    if mode == "changed-navigation":
+        target.write_text("# Changed outside catalog\n", encoding="utf-8")
+    current, guard = vault_module.read_guarded_text(vault, target)
+
+    with pytest.raises(catalog_publication.CatalogPublicationError, match="reviewed predecessor"):
+        catalog_publication.prepare_planned_markdown_batch(
+            vault,
+            writes=(vault_module.PlannedWrite(target, current + "change\n", guard=guard),),
+            now=now + 1,
+        )
+
+    assert target.read_text(encoding="utf-8") == current
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 1
+    assert custody.control.activation_state_digest == migration.activation_state_digest

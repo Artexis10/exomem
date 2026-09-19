@@ -1567,3 +1567,14 @@ def test_pre_migration_backup_restore_refuses_postfence_proof_drift(
             expected_backup_reference=committed.backup_reference,
             now=now + 4,
         )
+
+
+def test_forward_migration_catalogs_existing_navigation_pages(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    kb = vault / "Knowledge Base"
+    (kb / "index.md").write_text("# Knowledge Base\n", encoding="utf-8")
+    (kb / "log.md").write_text("# Log\n", encoding="utf-8")
+
+    plan = schema_migration.prepare_forward_migration(vault, now=int(time.time()))
+
+    assert plan.item_count == 3

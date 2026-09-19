@@ -8,19 +8,21 @@ storage, governance migration, serving readiness, Traefik ingress and the MCP
 gateway. It captures a synthetic note, recalls its citation, restarts the runtime
 Pod and reads the same note again.
 
-The selected 0.77.0 runtime currently reaches serving and draft validation, but
+The default 0.77.0 runtime reaches serving and draft validation, but
 the real note commit refuses with `GOVERNANCE_CATALOG_PUBLICATION_BLOCKED`.
 The connected test remains failing at that checkpoint. Capture, recall and
-restart acceptance are not complete; diagnose catalog publication before
-repeating the cluster run or attempting the live owner launch.
+restart acceptance are not complete. The omitted navigation-catalog predecessor
+was reproduced and repaired in PR #1324; repeat the connected journey only after
+a reviewed released image containing that repair is selectable.
 
 ## Prerequisites
 
 Use the paired Substrate checkout containing
 `scripts/hosted-cluster-rehearsal.ts`, with its Node dependencies installed.
 Install the pinned tools from `infra/tool-versions.env`, a working Docker daemon,
-and the runtime and provisioner test dependencies. The test reads the exact
-Exomem 0.77.0 runtime image from the local Docker image store and pulls that
+and the runtime and provisioner test dependencies. The test resolves its exact
+runtime target from the companion Substrate checkout's reviewed registry before
+creating a cluster. It reads that image from the local Docker image store and pulls that
 immutable digest into its own K3s containerd; it builds the provisioner image
 from the current checkout. Registry and Helm chart access are required.
 
@@ -41,6 +43,18 @@ PYTHONPATH=src:infra/provisioner/src:tests \
 
 The explicit connected lane fails if its companion checkout or required tools
 are missing. A default suite that skips this opt-in test is not cluster evidence.
+
+For a repaired release, first deliver its verified candidate, gateway/agent
+fixtures and runtime target into the companion's trust registry. Set
+`EXOMEM_REHEARSAL_RELEASE` to that exact version and pull the image it names.
+Inspect the selection without credentials, a database or cluster effects by
+running `node --import tsx scripts/hosted-cluster-rehearsal.ts --describe-runtime-target`
+from the Substrate checkout with the same release environment variable. Unknown
+versions are refused; the environment cannot supply arbitrary image or digest
+overrides. The Python harness passes the complete selected target back to
+Substrate, which rechecks it before creating its disposable database schema.
+The final connection handoff must carry the same target. Selection does not
+replace signed release verification or authorize a live deployment.
 
 ## Evidence and boundaries
 
