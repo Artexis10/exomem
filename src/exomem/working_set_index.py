@@ -170,6 +170,7 @@ def _unicode_tokens(text: str) -> tuple[str, ...]:
         tokens.append("".join(current))
     return tuple(tokens)
 
+
 #: Section/tag names that structurally imply a semantic-unit category. The map
 #: is the shipped core category vocabulary plus its plural section spellings; it
 #: is a lookup, not an inference, so the same page always yields the same set.
