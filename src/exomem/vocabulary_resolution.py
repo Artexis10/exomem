@@ -16,6 +16,10 @@ from yaml.resolver import BaseResolver
 from . import source_taxonomy, vault
 from .vault import kb_root
 
+MAX_PREPARATION_CANDIDATES = 8
+MAX_PREPARATION_LABEL_CHARS = 256
+MAX_PREPARATION_DESCRIPTION_CHARS = 1_024
+
 
 class _DuplicateTaxonomyKey(yaml.YAMLError):
     """A strict write registry cannot hide a YAML key behind a later value."""
@@ -103,6 +107,8 @@ def resolve_notes_domain(
     destination here.
     """
     root = Path(vault_root)
+    if not isinstance(requested, str) or len(requested) > 256:
+        raise VocabularyResolutionError("INVALID_DOMAIN", "domain request exceeds the bounded receipt contract")
     taxonomy, registry_guard, snapshot = _strict_taxonomy(root)
     try:
         resolved = taxonomy.resolve_domain(requested)
@@ -129,6 +135,7 @@ def resolve_notes_domain(
 
     definition = taxonomy.domains.get(canonical)
     folder = definition.path_label if definition is not None else source_taxonomy.derive_path_label(canonical)
+    _require_bounded_destination(folder)
     parent = kb_root(root) / "Notes" / "Experiments"
     parent_guard = vault.DirectoryCensusGuard.capture(
         root, parent.relative_to(root).as_posix(), max_entries=256
@@ -151,16 +158,22 @@ def resolve_notes_domain(
     )
 
 
+def _require_bounded_destination(folder: str) -> None:
+    try:
+        encoded = folder.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise VocabularyResolutionError(
+            "INVALID_DOMAIN_TAXONOMY", "domain path_label is not a portable path segment"
+        ) from error
+    if len(encoded) > 255:
+        raise VocabularyResolutionError(
+            "INVALID_DOMAIN_TAXONOMY", "domain path_label exceeds the portable component limit (255 UTF-8 bytes)"
+        )
+
+
 def binding_from_dict(vault_root: Path, value: object) -> DomainBinding:
     """Re-resolve an encoded binding and refuse a changed snapshot or target."""
-    if not isinstance(value, dict) or set(value) != {
-        "family", "requested", "canonical", "destination", "match_kind", "snapshot"
-    }:
-        raise VocabularyResolutionError("INVALID_DRAFT_TOKEN", "draft token has invalid vocabulary binding")
-    if value["family"] != "domain" or not all(
-        isinstance(value[key], str) and value[key]
-        for key in ("requested", "canonical", "destination", "match_kind", "snapshot")
-    ):
+    if not valid_public_resolution(value):
         raise VocabularyResolutionError("INVALID_DRAFT_TOKEN", "draft token has invalid vocabulary binding")
     decision = None
     if value["match_kind"] == "decision-create":
@@ -199,6 +212,7 @@ def _resolve_bound_notes_domain(
             raise VocabularyResolutionError("STALE_VOCABULARY_BINDING", "domain decision requires fresh validation")
     definition = taxonomy.domains.get(canonical)
     folder = definition.path_label if definition is not None else source_taxonomy.derive_path_label(canonical)
+    _require_bounded_destination(folder)
     parent = kb_root(root) / "Notes" / "Experiments"
     parent_guard = vault.DirectoryCensusGuard.capture(root, parent.relative_to(root).as_posix(), max_entries=256)
     existing = _existing_projection_spelling(
@@ -326,22 +340,41 @@ def _match_kind(requested: str, resolution: source_taxonomy.Resolution) -> str:
 def _preparation_evidence(
     taxonomy: source_taxonomy.SourceTaxonomy, requested: str, candidates: tuple[str, ...], snapshot: str
 ) -> dict[str, Any]:
+    selected = candidates[:MAX_PREPARATION_CANDIDATES]
     body = {
         "family": "domain",
         "requested": requested,
         "candidates": [
-            {
-                "canonical": key,
-                "label": taxonomy.domains[key].label,
-                "description": taxonomy.domains[key].description,
-            }
-            for key in candidates
+            _bounded_candidate(key, taxonomy.domains[key]) for key in selected
         ],
+        "candidate_truncation": {
+            "omitted": len(candidates) - len(selected),
+            "disclosed": len(candidates) > len(selected),
+        },
         "representative_usage": {"state": "unavailable", "items": []},
         "snapshot": snapshot,
     }
     body["evidence_fingerprint"] = _snapshot(body)
     return body
+
+
+def _bounded_candidate(key: str, definition: source_taxonomy.DomainDefinition) -> dict[str, Any]:
+    label, label_truncated = _truncate_display(definition.label, MAX_PREPARATION_LABEL_CHARS)
+    description, description_truncated = _truncate_display(
+        definition.description, MAX_PREPARATION_DESCRIPTION_CHARS
+    )
+    return {
+        "canonical": key,
+        "label": label,
+        "description": description,
+        "truncated": {"label": label_truncated, "description": description_truncated},
+    }
+
+
+def _truncate_display(value: str, maximum: int) -> tuple[str, bool]:
+    if len(value) <= maximum:
+        return value, False
+    return value[:maximum], True
 
 
 def _apply_decision(
@@ -396,7 +429,7 @@ def _nearby_definitions(
             overlap = max(overlap, 1)
         if overlap:
             candidates.append((-overlap, key))
-    return tuple(key for _score, key in sorted(candidates)[:8])
+    return tuple(key for _score, key in sorted(candidates))
 
 
 def _terms(value: str) -> tuple[str, ...]:
@@ -425,7 +458,6 @@ def valid_public_resolution(value: object) -> bool:
     return (
         value["family"] == "domain"
         and all(isinstance(value[key], str) and value[key] for key in value if key != "family")
-        and len(value["requested"]) <= 256
-        and len(value["destination"]) <= 256
+        and all(len(value[key]) <= 256 for key in ("requested", "canonical", "destination", "match_kind"))
         and len(value["snapshot"]) == 64
     )

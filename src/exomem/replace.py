@@ -24,6 +24,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import find as find_module
 from . import (
@@ -33,6 +34,7 @@ from . import (
     reserved_paths,
     semantic_writes,
     temporal,
+    vocabulary_resolution,
 )
 from . import note as note_module
 from .kbdir import kb_page_target, kb_prefix
@@ -122,6 +124,9 @@ class ReplaceResult:
         }
         if self.creation is not None:
             value["creation"] = self.creation
+            resolution = self.creation.get("vocabulary_resolution")
+            if isinstance(resolution, dict):
+                value["vocabulary_resolution"] = resolution
         return value
 
 
@@ -521,7 +526,8 @@ def replace(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
-) -> ReplaceResult | semantic_writes.CreationPreflight:
+    vocabulary_decision: dict[str, Any] | None = None,
+) -> ReplaceResult | semantic_writes.CreationPreflight | vocabulary_resolution.VocabularyPreparation:
     """Supersede through one successor-last semantic creation batch."""
     root = Path(vault_root)
     old_resolved, rel_old_with_ext = _resolve_kb_path(root, old_path)
@@ -629,6 +635,7 @@ def replace(
             relation_disposition=relation_disposition,
             relation_review_hash=relation_review_hash,
             relation_review_reason=relation_review_reason,
+            vocabulary_decision=vocabulary_decision,
             _return_prepared=True,
             _supersedes_target=old_link_target,
             _preflight_operation="replacement",
@@ -647,6 +654,8 @@ def replace(
                 {"applicability": "full", "mutated": False, "already_committed": True},
             )
         raise
+    if isinstance(prepared, vocabulary_resolution.VocabularyPreparation):
+        return prepared
     assert isinstance(prepared, note_module._PreparedNote)
     if prepared.preflight.applicability != "full":
         raise ReplaceError(

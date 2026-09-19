@@ -3877,6 +3877,7 @@ def commit_prepared_creation_draft(
                         "DRAFT_ID_IN_USE", "draft identity is already reserved"
                     )
                 required_guards = (
+                    *required_guards,
                     vault.PathGuard.capture(
                         root,
                         artifact_rel,

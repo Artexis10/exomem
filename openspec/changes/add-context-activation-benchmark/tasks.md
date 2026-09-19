@@ -19,7 +19,7 @@ Checked tasks record the delivered instrument, not proof that the corpus exercis
 - [x] 1.4 Rebuild fixtures through normal supported writers with canonical entity/hub/Records/Planning structure; verify structural prerequisites, isolated state and new corpus digests before retrieval. Delivered in PR #1312 with independent review and required CI; this establishes corpus construction, not complete topology or compiler acceptance.
 - [ ] 1.5 Publish the real graph/index and call the actual compiler for all eighteen fixtures; verify existing recall/precision/poison/budget thresholds and a failing mechanism-removal run, keeping oracle-packet tests separate.
 - [ ] 1.6 Add capture-to-activation integration with same-origin fan-out and interrupted resume from `close-memory-loop`; verify canonical readback and later fresh-session context without fixture-specific product rules.
-- [ ] 1.7 Freeze and digest-bind canonical current-state projection eligibility and reference identities; verify precision retains every surfaced reference, poison cannot be hidden, fabricated projections earn no credit, and stale/missing bindings void product runs.
+- [x] 1.7 Freeze and digest-bind canonical current-state projection eligibility and reference identities; verify precision retains every surfaced reference, poison cannot be hidden, fabricated projections earn no credit, and stale/missing bindings void product runs. Delivered in PR #1314 with independent review, adversarial regression tests and required CI.
 - [ ] 1.8 Audit the distinct Planning collection/item identity mismatch and missing topology/continuity prerequisites before interpreting the eighteen-case report as compiler quality evidence.
 
 ## 2. Deterministic scorer
@@ -57,7 +57,7 @@ Checked tasks record the delivered instrument, not proof that the corpus exercis
       nonce rules, n = 1 baselines, n = 5 comparison, stopping criteria verbatim.
 - [ ] 4.2 Record the corrected product-path deterministic report with fixture/corpus/threshold digests and per-case duals; verify no oracle packet substitutes for compiler output and no earlier broken-corpus result is presented as current acceptance.
 - [ ] 4.3 Record ordinary own-use or authorized replay evidence for first-response usefulness and no user reminder, with private evidence retained outside the repository; verify forced-call transport success is distinguished from agent initiation.
-- [ ] 4.4 Update the existing runbook to label paid A1–A5 measurements deferred and optional; verify any later comparative report still uses `c6_win_for_a3` and `effective_bar_reading`, all controls, cost reservations and the original stopping criteria, without making that future run a delivery prerequisite.
+- [x] 4.4 Update the existing runbook to label paid A1–A5 measurements deferred and optional; verify any later comparative report still uses `c6_win_for_a3` and `effective_bar_reading`, all controls, cost reservations and the original stopping criteria, without making that future run a delivery prerequisite. Delivered in PR #1314; no paid comparison is claimed.
 
 ## 5. Delivery
 

@@ -108,6 +108,19 @@ The first Notes-domain slice SHALL use a strict write-side registry snapshot and
 - **THEN** both structural and relation-reviewed creation paths revalidate inside their existing commit boundary and preserve the identical binding or refuse for fresh preparation
 - **AND** an immutable draft token is never silently retargeted
 
+#### Scenario: Replacement or a composed plan needs a vocabulary decision
+
+- **WHEN** replacement or a composed create-note or supersede step encounters a nearby domain meaning
+- **THEN** it exposes the bounded preparation through its existing public result or error contract and accepts the same finite agent decision
+- **AND** unresolved or deferred preparation leaves the predecessor unchanged and stores no committable destination or curation plan
+- **AND** a resolved decision preserves the canonical binding and guards through the existing leaf executor
+
+#### Scenario: Recovery resumes from a graph receipt or prepared relation artifact
+
+- **WHEN** a committed Notes write is recovered from its graph receipt before the ordinary idempotency completion record exists
+- **THEN** replay preserves the original bounded vocabulary resolution without repeating the effect
+- **AND** resuming a prepared relation artifact retains the registry and directory guards through atomic commitment
+
 ### Requirement: Activation earns acceptance through useful bounded context
 
 Activation SHALL resolve anchors, apply task-conditioned roles and bounded typed expansion, qualify current state and carry provenance under the existing context-activation budgets. Ambiguity, partial anchor coverage and stale/unavailable publication SHALL remain explicit. Acceptance SHALL exercise negative twins, rare/unfamiliar and multilingual referents, cross-kind links, supersession, Records state, distractor padding and an embeddings-on smoke path. Accepted context SHALL improve a later ordinary response without poison facts or unsupported resolution.

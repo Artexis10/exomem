@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 from pathlib import Path
 
 import pytest
@@ -500,3 +501,139 @@ def test_compact_terminal_keeps_valid_vocabulary_resolution() -> None:
     terminal["leaf_result"] = {}
     assert mutation_terminal.project_terminal(terminal)["vocabulary_resolution"] == resolution
     assert mutation_terminal.project_terminal(terminal, "full")["vocabulary_resolution"] == resolution
+
+
+def test_vocabulary_preparation_bounds_candidate_display_and_discloses_omissions(vault: Path) -> None:
+    registry = vault / "Knowledge Base/_Schema/source-taxonomy.yaml"
+    registry.parent.mkdir(exist_ok=True)
+    entries = "\n".join(
+        f"  candidate-{index}:\n"
+        f"    label: {'L' * 500}\n"
+        f"    description: wealth {'x' * 50_000}\n"
+        for index in range(10)
+    )
+    registry.write_text(f"domains:\n{entries}", encoding="utf-8")
+
+    with pytest.raises(vocabulary_resolution.VocabularyResolutionError) as error:
+        vocabulary_resolution.resolve_notes_domain(vault, "wealth")
+
+    evidence = error.value.details["vocabulary_preparation"]
+    assert len(evidence["candidates"]) == 8
+    assert evidence["candidate_truncation"]["disclosed"] is True
+    assert evidence["candidate_truncation"]["omitted"] >= 2
+    assert all(len(candidate["label"]) <= 256 for candidate in evidence["candidates"])
+    assert all(len(candidate["description"]) <= 1024 for candidate in evidence["candidates"])
+    assert all(candidate["truncated"] == {"label": True, "description": True} for candidate in evidence["candidates"])
+    assert len(json.dumps(evidence, ensure_ascii=False).encode("utf-8")) < 16_000
+    assert evidence["evidence_fingerprint"] == vocabulary_resolution._snapshot(
+        {key: value for key, value in evidence.items() if key != "evidence_fingerprint"}
+    )
+
+
+def test_vocabulary_binding_stays_within_public_receipt_bounds(vault: Path) -> None:
+    binding = vocabulary_resolution.resolve_notes_domain(vault, "health")
+    assert vocabulary_resolution.valid_public_resolution(binding.as_dict())
+
+    with pytest.raises(vocabulary_resolution.VocabularyResolutionError, match="bounded receipt"):
+        vocabulary_resolution.resolve_notes_domain(vault, " " * 300 + "health")
+
+    registry = vault / "Knowledge Base/_Schema/source-taxonomy.yaml"
+    registry.parent.mkdir(exist_ok=True)
+    registry.write_text(
+        "domains:\n  health:\n    path_label: " + "H" * 300 + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(vocabulary_resolution.VocabularyResolutionError, match="path_label exceeds"):
+        vocabulary_resolution.resolve_notes_domain(vault, "health")
+
+
+def test_crafted_unbounded_vocabulary_token_is_rejected_before_note_validation_or_commit(
+    vault: Path,
+) -> None:
+    kwargs = {
+        "content": "# Trial\n\n## Hypothesis\n\nA bounded trial.\n",
+        "note_type": "experiment",
+        "title": "Crafted bound refusal",
+        "domain": "health",
+        "started": "2026-05-18",
+        "duration": "one day",
+        "status": "draft",
+    }
+    validation = commands.op_remember(vault, validate_only=True, **kwargs)
+    token = semantic_writes.DraftToken.decode(validation["draft_token"])
+    assert token.vocabulary_binding is not None
+    crafted_binding = {**token.vocabulary_binding, "requested": " " * 300 + "health"}
+    crafted = semantic_writes.DraftToken(
+        token.writer,
+        token.operation,
+        token.destination,
+        token.render_date,
+        token.registrations,
+        render_stamp=token.render_stamp,
+        vocabulary_binding=crafted_binding,
+    ).encode()
+
+    for validate_only in (True, False):
+        with pytest.raises(ValueError, match="INVALID_DRAFT_TOKEN"):
+            commands.op_remember(
+                vault,
+                validate_only=validate_only,
+                draft_id=validation["draft_id"],
+                draft_hash=validation["draft_hash"],
+                draft_token=crafted,
+                **kwargs,
+            )
+    assert not (vault / validation["destination"]).exists()
+
+
+@pytest.mark.parametrize("path_label", ["H" * 256, "é" * 128])
+def test_unrepresentable_domain_path_label_refuses_before_draft_or_commit(
+    vault: Path, path_label: str
+) -> None:
+    registry = vault / "Knowledge Base/_Schema/source-taxonomy.yaml"
+    registry.parent.mkdir(exist_ok=True)
+    registry.write_text(
+        f"domains:\n  health:\n    path_label: {path_label}\n", encoding="utf-8"
+    )
+    kwargs = {
+        "content": "# Trial\n\n## Hypothesis\n\nA bounded trial.\n",
+        "note_type": "experiment",
+        "title": "Path projection refusal",
+        "domain": "health",
+        "started": "2026-05-18",
+        "duration": "one day",
+        "status": "draft",
+    }
+
+    with pytest.raises(ValueError, match="portable component limit"):
+        commands.op_remember(vault, validate_only=True, **kwargs)
+    assert not (vault / "Knowledge Base/Notes/Experiments").exists()
+
+
+def test_representable_unicode_domain_path_label_validates_and_commits(vault: Path) -> None:
+    path_label = "é" * 127
+    registry = vault / "Knowledge Base/_Schema/source-taxonomy.yaml"
+    registry.parent.mkdir(exist_ok=True)
+    registry.write_text(
+        f"domains:\n  health:\n    path_label: {path_label}\n", encoding="utf-8"
+    )
+    kwargs = {
+        "content": "# Trial\n\n## Hypothesis\n\nA bounded trial.\n",
+        "note_type": "experiment",
+        "title": "Path projection boundary",
+        "domain": "health",
+        "started": "2026-05-18",
+        "duration": "one day",
+        "status": "draft",
+    }
+    validation = commands.op_remember(vault, validate_only=True, **kwargs)
+    committed = commands.op_remember(
+        vault,
+        draft_id=validation["draft_id"],
+        draft_hash=validation["draft_hash"],
+        draft_token=validation["draft_token"],
+        **kwargs,
+    )
+
+    assert committed["vocabulary_resolution"]["destination"] == path_label
+    assert (vault / committed["path"]).is_file()
