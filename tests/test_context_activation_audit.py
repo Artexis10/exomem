@@ -46,6 +46,7 @@ from membench.utility.context_activation import (
 MANIFEST = {
     "fixture_set_digest": "a" * 64,
     "corpus_digest": "b" * 64,
+    "logical_corpus_digest": "d" * 64,
     "threshold_digest": "c" * 64,
     "mechanism": "oracle_packet",
 }
@@ -82,6 +83,194 @@ def test_packet_from_dict_round_trips_anchors_units_and_budget() -> None:
     assert packet.units[0].text == "hello"
     assert packet.current_state[0].source == "records"
     assert packet.budget_used_chars == 5
+
+
+def test_packet_from_dict_preserves_structured_missing_from_product_packet() -> None:
+    from exomem import working_set
+
+    product_packet = working_set.build_packet(
+        items=(),
+        anchors=(),
+        roles=(),
+        current_state=(),
+        ambiguity=(),
+        missing=({"role": "constraints", "reason": "no_material", "detail": "ü"},),
+        max_chars=4000,
+        generation={"freshness_key": "k", "index_generation": 1, "roles_hash": "h"},
+        status="resolved",
+    )
+
+    packet = packet_from_dict(product_packet)
+
+    assert packet.missing == ('{"detail":"ü","reason":"no_material","role":"constraints"}',)
+    assert injected_char_count(packet) == len(packet.missing[0])
+
+
+def test_packet_from_dict_preserves_structured_ambiguity_from_product_packet() -> None:
+    from exomem import working_set
+
+    product_packet = working_set.abstained_packet(
+        reason="ambiguous",
+        max_chars=4000,
+        generation={"freshness_key": "k", "index_generation": 1, "roles_hash": "h"},
+        ambiguity=(
+            {"ref": "north", "title": "Nørth", "kind": "hub", "neighbourhood_size": 2},
+        ),
+    )
+
+    packet = packet_from_dict(product_packet)
+
+    assert packet.ambiguity == ("north",)
+    assert packet.ambiguity_text == (
+        '{"kind":"hub","neighbourhood_size":2,"ref":"north","title":"Nørth"}',
+    )
+    assert injected_char_count(packet) == len(packet.ambiguity_text[0])
+    assert packet.abstention_reason == "ambiguous"
+    assert turn_status(packet) == "ambiguous"
+
+
+def test_packet_from_dict_keeps_legacy_string_labels() -> None:
+    packet = packet_from_dict(
+        {"missing": ["constraints:no_material"], "ambiguity": ["exomem://memory/a"]}
+    )
+
+    assert packet.missing == ("constraints:no_material",)
+    assert packet.ambiguity == ("exomem://memory/a",)
+    assert packet.ambiguity_text == ()
+
+
+def test_legacy_direct_ambiguity_uses_refs_as_budget_text() -> None:
+    packet = ActivationPacket(ambiguity=("north", "south"))
+
+    assert injected_char_count(packet) == len("north\nsouth")
+    assert turn_status(packet) == "ambiguous"
+
+
+@pytest.mark.parametrize("field", ["missing", "ambiguity"])
+@pytest.mark.parametrize("entry", [7, ["nested"], None])
+def test_packet_from_dict_refuses_unsupported_label_entries(field: str, entry: object) -> None:
+    with pytest.raises(PacketError, match=rf"{field} entry must be a string or object"):
+        packet_from_dict({field: [entry]})
+
+
+@pytest.mark.parametrize("field", ["missing", "ambiguity"])
+@pytest.mark.parametrize(
+    "container",
+    [{"role": "constraints", "reason": "no_material"}, "legacy-label", 7, None],
+)
+def test_packet_from_dict_refuses_non_array_label_containers(
+    field: str, container: object
+) -> None:
+    with pytest.raises(PacketError, match=rf"{field} must be an array"):
+        packet_from_dict({field: container})
+
+
+def test_packet_from_dict_allows_absent_label_arrays() -> None:
+    packet = packet_from_dict({})
+
+    assert packet.missing == ()
+    assert packet.ambiguity == ()
+    assert packet.ambiguity_text == ()
+
+
+@pytest.mark.parametrize("candidate", [{}, {"ref": ""}, {"ref": "   "}, {"ref": 7}])
+def test_packet_from_dict_refuses_ambiguity_objects_without_a_valid_ref(
+    candidate: dict[str, object],
+) -> None:
+    with pytest.raises(PacketError, match="ambiguity object ref must be a non-empty string"):
+        packet_from_dict({"ambiguity": [candidate]})
+
+
+@pytest.mark.parametrize(
+    ("case_id", "candidates"),
+    [
+        (
+            "T4",
+            (
+                {"ref": "t4_shared_first_name_entity_a", "title": "Alex Monroe", "kind": "entity"},
+                {"ref": "t4_shared_first_name_entity_b", "title": "Alex Park", "kind": "entity"},
+            ),
+        ),
+        (
+            "C7",
+            (
+                {"ref": "c7_hub_feature", "title": "AI search feature", "kind": "hub"},
+                {"ref": "c7_hub_market", "title": "AI search market", "kind": "hub"},
+                {"ref": "c7_hub_search_ux", "title": "Search UX", "kind": "hub"},
+            ),
+        ),
+    ],
+)
+def test_product_ambiguity_candidates_score_by_ref_and_budget_all_text(
+    case_id: str, candidates: tuple[dict[str, object], ...]
+) -> None:
+    from exomem import working_set
+
+    product_packet = working_set.abstained_packet(
+        reason="ambiguous",
+        max_chars=4000,
+        generation={"freshness_key": "k", "index_generation": 1, "roles_hash": "h"},
+        ambiguity=candidates,
+    )
+    packet = packet_from_dict(product_packet)
+
+    score = score_case(packet, fixture_by_id(case_id))
+    expected_text = "\n".join(
+        json.dumps(candidate, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        for candidate in candidates
+    )
+    assert packet.ambiguity == tuple(str(candidate["ref"]) for candidate in candidates)
+    assert injected_char_count(packet) == len(expected_text)
+    assert score.observed_status == "ambiguous"
+    assert score.gold_hit == score.gold_total
+    assert score.poison_hit == 0
+    assert score.passed, score.failure_reasons
+
+
+def test_product_ambiguity_poison_ref_still_fails_twin_safety() -> None:
+    from exomem import working_set
+
+    t4 = fixture_by_id("T4")
+    product_packet = working_set.abstained_packet(
+        reason="ambiguous",
+        max_chars=4000,
+        generation={"freshness_key": "k", "index_generation": 1, "roles_hash": "h"},
+        ambiguity=(
+            {"ref": t4.gold[0], "title": "Alex Monroe", "kind": "entity"},
+            {"ref": t4.gold[1], "title": "Alex Park", "kind": "entity"},
+            {"ref": t4.poison[0], "title": "Wrong colleague", "kind": "entity"},
+        ),
+    )
+
+    score = score_case(packet_from_dict(product_packet), t4)
+
+    assert score.poison_hit == 1
+    assert score.twin_false_activation is True
+    assert not score.passed
+
+
+def test_packet_from_dict_mixed_ambiguity_labels_preserve_both_budget_texts() -> None:
+    candidate = {"ref": "north", "title": "Nørth", "kind": "hub"}
+    packet = packet_from_dict({"ambiguity": ["legacy-ref", candidate]})
+    candidate_text = json.dumps(
+        candidate, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    assert packet.ambiguity == ("legacy-ref", "north")
+    assert packet.ambiguity_text == ("legacy-ref", candidate_text)
+    assert injected_char_count(packet) == len(f"legacy-ref\n{candidate_text}")
+
+
+def test_product_disabled_abstention_wins_over_ambiguity_candidates() -> None:
+    from exomem import working_set
+
+    product_packet = working_set.abstained_packet(
+        reason="disabled",
+        max_chars=4000,
+        generation={"freshness_key": "k", "index_generation": 1, "roles_hash": "h"},
+        ambiguity=({"ref": "north", "title": "North", "kind": "hub"},),
+    )
+
+    assert turn_status(packet_from_dict(product_packet)) == "unresolved"
 
 
 def test_load_packet_refuses_a_malformed_file(tmp_path) -> None:
@@ -430,6 +619,15 @@ def test_manifest_missing_any_digest_is_void() -> None:
 def test_complete_manifest_validates() -> None:
     manifest = validate_manifest(MANIFEST)
     assert manifest.fixture_set_digest == MANIFEST["fixture_set_digest"]
+    assert manifest.logical_corpus_digest == MANIFEST["logical_corpus_digest"]
+
+
+def test_legacy_three_digest_manifest_is_void() -> None:
+    legacy = dict(MANIFEST)
+    legacy.pop("logical_corpus_digest")
+
+    with pytest.raises(ManifestVoidError, match="logical_corpus_digest"):
+        validate_manifest(legacy)
 
 
 # -- mechanism removal: the audit exits red with no packets supplied -----
@@ -529,6 +727,7 @@ def test_report_per_case_keys_match_the_allowlist_exactly() -> None:
     packets = {"C1": _good_c1_packet()}
     report = run_audit(packets, manifest=manifest)
     payload = report_to_dict(report)
+    assert payload["manifest"]["logical_corpus_digest"] == MANIFEST["logical_corpus_digest"]
     for case in payload["per_case"]:
         assert set(case) == _PER_CASE_ALLOWED_KEYS
         assert set(case["gold"]) == _DUAL_KEYS

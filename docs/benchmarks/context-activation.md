@@ -146,14 +146,47 @@ implement):
 uv run python -m pytest tests/test_context_activation_fixtures.py tests/test_context_activation_audit.py -q
 ```
 
+The public synthetic corpus is a real initialized Exomem vault. Its fixture
+keys resolve under `Knowledge Base/` to governed entity and note pages,
+Records collections and items, Planning collections and items, product/system
+resources, and tagged hub notes. Construction uses the same typed writers as
+the product; a fresh `WorkingSetIndex` must publish entity, hub, resource,
+plan, and collection anchors before the corpus is eligible for compiler
+quality measurement.
+
+`build_corpus` runs that writer recipe in an isolated child process. The child
+keeps the caller's `HOME` but clears inherited `EXOMEM_*` values and owns fresh
+external state, configuration, lease, ledger, log, and temporary roots. A
+writer refusal fails the build; curated gold resources are never substituted
+with direct fixture file writes. Graph scheduling is disabled in this corpus
+construction child because compiler graph publication belongs to the later
+full golden gate.
+
+`CorpusManifest.corpus_hash` binds the exact canonical Markdown, YAML, and
+JSON bytes for one constructed snapshot, excluding generated navigation and
+activity-log pages. Writer-minted identities and audit receipts therefore
+change it. `CorpusManifest.logical_hash` is the separate reproducible fixture
+identity: it covers the fixture set, seed, logical paths, and authored page
+semantics while excluding only writer receipts already bound by the exact
+hash. Run reports serialize both fields. Rebuilding the v2 corpus invalidates
+reports produced from v1 bytes.
+
 The audit itself is a library, not (yet) a standalone CLI:
 `membench.utility.context_activation.run_audit` takes a `case_id -> packet`
 mapping (from `load_packet` on an oracle-packet file, or later from
 `activate_context` output) and a `RunManifest` carrying the three required
-digests, and returns a report with no aggregate field -- every metric is a
-per-case or per-case-per-anchor-kind numerator/denominator pair. A `case_id`
-with no supplied packet scores against the documented kill-switch shape
-(`DISABLED_PACKET`): this is the mechanism-removal check --
+pre-registered digests plus the required `logical_corpus_digest`, and returns
+a report with no aggregate field -- every metric is a
+per-case or per-case-per-anchor-kind numerator/denominator pair.
+
+Product packets may carry `missing` and `ambiguity` labels as JSON objects.
+The loader preserves every field as stable, sorted, compact Unicode JSON for
+budget and fact-text checks, while retaining each ambiguity object's non-empty
+`ref` as its scoring identity. Legacy string labels remain supported. An absent
+field remains compatible with older packets; a present field must be an array,
+including when empty, and malformed entries or `null` are rejected.
+A `case_id` with no supplied packet scores against the documented kill-switch
+shape (`DISABLED_PACKET`): this is the mechanism-removal check --
 `EXOMEM_DISABLE_WORKING_SET=1` should make every positive case fail, because
 running the audit against an empty packet map is exactly what "the compiler
 is disabled" looks like from this scorer's point of view.

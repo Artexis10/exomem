@@ -52,7 +52,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -134,7 +134,10 @@ class ActivationPacket:
     pointers: tuple[Pointer, ...] = ()
     current_state: tuple[CurrentStateEntry, ...] = ()
     missing: tuple[str, ...] = ()
+    #: Canonical refs for identity/scoring. Structured producer candidates
+    #: retain their full rendered objects separately in ``ambiguity_text``.
     ambiguity: tuple[str, ...] = ()
+    ambiguity_text: tuple[str, ...] = ()
     budget_limit_chars: int | None = None
     budget_used_chars: int = 0
     abstained: bool = False
@@ -166,6 +169,61 @@ DISABLED_PACKET = ActivationPacket(abstained=True, abstention_reason="disabled")
 def _tuple_or_empty(data: dict[str, Any], key: str) -> tuple[Any, ...]:
     value = data.get(key)
     return tuple(value) if value else ()
+
+
+def _label_items(data: dict[str, Any], key: str) -> tuple[Any, ...]:
+    if key not in data:
+        return ()
+    items = data[key]
+    if not isinstance(items, (list, tuple)):
+        raise PacketError(f"{key} must be an array")
+    return tuple(items)
+
+
+def _mapping_text(item: Mapping[Any, Any], key: str) -> str:
+    try:
+        return json.dumps(
+            dict(item),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError) as exc:
+        raise PacketError(f"{key} entry must be a string or object") from exc
+
+
+def _text_labels(data: dict[str, Any], key: str) -> tuple[str, ...]:
+    labels: list[str] = []
+    for item in _label_items(data, key):
+        if isinstance(item, str):
+            labels.append(item)
+            continue
+        if isinstance(item, Mapping):
+            labels.append(_mapping_text(item, key))
+            continue
+        raise PacketError(f"{key} entry must be a string or object")
+    return tuple(labels)
+
+
+def _ambiguity_labels(data: dict[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    refs: list[str] = []
+    labels: list[str] = []
+    structured = False
+    for item in _label_items(data, "ambiguity"):
+        if isinstance(item, str):
+            refs.append(item)
+            labels.append(item)
+            continue
+        if isinstance(item, Mapping):
+            ref = item.get("ref")
+            if not isinstance(ref, str) or not ref.strip():
+                raise PacketError("ambiguity object ref must be a non-empty string")
+            refs.append(ref)
+            labels.append(_mapping_text(item, "ambiguity"))
+            structured = True
+            continue
+        raise PacketError("ambiguity entry must be a string or object")
+    return tuple(refs), tuple(labels) if structured else ()
 
 
 def _pointer_from_item(item: Any) -> Pointer:
@@ -210,6 +268,7 @@ def packet_from_dict(data: dict[str, Any]) -> ActivationPacket:
     except KeyError as exc:
         raise PacketError(f"packet entry missing required field {exc}") from exc
 
+    ambiguity, ambiguity_text = _ambiguity_labels(data)
     budget = data.get("budget", {}) or {}
     abstention = data.get("abstention", {}) or {}
     return ActivationPacket(
@@ -218,8 +277,9 @@ def packet_from_dict(data: dict[str, Any]) -> ActivationPacket:
         units=units,
         pointers=pointers,
         current_state=current_state,
-        missing=_tuple_or_empty(data, "missing"),
-        ambiguity=_tuple_or_empty(data, "ambiguity"),
+        missing=_text_labels(data, "missing"),
+        ambiguity=ambiguity,
+        ambiguity_text=ambiguity_text,
         budget_limit_chars=budget.get("limit_chars"),
         budget_used_chars=int(budget.get("used_chars", 0) or 0),
         abstained=bool(data.get("abstained", False)),
@@ -251,10 +311,12 @@ def turn_status(packet: ActivationPacket) -> str:
     single vocabulary the benchmark fixtures pin per case.
     """
 
-    if packet.abstained:
+    if packet.abstained and packet.abstention_reason != "ambiguous":
         return "unresolved"
     if packet.ambiguity:
         return "ambiguous"
+    if packet.abstained:
+        return "unresolved"
     statuses = {a.status for a in packet.anchors}
     if "resolved" in statuses:
         return "resolved"
@@ -278,7 +340,7 @@ def _injected_text_parts(packet: ActivationPacket) -> tuple[str, ...]:
         *(unit.text for unit in packet.units),
         *(f"{p.title} {p.why}".strip() for p in packet.pointers),
         *packet.missing,
-        *packet.ambiguity,
+        *(packet.ambiguity_text or packet.ambiguity),
         *(entry.statement or "" for entry in packet.current_state),
     )
 
@@ -747,13 +809,19 @@ def score_padding_robustness(padded_score: CaseScore, base_score: CaseScore) -> 
 # per-case or per-case-per-anchor-kind numerator/denominator dual).
 # --------------------------------------------------------------------------
 
-REQUIRED_DIGEST_FIELDS: tuple[str, ...] = ("fixture_set_digest", "corpus_digest", "threshold_digest")
+REQUIRED_DIGEST_FIELDS: tuple[str, ...] = (
+    "fixture_set_digest",
+    "corpus_digest",
+    "logical_corpus_digest",
+    "threshold_digest",
+)
 
 
 @dataclass(frozen=True)
 class RunManifest:
     fixture_set_digest: str
     corpus_digest: str
+    logical_corpus_digest: str
     threshold_digest: str
     mechanism: str = "unknown"
 
@@ -767,6 +835,7 @@ def validate_manifest(data: dict[str, Any]) -> RunManifest:
     return RunManifest(
         fixture_set_digest=data["fixture_set_digest"],
         corpus_digest=data["corpus_digest"],
+        logical_corpus_digest=data["logical_corpus_digest"],
         threshold_digest=data["threshold_digest"],
         mechanism=str(data.get("mechanism", "unknown")),
     )

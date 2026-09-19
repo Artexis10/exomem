@@ -19,6 +19,8 @@ from epistemic.corpora.context_activation import (
     MEASURED_LATENCY_MS,
     TWIN_IDS,
     FixtureError,
+    _corpus_hash,
+    _logical_corpus_hash,
     assert_manifest_consistent,
     build_corpus,
     cases,
@@ -28,7 +30,6 @@ from epistemic.corpora.context_activation import (
     fixture_by_id,
     fixture_set_digest,
     latest_record,
-    parse_records_items,
     twins,
 )
 
@@ -127,20 +128,43 @@ def test_build_corpus_maps_every_gold_and_poison_key_to_a_real_page(tmp_path) ->
 def test_build_corpus_is_deterministic_for_the_same_seed(tmp_path) -> None:
     first = build_corpus(tmp_path / "first", seed=5, distractor_count=5)
     second = build_corpus(tmp_path / "second", seed=5, distractor_count=5)
-    assert first.corpus_hash == second.corpus_hash
+    assert first.logical_hash == second.logical_hash
     assert first.key_to_path == second.key_to_path
 
 
 def test_build_corpus_different_seed_changes_the_hash(tmp_path) -> None:
     first = build_corpus(tmp_path / "first", seed=5, distractor_count=5)
     second = build_corpus(tmp_path / "second", seed=6, distractor_count=5)
-    assert first.corpus_hash != second.corpus_hash
+    assert first.logical_hash != second.logical_hash
+
+
+def test_logical_hash_changes_when_key_mapping_changes_but_corpus_bytes_do_not(tmp_path) -> None:
+    manifest = build_corpus(tmp_path, seed=5, distractor_count=0)
+    remapped = dict(manifest.key_to_path)
+    remapped["c2_grill_equipment_page"], remapped["t2_camera_gear_note"] = (
+        remapped["t2_camera_gear_note"],
+        remapped["c2_grill_equipment_page"],
+    )
+
+    changed = _logical_corpus_hash(
+        tmp_path,
+        seed=manifest.seed,
+        distractor_count=manifest.distractor_count,
+        key_to_path=remapped,
+    )
+
+    assert changed != manifest.logical_hash
+    assert _corpus_hash(tmp_path) == manifest.corpus_hash
 
 
 def test_build_corpus_default_distractor_count_is_two_hundred(tmp_path) -> None:
     manifest = build_corpus(tmp_path)
     assert manifest.distractor_count == 200
-    distractor_pages = list((tmp_path / "Evidence").glob("distractor-*.md"))
+    distractor_pages = list(
+        (tmp_path / "Knowledge Base" / "Evidence" / "context-activation").glob(
+            "distractor-*.md"
+        )
+    )
     assert len(distractor_pages) == 200
 
 
@@ -298,7 +322,7 @@ def test_a_fixture_with_no_distractor_count_fails_manifest_consistency() -> None
 def test_build_corpus_supports_a_base_unpadded_tree(tmp_path) -> None:
     manifest = build_corpus(tmp_path, distractor_count=BASE_DISTRACTOR_COUNT)
     assert manifest.distractor_count == 0
-    assert not (tmp_path / "Evidence").exists()
+    assert not (tmp_path / "Knowledge Base" / "Evidence" / "context-activation").exists()
 
 
 # -- N2: distractor bodies are composed from a domain word bank, never a
@@ -307,7 +331,13 @@ def test_build_corpus_supports_a_base_unpadded_tree(tmp_path) -> None:
 
 def test_distractor_bodies_are_generic_not_pure_random_numbers(tmp_path) -> None:
     build_corpus(tmp_path, distractor_count=5)
-    text = (tmp_path / "Evidence" / "distractor-0000.md").read_text(encoding="utf-8")
+    text = (
+        tmp_path
+        / "Knowledge Base"
+        / "Evidence"
+        / "context-activation"
+        / "distractor-0000.md"
+    ).read_text(encoding="utf-8")
     domain_words = ("smoke", "brine", "sear", "temperature", "wood", "doneness", "marinade", "thermometer")
     assert any(word in text for word in domain_words)
 
@@ -320,13 +350,21 @@ def test_find_fact_leaks_outside_gold_poison_pages_is_clean_on_the_full_corpus(t
 # -- C5: the records collection is structural, latest by observed_on -------
 
 
-def test_c5_records_page_parses_as_structured_items(tmp_path) -> None:
+def test_c5_records_collection_queries_canonical_items(tmp_path) -> None:
+    from exomem.commands import op_record_memory
+
     manifest = build_corpus(tmp_path, distractor_count=0)
     rel = manifest.key_to_path["c5_records_latest_unavailable"]
-    text = (tmp_path / rel).read_text(encoding="utf-8")
-    items = parse_records_items(text)
-    assert len(items) == 2
-    assert {item["status"] for item in items} == {"available", "unavailable"}
+    queried = op_record_memory(
+        tmp_path,
+        action="query",
+        collection=rel,
+        columns=["observed_on", "status"],
+        sort_by="observed_on",
+        limit=10,
+    )
+    assert len(queried["rows"]) == 2
+    assert {item["status"] for item in queried["rows"]} == {"available", "unavailable"}
 
 
 def test_c5_latest_record_by_observed_on_is_unavailable_never_by_line_order() -> None:
@@ -341,7 +379,7 @@ def test_c5_resource_page_links_to_the_records_collection(tmp_path) -> None:
     manifest = build_corpus(tmp_path, distractor_count=0)
     rel = manifest.key_to_path["c5_resource_profile"]
     text = (tmp_path / rel).read_text(encoding="utf-8")
-    assert "workshop-bench-records" in text
+    assert "Knowledge Base/Records/Workshop Bench/_collection" in text
 
 
 # -- C7: three hubs have distinct, pairwise-disjoint wikilink neighbourhoods -
