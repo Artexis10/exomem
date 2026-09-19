@@ -15,7 +15,7 @@
 
 ## 3. Prove the first complete episode slice
 
-- [ ] 3.1 Add pure-logic tests for episode/input/candidate/proposal identities, dispositions and candidate-to-leaf mappings before wiring persistence; verify reordered or revised plans cannot reapply an equivalent committed effect.
+- [x] 3.1 Add pure-logic tests for episode/input/candidate/proposal identities, dispositions and candidate-to-leaf mappings before wiring persistence; verify reordered or revised plans cannot reapply an equivalent committed effect.
 - [ ] 3.2 Extend existing review/curation persistence with minimal authorized input evidence, revisions and receipt mappings; verify recovery after context loss, unavailable evidence, disclosure boundaries and no required full-transcript dump.
 - [ ] 3.3 Expose typed episode inspect/prepare/disposition/resume operations through the canonical command definitions and generated MCP/CLI/REST surfaces; verify shared leaf semantics and reject arbitrary execution payloads.
 - [ ] 3.4 Add pre-destination decomposition guidance to bootstrap/scaffold and one lifecycle-capable adapter; verify a normal fixture turn initiates consideration of all durable candidates, including justified abstention, before the first destination is selected.
