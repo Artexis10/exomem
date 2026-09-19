@@ -7,6 +7,7 @@ structures are visible to a freshly published activation index.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 import subprocess
@@ -15,9 +16,22 @@ from pathlib import Path
 
 import pytest
 from epistemic.corpora.context_activation import (
+    FixtureError,
     _corpus_hash,
     _governed_resource,
     build_corpus,
+    fixture_by_id,
+    freeze_reference_binding,
+)
+from membench.utility.context_activation import (
+    ActivationPacket,
+    Anchor,
+    CurrentStateEntry,
+    ManifestVoidError,
+    Unit,
+    run_audit,
+    score_case,
+    validate_manifest,
 )
 
 from exomem import structured_collections, working_set_index
@@ -231,3 +245,323 @@ print(json.dumps({"corpus_id": manifest.corpus_id, "paths": len(manifest.key_to_
 
     assert completed.returncode == 0, completed.stderr[-4000:]
     assert '"paths": 24' in completed.stdout
+
+
+def _projection_packet(binding, *keys: str) -> ActivationPacket:
+    projections = {projection.anchor_key: projection for projection in binding.projections}
+    selected = [projections[key] for key in keys]
+    return ActivationPacket(
+        anchors=tuple(
+            Anchor(ref=projection.anchor_ref, title=projection.anchor_key, kind="resource", status="resolved")
+            for projection in selected
+        ),
+        units=tuple(
+            Unit(
+                ref=projection.projection_ref,
+                role="current_state",
+                text=projection.statement,
+                updated=projection.as_of,
+                provenance={
+                    "anchor": projection.anchor_ref,
+                    "source": projection.source_kind,
+                    "as_of": projection.as_of,
+                },
+            )
+            for projection in selected
+        ),
+        current_state=tuple(
+            CurrentStateEntry(
+                anchor=projection.anchor_ref,
+                source=projection.source_kind,
+                as_of=projection.as_of,
+                statement=projection.statement,
+            )
+            for projection in selected
+        ),
+    )
+
+
+def test_frozen_binding_reads_authored_records_and_profile_state(product_corpus) -> None:
+    root, manifest = product_corpus
+    binding = freeze_reference_binding(root, manifest, manifest.key_to_path)
+    projections = {projection.anchor_key: projection for projection in binding.projections}
+
+    assert projections["c1_subscriptions_collection"].statement == "state: limit-reached"
+    assert projections["c5_resource_profile"].source_key == "c5_records_latest_unavailable"
+    assert projections["c5_resource_profile"].statement == "status: unavailable"
+    assert projections["c5_records_latest_unavailable"].statement == "status: unavailable"
+    assert projections["t5_available_resource"].statement == "status: active"
+    assert projections["c2_grill_equipment_page"].statement == "status: active"
+    assert projections["t2_camera_gear_note"].statement == "status: active"
+    assert all(projection.source_snapshot_digest for projection in binding.projections)
+
+
+def test_binding_reads_latest_canonical_record_independently_of_state_resolver(
+    product_corpus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import working_set_state
+
+    root, manifest = product_corpus
+    monkeypatch.setattr(
+        working_set_state,
+        "_from_records",
+        lambda *_args, **_kwargs: {
+            "source": "records",
+            "as_of": "2026-08-02",
+            "statement": "status: available",
+        },
+    )
+
+    binding = freeze_reference_binding(root, manifest, manifest.key_to_path)
+    projections = {projection.anchor_key: projection for projection in binding.projections}
+
+    assert projections["c5_resource_profile"].as_of == "2026-09-10"
+    assert projections["c5_resource_profile"].statement == "status: unavailable"
+
+
+def test_c5_counts_two_gold_sources_and_two_bound_projections_independently(product_corpus) -> None:
+    root, manifest = product_corpus
+    binding = freeze_reference_binding(root, manifest, manifest.key_to_path)
+    packet = _projection_packet(binding, "c5_resource_profile", "c5_records_latest_unavailable")
+
+    score = score_case(packet, fixture_by_id("C5"), reference_binding=binding)
+
+    assert score.gold_hit == score.gold_total == 2
+    assert score.precision == 1.0
+
+
+def test_t5_own_bound_profile_projection_is_not_false_activation(product_corpus) -> None:
+    root, manifest = product_corpus
+    binding = freeze_reference_binding(root, manifest, manifest.key_to_path)
+    score = score_case(
+        _projection_packet(binding, "t5_available_resource"),
+        fixture_by_id("T5"),
+        reference_binding=binding,
+    )
+
+    assert score.gold_hit == score.gold_total == 1
+    assert score.precision == 1.0
+    assert score.twin_false_activation is False
+
+
+def test_bound_projection_alone_recalls_its_canonical_gold_identity(product_corpus) -> None:
+    root, manifest = product_corpus
+    binding = freeze_reference_binding(root, manifest, manifest.key_to_path)
+    packet = dataclasses.replace(_projection_packet(binding, "t5_available_resource"), anchors=())
+
+    score = score_case(packet, fixture_by_id("T5"), reference_binding=binding)
+
+    assert score.gold_hit == score.gold_total == 1
+    assert score.precision == 1.0
+
+
+def test_unbound_person_current_projection_cannot_manufacture_relevance(product_corpus) -> None:
+    root, manifest = product_corpus
+    binding = freeze_reference_binding(root, manifest, manifest.key_to_path)
+    base = manifest.key_to_path["c4_entity_profile"]
+    packet = ActivationPacket(
+        anchors=(Anchor(ref=base, title="person", kind="entity", status="resolved"),),
+        units=(
+            Unit(
+                ref=f"{base}#current",
+                role="current_state",
+                text="status: active",
+                provenance={"anchor": base, "source": "profile"},
+            ),
+        ),
+        current_state=(CurrentStateEntry(anchor=base, source="profile", statement="status: active"),),
+    )
+
+    score = score_case(packet, fixture_by_id("C4"), reference_binding=binding)
+
+    assert score.gold_hit == 1
+    assert score.gold_total == 2
+    assert score.precision == 0.5
+
+
+@pytest.mark.parametrize(
+    ("mutation",),
+    [
+        ("wrong_role",),
+        ("missing_state",),
+        ("mismatched_state",),
+        ("lying_provenance",),
+        ("missing_updated",),
+        ("mismatched_updated",),
+    ],
+)
+def test_projection_credit_requires_bound_packet_metadata(product_corpus, mutation: str) -> None:
+    root, manifest = product_corpus
+    binding = freeze_reference_binding(root, manifest, manifest.key_to_path)
+    packet = _projection_packet(binding, "t5_available_resource")
+    unit = packet.units[0]
+    state = packet.current_state
+    if mutation == "wrong_role":
+        unit = dataclasses.replace(unit, role="profile")
+    elif mutation == "missing_state":
+        state = ()
+    elif mutation == "mismatched_state":
+        state = (dataclasses.replace(state[0], statement="status: unavailable"),)
+    elif mutation == "missing_updated":
+        unit = dataclasses.replace(unit, updated=None)
+    elif mutation == "mismatched_updated":
+        unit = dataclasses.replace(unit, updated="2026-01-01")
+    else:
+        unit = dataclasses.replace(unit, provenance={"anchor": "someone-else", "source": "profile"})
+    packet = dataclasses.replace(packet, anchors=(), units=(unit,), current_state=state)
+
+    score = score_case(packet, fixture_by_id("T5"), reference_binding=binding)
+
+    assert score.gold_hit == 0
+    assert score.precision == 0.0
+
+
+def test_known_poison_projection_cannot_hide_with_wrong_role_or_supersession(product_corpus) -> None:
+    root, manifest = product_corpus
+    binding = freeze_reference_binding(root, manifest, manifest.key_to_path)
+    packet = _projection_packet(binding, "c5_records_latest_unavailable")
+    poisoned = dataclasses.replace(
+        packet.units[0],
+        role="other",
+        lifecycle="superseded",
+        provenance={"superseded_by": "invented-successor"},
+    )
+    packet = dataclasses.replace(packet, anchors=(), units=(poisoned,), current_state=())
+
+    score = score_case(packet, fixture_by_id("T5"), reference_binding=binding)
+
+    assert score.poison_hit == 1
+    assert score.twin_false_activation is True
+
+
+def test_current_state_only_canonical_poison_remains_a_poison_hit(product_corpus) -> None:
+    root, manifest = product_corpus
+    binding = freeze_reference_binding(root, manifest, manifest.key_to_path)
+    poison = manifest.key_to_path["t5_available_resource"]
+    packet = ActivationPacket(
+        current_state=(
+            CurrentStateEntry(
+                anchor=poison,
+                source="profile",
+                statement="status: active",
+            ),
+        ),
+    )
+
+    score = score_case(packet, fixture_by_id("C5"), reference_binding=binding)
+
+    assert score.poison_hit == 1
+    resource_tally = next(row for row in score.by_anchor_kind if row.kind == "resource")
+    assert resource_tally.poison_hit == 1
+
+
+def test_true_unit_fragment_stays_a_distinct_precision_entry(product_corpus) -> None:
+    root, manifest = product_corpus
+    binding = freeze_reference_binding(root, manifest, manifest.key_to_path)
+    packet = _projection_packet(binding, "c5_resource_profile", "c5_records_latest_unavailable")
+    packet = dataclasses.replace(
+        packet,
+        units=(*packet.units, Unit(ref=f"{packet.anchors[0].ref}#unit", role="note", text="extra")),
+    )
+
+    score = score_case(packet, fixture_by_id("C5"), reference_binding=binding)
+
+    assert score.gold_hit == 2
+    assert score.precision == 0.8
+
+
+def test_bound_scoring_keeps_irrelevant_padding_and_true_supersession_rules(product_corpus) -> None:
+    root, manifest = product_corpus
+    binding = freeze_reference_binding(root, manifest, manifest.key_to_path)
+    packet = _projection_packet(binding, "c5_resource_profile", "c5_records_latest_unavailable")
+    padded = dataclasses.replace(
+        packet,
+        units=(*packet.units, Unit(ref="irrelevant", role="note", text="extra")),
+    )
+    assert score_case(padded, fixture_by_id("C5"), reference_binding=binding).precision == 0.8
+
+    c8 = fixture_by_id("C8")
+    superseded = ActivationPacket(
+        anchors=(
+            Anchor(ref=manifest.key_to_path["c8_active_head"], title="head", kind="note", status="resolved"),
+            Anchor(ref=manifest.key_to_path["c8_superseded_ancestor_1"], title="old", kind="note", status="resolved"),
+        ),
+        units=(
+            Unit(ref=manifest.key_to_path["c8_active_head"], role="current_state", text="current"),
+            Unit(
+                ref=manifest.key_to_path["c8_superseded_ancestor_1"],
+                role="current_state",
+                text="old",
+                lifecycle="superseded",
+                provenance={"superseded_by": manifest.key_to_path["c8_active_head"]},
+            ),
+        ),
+    )
+    assert score_case(superseded, c8, reference_binding=binding).precision == 1.0
+
+
+def _bound_manifest(manifest, binding, **changes):
+    values = {
+        "fixture_set_digest": "a" * 64,
+        "corpus_digest": manifest.corpus_hash,
+        "logical_corpus_digest": manifest.logical_hash,
+        "threshold_digest": "c" * 64,
+        "reference_binding_digest": binding.digest,
+        "mechanism": "product",
+    }
+    values.update(changes)
+    return validate_manifest(values)
+
+
+@pytest.mark.parametrize("field", ["corpus_digest", "logical_corpus_digest", "reference_binding_digest"])
+def test_product_run_refuses_manifest_binding_identity_mismatch(product_corpus, field: str) -> None:
+    root, manifest = product_corpus
+    binding = freeze_reference_binding(root, manifest, manifest.key_to_path)
+    run_manifest = _bound_manifest(manifest, binding, **{field: "f" * 64})
+
+    with pytest.raises(ManifestVoidError, match=field):
+        run_audit({}, manifest=run_manifest, reference_binding=binding)
+
+
+def test_product_run_refuses_missing_or_tampered_binding(product_corpus) -> None:
+    root, manifest = product_corpus
+    binding = freeze_reference_binding(root, manifest, manifest.key_to_path)
+
+    with pytest.raises(ManifestVoidError, match="reference_binding"):
+        run_audit({}, manifest=_bound_manifest(manifest, binding), reference_binding=None)
+    without_digest = _bound_manifest(manifest, binding)
+    without_digest = dataclasses.replace(without_digest, reference_binding_digest=None)
+    with pytest.raises(ManifestVoidError, match="reference_binding_digest"):
+        run_audit({}, manifest=without_digest, reference_binding=binding)
+    with pytest.raises(ManifestVoidError, match="digest"):
+        run_audit(
+            {},
+            manifest=_bound_manifest(manifest, binding),
+            reference_binding=dataclasses.replace(binding, digest="f" * 64),
+        )
+    with pytest.raises(ManifestVoidError, match="digest"):
+        run_audit(
+            {},
+            manifest=_bound_manifest(manifest, binding),
+            reference_binding=dataclasses.replace(binding, corpus_digest="f" * 64),
+        )
+
+
+def test_product_run_refuses_mapping_tamper_without_a_new_binding_digest(product_corpus) -> None:
+    root, manifest = product_corpus
+    binding = freeze_reference_binding(root, manifest, manifest.key_to_path)
+    mapping = dict(binding.key_to_ref)
+    mapping["c5_resource_profile"] = "invented-ref"
+    tampered = dataclasses.replace(binding, key_to_ref=tuple(sorted(mapping.items())))
+
+    with pytest.raises(ManifestVoidError, match="digest"):
+        run_audit({}, manifest=_bound_manifest(manifest, binding), reference_binding=tampered)
+
+
+def test_freeze_refuses_a_stale_canonical_source_file(tmp_path: Path) -> None:
+    manifest = build_corpus(tmp_path, distractor_count=0)
+    source = tmp_path / manifest.key_to_path["t5_available_resource"]
+    source.write_text(source.read_text(encoding="utf-8") + "\nchanged after manifest\n", encoding="utf-8")
+
+    with pytest.raises(FixtureError, match="corpus digest"):
+        freeze_reference_binding(tmp_path, manifest, manifest.key_to_path)

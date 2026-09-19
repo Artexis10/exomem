@@ -25,9 +25,13 @@ run the instrument in the order the pre-registration requires.
   `epistemic.journeys.f27_replay`'s isolation primitives directly. **No
   code in this repository executes a real `claude -p` session for these
   arms.** Building and printing a dry-run argv is the supported entry
-  point; an actual replay is a separate, explicitly authorized, opt-in paid
-  probe under the existing paid-probe rule
+  point; actual comparative replays are deferred, optional, and require a
+  bounded authorized run under the existing paid-probe rule
   (`epistemic-utility-regression`, "Paid probes are bounded and opt-in").
+  They are not prerequisites for delivering deterministic compiler acceptance
+  and ordinary-use evidence. A future subscription-backed Codex runner must
+  record returned usage separately from metered API costs and must not silently
+  fall back to API billing.
 - The **private real-vault instrument** runs the same Layer A scorer
   locally over a digest-pinned snapshot of a real vault. Its results are
   Evidence in the owner's own knowledge base, never committed here.
@@ -143,7 +147,7 @@ implement):
 ## Running the deterministic audit (CI, always available)
 
 ```
-uv run python -m pytest tests/test_context_activation_fixtures.py tests/test_context_activation_audit.py -q
+uv run python -m pytest tests/test_context_activation_fixtures.py tests/test_context_activation_audit.py tests/test_context_activation_product_corpus.py -q
 ```
 
 The public synthetic corpus is a real initialized Exomem vault. Its fixture
@@ -168,12 +172,33 @@ activity-log pages. Writer-minted identities and audit receipts therefore
 change it. `CorpusManifest.logical_hash` is the separate reproducible fixture
 identity: it covers the fixture set, seed, logical paths, and authored page
 semantics while excluding only writer receipts already bound by the exact
-hash. Run reports serialize both fields. Rebuilding the v2 corpus invalidates
-reports produced from v1 bytes.
+hash. Run reports serialize both fields. A new corpus version invalidates reports
+from earlier corpus bytes; historical reports remain unchanged.
+
+Before activating a product corpus, call `freeze_reference_binding(root,
+corpus_manifest, key_to_ref)` with the trusted canonical reference map. The
+factory verifies the snapshot digests and reads the declared state sources from
+canonical pages. Its frozen result binds each eligible `#current` reference to
+its authored state and source identity. Pass that result as `reference_binding`
+and record its `digest` as `RunManifest.reference_binding_digest`. Missing,
+stale, or mismatched binding identities void the run.
+Only `mechanism="oracle_packet"` and the legacy `"unknown"` mechanism allow
+identity-only scoring without a binding. Every other mechanism requires both
+the binding and its digest, including historical product mechanism labels.
+Neither binding-optional mechanism establishes product acceptance.
+
+Every distinct surfaced reference still counts in precision. A valid derived
+state reference earns its own relevance credit without adding another gold
+identity to recall. Packet provenance cannot create eligibility, arbitrary
+fragments remain distinct, and known poison projections remain poison even
+when their packet metadata is malformed. Identity-only oracle tests remain
+supported separately; they do not establish product-path acceptance.
+Projection dates must agree across the frozen source, unit `updated`, state
+entry, and provenance; a missing or contradictory unit date earns no credit.
 
 The audit itself is a library, not (yet) a standalone CLI:
 `membench.utility.context_activation.run_audit` takes a `case_id -> packet`
-mapping (from `load_packet` on an oracle-packet file, or later from
+mapping (from `load_packet` on an oracle-packet file, or from
 `activate_context` output) and a `RunManifest` carrying the three required
 pre-registered digests plus the required `logical_corpus_digest`, and returns
 a report with no aggregate field -- every metric is a
@@ -185,11 +210,11 @@ budget and fact-text checks, while retaining each ambiguity object's non-empty
 `ref` as its scoring identity. Legacy string labels remain supported. An absent
 field remains compatible with older packets; a present field must be an array,
 including when empty, and malformed entries or `null` are rejected.
-A `case_id` with no supplied packet scores against the documented kill-switch
-shape (`DISABLED_PACKET`): this is the mechanism-removal check --
-`EXOMEM_DISABLE_WORKING_SET=1` should make every positive case fail, because
-running the audit against an empty packet map is exactly what "the compiler
-is disabled" looks like from this scorer's point of view.
+A `case_id` with no supplied packet is blocked; it is not evidence of a disabled
+compiler. For the product mechanism-removal check, repeat the actual compiler
+calls with `EXOMEM_DISABLE_WORKING_SET=1` and retain their returned packets.
+Every positive case must fail under that intervention. Synthetic
+`DISABLED_PACKET` scorer tests exercise the scoring rule only.
 
 ## Producing a dry-run argv for one arm (never executes anything)
 

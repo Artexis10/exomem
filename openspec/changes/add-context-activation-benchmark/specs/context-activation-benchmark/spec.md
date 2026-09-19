@@ -48,6 +48,77 @@ Required CI acceptance SHALL create the synthetic corpus through supported write
 - **WHEN** an oracle packet passes but real canonical entity or collection prerequisites are absent from the generated corpus
 - **THEN** product-path acceptance fails before a compiler success can be reported
 
+### Requirement: Derived references retain independent scoring identities
+
+Every distinct reference surfaced in a precision-bearing channel SHALL remain a
+separate denominator entry. A current-state projection MAY count as relevant to a
+gold source only through a benchmark-owned binding frozen from the canonical
+fixture's actual state source before activation. The binding SHALL identify its
+anchor, state source, source kind and supported projection form, and SHALL be
+bound to the canonical corpus digest, logical corpus identity and reference map.
+Packet-authored provenance, membership in a gold set, or a fragment suffix alone
+SHALL NOT establish eligibility. A scored projection SHALL also match the expected
+current-state role and corresponding state entry, with consistent dates in the
+unit's `updated` field, provenance, state entry and frozen source. Gold recall SHALL count canonical
+gold identities once; precision SHALL count each eligible surfaced reference.
+Known poison projections SHALL remain poison, including when their packet metadata
+is malformed or attempts to claim supersession. Arbitrary unit fragments SHALL
+remain distinct. Identity-only oracle scoring SHALL remain supported. A run using
+bindings SHALL record and validate their digest. Only `oracle_packet` and legacy
+`unknown` mechanisms MAY omit bindings, and neither SHALL establish product-path
+acceptance. All other mechanisms SHALL require both the binding and its digest;
+missing, mismatched or stale bindings SHALL void that run. Earlier reports SHALL
+remain historical.
+
+#### Scenario: Product scoring cannot opt out by omitting both binding fields
+
+- **WHEN** a product run supplies neither a reference binding nor its digest
+- **THEN** the audit rejects the run as void before scoring
+
+#### Scenario: A contradictory projection date earns no relevance
+
+- **WHEN** a projection matches its frozen state but its unit date is missing or different
+- **THEN** the projection remains in the precision denominator without projection credit
+
+#### Scenario: A relevant state projection is counted without padding the denominator
+
+- **WHEN** a packet surfaces two gold sources and their two independently bound current-state projections
+- **THEN** precision counts four relevant references out of four, while gold recall counts two identities out of two
+
+#### Scenario: Packet metadata cannot manufacture relevance
+
+- **WHEN** an unbound person reference is suffixed with `#current` and supplied with matching-looking provenance and state metadata
+- **THEN** it receives no projection credit and remains an extra reference
+
+#### Scenario: A poison projection cannot hide behind presentation metadata
+
+- **WHEN** a bound projection of a poison source is emitted with a wrong role or a claimed superseded lifecycle
+- **THEN** the poison is still reported and the case fails
+
+### Requirement: Subscription benchmark usage has explicit accounting provenance
+
+Agent runs SHALL record the configured and reported model, effort, provider and
+billing mode, CLI version, elapsed time, available input/output/cached/reasoning
+token counters and their source. Unsupported counters SHALL be unknown, not zero.
+Subscription allowance or credit observations SHALL remain distinct from token
+counts and actual monetary charges. An API-equivalent cost estimate, when supplied,
+SHALL be separately labelled with its pricing source and version; it SHALL NOT be
+reported as a subscription bill. Each attempt, including failure, timeout and retry,
+SHALL retain its own usage disposition. Unavailable usage SHALL remain visible.
+Configured call/time/token limits SHALL bound authorized runs; an unavailable
+subscription SHALL NOT cause an automatic switch to metered API credentials.
+Deterministic acceptance SHALL make no model calls.
+
+#### Scenario: A subscription completion supplies tokens but no price
+
+- **WHEN** the CLI reports input, cached-input and output tokens without a charge or credit deduction
+- **THEN** the report preserves those counters and reports charge and credit consumption as unknown
+
+#### Scenario: A failed attempt has incomplete usage
+
+- **WHEN** a benchmark attempt times out before its completion usage arrives
+- **THEN** the attempt and elapsed time remain recorded with incomplete usage, rather than being counted as a zero-cost successful run
+
 ### Requirement: Paid comparisons are optional and separately authorized
 
 Required delivery SHALL use deterministic product-path acceptance and observed ordinary-use evidence, with explicit distinction between forced tool invocation and ordinary-agent initiation. Paid multi-arm experiments SHALL remain deferred until separately authorized and SHALL NOT gate that delivery. The agent-arm, agent-layer scoring and comparative run-protocol requirements below SHALL apply when such an experiment runs. Without it, reports SHALL make no comparative efficacy verdict and SHALL not describe a deterministic pass as the original A3-versus-A4 acceptance verdict.

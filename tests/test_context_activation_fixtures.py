@@ -132,6 +132,18 @@ def test_build_corpus_is_deterministic_for_the_same_seed(tmp_path) -> None:
     assert first.key_to_path == second.key_to_path
 
 
+def test_logical_corpus_identity_and_state_declarations_are_deterministic_across_writer_builds(
+    tmp_path,
+) -> None:
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first = build_corpus(first_root, seed=5, distractor_count=0)
+    second = build_corpus(second_root, seed=5, distractor_count=0)
+
+    assert first.logical_hash == second.logical_hash
+    assert first.state_sources == second.state_sources
+
+
 def test_build_corpus_different_seed_changes_the_hash(tmp_path) -> None:
     first = build_corpus(tmp_path / "first", seed=5, distractor_count=5)
     second = build_corpus(tmp_path / "second", seed=6, distractor_count=5)
@@ -151,6 +163,25 @@ def test_logical_hash_changes_when_key_mapping_changes_but_corpus_bytes_do_not(t
         seed=manifest.seed,
         distractor_count=manifest.distractor_count,
         key_to_path=remapped,
+    )
+
+    assert changed != manifest.logical_hash
+    assert _corpus_hash(tmp_path) == manifest.corpus_hash
+
+
+def test_logical_hash_changes_when_state_source_declaration_changes(tmp_path) -> None:
+    manifest = build_corpus(tmp_path, seed=5, distractor_count=0)
+    declarations = (
+        dataclasses.replace(manifest.state_sources[0], state_field="status"),
+        *manifest.state_sources[1:],
+    )
+
+    changed = _logical_corpus_hash(
+        tmp_path,
+        seed=manifest.seed,
+        distractor_count=manifest.distractor_count,
+        key_to_path=manifest.key_to_path,
+        state_sources=declarations,
     )
 
     assert changed != manifest.logical_hash
