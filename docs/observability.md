@@ -227,6 +227,8 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `commit.boundary_acquire`, `commit.creation_lock`, `commit.embedding_prewarm`, `commit.locked_commit`, `commit.manifest`, `commit.resolver_prime`, `commit.revalidate`, `commit.stamp_check` | Its commit stages, from the same collector. These are emitted into every row regardless of `EXOMEM_WRITE_TIMINGS`; that flag governs only whether the *caller* is handed a timing envelope on its response. |
 | `derived.receipt_prepare`, `derived.receipt_proof`, `derived.acknowledgement`, `derived.pending_visibility` | The receipt and acknowledgement path. |
 | `index.upsert_after_write` | The whole derived fan-out, and the sum the per-component spans below break down. |
+| `index.completion_check` | Verifying full-index completion after component dispatch, including current publication state. `paths` counts the written paths checked. |
+| `index.full_refresh_store` | Persisting durable full-index refresh work when completion is incomplete or dispatch raises. `paths` counts the written paths submitted for repair. |
 | `index.memory_refs`, `index.resolver`, `index.lexstore`, `index.epistemic_graph`, `index.embeddings` | One per derived component, recorded at the shared dispatch seam. |
 | `graph.refresh_paths` | The graph's incremental pass inside `index.epistemic_graph`. |
 | `lexical.rebuild_atomic` | A whole-corpus lexical rebuild. |
