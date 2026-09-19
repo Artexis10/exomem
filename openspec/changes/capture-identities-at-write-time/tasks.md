@@ -81,7 +81,7 @@
       naming it resolves it. No compiler code changes.
 - [x] 4.3 `ask_memory` and `find` byte-identical for every input; write latency with the
       candidate computation inside the existing write budget.
-- [ ] 4.4 Real-vault check on the owner's snapshot: the lane surfaces the identities
+- [x] 4.4 Real-vault check on the owner's snapshot: the lane surfaces the identities
       measured at two pages, and no `index.md`-only identity. Evidence to the owner's
       knowledge base, not the repository.
 
