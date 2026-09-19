@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.88.0](https://github.com/Artexis10/exomem/compare/v0.87.1...v0.88.0) (2026-09-19)
+
+
+### Features
+
+* **recall:** activate context on host turns with hook injection, continuity and anchor override ([#1287](https://github.com/Artexis10/exomem/issues/1287)) ([169e6de](https://github.com/Artexis10/exomem/commit/169e6debf9d2b278a43005a4ef74ebd3fb0d71db))
+
+
+### Bug Fixes
+
+* **recall:** resolve an anchor only when the turn's own words reach it ([#1300](https://github.com/Artexis10/exomem/issues/1300)) ([6cb28cf](https://github.com/Artexis10/exomem/commit/6cb28cfa198933ab76d5c5e134102f478f3519a8))
+
 ## [0.87.1](https://github.com/Artexis10/exomem/compare/v0.87.0...v0.87.1) (2026-09-18)
 
 
