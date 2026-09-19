@@ -15,7 +15,6 @@ exercised by the unit tests and by the live operation.
 
 from __future__ import annotations
 
-import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
@@ -248,7 +247,12 @@ class Resolution:
 
 def analyze_turn(turn: str) -> TurnAnalysis:
     """Normalise a raw turn once: NFKC + casefold, tokens, n-grams, cues."""
-    text = unicodedata.normalize("NFKC", str(turn)).strip().casefold()
+    # Calls the shared `normalize()` rather than restating its formula: a
+    # hand-rolled copy here once skipped `normalize()`'s typographic-
+    # apostrophe fold, so a turn spelled with a curly quote matched none of
+    # `CUE_PATTERNS`'s plain-apostrophe substrings (e.g. "i'm planning")
+    # even though every OTHER comparison in this module already folded it.
+    text = normalize(turn)
     # Order and repetitions are kept: the n-gram window below must be able to
     # start a phrase at a word the turn has already used, or a turn naming two
     # anchors that share a word can only ever reach the first of them. Callers
