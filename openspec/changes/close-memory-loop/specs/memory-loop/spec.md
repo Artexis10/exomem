@@ -39,6 +39,57 @@ The system SHALL resolve and enrich existing entities before creating duplicates
 - **THEN** the agent proposes or applies permitted hydration of that identity instead of creating a duplicate
 - **AND** ambiguous or incidental mentions do not cause automatic identity assignment
 
+### Requirement: Independent referents remain distinct from roles
+
+The system SHALL support separately evidenced operator organizations, physical sites and independently useful brands without conflating their identities. One entity MAY carry several governed roles/facets without duplicate identities per role. Canonical types and optional parent families SHALL use the existing dynamic registry; filesystem paths SHALL remain projections. The possibility of independent change SHALL inform active-agent consideration but SHALL NOT alone justify entity creation. Existing identity and alias resolution, hydration, authority and provenance rules SHALL apply before creation or restructuring.
+
+#### Scenario: A site changes operator
+
+- **WHEN** evidence establishes a physical site, its current operator and a later operator transition
+- **THEN** the site retains its identity and the operators remain distinct identities
+- **AND** historical relationships retain their evidence and temporal qualification while supported current state reflects the transition
+
+#### Scenario: One organization fills several roles
+
+- **WHEN** one organization is a producer, operator and supplier
+- **THEN** the agent records supported roles/facets or relationships on that identity without creating three organizations
+- **AND** an incidental trading name does not automatically create a separate brand
+
+#### Scenario: A brand has an independently useful identity
+
+- **WHEN** evidence establishes a durable brand whose ownership or usage can change independently of an existing organization
+- **THEN** the agent resolves or proposes its separate identity through the normal governed type/entity path and preserves supported relationships
+- **AND** the organization is not duplicated or retyped as the brand
+
+### Requirement: Contextual name resolution preserves genuine ambiguity
+
+Exact names and aliases that have multiple real-world referents SHALL return bounded candidates with explicit omission information. The active agent SHALL decide semantic reuse, a justified distinct identity or abstention using authorized context and evidence. Deterministic infrastructure SHALL NOT apply domain-specific context rules to select a referent, silently transfer an alias or merge identities. A justified distinct identity SHALL remain expressible through a governed public writer despite overlapping surface names; existing aliases SHALL NOT be reassigned implicitly.
+
+#### Scenario: One name denotes both a company and its site
+
+- **WHEN** an episode uses a surface name shared by an organization and a physical site
+- **THEN** the resolver preserves both candidates and the agent can select the evidence-supported identity for each claim
+- **AND** insufficient context leaves the claim unresolved without a write to an arbitrary target
+- **AND** later activation preserves the same ambiguity rather than treating the alias as globally owned by one node
+
+### Requirement: Supplier topology preserves evidence for each relationship
+
+Every authored entity and durable edge in the integrated loop SHALL retain attributable source, evidence or originating governed-write provenance and its supported epistemic status. Registered relations SHALL be reused where truthful and missing reusable meanings SHALL follow governed extension rules. Seller, operator, producer, production site and purchased lot SHALL remain distinguishable when evidence establishes them. Mutable lot/event provenance SHALL remain in Records or canonical domain stores. Graph traversal SHALL NOT turn inferred transitive paths into directly sourced edges or general sourcing relationships into unsupported lot attribution.
+
+#### Scenario: One seller supplies products from several producers
+
+- **WHEN** a purchase episode identifies one lot from the seller's own site and another from a partner producer
+- **THEN** capture resolves existing identities and preserves each lot's supported origin and source attribution separately
+- **AND** fresh-session activation returns the correct provenance for the requested lot within existing budgets
+- **AND** an otherwise identical lot with unknown origin stays unresolved even when the seller's partner list is known
+
+#### Scenario: Dynamic site capture completes the ordinary loop
+
+- **WHEN** an ordinary supported episode establishes a recurring physical site, operator and evidence-bound relationships
+- **THEN** the active agent considers their canonical homes before writing, uses permitted normal type/entity/relation operations, publishes the resulting graph and performs the bounded coverage check without a user nudge
+- **AND** MCP, CLI and REST agree on identity and later activation consumes the resulting topology without a generic file writer or a forced organization classification
+- **AND** deterministic forced-call tests and observed ordinary-client initiation are reported separately
+
 ### Requirement: Client guarantees reflect observed lifecycle support
 
 MCP, CLI and REST SHALL expose the same core semantics and versioned capabilities. Acceptance SHALL cover Claude Code, Codex, ChatGPT, Claude app and a generic MCP client, recording adapter versions, tool parity, lifecycle enforcement, recovery and observed initiation separately. A host exposing lifecycle hooks or equivalent middleware SHALL enforce bounded checkpoints and pending continuation. A tool-only host SHALL receive bootstrap/skill guidance and SHALL report initiation as best effort, without promising interception of unseen tool-free turns.
