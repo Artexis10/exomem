@@ -55,8 +55,7 @@ evidence_categories: [action, decision]    # default: none
 
 For a turn, the categories that may earn `category_match` are the union of
 `evidence_categories` over roles with an **evidence cue** in the turn. An evidence cue is
-a cue listed in the role's `evidence_cues`, or any cue a vault override added to the
-role, that passes three bounds: it is at least three characters long, it tokenises to at
+a cue in the role's effective `evidence_cues` that passes three bounds: it is at least three characters long, it tokenises to at
 least one term, and its terms occur in the turn as whole terms in order (the cue is
 tokenised with the resolver's own tokeniser and sought as a contiguous run in the turn's
 terms). A cue that fails a bound is never evidence and is reported as a finding. Role
@@ -74,9 +73,15 @@ an evidence cue (one character, no terms), so a turn whose only question signal 
 question mark no longer makes `question` and `problem` eligible. It still selects
 `open_questions`. The direction is the safe one: fewer qualifiers, never more.
 
-What an owner adds is theirs: a cue added to a role by an override counts for selection
-and, when it passes the bounds, for evidence, so one line reaches both. An override may
-also add to a role's `evidence_categories`, on shipped roles and its own. An entry is
+The rule is the same for shipped and owner cues, so the role model needs no record of
+where a cue came from. An override extends `evidence_cues` and `evidence_categories` by
+union, as it already extends `categories`, on shipped roles and its own (both keys join
+the loader's `_OVERRIDE_FIELDS`, which today would report them as unknown). An owner who
+wants a cue to select a role and to count as evidence writes it in both lists; an
+`evidence_cues` entry that is not among the role's cues also selects the role, so one
+line in `evidence_cues` is enough. This is how an owner promotes a shipped selection cue
+such as `budget`: naming it again under `add_cues` would be a silent no-op, because the
+loader skips a cue the role already has. An entry is
 valid when the semantic-language registry's `resolve_category` returns a status other
 than `unregistered`, and its resolved key is what is stored; anything else is dropped
 with a finding. At most 8 per role.
@@ -297,11 +302,12 @@ hash. The scaffold skill gains a short reference section for it.
 
 ## Risks / Trade-offs
 
-- **Shipped evidence drift.** Role cues are a superset of the deleted patterns, so more
-  turns can earn `category_match` for the same categories. Mitigation: the equivalence
-  and property tests in decision 1; the deterministic audit gates recall as well as
-  precision, before and after; if a role drifts, its shipped `evidence_categories`
-  shrink. No table is reinstated.
+- **An owner widens the triggers.** Shipped evidence never widens (decision 1's three
+  tests hold it), but every cue an override puts in `evidence_cues` is a new trigger for
+  that role's evidence categories. The three bounds and the category validation limit
+  what such a cue can do, `roles_findings` reports what was refused, and the qualifier
+  still cannot establish contact. The deterministic audit gates recall as well as
+  precision on the shipped registry, before and after.
 - **An owner admits everything or drops everything.** Both are legitimate vaults. The
   first is slow; the latency gate reports it.
 - **Two registries to learn.** Roles say which questions a packet answers, conventions

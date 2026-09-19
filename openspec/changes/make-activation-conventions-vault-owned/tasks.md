@@ -62,9 +62,11 @@
       the question-mark loss.
 - [ ] 3.2 Add `evidence_cues` and `evidence_categories` to the role model, the shipped
       registry (the eight roles, with the deleted table's patterns and sets; `what about`
-      added to `open_questions`) and the override grammar; override-added cues count as
-      evidence when they pass the bounds (three characters, at least one term, whole
-      terms in order), otherwise a finding; categories validated through
+      added to `open_questions`) and the override grammar (both keys join
+      `_OVERRIDE_FIELDS` and extend by union); a cue is evidence only when it is in the
+      effective `evidence_cues` and passes the bounds (three characters, at least one
+      term, whole terms in order), otherwise a finding; an `evidence_cues` entry also
+      selects its role; categories validated through
       `resolve_category`; add the roles caps and the size cap before parse.
 - [ ] 3.3 Delete `CUE_PATTERNS` and `_CUE_CATEGORIES`. Eligible categories are computed
       in the runtime from the effective registry and passed into `candidates_for`;

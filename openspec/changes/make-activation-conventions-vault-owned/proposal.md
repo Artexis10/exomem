@@ -45,8 +45,8 @@ This change does not make words in other scripts recognisable; the tokeniser fix
   counts as evidence only when it is three characters or longer, tokenises to at least
   one term and matches on term boundaries. The shipped registry carries the deleted
   table's patterns and category sets and never widens them; a question mark alone stops
-  counting. A cue an owner adds to a role reaches both role selection and anchor
-  evidence.
+  counting. A cue an owner adds to a role's `evidence_cues` reaches both role selection
+  and anchor evidence.
 - **New registry `activation-conventions.yaml`**, shipped in the skill scaffold and the
   plugin copy, overridable at `<Knowledge Base>/_Schema/activation-conventions.yaml`:
   - `anchors`: folders, tags and frontmatter `type` values that make a page a `resource`
