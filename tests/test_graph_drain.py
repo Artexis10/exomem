@@ -8,7 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from exomem import deferred_index, graph_drain, index_sync
+from exomem import deferred_index, epistemic_graph, freshness, graph_drain, graph_sync, index_sync
+from exomem import find as find_module
+from exomem import vault as vault_module
+from exomem.epistemic_graph import EpistemicGraphIndex
 
 
 @pytest.fixture(autouse=True)
@@ -20,14 +23,20 @@ def _stop_the_daemon():
 
 
 @pytest.fixture(autouse=True)
-def _no_standing_barrier(monkeypatch: pytest.MonkeyPatch):
+def _no_standing_barrier(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
     """Default to a graph with no stopped rebuild to repair.
 
     `_pending` is the union of queued receipts and a persisted barrier, so a
     test about the queue has to say the barrier is absent or it is quietly
     testing both.
     """
-    monkeypatch.setattr(graph_drain, "_barrier_pending", lambda _root: False)
+    if "real_barrier" not in request.fixturenames:
+        monkeypatch.setattr(graph_drain, "_barrier_pending", lambda _root: False)
+
+
+@pytest.fixture
+def real_barrier() -> None:
+    """Opt into the persisted read-barrier probe for daemon recovery tests."""
 
 
 def _wait_for(predicate, timeout: float = 5.0) -> bool:
@@ -37,6 +46,34 @@ def _wait_for(predicate, timeout: float = 5.0) -> bool:
             return True
         time.sleep(0.01)
     return predicate()
+
+
+def _page(title: str, body: str) -> str:
+    return f"---\ntype: insight\nstatus: active\n---\n# {title}\n\n## Claim\n\n{body}\n"
+
+
+def _published_vault(root: Path) -> Path:
+    """Build a graph whose recall publication can be made cold independently."""
+    vault = root / "vault"
+    notes = vault / "Knowledge Base/Notes/Insights"
+    notes.mkdir(parents=True)
+    (notes / "a.md").write_text(_page("A", "A links to [[b]]."), encoding="utf-8")
+    (notes / "b.md").write_text(_page("B", "B is present."), encoding="utf-8")
+    freshness.seed(
+        vault,
+        "vault",
+        ((str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault)),
+    )
+    freshness.seed(
+        vault,
+        "kb",
+        (
+            (str(path), freshness.stat_signature(path))
+            for path in find_module._walk_md(vault / "Knowledge Base")
+        ),
+    )
+    EpistemicGraphIndex(vault).rebuild_all()
+    return vault
 
 
 def test_a_queued_write_is_drained_without_waiting_for_the_reconcile_tick(
@@ -366,3 +403,373 @@ def test_the_queue_is_drained_before_a_barrier_is_repaired(
 
     assert graph_drain._work_once(tmp_path) == 2
     assert order == ["drain", "recover"]
+
+
+def test_a_barrier_with_an_external_mark_converges_through_the_full_marker(
+    tmp_path: Path,
+    real_barrier: None,
+) -> None:
+    """A declined barrier recovery is coverage debt, not a settled graph.
+
+    The daemon sees an empty per-path queue here.  The external mark says its
+    coverage is unknown, so it must use the existing full-marker route rather
+    than baselining the current process and advertising the old graph.
+    """
+    vault = _published_vault(tmp_path)
+    index = EpistemicGraphIndex(vault)
+    index.suspend_reads()
+    freshness.mark_external_pending(vault, paths=[vault / "Knowledge Base/Notes/Insights/a.md"])
+
+    assert graph_drain._work_once(vault) == 1
+    assert deferred_index.graph_full_rebuild_pending(vault) is not None
+    assert freshness.external_pending(vault)
+    assert not index.available()
+
+    assert graph_drain._work_once(vault) == 1
+    assert deferred_index.graph_full_rebuild_pending(vault) is None
+    assert not freshness.external_pending(vault)
+    assert EpistemicGraphIndex(vault).available()
+
+
+def test_cold_recovery_rebuilds_unqueued_recall_content_before_advertising_current(
+    tmp_path: Path,
+    real_barrier: None,
+) -> None:
+    """A cold process cannot bless a partial event scope as a complete graph."""
+    vault = _published_vault(tmp_path)
+    queued = vault / "Knowledge Base/Notes/Insights/c.md"
+    unqueued = vault / "Knowledge Base/Notes/Insights/other.md"
+    queued.write_text(_page("C", "C is queued."), encoding="utf-8")
+    unqueued.write_text(_page("Other", "Other was not in the event scope."), encoding="utf-8")
+    freshness.invalidate(vault)
+    EpistemicGraphIndex(vault).suspend_reads()
+    freshness.mark_external_pending(vault, paths=[queued])
+
+    assert graph_drain._work_once(vault) == 1
+    assert graph_drain._work_once(vault) == 1
+
+    connection = EpistemicGraphIndex(vault)._open_read_snapshot()
+    assert connection is not None
+    try:
+        assert connection.execute(
+            "SELECT path FROM graph_nodes WHERE path = ?", (str(unqueued.relative_to(vault)),)
+        ).fetchone() is not None
+    finally:
+        connection.close()
+
+
+def test_a_newer_external_epoch_stays_pending_when_reconcile_retires_the_older_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    real_barrier: None,
+) -> None:
+    """Clear-through may retire only the sampled epoch, never a newer mark."""
+    vault = _published_vault(tmp_path)
+    EpistemicGraphIndex(vault).suspend_reads()
+    freshness.mark_external_pending(vault, paths=[vault / "Knowledge Base/Notes/Insights/a.md"])
+    assert graph_drain._work_once(vault) == 1
+
+    real_reconcile = freshness.reconcile
+    real_clear = freshness.clear_external_pending
+    after_old_clear: list[tuple[bool, bool]] = []
+    evictions: list[str] = []
+    marked_newer = False
+
+    real_evict_resolver = find_module.evict_resolver_caches
+    real_evict_inbound = vault_module.evict_inbound_index
+
+    def evict_resolver(root: Path) -> None:
+        evictions.append("resolver")
+        real_evict_resolver(root)
+
+    def evict_inbound(root: Path) -> None:
+        evictions.append("inbound")
+        real_evict_inbound(root)
+
+    def reconcile_with_newer_mark(*args, **kwargs):
+        nonlocal marked_newer
+        result = real_reconcile(*args, **kwargs)
+        if not marked_newer:
+            marked_newer = True
+            freshness.mark_external_pending(
+                vault, paths=[vault / "Knowledge Base/Notes/Insights/b.md"]
+            )
+        return result
+
+    def observe_clear(root: Path, *, through: int) -> None:
+        assert evictions[:2] == ["resolver", "inbound"]
+        real_clear(root, through=through)
+        after_old_clear.append(
+            (freshness.external_pending(vault), EpistemicGraphIndex(vault).available())
+        )
+
+    monkeypatch.setattr(freshness, "reconcile", reconcile_with_newer_mark)
+    monkeypatch.setattr(freshness, "clear_external_pending", observe_clear)
+    monkeypatch.setattr(find_module, "evict_resolver_caches", evict_resolver)
+    monkeypatch.setattr(vault_module, "evict_inbound_index", evict_inbound)
+
+    assert graph_drain._work_once(vault) == 1
+    assert after_old_clear[0] == (True, False)
+
+
+def test_refusal_backoff_and_an_active_owner_do_not_duplicate_recovery_markers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    real_barrier: None,
+) -> None:
+    """The durable marker is one retry handle, subject to the existing backoff."""
+    vault = _published_vault(tmp_path)
+    EpistemicGraphIndex(vault).suspend_reads()
+    freshness.mark_external_pending(vault, paths=[vault / "Knowledge Base/Notes/Insights/a.md"])
+    epistemic_graph.note_publication_refusal(vault)
+
+    assert graph_drain._work_once(vault) == 0
+    assert deferred_index.graph_full_rebuild_pending(vault) is None
+
+    epistemic_graph.clear_publication_refusal(vault)
+    assert graph_drain._work_once(vault) == 1
+    marker = deferred_index.graph_full_rebuild_pending(vault)
+    assert marker is not None
+
+    monkeypatch.setattr(graph_sync, "claim_rebuild_owner", lambda *_args, **_kwargs: False)
+
+    assert graph_drain._work_once(vault) == 0
+    assert deferred_index.graph_full_rebuild_pending(vault) == marker
+    assert graph_drain._work_once(vault) == 0
+    assert deferred_index.graph_full_rebuild_pending(vault) == marker
+
+
+def test_a_pending_recovery_marker_does_not_bypass_publication_refusal_backoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    real_barrier: None,
+) -> None:
+    """A queued marker remains debt; it is not authority to retry a refusal."""
+    vault = _published_vault(tmp_path)
+    EpistemicGraphIndex(vault).suspend_reads()
+    freshness.mark_external_pending(vault, paths=[vault / "Knowledge Base/Notes/Insights/a.md"])
+    assert graph_drain._work_once(vault) == 1
+    marker = deferred_index.graph_full_rebuild_pending(vault)
+    assert marker is not None
+
+    attempts: list[Path] = []
+    real_converge = epistemic_graph.converge_full_graph_marker
+
+    def record_converge(root: Path):
+        attempts.append(root)
+        return real_converge(root)
+
+    epistemic_graph.note_publication_refusal(vault)
+    monkeypatch.setattr(epistemic_graph, "converge_full_graph_marker", record_converge)
+
+    assert graph_drain._work_once(vault) == 0
+    assert attempts == []
+    assert deferred_index.graph_full_rebuild_pending(vault) == marker
+    assert graph_drain._work_once(vault) == 0
+    assert deferred_index.graph_full_rebuild_pending(vault) == marker
+
+
+def test_recovery_eviction_prevents_an_inflight_inbound_build_from_republishing_stale_data(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    real_barrier: None,
+) -> None:
+    """An old full walk may finish for its caller but cannot repopulate the cache."""
+    vault = _published_vault(tmp_path)
+    source = vault / "Knowledge Base/Notes/Insights/a.md"
+    target = "Knowledge Base/Notes/Insights/b.md"
+    old_signature = freshness.stat_signature(source)
+    real_signature = freshness.stat_signature
+    real_build = vault_module._build_inbound_index
+    read_old = threading.Event()
+    release_old = threading.Event()
+    failures: list[BaseException] = []
+
+    def paused_build(root: Path):
+        data = real_build(root)
+        if threading.current_thread().name == "stale-inbound-builder":
+            read_old.set()
+            assert release_old.wait(20)
+        return data
+
+    def old_reader() -> None:
+        try:
+            vault_module.find_inbound_wikilinks(vault, target)
+        except BaseException as error:  # noqa: BLE001 - thread failure reaches the assertion
+            failures.append(error)
+
+    monkeypatch.setattr(vault_module, "_build_inbound_index", paused_build)
+    thread = threading.Thread(target=old_reader, name="stale-inbound-builder")
+    thread.start()
+    try:
+        assert read_old.wait(10), "the inbound builder never captured old source bytes"
+        source.write_text(_page("A", "A has no links."), encoding="utf-8")
+        monkeypatch.setattr(
+            freshness,
+            "stat_signature",
+            lambda path: old_signature if path == source else real_signature(path),
+        )
+        EpistemicGraphIndex(vault).suspend_reads()
+        freshness.mark_external_pending(vault, paths=[source])
+        assert graph_drain._work_once(vault) == 1
+        assert graph_drain._work_once(vault) == 1
+    finally:
+        release_old.set()
+        thread.join(10)
+
+    assert failures == []
+    assert not thread.is_alive()
+    assert vault_module.find_inbound_wikilinks(vault, target) == []
+
+
+def test_recovery_eviction_prevents_an_inflight_recall_build_from_republishing_stale_data(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    real_barrier: None,
+) -> None:
+    """The single-flight leader may return its old snapshot but cannot publish it."""
+    vault = _published_vault(tmp_path)
+    real_from_entries = vault_module.WikilinkResolver.from_entries
+    read_old = threading.Event()
+    release_old = threading.Event()
+    failures: list[BaseException] = []
+
+    monkeypatch.setenv("EXOMEM_DISABLE_RESOLVER_WARM", "1")
+    find_module.evict_resolver_caches(vault)
+
+    def paused_from_entries(root: Path, entries):  # noqa: ANN001, ANN202
+        if threading.current_thread().name == "stale-recall-builder":
+            read_old.set()
+            assert release_old.wait(20)
+        return real_from_entries(root, entries)
+
+    def old_reader() -> None:
+        try:
+            find_module.recall_resolver_snapshot(vault)
+        except BaseException as error:  # noqa: BLE001 - thread failure reaches the assertion
+            failures.append(error)
+
+    monkeypatch.setattr(vault_module.WikilinkResolver, "from_entries", paused_from_entries)
+    thread = threading.Thread(target=old_reader, name="stale-recall-builder")
+    thread.start()
+    try:
+        assert read_old.wait(10), "the recall builder never captured old resolver entries"
+        find_module.evict_resolver_caches(vault)
+    finally:
+        release_old.set()
+        thread.join(10)
+
+    assert failures == []
+    assert not thread.is_alive()
+    assert Path(vault) not in find_module._RECALL_RESOLVER_CACHE
+
+
+def test_inbound_event_patch_cannot_reinsert_data_after_eviction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An event patch publishes only if the cached generation still owns it."""
+    vault = _published_vault(tmp_path)
+    source = vault / "Knowledge Base/Notes/Insights/a.md"
+    target = "Knowledge Base/Notes/Insights/b.md"
+    vault_module.find_inbound_wikilinks(vault, target)
+    source.write_text(_page("A", "A has no links."), encoding="utf-8")
+    changed = source.relative_to(vault).as_posix()
+    real_patch = vault_module._InboundIndexData.on_files_changed
+    patched = threading.Event()
+    release = threading.Event()
+    failures: list[BaseException] = []
+
+    def paused_patch(self, root: Path, changed_rels, deleted_rels):  # noqa: ANN001
+        real_patch(self, root, changed_rels, deleted_rels)
+        patched.set()
+        assert release.wait(20)
+
+    def patcher() -> None:
+        try:
+            vault_module.on_inbound_files_changed(vault, [changed], [])
+        except BaseException as error:  # noqa: BLE001 - thread failure reaches the assertion
+            failures.append(error)
+
+    monkeypatch.setattr(vault_module._InboundIndexData, "on_files_changed", paused_patch)
+    thread = threading.Thread(target=patcher, name="stale-inbound-patch")
+    thread.start()
+    try:
+        assert patched.wait(10), "the inbound event patch never captured its data"
+        vault_module.evict_inbound_index(vault)
+    finally:
+        release.set()
+        thread.join(10)
+
+    assert failures == []
+    assert not thread.is_alive()
+    assert str(vault.resolve()) not in vault_module._INBOUND_INDEX
+
+
+def test_clearing_inbound_cache_revokes_an_inflight_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The test clear hook cannot reset an old builder's publication authority."""
+    vault = _published_vault(tmp_path)
+    target = "Knowledge Base/Notes/Insights/b.md"
+    real_build = vault_module._build_inbound_index
+    building = threading.Event()
+    release = threading.Event()
+
+    def paused_build(root: Path):
+        data = real_build(root)
+        building.set()
+        assert release.wait(20)
+        return data
+
+    monkeypatch.setattr(vault_module, "_build_inbound_index", paused_build)
+    thread = threading.Thread(
+        target=lambda: vault_module.find_inbound_wikilinks(vault, target),
+        name="cleared-inbound-builder",
+    )
+    thread.start()
+    try:
+        assert building.wait(10), "the inbound builder never started"
+        vault_module.clear_inbound_index()
+    finally:
+        release.set()
+        thread.join(10)
+
+    assert not thread.is_alive()
+    assert str(vault.resolve()) not in vault_module._INBOUND_INDEX
+
+
+def test_unloading_resolver_caches_revokes_an_inflight_recall_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Memory release cannot let an old resolver return to the shared cache."""
+    vault = _published_vault(tmp_path)
+    real_from_entries = vault_module.WikilinkResolver.from_entries
+    building = threading.Event()
+    release = threading.Event()
+
+    monkeypatch.setenv("EXOMEM_DISABLE_RESOLVER_WARM", "1")
+    find_module.evict_resolver_caches(vault)
+
+    def paused_from_entries(root: Path, entries):  # noqa: ANN001, ANN202
+        building.set()
+        assert release.wait(20)
+        return real_from_entries(root, entries)
+
+    monkeypatch.setattr(vault_module.WikilinkResolver, "from_entries", paused_from_entries)
+    thread = threading.Thread(
+        target=lambda: find_module.recall_resolver_snapshot(vault),
+        name="unloaded-recall-builder",
+    )
+    thread.start()
+    try:
+        assert building.wait(10), "the recall builder never started"
+        find_module.unload_ram_caches()
+    finally:
+        release.set()
+        thread.join(10)
+
+    assert not thread.is_alive()
+    assert Path(vault) not in find_module._RECALL_RESOLVER_CACHE

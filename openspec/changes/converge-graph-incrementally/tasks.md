@@ -194,6 +194,13 @@ time. Reachable today on every path that already rebuilds off the write path.
   publication hold exists to avoid, arriving from a reader the hold cannot see because it
   was never registered. Found by instrumenting the benchmark that could not delete its own
   sidecar, not by a test.
+- [x] 5.16 Route a persisted graph read barrier with an external-pending epoch through
+  the existing durable full-rebuild marker when ordinary barrier recovery declines. Keep
+  publication-refusal backoff and active-owner coalescing intact; clear only the sampled
+  external epoch after resolver and inbound cache eviction, which revokes publication by
+  any already-running cache builder. Daemon-pass regressions cover
+  complete recovery, cold unqueued recall content, a newer mark across reconciliation,
+  and marker idempotency under backoff or another owner.
 - [x] 5.10 Stop the dispatch layer re-scheduling the whole-vault rebuild that 5.3
   removed. A defer-classified bail-out returns `deferred`, but the layer above reads an
   unregistered, unacknowledged checkpoint as a missing rebuild and registers one — so

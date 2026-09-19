@@ -5353,6 +5353,10 @@ _RESOLVER_CHECKPOINTS: dict[Path, freshness.FreshnessCheckpoint] = {}
 # that produced its maps.  The cache identity is deliberately kept separate
 # for compatibility with callers that supply a direct-disk freshness proof.
 _RECALL_RESOLVER_CHECKPOINTS: dict[Path, freshness.RecallFreshnessCheckpoint] = {}
+#: An eviction must also revoke a resolver that is still building outside
+#: `_RESOLVER_LOCK`.  Tokens are never reset: clearing a cache cannot make an
+#: old builder's captured generation current again.
+_RECALL_RESOLVER_GENERATIONS: dict[Path, int] = {}
 _RESOLVER_LOCK = threading.Lock()
 
 #: Vaults with a projected-resolver build already running.
@@ -5442,6 +5446,7 @@ def _evict_recall_resolver(root: Path) -> None:
     Scheduling the rebuild here is what makes the eviction cheap for everyone
     except a daemon thread.
     """
+    _RECALL_RESOLVER_GENERATIONS[root] = _RECALL_RESOLVER_GENERATIONS.get(root, 0) + 1
     _RECALL_RESOLVER_CACHE.pop(root, None)
     _RECALL_RESOLVER_CHECKPOINTS.pop(root, None)
     _schedule_recall_resolver_rebuild(root)
@@ -5640,6 +5645,7 @@ def recall_resolver_snapshot(
             status="temporarily_unavailable",
         )
     with _RESOLVER_LOCK:
+        generation = _RECALL_RESOLVER_GENERATIONS.setdefault(root, 0)
         cached = _RECALL_RESOLVER_CACHE.get(root)
         if cached and cached[0] == identity:
             return cached[1].fork()
@@ -5712,11 +5718,12 @@ def recall_resolver_snapshot(
             # A later caller with changed disk/policy identity cannot reuse it;
             # graph rebuild performs its stronger direct before/after proof
             # around sidecar publication.
-            _RECALL_RESOLVER_CACHE[root] = (identity, resolver)
-            if checkpoint is not None:
-                _RECALL_RESOLVER_CHECKPOINTS[root] = checkpoint
-            else:
-                _RECALL_RESOLVER_CHECKPOINTS.pop(root, None)
+            if _RECALL_RESOLVER_GENERATIONS.get(root) == generation:
+                _RECALL_RESOLVER_CACHE[root] = (identity, resolver)
+                if checkpoint is not None:
+                    _RECALL_RESOLVER_CHECKPOINTS[root] = checkpoint
+                else:
+                    _RECALL_RESOLVER_CHECKPOINTS.pop(root, None)
     finally:
         if leader:
             with _RECALL_REBUILD_LOCK:
@@ -6106,6 +6113,8 @@ def unload_ram_caches(
             resolver_entries += len(_RECALL_RESOLVER_CACHE)
             _RECALL_RESOLVER_CACHE.clear()
             _RECALL_RESOLVER_CHECKPOINTS.clear()
+            for root in _RECALL_RESOLVER_GENERATIONS:
+                _RECALL_RESOLVER_GENERATIONS[root] += 1
     with _FIND_CACHE_LOCK:
         hot_entries = len(_FIND_CACHE)
         _FIND_CACHE.clear()
