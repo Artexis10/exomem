@@ -14,6 +14,41 @@ At a supported substantive episode boundary the active agent SHALL consider the 
 - **THEN** decomposition still considers the remaining changes and resolves their separate destinations
 - **AND** an incidental name or uncertain ownership claim may be rejected or deferred without manufacturing an entity or edge
 
+### Requirement: Canonical destination fitness is distinct from similarity
+
+Before committing a substantive candidate, the active agent SHALL compare its proposed canonical home with bounded inspected alternatives. The comparison SHALL consider title/scope alignment, artifact role, independent meaning, future lookup language, consequential facets, supported relationship fan-out, synthesis versus refinement and continuation value as applicable. Retrieval similarity, a stable name, page length or an edge count SHALL NOT independently determine destination. The active agent SHALL remain the semantic decider; deterministic infrastructure SHALL NOT score meaning or promote concepts autonomously.
+
+The episode plan SHALL distinguish updating an existing page, adding a semantic unit, creating a focused note, creating/hydrating an entity, routing by Records/Planning/experiment role, preserving Source/Evidence, adding only a relationship and no durable capture. It SHALL retain the selected route, candidate/input revision, target identity or proposed title, bounded alternative scope/version evidence and an attributable reason. Missing candidate evidence SHALL be explicit. Destination preparation SHALL bind current leaf targets and preserve their existing authority and stale-target checks. Replanning SHALL preserve candidate-to-leaf reconciliation.
+
+#### Scenario: A named synthesis spans related narrower pages
+
+- **WHEN** an ordinary episode develops an independently useful named thesis synthesizing several existing concepts
+- **THEN** the agent inspects the related pages and chooses a focused first-class home on the first capture pass when their narrower scopes do not own that thesis
+- **AND** truthful typed relations connect the antecedents while narrower pages receive only scope-owned updates
+- **AND** semantic similarity alone does not authorize appending the thesis to the nearest page
+
+#### Scenario: A minor refinement belongs to its existing home
+
+- **WHEN** a new detail refines an existing concept without independently useful scope or continuation value
+- **THEN** the agent updates the existing home or adds a semantic unit there
+- **AND** shared vocabulary, a newly coined label or a desire for more links does not manufacture another page
+
+#### Scenario: A prepared destination changes before commit
+
+- **WHEN** the selected target or decision-relevant evidence changes after preparation
+- **THEN** the existing target validation requires fresh consideration or proves the identical binding remains valid
+- **AND** the prior candidate and attempted leaf identities are retained rather than silently retargeted or retried as new work
+
+### Requirement: Destination coverage is reviewed before effects
+
+Before the first canonical effect, the active agent SHALL review the bounded plan against its original input revision for omitted durable candidates and unsuitable destinations. Every identified candidate SHALL have a supported routing, abstention, deferral or awaiting-authority disposition. This review SHALL be recorded separately from post-write receipt/readback reconciliation and SHALL NOT confer write authority or require a redundant user confirmation. Deferred work SHALL remain pending where appropriate. The server SHALL validate the recorded contract without claiming to prove semantic completeness or destination quality.
+
+#### Scenario: All facts are present but the thesis has the wrong home
+
+- **WHEN** a proposal covers every identified fact by appending them to a related page whose title/scope does not own their independently useful synthesis
+- **THEN** the precommit agent review revises the destination plan before canonical writes
+- **AND** successful leaf validation alone does not establish destination fitness or completed coverage
+
 ### Requirement: Input evidence and revisions support recovery
 
 Episode state SHALL bind a logical episode identity, input revision and original evidence references or minimal authorized excerpts sufficient to resume the candidate decisions. It SHALL obey disclosure and retention policy and SHALL NOT require full-transcript persistence by default. A digest without recoverable evidence SHALL NOT count as preserved original input. Missing evidence SHALL produce an explicit unavailable recovery state. User corrections SHALL create a new input revision requiring reconsideration of affected candidates.

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib
-import time
 from pathlib import Path
 
 import pytest
@@ -499,9 +498,30 @@ def test_anchor_beyond_cap_does_not_corroborate() -> None:
     assert out.resolved == ()
 
 
-def test_qualifier_anchor_scan_is_hoisted_for_large_graph_fanout() -> None:
+def test_qualifier_anchor_scan_is_hoisted_for_large_graph_fanout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     rr = _rr()
+    token_visits = 0
+    qualifier_scans = 0
+
+    class CountedTokens(tuple):
+        def __iter__(self):
+            nonlocal token_visits
+            for token in super().__iter__():
+                token_visits += 1
+                yield token
+
+    match_qualifiers = rr._tokens_match_qualifiers
+
+    def counted_match(*args):
+        nonlocal qualifier_scans
+        qualifier_scans += 1
+        return match_qualifiers(*args)
+
+    monkeypatch.setattr(rr, "_tokens_match_qualifiers", counted_match)
     anchor = "Knowledge Base/Notes/Research/large-topic.md"
+    tokens = CountedTokens(f"topic{index}" for index in range(1000))
     entities = tuple(
         _entity(
             f"Knowledge Base/Entities/People/fanout-{index:03d}.md",
@@ -514,16 +534,17 @@ def test_qualifier_anchor_scan_is_hoisted_for_large_graph_fanout() -> None:
         rr.EdgeFact(anchor, entity.path, "relates_to", "outbound", "epistemic")
         for entity in entities
     )
-    started = time.perf_counter()
     out = _resolve(
         "my two verdant friends route timing details",
         entities=entities,
-        hits=(_hit(anchor, descriptor_tokens=tuple(f"topic{index}" for index in range(1000))),),
+        hits=(_hit(anchor, descriptor_tokens=tokens),),
         edges=edges,
     )
-    elapsed_ms = (time.perf_counter() - started) * 1000
     assert out.resolved == ()
-    assert elapsed_ms < 250
+    # One stem pass and one prefix pass per anchor, independent of graph fanout
+    # and the amount of CPU time a shared runner gives this process.
+    assert qualifier_scans == 1
+    assert 0 < token_visits <= 2 * len(tokens)
 
 
 def test_attribute_overlap_matches_stem_or_prefix() -> None:

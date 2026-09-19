@@ -272,6 +272,8 @@ _DOCUMENTED_SPAN_NAMES = frozenset(
         "index.path_custody",
         "index.self_write_registration",
         "index.graph_epoch_handoff",
+        "index.completion_check",
+        "index.full_refresh_store",
         "advisory.best_cosine",
         "advisory.overlap_groups",
         # The write-stage collector's own names, emitted into the ledger

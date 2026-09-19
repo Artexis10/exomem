@@ -4253,8 +4253,11 @@ def post_commit_batch_fanout(
                 )
         if index_reports is not None:
             index_reports.append(report)
-        if not index_sync.full_upsert_succeeded(vault_root, replaced, report):
-            index_sync.record_failed_refresh(vault_root, replaced)
+        with call_spans.span("index.completion_check", {"paths": len(replaced)}):
+            complete = index_sync.full_upsert_succeeded(vault_root, replaced, report)
+        if not complete:
+            with call_spans.span("index.full_refresh_store", {"paths": len(replaced)}):
+                index_sync.record_failed_refresh(vault_root, replaced)
             logging.getLogger(__name__).warning(
                 "index upsert incomplete after batch_atomic_write; "
                 "durable full-index refresh recorded"
@@ -4273,7 +4276,8 @@ def post_commit_batch_fanout(
         try:
             from . import index_sync as failed_index_sync
 
-            failed_index_sync.record_failed_refresh(vault_root, replaced)
+            with call_spans.span("index.full_refresh_store", {"paths": len(replaced)}):
+                failed_index_sync.record_failed_refresh(vault_root, replaced)
         except Exception:  # noqa: BLE001 - canonical commit must still survive
             logging.getLogger(__name__).exception(
                 "failed to persist deferred index refresh after dispatch failure"

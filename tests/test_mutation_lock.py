@@ -2219,22 +2219,30 @@ def test_the_shipped_hold_threshold_is_small_enough_to_matter(
 
 
 def test_a_genuinely_routine_hold_is_still_demoted(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The other side of the same bar: no sleep at all stays at DEBUG.
+    """A measured sub-millisecond hold stays DEBUG under the shipped threshold.
 
-    This is the population the flood came from -- 5,000 sampled uncontended
-    reserved-state holds, none of which exceeded 5ms.
+    An empty body can exceed that threshold when the runner is descheduled.
+    Control only this module's measurement clock, while still acquiring and
+    releasing the real boundary and exercising its logging path.
     """
+    clock = [100.0]
+    monkeypatch.setattr(
+        mutation_lock_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock[0], time=time.time, sleep=time.sleep),
+    )
     vault = tmp_path / "vault"
     vault.mkdir()
     coordinator = VaultMutationCoordinator(tmp_path / "state", vault)
 
     with caplog.at_level(logging.DEBUG, logger="exomem.mutation_lock"):
         with _reserved_state_hold(coordinator):
-            pass
+            clock[0] += 0.0005
 
     [released] = _events(caplog, "mutation_lock_released")
+    assert released.fields["hold_ms"] == 0.5
     assert released.levelno == logging.DEBUG
 
 
