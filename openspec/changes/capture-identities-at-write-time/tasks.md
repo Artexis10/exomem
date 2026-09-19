@@ -6,7 +6,7 @@
       block is allowed to miss folder-qualified and differently normalised spellings. If
       the lookup needs a vault walk or a dependency-format change, stop and report; do
       not build either without a ruling.
-- [ ] 0.2 Record the before-image on a seeded synthetic vault: candidates surfaced by the
+- [x] 0.2 Record the before-image on a seeded synthetic vault: candidates surfaced by the
       wikilink lane today and the write responses for the 5.1 sequence.
 
 ## 1. The wikilink lane
@@ -65,13 +65,13 @@
 
 ## 4. Proof
 
-- [ ] 4.1 End-to-end on the seeded vault with a scripted agent: a note links a page-less
+- [x] 4.1 End-to-end on the seeded vault with a scripted agent: a note links a page-less
       name (no block); a second note links it (block on that response); `create-entity`
       closes the candidate and both notes hold their edge without a full rebuild.
       Compare with 0.2.
-- [ ] 4.2 Context compiler proof: after 4.1 the created Entity is an anchor and a turn
+- [x] 4.2 Context compiler proof: after 4.1 the created Entity is an anchor and a turn
       naming it resolves it. No compiler code changes.
-- [ ] 4.3 `ask_memory` and `find` byte-identical for every input; write latency with the
+- [x] 4.3 `ask_memory` and `find` byte-identical for every input; write latency with the
       candidate computation inside the existing write budget.
 - [ ] 4.4 Real-vault check on the owner's snapshot: the lane surfaces the identities
       measured at two pages, and no `index.md`-only identity. Evidence to the owner's
