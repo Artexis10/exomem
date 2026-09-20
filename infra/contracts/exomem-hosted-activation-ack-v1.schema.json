@@ -1,0 +1,263 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Artexis10/exomem/blob/main/infra/contracts/exomem-hosted-activation-ack-v1.schema.json",
+  "title": "Exomem hosted activation acknowledgement protocol v1",
+  "$comment": "JSON Schema validates parsed message shape only. Transports separately reject duplicate keys and invalid UTF-8, enforce request, response, header and custody-record byte limits before parsing, perform authentication of peers and credentials, and enforce runtime rules including deadlines, freshness, epoch adjacency and same-store advancement.",
+  "oneOf": [
+    {"$ref": "#/$defs/proofRequest"},
+    {"$ref": "#/$defs/proofResponse"},
+    {"$ref": "#/$defs/udsCheckRequest"},
+    {"$ref": "#/$defs/udsAckRequest"},
+    {"$ref": "#/$defs/udsResponse"},
+    {"$ref": "#/$defs/httpAckRequest"},
+    {"$ref": "#/$defs/httpBundleResponse"},
+    {"$ref": "#/$defs/errorResponse"}
+  ],
+  "$defs": {
+    "protocol": {"const": "exomem.hosted-activation-ack/v1"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$(?![\\s\\S])"},
+    "requestId": {"$ref": "#/$defs/sha256"},
+    "challengeId": {"$ref": "#/$defs/sha256"},
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,511}$(?![\\s\\S])"
+    },
+    "positiveSqliteInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "budgetMs": {"type": "integer", "minimum": 1, "maximum": 5000},
+    "retryAfterMs": {"type": "integer", "minimum": 0, "maximum": 5000},
+    "activationTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["activation_store_id", "activation_epoch", "activation_state_digest"],
+      "properties": {
+        "activation_store_id": {"$ref": "#/$defs/identifier"},
+        "activation_epoch": {"$ref": "#/$defs/positiveSqliteInteger"},
+        "activation_state_digest": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "publicationSelector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["publication_event_id", "predecessor", "successor"],
+      "properties": {
+        "publication_event_id": {"$ref": "#/$defs/identifier"},
+        "predecessor": {"$ref": "#/$defs/activationTuple"},
+        "successor": {"$ref": "#/$defs/activationTuple"}
+      }
+    },
+    "publicationEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["component_kind", "component_sha256"],
+      "properties": {
+        "component_kind": {
+          "enum": ["hosted-mutation-child/v1", "hosted-mutation-commit/v1"]
+        },
+        "component_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "proofRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "challenge_id",
+        "issued_at",
+        "expires_at",
+        "cell_id",
+        "logical_vault_id",
+        "registry_attachment_id",
+        "attachment_epoch",
+        "expected_bundle_revision",
+        "publication"
+      ],
+      "properties": {
+        "protocol": {"$ref": "#/$defs/protocol"},
+        "challenge_id": {"$ref": "#/$defs/challengeId"},
+        "issued_at": {"$ref": "#/$defs/positiveSqliteInteger"},
+        "expires_at": {"$ref": "#/$defs/positiveSqliteInteger"},
+        "cell_id": {"$ref": "#/$defs/identifier"},
+        "logical_vault_id": {"$ref": "#/$defs/identifier"},
+        "registry_attachment_id": {"$ref": "#/$defs/identifier"},
+        "attachment_epoch": {"$ref": "#/$defs/positiveSqliteInteger"},
+        "expected_bundle_revision": {"$ref": "#/$defs/sha256"},
+        "publication": {"$ref": "#/$defs/publicationSelector"}
+      }
+    },
+    "proofResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "challenge_id",
+        "issued_at",
+        "expires_at",
+        "cell_id",
+        "logical_vault_id",
+        "registry_attachment_id",
+        "attachment_epoch",
+        "expected_bundle_revision",
+        "publication",
+        "publication_evidence",
+        "signing_key_id",
+        "mac"
+      ],
+      "properties": {
+        "protocol": {"$ref": "#/$defs/protocol"},
+        "challenge_id": {"$ref": "#/$defs/challengeId"},
+        "issued_at": {"$ref": "#/$defs/positiveSqliteInteger"},
+        "expires_at": {"$ref": "#/$defs/positiveSqliteInteger"},
+        "cell_id": {"$ref": "#/$defs/identifier"},
+        "logical_vault_id": {"$ref": "#/$defs/identifier"},
+        "registry_attachment_id": {"$ref": "#/$defs/identifier"},
+        "attachment_epoch": {"$ref": "#/$defs/positiveSqliteInteger"},
+        "expected_bundle_revision": {"$ref": "#/$defs/sha256"},
+        "publication": {"$ref": "#/$defs/publicationSelector"},
+        "publication_evidence": {"$ref": "#/$defs/publicationEvidence"},
+        "signing_key_id": {"$ref": "#/$defs/identifier"},
+        "mac": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "udsCheckRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "request_id", "operation", "budget_ms", "publication"],
+      "properties": {
+        "protocol": {"$ref": "#/$defs/protocol"},
+        "request_id": {"$ref": "#/$defs/requestId"},
+        "operation": {"const": "check"},
+        "budget_ms": {"$ref": "#/$defs/budgetMs"},
+        "publication": {"type": "null"}
+      }
+    },
+    "udsAckRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "request_id", "operation", "budget_ms", "publication"],
+      "properties": {
+        "protocol": {"$ref": "#/$defs/protocol"},
+        "request_id": {"$ref": "#/$defs/requestId"},
+        "operation": {"const": "ack"},
+        "budget_ms": {"$ref": "#/$defs/budgetMs"},
+        "publication": {"$ref": "#/$defs/publicationSelector"}
+      }
+    },
+    "udsRequest": {
+      "oneOf": [
+        {"$ref": "#/$defs/udsCheckRequest"},
+        {"$ref": "#/$defs/udsAckRequest"}
+      ]
+    },
+    "udsResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "request_id",
+        "status",
+        "bundle_revision",
+        "activation",
+        "code",
+        "retry_after_ms"
+      ],
+      "properties": {
+        "protocol": {"$ref": "#/$defs/protocol"},
+        "request_id": {"$ref": "#/$defs/requestId"},
+        "status": {"enum": ["ready", "acknowledged", "pending", "conflict", "unavailable"]},
+        "bundle_revision": {
+          "anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+        },
+        "activation": {
+          "anyOf": [{"$ref": "#/$defs/activationTuple"}, {"type": "null"}]
+        },
+        "code": {"$ref": "#/$defs/errorCode"},
+        "retry_after_ms": {"$ref": "#/$defs/retryAfterMs"}
+      }
+    },
+    "httpAckRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "request_id", "budget_ms", "publication"],
+      "properties": {
+        "protocol": {"$ref": "#/$defs/protocol"},
+        "request_id": {"$ref": "#/$defs/requestId"},
+        "budget_ms": {"$ref": "#/$defs/budgetMs"},
+        "publication": {"$ref": "#/$defs/publicationSelector"}
+      }
+    },
+    "httpBundleResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "request_id",
+        "outcome",
+        "cell_id",
+        "logical_vault_id",
+        "registry_attachment_id",
+        "attachment_epoch",
+        "bundle_revision",
+        "keyring_sha256",
+        "control_b64",
+        "serving_membership_b64"
+      ],
+      "properties": {
+        "protocol": {"$ref": "#/$defs/protocol"},
+        "request_id": {"$ref": "#/$defs/requestId"},
+        "outcome": {"enum": ["advanced", "unchanged", "current"]},
+        "cell_id": {"$ref": "#/$defs/identifier"},
+        "logical_vault_id": {"$ref": "#/$defs/identifier"},
+        "registry_attachment_id": {"$ref": "#/$defs/identifier"},
+        "attachment_epoch": {"$ref": "#/$defs/positiveSqliteInteger"},
+        "bundle_revision": {"$ref": "#/$defs/sha256"},
+        "keyring_sha256": {"$ref": "#/$defs/sha256"},
+        "control_b64": {"$ref": "#/$defs/custodyRecordBase64Url"},
+        "serving_membership_b64": {"$ref": "#/$defs/custodyRecordBase64Url"}
+      }
+    },
+    "httpCurrentOrAckBundleResponse": {"$ref": "#/$defs/httpBundleResponse"},
+    "custodyRecordBase64Url": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 87382,
+      "pattern": "^[A-Za-z0-9_-]+$(?![\\s\\S])"
+    },
+    "errorCode": {
+      "enum": [
+        "MALFORMED_REQUEST",
+        "AUTHENTICATION_FAILED",
+        "ACTIVATION_CONFLICT",
+        "ACK_CAPACITY_EXCEEDED",
+        "ACK_UNAVAILABLE",
+        "ACK_DEADLINE_EXCEEDED",
+        "ACK_PENDING",
+        "KEYRING_NOT_AVAILABLE",
+        "ACKNOWLEDGED",
+        "ACK_READY"
+      ]
+    },
+    "errorResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "request_id", "code", "retry_after_ms"],
+      "properties": {
+        "protocol": {"$ref": "#/$defs/protocol"},
+        "request_id": {
+          "anyOf": [{"$ref": "#/$defs/requestId"}, {"type": "null"}]
+        },
+        "code": {"$ref": "#/$defs/errorCode"},
+        "retry_after_ms": {"$ref": "#/$defs/retryAfterMs"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"request_id": {"type": "null"}}},
+          "then": {"properties": {"code": {"const": "MALFORMED_REQUEST"}}}
+        }
+      ]
+    }
+  }
+}

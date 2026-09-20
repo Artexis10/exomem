@@ -1218,6 +1218,7 @@ def _prepare_markdown_batch(
             custody=custody,
             now=moment,
         )
+        authorization_custody.require_activation_acknowledgement_available(root)
         control = custody.control
         if (
             not control.governance_enrolled

@@ -1,0 +1,30 @@
+{
+  "protocol": "exomem.hosted-activation-ack/v1",
+  "challenge_id": "1111111111111111111111111111111111111111111111111111111111111111",
+  "issued_at": 1789905600,
+  "expires_at": 1789905603,
+  "cell_id": "cell-ack-fixture",
+  "logical_vault_id": "vault-ack-fixture",
+  "registry_attachment_id": "hosted-attachment-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "attachment_epoch": 7,
+  "expected_bundle_revision": "2222222222222222222222222222222222222222222222222222222222222222",
+  "publication": {
+    "publication_event_id": "publication-intermediate-child",
+    "predecessor": {
+      "activation_store_id": "activation-store-fixture",
+      "activation_epoch": 11,
+      "activation_state_digest": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    "successor": {
+      "activation_store_id": "activation-store-fixture",
+      "activation_epoch": 12,
+      "activation_state_digest": "4444444444444444444444444444444444444444444444444444444444444444"
+    }
+  },
+  "publication_evidence": {
+    "component_kind": "hosted-mutation-child/v1",
+    "component_sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+  },
+  "signing_key_id": "key-ack-fixture",
+  "mac": "6666666666666666666666666666666666666666666666666666666666666666"
+}
