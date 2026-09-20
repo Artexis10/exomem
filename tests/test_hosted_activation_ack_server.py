@@ -320,7 +320,16 @@ def test_oversized_or_slow_initial_frame_does_not_occupy_a_service_slot(publishe
             oversized.sendall(struct.pack("!I", 8193))
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as partial:
             partial.connect(str(path))
-            partial.sendall(b"\x00")
+            try:
+                partial.sendall(b"\x00")
+            except BrokenPipeError:
+                # The server closes a connection that has not delivered its
+                # initial frame within _MAX_INITIAL_SECONDS of accept, and on a
+                # loaded machine that half second can pass between connect and
+                # this send. Losing the race is the behaviour under test, not a
+                # failure of it: the byte is only here to leave the frame
+                # incomplete, and the assertion below is what decides.
+                pass
             time.sleep(0.6)
         assert ActivationAcknowledgementClient(path).check()["code"] == "ACK_READY"
     finally:
