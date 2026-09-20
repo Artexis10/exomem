@@ -248,6 +248,8 @@ def _live_descendants(
 #: separate from the cutover budget and is measured in minutes, not seconds.
 STANDBY_WARM_ENV = "EXOMEM_STANDBY_WARM_SECONDS"
 DEFAULT_STANDBY_WARM_SECONDS = 300.0
+#: A cold start waits the warm budget, and never less than this.
+COLD_START_FLOOR_SECONDS = 120.0
 
 
 def standby_warm_budget() -> float:
@@ -302,7 +304,12 @@ class Supervisor:
             return
         target = self.records.active() or self.initial_target
         target = await self.runtime.inspect(target)
-        client = await self.runtime.start(target, timeout=120)
+        # A cold worker warms the same catalogs a standby does, with no serving
+        # worker to protect. A window shorter than the warm budget stops it
+        # mid-warm, and the unit restarts into the same cold catalog.
+        client = await self.runtime.start(
+            target, timeout=max(COLD_START_FLOOR_SECONDS, self.standby_warm_timeout)
+        )
         self.records.accept(target)
         self.ingress.resume(client)
         self.phase = "ready"
