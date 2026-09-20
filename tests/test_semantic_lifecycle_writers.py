@@ -1152,9 +1152,9 @@ def test_recovery_missing_parent_external_race_still_blocks(
     raced_parent = tmp_path / "Knowledge Base/Notes/Insights/raced-parent"
     real_commit = semantic_writes.commit_recovery
 
-    def race_then_commit(vault_root: Path, *, preflight, mutate):
+    def race_then_commit(vault_root: Path, *, preflight, mutate, **kwargs):
         raced_parent.mkdir()
-        return real_commit(vault_root, preflight=preflight, mutate=mutate)
+        return real_commit(vault_root, preflight=preflight, mutate=mutate, **kwargs)
 
     monkeypatch.setattr(semantic_writes, "commit_recovery", race_then_commit)
 
@@ -1238,8 +1238,8 @@ def test_recovery_never_unlinks_sidecar_replaced_after_preflight(
     replacement = b'{"replacement":"belongs to another writer"}'
     real_commit = semantic_writes.commit_recovery
 
-    def replace_after_commit(vault_root: Path, *, preflight, mutate):
-        committed = real_commit(vault_root, preflight=preflight, mutate=mutate)
+    def replace_after_commit(vault_root: Path, *, preflight, mutate, **kwargs):
+        committed = real_commit(vault_root, preflight=preflight, mutate=mutate, **kwargs)
         sidecar.write_bytes(replacement)
         return committed
 
@@ -1591,13 +1591,13 @@ def test_directory_recovery_binds_every_nested_directory_census(
     )
     real_commit = semantic_writes.commit_recovery
 
-    def drift_then_commit(vault_root: Path, *, preflight, mutate):
+    def drift_then_commit(vault_root: Path, *, preflight, mutate, **kwargs):
         trash_root = vault_root / trashed.trash_path
         (trash_root / "nested" / "added.md").write_text(
             _source("Unvalidated", page_id="00000000-0000-4000-8000-000000000099"),
             encoding="utf-8",
         )
-        return real_commit(vault_root, preflight=preflight, mutate=mutate)
+        return real_commit(vault_root, preflight=preflight, mutate=mutate, **kwargs)
 
     monkeypatch.setattr(semantic_writes, "commit_recovery", drift_then_commit)
 
@@ -2032,7 +2032,7 @@ def test_recovery_commit_rejects_post_preflight_drift(
     )
     real_commit = semantic_writes.commit_recovery
 
-    def drift_then_commit(vault_root: Path, *, preflight, mutate):
+    def drift_then_commit(vault_root: Path, *, preflight, mutate, **kwargs):
         if drift == "destination":
             _write(vault_root, _PAGE, "racer")
         elif drift == "trash":
@@ -2043,7 +2043,7 @@ def test_recovery_commit_rejects_post_preflight_drift(
             (vault_root / trashed.trash_meta_path).write_text(
                 '{"original_path":"changed.md"}', encoding="utf-8"
             )
-        return real_commit(vault_root, preflight=preflight, mutate=mutate)
+        return real_commit(vault_root, preflight=preflight, mutate=mutate, **kwargs)
 
     monkeypatch.setattr(semantic_writes, "commit_recovery", drift_then_commit)
 
