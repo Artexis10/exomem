@@ -6165,8 +6165,11 @@ def _op_activate_context_body(
     if not managed_cold:
         with find_types.timing_span(timings, "working_set.freshness"):
             try:
+                # No `timings` here: the snapshot would report its projection as
+                # a child of this span, and the table's stages must stay flat so
+                # they sum to no more than the total.
                 snapshot = find_module.FreshnessSnapshot(
-                    vault_root, require_live_recall=require_live_recall, timings=timings
+                    vault_root, require_live_recall=require_live_recall
                 )
                 freshness_key = snapshot.projection_key("kb")
                 lexical_freshness = snapshot.for_scope("kb")

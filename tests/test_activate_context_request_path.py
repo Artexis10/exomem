@@ -107,6 +107,24 @@ def test_freshness_current_state_and_guard_spans_are_registered(
     } <= set(stages)
 
 
+def test_no_reported_stage_is_nested_inside_another_reported_stage(
+    activation_vault: Path,
+) -> None:
+    # The timing table is flat by contract: its stages sum to no more than the
+    # total. A span reported alongside the parent that contains it is counted
+    # twice, and the sum then exceeds the total whenever the child is large.
+    packet = commands.op_activate_context(activation_vault, turn=TURN, include_timings=True)
+
+    names = sorted(packet["timings"]["stages"])
+    nested = [
+        (parent, child)
+        for parent in names
+        for child in names
+        if child.startswith(parent + ".")
+    ]
+    assert nested == []
+
+
 def test_a_disabled_abstention_still_returns_its_timings(
     activation_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
