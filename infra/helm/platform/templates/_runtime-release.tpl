@@ -17,6 +17,9 @@
 {{- if hasKey $lock "runtimeUpgrade" -}}
 {{- $lockKeys = append $lockKeys "runtimeUpgrade" -}}
 {{- end -}}
+{{- if hasKey $lock "activationAcknowledgement" -}}
+{{- $lockKeys = append $lockKeys "activationAcknowledgement" -}}
+{{- end -}}
 {{- if ne (len $lock) (len $lockKeys) -}}
 {{- fail "deployment lock fields are incomplete or unknown" -}}
 {{- end -}}
@@ -59,6 +62,21 @@
 {{- $upgrade := $lock.runtimeUpgrade -}}
 {{- if or (not (kindIs "map" $upgrade)) (ne (len $upgrade) 4) (not (hasKey $upgrade "compatibilityDigest")) (not (hasKey $upgrade "migrationMode")) (not (hasKey $upgrade "substrateConsumerCommit")) (not (hasKey $upgrade "substrateTrustSha256")) (not (regexMatch "^[0-9a-f]{64}$" $upgrade.compatibilityDigest)) (not (has $upgrade.migrationMode (list "none" "binding-v1-to-v2" "state-root-v1" "governance-v3-to-v4"))) (not (regexMatch "^[0-9a-f]{40}$" $upgrade.substrateConsumerCommit)) (not (regexMatch "^[0-9a-f]{64}$" $upgrade.substrateTrustSha256)) -}}
 {{- fail "deployment lock runtime upgrade is invalid" -}}
+{{- end -}}
+{{- end -}}
+{{- if hasKey $lock "activationAcknowledgement" -}}
+{{- $ack := $lock.activationAcknowledgement -}}
+{{- $ackKeys := list "protocol" "platformNamespace" "trustBundleSha256" -}}
+{{- if or (not (kindIs "map" $ack)) (ne (len $ack) (len $ackKeys)) -}}
+{{- fail "deployment lock activation acknowledgement is invalid" -}}
+{{- end -}}
+{{- range $key := $ackKeys -}}
+{{- if not (hasKey $ack $key) -}}
+{{- fail (printf "deployment lock activation acknowledgement is missing %s" $key) -}}
+{{- end -}}
+{{- end -}}
+{{- if or (ne $ack.protocol "exomem.hosted-activation-ack/v1") (not (regexMatch "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$" $ack.platformNamespace)) (not (regexMatch "^[a-f0-9]{64}$" $ack.trustBundleSha256)) -}}
+{{- fail "deployment lock activation acknowledgement is invalid" -}}
 {{- end -}}
 {{- end -}}
 {{- $composition := $lock.composition -}}

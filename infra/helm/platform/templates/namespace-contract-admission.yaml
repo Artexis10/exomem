@@ -1,6 +1,14 @@
 {{- $operatorUsernames := concat .Values.admission.namespaceContractOperatorUsernames (list (printf "system:serviceaccount:%s:exomem-cell-provisioner" .Release.Namespace) (printf "system:serviceaccount:%s:exomem-durability-actions" .Release.Namespace)) | uniq | toJson -}}
+{{- $lock := include "exomem.hostedDeploymentLock" . | mustFromJson -}}
+{{- $ackEnabled := hasKey $lock "activationAcknowledgement" -}}
+{{- $ack := $lock.activationAcknowledgement -}}
 {{- $protectedLabels := list "exomem.io/tenant-cell" "exomem.io/cell-resource" "pod-security.kubernetes.io/enforce" "pod-security.kubernetes.io/enforce-version" "pod-security.kubernetes.io/audit" "pod-security.kubernetes.io/audit-version" "pod-security.kubernetes.io/warn" "pod-security.kubernetes.io/warn-version" -}}
 {{- $protectedAnnotations := list "helm.sh/resource-policy" "exomem.io/resource-name" "exomem.io/approved-image" "exomem.io/pvc-name" "exomem.io/credentials-secret-name" "exomem.io/authorization-session-secret-name" "exomem.io/init-request-configmap-name" "exomem.io/tenant-id" "exomem.io/cell-id" "exomem.io/operation-id" "exomem.io/tenant-digest" "exomem.io/subject-digest" "exomem.io/operation-digest" "exomem.io/fence" "exomem.io/vault-id" "exomem.io/expected-release" "exomem.io/worker-policy-digest" "exomem.io/records-reader-version" "exomem.io/lifecycle-actions-enabled" "exomem.io/browser-origin" "exomem.io/transfer-hostname" -}}
+{{- if $ackEnabled -}}
+{{- $protectedAnnotations = append $protectedAnnotations "exomem.io/activation-ack-protocol" -}}
+{{- $protectedAnnotations = append $protectedAnnotations "exomem.io/activation-ack-platform-namespace" -}}
+{{- $protectedAnnotations = append $protectedAnnotations "exomem.io/activation-ack-trust-sha256" -}}
+{{- end -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -94,6 +102,14 @@ spec:
         variables.newAnnotations['exomem.io/browser-origin'].matches('^https://[^/]+$') &&
         'exomem.io/transfer-hostname' in variables.newAnnotations &&
         variables.newAnnotations['exomem.io/transfer-hostname'].matches('^[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$')
+        {{- if $ackEnabled }} &&
+        'exomem.io/activation-ack-protocol' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/activation-ack-protocol'] == '{{ $ack.protocol }}' &&
+        'exomem.io/activation-ack-platform-namespace' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/activation-ack-platform-namespace'].matches('^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$') &&
+        'exomem.io/activation-ack-trust-sha256' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/activation-ack-trust-sha256'].matches('^[a-f0-9]{64}$')
+        {{- end }}
         )
       message: Tenant namespaces must keep the exact restricted-v1.35 tenant namespace contract.
     - expression: >-

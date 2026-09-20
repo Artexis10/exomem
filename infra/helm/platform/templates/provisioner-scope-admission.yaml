@@ -1,5 +1,60 @@
 {{- $runtimeImages := include "exomem.hostedRuntimeImages" . | mustFromJson -}}
 {{- $provisionerImage := include "exomem.hostedProvisionerImage" . -}}
+{{- $lock := include "exomem.hostedDeploymentLock" . | mustFromJson -}}
+{{- $ackEnabled := hasKey $lock "activationAcknowledgement" -}}
+{{- $ackTrustName := "" -}}
+{{- if $ackEnabled -}}
+{{- $ackTrustName = printf "exomem-ack-ca-%s" (substr 0 40 $lock.activationAcknowledgement.trustBundleSha256) -}}
+{{- end -}}
+{{/* Shared between exomem-provisioner-scope and exomem-durability-actions-scope: both variable
+  blocks define target/name/labels/annotations/resourceName with the same meaning, so one shape
+  check covers whichever service account actually creates these resources. */}}
+{{- define "exomem.activationAckResourceAdmission" -}}
+{{- $lock := include "exomem.hostedDeploymentLock" . | mustFromJson -}}
+{{- $ack := $lock.activationAcknowledgement -}}
+{{- $trustName := printf "exomem-ack-ca-%s" (substr 0 40 $ack.trustBundleSha256) -}}
+- expression: >-
+    request.resource.resource != 'configmaps' || variables.name != '{{ $trustName }}' ||
+    request.operation == 'DELETE' ||
+    (variables.target.immutable == true &&
+      size(variables.target.data) == 1 &&
+      'ca.pem' in variables.target.data &&
+      variables.target.data['ca.pem'].size() > 0 &&
+      variables.target.data['ca.pem'].size() <= 65536 &&
+      variables.labels['exomem.io/cell'] == variables.resourceName &&
+      'exomem.io/recovery-envelope' in variables.annotations)
+  message: The activation acknowledgement trust ConfigMap must be the exact immutable bounded CA bundle.
+- expression: >-
+    request.resource.resource != 'networkpolicies' ||
+    variables.name != variables.resourceName + '-activation-ack-egress' ||
+    request.operation == 'DELETE' ||
+    (variables.target.spec.podSelector.matchLabels == {
+        'app.kubernetes.io/name': 'exomem-cell',
+        'exomem.io/cell': variables.resourceName
+      } &&
+      variables.target.spec.policyTypes == ['Egress'] &&
+      size(variables.target.spec.egress) == 2 &&
+      size(variables.target.spec.egress[0].to) == 1 &&
+      variables.target.spec.egress[0].to[0].namespaceSelector.matchLabels ==
+        {'kubernetes.io/metadata.name': 'kube-system'} &&
+      variables.target.spec.egress[0].to[0].podSelector.matchLabels ==
+        {'k8s-app': 'kube-dns'} &&
+      size(variables.target.spec.egress[0].ports) == 2 &&
+      variables.target.spec.egress[0].ports[0].protocol == 'UDP' &&
+      variables.target.spec.egress[0].ports[0].port == 53 &&
+      variables.target.spec.egress[0].ports[1].protocol == 'TCP' &&
+      variables.target.spec.egress[0].ports[1].port == 53 &&
+      size(variables.target.spec.egress[1].to) == 1 &&
+      variables.target.spec.egress[1].to[0].namespaceSelector.matchLabels ==
+        {'kubernetes.io/metadata.name':
+          namespaceObject.metadata.annotations['exomem.io/activation-ack-platform-namespace']} &&
+      variables.target.spec.egress[1].to[0].podSelector.matchLabels ==
+        {'app.kubernetes.io/name': 'exomem-provisioner-worker'} &&
+      size(variables.target.spec.egress[1].ports) == 1 &&
+      variables.target.spec.egress[1].ports[0].protocol == 'TCP' &&
+      variables.target.spec.egress[1].ports[0].port == 8443)
+  message: The activation acknowledgement egress NetworkPolicy must reach only cluster DNS and the platform ack listener.
+{{- end -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -30,6 +85,8 @@ spec:
     - name: annotations
       expression: >-
         has(variables.target.metadata.annotations) ? variables.target.metadata.annotations : {}
+    - name: resourceName
+      expression: request.namespace
     - name: vaultFingerprint
       expression: >-
         'exomem.io/vault-fingerprint' in variables.labels &&
@@ -136,7 +193,8 @@ spec:
             (request.resource.resource == 'configmaps' &&
               (variables.name == request.namespace + '-init-request' ||
                 variables.name.matches('^exo-op-[a-f0-9]{20}$') ||
-                variables.helmRelease)) ||
+                variables.helmRelease{{ if $ackEnabled }} ||
+                variables.name == '{{ $ackTrustName }}'{{ end }})) ||
             (request.resource.resource == 'limitranges' &&
               variables.name == request.namespace + '-limits') ||
             (request.resource.resource == 'persistentvolumeclaims' &&
@@ -161,7 +219,8 @@ spec:
               variables.name == request.namespace + '-init') ||
             (request.resource.resource == 'networkpolicies' &&
               variables.name in [request.namespace + '-default-deny',
-                request.namespace + '-traefik-ingress']) ||
+                request.namespace + '-traefik-ingress'{{ if $ackEnabled }},
+                request.namespace + '-activation-ack-egress'{{ end }}]) ||
             (request.resource.resource == 'ingressroutes' &&
               variables.name in [request.namespace + '-control', request.namespace + '-transfer']) ||
             (request.resource.resource == 'middlewares' &&
@@ -407,6 +466,9 @@ spec:
                 variables.annotations['exomem.io/cell-id'] +
                 '/public/exomem/v2/transfers/download`))'))
       message: The hosted provisioner may manage only exact private cell routes to the same namespace service.
+    {{- if $ackEnabled }}
+    {{- include "exomem.activationAckResourceAdmission" . | nindent 4 }}
+    {{- end }}
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -486,7 +548,8 @@ spec:
           variables.name == variables.resourceName) ||
         (request.resource.resource == 'networkpolicies' &&
           variables.name in [variables.resourceName + '-default-deny',
-            variables.resourceName + '-traefik-ingress']) ||
+            variables.resourceName + '-traefik-ingress'{{ if $ackEnabled }},
+            variables.resourceName + '-activation-ack-egress'{{ end }}]) ||
         (request.resource.resource == 'ingressroutes' &&
           variables.name in [variables.resourceName + '-control',
             variables.resourceName + '-transfer']) ||
@@ -510,12 +573,14 @@ spec:
         (request.operation == 'CREATE' &&
           ((request.resource.resource == 'configmaps' &&
               (variables.name.matches('^restore-[a-f0-9]{20}-request$') ||
-                variables.helmRelease)) ||
+                variables.helmRelease{{ if $ackEnabled }} ||
+                variables.name == '{{ $ackTrustName }}'{{ end }})) ||
             (request.resource.resource == 'secrets' &&
               variables.name.matches('^restore-[a-f0-9]{20}-source$')) ||
             (request.resource.resource == 'networkpolicies' &&
               (variables.name.matches('^restore-[a-f0-9]{20}-egress$') ||
-                variables.name == variables.resourceName + '-traefik-ingress')) ||
+                variables.name == variables.resourceName + '-traefik-ingress'{{ if $ackEnabled }} ||
+                variables.name == variables.resourceName + '-activation-ack-egress'{{ end }})) ||
             (request.resource.resource == 'jobs' &&
               variables.name.matches('^restore-[a-f0-9]{20}$')) ||
             (request.resource.resource == 'leases' &&
@@ -555,12 +620,14 @@ spec:
           ((request.resource.resource == 'configmaps' &&
               (variables.name.matches('^restore-[a-f0-9]{20}-request$') ||
                 variables.name == variables.resourceName + '-init-request' ||
-                variables.helmRelease)) ||
+                variables.helmRelease{{ if $ackEnabled }} ||
+                variables.name == '{{ $ackTrustName }}'{{ end }})) ||
             (request.resource.resource == 'secrets' &&
               variables.name.matches('^restore-[a-f0-9]{20}-source$')) ||
             (request.resource.resource == 'networkpolicies' &&
               (variables.name.matches('^restore-[a-f0-9]{20}-egress$') ||
-                variables.name == variables.resourceName + '-traefik-ingress')) ||
+                variables.name == variables.resourceName + '-traefik-ingress'{{ if $ackEnabled }} ||
+                variables.name == variables.resourceName + '-activation-ack-egress'{{ end }})) ||
             (request.resource.resource == 'jobs' &&
               (variables.name.matches('^restore-[a-f0-9]{20}$') ||
                 variables.name == variables.resourceName + '-init')) ||
@@ -921,6 +988,9 @@ spec:
                 namespaceObject.metadata.annotations['exomem.io/cell-id'] +
                 '/public/exomem/v2/transfers/download`))'))
       message: Durability actions may close or promote only the exact candidate routes.
+    {{- if $ackEnabled }}
+    {{- include "exomem.activationAckResourceAdmission" . | nindent 4 }}
+    {{- end }}
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
