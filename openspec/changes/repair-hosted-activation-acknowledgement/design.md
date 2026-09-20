@@ -207,11 +207,15 @@ it prevents is a disposable CA quietly serving production; what it costs when it
 fires wrongly is one refused issuance with an explicit reason, paid by the operator
 at issuance time rather than by a tenant in production.
 
-Measured while designing this: `x509.verification.PolicyBuilder().build_server_verifier()`
-refuses a leaf that carries no Authority Key Identifier (`2.5.29.35`), even when the
-chain and SAN are otherwise correct. Internal issuance must add AKI and SKI so the
-library verification path can be used; hand-rolled signature checking is the worse
-option here.
+Measured while implementing this: `x509.verification.PolicyBuilder().build_server_verifier()`
+refuses a leaf that carries no Authority Key Identifier (`2.5.29.35`), and refuses the
+chain when the CA itself carries no Key Usage (`2.5.29.15`) -- the second reports as
+`candidates exhausted: invalid extension: 2.5.29.15`, which reads like a leaf problem
+and is not. Internal issuance must therefore give the CA `keyCertSign`/`crlSign` key
+usage and a subject key identifier, and the leaf an authority key identifier, so the
+library verification path can be used. Hand-rolled signature checking is the worse
+option here, and `validate_activation_ack_server_certificate` now takes the library
+path with these requirements encoded in its tests.
 
 ## Risks / Trade-offs
 
