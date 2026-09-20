@@ -143,6 +143,40 @@ authority change and belongs in task 1.4's adversarial review before implementat
 Preflight in task 5.4 must additionally classify a cell by remaining window, and
 refuse to begin work that cannot complete inside it.
 
+**Amendment, 2026-09-20: the premise above is a hypothesis and the trace now
+contradicts part of it.** Read only, not executed. The hourly renewal does not
+appear to pass through `_ready_custody`. `renew-authorization` reaches
+`live.py::_transition_authorization_session_membership` with
+`require_runtime_attestation=True`, which calls the adapter's
+`attest_authorization_session_membership`; that POSTs
+`authorization-membership/attest` directly and never calls `health()` or
+`verify_governance_readiness`. On the cell, the only gate is
+`hosted_runtime.attest_authorization_membership`, which refuses when
+`phase == "active" and not _core_ready_locked()` -- vault readiness, service
+auth and `_mutation_authority_ready`, the last set once at startup by
+`probe_hosted_mutation_authority`. `mint_hosted_replica_readiness_attestation`
+then reads custody, checks identity, epoch, digest and the key window, derives
+the state from the lifecycle phase, and signs. It never calls
+`schema_v4.load_active_state` and never compares the store's activation tuple
+to `control.json`.
+
+What `_ready_custody` does gate is `/ready`, session issuance via
+`_resolve_session`, and content serving -- which is exactly the observed
+defect, and which this repair addresses through the acknowledgement protocol
+itself.
+
+If the trace holds, the fuse is not "every acknowledgement failure is a
+one-hour countdown". It is at most "an acknowledgement failure plus a pod
+restart", because a restart re-runs the startup probe against the diverged
+state. That is a narrower risk with a different shape, and it would not
+justify widening the readiness proof and its provisioner validator.
+
+Task 3.4 therefore begins with the experiment, not the implementation: a real
+hosted vault whose store leads `control.json`, asking whether the attestation
+still mints. Decisions 7's window arithmetic in the preflight classifier stands
+either way -- refusing work that cannot finish inside the remaining window
+costs nothing and is right whatever renews it.
+
 ### 8. Activation epoch is an authorization generation for vocabulary authority v2
 
 `vocabulary_authority` pins a persisted activation generation to
