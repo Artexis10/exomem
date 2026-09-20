@@ -143,9 +143,16 @@ authority change and belongs in task 1.4's adversarial review before implementat
 Preflight in task 5.4 must additionally classify a cell by remaining window, and
 refuse to begin work that cannot complete inside it.
 
-**Amendment, 2026-09-20: the premise above is a hypothesis and the trace now
-contradicts part of it.** Read only, not executed. The hourly renewal does not
-appear to pass through `_ready_custody`. `renew-authorization` reaches
+**Amendment, 2026-09-20: the premise above is contradicted by the code.** The
+core claim is settled by enumeration rather than by reading one path:
+`schema_v4.load_active_state` has exactly five callers in `src/exomem/`, and
+the only one on any readiness or attestation path is
+`authorization_session_lifecycle.py:153`, inside `_ready_custody`. The other
+four are an attachment-transfer authority check, the down-migration and the
+governance tool. So no activation-tuple comparison against the store exists
+anywhere on the minting path.
+
+The hourly renewal does not pass through `_ready_custody`. `renew-authorization` reaches
 `live.py::_transition_authorization_session_membership` with
 `require_runtime_attestation=True`, which calls the adapter's
 `attest_authorization_session_membership`; that POSTs
@@ -171,9 +178,16 @@ restart", because a restart re-runs the startup probe against the diverged
 state. That is a narrower risk with a different shape, and it would not
 justify widening the readiness proof and its provisioner validator.
 
+What is still open is only the restart variant: `_mutation_authority_ready` is
+set once at startup by `probe_hosted_mutation_authority`, so a pod that
+restarts while an acknowledgement is pending re-runs that probe against the
+diverged state. The probe calls `require_mutation_admission` and
+`hosted_mutation_guard`, neither of which obviously reaches the activation
+tuple on a hosted cell, but that has not been settled the same way.
+
 Task 3.4 therefore begins with the experiment, not the implementation: a real
-hosted vault whose store leads `control.json`, asking whether the attestation
-still mints. Decisions 7's window arithmetic in the preflight classifier stands
+hosted vault whose store leads `control.json`, restarted, asking whether the
+attestation still mints. Decisions 7's window arithmetic in the preflight classifier stands
 either way -- refusing work that cannot finish inside the remaining window
 costs nothing and is right whatever renews it.
 
