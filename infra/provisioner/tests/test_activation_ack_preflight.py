@@ -57,6 +57,62 @@ def test_an_outstanding_acknowledgement_without_the_capability_stays_unknown() -
     assert result.may_begin is False
     assert result.acknowledgement_outstanding is True
     assert "no protocol to recover it" in result.reason
+    # The verdict is worthless unless it survives its own inputs, so the caller
+    # is told to write it down before acting on anything else here.
+    assert result.mark_legacy_uncertain is True
+
+
+def test_a_recorded_legacy_uncertain_verdict_survives_everything_that_would_hide_it() -> None:
+    """The whole point of the mark: the live inputs stop being able to clear it.
+
+    Both routes back to looking healthy are live. Deploying the capability
+    makes `capability_bound` true, and one later write brings the tuples back
+    into parity. Neither produces the receipt the cell never wrote, so neither
+    may reclassify it -- and the comparison is direction-blind precisely
+    because parity is not evidence about what happened.
+    """
+
+    for arguments in (
+        {"store_activation": AHEAD, "capability_bound": False},
+        {"store_activation": AHEAD, "capability_bound": True},
+        {"store_activation": TUPLE},
+    ):
+        marked = _classify(**arguments, legacy_uncertain_mark=True)
+        assert marked.status == LEGACY_UNCERTAIN
+        assert marked.may_begin is False
+        assert "has not been adjudicated" in marked.reason
+        # Already recorded, so nothing asks for it to be recorded again.
+        assert marked.mark_legacy_uncertain is False
+
+    # Without the mark the same clean cell is clean; the mark is doing the work.
+    assert _classify(store_activation=TUPLE).status == CLEAN
+
+
+def test_a_recorded_mark_never_hides_a_stranded_cell() -> None:
+    """Stranded is the harder fact and the one an operator pages on."""
+
+    result = _classify(
+        store_activation=AHEAD,
+        capability_bound=False,
+        legacy_uncertain_mark=True,
+        attestation_expires_at=NOW - 1,
+    )
+
+    assert result.status == STRANDED
+    assert result.may_begin is False
+
+
+def test_nothing_but_a_legacy_uncertain_verdict_asks_for_a_mark() -> None:
+    assert _classify().mark_legacy_uncertain is False
+    assert _classify(store_activation=AHEAD).mark_legacy_uncertain is False
+    assert _classify(release_compatible=False).mark_legacy_uncertain is False
+    assert _classify(required_seconds=HOUR + 1).mark_legacy_uncertain is False
+    assert (
+        _classify(
+            store_activation=AHEAD, replica_state="SERVING", attestation_expires_at=NOW - 1
+        ).mark_legacy_uncertain
+        is False
+    )
 
 
 def test_a_lapsed_window_on_a_cell_that_has_served_is_stranded() -> None:

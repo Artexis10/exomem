@@ -13,6 +13,15 @@ committed mutation is genuinely unknown, and it stays unknown -- a preflight
 that restores activation parity has not learned what the missing receipt said
 and must never write one.
 
+That last verdict has to outlive the observation that produced it. Its inputs
+are all live: deploy the capability, or let a later write bring the tuples back
+into parity, and the same cell reclassifies as recoverable or clean while the
+one mutation whose outcome was never knowable is still in its vault. So the
+caller records the verdict durably and hands it back as `legacy_uncertain_mark`,
+and a marked cell keeps the verdict whatever the live inputs now say. The
+classifier asks for the mark by setting `mark_legacy_uncertain`; it cannot write
+one itself, and clearing one is an operator adjudication, not a computation.
+
 Whether the attestation window has room. A cell that cannot acknowledge cannot
 sign its readiness attestation, so the window stops being renewed; once it
 lapses on a cell that has served, minting is fenced off and the cell is lost.
@@ -46,6 +55,10 @@ class ActivationAckPreflight:
     remaining_seconds: int
     acknowledgement_outstanding: bool
     reason: str
+    # True exactly when this classification newly found a legacy-uncertain cell
+    # and no durable mark records it yet. The caller must persist the mark
+    # before acting on anything else in this result.
+    mark_legacy_uncertain: bool = False
 
 
 def _tuples_match(
@@ -74,6 +87,7 @@ def classify_activation_ack_target(
     attestation_expires_at: int,
     now: int,
     required_seconds: int,
+    legacy_uncertain_mark: bool = False,
 ) -> ActivationAckPreflight:
     """Name what this cell is and whether acknowledgement work may start on it."""
 
@@ -95,6 +109,19 @@ def classify_activation_ack_target(
             reason="the attestation window lapsed on a cell that has served",
         )
 
+    if legacy_uncertain_mark:
+        # A recorded verdict, not a recomputed one. Deploying the capability
+        # does not retroactively produce the receipt this cell never wrote, and
+        # a later write restoring parity is not evidence about the mutation that
+        # lost one -- the tuple comparison is direction-blind for that reason.
+        return ActivationAckPreflight(
+            status=LEGACY_UNCERTAIN,
+            may_begin=False,
+            remaining_seconds=remaining,
+            acknowledgement_outstanding=outstanding,
+            reason="a recorded legacy-uncertain mutation outcome has not been adjudicated",
+        )
+
     if not outstanding:
         status = CLEAN
     elif capability_bound:
@@ -112,6 +139,7 @@ def classify_activation_ack_target(
             remaining_seconds=remaining,
             acknowledgement_outstanding=True,
             reason="a committed mutation has no acknowledgement and no protocol to recover it",
+            mark_legacy_uncertain=True,
         )
 
     if capability_bound and not release_compatible:

@@ -184,11 +184,19 @@ def validate_activation_ack_server_certificate(
     trust_pem: str,
     now: datetime,
     allow_test_trust: bool = False,
+    minimum_remaining: timedelta = MIN_ACTIVATION_ACK_CERTIFICATE_REMAINING,
 ) -> dict[str, object]:
     """Validate the listener's leaf against the pinned bundle at a given instant.
 
     Unlike the bundle validator this is deliberately time-dependent: it is the
     issuance and preflight check, and a refusal here means rotate, not redeploy.
+
+    `minimum_remaining` is the one part callers differ on. Issuance refuses a
+    certificate that is already inside its rotation window, because minting one
+    is free and a short leaf is simply a mistake. Startup passes zero: a worker
+    that refused to serve a valid certificate with nine days left would strand
+    the fleet now to prevent something nine days away, and it reports the
+    remaining time instead.
     """
 
     if not isinstance(now, datetime) or now.tzinfo is None:
@@ -256,7 +264,7 @@ def validate_activation_ack_server_certificate(
     if expires - starts > MAX_ACTIVATION_ACK_CERTIFICATE_LIFETIME:
         raise ValueError("activation acknowledgement server certificate lifetime is unbounded")
     remaining = expires - now
-    if remaining < MIN_ACTIVATION_ACK_CERTIFICATE_REMAINING:
+    if remaining < minimum_remaining:
         raise ValueError(
             "activation acknowledgement server certificate is inside its rotation window"
         )

@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives import serialization
-
 from exomem.hosted_activation_ack_http import HostedActivationAckHttpClient
+
 from exomem_provisioner.activation_ack_configuration import (
     activation_ack_server_dns_name,
     validate_activation_ack_server_certificate,

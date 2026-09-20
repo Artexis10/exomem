@@ -250,6 +250,93 @@ to the validator, and completes a real TLS handshake against a certificate the
 issuer minted. It can only pass if the two sides agree, which is the property
 that matters and the one neither suite was asserting.
 
+### 11. The listener's certificate is checked where it is loaded, not only where it is issued
+
+The same review found that nothing read the certificate again after issuance.
+`validate_activation_ack_server_certificate` ran only inside the issuing
+script, so the disposable-test-CA marker and the remaining-lifetime floor were
+inert against the certificate the worker actually mounts. A Secret replaced by
+hand, rolled back to an older pair, or simply left until it expired would be
+served without complaint.
+
+The consequence is the same fleet-wide loss as Decision 10, arriving later. A
+cell whose handshake fails cannot acknowledge, cannot then sign its readiness
+attestation, and loses the window within the hour; minting is fenced off for a
+cell that has served, so the loss is irreversible.
+
+`activation_ack_startup.preflight_activation_ack_listener` therefore runs in
+`production.py` before anything answers on 8443. It reads the mounted leaf,
+fetches the immutable trust ConfigMap through the same adapter the lifecycle
+path uses -- so the lock's pinned digest decides which bundle counts -- and
+validates one against the other. What it prevents is that loss; what it costs
+when it fires wrongly is a worker that will not start, pausing routine
+lifecycle work until the Secret is fixed or rolled back; and the operator pays
+it at deploy time with the reason in the first log line and no cell yet harmed.
+A certificate that does not chain to the bundle pinned in its own deployment
+lock is a fault, not an eventually-consistent state.
+
+The rotation floor is deliberately **not** fatal here, and this is the part
+worth keeping. Refusing to serve a valid certificate because it has nine days
+left would strand the fleet now to prevent a handshake failure nine days away:
+the wrong-firing cost far exceeds what it prevents. `minimum_remaining` is
+therefore a parameter. Issuance keeps the fourteen-day floor, because minting a
+longer leaf is free and a short one is simply a mistake; startup passes zero
+and logs `activation-ack-certificate-rotation-due` instead.
+
+### 12. A legacy-uncertain verdict is recorded, not recomputed
+
+`classify_activation_ack_target` returned `legacy-uncertain` for a cell whose
+committed mutation has no acknowledgement and no protocol to recover one. The
+review's point was that the verdict could not survive its own inputs. Both
+routes back to looking healthy are live: deploying the capability makes
+`capability_bound` true and reclassifies the cell as recoverable, and one later
+governed write brings the tuples back into parity and reclassifies it as clean.
+Neither produces the receipt the cell never wrote. The tuple comparison is
+direction-blind precisely because parity is not evidence about what happened,
+and reconciling to parity and then reading parity as health is that error with
+an extra step.
+
+The classifier now takes `legacy_uncertain_mark` and returns
+`mark_legacy_uncertain`. It asks its caller to write the verdict down and
+honours a written one whatever the live inputs later say; it cannot persist
+anything itself, and clearing a mark is an operator adjudication rather than a
+computation. A recorded mark does not mask `stranded`, which is the harder fact
+and the one an operator pages on.
+
+The cost of a mark that fires wrongly is bounded: acknowledgement work stays
+refused on that one cell until it is adjudicated. That is not a tax, it is
+accuracy -- there is nothing for the protocol to recover there. The mark does
+not block ordinary lifecycle work.
+
+### 13. The vocabulary-authority incompatibility keeps one refusal site
+
+The review's last deferred finding was that the floor-2 refusal in
+`VocabularyAuthority._custody_floor` is sited at runtime while it reads as a
+configuration-time rule, so a tenant meets it as a failed capture rather than
+an operator meeting it at bind time.
+
+The direction that matters is already covered. `_custody_floor` is called by
+`activate()`, so turning the authority on while the capability is deployed is
+refused at the deliberate, operator-initiated action with an explicit message
+naming both halves. The gap is only the reverse order: a cell already at floor
+2 when the capability is later deployed to it.
+
+Three sites could catch that -- the cell's projected-custody mount, the
+provisioner as it binds `_activationAcknowledgement` to an operation, and lock
+composition. Each costs something real. The mount refusal is content-free by
+design, so it surfaces as a pod that will not go ready without saying why. The
+provisioner site adds an authorization-Secret read to every driver step of
+every capable cell, permanently, to catch a mistake that can be made once per
+cell. Lock composition cannot see any cell's custody floor at all.
+
+So this stays at one site. Alpha cells mint at floor 1, no provisioner code
+sets the floor, and the combination is reachable only by deliberately
+activating floor 2 first -- which is the direction `activate()` already
+refuses. Adding a second control to a latent state in a single-operator alpha
+is governance that costs more than it protects. The real fix remains decoupling
+the persisted generation from the activation epoch, which retires the
+incompatibility rather than guarding it twice.
+
 ## Risks / Trade-offs
 
 - Two stores can temporarily disagree after canonical commit. Exact recoverable outcome evidence, predecessor-bound external CAS and blocked content serving cover that cut; a success-shaped response does not.

@@ -11,6 +11,7 @@ import httpx
 import uvicorn
 
 from .activation_ack_api import ActivationAckService, create_activation_ack_app
+from .activation_ack_startup import preflight_activation_ack_listener
 from .adapters import (
     HelmCliAdapter,
     KubernetesCellAdapter,
@@ -365,17 +366,31 @@ async def _run_worker() -> None:
             capacity_admission=components.capacity,
         )
         try:
-            polling = run_polling_loop(
-                worker,
-                poll_seconds=provider.poll_seconds,
-                idle_poll_seconds=provider.idle_poll_seconds,
-            )
+            def polling_loop() -> Awaitable[None]:
+                # Built on demand, not up front: the listener preflight below
+                # can refuse, and an unawaited polling coroutine would be left
+                # behind by that refusal.
+                return run_polling_loop(
+                    worker,
+                    poll_seconds=provider.poll_seconds,
+                    idle_poll_seconds=provider.idle_poll_seconds,
+                )
+
             if provider.activation_ack_protocol is None:
-                await polling
+                await polling_loop()
             else:
                 assert provider.activation_ack_tls_cert_path is not None
                 assert provider.activation_ack_tls_key_path is not None
-                target = components.lock.selected_runtime(provider.runtime_selection).runtimeTarget
+                selected = components.lock.selected_runtime(provider.runtime_selection)
+                # Before anything answers on 8443. A certificate the cells
+                # cannot verify is not a degraded listener, it is a fleet that
+                # strands within the hour; see activation_ack_startup.
+                await preflight_activation_ack_listener(
+                    binding=selected.activationAcknowledgement,
+                    certificate_path=provider.activation_ack_tls_cert_path,
+                    read_trust_bundle=components.cell.read_activation_ack_trust_bundle,
+                )
+                target = selected.runtimeTarget
                 ack_service = ActivationAckService(
                     cell_lookup=repository,
                     cell=components.cell,
@@ -396,7 +411,7 @@ async def _run_worker() -> None:
                     finally:
                         await ack_app.state.activation_ack_drain()
 
-                await run_worker_with_activation_ack(polling, serve_activation_ack())
+                await run_worker_with_activation_ack(polling_loop(), serve_activation_ack())
         finally:
             await database.dispose()
             await asyncio.to_thread(api_client.close)
