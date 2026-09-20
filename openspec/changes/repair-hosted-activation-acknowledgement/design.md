@@ -307,10 +307,17 @@ inert against the certificate the worker actually mounts. A Secret replaced by
 hand, rolled back to an older pair, or simply left until it expired would be
 served without complaint.
 
-The consequence is the same fleet-wide loss as Decision 10, arriving later. A
-cell whose handshake fails cannot acknowledge, cannot then sign its readiness
-attestation, and loses the window within the hour; minting is fenced off for a
-cell that has served, so the loss is irreversible.
+The consequence is the same fleet-wide outage as Decision 10, arriving later.
+A cell whose handshake fails cannot acknowledge, so `_ready_custody` refuses
+and its readiness, session issuance and content serving all stop. Every
+capability-bound cell fails the same way at once, silently, and stays failed
+until an operator notices and rotates the certificate.
+
+An earlier version of this decision said the cell also loses its attestation
+window within the hour and is then unrecoverable. That is the Decision 7
+mechanism, and the amendment there retracts it: the hourly renewal does not
+pass through `_ready_custody`. A fleet-wide outage is the honest consequence,
+and it is enough.
 
 `activation_ack_startup.preflight_activation_ack_listener` therefore runs in
 `production.py` before anything answers on 8443. It reads the mounted leaf,

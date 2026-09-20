@@ -383,8 +383,8 @@ async def _run_worker() -> None:
                 assert provider.activation_ack_tls_key_path is not None
                 selected = components.lock.selected_runtime(provider.runtime_selection)
                 # Before anything answers on 8443. A certificate the cells
-                # cannot verify is not a degraded listener, it is a fleet that
-                # strands within the hour; see activation_ack_startup.
+                # cannot verify takes every capability-bound cell out of
+                # service at once, silently; see activation_ack_startup.
                 await preflight_activation_ack_listener(
                     binding=selected.activationAcknowledgement,
                     certificate_path=provider.activation_ack_tls_cert_path,

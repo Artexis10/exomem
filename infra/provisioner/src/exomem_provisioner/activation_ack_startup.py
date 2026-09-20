@@ -7,14 +7,13 @@ issuer. So the certificate the worker actually loads had never been checked
 against the trust bundle its own deployment lock pins.
 
 That gap is worse here than it looks. A cell whose handshake fails cannot
-acknowledge its activation tuple; a cell that cannot acknowledge cannot sign
-its readiness attestation; an attestation that is not renewed lapses within the
-hour, and minting is fenced off for a cell that has already served. A wrong
-certificate is therefore not a degraded listener -- it is a silent, fleet-wide,
-irreversible loss that begins the moment the first governed write lands.
+acknowledge its activation tuple, so `_ready_custody` refuses and its
+readiness, session issuance and content serving all stop. Every
+capability-bound cell fails the same way at the same moment, and none of them
+says why: the symptom is a fleet that went quiet, not a certificate error.
 
 What this refusal prevents, what it costs when it fires wrongly, and who pays:
-it prevents that loss; it costs a worker that will not start, so routine
+it prevents that outage; it costs a worker that will not start, so routine
 lifecycle operations pause until the certificate Secret is fixed or rolled
 back; and the operator pays, at deploy time, with the reason in the first log
 line and no cell yet harmed. A certificate that does not chain to the bundle
@@ -22,9 +21,9 @@ pinned in its own lock is a fault, not an eventually-consistent state, so
 fail-closed is the right category.
 
 The rotation floor is deliberately *not* fatal. Refusing to serve because a
-valid certificate has nine days left would destroy the fleet now to prevent
-something that happens in nine days -- the wrong-firing cost far exceeds what
-it prevents. It is logged instead, loudly, every time the worker starts.
+valid certificate has nine days left would cause that outage now to prevent a
+handshake failure in nine days -- the wrong-firing cost far exceeds what it
+prevents. It is logged instead, loudly, every time the worker starts.
 """
 
 from __future__ import annotations
