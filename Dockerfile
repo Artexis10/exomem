@@ -1,10 +1,11 @@
 # exomem — multi-stage container image.
 #
-# Four final targets share this one file:
+# Five final targets share this one file:
 #   lean (target `lean`, DEFAULT — base deps only, no torch, no model download)
 #   ml   (target `ml`   — the `embeddings` extra, CPU-only torch, no CUDA runtime)
 #   cuda (target `cuda` — the `embeddings` extra, CUDA-capable torch, CPU-default at idle)
 #   hosted (target `hosted` — fixed non-root identity and immutable release metadata)
+#   documents-cpu (target `documents-cpu` — local document/OCR converters only)
 #
 # `lean` is intentionally the LAST stage in this file: `docker build .` / `docker
 # buildx build .` with no `--target` builds the final stage in the file, and lean
@@ -44,6 +45,14 @@ COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src/ src/
 
 RUN uv sync --frozen --no-dev --no-editable
+
+########################################################################
+# builder-documents-cpu — local document conversion and OCR only. This keeps
+# ASR/CUDA dependencies out of the hosted worker image while retaining the
+# existing `media` extra as the desktop superset.
+########################################################################
+FROM builder-lean AS builder-documents-cpu
+RUN uv sync --frozen --no-dev --no-editable --extra documents --extra ocr
 
 ########################################################################
 # builder-ml — adds the `embeddings` extra (hybrid search) with CPU-only
@@ -233,6 +242,37 @@ USER 10001:10001
 EXPOSE 8765
 ENTRYPOINT ["exomem"]
 CMD ["--transport", "http", "--port", "8765"]
+
+########################################################################
+# Final: documents-cpu (target `documents-cpu`). This worker-base artifact has
+# local PDF/Office converters and Tesseract, but carries no ASR, CUDA or model
+# runtime. It is neither published nor selected automatically: job admission,
+# sandboxing and worker authority remain the caller's responsibility.
+########################################################################
+FROM python:3.12-slim AS documents-cpu
+COPY --from=builder-documents-cpu /app/.venv /app/.venv
+COPY LICENSE /LICENSE
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --gid 10001 exomem \
+ && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin exomem
+
+ENV PATH=/app/.venv/bin:$PATH \
+    EXOMEM_CONTAINER_VARIANT=documents-cpu \
+    EXOMEM_DISABLE_EMBEDDINGS=1 \
+    EXOMEM_DISABLE_RANKING=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.description="exomem — CPU document and OCR worker base (local parsers only, no ASR/CUDA/model runtime)"
+
+USER 10001:10001
+ENTRYPOINT ["exomem"]
+CMD ["--help"]
 
 ########################################################################
 # Final: lean (target `lean`) — the DEFAULT stage (last in this file; see
