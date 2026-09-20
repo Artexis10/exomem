@@ -61,6 +61,19 @@ def _refuse() -> MetadataConflict:
 _SOURCE_WINDOW_FLOOR_SECONDS = MIGRATION_JOB_DEADLINE_SECONDS + 300
 
 
+# The adapter reports a malformed predecessor and a lost CAS race under distinct
+# reasons. Both mean the same thing to a caller holding a durable commitment: the
+# Secret is not what we last observed, so reread what is actually stored. A
+# concurrent publication is ordinary in an eventually consistent cluster, not a
+# fault, and must not strand the operation.
+_RECONCILABLE_BUNDLE_CONFLICTS = frozenset(
+    {
+        ConflictReason.AUTHORIZATION_SESSION_BUNDLE_PREDECESSOR_DIFFERS,
+        ConflictReason.AUTHORIZATION_SESSION_BUNDLE_CHANGED_CONCURRENTLY,
+    }
+)
+
+
 class HostedGovernanceMigrationCoordinator:
     def __init__(
         self,
@@ -219,7 +232,7 @@ class HostedGovernanceMigrationCoordinator:
         except (DriverRetryable, LostAcknowledgement):
             return DriverPending(context.checkpoint, 30)
         except MetadataConflict as error:
-            if error.reason == ConflictReason.AUTHORIZATION_SESSION_BUNDLE_PREDECESSOR_DIFFERS:
+            if error.reason in _RECONCILABLE_BUNDLE_CONFLICTS:
                 # A delayed identical CAS can win between our observation and
                 # the adapter's predecessor read. Reread under the same durable
                 # commitment before deciding whether the successor is foreign.
@@ -402,10 +415,7 @@ class HostedGovernanceMigrationCoordinator:
                         effect_guard=context.assert_effect_authority,
                     )
                 except MetadataConflict as error:
-                    if (
-                        error.reason
-                        != ConflictReason.AUTHORIZATION_SESSION_BUNDLE_PREDECESSOR_DIFFERS
-                    ):
+                    if error.reason not in _RECONCILABLE_BUNDLE_CONFLICTS:
                         raise
                     # Another publication landed first; decide again on what is stored.
                     return DriverPending(context.checkpoint, 30)
