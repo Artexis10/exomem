@@ -1,37 +1,39 @@
 ## 1. Freeze the proof and compatibility boundaries
 
-- [ ] 1.1 Add the three-second mounted-image read-only-custody reproduction and its writable control to the maintained test suite. Preserve the after-failure note/DB/control evidence and the same-key replay that currently returns outcome unknown. Keep this distinct from the full cluster rehearsal.
-- [ ] 1.2 Inventory every supported hosted mutator/selector and direct catalog/policy publisher. Record each canonical effect boundary, prepared result source, required child set and derived work in this change's design. Refuse to dispatch a remember-only implementation as complete coverage.
-- [ ] 1.3 Freeze the versioned pending-proof, acknowledgement/current response, Unix-socket and private recovery-descriptor schemas. Specify field bounds, identity source, replay checks, full deadline allocation, reserved proof executor/admission capacity, writer-journal variant/phase ownership, recovery dispatch and retention pins, and stable refusal/pending codes. Execute codec fixtures and specify concrete callback lock-ordering/saturation and composite-crash integration cases before dependent implementation, including an intermediate-child acknowledgement before a complete-operation commit component exists; child acknowledgement never proves the whole mutation completed. Execute the real-path cases in tasks 2.5 and 3.1 as completion gates.
+- [x] 1.1 Add the three-second mounted-image read-only-custody reproduction and its writable control to the maintained test suite. Preserve the after-failure note/DB/control evidence and the same-key replay that currently returns outcome unknown. Keep this distinct from the full cluster rehearsal.
+- [x] 1.2 Inventory every supported hosted mutator/selector and direct catalog/policy publisher. Record each canonical effect boundary, prepared result source, required child set and derived work in this change's design. Refuse to dispatch a remember-only implementation as complete coverage.
+- [x] 1.3 Freeze the versioned pending-proof, acknowledgement/current response, Unix-socket and private recovery-descriptor schemas. Specify field bounds, identity source, replay checks, full deadline allocation, reserved proof executor/admission capacity, writer-journal variant/phase ownership, recovery dispatch and retention pins, and stable refusal/pending codes. Execute codec fixtures and specify concrete callback lock-ordering/saturation and composite-crash integration cases before dependent implementation, including an intermediate-child acknowledgement before a complete-operation commit component exists; child acknowledgement never proves the whole mutation completed. Execute the real-path cases in tasks 2.5 and 3.1 as completion gates.
 - [ ] 1.4 Obtain independent adversarial/security review of the authority, secret-disclosure, recovery and rollout design. Resolve findings before changing those boundaries.
 
 ## 2. Bind exact mutation recovery to canonical publication
 
 - [ ] 2.1 Extend writer_lease.py with attempt-bound PreparedCanonicalMutationRecovery and durable private prepared payloads. Test tampering, substituted attempts, stale payloads, missing evidence and precommit crash without marking preparation as success.
-- [ ] 2.2 Extend catalog_publication.py and schema_v4.py to bind each hosted-mutation-child/v1 component atomically with its tuple publication and bind whole-command hosted-mutation-commit/v1 only after all required children verify (same transaction when possible, otherwise a later evidence-only transaction with no activation advance) using existing journal/component tables. Preserve exact v4 schema compatibility and bind all required child effects. Test generic governance recovery dispatch, unknown-variant refusal, projection/catalog garbage-collection pins, retention and downmigration.
+- [x] 2.2 Extend catalog_publication.py and schema_v4.py to bind each hosted-mutation-child/v1 component atomically with its tuple publication and bind whole-command hosted-mutation-commit/v1 only after all required children verify (same transaction when possible, otherwise a later evidence-only transaction with no activation advance) using existing journal/component tables. Preserve exact v4 schema compatibility and bind all required child effects. Test generic governance recovery dispatch, unknown-variant refusal, projection/catalog garbage-collection pins, retention and downmigration.
 - [ ] 2.3 Extract prepare/commit/result seams at the shared semantic creation, edit, move and recovery boundaries and each inventoried direct publication caller. Preserve existing public result shapes and current authorization/egress; no effectful leaf replay is a recovery renderer.
 - [ ] 2.4 Extend exact_commit_evidence and canonical resume to verify the actual publication plus original private payload, recover its acknowledgement, render the same canonical outcome and resume derived work. Preserve uncertainty for legacy incomplete attempts.
 - [ ] 2.5 Prove the crash cuts before commit, after publication/before acknowledgement, after authoritative acknowledgement/before response, and before outer terminal persistence. Include composite mutations with an incomplete child set and fresh-process recovery, not only caught exceptions. For Adoption Studio cover after catalog/before proposal completion, after atomic proposal/receipt replacement before SQLite evidence, and after aggregate commitment before terminal persistence; none may repeat _route_apply, duplicate a note, or advance activation to record completion.
 
 ## 3. Add control-plane-owned acknowledgement
 
-- [ ] 3.1 Add a bounded private pending-publication proof route in server_hosted.py and its transport descriptor. Verify exact committed publication/receipt and challenge, cell, attachment, store and tuple bindings while content parity is blocked. Prove it does not acquire a fence held by the waiting capture or return paths/content. Saturate the shared command worker pool and prove reserved bounded callback capacity remains available.
-- [ ] 3.2 Add provisioner acknowledgement/current services using current owned cell credentials, provider recovery identity, trusted callback selection and existing authorization Secret revision CAS. Preserve renewal fields; test replay, stale/foreign proof, expiry, wrong credentials and concurrent acknowledgement/renewal.
-- [ ] 3.3 Add activation_ack_api.py to the existing worker composition with a narrow injected capability set and coordinated listener/worker shutdown. Keep the general admission API's privileges and global bearer boundary unchanged. Return signed control/membership and keyring digest/revision only, never keyring bytes.
+- [x] 3.1 Add a bounded private pending-publication proof route in server_hosted.py and its transport descriptor. Verify exact committed publication/receipt and challenge, cell, attachment, store and tuple bindings while content parity is blocked. Prove it does not acquire a fence held by the waiting capture or return paths/content. Saturate the shared command worker pool and prove reserved bounded callback capacity remains available.
+- [x] 3.2 Add provisioner acknowledgement/current services using current owned cell credentials, provider recovery identity, trusted callback selection and existing authorization Secret revision CAS. Preserve renewal fields; test replay, stale/foreign proof, expiry, wrong credentials and concurrent acknowledgement/renewal.
+- [x] 3.3 Add activation_ack_api.py to the existing worker composition with a narrow injected capability set and coordinated listener/worker shutdown. Keep the general admission API's privileges and global bearer boundary unchanged. Return signed control/membership and keyring digest/revision only, never keyring bytes.
+- [ ] 3.4 Let an exact pending successor renew the attestation window without reporting the cell as serving. Readiness currently fails whenever the store leads `control.json`, so a pending acknowledgement blocks the hourly renewal and expiry is unrecoverable. Distinguish an unexplained divergence from an exact pending successor proven by the same committed-publication evidence the protocol already requires; renew only for the second, keep content parity blocked, and have the provisioner verify the evidence rather than trust the claim. `store_agreement` is not the seam: both validators reject anything but `True`. This widens an authority boundary, so close task 1.4 review on it before implementing.
 
 ## 4. Deliver custody promptly and monotonically
 
-- [ ] 4.1 Extend the native custody helper with a bounded Unix-socket acknowledgement client/server path and fixed authenticated TLS control-plane client. Verify identities, signatures and installed parity before completing the healthy request.
-- [ ] 4.2 Serialize fast delivery and projected refresh. Test stale projected predecessors, conflicting equal epochs, incomparable renewal generations, sidecar restart, missing rotated verification key and interrupted multi-file publication. Reconcile from authority without locally combining generations.
-- [ ] 4.3 Wire hosted acknowledge_activation_tuple to the helper while preserving standalone behavior. Refuse missing capability before mutation and retain exact committed pending recovery after transport loss. Prove the healthy path fits the existing command deadline with the actual held mutation fences.
+- [x] 4.1 Extend the native custody helper with a bounded Unix-socket acknowledgement client/server path and fixed authenticated TLS control-plane client. Verify identities, signatures and installed parity before completing the healthy request.
+- [x] 4.2 Serialize fast delivery and projected refresh. Test stale projected predecessors, conflicting equal epochs, incomparable renewal generations, sidecar restart, missing rotated verification key and interrupted multi-file publication. Reconcile from authority without locally combining generations.
+- [x] 4.3 Wire hosted acknowledge_activation_tuple to the helper while preserving standalone behavior. Refuse missing capability before mutation and retain exact committed pending recovery after transport loss. Prove the healthy path fits the existing command deadline with the actual held mutation fences.
 
 ## 5. Wire deployment and credentials
 
 - [ ] 5.1 Add the worker's internal 8443 TLS listener and ClusterIP Service, trusted fixed endpoint configuration, dedicated certificate Secret and public trust ConfigMap distribution. Add the socket/credential/trust mounts without making runtime custody writable or sharing a Kubernetes/global bearer token.
 - [ ] 5.2 Update cell/platform values schemas, exact-shape tenant and provisioner admission policies, Secret/ConfigMap ownership verification, fixed destination egress/DNS and callback ingress. Render and exercise acceptance/refusal against a real API server.
 - [ ] 5.3 Document and preflight production certificate creation, encrypted custody, SAN/expiry validation and overlap rotation. Generate a separate disposable CA for tests. Production transport credentials and target deployment remain separately verified actions.
-- [ ] 5.4 Add and test preflight classification of clean, protocol-qualified and legacy pending/uncertain targets. Preserve legacy unknown mutation outcomes even when exact activation-only reconciliation restores parity; never invent their missing receipts or replace their identity. Bind the capability to compatible runtime/provisioner/chart releases and deployment locks. Describe forward recovery after an activation advance and refuse incompatible rollback; regenerate signed target and final consumer evidence only for the released exact source.
-- [ ] 5.5 Implement the closed deployment-lock capability/trust extension, both signed-source declarations, exact conditional trust/egress recovery envelopes, retained encrypted operation binding, and unchanged-public-request replay across trust rotation. Verify capable-forward refusal without binding, legacy shape preservation, active-versus-rollback selection, and original trust retention.
+- [ ] 5.4 Add and test preflight classification of clean, protocol-qualified and legacy pending/uncertain targets, and of remaining attestation window; refuse to begin work that cannot complete inside the window. Preserve legacy unknown mutation outcomes even when exact activation-only reconciliation restores parity; never invent their missing receipts or replace their identity. Bind the capability to compatible runtime/provisioner/chart releases and deployment locks. Describe forward recovery after an activation advance and refuse incompatible rollback; regenerate signed target and final consumer evidence only for the released exact source.
+- [x] 5.5 Implement the closed deployment-lock capability/trust extension, both signed-source declarations, exact conditional trust/egress recovery envelopes, retained encrypted operation binding, and unchanged-public-request replay across trust rotation. Verify capable-forward refusal without binding, legacy shape preservation, active-versus-rollback selection, and original trust retention.
+- [ ] 5.6 Decouple the vocabulary-authority generation from the activation epoch, or refuse `vocabulary_authority_floor == 2` on a cell with acknowledgement capability. Per-write activation advancement invalidates every grant and reservation stamped with the pinned generation. Alpha cells mint at floor 1, so this is latent; add a test that fails if floor 2 and acknowledgement capability are ever combined.
 
 ## 6. Verify and deliver the repair
 
@@ -39,6 +41,49 @@
 - [ ] 6.2 Obtain independent review of the implemented authority and recovery cut, including real race and forged-evidence probes. Deliver committed, pushed ready PRs and merge/publish only within the operator's authorized scope.
 - [ ] 6.3 Run the real mounted-image/worker/sidecar flow for first capture, cited recall, all acknowledgement loss cuts, renewal races, stale Secret refresh, sidecar restart and pod replacement. Retain bounded private diagnostic evidence before fixture cleanup; do not repeat an unchanged failed cluster run.
 - [ ] 6.4 Re-run the connected ordinary empty-installation journey using the released signed image and final consumer commit. Complete owner consent/usefulness acceptance before friends; retain the original invite, tenant and durable attempt. This repair does not complete the later gateway/self-hosting/public redesign.
+
+## Status, 2026-09-20
+
+Boxes are checked only where code and executing tests were both confirmed in this
+worktree. Evidence for the checked set:
+
+- Runtime scope — `HELM_BIN=... .venv/bin/python -m pytest -q -p no:randomly`
+  over the activation, journal, recovery, writer-lease, composition-lock and
+  Helm-contract suites: 611 passed, 2 failed. The two failures are task 5.2's own
+  red tests for the platform admission policy, which are the next work item and
+  were previously skipped for want of `HELM_BIN`.
+- Provisioner scope — `uv run --frozen --with-editable . pytest -q` over
+  `infra/provisioner/tests`: 1713 passed, 69 skipped, 0 failed.
+- Helm rendering — `tests/test_hosted_helm_contract.py` with real Helm 3.19.4:
+  72 passed.
+
+Deliberately left unchecked, with the reason:
+
+- 1.4 — a prior session reported independent adversarial review of the
+  preparation, but no evidence of it survives in the repository. Re-obtain it.
+- 2.1, 2.3, 2.4 — the private recovery descriptor and the mutator seams exist and
+  their own tests pass, but neither the writer-lease binding nor each selector's
+  result recipe has been checked against the full contract these tasks state.
+- 2.5 — no crash-cut or fresh-process recovery test exists yet. Caught exceptions
+  are not the cuts this task requires.
+- 5.1 — the cell side renders (trust ConfigMap, 8443 egress). The platform side
+  has no activation-ack listener, Service or certificate Secret at all.
+- 5.2 — in progress; its two tests are red by design until the platform admission
+  policy lands.
+- 5.3, 5.4, 6.1-6.4 — not started.
+
+Two interactions found while recovering this work are not covered by design.md and
+must be closed before 6.3:
+
+1. A failed acknowledgement blocks serving-membership readiness attestation, so the
+   provisioner's hourly window renewal cannot complete; once that window expires the
+   cell cannot recover. Every acknowledgement failure is a one-hour countdown, which
+   changes how a rehearsal may be run and what 5.4 preflight must detect.
+2. Vocabulary authority v2 pins a persisted activation generation to
+   `control.activation_epoch` and requires equality for every grant. This repair
+   advances that epoch on every governed write. It is gated behind
+   `vocabulary_authority_floor == 2`, the default is 1, and no provisioner code
+   raises it, so it is latent rather than an alpha blocker.
 
 ## Execution ownership
 

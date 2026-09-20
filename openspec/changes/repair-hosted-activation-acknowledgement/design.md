@@ -108,6 +108,59 @@ Use allocating when private preparation and the complete child manifest exist bu
 
 **Retention:** extend store.pinned_component_keys and schema_v4.projection_namespace_pins for the full writer dependency manifest: predecessor/successor publications, policy generations, catalogs, projection namespaces, measurement stores and required-child dependencies. For v1, retain journal evidence and its pins even after closure; do not introduce automatic retirement in this repair. This preserves non-expiring idempotency semantics at a storage cost. Unknown/malformed retained dependencies block collection/downmigration instead of returning empty pins. Reclamation requires a separate contract coordinating private writer-state retirement. No schema-v4 table-definition change is needed.
 
+### 7. The pending acknowledgement must not consume the attestation window
+
+Serving-membership readiness runs through `_ready_custody`, which calls
+`schema_v4.load_active_state` and so asserts activation-tuple equality between the
+store and `control.json`. A cell whose store is ahead therefore cannot sign a
+readiness attestation. The provisioner's hourly renewal of the attestation window
+needs exactly that signature, so a pending acknowledgement stops the window from
+advancing; `live.py` records that once the window expires the cell cannot recover,
+because minting is fenced off for a cell that has served and the drain that would
+renew it needs an attestation the cell can no longer sign.
+
+That renewal exists precisely to close this deadlock once before. This repair
+reopens it through a different door: a pending acknowledgement becomes a one-hour
+countdown to an unrecoverable cell rather than a recoverable stall. The healthy
+path is seconds, so the exposure is a control-plane outage that outlasts the
+window while a cell holds a committed publication awaiting acknowledgement.
+
+`GovernanceReadinessProof.store_agreement` is not the seam. It is hardcoded `True`,
+and both the runtime validator and `governance_readiness.py` reject a proof whose
+value is not `True`, so reporting the truth through it only changes which side
+refuses.
+
+Decision: readiness must distinguish "the store and the registry disagree for an
+unknown reason" from "this cell holds an exact pending successor that the control
+plane has not yet acknowledged". Only the second may renew the window, it must be
+proven by the same committed-publication evidence the acknowledgement protocol
+already requires, and it must not report the cell as fully serving or unblock
+content parity. The provisioner is the acknowledging authority and can verify that
+evidence itself rather than trusting the cell's claim.
+
+This widens the readiness proof and its provisioner validator, so it is an
+authority change and belongs in task 1.4's adversarial review before implementation.
+Preflight in task 5.4 must additionally classify a cell by remaining window, and
+refuse to begin work that cannot complete inside it.
+
+### 8. Activation epoch is an authorization generation for vocabulary authority v2
+
+`vocabulary_authority` pins a persisted activation generation to
+`control.activation_epoch` when it activates, and requires exact equality on every
+later check, with grants and reservations stamped by that generation. Hosted
+activation epochs are effectively static after migration today, so the coupling has
+never been exercised. This repair advances the epoch on every governed write, which
+would invalidate every outstanding grant and reservation on each write.
+
+It is gated on `control.version == 2` with `vocabulary_authority_floor == 2`. The
+schema default is `1` and no provisioner code raises the floor, so alpha cells are
+minted at floor 1 and this is latent rather than an alpha blocker. It must not stay
+undocumented: raising the floor without decoupling the generation would break
+vocabulary authority silently. Either the generation must stop tracking the
+activation epoch, or floor 2 must be refused on a cell with acknowledgement
+capability, and whichever is chosen needs a test that fails if the two are ever
+combined.
+
 ## Risks / Trade-offs
 
 - Two stores can temporarily disagree after canonical commit. Exact recoverable outcome evidence, predecessor-bound external CAS and blocked content serving cover that cut; a success-shaped response does not.
