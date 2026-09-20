@@ -166,7 +166,7 @@ def load_registry(
         for destination_id, destination in destinations.items():
             if (
                 isinstance(destination, dict)
-                and destination.get("kind") == "sops_k8s_secret"
+                and destination.get("kind") in {"sops_k8s_secret", "sops_k8s_tls_secret"}
                 and destination.get("slot") == "active"
             ):
                 target = destination.get("target")

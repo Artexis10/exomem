@@ -90,7 +90,12 @@ def _active_destinations(matrix: dict[str, Any]) -> dict[str, tuple[str, str]]:
                 raise ActiveSecretRegistrySigningError("secret destination matrix is invalid")
             destination_ids.add(destination_id)
             kind = destination.get("kind")
-            if kind in {"sops_k8s_secret", "sops_escrow", "sops_ansible_vars"}:
+            if kind in {
+                "sops_k8s_secret",
+                "sops_k8s_tls_secret",
+                "sops_escrow",
+                "sops_ansible_vars",
+            }:
                 target = destination.get("target")
                 if (
                     not isinstance(target, str)
@@ -102,7 +107,14 @@ def _active_destinations(matrix: dict[str, Any]) -> dict[str, tuple[str, str]]:
                 ):
                     raise ActiveSecretRegistrySigningError("secret destination matrix is invalid")
                 target_paths.add(target)
-            if destination.get("kind") == "sops_k8s_secret" and destination.get("slot") == "active":
+            if (
+                destination.get("kind")
+                in {
+                    "sops_k8s_secret",
+                    "sops_k8s_tls_secret",
+                }
+                and destination.get("slot") == "active"
+            ):
                 target = destination.get("target")
                 if not isinstance(target, str) or target.count("{version}") != 1:
                     raise ActiveSecretRegistrySigningError("secret destination matrix is invalid")

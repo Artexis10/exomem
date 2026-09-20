@@ -54,7 +54,12 @@ def _destinations(matrix: dict[str, Any]) -> list[Destination]:
             if not isinstance(destination_id, str) or not isinstance(raw, dict):
                 raise RuntimeError("secret destination matrix is invalid")
             kind = raw.get("kind")
-            if kind not in {"sops_k8s_secret", "sops_ansible_vars", "sops_escrow"}:
+            if kind not in {
+                "sops_k8s_secret",
+                "sops_k8s_tls_secret",
+                "sops_ansible_vars",
+                "sops_escrow",
+            }:
                 continue
             target = raw.get("target")
             if (
@@ -112,7 +117,7 @@ def _require_exact_keys(value: Any, expected: set[str], label: str) -> dict[str,
 
 def _validate_shape(document: dict[str, Any], destination: Destination) -> None:
     payload = {key: value for key, value in document.items() if key != "sops"}
-    if destination.kind == "sops_k8s_secret":
+    if destination.kind in {"sops_k8s_secret", "sops_k8s_tls_secret"}:
         _require_exact_keys(
             payload,
             {"apiVersion", "kind", "metadata", "type", "stringData"},
@@ -126,9 +131,12 @@ def _validate_shape(document: dict[str, Any], destination: Destination) -> None:
             {"app.kubernetes.io/managed-by", "exomem.io/secret-version"},
             "Secret labels",
         )
-        _require_exact_keys(
-            payload["stringData"], {destination.fields["key"]}, "Secret stringData"
+        expected_data = (
+            {"tls.crt", "tls.key"}
+            if destination.kind == "sops_k8s_tls_secret"
+            else {destination.fields["key"]}
         )
+        _require_exact_keys(payload["stringData"], expected_data, "Secret stringData")
     elif destination.kind == "sops_ansible_vars":
         _require_exact_keys(payload, {destination.fields["variable"]}, "Ansible variables")
     else:
@@ -153,7 +161,9 @@ def validate_artifact(path: Path, *, root: Path, destinations: list[Destination]
     lowered = path.name.lower()
     if any(token in lowered for token in (".dec.", ".plain.", ".decrypted.", "age.key", ".agekey")):
         raise RuntimeError("tracked plaintext secret artifact is forbidden")
-    matches = [destination for destination in destinations if destination.pattern.fullmatch(relative)]
+    matches = [
+        destination for destination in destinations if destination.pattern.fullmatch(relative)
+    ]
     if len(matches) != 1:
         raise RuntimeError("tracked SOPS artifact does not match exactly one destination")
     try:

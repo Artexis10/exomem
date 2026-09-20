@@ -1069,8 +1069,9 @@ def test_placeholder_detection_does_not_rewrite_real_secret_content() -> None:
 def test_matrix_never_routes_a_file_shaped_secret_to_vercel(tmp_path: Path) -> None:
     """A multi-line value in a Vercel env var is a different kind of object.
 
-    File shape is only meaningful for a Kubernetes Secret that materializes the
-    bytes as a file, so the matrix parser refuses any other destination for it.
+    A Kubernetes Secret and an offline escrow document both carry the bytes as
+    written. A Vercel environment variable and an Ansible variable do not, so the
+    matrix parser refuses a file-shaped secret at either of those.
     """
 
     module = _load_module()
@@ -1079,10 +1080,213 @@ def test_matrix_never_routes_a_file_shaped_secret_to_vercel(tmp_path: Path) -> N
     assert set(shaped) == {"database_backup_pg_service_file", "database_backup_pgpass_file"}
     for name in shaped:
         for destination in matrix["secrets"][name]["destinations"].values():
-            assert destination["kind"] == "sops_k8s_secret"
+            assert destination["kind"] in {
+                "sops_k8s_secret",
+                "sops_k8s_tls_secret",
+                "sops_escrow",
+            }
 
     matrix["secrets"]["cloudflare_access_client_id"]["value_shape"] = "file"
     poisoned = tmp_path / "poisoned-matrix.json"
     poisoned.write_text(json.dumps(matrix), encoding="utf-8")
-    with pytest.raises(module.HandoffError, match="outside a Kubernetes Secret"):
+    with pytest.raises(module.HandoffError, match="single-line destination"):
+        module.load_matrix(poisoned)
+
+
+def _matrix_with_tls_pair(tmp_path: Path) -> Path:
+    """A matrix carrying the TLS destination kind, without claiming a live route.
+
+    The real matrix gains its activation-acknowledgement entries when the
+    certificate is actually issued: the signer requires every active Kubernetes
+    destination to have a selection entry and a published artifact, so declaring
+    the route before issuance would make the signed active registry incomplete.
+    """
+
+    matrix = _matrix()
+    matrix["secrets"]["activation_ack_tls_pair"] = {
+        "value_shape": "file",
+        "sources": [{"kind": "generated-activation-ack-tls"}],
+        "destinations": {
+            "k3s.activation-ack-tls.active": {
+                "kind": "sops_k8s_tls_secret",
+                "slot": "active",
+                "target": "infra/secrets/platform/activation-ack-tls.{version}.sops.json",
+                "namespace": "exomem-platform",
+                "kubernetes_secret": "exomem-activation-ack-tls",
+            }
+        },
+    }
+    matrix["secrets"]["activation_ack_ca_private_key"] = {
+        "value_shape": "file",
+        "sources": [{"kind": "generated-activation-ack-tls"}],
+        "destinations": {
+            "escrow.activation-ack-ca.active": {
+                "kind": "sops_escrow",
+                "slot": "active",
+                "target": "infra/secrets/escrow/activation-ack-ca.{version}.sops.json",
+                "secret_key": "ca_private_key",
+            }
+        },
+    }
+    path = tmp_path / "tls-matrix.json"
+    path.write_text(json.dumps(matrix), encoding="utf-8")
+    path.chmod(0o644)
+    return path
+
+
+def test_matrix_accepts_a_tls_pair_destination_and_pins_both_halves(tmp_path: Path) -> None:
+    module = _load_module()
+    matrix = module.load_matrix(_matrix_with_tls_pair(tmp_path))
+
+    pair = matrix.secrets["activation_ack_tls_pair"]
+    assert pair.value_shape == "file"
+    destination = pair.destinations["k3s.activation-ack-tls.active"]
+    assert destination.kind == "sops_k8s_tls_secret"
+    assert destination.fields["kubernetes_secret"] == "exomem-activation-ack-tls"
+    # A TLS destination carries no single `key`: both halves are fixed by
+    # Kubernetes, so there is nothing for an operator to choose or mistype.
+    assert "key" not in destination.fields
+
+    # A file-shaped value reaches escrow because an escrow document stores the
+    # bytes as written; the CA private key is escrowed and never installed.
+    authority = matrix.secrets["activation_ack_ca_private_key"]
+    assert [d.kind for d in authority.destinations.values()] == ["sops_escrow"]
+
+
+def test_matrix_refuses_a_tls_destination_that_names_a_single_key(tmp_path: Path) -> None:
+    module = _load_module()
+    matrix = json.loads(_matrix_with_tls_pair(tmp_path).read_text(encoding="utf-8"))
+    matrix["secrets"]["activation_ack_tls_pair"]["destinations"]["k3s.activation-ack-tls.active"][
+        "key"
+    ] = "tls.crt"
+    poisoned = tmp_path / "keyed-tls-matrix.json"
+    poisoned.write_text(json.dumps(matrix), encoding="utf-8")
+
+    with pytest.raises(module.HandoffError, match="invalid SOPS destination"):
+        module.load_matrix(poisoned)
+
+
+def test_generic_handoff_refuses_a_tls_pair_before_reading_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_module()
+    read_calls: list[object] = []
+    monkeypatch.setattr(
+        module, "_read_secret", lambda **kwargs: read_calls.append(kwargs) or b"never"
+    )
+
+    with pytest.raises(module.HandoffError, match="own issuing command"):
+        module.execute_handoff(
+            matrix_path=_matrix_with_tls_pair(tmp_path),
+            repository_root=tmp_path,
+            secret_name="activation_ack_tls_pair",
+            version="v1",
+            destination_ids=("k3s.activation-ack-tls.active",),
+            source_kind="generated-activation-ack-tls",
+            terraform_bin="terraform",
+            sops_bin="sops",
+            vercel_bin="vercel",
+            vercel_project=None,
+            dry_run=False,
+        )
+
+    assert read_calls == []
+
+
+def test_tls_pair_seals_one_kubernetes_tls_secret_without_leaking_either_half(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_module()
+    monkeypatch.setenv("SOPS_AGE_RECIPIENTS", "age1testrecipient")
+    plaintext_by_path: dict[Path, dict[str, object]] = {}
+
+    def _runner(command, **kwargs):
+        result = _run_fake_sops(list(command), kwargs, plaintext_by_path)
+        assert result is not None
+        return result
+
+    monkeypatch.setattr(module.subprocess, "run", _runner)
+    matrix = module.load_matrix(_matrix_with_tls_pair(tmp_path))
+    destination = matrix.secrets["activation_ack_tls_pair"].destinations[
+        "k3s.activation-ack-tls.active"
+    ]
+    certificate = b"-----BEGIN CERTIFICATE-----\nZmFrZS1jZXJ0\n-----END CERTIFICATE-----\n"
+    private_key = b"-----BEGIN PRIVATE KEY-----\nZmFrZS1rZXk=\n-----END PRIVATE KEY-----\n"
+
+    module.seal_k8s_tls_secret(
+        destination=destination,
+        certificate=certificate,
+        private_key=private_key,
+        version="v3",
+        repository_root=tmp_path,
+        sops_bin="sops",
+    )
+
+    target = tmp_path / "infra/secrets/platform/activation-ack-tls.v3.sops.json"
+    assert target.is_file()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert private_key not in target.read_bytes()
+    assert certificate not in target.read_bytes()
+
+    # The seal encrypts into a temporary file and hard-links it into place, so the
+    # recorded plaintext is keyed by that temporary path rather than the target.
+    assert len(plaintext_by_path) == 1
+    sealed = next(iter(plaintext_by_path.values()))
+    assert sealed["type"] == "kubernetes.io/tls"
+    assert sealed["metadata"]["name"] == "exomem-activation-ack-tls"
+    assert sealed["metadata"]["labels"]["exomem.io/secret-version"] == "v3"
+    assert set(sealed["stringData"]) == {"tls.crt", "tls.key"}
+
+    validator = _load_ciphertext_validator()
+    validator._validate_shape(json.loads(target.read_text(encoding="utf-8")), destination)
+
+
+def test_tls_seal_refuses_a_swapped_or_contaminated_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_module()
+    monkeypatch.setenv("SOPS_AGE_RECIPIENTS", "age1testrecipient")
+    matrix = module.load_matrix(_matrix_with_tls_pair(tmp_path))
+    destination = matrix.secrets["activation_ack_tls_pair"].destinations[
+        "k3s.activation-ack-tls.active"
+    ]
+    certificate = b"-----BEGIN CERTIFICATE-----\nZmFrZS1jZXJ0\n-----END CERTIFICATE-----\n"
+    private_key = b"-----BEGIN PRIVATE KEY-----\nZmFrZS1rZXk=\n-----END PRIVATE KEY-----\n"
+
+    for cert, key in (
+        (private_key, private_key),
+        (certificate, certificate),
+        (certificate + private_key, private_key),
+    ):
+        with pytest.raises(module.HandoffError):
+            module.seal_k8s_tls_secret(
+                destination=destination,
+                certificate=cert,
+                private_key=key,
+                version="v4",
+                repository_root=tmp_path,
+                sops_bin="sops",
+            )
+    assert not (tmp_path / "infra/secrets/platform/activation-ack-tls.v4.sops.json").exists()
+
+
+def test_matrix_still_refuses_two_destinations_owning_one_kubernetes_secret(
+    tmp_path: Path,
+) -> None:
+    """The TLS kind exists because this guard is right, not to work around it."""
+
+    module = _load_module()
+    matrix = json.loads(_matrix_with_tls_pair(tmp_path).read_text(encoding="utf-8"))
+    matrix["secrets"]["hosted_scheduler_secret"]["destinations"]["k3s.collision"] = {
+        "kind": "sops_k8s_secret",
+        "slot": "active",
+        "target": "infra/secrets/platform/collision.{version}.sops.json",
+        "namespace": "exomem-platform",
+        "kubernetes_secret": "exomem-activation-ack-tls",
+        "key": "tls.key",
+    }
+    poisoned = tmp_path / "collision-matrix.json"
+    poisoned.write_text(json.dumps(matrix), encoding="utf-8")
+
+    with pytest.raises(module.HandoffError, match="reuses a Kubernetes Secret"):
         module.load_matrix(poisoned)

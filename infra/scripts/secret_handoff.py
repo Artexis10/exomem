@@ -188,6 +188,7 @@ def load_matrix(path: Path) -> HandoffMatrix:
                     "bws",
                     "generated-ed25519-private",
                     "derived-ed25519-public",
+                    "generated-activation-ack-tls",
                 }
                 or kind in seen_source_kinds
             ):
@@ -234,6 +235,7 @@ def load_matrix(path: Path) -> HandoffMatrix:
             if kind not in {
                 "vercel_env",
                 "sops_k8s_secret",
+                "sops_k8s_tls_secret",
                 "sops_escrow",
                 "sops_ansible_vars",
             } or slot not in {
@@ -259,6 +261,10 @@ def load_matrix(path: Path) -> HandoffMatrix:
             else:
                 expected_fields = {
                     "sops_k8s_secret": {"target", "namespace", "kubernetes_secret", "key"},
+                    # A kubernetes.io/tls Secret is only valid with both halves
+                    # present, so the pair is one destination sealed once rather
+                    # than two entries racing to own the same object.
+                    "sops_k8s_tls_secret": {"target", "namespace", "kubernetes_secret"},
                     "sops_escrow": {"target", "secret_key"},
                     "sops_ansible_vars": {"target", "variable"},
                 }[kind]
@@ -276,10 +282,11 @@ def load_matrix(path: Path) -> HandoffMatrix:
                         f"secret matrix has invalid or duplicate SOPS target for {name}"
                     )
                 target_paths.add(target)
-                if kind == "sops_k8s_secret":
+                if kind in {"sops_k8s_secret", "sops_k8s_tls_secret"}:
                     _require_string(fields["namespace"], "Kubernetes namespace")
                     _require_string(fields["kubernetes_secret"], "Kubernetes Secret")
-                    _require_string(fields["key"], "Kubernetes Secret key")
+                    if kind == "sops_k8s_secret":
+                        _require_string(fields["key"], "Kubernetes Secret key")
                     kubernetes_object = (fields["namespace"], fields["kubernetes_secret"])
                     if kubernetes_object in kubernetes_objects:
                         raise HandoffError(f"secret matrix reuses a Kubernetes Secret for {name}")
@@ -306,11 +313,16 @@ def load_matrix(path: Path) -> HandoffMatrix:
         offenders = sorted(
             destination.destination_id
             for destination in secret.destinations.values()
-            if destination.kind != "sops_k8s_secret"
+            # Escrow is an offline JSON document rather than a projected file, so
+            # multi-line PEM material is content there in the same way it is in a
+            # Kubernetes Secret. What this guard is for is keeping multi-line values
+            # out of Vercel environment variables and Ansible variables, where they
+            # would be silently reshaped by the consumer; both stay refused.
+            if destination.kind not in {"sops_k8s_secret", "sops_k8s_tls_secret", "sops_escrow"}
         )
         if offenders:
             raise HandoffError(
-                f"secret matrix routes file-shaped {secret.name} outside a Kubernetes Secret"
+                f"secret matrix routes file-shaped {secret.name} to a single-line destination"
             )
     return HandoffMatrix(
         schema_version=1,
@@ -359,6 +371,8 @@ def _read_secret(
         raise HandoffError(f"source {source_kind} is not allowed for {secret_spec.name}")
     if source_kind in {"generated-ed25519-private", "derived-ed25519-public"}:
         raise HandoffError("derived key material requires the atomic keypair handoff")
+    if source_kind == "generated-activation-ack-tls":
+        raise HandoffError("certificate material requires the atomic certificate handoff")
     if source_kind == "stdin":
         return _normalize_secret(
             sys.stdin.buffer.read(_MAX_SECRET_BYTES + 2), secret_spec.value_shape
@@ -636,6 +650,14 @@ def _assert_sops_destination_shape(
         raise HandoffError("SOPS output failed the destination shape check")
     encrypted_payload = {key: value for key, value in ciphertext.items() if key != "sops"}
     _assert_same_container_shape(plaintext, encrypted_payload)
+    if destination.kind == "sops_k8s_tls_secret":
+        string_data = encrypted_payload.get("stringData")
+        if not isinstance(string_data, dict) or set(string_data) != {"tls.crt", "tls.key"}:
+            raise HandoffError("SOPS output failed the destination shape check")
+        for value in string_data.values():
+            if not isinstance(value, str) or not value.startswith("ENC["):
+                raise HandoffError("SOPS output failed the destination shape check")
+        return
     if destination.kind == "sops_k8s_secret":
         string_data = encrypted_payload.get("stringData")
         sensitive_value = (
@@ -657,6 +679,7 @@ def _seal_sops_document(
     repository_root: Path,
     sops_bin: str,
     document: dict[str, Any],
+    additional_secrets: tuple[bytes, ...] = (),
 ) -> None:
     recipients = os.environ.get("SOPS_AGE_RECIPIENTS", "").strip()
     if not recipients or "\n" in recipients or "\r" in recipients:
@@ -702,13 +725,16 @@ def _seal_sops_document(
         if result.returncode != 0 or not encrypted_path.is_file():
             raise HandoffError("SOPS encryption failed")
         ciphertext = encrypted_path.read_bytes()
-        try:
-            secret_text = secret.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise HandoffError("secret source must be UTF-8 text") from exc
-        escaped_secret = json.dumps(secret_text).encode("utf-8")
-        if not ciphertext or secret in ciphertext or escaped_secret in ciphertext:
+        if not ciphertext:
             raise HandoffError("SOPS output failed the ciphertext check")
+        for plaintext_value in (secret, *additional_secrets):
+            try:
+                secret_text = plaintext_value.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise HandoffError("secret source must be UTF-8 text") from exc
+            escaped_secret = json.dumps(secret_text).encode("utf-8")
+            if plaintext_value in ciphertext or escaped_secret in ciphertext:
+                raise HandoffError("SOPS output failed the ciphertext check")
         try:
             encrypted_document = json.loads(ciphertext)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -792,6 +818,59 @@ def _seal_k8s_secret(
     _seal_sops_document(
         destination=destination,
         secret=secret,
+        version=version,
+        repository_root=repository_root,
+        sops_bin=sops_bin,
+        document=document,
+    )
+
+
+def seal_k8s_tls_secret(
+    *,
+    destination: DestinationSpec,
+    certificate: bytes,
+    private_key: bytes,
+    version: str,
+    repository_root: Path,
+    sops_bin: str,
+) -> None:
+    """Seal both halves of a kubernetes.io/tls Secret into one artifact.
+
+    The certificate is public and the key is not, but they are sealed together
+    because Kubernetes only accepts the pair. Splitting them across two
+    destinations would put two handoffs on one object, and server-side apply
+    would then let whichever ran last drop the other half.
+    """
+
+    if destination.kind != "sops_k8s_tls_secret":
+        raise HandoffError("destination does not carry a TLS pair")
+    try:
+        certificate_text = certificate.decode("utf-8")
+        key_text = private_key.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HandoffError("secret source must be UTF-8 text") from exc
+    if "PRIVATE KEY" in certificate_text:
+        raise HandoffError("TLS certificate carries private-key material")
+    if "PRIVATE KEY" not in key_text:
+        raise HandoffError("TLS private key is not a private key")
+    document = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": destination.fields["kubernetes_secret"],
+            "namespace": destination.fields["namespace"],
+            "labels": {
+                "app.kubernetes.io/managed-by": "exomem-secret-handoff",
+                "exomem.io/secret-version": version,
+            },
+        },
+        "type": "kubernetes.io/tls",
+        "stringData": {"tls.crt": certificate_text, "tls.key": key_text},
+    }
+    _seal_sops_document(
+        destination=destination,
+        secret=private_key,
+        additional_secrets=(certificate,),
         version=version,
         repository_root=repository_root,
         sops_bin=sops_bin,
@@ -893,6 +972,11 @@ def execute_handoff(
         destination = secret_spec.destinations.get(destination_id)
         if destination is None:
             raise HandoffError(f"destination {destination_id} is not allowed for {secret_name}")
+        if destination.kind == "sops_k8s_tls_secret":
+            # This command reads exactly one value; a TLS Secret needs two that
+            # belong to each other. Its dedicated issuing command supplies both
+            # and calls seal_k8s_tls_secret directly.
+            raise HandoffError("a TLS pair is handed off by its own issuing command")
         destinations.append(destination)
     if not _VERSION.fullmatch(version):
         raise HandoffError("secret version must be v1 or a later positive integer")
