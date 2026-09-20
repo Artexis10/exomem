@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.90.0](https://github.com/Artexis10/exomem/compare/v0.89.0...v0.90.0) (2026-09-20)
+
+
+### Features
+
+* recover episode inputs under their canonical audience ([#1327](https://github.com/Artexis10/exomem/issues/1327)) ([3719997](https://github.com/Artexis10/exomem/commit/37199979b6e2db3d1b5db5ab3e7a94afa8ea220a))
+
+
+### Bug Fixes
+
+* **activation:** bound interactive activation work under a deadline ([#1332](https://github.com/Artexis10/exomem/issues/1332)) ([513a606](https://github.com/Artexis10/exomem/commit/513a606072aa1185eaf60d1937f7005a3ebab28d))
+* bound context activation work ([#1329](https://github.com/Artexis10/exomem/issues/1329)) ([d7df875](https://github.com/Artexis10/exomem/commit/d7df8750f8f3b5213989504b7d84175abeb185ae))
+
 ## [0.89.0](https://github.com/Artexis10/exomem/compare/v0.88.0...v0.89.0) (2026-09-19)
 
 
