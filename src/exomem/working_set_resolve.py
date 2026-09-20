@@ -135,9 +135,7 @@ class TurnAnalysis:
 
     @property
     def cue_categories(self) -> frozenset[str]:
-        return frozenset(
-            category for cue in self.cues for category in _CUE_CATEGORIES.get(cue, ())
-        )
+        return frozenset(category for cue in self.cues for category in _CUE_CATEGORIES.get(cue, ()))
 
 
 @dataclass(frozen=True, slots=True)
@@ -479,9 +477,7 @@ def anchor_ref(row: Any) -> str:
     from drifting apart.
     """
     return str(
-        getattr(row, "ref", None)
-        or getattr(row, "path", "")
-        or getattr(row, "anchor_id", "")
+        getattr(row, "ref", None) or getattr(row, "path", "") or getattr(row, "anchor_id", "")
     )
 
 
@@ -501,43 +497,52 @@ def apply_continuity(
     if not refs:
         return tuple(candidates)
     return tuple(
-        replace(item, evidence=item.evidence | {"continuity"})
-        if anchor_ref(item) in refs
-        else item
+        replace(item, evidence=item.evidence | {"continuity"}) if anchor_ref(item) in refs else item
         for item in candidates
     )
 
 
-def override_candidate(
-    rows: Sequence[AnchorFacts], ref: str
-) -> CandidateFacts | None:
-    """The one candidate an agent's `anchor` choice names, or `None`.
+def override_candidate(rows: Sequence[AnchorFacts], ref: str) -> CandidateFacts | None:
+    """Compatibility view of the first candidate named by an agent choice."""
+    chosen = override_candidates(rows, ref)
+    return chosen[0] if chosen else None
+
+
+def override_candidates(rows: Sequence[AnchorFacts], ref: str) -> tuple[CandidateFacts, ...]:
+    """Exact identities named by the choice, including items in one canonical home.
+
+    A collection path may represent several complementary Planning items. The
+    choice selects all those items, never merely the first index row. An internal
+    item id still selects only that item. No semantic neighbours are selected.
 
     `agent_choice` is its only evidence, and it resolves alone: the agent is the
     decider, so the turn's own evidence for that anchor is beside the point and
-    the competing senses are not candidates at all. `None` means the ref names no
+    the competing senses are not candidates at all. An empty tuple names no
     anchor in this index — the caller decides what to say about that, and by
     contract says exactly what it says about a withheld one.
     """
     wanted = str(ref or "").strip()
     if not wanted:
-        return None
+        return ()
+    chosen: list[CandidateFacts] = []
     for row in rows:
         spellings = {anchor_ref(row), str(row.path or ""), str(row.anchor_id or "")}
         if wanted in spellings - {""}:
-            return CandidateFacts(
-                anchor_id=row.anchor_id,
-                path=row.path,
-                ref=row.ref,
-                title=row.title,
-                kind=row.kind,
-                lifecycle=row.lifecycle,
-                categories=row.categories,
-                neighbourhood=row.neighbourhood,
-                anchor_neighbourhood=row.anchor_neighbourhood,
-                evidence=frozenset({"agent_choice"}),
+            chosen.append(
+                CandidateFacts(
+                    anchor_id=row.anchor_id,
+                    path=row.path,
+                    ref=row.ref,
+                    title=row.title,
+                    kind=row.kind,
+                    lifecycle=row.lifecycle,
+                    categories=row.categories,
+                    neighbourhood=row.neighbourhood,
+                    anchor_neighbourhood=row.anchor_neighbourhood,
+                    evidence=frozenset({"agent_choice"}),
+                )
             )
-    return None
+    return tuple(chosen)
 
 
 # --------------------------------------------------------------------------- #
@@ -627,7 +632,7 @@ def resolve(candidates: Sequence[CandidateFacts]) -> Resolution:
 
 
 def _ambiguity(resolved: Sequence[ResolvedAnchor]) -> tuple[dict[str, Any], ...]:
-    """Two resolved anchors of ONE kind with disjoint ANCHOR neighbourhoods compete.
+    """Disconnected groups of resolved anchors of ONE kind compete.
 
     Restricted to a single anchor kind deliberately. A person and a product
     resolved by the same turn are complementary — that is the whole point of a
@@ -648,6 +653,11 @@ def _ambiguity(resolved: Sequence[ResolvedAnchor]) -> tuple[dict[str, Any], ...]
     serve — two entities the user asks to compare, which link to each other and
     so both carry `graph_corroboration` from that very edge.
 
+    Distinct items in the same canonical page or collection are complementary
+    too: an outcome and its next action need no extra edge to establish their
+    shared home. Empty paths never establish that relationship. Compare connected
+    groups, so a complementary pair cannot hide a third, disjoint competitor.
+
     `project` anchors come from project keys rather than from a page, so their
     path is empty and no neighbourhood can contain them: they can neither bridge
     two anchors nor be anyone's neighbour, so two resolved project anchors are
@@ -661,26 +671,38 @@ def _ambiguity(resolved: Sequence[ResolvedAnchor]) -> tuple[dict[str, Any], ...]
         group = [anchor for anchor in resolved if anchor.kind == kind]
         if len(group) < 2:
             continue
-        disjoint = [
-            anchor
-            for anchor in group
-            if all(
-                not (anchor.anchor_neighbourhood & other.anchor_neighbourhood)
-                and other.path not in anchor.anchor_neighbourhood
-                and anchor.path not in other.anchor_neighbourhood
-                for other in group
-                if other.anchor_id != anchor.anchor_id
-            )
-        ]
-        if len(disjoint) >= 2:
+        # At most MAX_ANCHORS nodes; a bounded structural connectivity check.
+        reached = {0}
+        pending = [0]
+        while pending:
+            anchor = group[pending.pop()]
+            for index, other in enumerate(group):
+                if index in reached:
+                    continue
+                if (
+                    (anchor.path and anchor.path == other.path)
+                    or (anchor.anchor_neighbourhood & other.anchor_neighbourhood)
+                    or other.path in anchor.anchor_neighbourhood
+                    or anchor.path in other.anchor_neighbourhood
+                ):
+                    reached.add(index)
+                    pending.append(index)
+        if len(reached) != len(group):
+            # A canonical path is one agent choice even when several Planning
+            # items inhabit it. Preserve each item's title in that choice.
+            choices: dict[str, list[ResolvedAnchor]] = {}
+            for anchor in group:
+                choices.setdefault(anchor_ref(anchor), []).append(anchor)
             return tuple(
                 {
-                    "ref": anchor.ref or anchor.path or anchor.anchor_id,
-                    "title": anchor.title,
-                    "kind": anchor.kind,
-                    "neighbourhood_size": len(anchor.neighbourhood),
+                    "ref": ref,
+                    "title": "; ".join(dict.fromkeys(item.title for item in members)),
+                    "kind": kind,
+                    "neighbourhood_size": len(
+                        frozenset().union(*(item.neighbourhood for item in members))
+                    ),
                 }
-                for anchor in disjoint
+                for ref, members in choices.items()
             )
     return ()
 

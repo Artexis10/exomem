@@ -20,9 +20,9 @@ The active agent decides meaning, importance, equivalence, candidate disposition
 
 ### 2. Decompose before selecting destinations
 
-At a substantive episode boundary, the agent enumerates supported durable changes from the original input: observations, outcomes, entity candidates/facets, relations, Records events, expressed Planning changes, provenance and structural routing. It resolves each against current knowledge before writing. One episode may produce several destinations or none; every candidate receives a disposition with a reason. Importance may justify first-mention promotion; recurrence is supporting pressure, never a name-count quota. Incidental names and uncertain identity remain unresolved.
+At a substantive episode boundary, the agent enumerates supported durable changes from the original input: observations, outcomes, entity candidates/facets, relations, Records events, expressed Planning changes, provenance and structural routing. Before choosing any destination, it partitions independently reusable objects by their retrieval question, subject/domain, temporal episode and epistemic role. A currently open note is one inspected alternative, never a preferred default. A meaningful stable cluster earns a canonical home when it supports a distinct future question or continuation; a detail that belongs to an existing cluster remains an in-scope update or semantic unit rather than a new page. It resolves each partition against current knowledge before writing. One episode may produce several destinations or none; every candidate receives a disposition with a reason. Importance may justify first-mention promotion; recurrence is supporting pressure, never a name-count quota. Incidental names and uncertain identity remain unresolved.
 
-Preserve epistemic distinctions: direct user verification, hearsay, agent inference and comparison are different claims. An exposure during an experiment is an event, not evidence of causal effect. Planning writes require expressed intent; a mentioned possibility is not an automatic commitment. Completeness is an agent attestation against an input revision, not a server proof of semantic exhaustiveness.
+Preserve epistemic distinctions: direct user verification, hearsay, agent inference and comparison are different claims. Durable user hypotheses and interpretations retain their speaker or source attribution and uncertainty; they are neither silently omitted nor upgraded into direct facts. An exposure during an experiment is an event, not evidence of causal effect. Planning writes require expressed intent; a mentioned possibility is not an automatic commitment. Completeness is an agent attestation against an input revision, not a server proof of semantic exhaustiveness.
 
 #### Destination fitness before commit
 
@@ -35,6 +35,8 @@ For substantive routing decisions, retain the candidate/input revision, selected
 Before the first commit, the active agent checks the destination plan against the original episode revision: all identified candidates have a route or an honest abstention/defer/authority disposition, and no independently useful synthesis is buried merely because a related page ranked highly. After execution, reconcile actual receipts/readback and repeat coverage against the same input revision. The precommit review is not a new confirmation prompt and grants no permission. The postcommit sweep and lexical/vector structural audits remain safety nets; a successful write or a generic overload warning is not proof of correct routing.
 
 The first acceptance pair uses a synthetic product discussion whose broader, explicitly named operating thesis synthesizes five existing narrower notes, and a matched minor refinement that should remain a semantic unit on its current page. Freeze original actor input and pre-capture vault state separately from evaluator expectations. The actor sees an ordinary discussion without save, page-creation, routing or corrective nudges. Measure retrieval of relevant antecedents, first-pass focused destination, truthful typed links, scope-owned updates and fresh-session activation. Run real public writers and publication; scripted correct writes establish plumbing only, never ordinary-agent success. Keep exact private conversation replay local and label reconstruction or unavailable original input honestly; corrected pages cannot substitute for the original turn.
+
+A separate generic synthetic replay shall distinguish a preference or product observation, repeated personal sensory observations, a historical recovery episode, a baseline ability and an attributed family interpretation. It verifies that decomposition preserves those distinct retrieval questions, subjects, temporal episodes and epistemic roles before choosing homes, while only meaningful stable clusters receive their own canonical home. Public fixture inputs, assertions and paths contain no private names, medical conclusions or private source paths. The prior personal capture failure is evidence for this acceptance need only; it is not public fixture content or a source of new facts.
 
 ### 3. Recoverable episode identity and evidence
 
@@ -165,6 +167,67 @@ Development uses isolated state and affected tests. Personal candidate testing u
 The existing manager already admits interpreter/protocol/state descriptors; the staging installer currently selects only a published version and needs an explicit local-wheel source. Preserve service-manager ownership and single-writer state. Compatible descriptors can reuse completed migrations. Descriptor-changing experiments use disposable state or explicit forward-migration/recovery evidence. Never promise arbitrary rollback after a state migration. Required full-suite and release checks are completion gates, not every-edit development gates; do not rerun known failing full jobs simply to wait for a release.
 
 ## Ownership and delivery order
+
+### Activation latency repair
+
+Activation uses its derived anchor catalogue as the semantic search domain. The
+ordinary full-vault hybrid search is removed from the activation request path;
+its small result limit did not bound matrix loading, multimodal scoring or graph
+expansion. The existing signature embeddings and `vector_band` rule corroborate
+worded anchor evidence without changing ordinary recall. Exact matches do not
+skip competing candidates, and vectors alone still cannot resolve an anchor.
+
+One query may use an already resident encoder with nonblocking admission. It
+must not load a model or queue behind other model work. Disabled, absent,
+warming, busy and unavailable semantic evidence are distinguished in packet
+generation metadata. Transiently incomplete evidence is not cached; a later
+request can acquire the missing evidence. Explicit agent choice needs no vector
+pass. Normal resource-mode cache and model policies remain unchanged.
+
+Optional lexical corroboration uses the maintained full-page FTS index,
+restricted to anchor paths, with governed overfetch and no foreground repair
+or Python corpus fallback. This preserves own-page `retrieval` evidence on lean
+installs; matching an anchor's title a second time is not a substitute. Indexed
+matches cross the release plane before becoming resolution evidence, and the
+final guard independently checks every packet reference. Lexical corroboration
+requires two distinct matched content stems after the shared stopword filter;
+repeating the one authored name word is not independent evidence. This predicate
+applies before the ranked result limit so weak hits cannot crowd out a valid
+corroborator. Ordinary recall keeps its existing any-term behavior. Planning
+items in the same nonempty canonical collection are complementary, while
+disconnected groups and pathless project identities still compete. Ambiguity
+choices deduplicate canonical homes; choosing a collection retains all its
+complementary items rather than selecting the first index row.
+Missing/stale lexical publication is explicit and non-cacheable. Regression evidence
+covers rare-term/vector corroboration, competing same-kind anchors, vector-only
+negatives, current policy on cached packets, model contention and forbidden
+full-corpus/CLIP acquisition. End-to-end timings include semantic evidence;
+compiler-only timing is insufficient acceptance.
+
+The request shares one freshness snapshot and full recall checkpoint across
+lexical evidence and role queries. Catalogue reads still prove their checkpoint,
+policy and schema inside the query transaction. Unit roles query the maintained
+catalogue with neighbourhood parent paths before the row limit; unrelated units
+cannot consume the cap or trigger per-page hydration. Current-parent validation
+remains in force. Missing or stale unit publication reports a failed lane and
+never repairs inline. Service latency acceptance seeds the event-maintained
+registry; offline cold-start filesystem proof is measured separately.
+
+Shared name prefixes can still produce conservative ambiguity despite an exact
+name. Ordinary-client relevance acceptance must cover that case and agent
+disambiguation without a user nudge. The scale gate uses a unique authored alias
+to exercise useful role work at every corpus size; it does not establish that
+the common-prefix relevance case is solved.
+
+The first managed candidate trial did not meet live acceptance despite passing
+the warm snapshot and scale gates. Concurrent startup readers built the same
+private-identity inventory; generation churn forced an all-domain locked scan
+and activation failed closed on contention. A later request also exposed large
+unattributed leaf time. Live acceptance therefore includes promotion, current
+governance and background contention, with timings retained on failures. Any
+inventory prewarm must bind its proof to the shared identity generation and
+revalidate at promotion; merely carrying the existing unversioned cache would
+weaken physical-alias checks. These remain delivery work before enablement.
 
 | Contract | Owner | Programme integration |
 | --- | --- | --- |

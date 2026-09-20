@@ -35,13 +35,19 @@ Where evidence supplies them, event occurrence, knowledge acquisition and claim 
 
 ### Requirement: Canonical ownership and provenance survive routing
 
-Stable identity/facets SHALL belong to entities, mutable state/events to Records or appropriate domain stores, and original provenance to Sources/Evidence. Hubs SHALL be navigation/projections. Markdown semantic units and supported structured collections SHALL remain canonical; graph/search/profile stores SHALL be rebuildable with explicit currency. Routing SHALL preserve direct verification, reported claims, inferences and uncertainty distinctly and SHALL NOT invent user Planning commitments.
+Stable identity/facets SHALL belong to entities, mutable state/events to Records or appropriate domain stores, and original provenance to Sources/Evidence. Hubs SHALL be navigation/projections. Markdown semantic units and supported structured collections SHALL remain canonical; graph/search/profile stores SHALL be rebuildable with explicit currency. Routing SHALL preserve direct verification, reported claims, user hypotheses, attributed interpretations, inferences and uncertainty distinctly and SHALL NOT invent user Planning commitments. A durable user hypothesis or interpretation SHALL retain speaker or source attribution and uncertainty and SHALL NOT be silently omitted or represented as a direct fact.
 
 #### Scenario: One conversation creates several destinations
 
 - **WHEN** a supplier discussion includes a direct label observation, a reported formulation and an experiment exposure
 - **THEN** their provenance and epistemic status remain distinct across entity knowledge and Records events
 - **AND** an exposure is not upgraded into a causal conclusion or an unexpressed plan
+
+#### Scenario: An attributed interpretation remains distinct from observation
+
+- **WHEN** an episode preserves direct observations alongside a user-attributed family interpretation
+- **THEN** the interpretation retains its source and uncertainty through canonical routing and later activation
+- **AND** activation does not present it as a direct observation or silently drop it from the durable episode account
 
 ### Requirement: Dynamic identities and relations use normal public surfaces
 
@@ -224,6 +230,95 @@ Activation SHALL resolve anchors, apply task-conditioned roles and bounded typed
 - **WHEN** a task names a rare entity with useful current state and neighbouring popular material is irrelevant
 - **THEN** the packet preserves the explicit resolved anchor and its relevant provenance within budget
 - **AND** popularity does not substitute an unrelated entity or turn uncertain state into a fact
+
+### Requirement: Activation semantic work stays within the anchor catalogue
+
+Activation SHALL use the derived anchor signature vectors for optional semantic
+corroboration instead of unconditionally invoking ordinary full-vault hybrid
+recall. It SHALL NOT load full note-chunk or multimodal vector matrices on the
+activation path. Ordinary recall behaviour SHALL remain unchanged. One query
+encode MAY use the configured resident encoder only under nonblocking model
+admission; activation SHALL NOT load a cold model or wait behind another model
+operation. Existing categorical evidence and ambiguity rules SHALL apply to
+all candidates, including competitors of an exact match. Vector evidence alone
+SHALL NOT resolve an anchor.
+
+Lean activation SHALL retain bounded own-page lexical retrieval evidence from
+the maintained full-page FTS catalogue restricted to anchor paths. The lexical
+query SHALL preserve governed overfetch and per-audience release before its
+paths become evidence, SHALL NOT rebuild or apply a foreground delta, and SHALL
+NOT fall back to an in-process corpus scan. Its readiness result SHALL be
+reported as `generation.lexical_evidence`; incomplete publication SHALL remain
+non-cacheable. Title/alias overlap alone SHALL NOT be relabelled as retrieval.
+Lexical corroboration SHALL match at least two distinct content stems from the
+turn after the shared stopword filter, with that predicate applied before the
+ranked result limit. Repeated or inflected forms of one stem SHALL NOT provide
+the second match. This restriction SHALL NOT change ordinary recall.
+Independently resolved items sharing a nonempty canonical page or collection
+SHALL be treated as complementary rather than competing senses. Empty paths
+SHALL NOT establish that relationship. Disconnected same-kind groups SHALL
+remain ambiguous even when one group has several complementary items.
+Ambiguity choices SHALL name each canonical home once, and a choice of that
+home SHALL retain its complementary items. Distinct canonical refs SHALL
+remain individually selectable; choosing one SHALL NOT mark its graph
+neighbours as explicit agent choices.
+
+The activation request SHALL reuse one freshness snapshot and full recall
+checkpoint across lexical and role queries without weakening transaction-bound
+catalogue proof or current-parent validation. Unit role queries SHALL restrict
+parent paths to the resolved anchor neighbourhood before applying their row
+limit. Missing or stale publication SHALL remain explicit and SHALL NOT trigger
+foreground repair. Managed-service warm latency and offline cold filesystem
+proof SHALL be reported separately.
+
+Packet generation metadata SHALL identify semantic evidence as ready, disabled,
+absent, warming, busy, unavailable or unnecessary for an explicit agent choice.
+Transiently incomplete evidence SHALL NOT create a reusable packet cache entry.
+Every packet SHALL still cross the current governance release plane, including
+cached packets and packets without semantic evidence. End-to-end latency
+acceptance SHALL include semantic work and useful context, not just an empty
+fast abstention or compiler-only timing.
+
+#### Scenario: An exact name has a weak competing sense
+
+- **WHEN** the turn exactly names one resource and independently reaches a second
+  same-kind resource through a rare term plus a signature vector match
+- **THEN** both participate in resolution and the existing ambiguity rule applies
+- **AND** no ordinary full-vault recall or multimodal matrix is acquired
+
+#### Scenario: Another request occupies model execution
+
+- **WHEN** the resident encoder cannot acquire model execution immediately
+- **THEN** activation reports busy semantic evidence and uses only available
+  structural evidence without queuing an encode or caching the incomplete result
+- **AND** a later uncontended request can add genuine signature evidence
+
+#### Scenario: Signature similarity has no worded contact
+
+- **WHEN** a signature is semantically similar but has no independently deciding
+  worded evidence or valid continuity qualification
+- **THEN** it remains partial and supplies no context-role material
+
+#### Scenario: A lean installation reaches a resource through its contents
+
+- **WHEN** embeddings are disabled, a turn carries a rare resource term and
+  corroborating content ranked from that resource's own current page
+- **THEN** the resource can retain `rare_term` plus `retrieval` resolution without
+  loading any model, vector matrix or full-vault search
+- **AND** a stale catalogue contributes no evidence and is not repaired inline
+
+#### Scenario: One shared word has no independent corroboration
+
+- **WHEN** a turn shares one rare authored term with an anchor and its own-page
+  text match supplies only that same stem plus function words
+- **THEN** text retrieval does not resolve the anchor through a second vote
+- **AND** repeated or plural forms of the shared word do not change that result
+
+#### Scenario: A collection contains complementary Planning items
+
+- **WHEN** an outcome and an action resolve to the same canonical collection
+- **THEN** the compiler may serve their context without reporting ambiguity
+- **AND** genuinely disjoint collections still participate in ambiguity checks
 
 ### Requirement: Integration acceptance does not substitute scorer fixtures for product behaviour
 

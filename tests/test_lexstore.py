@@ -106,6 +106,41 @@ def test_schema_creation_is_idempotent(tmp_path):
     assert _count(lexstore.lexical_path(tmp_path), "pages") == 1
 
 
+def test_bm25_corroboration_filters_before_limit_and_counts_distinct_stems(tmp_path):
+    from test_latency_gate import _seed_freshness_live
+
+    for number in range(12):
+        word = "sled" if number % 2 else "rated"
+        _write_page(tmp_path, f"Knowledge Base/one-{number}.md", (word + " ") * 20)
+    wanted = "Knowledge Base/two.md"
+    _write_page(tmp_path, wanted, "sled rated " + "unrelated " * 2000)
+    _seed_freshness_live(tmp_path)
+    lexstore.ensure_fresh(tmp_path)
+    # Establish that filtering a size-one result after retrieval would fail.
+    ordinary = lexstore.search_bm25_result(tmp_path, "sled rated", 1)
+    assert ordinary.readiness.complete
+    assert ordinary.value[0][0] != wanted
+
+    corroborated = lexstore.search_bm25_result(
+        tmp_path,
+        "sled rated",
+        1,
+        min_matched_terms=2,
+        allow_delta=False,
+    )
+    assert corroborated.readiness.complete
+    assert [path for path, _ in corroborated.value] == [wanted]
+    repeated = lexstore.search_bm25_result(
+        tmp_path,
+        "sled sleds sled",
+        1,
+        min_matched_terms=2,
+        allow_delta=False,
+    )
+    assert repeated.readiness.complete
+    assert repeated.value == []
+
+
 def test_out_of_band_edit_self_heals(tmp_path):
     """Markdown changed while no lexstore was watching (server down): the next
     use detects the count/mtime mismatch against the walk and rebuilds."""

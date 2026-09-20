@@ -37,6 +37,7 @@ import copy
 import hashlib
 import json
 import logging
+import os
 import sqlite3
 import threading
 from collections import OrderedDict
@@ -155,6 +156,7 @@ def cache_key(
         retrieval_digest(retrieval_paths),
         continuity_digest(continuity),
         str(anchor or ""),
+        bool(os.environ.get("EXOMEM_DISABLE_EMBEDDINGS")),
     )
 
 
@@ -257,9 +259,7 @@ def encode_continuity(
     # take this posture. Encoding with it and decoding without would be worse than
     # either: tokens minted and then called stale, continuity lost undiagnosed.
     return (
-        base64.urlsafe_b64encode(raw.encode("utf-8", "surrogatepass"))
-        .decode("ascii")
-        .rstrip("=")
+        base64.urlsafe_b64encode(raw.encode("utf-8", "surrogatepass")).decode("ascii").rstrip("=")
     )
 
 
@@ -379,9 +379,7 @@ def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
     generation = packet.get("generation")
     generation = generation if isinstance(generation, Mapping) else {}
     roles = [
-        str(role.get("id") or "")
-        for role in packet.get("roles") or ()
-        if isinstance(role, Mapping)
+        str(role.get("id") or "") for role in packet.get("roles") or () if isinstance(role, Mapping)
     ]
     # The mint cannot raise. It runs at the very end of a read that has already
     # succeeded and crossed the egress guard, so anything that fails here must
@@ -424,6 +422,8 @@ def ensure_index(
     index = working_set_index.WorkingSetIndex(root)
     if not index.available():
         return DISABLED, None, False
+    if not index.readable():
+        return UNAVAILABLE, None, False
     if not index.anchors():
         if _managed():
             _schedule_build(root)
@@ -445,9 +445,59 @@ def ensure_index(
     return READY, index, False
 
 
-def refresh_index(
-    index: working_set_index.WorkingSetIndex, *, freshness_stamp: str = ""
-) -> bool:
+def lexical_evidence(
+    vault_root: Path, turn: str, rows, *, limit: int, freshness=None, recall_checkpoint=None
+):
+    """Rank only anchor pages in the maintained full-page text index.
+
+    This is own-page retrieval evidence, not a second vote for title overlap.
+    Unavailable FTS never falls back to a corpus walk or foreground repair.
+    """
+    from . import find_types, lexstore
+
+    by_path = {row.path: row for row in rows if row.path}
+    if not by_path:
+        return [], "available"
+    try:
+        # A full-page match on the same single name word is not a second fact.
+        # Retain two distinct content stems; exact aliases still resolve alone.
+        content_turn = " ".join(
+            token for token in working_set_index.tokens_of(working_set_index.normalize(turn))
+            if token not in working_set_index.STOPWORDS
+        )
+        result = lexstore.search_bm25_result(
+            vault_root,
+            content_turn,
+            min(limit, len(by_path)),
+            scope="kb",
+            freshness=freshness,
+            allowed_paths=set(by_path),
+            allow_delta=False,
+            min_matched_terms=2,
+            recall_checkpoint=recall_checkpoint,
+        )
+        if not result.readiness.complete:
+            return [], result.readiness.status
+        hits = [
+            find_types.Hit(
+                path=path,
+                type=None,
+                scope=None,
+                title=by_path[path].title,
+                updated="",
+                excerpt="",
+                bm25_rank=rank,
+            )
+            for rank, (path, _score) in enumerate(result.value or (), 1)
+            if path in by_path
+        ]
+        return hits, "available"
+    except Exception:  # noqa: BLE001 - one optional evidence lane
+        log.debug("activation lexical evidence unavailable", exc_info=True)
+        return [], "unavailable"
+
+
+def refresh_index(index: working_set_index.WorkingSetIndex, *, freshness_stamp: str = "") -> bool:
     """Bring a stale index up to the current vault state; False when it could not.
 
     A managed runtime hands the walk to the background thread, so the request
@@ -513,6 +563,9 @@ def serve(
     index_stale: bool = False,
     continuity: str | None = None,
     anchor: str | None = None,
+    lexical_state: str = "not_requested",
+    evidence_token: tuple[int, int, int] | None = None,
+    freshness_snapshot: Any = None,
 ) -> dict[str, Any]:
     """Compile (or reuse) one unguarded packet. Never raises: it abstains instead."""
     root = Path(vault_root)
@@ -533,6 +586,26 @@ def serve(
                 **registry.generation_block(),
             },
         )
+
+    def evidence_changed() -> dict | None:
+        if evidence_token is None or index.token() == evidence_token:
+            return None
+        return working_set.abstained_packet(
+            reason=UNAVAILABLE,
+            max_chars=limit,
+            generation={
+                "freshness_key": stamp,
+                "index_generation": index.generation(),
+                "index_stale": True,
+                "lexical_evidence": "stale",
+                "continuity": unevaluated_continuity(continuity),
+                **registry.generation_block(),
+            },
+        )
+
+    changed = evidence_changed()
+    if changed is not None:
+        return changed
 
     # Outside the try that wraps `compile_packet`, so it gets an abstain-never-raise
     # shape of its own: `serve` promises never to raise, and everything the token
@@ -558,7 +631,7 @@ def serve(
         continuity=continuity,
         anchor=anchor,
     )
-    cache_identity = (str(root.absolute()), key)
+    cache_identity = (str(root.absolute()), key, lexical_state, index.token())
     with _CACHE_LOCK:
         cached = _PACKET_CACHE.get(cache_identity)
         if cached is not None:
@@ -576,6 +649,7 @@ def serve(
             retrieval_paths=retrieval_paths,
             index=index,
             freshness_key=_key_text(freshness_key),
+            freshness_snapshot=freshness_snapshot,
             continuity_refs=continuity_refs,
             anchor=anchor,
         )
@@ -594,8 +668,18 @@ def serve(
             },
         )
     packet["generation"]["continuity"] = continuity_state
+    packet["generation"]["lexical_evidence"] = lexical_state
+    changed = evidence_changed()
+    if changed is not None:
+        return changed
     if index_stale:
         packet["generation"]["index_stale"] = True
+    if packet["generation"].get("semantic_evidence") in {
+        "warming",
+        "busy",
+        "unavailable",
+    } or lexical_state not in {"available", "not_requested", "agent_choice"}:
+        return packet
     with _CACHE_LOCK:
         _PACKET_CACHE[cache_identity] = copy.deepcopy(packet)
         _PACKET_CACHE.move_to_end(cache_identity)

@@ -5883,9 +5883,8 @@ def _with_due_state(
     return {"hits": result, "due_state": block}
 
 
-#: Hits the `retrieval` evidence kind reads. Small on purpose: this is ONE of
-#: eight evidence kinds, and the compiler's own lanes are index-backed, so the
-#: operation must not inherit a whole-vault recall's cost to learn one signal.
+#: Bounded own-page FTS corroborators; governed overfetch precedes release.
+#: A result limit alone never bounds an ordinary full-vault hybrid search.
 ACTIVATE_RETRIEVAL_LIMIT = 8
 
 
@@ -5989,35 +5988,64 @@ def op_activate_context(
             reason="disabled", max_chars=budget, generation=generation_stub
         )
 
-    # Release gate first, in `op_find`'s shape (see the release-gate comment in
-    # `op_find`): the pool is widened only when a policy is active, and decisions
-    # are computed strictly after `find()` has returned.
-    #
-    # The try wraps `find()` and NOTHING else. `retrieval` is one evidence kind of
-    # eight, so losing it degrades resolution; losing the release object would
-    # turn a governance-blocked read into a full disclosure, because the guard
-    # below would have no decisions to apply. `annotate_hits` therefore runs on
-    # every path, over an empty hit list when recall failed.
+    freshness_key: Any = ""
+    lexical_freshness = None
+    snapshot = None
+    try:
+        snapshot = find_module.FreshnessSnapshot(vault_root)
+        freshness_key = snapshot.projection_key("kb")
+        lexical_freshness = snapshot.for_scope("kb")
+    except Exception:  # noqa: BLE001 - unavailable freshness never grants disclosure
+        freshness_key = ""
+
+    # A cold managed index can only return an empty warming packet. Check it
+    # before optional retrieval evidence loads the hybrid corpus and models.
+    # The serving path still checks freshness after retrieval; readiness here
+    # grants neither a cached packet nor a disclosure decision.
+    with find_types.timing_span(timings, "working_set.readiness"):
+        try:
+            state, index, _stale = working_set_runtime_module.ensure_index(
+                vault_root, freshness_stamp=working_set_runtime_module._key_text(freshness_key)
+            )
+            evidence_token = index.token() if index is not None else None
+            anchor_rows = index.anchors() if index is not None else ()
+        except Exception:  # noqa: BLE001 - unreadable derived state abstains
+            log.warning("activation index readiness unavailable", exc_info=True)
+            state, index = working_set_runtime_module.UNAVAILABLE, None
+    if index is not None:
+        index.close()
+    if state != working_set_runtime_module.READY or index is None:
+        packet = working_set_module.abstained_packet(
+            reason=state, max_chars=budget, generation=generation_stub
+        )
+        if timings is not None:
+            packet["timings"] = timings.as_dict()
+        return packet
+
+    # Activation's search domain is its small anchor catalogue.
+    # Ordinary hybrid recall loads note-chunk and media matrices even for a
+    # small result limit; none belongs on this bounded request path. The release
+    # object is still mandatory: the final guard independently decides every
+    # packet reference under the current audience and purpose.
     try:
         _policy, release_active = egress_module.gate_state(vault_root)
-        retrieval_limit = (
-            egress_module.pool_limit(ACTIVATE_RETRIEVAL_LIMIT)
-            if release_active
-            else ACTIVATE_RETRIEVAL_LIMIT
-        )
-        with find_types.timing_span(timings, "working_set.retrieval"):
-            try:
-                hits = find_module.find(
+        with find_types.timing_span(timings, "working_set.lexical"):
+            if anchor:
+                hits, lexical_state = [], "agent_choice"
+            else:
+                hits, lexical_state = working_set_runtime_module.lexical_evidence(
                     vault_root,
-                    query=turn,
-                    limit=retrieval_limit,
-                    mode="hybrid",
-                    rerank=False,
-                    graph=True,
+                    turn,
+                    anchor_rows,
+                    limit=(
+                        egress_module.pool_limit(ACTIVATE_RETRIEVAL_LIMIT)
+                        if release_active
+                        else ACTIVATE_RETRIEVAL_LIMIT
+                    ),
+                    freshness=lexical_freshness,
+                    recall_checkpoint=(snapshot.recall_checkpoint("kb") if snapshot else None),
                 )
-            except Exception:  # noqa: BLE001 - one degraded evidence kind, not a bypass
-                log.debug("activation retrieval evidence unavailable", exc_info=True)
-                hits = []
+        with find_types.timing_span(timings, "working_set.release"):
             release = egress_module.annotate_hits(
                 vault_root, hits, limit=ACTIVATE_RETRIEVAL_LIMIT, purpose=purpose
             )
@@ -6026,35 +6054,19 @@ def op_activate_context(
         return working_set_module.abstained_packet(
             reason="unavailable", max_chars=budget, generation=generation_stub
         )
-    # `graph_hop` marks a hit `find()` admitted ONLY by expanding from another
-    # hit's typed link, never because the turn's own words reached it — the
-    # exact "recall hit elsewhere in the anchor's link neighbourhood" shape
-    # the canonical spec's `retrieval` clause forbids, just reached through the
-    # OTHER page's contact rather than the anchor's own. `find()` itself stays
-    # byte-identical (`graph=True` is unchanged): this filters the evidence
-    # this operation derives from its hits, not the call that produces them.
-    retrieval_paths = frozenset(
-        str(getattr(hit, "path", "") or "")
-        for hit in release.hits
-        if not getattr(hit, "graph_hop", False)
-    ) - {""}
-
-    freshness_key: Any = ""
-    try:
-        freshness_key = find_module.FreshnessSnapshot(vault_root).projection_key("kb")
-    except Exception:  # noqa: BLE001 - an unkeyed packet is uncached, never wrong
-        freshness_key = ""
-
     packet = working_set_runtime_module.serve(
         vault_root,
         turn=turn,
         max_chars=budget,
         purpose=purpose,
         timings=timings,
-        retrieval_paths=retrieval_paths,
         freshness_key=freshness_key,
         continuity=continuity,
         anchor=anchor,
+        retrieval_paths=frozenset(hit.path for hit in release.hits),
+        lexical_state=lexical_state,
+        evidence_token=evidence_token,
+        freshness_snapshot=snapshot,
     )
     # An override that resolved nothing named no anchor of this index. Refused
     # here, before the guard, with the same words a withheld ref gets below —
@@ -6066,9 +6078,7 @@ def op_activate_context(
     # Unconditional: every served packet crosses the guard. A guard that only ran
     # when the retrieval lane happened to succeed is not a guard.
     try:
-        guarded = egress_module.guard_working_set(
-            vault_root, packet, release, purpose=purpose
-        )
+        guarded = egress_module.guard_working_set(vault_root, packet, release, purpose=purpose)
     except Exception:  # noqa: BLE001 - a guard that cannot decide must not disclose
         log.warning("activation egress guard failed; abstaining", exc_info=True)
         return working_set_module.abstained_packet(

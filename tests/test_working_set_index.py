@@ -536,6 +536,80 @@ def test_a_managed_runtime_abstains_with_index_warming_and_warms_once(
     assert working_set_index.WorkingSetIndex(seeded).anchors() == ()
 
 
+def test_cold_activation_abstains_before_starting_retrieval(
+    seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import commands, readiness, working_set_runtime
+
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    scheduled: list[Path] = []
+    monkeypatch.setattr(working_set_runtime, "_schedule_build", scheduled.append)
+    retrieval_calls: list[dict] = []
+
+    def costly_retrieval(*args, **kwargs):
+        retrieval_calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(commands.find_module, "find", costly_retrieval)
+    packet = commands.op_activate_context(
+        seeded, turn="the cargo sled", continuity="old-token", include_timings=True
+    )
+
+    assert packet["abstention"] == {"reason": "index_warming"}
+    assert retrieval_calls == [], "a warming response must not load hybrid resources"
+    assert scheduled == [seeded]
+    assert packet["units"] == []
+    assert packet["generation"]["continuity"] == "stale"
+    assert "working_set.readiness" in packet["timings"]["stages"]
+
+
+def test_activation_readiness_failure_does_not_start_retrieval(
+    seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import commands, working_set_runtime
+
+    def unreadable_index(*args, **kwargs):
+        raise OSError("index unavailable")
+
+    monkeypatch.setattr(working_set_runtime, "ensure_index", unreadable_index)
+    retrieval_calls: list[dict] = []
+    monkeypatch.setattr(
+        commands.find_module, "find", lambda *args, **kwargs: retrieval_calls.append(kwargs) or []
+    )
+    packet = commands.op_activate_context(seeded, turn="the cargo sled")
+
+    assert packet["abstention"] == {"reason": "unavailable"}
+    assert retrieval_calls == []
+    assert packet["units"] == []
+
+
+@pytest.mark.parametrize("broken_kind", ["directory", "corrupt"])
+def test_broken_activation_sidecar_is_unavailable_not_warming(
+    seeded: Path, monkeypatch: pytest.MonkeyPatch, broken_kind: str
+) -> None:
+    from exomem import commands, readiness, working_set_runtime
+
+    path = working_set_index.sidecar_path(seeded)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if broken_kind == "directory":
+        path.mkdir()
+    else:
+        path.write_bytes(b"not a sqlite database")
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    scheduled: list[Path] = []
+    monkeypatch.setattr(working_set_runtime, "_schedule_build", scheduled.append)
+    retrieval_calls: list[dict] = []
+    monkeypatch.setattr(
+        commands.find_module, "find", lambda *args, **kwargs: retrieval_calls.append(kwargs) or []
+    )
+
+    packet = commands.op_activate_context(seeded, turn="the cargo sled")
+
+    assert packet["abstention"] == {"reason": "unavailable"}
+    assert scheduled == []
+    assert retrieval_calls == []
+
+
 def test_a_managed_runtime_reports_a_stale_index_rather_than_walking(
     seeded: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

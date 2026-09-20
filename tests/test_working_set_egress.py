@@ -668,9 +668,10 @@ def test_a_resolver_failure_abstains_through_the_operation(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """End to end: the operation's guard handler turns it into an abstention."""
+    from test_latency_gate import _seed_freshness_live
     from test_working_set_index import _seed_planning, _seed_structure
 
-    from exomem import commands, working_set_index, working_set_runtime
+    from exomem import commands, lexstore, working_set_index, working_set_runtime
 
     _seed_structure(vault)
     _seed_planning(vault)
@@ -701,6 +702,10 @@ Never tow without checking [[Cargo Sled]] first.
     write_scope(vault, paths="Products/**")
     write_rule(vault, ceiling=0, audience="external")
 
+    # Publication owns catalogue warming. Activation must not rebuild it just
+    # to reach this test's downstream prose-release failure.
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
     turn = "what are the constraints on the tow bar"
     with request_scope(_external()):
         baseline = commands.op_activate_context(vault, turn=turn)
