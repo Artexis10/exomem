@@ -9,6 +9,8 @@ carried one would be exactly that.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from exomem import working_set_resolve as resolve_module
@@ -663,6 +665,90 @@ def test_overlapping_neighbourhoods_are_not_ambiguous() -> None:
 
     assert resolution.status == "resolved"
     assert resolution.ambiguity == ()
+
+
+def test_planning_items_in_one_canonical_collection_are_complementary() -> None:
+    items = tuple(
+        replace(
+            _facts(identity, kind="plan", evidence=("lexical_overlap", "retrieval")),
+            path="Knowledge Base/Planning/Expedition/_collection.md",
+        )
+        for identity in ("plan:outcome", "plan:next-action")
+    )
+
+    resolution = resolve_module.resolve(items)
+
+    assert resolution.status == "resolved"
+    assert len(resolution.resolved_anchors) == 2
+    assert resolution.ambiguity == ()
+
+
+def test_empty_paths_do_not_make_distinct_project_keys_complementary() -> None:
+    items = tuple(
+        replace(_facts(identity, kind="project", evidence=("exact_alias",)), path="")
+        for identity in ("project:north", "project:south")
+    )
+
+    assert resolve_module.resolve(items).status == "ambiguous"
+
+
+def test_complementary_collection_items_do_not_hide_a_competing_collection() -> None:
+    items = tuple(
+        replace(
+            _facts(identity, kind="plan", evidence=("lexical_overlap", "retrieval")),
+            path=path,
+        )
+        for identity, path in (
+            ("plan:outcome", "Planning/A/_collection.md"),
+            ("plan:action", "Planning/A/_collection.md"),
+            ("plan:competitor", "Planning/B/_collection.md"),
+        )
+    )
+
+    resolution = resolve_module.resolve(items)
+    assert resolution.status == "ambiguous"
+    assert len(resolution.ambiguity) == 2
+    assert {item["ref"] for item in resolution.ambiguity} == {
+        "Planning/A/_collection.md",
+        "Planning/B/_collection.md",
+    }
+
+
+def test_canonical_path_override_keeps_all_complementary_items() -> None:
+    rows = tuple(
+        replace(_row(path, identity, kind="plan"), anchor_id=identity)
+        for identity, path in (
+            ("plan:outcome", "Planning/A/_collection.md"),
+            ("plan:action", "Planning/A/_collection.md"),
+            ("plan:competitor", "Planning/B/_collection.md"),
+        )
+    )
+    chosen = resolve_module.override_candidates(rows, "Planning/A/_collection.md")
+    assert {row.anchor_id for row in chosen} == {"plan:outcome", "plan:action"}
+    assert resolve_module.resolve(chosen).status == "resolved"
+    exact = resolve_module.override_candidates(rows, "plan:action")
+    assert [row.anchor_id for row in exact] == ["plan:action"]
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_linked_pair_with_disconnected_candidate_keeps_explicit_ref_choices(shared):
+    first_neighbours = ("shared.md",) if shared else ("b.md",)
+    second_neighbours = ("shared.md",) if shared else ()
+    candidates = (
+        _facts("a.md", kind="hub", evidence=("exact_alias",), neighbourhood=first_neighbours),
+        _facts("b.md", kind="hub", evidence=("exact_alias",), neighbourhood=second_neighbours),
+        _facts("c.md", kind="hub", evidence=("exact_alias",)),
+    )
+    result = resolve_module.resolve(candidates)
+    assert result.status == "ambiguous"
+    assert len(result.ambiguity) == 3
+    assert {item["ref"] for item in result.ambiguity} == {"a.md", "b.md", "c.md"}
+    rows = tuple(
+        _row(c.path, c.title, neighbourhood=tuple(c.neighbourhood)) for c in candidates
+    )
+    chosen = resolve_module.override_candidates(rows, "a.md")
+    assert [item.path for item in chosen] == ["a.md"]
+    assert resolve_module.resolve(chosen).status == "resolved"
 
 
 def test_two_anchors_linked_to_each_other_are_not_ambiguous() -> None:

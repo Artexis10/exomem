@@ -104,12 +104,9 @@ CEIL_REFERENTS_RATIO = 1.5
 REFERENTS_RATIO_SLACK_MS = 25.0
 
 # --- Context-compiler ceilings (add-context-activation, design D9).
-# The metric is the COMPILER's own stages — anchor resolution over the activation
-# index, role selection, the bounded role lanes and the budget pass — and
-# deliberately NOT `working_set.retrieval`, which is one small-limit `find()` and
-# is already bounded by CEIL_TOTAL_MS above. Attributing them together would hide
-# a compiler regression behind recall's cost, which is the exact mistake the
-# per-lane gate exists to prevent.
+# The metric includes the entire activation request. Excluding its retrieval
+# stage previously allowed a fast compiler behind a many-second corpus search
+# to pass. Stage timings diagnose regressions; total latency admits the request.
 #
 # The compiler's stages are index-backed and seed-capped, so they must be FLAT in
 # corpus size: resolution reads a bounded candidate window out of the anchor
@@ -118,13 +115,9 @@ REFERENTS_RATIO_SLACK_MS = 25.0
 # regression class this gate names. The absolute ceiling is a
 # catastrophic-blowup backstop sized like CEIL_REFERENTS_MS, not a tuned bound;
 # re-measure rather than hand-tuning it.
-CEIL_WORKING_SET_MS = 1500.0
+CEIL_WORKING_SET_MS = 1000.0
 CEIL_WORKING_SET_RATIO = 1.5
 WORKING_SET_RATIO_SLACK_MS = 50.0
-#: The compiler's root spans. `working_set.lanes.<role>` is matched by prefix
-#: because the selected role set is a function of the turn, not of this gate.
-WORKING_SET_STAGE_PREFIX = "working_set."
-WORKING_SET_EXCLUDED_STAGES = frozenset({"working_set.retrieval"})
 #: A turn that names one synthetic entity exactly, so an anchor resolves and the
 #: lanes actually run. A turn that abstained would measure nothing.
 WORKING_SET_TURN = (
@@ -635,15 +628,8 @@ def test_entity_type_registry_load_is_bounded_at_scale(
 
 
 def _compiler_ms(timings: dict) -> float:
-    """Sum the compiler's own root stages from one `activate_context` call."""
-    return sum(
-        entry["ms"]
-        for name, entry in timings["stages"].items()
-        if name.startswith(WORKING_SET_STAGE_PREFIX)
-        and name not in WORKING_SET_EXCLUDED_STAGES
-        and "parent" not in entry
-        and "ms" in entry
-    )
+    """Measure the whole operation, including work outside compiler spans."""
+    return float(timings["total_ms"])
 
 
 def _measure_working_set(vault: Path) -> tuple[float, dict]:

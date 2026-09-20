@@ -168,6 +168,51 @@ The existing manager already admits interpreter/protocol/state descriptors; the 
 
 ## Ownership and delivery order
 
+### Activation latency repair
+
+Activation uses its derived anchor catalogue as the semantic search domain. The
+ordinary full-vault hybrid search is removed from the activation request path;
+its small result limit did not bound matrix loading, multimodal scoring or graph
+expansion. The existing signature embeddings and `vector_band` rule corroborate
+worded anchor evidence without changing ordinary recall. Exact matches do not
+skip competing candidates, and vectors alone still cannot resolve an anchor.
+
+One query may use an already resident encoder with nonblocking admission. It
+must not load a model or queue behind other model work. Disabled, absent,
+warming, busy and unavailable semantic evidence are distinguished in packet
+generation metadata. Transiently incomplete evidence is not cached; a later
+request can acquire the missing evidence. Explicit agent choice needs no vector
+pass. Normal resource-mode cache and model policies remain unchanged.
+
+Optional lexical corroboration uses the maintained full-page FTS index,
+restricted to anchor paths, with governed overfetch and no foreground repair
+or Python corpus fallback. This preserves own-page `retrieval` evidence on lean
+installs; matching an anchor's title a second time is not a substitute. Indexed
+matches cross the release plane before becoming resolution evidence, and the
+final guard independently checks every packet reference. Lexical corroboration
+requires two distinct matched content stems after the shared stopword filter;
+repeating the one authored name word is not independent evidence. This predicate
+applies before the ranked result limit so weak hits cannot crowd out a valid
+corroborator. Ordinary recall keeps its existing any-term behavior. Planning
+items in the same nonempty canonical collection are complementary, while
+disconnected groups and pathless project identities still compete. Ambiguity
+choices deduplicate canonical homes; choosing a collection retains all its
+complementary items rather than selecting the first index row.
+Missing/stale lexical publication is explicit and non-cacheable. Regression evidence
+covers rare-term/vector corroboration, competing same-kind anchors, vector-only
+negatives, current policy on cached packets, model contention and forbidden
+full-corpus/CLIP acquisition. End-to-end timings include semantic evidence;
+compiler-only timing is insufficient acceptance.
+
+The request shares one freshness snapshot and full recall checkpoint across
+lexical evidence and role queries. Catalogue reads still prove their checkpoint,
+policy and schema inside the query transaction. Unit roles query the maintained
+catalogue with neighbourhood parent paths before the row limit; unrelated units
+cannot consume the cap or trigger per-page hydration. Current-parent validation
+remains in force. Missing or stale unit publication reports a failed lane and
+never repairs inline. Service latency acceptance seeds the event-maintained
+registry; offline cold-start filesystem proof is measured separately.
+
 | Contract | Owner | Programme integration |
 | --- | --- | --- |
 | Activation, roles, host continuity | Canonical `context-activation`, `context-roles`, `context-activation-continuity`; active `make-anchor-resolution-sound` | Reconcile current merges and convention work before wiring activation; preserve their requirements |

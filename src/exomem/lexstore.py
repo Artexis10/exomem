@@ -1774,6 +1774,9 @@ def search_bm25_result(
     scope: str = "kb",
     freshness: tuple | None = None,
     allowed_paths: set[str] | None = None,
+    allow_delta: bool = True,
+    min_matched_terms: int = 1,
+    recall_checkpoint: Any | None = None,
 ) -> CatalogQueryResult[list[tuple[str, float]]]:
     """Non-walking maintained-catalog BM25 query with explicit readiness."""
     if not _usable():
@@ -1791,6 +1794,9 @@ def search_bm25_result(
         scope,
         freshness,
         allowed_paths,
+        allow_delta=allow_delta,
+        min_matched_terms=min_matched_terms,
+        recall_checkpoint=recall_checkpoint,
     )
 
 
@@ -1878,10 +1884,12 @@ def search_semantic_units(
     scope: str = "kb",
     freshness: tuple | None = None,
     allowed_unit_refs: set[str] | None = None,
+    allowed_parent_paths: set[str] | None = None,
     literal_all: bool = False,
     _repair_stale: bool = False,
     _validate_current: bool = True,
     repair: bool = True,
+    recall_checkpoint: Any | None = None,
 ) -> list[SemanticUnitLexicalHit] | None:
     """Return exact-metadata semantic-unit candidates from the lexical sidecar.
 
@@ -1916,10 +1924,12 @@ def search_semantic_units(
             scope=scope,
             freshness=freshness,
             allowed_unit_refs=allowed_unit_refs,
+            allowed_parent_paths=allowed_parent_paths,
             literal_all=literal_all,
             _repair_stale=_repair_stale,
             _validate_current=_validate_current,
             repair=repair,
+            recall_checkpoint=recall_checkpoint,
         )
         return result.value if result.readiness.complete else None
     if not _catalog_usable():
@@ -1943,6 +1953,7 @@ def search_semantic_units(
         literal_tokens,
         repair,
         clauses=clauses,
+        allowed_parent_paths=allowed_parent_paths,
     )
     if hits is None:
         return None
@@ -1993,9 +2004,11 @@ def search_semantic_units(
             scope=scope,
             freshness=freshness,
             allowed_unit_refs=allowed_unit_refs,
+            allowed_parent_paths=allowed_parent_paths,
             literal_all=literal_all,
             _repair_stale=False,
             repair=repair,
+            recall_checkpoint=recall_checkpoint,
         )
     if stale_paths:
         _schedule_repair(vault_root)
@@ -2018,10 +2031,13 @@ def search_semantic_units_result(
     scope: str = "kb",
     freshness: tuple | None = None,
     allowed_unit_refs: set[str] | None = None,
+    allowed_parent_paths: set[str] | None = None,
     literal_all: bool = False,
     _repair_stale: bool = False,
     _validate_current: bool = True,
     repair: bool = True,
+    recall_checkpoint: Any | None = None,
+    allow_delta: bool = True,
 ) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
     """Typed exact-category unit query preserving every catalog outcome."""
     from .semantic_units import canonicalize_category
@@ -2052,6 +2068,9 @@ def search_semantic_units_result(
         allowed_unit_refs,
         literal_tokens,
         clauses=clauses,
+        recall_checkpoint=recall_checkpoint,
+        allow_delta=allow_delta,
+        allowed_parent_paths=allowed_parent_paths,
     )
     if not result.readiness.complete or not _validate_current:
         return result
@@ -2098,9 +2117,12 @@ def search_semantic_units_result(
                 scope=scope,
                 freshness=freshness,
                 allowed_unit_refs=allowed_unit_refs,
+                allowed_parent_paths=allowed_parent_paths,
                 literal_all=literal_all,
                 _repair_stale=False,
                 repair=repair,
+                recall_checkpoint=recall_checkpoint,
+                allow_delta=allow_delta,
             )
     _schedule_repair(vault_root)
     return CatalogQueryResult(
@@ -5620,14 +5642,21 @@ class LexicalStore:
         scope: str,
         freshness: tuple | None,
         allowed_paths: set[str] | None = None,
+        *,
+        allow_delta: bool = True,
+        min_matched_terms: int = 1,
+        recall_checkpoint: Any | None = None,
     ) -> CatalogQueryResult[list[tuple[str, float]]]:
         return self._serve_from_ready_catalog_result(
             scope,
             freshness,
             lambda conn: self._bm25_query(
-                conn, stemmed_tokens, k, scope, allowed_paths
+                conn, stemmed_tokens, k, scope, allowed_paths,
+                min_matched_terms=min_matched_terms,
             ),
             "lexical sidecar BM25 query failed (%s)",
+            allow_delta=allow_delta,
+            recall_checkpoint=recall_checkpoint,
         )
 
     def _bm25_query(
@@ -5637,6 +5666,8 @@ class LexicalStore:
         k: int,
         scope: str,
         allowed_paths: set[str] | None = None,
+        *,
+        min_matched_terms: int = 1,
     ) -> list[tuple[str, float]]:
         # Tokens are [a-z0-9]+ — no FTS5 syntax can hide in them, but quote
         # anyway; OR mirrors get_scores() membership (any-term match).
@@ -5647,6 +5678,14 @@ class LexicalStore:
         if allowed_paths is not None:
             allowed_clause = " AND p.path IN (SELECT value FROM json_each(?))"
             params.append(json.dumps(sorted(allowed_paths), ensure_ascii=False))
+        if min_matched_terms > 1:
+            # Corroboration counts distinct stems, not repetitions of one word.
+            # Filter before LIMIT so one-term hits cannot crowd out valid pages.
+            allowed_clause += (
+                " AND (SELECT COUNT(*) FROM json_each(?) AS term "
+                "WHERE instr(' ' || fts.stemmed || ' ', ' ' || term.value || ' ') > 0) >= ?"
+            )
+            params.extend((json.dumps(sorted(set(tokens))), min_matched_terms))
         params.append(k)
         rows = conn.execute(
             "SELECT p.path, -bm25(fts) AS score "
@@ -5956,6 +5995,7 @@ class LexicalStore:
         failure_message: str,
         *,
         recall_checkpoint: Any | None = None,
+        allow_delta: bool = True,
     ) -> CatalogQueryResult[_CatalogValue]:
         """Validate readiness AND run `query_fn(conn)` bound to ONE connection and
         read transaction, so a concurrent publication cannot swap the catalog file
@@ -5975,10 +6015,10 @@ class LexicalStore:
         if recall_checkpoint is None:
             recall_checkpoint = _admitted_catalog_checkpoint(self.vault_root, scope)
         readiness = (
-            self.catalog_readiness(scope, freshness)
+            self.catalog_readiness(scope, freshness, allow_delta=allow_delta)
             if recall_checkpoint is None
             else self.catalog_readiness(
-                scope, freshness, recall_checkpoint=recall_checkpoint
+                scope, freshness, recall_checkpoint=recall_checkpoint, allow_delta=allow_delta
             )
         )
         if not readiness.complete:
@@ -6066,7 +6106,9 @@ class LexicalStore:
         allowed_unit_refs: set[str] | None = None,
         literal_tokens: tuple[str, ...] = (),
         repair: bool = True,
+        *,
         clauses: tuple | None = None,
+        allowed_parent_paths: set[str] | None = None,
     ) -> list[SemanticUnitLexicalHit] | None:
         if categories or kinds or clauses:
             # Exact category/kind selection (flat axes or a branch-preserving DNF
@@ -6085,6 +6127,7 @@ class LexicalStore:
                 allowed_unit_refs,
                 literal_tokens,
                 clauses=clauses,
+                allowed_parent_paths=allowed_parent_paths,
             )
             return result.value if result.readiness.complete else None
         if self._failed:
@@ -6106,6 +6149,7 @@ class LexicalStore:
                     scope,
                     allowed_unit_refs,
                     literal_tokens,
+                    allowed_parent_paths=allowed_parent_paths,
                 ),
             )
         except sqlite3.Error as e:
@@ -6127,6 +6171,9 @@ class LexicalStore:
         literal_tokens: tuple[str, ...] = (),
         *,
         clauses: tuple | None = None,
+        recall_checkpoint: Any | None = None,
+        allow_delta: bool = True,
+        allowed_parent_paths: set[str] | None = None,
     ) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
         """Typed exact category/kind unit query; never used for content-only lanes."""
         if not (categories or kinds or clauses):
@@ -6146,8 +6193,11 @@ class LexicalStore:
                 allowed_unit_refs,
                 literal_tokens,
                 dnf_clauses=clauses,
+                allowed_parent_paths=allowed_parent_paths,
             ),
             "lexical semantic-unit sidecar failed (%s); unit retrieval degrades",
+            recall_checkpoint=recall_checkpoint,
+            allow_delta=allow_delta,
         )
 
     def _semantic_unit_query(
@@ -6161,6 +6211,8 @@ class LexicalStore:
         allowed_unit_refs: set[str] | None = None,
         literal_tokens: tuple[str, ...] = (),
         dnf_clauses: tuple | None = None,
+        *,
+        allowed_parent_paths: set[str] | None = None,
     ) -> list[SemanticUnitLexicalHit]:
         col = "in_vault" if scope == "vault" else "in_kb"
         clauses = [f"u.{col} = 1"]
@@ -6183,6 +6235,9 @@ class LexicalStore:
         if allowed_unit_refs is not None:
             clauses.append("u.unit_ref IN (SELECT value FROM json_each(?))")
             params.append(json.dumps(sorted(allowed_unit_refs), ensure_ascii=False))
+        if allowed_parent_paths is not None:
+            clauses.append("u.parent_path IN (SELECT value FROM json_each(?))")
+            params.append(json.dumps(sorted(allowed_parent_paths), ensure_ascii=False))
         columns = (
             "u.record_type, u.unit_ref, u.parent_path, u.parent_ref, "
             "u.parent_generation, u.parent_source_hash, u.parser_version, u.form, "

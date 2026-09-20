@@ -578,9 +578,7 @@ updated: 2026-09-01
 
 # Bulk constraint {index:04d}
 
-## Constraints
-
-Never exceed {index} kilograms when towing the Cargo Sled.
+- [constraint] Never exceed {index} kilograms when towing the Cargo Sled. ^bulk-{index}
 """,
             encoding="utf-8",
         )
@@ -592,14 +590,17 @@ Never exceed {index} kilograms when towing the Cargo Sled.
     lexstore.ensure_fresh(stateful_vault)
     working_set_index.WorkingSetIndex(stateful_vault).reset()
     working_set_index.WorkingSetIndex(stateful_vault).rebuild()
-    packet = working_set.compile_packet(
-        stateful_vault,
-        turn="what are the constraints on the Cargo Sled",
-        max_chars=2000,
-    )
+    from exomem import context_roles
 
-    reasons = {(entry["role"], entry["reason"]) for entry in packet["missing"]}
-    assert any(reason == "lane_truncated" for _role, reason in reasons), reasons
+    result = working_set._units_lane(
+        stateful_vault,
+        context_roles.load_roles().roles["constraints"],
+        neighbourhood=frozenset(
+            f"Knowledge Base/Notes/Patterns/bulk-constraint-{index:04d}.md"
+            for index in range(working_set.UNIT_LANE_LIMIT + 30)
+        ),
+    )
+    assert result.truncated is True
 
 
 def test_current_state_is_resolved_once_per_compile(
@@ -772,7 +773,7 @@ def test_each_losing_role_gets_its_own_budget_marker() -> None:
     assert roles == ["constraints", "resources"]
 
 
-def test_an_exact_limit_read_does_not_claim_truncation() -> None:
+def test_an_exact_limit_read_does_not_claim_truncation(monkeypatch: pytest.MonkeyPatch) -> None:
     """`lane_truncated` must mean "there was more", not "the read was full".
 
     Reading one row past the limit and slicing is what makes the marker exact: a
@@ -802,16 +803,12 @@ def test_an_exact_limit_read_does_not_claim_truncation() -> None:
             for index in range(working_set.UNIT_LANE_LIMIT)
         ]
 
-    original = find_module._find_semantic_units
-    find_module._find_semantic_units = fake_units
-    try:
-        result = working_set._units_lane(
-            Path("/nonexistent"),
-            role,
-            neighbourhood=frozenset({"Knowledge Base/Notes/Patterns/p.md"}),
-        )
-    finally:
-        find_module._find_semantic_units = original
+    monkeypatch.setattr(find_module, "_find_semantic_units", fake_units)
+    result = working_set._units_lane(
+        Path("/nonexistent"),
+        role,
+        neighbourhood=frozenset({"Knowledge Base/Notes/Patterns/p.md"}),
+    )
 
     assert calls == [working_set.UNIT_LANE_LIMIT + 1], (
         "the lane must read one past its limit so the marker can be exact"

@@ -2371,6 +2371,11 @@ def _find_semantic_units(
     retrieval_trace: Any | None = None,
     timings: FindTimings | None = None,
     query_vector_provider: Callable[[], Any] | None = None,
+    allowed_parent_paths: set[str] | None = None,
+    recall_checkpoint: Any | None = None,
+    repair: bool | None = None,
+    max_catalog_candidates: int | None = None,
+    truncated_out: list[bool] | None = None,
 ) -> list[SemanticUnitHit]:
     """Rank current, exactly eligible units through lexical and vector lanes."""
     from . import lexstore
@@ -2406,7 +2411,13 @@ def _find_semantic_units(
             # so FTS absence cannot change the catalog outcome.
             with _span(timings, "filter_eligibility", source=find_types.SOURCE_INDEX):
                 exact_freshness = snapshot.for_scope(scope)
-                exact_repair = _bounded_lexical_repair_allowed(exact_freshness)
+                exact_repair = (
+                    _bounded_lexical_repair_allowed(exact_freshness)
+                    if repair is None
+                    else repair
+                )
+                exact_checkpoint = recall_checkpoint
+                exact_allow_delta = True if repair is None else repair
                 bounded_filter_only = (
                     not query.strip() and limit is not None and not algebra.post_filter_required
                 )
@@ -2420,6 +2431,8 @@ def _find_semantic_units(
                     # moving boundary. The common eligible path still opens only
                     # max(8, requested_limit) rows.
                     prefix_size = max(8, requested_limit)
+                    if max_catalog_candidates is not None:
+                        prefix_size = min(prefix_size, max_catalog_candidates)
                     indexed = []
                     records = {}
                     while True:
@@ -2430,8 +2443,11 @@ def _find_semantic_units(
                             clauses=dnf_clauses,
                             scope=scope,
                             freshness=exact_freshness,
+                            recall_checkpoint=exact_checkpoint,
+                            allowed_parent_paths=allowed_parent_paths,
                             _repair_stale=True,
                             repair=exact_repair,
+                            allow_delta=exact_allow_delta,
                         )
                         _set_catalog_timing_profile(timings, catalog_result.readiness)
                         if not catalog_result.readiness.complete:
@@ -2440,7 +2456,18 @@ def _find_semantic_units(
                         records = _hydrate_indexed_unit_records(vault_root, indexed, plan=plan)
                         if len(records) >= requested_limit or len(indexed) < prefix_size:
                             break
-                        prefix_size *= 2
+                        if (
+                            max_catalog_candidates is not None
+                            and prefix_size >= max_catalog_candidates
+                        ):
+                            if truncated_out is not None:
+                                truncated_out.append(True)
+                            break
+                        prefix_size = (
+                            min(prefix_size * 2, max_catalog_candidates)
+                            if max_catalog_candidates is not None
+                            else prefix_size * 2
+                        )
                 else:
                     # Category/kind rows are only the exact seed. Page
                     # predicates and other canonical filters run after
@@ -2454,9 +2481,12 @@ def _find_semantic_units(
                         clauses=dnf_clauses,
                         scope=scope,
                         freshness=exact_freshness,
+                        recall_checkpoint=exact_checkpoint,
+                        allowed_parent_paths=allowed_parent_paths,
                         literal_all=mode == "keyword" and bool(query.strip()),
                         _repair_stale=True,
                         repair=exact_repair,
+                        allow_delta=exact_allow_delta,
                     )
                     _set_catalog_timing_profile(timings, catalog_result.readiness)
                     if not catalog_result.readiness.complete:

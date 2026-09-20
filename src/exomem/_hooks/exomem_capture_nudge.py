@@ -69,16 +69,16 @@ REMINDER = (
     "decision value; "
     "fleeting/one-off/incidental/trivial/tentative events stay quiet. At balanced/maximal, "
     "after primary work, before the final response, "
-    'review_memory(mode="attention", categories=["entity_recurrence"], limit=3) once/session; '
-    "no scan/model. Resolve active entity registry/selected knowledge packs: "
+    'review_memory(mode="attention", categories=["entity_recurrence"], limit=3) once per session; '
+    "no local scan; no model. Active agent resolves entity registry/knowledge packs: "
     'connect_memory(operation="resolve-entity"); stop on ambiguity; single incidental mention stays '
-    "in context. Uniquely resolved Entity: narrow Entity facet, else compiled observation/proactive_capture; "
+    "in context. Uniquely resolved Entity: facet, else compiled observation/proactive_capture; "
     "affiliation relation/link_acceptance; compatible Records only. Hydrate via edit_memory before "
     "duplicating; else "
     'connect_memory(operation="create-entity") only for stable recurring identity beyond source. '
     "Entity creation/substantial curation: confirmed "
-    "restructure_execution. Recheck on confirmed terminal batch receipt; eighth recheck is "
-    "closure-only. Distilled notes, not transcripts. replace_memory supersedes contradicted "
+    "restructure_execution. Recheck on confirmed batch terminal receipt; closure-only eighth recheck. "
+    "Distilled notes, not transcripts. replace_memory supersedes contradicted "
     "conclusions, not corrections beside them. Stated intent -> "
     "Planning/plan_memory; observed outcome -> Records/record_memory. Generated draft stays "
     "ephemeral; selected is not write consent: proactive_capture keeps exact Source/Evidence bytes "

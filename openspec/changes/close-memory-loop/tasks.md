@@ -56,6 +56,7 @@
 - [ ] 6.5 Verify the shipped title-first citation contract in ordinary cross-client answers, including visible custom-scheme Markdown, duplicate titles and missing-title fallback; stable IDs stay machine-facing unless explicitly requested.
 - [ ] 6.6 Execute the generic synthetic decomposition/replay acceptance through capture, publication and a fresh session; verify separate handling of preferences/product observations, repeated personal sensory observations, historical recovery, baseline ability and attributed family interpretation, with useful activation preserving attribution and uncertainty.
 - [ ] 6.7 Verify fast activation readiness under cold hybrid resources and measure live latency and usefulness through the existing acceptance path. Record timeout, unavailable or degraded outcomes honestly; the current production trial timed out and does not establish a fix.
+- [ ] 6.8 Replace activation's unconditional full-vault hybrid recall with its bounded signature-vector evidence; admit one resident query encode without waiting behind model work, expose evidence availability, avoid caching transient degradation, preserve resolution/ambiguity/egress and ordinary recall, and verify total latency plus useful positive/negative live cases before enablement.
 
 ## 7. Deliver governed adaptation and derived working context
 

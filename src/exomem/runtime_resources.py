@@ -155,7 +155,7 @@ class ModelAdmissionGate:
         self._local = threading.local()
 
     @contextlib.contextmanager
-    def execution(self):
+    def execution(self, *, wait: bool = True):
         depth = getattr(self._local, "depth", 0)
         admitted = depth == 0
         if admitted and not self._admitted.acquire(blocking=False):
@@ -163,14 +163,19 @@ class ModelAdmissionGate:
         if admitted:
             with self._admission_lock:
                 self._admitted_count += 1
+        acquired = False
         try:
-            with self._execution:
-                self._local.depth = depth + 1
-                try:
-                    yield
-                finally:
-                    self._local.depth = depth
+            if not self._execution.acquire(blocking=wait):
+                raise ModelBusyError("model compute is busy; retry shortly")
+            acquired = True
+            self._local.depth = depth + 1
+            try:
+                yield
+            finally:
+                self._local.depth = depth
         finally:
+            if acquired:
+                self._execution.release()
             if admitted:
                 with self._admission_lock:
                     self._admitted_count -= 1
@@ -186,7 +191,7 @@ _gate: ModelAdmissionGate | None = None
 _gate_capacity: int | None = None
 
 
-def model_execution():
+def model_execution(*, wait: bool = True):
     """Return the process-wide model gate for an embedding, reranker, CLIP, or ASR call."""
     global _gate, _gate_capacity
     capacity = resolve_policy().model_admission
@@ -194,7 +199,7 @@ def model_execution():
         if _gate is None or _gate_capacity != capacity:
             _gate = ModelAdmissionGate(capacity)
             _gate_capacity = capacity
-        return _gate.execution()
+        return _gate.execution(wait=wait)
 
 
 def lifespan(inner=None):

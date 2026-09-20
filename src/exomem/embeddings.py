@@ -1015,6 +1015,36 @@ def _embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     return vecs.astype(np.float32, copy=False)
 
 
+def embed_query_if_loaded(text: str) -> np.ndarray | None:
+    """Encode one query only when the text encoder is already resident."""
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return None
+    if not _MODEL_LOCK.acquire(blocking=False):
+        raise runtime_resources.ModelBusyError("model compute is busy; retry shortly")
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(BGE_GUARD.active())
+            model = _MODEL
+        finally:
+            _MODEL_LOCK.release()
+        if model is None:
+            return None
+        caller = _encode_caller() if call_spans.MCP_CALL_TOKEN.get() is not None else "off-path"
+        with (
+            call_spans.span("embeddings.encode", {"texts": 1, "chars": len(text)}),
+            call_spans.span(f"encode.by.{caller}"),
+            runtime_resources.model_execution(wait=False),
+        ):
+            vecs = model.encode(
+                [QUERY_PREFIX + text],
+                batch_size=encode_batch_size(model),
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+        return vecs.astype(np.float32, copy=False)[0]
+
+
 def vector_backend_active(vault_root: Path) -> bool:
     """True when the vec0 backend would serve vector search for this vault now.
 

@@ -24,6 +24,7 @@ Three properties are load-bearing and each is tested directly:
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -340,6 +341,7 @@ def run_lanes(
     registry: context_roles.RoleRegistry,
     current_state: Sequence[Mapping[str, Any]] = (),
     timings: Any = None,
+    freshness_snapshot: Any = None,
 ) -> tuple[tuple[LaneItem, ...], tuple[dict[str, Any], ...]]:
     """Run one bounded lane per selected role. Every lane soft-fails alone.
 
@@ -366,6 +368,7 @@ def run_lanes(
                     anchors=anchors,
                     neighbourhood=neighbourhood,
                     current_state=current_state,
+                    freshness_snapshot=freshness_snapshot,
                 )
             except Exception:  # noqa: BLE001 - one lane's failure is not the packet's
                 log.debug("activation lane %s failed", role_id, exc_info=True)
@@ -431,6 +434,7 @@ def _lane(
     anchors: Sequence[Any],
     neighbourhood: frozenset[str],
     current_state: Sequence[Mapping[str, Any]] = (),
+    freshness_snapshot: Any = None,
 ) -> LaneResult:
     """Dispatch one role to its lane.
 
@@ -441,7 +445,9 @@ def _lane(
     are the selectors, and they are categorical.
     """
     if role.lane == "units":
-        return _units_lane(vault_root, role, neighbourhood=neighbourhood)
+        return _units_lane(
+            vault_root, role, neighbourhood=neighbourhood, freshness_snapshot=freshness_snapshot
+        )
     if role.lane == "records":
         return LaneResult(_records_lane(role, current_state=current_state))
     if role.lane == "planning":
@@ -460,51 +466,49 @@ def _units_lane(
     role: context_roles.ContextRole,
     *,
     neighbourhood: frozenset[str],
+    freshness_snapshot: Any = None,
 ) -> LaneResult:
     """Semantic units by category, restricted to the anchor neighbourhood.
 
-    The category set is pushed down into the existing unit catalogue query; the
-    neighbourhood restriction is applied to what comes back, because the unit
-    lane's filter vocabulary has no page-path axis and inventing one would move a
-    retrieval primitive for a composition concern.
-
-    That ordering has a cost worth naming: the read limit applies BEFORE the path
-    filter, so a vault with more than `UNIT_LANE_LIMIT` units in this role's
-    categories can leave in-neighbourhood units unread. The lane reports that as
-    `lane_truncated` rather than letting the packet imply it read everything.
+    Both category and parent-path constraints run in the maintained catalogue
+    before its bounded read, so unrelated units cannot consume this role's cap.
     """
     if not role.categories or not neighbourhood:
         return LaneResult(())
     from . import find as find_module
     from . import ranking_config, structured_filters
-
+    # One row past the limit, then sliced. Reading exactly `UNIT_LANE_LIMIT` rows
+    # cannot distinguish "there was more" from "that was all", so the marker would
+    # over-report on a corpus that happens to hold exactly the limit.
+    snapshot = freshness_snapshot or find_module.FreshnessSnapshot(Path(vault_root))
     plan = structured_filters.compile_filter(
         None,
         shortcuts=structured_filters.FilterShortcuts(categories=tuple(sorted(role.categories))),
     )
-    # One row past the limit, then sliced. Reading exactly `UNIT_LANE_LIMIT` rows
-    # cannot distinguish "there was more" from "that was all", so the marker would
-    # over-report on a corpus that happens to hold exactly the limit.
+    capped = []
     hits = find_module._find_semantic_units(
         Path(vault_root),
         query="",
         limit=UNIT_LANE_LIMIT + 1,
         scope="kb",
         plan=plan,
-        snapshot=find_module.FreshnessSnapshot(Path(vault_root)),
+        snapshot=snapshot,
         prefer_active=True,
         config=ranking_config.DEFAULT_RANKING,
         mode="keyword",
         degraded_out=None,
         failed_out=None,
+        allowed_parent_paths=set(neighbourhood),
+        recall_checkpoint=snapshot.recall_checkpoint("kb"),
+        repair=False,
+        max_catalog_candidates=UNIT_LANE_LIMIT + 1,
+        truncated_out=capped,
     )
-    truncated = len(hits) > UNIT_LANE_LIMIT
+    truncated = len(hits) > UNIT_LANE_LIMIT or bool(capped)
     hits = hits[:UNIT_LANE_LIMIT]
     out: list[LaneItem] = []
     for hit in hits:
         parent = str(getattr(hit, "parent_path", "") or "")
-        if parent not in neighbourhood:
-            continue
         superseded_by = list(getattr(hit, "parent_superseded_by", ()) or ())
         lifecycle = "superseded" if superseded_by else "active"
         out.append(
@@ -625,9 +629,7 @@ def _entity_lane(
     return tuple(out)
 
 
-def _graph_lane(
-    role: context_roles.ContextRole, *, anchors: Sequence[Any]
-) -> tuple[LaneItem, ...]:
+def _graph_lane(role: context_roles.ContextRole, *, anchors: Sequence[Any]) -> tuple[LaneItem, ...]:
     """Typed neighbours as pointers. A neighbour's BODY belongs to another lane."""
     out: list[LaneItem] = []
     for anchor in anchors:
@@ -690,6 +692,34 @@ def _span(timings: Any, name: str):
     return find_types.timing_span(timings, name)
 
 
+def signature_evidence(index: working_set_index.WorkingSetIndex, turn: str):
+    """Optional semantic corroboration over anchors, never the recall corpus.
+
+    An unavailable scorer removes one evidence kind, not the structural
+    resolver or its release guard. It cannot justify a cached negative result.
+    """
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return {}, None, "disabled"
+    try:
+        from . import embeddings, readiness, runtime_resources
+
+        if readiness.should_defer("embeddings"):
+            return {}, None, "warming"
+        vectors = index.vectors()
+        if not vectors:
+            return {}, None, "absent"
+        try:
+            query_vector = embeddings.embed_query_if_loaded(turn)
+        except runtime_resources.ModelBusyError:
+            return {}, None, "busy"
+        if query_vector is None:
+            return {}, None, "unavailable"
+        return vectors, query_vector, "ready"
+    except Exception:  # noqa: BLE001 - optional scorer failure is explicit
+        log.debug("activation signature evidence unavailable", exc_info=True)
+        return {}, None, "unavailable"
+
+
 def compile_packet(
     vault_root: Path,
     *,
@@ -700,6 +730,7 @@ def compile_packet(
     retrieval_paths: frozenset[str] = frozenset(),
     index: working_set_index.WorkingSetIndex | None = None,
     freshness_key: str = "",
+    freshness_snapshot: Any = None,
     continuity_refs: frozenset[str] = frozenset(),
     anchor: str | None = None,
 ) -> dict[str, Any]:
@@ -720,6 +751,13 @@ def compile_packet(
         **registry.generation_block(),
     }
 
+    with _span(timings, "working_set.semantic"):
+        if anchor:
+            vectors, query_vector, semantic_state = {}, None, "agent_choice"
+        else:
+            vectors, query_vector, semantic_state = signature_evidence(index, turn)
+    generation["semantic_evidence"] = semantic_state
+
     with _span(timings, "working_set.resolve"):
         # `analysis` is needed on BOTH branches. The override replaces which
         # anchor the turn is about; it does not replace which lenses the turn asks
@@ -729,18 +767,18 @@ def compile_packet(
         analysis = working_set_resolve.analyze_turn(turn)
         rows = working_set_resolve.facts_from_rows(index.anchors())
         if anchor:
-            chosen = working_set_resolve.override_candidate(rows, anchor)
+            chosen = working_set_resolve.override_candidates(rows, anchor)
             # A ref that names no anchor is not a packet with nothing in it: the
             # caller asked about a sense that does not exist here. It abstains,
             # and `op_activate_context` turns that into the one refusal an
             # unknown and a withheld ref share.
-            resolution = working_set_resolve.resolve(
-                (chosen,) if chosen is not None else ()
-            )
+            resolution = working_set_resolve.resolve(chosen)
         else:
             candidates = working_set_resolve.candidates_for(
                 analysis,
                 rows,
+                vectors=vectors,
+                query_vector=query_vector,
                 retrieval_paths=retrieval_paths,
                 routing_targets=_routing_targets(root),
                 used_paths=_used_paths(root, rows),
@@ -749,9 +787,7 @@ def compile_packet(
             candidates = working_set_resolve.add_graph_corroboration(
                 candidates, retrieval_paths=retrieval_paths
             )
-            candidates = working_set_resolve.apply_continuity(
-                candidates, continuity_refs
-            )
+            candidates = working_set_resolve.apply_continuity(candidates, continuity_refs)
             resolution = working_set_resolve.resolve(candidates)
 
     if resolution.status != "resolved":
@@ -764,12 +800,8 @@ def compile_packet(
         )
 
     with _span(timings, "working_set.roles"):
-        anchor_kinds = tuple(
-            dict.fromkeys(anchor.kind for anchor in resolution.resolved_anchors)
-        )
-        roles = context_roles.select_roles(
-            registry, anchor_kinds=anchor_kinds, analysis=analysis
-        )
+        anchor_kinds = tuple(dict.fromkeys(anchor.kind for anchor in resolution.resolved_anchors))
+        roles = context_roles.select_roles(registry, anchor_kinds=anchor_kinds, analysis=analysis)
 
     # RESOLVED anchors only: a `partial` anchor is listed in `anchors[]` with
     # its status and evidence, but no lane runs for it and nothing of its page
@@ -789,6 +821,7 @@ def compile_packet(
         registry=registry,
         current_state=current_state,
         timings=timings,
+        freshness_snapshot=freshness_snapshot,
     )
 
     with _span(timings, "working_set.budget"):
