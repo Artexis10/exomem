@@ -1,0 +1,94 @@
+name: Mixed-load observations
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  observe:
+    if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'perf/mixed-load-'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 220
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: '0.11.28'
+      - name: Install deterministic extraction dependencies
+        timeout-minutes: 6
+        run: |
+          scripts/ci-apt-install.sh tesseract-ocr
+          uv sync --frozen --python 3.13.14
+          uv pip install --python .venv/bin/python Pillow==12.2.0 PyMuPDF==1.27.2.3 pytesseract==0.3.13
+      - name: Collect serial observations
+        run: |
+          umask 022
+          .venv/bin/python scripts/mixed_load_cohort.py --output "$RUNNER_TEMP/mixed-load-cohort"
+      - name: Retain raw outcomes and generated evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mixed-load-observations
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/mixed-load-cohort/cohort.json
+            ${{ runner.temp }}/mixed-load-cohort/*/result.json
+            ${{ runner.temp }}/mixed-load-cohort/*/host.json
+            ${{ runner.temp }}/mixed-load-cohort/*/stdout.log
+            ${{ runner.temp }}/mixed-load-cohort/*/stderr.log
+            ${{ runner.temp }}/mixed-load-cohort/*/state/stdio.log
+            ${{ runner.temp }}/mixed-load-cohort/*/state/logs/*.log
+            ${{ runner.temp }}/mixed-load-cohort/*/vault/Knowledge Base/Evidence/**
+  compare:
+    if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'perf/mixed-load-'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 220
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: '0.11.28'
+      - name: Install current-source environments
+        run: |
+          uv sync --frozen --python 3.13.14
+          basic_memory="$RUNNER_TEMP/basic-memory-current"
+          revision="$(PYTHONPATH="$GITHUB_WORKSPACE/scripts" .venv/bin/python -c 'import parity_basic_memory; print(parity_basic_memory.REVISION)')"
+          git clone --no-checkout https://github.com/basicmachines-co/basic-memory.git "$basic_memory"
+          git -C "$basic_memory" fetch --tags origin "$revision"
+          git -C "$basic_memory" checkout --detach "$revision"
+          uv sync --frozen --no-dev --python 3.13.14 --project "$basic_memory"
+      - name: Collect serial current-source parity observations
+        run: |
+          umask 022
+          basic_memory="$RUNNER_TEMP/basic-memory-current"
+          .venv/bin/python scripts/parity_cohort.py \
+            --output "$RUNNER_TEMP/parity-cohort" \
+            --basic-memory-source "$basic_memory" \
+            --basic-memory-python "$basic_memory/.venv/bin/python"
+      - name: Retain raw parity outcomes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: current-source-parity-observations
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/parity-cohort/cohort.json
+            ${{ runner.temp }}/parity-cohort/*/result.json
+            ${{ runner.temp }}/parity-cohort/*/host.json
+            ${{ runner.temp }}/parity-cohort/*/stdout.log
+            ${{ runner.temp }}/parity-cohort/*/stderr.log
+            ${{ runner.temp }}/parity-cohort/*/state/*-stdio.log
+            ${{ runner.temp }}/parity-cohort/*/state/logs/*.log
+            ${{ runner.temp }}/parity-cohort/*/state/config/basic-memory.log*
