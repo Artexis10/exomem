@@ -331,16 +331,22 @@ ran; `migration.state` says whether it did. When it is close to
 `unavailable_ms`, the cutover itself was cheap and the replacement's own warm
 is what the outage was.
 
-Both fields appear on a failed handoff too, and there `handoff.waiting` carries
-what the replacement last reported waiting on — a readiness reason such as
-`retrieval_unavailable`, with the lexical repair phase when there is one, or
-the cutover component a candidate was still warming. Together they separate a
+Both fields appear on a failed handoff too, and there `handoff.replacement_waiting`
+carries what the replacement last reported waiting on — a readiness reason such
+as `retrieval_unavailable`, with the lexical repair phase when there is one, or
+the cutover component it was still warming. Together they separate a
 replacement that burned the whole window on a background repair from one that
 died two seconds after the stop, which need different responses. Both are
 recorded from the readiness contract's own fixed vocabulary and are
 observations only: no budget, wait or outcome depends on them. A failure before
 the old worker stopped carries neither, because there was no replacement to
 measure.
+
+`replacement_waiting` is a separate field from `handoff.waiting`, which keeps
+its own meaning: the component a *standby* was warming when it was discarded.
+An upgrade can record both — a candidate discarded on its warm budget, then a
+one-worker replacement that never reported ready — and that combination is
+precisely the one worth reading closely, so neither value overwrites the other.
 
 `migration.state` is `ran` with the reason (`descriptors_changed`, or the
 manifest state that was not complete) when it runs. `promotion.snapshot` is

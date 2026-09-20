@@ -650,9 +650,14 @@ class Supervisor:
                     handoff["ready_after_ms"] = round(
                         (time.monotonic() - stopped_at) * 1000.0, 1
                     )
+                # Its own key: `waiting` belongs to a discarded standby's
+                # component, and the handoff that discards a candidate and then
+                # fails to start its replacement is the incident shape -- both
+                # facts matter to whoever reads the record, so neither
+                # displaces the other.
                 waiting = getattr(self.runtime, "replacement_waiting", None)
                 if waiting:
-                    handoff["waiting"] = waiting
+                    handoff["replacement_waiting"] = waiting
                 # Error text from subprocesses can contain configuration or
                 # vault content. Retain phase and identity, not arbitrary text.
                 self.records.phase("failed", worker_pid=self.runtime.pid)

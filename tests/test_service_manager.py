@@ -1244,8 +1244,48 @@ def test_a_failed_handoff_records_the_window_it_burned_and_what_it_waited_on(tmp
         assert result["ok"] is False
         assert result["handoff"]["ready_after_ms"] >= 450, result["handoff"]
         assert (
-            result["handoff"]["waiting"] == "retrieval_unavailable (repair: rebuilding)"
+            result["handoff"]["replacement_waiting"]
+            == "retrieval_unavailable (repair: rebuilding)"
         )
+
+    asyncio.run(scenario())
+
+
+def test_a_discarded_standby_and_a_failed_replacement_each_keep_their_own_field(
+    tmp_path,
+):
+    """The incident shape: a candidate discarded, then its replacement stuck.
+
+    Both facts are needed to read the record -- which component the discarded
+    candidate was warming, and what the cold replacement could not finish -- so
+    neither is allowed to overwrite the other.
+    """
+
+    async def scenario():
+        manager, ingress, runtime, target = _slow_supervisor(
+            tmp_path, ready_after=30.0, transition_timeout=0.25, cold=0.6
+        )
+        runtime.standby_failure = "budget"
+        result = await manager.upgrade(target)
+        assert result["ok"] is False
+        handoff = result["handoff"]
+        # The candidate was discarded for missing its warm budget...
+        assert handoff["standby"] == "discarded"
+        assert handoff["reason"] == "warm budget expired"
+        assert handoff["waiting"] == "graph_snapshot"
+        # ...and the one-worker replacement it fell back to never came up.
+        assert (
+            handoff["replacement_waiting"]
+            == "retrieval_unavailable (repair: rebuilding)"
+        )
+        assert runtime.events == [
+            "inspect",
+            "start-standby",
+            "discard-standby",
+            "stop",
+            "start",
+            "stop",
+        ]
 
     asyncio.run(scenario())
 
@@ -1264,7 +1304,7 @@ def test_a_failure_before_the_stop_claims_no_replacement_measurement(tmp_path):
         result = await asyncio.wait_for(manager.upgrade(target), 5)
         assert result["ok"] is False
         assert "ready_after_ms" not in result["handoff"], result["handoff"]
-        assert "waiting" not in result["handoff"], result["handoff"]
+        assert "replacement_waiting" not in result["handoff"], result["handoff"]
 
     asyncio.run(scenario())
 
