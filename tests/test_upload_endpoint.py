@@ -110,6 +110,39 @@ def test_upload_happy_path_lands_in_evidence(vault, monkeypatch: pytest.MonkeyPa
     assert written.read_bytes() == b"\x89PNGrealbytes"
 
 
+@pytest.mark.parametrize(
+    ("filename", "data", "query"),
+    [
+        ("readings.csv", b"instrument,reading\nprivate-row-value,7\n", "readings"),
+        ("export.yaml", b"export-marker: literal content\n", "export-marker"),
+    ],
+)
+def test_structured_upload_search_and_unchanged_download(vault, monkeypatch, filename, data, query):
+    from exomem import commands, upload_tokens
+
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+    response = client.post(
+        "/upload", files={"file": (filename, data, "application/octet-stream")},
+        data={"scope": "Test", "category": "exports"},
+        headers={"Authorization": "Bearer sekret"},
+    )
+    assert response.status_code == 201, response.text
+    result = response.json()
+    found = commands.op_find(vault, query=query, mode="keyword", graph=False)
+    assert any(hit["path"] == result["sidecar_path"] for hit in found)
+    if filename.endswith(".csv"):
+        assert commands.op_query_dataset(
+            vault, path=result["path"], aggregate="sum:reading"
+        )["aggregate"]["sum"] == 7
+        assert "private-row-value" not in (vault / result["sidecar_path"]).read_text()
+    downloaded = client.get(
+        "/download", params={"path": result["path"]},
+        headers={"Authorization": f"Bearer {upload_tokens.mint('sekret', scope='download')}"},
+    )
+    assert downloaded.status_code == 200, downloaded.text
+    assert downloaded.content == data
+
+
 def test_upload_supported_media_routes_through_canonical_reconciliation(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:

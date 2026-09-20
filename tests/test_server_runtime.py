@@ -360,6 +360,9 @@ def test_local_runtime_activation_waits_for_terminal_warm_after_catalog_failure(
 def test_disable_warmup_preserves_unverified_lazy_runtime_admission(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Start before any warm-up; earlier tests in the same shard may leave
+    # process-global readiness from a different scenario behind.
+    readiness.reset()
     monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
     vault = tmp_path / "vault"
     vault.mkdir()
