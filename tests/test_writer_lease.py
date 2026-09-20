@@ -4684,6 +4684,8 @@ def test_startup_sweep_reads_a_released_store_without_changing_its_schema(
         "attempt_id",
         "commit_token",
         "commit_secret",
+        "prepared_recovery_digest",
+        "prepared_recovery_json",
     }
     del released
     _seed_idempotency_row(database, "dead:legacy", owner="4244:deadbeefdeadbeef", updated_at=1.0)

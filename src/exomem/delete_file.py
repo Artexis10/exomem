@@ -408,6 +408,17 @@ def delete_file(
             code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
             reason=str(error),
         ) from error
+    catalog_publication.prepare_hosted_catalog_recovery(
+        catalog_target,
+        canonical_result=DeleteFileResult(
+            path=rel_path,
+            trash_path=trash_rel,
+            trash_meta_path=meta_rel,
+            inbound_link_count=len(inbound),
+            inbound_ignored_count=len(inbound_ignored),
+            warnings=list(warnings),
+        ).as_dict(),
+    )
     from . import graph_sync
 
     try:

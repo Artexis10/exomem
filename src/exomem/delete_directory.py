@@ -341,6 +341,17 @@ def delete_directory(
                 code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                 reason=str(error),
             ) from error
+    catalog_publication.prepare_hosted_catalog_recovery(
+        catalog_target,
+        canonical_result=DeleteDirectoryResult(
+            path=rel_path,
+            trash_path=trash_rel,
+            trash_meta_path=meta_rel,
+            file_count=len(files),
+            inbound_link_count=inbound_total,
+            warnings=list(warnings),
+        ).as_dict(),
+    )
 
     from . import graph_sync
 

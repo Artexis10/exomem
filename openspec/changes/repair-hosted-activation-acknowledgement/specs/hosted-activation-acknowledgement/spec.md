@@ -59,3 +59,26 @@ An interrupted acknowledgement SHALL retain the exact publication and mutation i
 - **WHEN** ordinary command workers are occupied by calls waiting on mutation fences
 - **THEN** reserved bounded proof execution capacity still allows the active publication's callback to complete
 - **AND** excess proof requests cannot create an unbounded queue or exhaust ordinary serving capacity
+
+### Requirement: Authenticated deployment capability and retained trust
+
+Acknowledgement capability SHALL be bound to the existing deployment lock and verified against explicit declarations at both authenticated candidate source commits. The public trust digest and platform namespace SHALL be immutable operation inputs, not caller-selected transport settings. Each admitted operation SHALL retain its original authenticated binding and exact conditional recovery-envelope set across retries and certificate rotation. A capable forward runtime without the required deployment binding SHALL be rejected; legacy target selection SHALL retain its existing object shapes and SHALL NOT inherit forward capability.
+
+#### Scenario: Candidate does not establish capability
+- **WHEN** an acknowledgement extension names a candidate without its exact signed-source declaration, or a declaring forward runtime has no extension
+- **THEN** composition and release verification refuse the deployment
+- **AND** a mutable chart value cannot override that refusal
+
+#### Scenario: Certificate rotation coincides with an unchanged caller retry
+- **WHEN** the current deployment uses a newer public trust bundle but the caller retries the same previously admitted public request
+- **THEN** the original durable operation, namespace, trust digest and signed object envelopes are retained
+- **AND** no idempotency conflict or authority substitution is caused solely by changing server-owned transport fields
+
+#### Scenario: Retained trust is missing or substituted
+- **WHEN** a retained operation's original immutable trust ConfigMap is absent or has a different full content digest
+- **THEN** reconciliation refuses without substituting current trust or another operation's envelope
+
+#### Scenario: Legacy and forward cells coexist
+- **WHEN** an expand deployment retains a legacy target alongside the capable forward target
+- **THEN** only the exact forward target receives the acknowledgement environment, trust copy and socket mounts
+- **AND** the enabled worker listener remains available to deployed forward cells during rollback selection

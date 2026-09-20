@@ -15,6 +15,11 @@ from urllib.parse import unquote, urlsplit
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .activation_ack_configuration import (
+    ACTIVATION_ACK_PROTOCOL,
+    validate_activation_ack_binding,
+)
+
 PROVISIONER_PROTOCOL: Literal["exomem-cell-provisioner.v1"] = "exomem-cell-provisioner.v1"
 _DATABASE_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{2,62}$")
 _DISALLOWED_ROLES = {"postgres", "public", "neondb_owner"}
@@ -292,6 +297,26 @@ class DeploymentRecordsCompatibility(BaseModel):
     rollbackRuntime: DeploymentRecordsRollbackRuntime
 
 
+class ActivationAcknowledgementBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    protocol: Literal["exomem.hosted-activation-ack/v1"]
+    platformNamespace: str = Field(
+        min_length=1,
+        max_length=63,
+        pattern=r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$",
+    )
+    trustBundleSha256: str = Field(pattern=_SHA256)
+
+    @model_validator(mode="after")
+    def validate_exact_binding(self) -> ActivationAcknowledgementBinding:
+        binding = self.model_dump(mode="json")
+        validate_activation_ack_binding(binding)
+        if self.protocol != ACTIVATION_ACK_PROTOCOL:
+            raise ValueError("activation acknowledgement protocol is unsupported")
+        return self
+
+
 class SelectedDeploymentRuntime(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
@@ -303,6 +328,7 @@ class SelectedDeploymentRuntime(BaseModel):
     migrationMode: Literal["none", "binding-v1-to-v2", "state-root-v1", "governance-v3-to-v4"] = (
         "none"
     )
+    activationAcknowledgement: ActivationAcknowledgementBinding | None = None
 
 
 class DeploymentRuntimeUpgrade(BaseModel):
@@ -328,6 +354,14 @@ class DeploymentLock(BaseModel):
     composition: DeploymentComposition
     rollback: DeploymentRollback
     recordsCompatibility: DeploymentRecordsCompatibility | None = None
+    activationAcknowledgement: ActivationAcknowledgementBinding | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_null_activation_acknowledgement(cls, value: object) -> object:
+        if isinstance(value, dict) and value.get("activationAcknowledgement", object()) is None:
+            raise ValueError("activation acknowledgement binding cannot be null")
+        return value
 
     @model_validator(mode="after")
     def validate_records_compatibility(self) -> DeploymentLock:
@@ -371,6 +405,7 @@ class DeploymentLock(BaseModel):
                 migrationMode=(
                     self.runtimeUpgrade.migrationMode if self.runtimeUpgrade else "none"
                 ),
+                activationAcknowledgement=self.activationAcknowledgement,
             )
         if selection not in {"active", "rollback"}:
             raise ValueError("deployment lock v3 requires an explicit runtime selection")
@@ -387,6 +422,7 @@ class DeploymentLock(BaseModel):
                 migrationMode=(
                     self.runtimeUpgrade.migrationMode if self.runtimeUpgrade else "none"
                 ),
+                activationAcknowledgement=self.activationAcknowledgement,
             )
         rollback = self.recordsCompatibility.rollbackRuntime
         return SelectedDeploymentRuntime(
@@ -638,6 +674,22 @@ class ProviderWorkerSettings(BaseSettings):
         pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
     )
     hcloud_server_id: int = Field(gt=0)
+    activation_ack_protocol: Literal["exomem.hosted-activation-ack/v1"] | None = Field(
+        default=None,
+        validation_alias="EXOMEM_PROVIDER_ACTIVATION_ACK_PROTOCOL",
+    )
+    activation_ack_tls_cert_path: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4096,
+        validation_alias="EXOMEM_PROVIDER_ACTIVATION_ACK_TLS_CERT_PATH",
+    )
+    activation_ack_tls_key_path: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4096,
+        validation_alias="EXOMEM_PROVIDER_ACTIVATION_ACK_TLS_KEY_PATH",
+    )
 
     @field_validator("deployment_lock_path")
     @classmethod
@@ -659,6 +711,13 @@ class ProviderWorkerSettings(BaseSettings):
         path = Path(value)
         if not path.is_absolute() or path.name != _CAPACITY_CONTRACT_FILENAME:
             raise ValueError("capacity contract path must be absolute and use the v1 filename")
+        return value
+
+    @field_validator("activation_ack_tls_cert_path", "activation_ack_tls_key_path")
+    @classmethod
+    def validate_activation_ack_tls_path(cls, value: str | None) -> str | None:
+        if value is not None and not Path(value).is_absolute():
+            raise ValueError("activation acknowledgement TLS paths must be absolute")
         return value
 
     @field_validator("control_hostname", "transfer_hostname")
@@ -712,6 +771,15 @@ class ProviderWorkerSettings(BaseSettings):
         )
         if any(os.environ.get(name) is not None for name in forbidden):
             raise ValueError("independent hosted release overrides are forbidden")
+        listener_values = (
+            self.activation_ack_protocol,
+            self.activation_ack_tls_cert_path,
+            self.activation_ack_tls_key_path,
+        )
+        if any(value is not None for value in listener_values) and not all(
+            value is not None for value in listener_values
+        ):
+            raise ValueError("activation acknowledgement listener configuration must be complete")
         return self
 
 

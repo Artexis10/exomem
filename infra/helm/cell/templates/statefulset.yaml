@@ -1,3 +1,4 @@
+{{- $ack := eq (include "exomem-cell.activationAckEnabled" .) "true" -}}
 {{- if eq .Values.workloadMode "serve" }}
 apiVersion: apps/v1
 kind: StatefulSet
@@ -38,6 +39,10 @@ spec:
           args:
             - -m
             - exomem.governance.authorization_hosted_mount
+          {{- if $ack }}
+          env:
+            {{- include "exomem-cell.activationAckEnv" . | nindent 12 }}
+          {{- end }}
           resources:
             requests:
               cpu: 10m
@@ -61,6 +66,10 @@ spec:
               readOnly: true
             - name: authorization-session-custody
               mountPath: /run/exomem/authorization-session
+            {{- if $ack }}
+            - name: activation-ack-socket
+              mountPath: /run/exomem/activation-ack
+            {{- end }}
         {{- /*
           A native sidecar (restartPolicy: Always on an init container) rather
           than an ordinary container: the tenant boundary policy pins
@@ -83,6 +92,18 @@ spec:
             - -m
             - exomem.governance.authorization_hosted_mount
             - --watch
+          {{- if $ack }}
+          env:
+            {{- include "exomem-cell.activationAckEnv" . | nindent 12 }}
+            - name: EXOMEM_HOSTED_ACTIVATION_ACK_PLATFORM_NAMESPACE
+              value: {{ .Values.activationAcknowledgement.platformNamespace | quote }}
+            - name: EXOMEM_HOSTED_CELL_ID
+              value: {{ .Values.cellId | quote }}
+            - name: EXOMEM_AUTH_SESSION_REPLICA_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          {{- end }}
           resources:
             requests:
               cpu: 10m
@@ -106,6 +127,17 @@ spec:
               readOnly: true
             - name: authorization-session-custody
               mountPath: /run/exomem/authorization-session
+            {{- if $ack }}
+            - name: credentials
+              mountPath: /run/exomem/credentials
+              readOnly: true
+            - name: activation-ack-trust
+              mountPath: /run/exomem/activation-ack-trust
+              readOnly: true
+            - name: activation-ack-socket
+              mountPath: /run/exomem/activation-ack
+              subPath: socket
+            {{- end }}
       containers:
         - name: exomem
           image: {{ .Values.image }}
@@ -122,6 +154,9 @@ spec:
               containerPort: 8765
               protocol: TCP
           env:
+            {{- if $ack }}
+            {{- include "exomem-cell.activationAckEnv" . | nindent 12 }}
+            {{- end }}
             - name: EXOMEM_HOSTED_CELL
               value: "1"
             - name: EXOMEM_HOSTED_CELL_ID
@@ -260,6 +295,12 @@ spec:
             - name: authorization-session-custody
               mountPath: /run/exomem/authorization-session
               readOnly: true
+            {{- if $ack }}
+            - name: activation-ack-socket
+              mountPath: /run/exomem/activation-ack
+              subPath: socket
+              readOnly: true
+            {{- end }}
       volumes:
         - name: data
           persistentVolumeClaim:
@@ -275,5 +316,15 @@ spec:
         - name: authorization-session-custody
           emptyDir:
             medium: Memory
-            sizeLimit: 256Ki
+            sizeLimit: {{ ternary "2Mi" "256Ki" $ack }}
+        {{- if $ack }}
+        - name: activation-ack-socket
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Ki
+        - name: activation-ack-trust
+          configMap:
+            name: {{ printf "exomem-ack-ca-%s" (substr 0 40 .Values.activationAcknowledgement.trustBundleSha256) }}
+            defaultMode: 0444
+        {{- end }}
 {{- end }}

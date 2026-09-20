@@ -491,7 +491,15 @@ def recover_from_trash(
                         reason="graph checkpoint failed; recovery will be reversed",
                     ) from error
             committed = semantic_writes.commit_recovery(
-                vault_root, preflight=preflight, mutate=restore
+                vault_root,
+                preflight=preflight,
+                mutate=restore,
+                hosted_canonical_result=RecoverResult(
+                    trash_path=trash_rel,
+                    restored_path=restore_rel,
+                    kind=trash_kind,
+                    warnings=[],
+                ).as_dict(),
             )
             catalog_published = committed.catalog_published
             semantic = committed.as_dict()
@@ -557,6 +565,15 @@ def recover_from_trash(
                     code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                     reason=str(error),
                 ) from error
+            catalog_publication.prepare_hosted_catalog_recovery(
+                direct_catalog_target,
+                canonical_result=RecoverResult(
+                    trash_path=trash_rel,
+                    restored_path=restore_rel,
+                    kind=trash_kind,
+                    warnings=[],
+                ).as_dict(),
+            )
         try:
             graph_transition = graph_sync.begin_recovery_transition(
                 vault_root,

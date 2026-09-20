@@ -459,6 +459,16 @@ def observe_memory(
             "LOG_PLAN_CONFLICT", "observe log update could not be planned safely"
         ) from error
     try:
+        prepared_result = _result(
+            operation=op,
+            path=editable.rel_path,
+            before_hash=editable.raw_hash,
+            after_hash=vault.content_hash(after_source),
+            mutated=True,
+            unit=proposed_unit,
+            removed_unit=removed_unit,
+            semantic=preflight.as_dict(),
+        )
         with semantic_contract.call_context("write"):
             committed = semantic_writes.commit_existing(
                 vault_root,
@@ -468,6 +478,7 @@ def observe_memory(
                     ("operation-log", write) for write in log_plan.writes
                 ),
                 timings=timings,
+                hosted_canonical_result=prepared_result,
             )
     except semantic_writes.SemanticWriteError as error:
         raise ObserveMemoryError(error.code, error.reason) from error

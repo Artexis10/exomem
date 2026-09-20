@@ -1015,6 +1015,55 @@ def register_hosted_routes(
         run_in_threadpool_func=run_in_threadpool,
     )
 
+    from .hosted_activation_ack_client import is_hosted_activation_ack_enabled
+
+    activation_proof_endpoint = None
+    if is_hosted_activation_ack_enabled():
+        from .governance.store import sidecar_path
+        from .hosted_activation_proof import (
+            ActivationProofEndpoint,
+            ActivationProofUnavailable,
+            prove_publication,
+            read_installed_bundle,
+        )
+        from .writer_lease import LeaseConfig
+
+        proof_lease = LeaseConfig.from_env()
+        proof_owner = hashlib.sha256(
+            f"{proof_lease.vault_id or 'standalone'}\0{proof_lease.replica_id or 'standalone'}".encode()
+        ).hexdigest()[:20]
+        if proof_lease.state_dir != config.state_root:
+            raise ActivationProofUnavailable
+        proof_database = config.state_root / f"idempotency-{proof_owner}.sqlite"
+
+        def prove_activation(body: Mapping[str, object]) -> dict[str, object]:
+            if config.vault_id is None or config.authorization_session_replica_id is None:
+                raise ActivationProofUnavailable
+            moment = int(time.time())
+            return prove_publication(
+                body,
+                installed=read_installed_bundle(config.vault_root, now=moment),
+                governance_db_path=sidecar_path(config.vault_root),
+                idempotency_db_path=proof_database,
+                expected_cell_id=config.cell_id,
+                expected_logical_vault_id=config.vault_id,
+                expected_replica_id=config.authorization_session_replica_id,
+                now=moment,
+            )
+
+        activation_proof_endpoint = ActivationProofEndpoint(prove_activation)
+
+    @mcp_app.custom_route("/private/exomem/v1/activation/proof", methods=["POST"])
+    async def _activation_proof(request: Request) -> Response:
+        if activation_proof_endpoint is None:
+            return Response(status_code=404)
+        started = time.perf_counter()
+        try:
+            _trusted_context(request, config, private_authenticator)
+        except gateway.HostedGatewayError as exc:
+            return _error_response(exc.code, config=config, operation="activation-proof", started=started)
+        return await activation_proof_endpoint.handle(request)
+
     @mcp_app.custom_route("/private/exomem/v1/contract", methods=["GET"])
     async def _contract(request: Request) -> Response:
         started = time.perf_counter()

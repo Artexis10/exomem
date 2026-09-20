@@ -4,6 +4,7 @@
   "additionalProperties": false,
   "required": ["resourceName", "cellId", "vaultId", "workloadMode", "migrationMode", "provisionMode", "image", "expectedRelease", "expectedProtocol", "workerPolicyDigest", "recordsReaderVersion", "lifecycleActionsEnabled", "runtimeUid", "runtimeGid", "storageClassName", "pvcSize", "providerIdentity", "providerRecoveryEnvelopes", "storageLimitBytes", "uploadLimitBytes", "workerLimit", "featureGrants", "cpuRequest", "cpuLimit", "memoryRequest", "memoryLimit", "embeddingThreads", "browserOrigin", "transferHostname", "credentialsSecretName", "credentialsManagedExternally", "authorizationSessionSecretName", "authorizationSessionRevision", "activeCredentialVersion", "initRequestId", "initOperationId", "routes"],
   "properties": {
+    "activationAcknowledgement": {"type": "object", "additionalProperties": false, "required": ["protocol", "platformNamespace", "trustBundleSha256", "trustBundlePem"], "properties": {"protocol": {"type": "string"}, "platformNamespace": {"type": "string"}, "trustBundleSha256": {"type": "string"}, "trustBundlePem": {"type": "string"}}, "oneOf": [{"properties": {"protocol": {"const": ""}, "platformNamespace": {"const": ""}, "trustBundleSha256": {"const": ""}, "trustBundlePem": {"const": ""}}}, {"properties": {"protocol": {"const": "exomem.hosted-activation-ack/v1"}, "platformNamespace": {"pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"}, "trustBundleSha256": {"pattern": "^[a-f0-9]{64}$"}, "trustBundlePem": {"minLength": 1, "maxLength": 65536}}}]},
     "resourceName": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,62}$"},
     "cellId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"},
     "vaultId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"},
@@ -56,6 +57,8 @@
         "statefulSet": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
         "stripCellMiddleware": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
         "controlIngressRoute": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "activationAckTrustConfigMap": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "activationAckEgressNetworkPolicy": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
         "transferIngressRoute": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"}
       }
     },

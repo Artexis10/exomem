@@ -11,6 +11,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "infra" / "scripts" / "hosted_composition_lock.py"
@@ -117,6 +121,24 @@ def _contract(image: str) -> dict[str, str]:
         "runtimeImage": image,
         "sourceCommit": COMMIT,
     }
+
+
+def _ca_pem() -> bytes:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    now = datetime.now(UTC)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Composition test CA")])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return certificate.public_bytes(serialization.Encoding.PEM)
 
 
 def _request(module, tmp_path: Path):
@@ -247,6 +269,155 @@ def test_composer_verifies_candidates_and_writes_deterministic_lock_pair(
         expand["components"]["runtime"]["candidateSha256"]
         == hashlib.sha256(request.runtime.candidate.read_bytes()).hexdigest()
     )
+
+
+def test_composer_binds_operator_supplied_trust_after_both_committed_declarations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    composer = _module()
+    trust = tmp_path / "ca.pem"
+    trust.write_bytes(_ca_pem())
+    request = replace(
+        _request(composer, tmp_path),
+        activation_ack_trust_bundle=trust,
+        activation_ack_platform_namespace="exomem-platform",
+    )
+    monkeypatch.setattr(composer.hosted_image_candidate, "verify_candidate", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        composer,
+        "verify_source_closure",
+        lambda _repository, candidate, composition, paths: {
+            "candidateCommit": candidate,
+            "compositionCommit": composition,
+            "paths": list(paths),
+        },
+    )
+    monkeypatch.setattr(composer, "candidate_declares_activation_ack", lambda *_a, **_k: True)
+
+    pair = composer.compose_locks(request)
+
+    digest = hashlib.sha256(trust.read_bytes()).hexdigest()
+    expected = {
+        "protocol": "exomem.hosted-activation-ack/v1",
+        "platformNamespace": "exomem-platform",
+        "trustBundleSha256": digest,
+    }
+    assert pair["locks"][0]["activationAcknowledgement"] == expected
+    assert pair["locks"][1]["activationAcknowledgement"] == expected
+
+
+@pytest.mark.parametrize(
+    ("runtime_capable", "provisioner_capable", "with_binding", "accepted"),
+    (
+        (False, False, False, True),
+        (False, True, False, True),
+        (True, True, False, False),
+        (False, False, True, False),
+        (True, False, True, False),
+        (True, True, True, True),
+    ),
+)
+def test_composer_enforces_committed_capability_matrix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_capable: bool,
+    provisioner_capable: bool,
+    with_binding: bool,
+    accepted: bool,
+) -> None:
+    composer = _module()
+    request = _request(composer, tmp_path)
+    if with_binding:
+        trust = tmp_path / "ca.pem"
+        trust.write_bytes(_ca_pem())
+        request = replace(
+            request,
+            activation_ack_trust_bundle=trust,
+            activation_ack_platform_namespace="exomem-platform",
+        )
+    monkeypatch.setattr(composer.hosted_image_candidate, "verify_candidate", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        composer,
+        "verify_source_closure",
+        lambda _repository, candidate, composition, paths: {
+            "candidateCommit": candidate,
+            "compositionCommit": composition,
+            "paths": list(paths),
+        },
+    )
+    declarations = iter((runtime_capable, provisioner_capable))
+    monkeypatch.setattr(
+        composer, "candidate_declares_activation_ack", lambda *_a, **_k: next(declarations)
+    )
+
+    if accepted:
+        composer.compose_locks(request)
+    else:
+        with pytest.raises(composer.CompositionError):
+            composer.compose_locks(request)
+
+
+def test_capability_declaration_is_read_from_the_candidate_commit_not_working_tree(
+    tmp_path: Path,
+) -> None:
+    composer = _module()
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.email", "test@example.test"], check=True
+    )
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "Test Author"], check=True)
+    paths = (
+        Path("src/exomem/hosted_deployment_capabilities.json"),
+        Path("infra/provisioner/src/exomem_provisioner/hosted_deployment_capabilities.json"),
+    )
+    declaration = b'{"activationAcknowledgement":"exomem.hosted-activation-ack/v1"}\n'
+    for path in paths:
+        destination = tmp_path / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(declaration)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "capabilities"], check=True)
+    commit = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    for path in paths:
+        (tmp_path / path).write_text("{}\n", encoding="utf-8")
+
+    assert composer.candidate_declares_activation_ack(tmp_path, commit, kind="runtime")
+    assert composer.candidate_declares_activation_ack(tmp_path, commit, kind="provisioner")
+
+
+def test_capability_declaration_refuses_noncanonical_or_duplicate_committed_json(
+    tmp_path: Path,
+) -> None:
+    composer = _module()
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.email", "test@example.test"], check=True
+    )
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "Test Author"], check=True)
+    path = tmp_path / "src/exomem/hosted_deployment_capabilities.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{"activationAcknowledgement":"exomem.hosted-activation-ack/v1",'
+        '"activationAcknowledgement":"exomem.hosted-activation-ack/v1"}\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "invalid"], check=True)
+    commit = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    with pytest.raises(composer.CompositionError):
+        composer.candidate_declares_activation_ack(tmp_path, commit, kind="runtime")
 
 
 def test_composer_closes_each_immutable_component_at_its_own_source_anchor(

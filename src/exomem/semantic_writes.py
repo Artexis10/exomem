@@ -1322,6 +1322,7 @@ MoveMutation = Callable[
         tuple[vault.PlannedWrite, ...],
         tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...],
         vault.PathGuard,
+        MoveCommit,
     ],
     None,
 ]
@@ -2055,6 +2056,7 @@ def _commit_existing_locked(
     auxiliaries: tuple[vault.PlannedWrite, ...],
     derived_auxiliaries: tuple[tuple[str, vault.PlannedWrite], ...],
     result: semantic_contract.SemanticContractResult,
+    hosted_canonical_result: dict[str, object] | None,
 ) -> ExistingCommit:
     """Plan lifecycle state and commit while the semantic namespace is held."""
     if preflight.committed_replay:
@@ -2205,6 +2207,11 @@ def _commit_existing_locked(
             "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
             str(error),
         ) from error
+    if hosted_canonical_result is not None:
+        catalog_publication.prepare_hosted_catalog_recovery(
+            catalog_target,
+            canonical_result=hosted_canonical_result,
+        )
     reports: list[Any] = []
     from . import vocabulary_auxiliaries
 
@@ -2499,6 +2506,7 @@ def commit_existing(
     auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
     derived_auxiliary_writes: tuple[tuple[str, vault.PlannedWrite], ...] = (),
     timings: MutationTimings | None = None,
+    hosted_canonical_result: dict[str, object] | None = None,
 ) -> ExistingCommit:
     """Commit one preflighted existing-page transition, primary Markdown last.
 
@@ -2513,6 +2521,7 @@ def commit_existing(
             auxiliary_writes=auxiliary_writes,
             derived_auxiliary_writes=derived_auxiliary_writes,
             timings=timings,
+            hosted_canonical_result=hosted_canonical_result,
         )
     suggestion = _structure_suggestion(preflight.after, preflight.after_corpus)
     routing = _records_routing(vault_root, preflight.after)
@@ -2541,6 +2550,7 @@ def _commit_existing(
     auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
     derived_auxiliary_writes: tuple[tuple[str, vault.PlannedWrite], ...] = (),
     timings: MutationTimings | None = None,
+    hosted_canonical_result: dict[str, object] | None = None,
 ) -> ExistingCommit:
     root = Path(vault_root)
     if preflight.contract_result.should_block:
@@ -2679,6 +2689,7 @@ def _commit_existing(
                         auxiliaries=auxiliaries,
                         derived_auxiliaries=derived_auxiliaries,
                         result=result,
+                        hosted_canonical_result=hosted_canonical_result,
                     )
         except vault.PathGuardError as error:
             # A caller-captured auxiliary guard (log/index) lost a race the
@@ -3238,7 +3249,13 @@ def commit_move(
             lifecycle_writes, required_guards, lifecycle_states = _plan_move_lifecycle(
                 root, preflight
             )
-            mutate(lifecycle_writes, required_guards, destination_guard)
+            planned_commit = MoveCommit(preflight, lifecycle_states)
+            mutate(
+                lifecycle_writes,
+                required_guards,
+                destination_guard,
+                planned_commit,
+            )
     except vault.VaultLockTimeout as error:
         raise SemanticWriteError(
             "SEMANTIC_CREATION_LOCK_TIMEOUT",
@@ -3622,6 +3639,7 @@ def commit_recovery(
     *,
     preflight: RecoveryPreflight,
     mutate: RecoveryMutation,
+    hosted_canonical_result: dict[str, object] | None = None,
 ) -> RecoveryCommit:
     """Prepare lifecycle auxiliaries, then perform one exact restore mutation."""
     root = Path(vault_root)
@@ -3710,6 +3728,17 @@ def commit_recovery(
                     "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                     str(error),
                 ) from error
+            if hosted_canonical_result is not None:
+                prepared_result = dict(hosted_canonical_result)
+                prepared_result["semantic"] = RecoveryCommit(
+                    preflight,
+                    lifecycle_states,
+                    catalog_published=catalog_target is not None,
+                ).as_dict()
+                catalog_publication.prepare_hosted_catalog_recovery(
+                    catalog_target,
+                    canonical_result=prepared_result,
+                )
             if lifecycle_writes:
                 vault.batch_atomic_write(
                     lifecycle_writes,
@@ -4006,6 +4035,7 @@ def commit_creation(
     operation: str,
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
+    hosted_canonical_result: dict[str, object] | None = None,
 ) -> CreationCommit:
     """Commit a page creation, then attach advisory structural feedback."""
     committed = _commit_creation(
@@ -4019,6 +4049,7 @@ def commit_creation(
         operation=operation,
         predecessor_path=predecessor_path,
         predecessor_content_hash=predecessor_content_hash,
+        hosted_canonical_result=hosted_canonical_result,
     )
     suggestion = _structure_suggestion(preflight.semantic_state, preflight.corpus)
     routing = _records_routing(vault_root, preflight.semantic_state)
@@ -4104,6 +4135,7 @@ def _commit_creation(
     operation: str,
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
+    hosted_canonical_result: dict[str, object] | None = None,
 ) -> CreationCommit:
     root = Path(vault_root)
     non_review_blockers = tuple(
@@ -4226,6 +4258,11 @@ def _commit_creation(
                     "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                     str(error),
                 ) from error
+            if hosted_canonical_result is not None:
+                catalog_publication.prepare_hosted_catalog_recovery(
+                    catalog_target,
+                    canonical_result=hosted_canonical_result,
+                )
             committed = relation_review.commit_prepared_creation_draft(
                 root,
                 prepared,
@@ -4306,6 +4343,11 @@ def _commit_creation(
                 "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                 str(error),
             ) from error
+        if hosted_canonical_result is not None:
+            catalog_publication.prepare_hosted_catalog_recovery(
+                catalog_target,
+                canonical_result=hosted_canonical_result,
+            )
         token = semantic_index.set_parent_states(
             {preflight.destination: semantic_index.from_semantic_page_state(catalog_state)}
         )

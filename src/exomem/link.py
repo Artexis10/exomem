@@ -836,6 +836,12 @@ def link(
         auxiliary_writes=tuple(auxiliary),
         derived_auxiliary_writes=tuple(derived_auxiliaries),
         operation="create",
+        hosted_canonical_result=LinkResult(
+            rel_entity,
+            memory_refs.memory_ref(identity),
+            list(warnings),
+            slug=filename_slug or "",
+        ).as_dict(),
     )
     return LinkResult(
         rel_entity,

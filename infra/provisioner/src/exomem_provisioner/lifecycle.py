@@ -18,6 +18,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
 
+from .activation_ack_configuration import validate_activation_ack_binding
 from .conflict_reason import ConflictReason, coerce_conflict_reason
 from .driver import (
     DriverFinal,
@@ -785,6 +786,7 @@ class VolumeRegistrationDriver:
                 fence_generation=metadata.fence_generation,
                 resource_name=metadata.resource_name,
                 operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+                activation_acknowledgement=request.get("_activationAcknowledgement"),
             )
             prefixed = context.checkpoint.startswith("gpi1:registering:")
             if prefixed:
@@ -1917,6 +1919,8 @@ def _fixed_helm_values(
     metadata: OpaqueProviderMetadata,
     request: dict[str, Any],
     config: LifecycleConfig,
+    *,
+    activation_ack_trust_pem: str | None = None,
 ) -> dict[str, Any]:
     has_runtime_target = "runtimeTarget" in request or "releaseVersion" in request
     target = (
@@ -1989,6 +1993,31 @@ def _fixed_helm_values(
         if not isinstance(recovery_envelopes, dict):
             raise MetadataConflict("provider recovery envelope set is invalid")
         values["providerRecoveryEnvelopes"] = dict(recovery_envelopes)
+    binding = request.get("_activationAcknowledgement")
+    if binding is None:
+        values["activationAcknowledgement"] = {
+            "protocol": "",
+            "platformNamespace": "",
+            "trustBundleSha256": "",
+            "trustBundlePem": "",
+        }
+    else:
+        try:
+            acknowledged = validate_activation_ack_binding(binding)
+        except ValueError as error:
+            raise MetadataConflict(
+                "activation acknowledgement binding is invalid",
+                reason=ConflictReason.ACTIVATION_ACK_TRUST_CONFIG_MAP_INVALID,
+            ) from error
+        if not isinstance(activation_ack_trust_pem, str) or not activation_ack_trust_pem:
+            raise MetadataConflict(
+                "activation acknowledgement trust bundle is unavailable",
+                reason=ConflictReason.ACTIVATION_ACK_TRUST_BUNDLE_UNAVAILABLE,
+            )
+        values["activationAcknowledgement"] = {
+            **acknowledged,
+            "trustBundlePem": activation_ack_trust_pem,
+        }
     return values
 
 

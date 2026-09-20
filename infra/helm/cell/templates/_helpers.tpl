@@ -43,7 +43,15 @@ exomem.io/recovery-envelope: {{ required (printf "providerRecoveryEnvelopes.%s i
   .Values.providerRecoveryEnvelopes.controlIngressRoute
   .Values.providerRecoveryEnvelopes.transferIngressRoute
 -}}
-{{- if ne (len (uniq $values)) 17 -}}
+{{- $ack := include "exomem-cell.activationAckEnabled" . -}}
+{{- $count := 17 -}}
+{{- if eq $ack "true" -}}
+{{- $values = concat $values (list (required "activationAckTrustConfigMap is required" .Values.providerRecoveryEnvelopes.activationAckTrustConfigMap) (required "activationAckEgressNetworkPolicy is required" .Values.providerRecoveryEnvelopes.activationAckEgressNetworkPolicy)) -}}
+{{- $count = 19 -}}
+{{- else if or (hasKey .Values.providerRecoveryEnvelopes "activationAckTrustConfigMap") (hasKey .Values.providerRecoveryEnvelopes "activationAckEgressNetworkPolicy") -}}
+{{- fail "legacy cells cannot carry activation acknowledgement envelopes" -}}
+{{- end -}}
+{{- if ne (len (uniq $values)) $count -}}
 {{- fail "provider recovery envelopes must be unique per exact object" -}}
 {{- end -}}
 {{- end -}}
@@ -72,4 +80,32 @@ Render-time is the last place to catch it, so catch it here.
 {{- if not (has "embeddings" $grants) -}}
 {{- fail "featureGrants must include embeddings: without it the cell silently serves keyword-only recall" -}}
 {{- end -}}
+{{- end -}}
+
+{{- define "exomem-cell.activationAckEnabled" -}}
+{{- $ack := .Values.activationAcknowledgement -}}
+{{- if or $ack.protocol $ack.platformNamespace $ack.trustBundleSha256 $ack.trustBundlePem -}}
+{{- if or (ne $ack.protocol "exomem.hosted-activation-ack/v1") (not $ack.platformNamespace) (not $ack.trustBundleSha256) (not $ack.trustBundlePem) -}}
+{{- fail "activationAcknowledgement requires the complete supported binding" -}}
+{{- end -}}
+{{- if or (ne (sha256sum $ack.trustBundlePem) $ack.trustBundleSha256) (gt (len $ack.trustBundlePem) 65536) (contains "PRIVATE KEY" $ack.trustBundlePem) -}}
+{{- fail "activation acknowledgement trust must match its exact bounded public digest" -}}
+{{- end -}}
+{{- $certs := regexFindAll "-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\\r\\n]+-----END CERTIFICATE-----" $ack.trustBundlePem -1 -}}
+{{- $remainder := $ack.trustBundlePem -}}
+{{- range $certs -}}{{- $remainder = replace . "" $remainder -}}{{- end -}}
+{{- if or (eq (len $certs) 0) (ne (trim $remainder) "") -}}
+{{- fail "activation acknowledgement trust must contain only PEM certificates" -}}
+{{- end -}}
+true
+{{- else -}}
+false
+{{- end -}}
+{{- end -}}
+
+{{- define "exomem-cell.activationAckEnv" -}}
+- name: EXOMEM_HOSTED_ACTIVATION_ACK_PROTOCOL
+  value: {{ .Values.activationAcknowledgement.protocol | quote }}
+- name: EXOMEM_HOSTED_ACTIVATION_ACK_SOCKET
+  value: /run/exomem/activation-ack/ack.sock
 {{- end -}}

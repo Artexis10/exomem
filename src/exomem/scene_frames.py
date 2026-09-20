@@ -419,6 +419,18 @@ def write_scene_frames(
             )
         if prepared_catalog is None:
             clear_scene_frames(root, canonical_video)
+        catalog_publication.prepare_hosted_catalog_recovery(
+            prepared_catalog,
+            canonical_result={
+                "frames": [
+                    {
+                        "artifact_path": jpg.relative_to(root).as_posix(),
+                        "sidecar_path": sidecar.relative_to(root).as_posix(),
+                    }
+                    for jpg, sidecar in out
+                ]
+            },
+        )
         batch_atomic_write(
             writes,
             vault_root=root,

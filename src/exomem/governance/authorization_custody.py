@@ -16,6 +16,7 @@ import os
 import re
 import secrets
 import stat
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -3897,9 +3898,27 @@ def require_activation_acknowledgement_available(vault_root: Path) -> None:
     publication recovery. Windows custody uses its native
     held-filesystem publication path rather than POSIX access checks.
     """
-    if os.name == "nt":
-        return
     try:
+        from ..hosted_activation_ack_client import (
+            ActivationAcknowledgementClient,
+            is_hosted_activation_ack_enabled,
+        )
+
+        if is_hosted_activation_ack_enabled():
+            from ..hosted_activation_delivery import require_serving_delivery
+            from ..hosted_activation_proof import read_installed_bundle
+
+            response = ActivationAcknowledgementClient().check()
+            current = read_installed_bundle(Path(vault_root), now=int(time.time()))
+            require_serving_delivery(current)
+            if response["activation"] != {
+                name: getattr(current.control, name)
+                for name in ("activation_store_id", "activation_epoch", "activation_state_digest")
+            }:
+                raise AuthorizationCustodyUnavailable
+            return
+        if os.name == "nt":
+            return
         external = load_external_custody(Path(vault_root))
         parent = external.control_path.parent
         options = {"effective_ids": True} if os.access in os.supports_effective_ids else {}
@@ -3936,6 +3955,36 @@ def acknowledge_activation_tuple(
         raise AuthorizationCustodyUnavailable
 
     root = Path(vault_root)
+    from ..hosted_activation_ack_client import (
+        ActivationAcknowledgementClient,
+        is_hosted_activation_ack_enabled,
+    )
+
+    try:
+        if is_hosted_activation_ack_enabled():
+            from ..hosted_activation_delivery import require_serving_delivery
+            from ..hosted_activation_proof import (
+                read_installed_bundle,
+                selector_for_committed_target,
+            )
+
+            selector = selector_for_committed_target(root, predecessor=expected_control, successor=target)
+            ActivationAcknowledgementClient().acknowledge(selector)
+            verified = read_installed_bundle(root, now=int(time.time()))
+            require_serving_delivery(verified)
+            if any(getattr(verified.control, name) != getattr(expected_control, name) for name in (
+                "cell_id", "logical_vault_id", "registry_attachment_id", "attachment_epoch"
+            )) or any(getattr(verified.control, name) != getattr(target, name) for name in (
+                "activation_store_id", "activation_epoch", "activation_state_digest"
+            )):
+                raise AuthorizationCustodyUnavailable
+            return schema_v4.ActivationRegistryAcknowledgement(
+                activation_store_id=target.activation_store_id,
+                activation_epoch=target.activation_epoch,
+                activation_state_digest=target.activation_state_digest,
+            )
+    except (OSError, RuntimeError, TypeError, ValueError):
+        raise AuthorizationCustodyUnavailable from None
     external = load_external_custody(root)
     keyring = parse_keyring(external.keyring)
     current = parse_control_record(external.control, keyring=keyring, now=now)

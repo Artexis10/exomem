@@ -267,6 +267,13 @@ def set_frontmatter_field(
             preflight=preflight,
             auxiliary_writes=tuple(auxiliaries),
             derived_auxiliary_writes=tuple(("operation-log", write) for write in log_plan.writes),
+            hosted_canonical_result=SetFrontmatterResult(
+                path=rel_path,
+                field=field,
+                old_value=old_value,
+                new_value=value,
+                warnings=list(warnings),
+            ).as_dict(),
         )
     except semantic_writes.SemanticWriteError as error:
         raise SetFrontmatterError(error.code, error.reason) from error

@@ -32,3 +32,8 @@ metadata:
     {{- end }}
     exomem.io/browser-origin: {{ .Values.browserOrigin | quote }}
     exomem.io/transfer-hostname: {{ .Values.transferHostname | quote }}
+    {{- if eq (include "exomem-cell.activationAckEnabled" .) "true" }}
+    exomem.io/activation-ack-protocol: {{ .Values.activationAcknowledgement.protocol | quote }}
+    exomem.io/activation-ack-platform-namespace: {{ .Values.activationAcknowledgement.platformNamespace | quote }}
+    exomem.io/activation-ack-trust-sha256: {{ .Values.activationAcknowledgement.trustBundleSha256 | quote }}
+    {{- end }}

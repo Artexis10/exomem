@@ -159,6 +159,31 @@ def test_selected_runtime_exposes_only_signed_forward_upgrade_metadata(
             load_deployment_lock(path)
 
 
+def test_activation_ack_binding_is_optional_strict_and_forward_only(tmp_path: Path) -> None:
+    value = _deployment_lock()
+    binding = {
+        "protocol": "exomem.hosted-activation-ack/v1",
+        "platformNamespace": "exomem-platform",
+        "trustBundleSha256": "9" * 64,
+    }
+    value["activationAcknowledgement"] = binding
+    path = tmp_path / "selected-lock.json"
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    lock = load_deployment_lock(path)
+
+    assert lock.activationAcknowledgement is not None
+    assert (
+        lock.selected_runtime("active").activationAcknowledgement == lock.activationAcknowledgement
+    )
+
+    for invalid in (None, {**binding, "unknown": "value"}, {**binding, "protocol": "v2"}):
+        value["activationAcknowledgement"] = invalid
+        path.write_text(json.dumps(value), encoding="utf-8")
+        with pytest.raises(ValueError):
+            load_deployment_lock(path)
+
+
 def test_expand_lock_matches_a_cataloged_legacy_v2_identity_except_to_place_an_image(
     tmp_path: Path,
 ) -> None:

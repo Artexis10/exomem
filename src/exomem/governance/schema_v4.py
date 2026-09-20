@@ -1783,6 +1783,23 @@ def _downmigrate_v4_connection(
         connection.execute("BEGIN IMMEDIATE")
     try:
         _require_downmigration_schema(connection)
+        retained_hosted = connection.execute(
+            "SELECT 1 FROM governance_operation_journals "
+            "WHERE operation='hosted_mutation_commit_v1' "
+            "AND principal_id='writer_canonical_v1' LIMIT 1"
+        ).fetchone()
+        if retained_hosted is not None:
+            from . import hosted_mutation_journal
+
+            try:
+                hosted_mutation_journal.retained_dependency_pins(connection)
+            except hosted_mutation_journal.HostedMutationJournalError as error:
+                raise SchemaV4Error(
+                    "downmigration retained hosted mutation evidence is invalid"
+                ) from error
+            raise SchemaV4Error(
+                "downmigration cannot discard retained hosted mutation evidence"
+            )
         pending = connection.execute(
             "SELECT event_id FROM governance_operation_journals "
             "WHERE phase IN ('allocating','pending') AND event_id<>? "
@@ -2479,6 +2496,32 @@ def projection_namespace_pins(connection: sqlite3.Connection) -> frozenset[str]:
                 raise SchemaV4Error(
                     "projection namespace pins cannot be verified"
                 ) from error
+        journal_columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(governance_operation_journals)"
+            )
+        }
+        component_columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(governance_operation_components)"
+            )
+        }
+        if {"operation", "principal_id"} <= journal_columns and {
+            "component_key",
+            "value_hash",
+        } <= component_columns:
+            from . import hosted_mutation_journal
+
+            try:
+                hosted_pins = hosted_mutation_journal.retained_dependency_pins(connection)
+                pins.update(
+                    _projection_namespace_id(value)
+                    for value in hosted_pins["projection_namespaces"]
+                )
+            except (hosted_mutation_journal.HostedMutationJournalError, ValueError) as error:
+                raise SchemaV4Error("projection namespace pins cannot be verified") from error
         return frozenset(pins)
     except SchemaV4Error:
         raise
@@ -2610,6 +2653,7 @@ def publish_policy_generation(
     acknowledge_registry: RegistryAcknowledger,
     dependent_grants: tuple[DependentGrantTransition, ...] | None = None,
     catalog: CatalogGenerationSeed | None = None,
+    hosted_child: object | None = None,
 ) -> TuplePublicationResult:
     """Insert and CAS one complete policy/catalog generation successor.
 
@@ -2894,6 +2938,21 @@ def publish_policy_generation(
                 activated,
             ),
         )
+        if hosted_child is not None:
+            from . import hosted_mutation_journal
+
+            if not isinstance(
+                hosted_child, hosted_mutation_journal.PreparedHostedMutationChild
+            ):
+                raise SchemaV4Error("hosted mutation child preparation is invalid")
+            hosted_mutation_journal.record_child_in_transaction(
+                connection,
+                recovery=hosted_child.recovery,
+                child_id=hosted_child.child_id,
+                publication_event_id=policy.receipt_event_id,
+                attempt_secret=hosted_child.attempt_secret,
+                now=hosted_child.now,
+            )
         _crash_point("policy-publication-before-commit")
         connection.commit()
     except BaseException:
@@ -3039,6 +3098,7 @@ def publish_catalog_generation(
     receipt_event_id: str,
     activated_at: int,
     acknowledge_registry: RegistryAcknowledger,
+    hosted_child: object | None = None,
 ) -> TuplePublicationResult:
     """Insert and CAS one complete catalog against its reviewed policy tuple."""
 
@@ -3162,6 +3222,21 @@ def publish_catalog_generation(
                 activated,
             ),
         )
+        if hosted_child is not None:
+            from . import hosted_mutation_journal
+
+            if not isinstance(
+                hosted_child, hosted_mutation_journal.PreparedHostedMutationChild
+            ):
+                raise SchemaV4Error("hosted mutation child preparation is invalid")
+            hosted_mutation_journal.record_child_in_transaction(
+                connection,
+                recovery=hosted_child.recovery,
+                child_id=hosted_child.child_id,
+                publication_event_id=event_id,
+                attempt_secret=hosted_child.attempt_secret,
+                now=hosted_child.now,
+            )
         _crash_point("catalog-publication-before-commit")
         connection.commit()
     except BaseException:

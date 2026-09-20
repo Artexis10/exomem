@@ -41,6 +41,7 @@ from exomem_provisioner.provider_identity import (
     ProviderRecoveryIdentityCodec,
     ProviderRecoveryIdentityVerifier,
     ProviderReference,
+    authenticate_cell_provider_recovery_envelopes,
     cell_provider_recovery_envelopes,
     chunk_hcloud_identity_envelope,
     decode_hcloud_identity_envelope,
@@ -123,6 +124,65 @@ def _request_with_provider_identity(**overrides: object) -> dict[str, object]:
     return value
 
 
+def test_provider_recovery_envelopes_include_exact_activation_ack_objects_when_bound() -> None:
+    metadata = _metadata()
+    binding = {
+        "protocol": "exomem.hosted-activation-ack/v1",
+        "platformNamespace": "exomem-platform",
+        "trustBundleSha256": "a" * 64,
+    }
+    codec = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
+
+    envelopes = cell_provider_recovery_envelopes(
+        codec,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+        activation_acknowledgement=binding,
+    )
+
+    assert set(envelopes) == {
+        "namespace",
+        "vaultPvc",
+        "credentialSecret",
+        "authorizationSessionSecret",
+        "serviceAccount",
+        "initRequestConfigMap",
+        "providerOperationConfigMap",
+        "activationAckTrustConfigMap",
+        "initJob",
+        "defaultDenyNetworkPolicy",
+        "traefikIngressNetworkPolicy",
+        "activationAckEgressNetworkPolicy",
+        "resourceQuota",
+        "limitRange",
+        "service",
+        "statefulSet",
+        "stripCellMiddleware",
+        "controlIngressRoute",
+        "transferIngressRoute",
+    }
+    trust_reference = ProviderReference.parse(
+        codec.verifier().claims(envelopes["activationAckTrustConfigMap"])["providerReference"]
+    )
+    assert trust_reference["namespace"] == metadata.resource_name
+    assert trust_reference["name"] == "exomem-ack-ca-" + "a" * 40
+    assert authenticate_cell_provider_recovery_envelopes(
+        codec.verifier(),
+        envelopes,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+        activation_acknowledgement=binding,
+    ) == envelopes
+
+
 def _credential(offset: int = 0) -> str:
     raw = bytes((index + offset) % 256 for index in range(32))
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
@@ -201,6 +261,34 @@ def test_fixed_helm_values_keep_legacy_runtime_records_lifecycle_read_only() -> 
 
     assert values["recordsReaderVersion"] == 2
     assert values["lifecycleActionsEnabled"] is False
+
+
+def test_fixed_helm_values_emit_closed_activation_acknowledgement_only_from_verified_context() -> None:
+    binding = {
+        "protocol": "exomem.hosted-activation-ack/v1",
+        "platformNamespace": "exomem-platform",
+        "trustBundleSha256": "a" * 64,
+    }
+    request = _v2_request(_activationAcknowledgement=binding)
+    config = replace(_config(), runtime_target=_runtime_target())
+
+    values = _fixed_helm_values(
+        _metadata(),
+        request,
+        config,
+        activation_ack_trust_pem="verified-ca-pem",
+    )
+
+    assert values["activationAcknowledgement"] == {
+        **binding,
+        "trustBundlePem": "verified-ca-pem",
+    }
+    assert _fixed_helm_values(_metadata(), _v2_request(), config)["activationAcknowledgement"] == {
+        "protocol": "",
+        "platformNamespace": "",
+        "trustBundleSha256": "",
+        "trustBundlePem": "",
+    }
 
 
 @pytest.mark.asyncio
@@ -1199,6 +1287,12 @@ async def test_provision_adopts_partial_attempt_and_waits_for_volume_health_and_
     assert plane.count_volumes(_metadata()) == 1
     assert plane.helm_values(_metadata()) == {
         "activeCredentialVersion": "1",
+        "activationAcknowledgement": {
+            "protocol": "",
+            "platformNamespace": "",
+            "trustBundleSha256": "",
+            "trustBundlePem": "",
+        },
         "agentProfile": "hosted-alpha-agent-v1",
         "browserOrigin": "https://substratesystems.io",
         "cellId": "cell-alpha",

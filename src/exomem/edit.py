@@ -948,6 +948,10 @@ def commit_edit(
                 auxiliary_writes=tuple(writes),
                 derived_auxiliary_writes=tuple(derived_auxiliary_writes),
                 timings=timings,
+                hosted_canonical_result={
+                    "path": rel_path,
+                    "warnings": list(warnings),
+                },
             )
     except semantic_writes.SemanticWriteError as error:
         raise EditError(error.code, [], error.reason) from error

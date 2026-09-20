@@ -371,6 +371,10 @@ def create_file(
                 relation_review_hash=relation_review_hash,
                 relation_review_reason=relation_review_reason,
                 operation="tier2_create",
+                hosted_canonical_result=CreateFileResult(
+                    path=rel_path,
+                    warnings=list(warnings),
+                ).as_dict(),
             )
         except (
             semantic_writes.SemanticWriteError,
@@ -407,6 +411,10 @@ def create_file(
                 preflight=preflight,
                 auxiliary_writes=log_plan.writes,
                 derived_auxiliary_writes=tuple(("operation-log", write) for write in log_plan.writes),
+                hosted_canonical_result=CreateFileResult(
+                    path=rel_path,
+                    warnings=list(warnings),
+                ).as_dict(),
             )
         except semantic_writes.SemanticWriteError as error:
             raise CreateFileError(error.code, error.reason) from error

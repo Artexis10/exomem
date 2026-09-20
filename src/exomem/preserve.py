@@ -652,6 +652,21 @@ def preserve(
                 "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                 str(error),
             ) from error
+        catalog_publication.prepare_hosted_catalog_recovery(
+            prepared_catalog,
+            canonical_result=PreserveResult(
+                path=artifact_path.relative_to(vault_root).as_posix(),
+                sidecar_path=sidecar_rel,
+                warnings=list(warnings),
+                ref=sidecar_ref,
+                size=artifact_size,
+                hash=artifact_hash,
+                hash_algorithm="sha256" if artifact_hash else None,
+                media_id=f"sha256:{artifact_hash}" if artifact_hash else None,
+                content_type=content_type_effective,
+                adoption=adoption_receipt,
+            ).as_dict(),
+        )
 
         # The held batch owns the artifact, companion, index, and log as one
         # caught-failure rollback set. The binary stage is copied without ever

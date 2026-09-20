@@ -33,6 +33,10 @@ from .transaction import (
     digest,
 )
 
+_INTERNAL_RECOVERY_OWNERS = {
+    "hosted_mutation_commit_v1": "writer_canonical_v1",
+}
+
 _SQLITE_INTEGER_MAX = (1 << 63) - 1
 _COMMIT_NONCE_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
 _CRITICAL_EVENT_ID_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
@@ -1384,6 +1388,20 @@ def reconcile_governance_operations(vault_root: Path) -> dict[str, Any]:
             "phase": str(row[10]),
         }
         event_ids.append(journal["event_id"])
+        internal_owner = _INTERNAL_RECOVERY_OWNERS.get(journal["operation"])
+        if internal_owner is not None:
+            from . import hosted_mutation_journal
+
+            conn = store.open_connection(vault_root)
+            try:
+                valid_internal = hosted_mutation_journal.validate_recovery_journal_shape(
+                    conn, journal["event_id"]
+                )
+            finally:
+                conn.close()
+            if not valid_internal:
+                blocked = True
+            continue
         try:
             transition = journal_variant(journal["operation"])
         except LookupError:

@@ -22,12 +22,14 @@ from .driver import DriverTerminal
 from .governance_migration_checkpoint import CHECKPOINT_VERSION as GOVERNANCE_CHECKPOINT_VERSION
 from .governance_migration_checkpoint import MigrationCheckpoint
 from .governance_migration_checkpoint import _binding as _canonical_binding
+from .lifecycle import OpaqueProviderMetadata
 from .models import (
     BackupRecord,
     CapacityDestructiveFence,
     CapacityLedger,
     CapacityReleaseReason,
     CapacityReservation,
+    CapacityReservationClass,
     CellOperationLock,
     CredentialMetadata,
     ExportRecord,
@@ -335,6 +337,15 @@ def canonical_request_sha256(request: dict[str, Any]) -> str:
     return hashlib.sha256(canonical_request_bytes(request)).hexdigest()
 
 
+def _canonical_public_request_bytes(request: dict[str, Any]) -> bytes:
+    """Compare replays without replacing retained provider authority."""
+
+    public = dict(request)
+    public.pop("_providerRecoveryEnvelopes", None)
+    public.pop("_activationAcknowledgement", None)
+    return canonical_request_bytes(public)
+
+
 def _reference_digest(reference: str) -> str:
     return hashlib.sha256(reference.encode("utf-8")).hexdigest()
 
@@ -502,6 +513,13 @@ class RollforwardEvidenceSnapshot:
     before_vault_sha256: str
     after_vault_sha256: str
     evidence_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class ActivationAckCellSnapshot:
+    """Trusted current owner identity for the private acknowledgement service."""
+
+    metadata: OpaqueProviderMetadata
 
 
 def _operation_snapshot(operation: Operation) -> OperationSnapshot:
@@ -814,6 +832,88 @@ class OperationRepository:
             operation = await session.get(Operation, operation_id)
             return _operation_snapshot(operation) if operation is not None else None
 
+    async def lookup_activation_ack_cell(self, cell_id: str) -> ActivationAckCellSnapshot:
+        """Resolve one serving cell without trusting request-selected provider identity."""
+
+        async with self._sessions() as session:
+            reservations = tuple(
+                await session.scalars(
+                    select(CapacityReservation).where(
+                        CapacityReservation.cell_id == cell_id,
+                        CapacityReservation.reservation_class == CapacityReservationClass.USER,
+                        CapacityReservation.released_at.is_(None),
+                    )
+                )
+            )
+            if len(reservations) != 1:
+                raise RepositoryConflict(
+                    "activation acknowledgement lifecycle state is unavailable"
+                )
+            reservation = reservations[0]
+            provision = await session.get(Operation, reservation.reserving_operation_id)
+            if (
+                provision is None
+                or provision.action is not OperationAction.PROVISION
+                or provision.state is not OperationState.FINAL
+                or provision.tenant_id != reservation.tenant_id
+                or provision.cell_id != reservation.cell_id
+                or provision.external_operation_id != reservation.reserving_provider_operation_id
+                or provision.fence_generation != reservation.reserving_fence_generation
+                or reservation.resource_name != cell_resource_name(cell_id)
+            ):
+                raise RepositoryConflict(
+                    "activation acknowledgement lifecycle state is unavailable"
+                )
+
+            safe_concurrent = {
+                OperationAction.HEALTH,
+                OperationAction.RENEW_AUTHORIZATION,
+                OperationAction.ROTATE_CREDENTIAL,
+            }
+            operations = tuple(
+                await session.scalars(
+                    select(Operation).where(
+                        Operation.id != provision.id,
+                        or_(
+                            and_(
+                                Operation.tenant_id == reservation.tenant_id,
+                                Operation.action == OperationAction.DESTROY,
+                                Operation.state != OperationState.FINAL,
+                            ),
+                            and_(
+                                Operation.cell_id == cell_id,
+                                or_(
+                                    and_(
+                                        Operation.state.in_(
+                                            {OperationState.PENDING, OperationState.CLAIMED}
+                                        ),
+                                        Operation.action.not_in(safe_concurrent),
+                                    ),
+                                    Operation.state == OperationState.ERROR,
+                                ),
+                            ),
+                        ),
+                    )
+                )
+            )
+            if any(
+                operation.action in {OperationAction.DESTROY, OperationAction.DISCARD}
+                or operation.state in {OperationState.PENDING, OperationState.CLAIMED}
+                or _holds_governance_checkpoint(operation, operation.checkpoint)
+                for operation in operations
+            ):
+                raise RepositoryConflict(
+                    "activation acknowledgement lifecycle state is unavailable"
+                )
+            return ActivationAckCellSnapshot(
+                metadata=OpaqueProviderMetadata(
+                    tenant_id=reservation.tenant_id,
+                    subject_id=reservation.cell_id,
+                    operation_id=reservation.reserving_provider_operation_id,
+                    fence_generation=reservation.reserving_fence_generation,
+                )
+            )
+
     async def load_resource_reference(self, resource_id: str) -> str:
         async with self._sessions() as session:
             resource = await session.get(Resource, resource_id)
@@ -887,7 +987,17 @@ class OperationRepository:
                             "idempotency key is bound to another wire protocol"
                         )
                     if existing is not None and existing.canonical_request_sha256 != digest:
-                        raise IdempotencyConflict("idempotency key is bound to another request")
+                        original = self._codec.decrypt_json(
+                            existing.request_ciphertext,
+                            purpose=(
+                                f"operation-request:{existing.action.value}:"
+                                f"{existing.idempotency_key}"
+                            ),
+                        )
+                        if _canonical_public_request_bytes(original) != _canonical_public_request_bytes(
+                            request
+                        ):
+                            raise IdempotencyConflict("idempotency key is bound to another request")
                     if fence is not None and fence_generation < fence.fence_generation:
                         raise StaleFence("request fence is older than durable tenant state")
                     if existing is None and fresh_rejection is not None:

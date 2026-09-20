@@ -242,6 +242,11 @@ def append_to_file(
                 preflight=preflight,
                 auxiliary_writes=log_plan.writes,
                 derived_auxiliary_writes=tuple(("operation-log", write) for write in log_plan.writes),
+                hosted_canonical_result=AppendResult(
+                    path=rel_path,
+                    bytes_appended=bytes_appended,
+                    warnings=list(warnings),
+                ).as_dict(),
             )
         except semantic_writes.SemanticWriteError as error:
             raise AppendError(error.code, error.reason) from error

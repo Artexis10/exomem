@@ -213,6 +213,12 @@ _ACTIVE_MUTATION_PROTOCOL: ContextVar[tuple[str | None, str | None] | None] = Co
 _ACTIVE_LEASE_MANAGER: ContextVar[Any | None] = ContextVar(
     "exomem_active_lease_manager", default=None
 )
+_ACTIVE_HOSTED_MUTATION_ATTEMPT: ContextVar[Any | None] = ContextVar(
+    "exomem_active_hosted_mutation_attempt", default=None
+)
+_ACTIVE_HOSTED_ADOPTION_COMPLETION: ContextVar[Any | None] = ContextVar(
+    "exomem_active_hosted_adoption_completion", default=None
+)
 _ACTIVE_DIRECT_MUTATION_GUARDS: ContextVar[tuple[tuple[str, Path], ...]] = ContextVar(
     "exomem_active_direct_mutation_guards", default=()
 )
@@ -1122,6 +1128,13 @@ def active_mutation_command_digest() -> str | None:
     return active[1] if active is not None else None
 
 
+def active_mutation_command_name() -> str | None:
+    """Return the current registered command name without exposing arguments."""
+
+    trace = _ACTIVE_MUTATION_TRACE.get()
+    return trace[1] if trace is not None else None
+
+
 class _PostCommitOutcomeUncertain(OpError):
     """Sanitized terminal state for an unexpected exception after canonical commit."""
 
@@ -1152,6 +1165,375 @@ class _ExecutionAttempt:
     commit_token: str
     commit_secret: bytes
     handle: Any | None
+
+
+@dataclass
+class _HostedMutationAttemptContext:
+    store: Any
+    key: str
+    command_digest: str
+    attempt: _ExecutionAttempt
+    recovery: Any | None = None
+    next_child: int = 0
+
+
+@dataclass
+class HostedAdoptionCompletion:
+    """Transient builder state for Adoption's catalog-plus-run-state operation."""
+
+    run_id: str
+    proposal: dict[str, Any]
+    why: str
+    applied_at: str
+    recovery: Any | None = None
+    transition: dict[str, Any] | None = None
+    receipt: dict[str, object] | None = None
+    result: dict[str, Any] | None = None
+
+
+@contextmanager
+def hosted_adoption_completion_context(
+    *, run_id: str, proposal: Mapping[str, Any], why: str, applied_at: str
+) -> Iterator[HostedAdoptionCompletion]:
+    state = HostedAdoptionCompletion(
+        run_id=run_id,
+        proposal=dict(proposal),
+        why=why,
+        applied_at=applied_at,
+    )
+    token = _ACTIVE_HOSTED_ADOPTION_COMPLETION.set(state)
+    try:
+        yield state
+    finally:
+        _ACTIVE_HOSTED_ADOPTION_COMPLETION.reset(token)
+
+
+@contextmanager
+def _active_hosted_mutation_attempt_context(
+    store: Any, key: str, command_digest: str, attempt: _ExecutionAttempt
+) -> Iterator[None]:
+    token = _ACTIVE_HOSTED_MUTATION_ATTEMPT.set(
+        _HostedMutationAttemptContext(store, key, command_digest, attempt)
+    )
+    try:
+        yield
+    finally:
+        _ACTIVE_HOSTED_MUTATION_ATTEMPT.reset(token)
+
+
+def prepare_attempt_recovery(
+    *,
+    vault_root: Path,
+    command: str,
+    selector_digest: str,
+    cell_id: str,
+    logical_vault_id: str,
+    registry_attachment_id: str,
+    attachment_epoch: int,
+    activation_store_id: str,
+    required_children: list[dict[str, object]],
+    prepared_results: Mapping[str, Mapping[str, object]],
+    result_recipe: dict[str, object],
+    dependency_manifest: Mapping[str, object],
+) -> Any | None:
+    """Durably freeze one hosted recovery plan before its first canonical effect."""
+
+    from . import hosted_activation_ack_client, hosted_mutation_recovery
+    from .governance import hosted_mutation_journal
+    from .governance import store as governance_store
+
+    if not hosted_activation_ack_client.is_hosted_activation_ack_enabled():
+        return None
+    active = _ACTIVE_HOSTED_MUTATION_ATTEMPT.get()
+    if not isinstance(active, _HostedMutationAttemptContext):
+        raise RuntimeError("hosted mutation recovery requires an idempotent writer attempt")
+    descriptor = hosted_mutation_recovery.prepare_descriptor(
+        scoped_idempotency_digest=hashlib.sha256(active.key.encode("utf-8")).hexdigest(),
+        command_digest=active.command_digest,
+        attempt_id=active.attempt.attempt_id,
+        commit_token=active.attempt.commit_token,
+        command=command,
+        selector_digest=selector_digest,
+        cell_id=cell_id,
+        logical_vault_id=logical_vault_id,
+        registry_attachment_id=registry_attachment_id,
+        attachment_epoch=attachment_epoch,
+        activation_store_id=activation_store_id,
+        required_children=required_children,
+        result_recipe=result_recipe,
+    )
+    recovery = hosted_mutation_journal.prepare_canonical_mutation_recovery(
+        descriptor=descriptor,
+        prepared_results=prepared_results,
+        attempt_secret=active.attempt.commit_secret,
+    )
+    if active.recovery is not None:
+        if active.recovery != recovery:
+            raise RuntimeError("hosted mutation recovery preparation changed")
+        return recovery
+    active.store.persist_prepared_recovery(active.key, active.command_digest, recovery)
+    connection = governance_store.open_authorization_session_connection(Path(vault_root))
+    try:
+        hosted_mutation_journal.create_allocating_journal(
+            connection,
+            recovery=recovery,
+            attempt_secret=active.attempt.commit_secret,
+            dependency_manifest=dependency_manifest,
+            now=active.store.clock(),
+        )
+    finally:
+        connection.close()
+    active.recovery = recovery
+    return recovery
+
+
+def prepare_catalog_attempt_recovery(
+    *,
+    vault_root: Path,
+    command: str,
+    selector_digest: str,
+    cell_id: str,
+    logical_vault_id: str,
+    registry_attachment_id: str,
+    attachment_epoch: int,
+    activation_store_id: str,
+    catalog_plan_sha256: str,
+    canonical_result: dict[str, object],
+    dependency_manifest: Mapping[str, object],
+    child_id: str = "catalog-0",
+) -> Any | None:
+    """Prepare an ordinary catalog child or Adoption's catalog-plus-O manifest."""
+
+    adoption = _ACTIVE_HOSTED_ADOPTION_COMPLETION.get()
+    if not isinstance(adoption, HostedAdoptionCompletion):
+        return prepare_attempt_recovery(
+            vault_root=vault_root,
+            command=command,
+            selector_digest=selector_digest,
+            cell_id=cell_id,
+            logical_vault_id=logical_vault_id,
+            registry_attachment_id=registry_attachment_id,
+            attachment_epoch=attachment_epoch,
+            activation_store_id=activation_store_id,
+            required_children=[
+                {
+                    "id": child_id,
+                    "kind": "catalog",
+                    "plan_sha256": catalog_plan_sha256,
+                    "requires": [],
+                }
+            ],
+            prepared_results={child_id: {"result": canonical_result}},
+            result_recipe={
+                "kind": "child-field",
+                "child_id": child_id,
+                "field": "result",
+            },
+            dependency_manifest=dependency_manifest,
+        )
+
+    from .governance import hosted_mutation_journal
+    from .governance.transaction import canonical_json
+
+    kind = str(adoption.proposal.get("kind") or "")
+    payload = adoption.proposal.get("payload")
+    payload = payload if isinstance(payload, Mapping) else {}
+    if kind in {"relation", "reconciliation"} and payload.get("resolution") != "supersede":
+        result_path = payload.get("from") or payload.get("subject_path")
+        result_ref = None
+    elif kind in {"supersession", "reconciliation"}:
+        result_path = canonical_result.get("new_path") or canonical_result.get("path")
+        result_ref = canonical_result.get("new_ref")
+    else:
+        result_path = canonical_result.get("path")
+        result_ref = canonical_result.get("ref")
+    if not isinstance(result_path, str) or not result_path:
+        raise RuntimeError("hosted adoption result path is not prepared")
+    if result_ref is not None and not isinstance(result_ref, str):
+        raise RuntimeError("hosted adoption result reference is invalid")
+    proposal_id = adoption.proposal.get("proposal_id")
+    if not isinstance(proposal_id, str) or not proposal_id:
+        raise RuntimeError("hosted adoption proposal identity is invalid")
+    transition = {
+        **adoption.proposal,
+        "status": "applied",
+        "applied": {
+            "at": adoption.applied_at,
+            "result_path": result_path,
+            "result_ref": result_ref,
+            "why": adoption.why,
+        },
+    }
+    outer_result = {
+        "applied": True,
+        "mode": "adoption",
+        "mutated": True,
+        "ref": adoption.proposal.get("ref"),
+        "kind": kind,
+        "run_id": adoption.run_id,
+        "result_path": result_path,
+        "result_ref": result_ref,
+        "why": adoption.why,
+        "result": canonical_result,
+    }
+    sidecar_id = "adoption-completion-0"
+    transition_sha256 = hashlib.sha256(canonical_json(transition).encode("utf-8")).hexdigest()
+    recovery = prepare_attempt_recovery(
+        vault_root=vault_root,
+        command=command,
+        selector_digest=selector_digest,
+        cell_id=cell_id,
+        logical_vault_id=logical_vault_id,
+        registry_attachment_id=registry_attachment_id,
+        attachment_epoch=attachment_epoch,
+        activation_store_id=activation_store_id,
+        required_children=[
+            {
+                "id": child_id,
+                "kind": "catalog",
+                "plan_sha256": catalog_plan_sha256,
+                "requires": [],
+            },
+            {
+                "id": sidecar_id,
+                "kind": "sidecar",
+                "plan_sha256": transition_sha256,
+                "requires": [child_id],
+            },
+        ],
+        prepared_results={
+            child_id: {"result": canonical_result},
+            sidecar_id: {
+                "result": outer_result,
+                "run_id": adoption.run_id,
+                "proposal_id": proposal_id,
+                "prior": adoption.proposal,
+                "transition": transition,
+            },
+        },
+        result_recipe={
+            "kind": "child-field",
+            "child_id": sidecar_id,
+            "field": "result",
+        },
+        dependency_manifest=dependency_manifest,
+    )
+    if recovery is None:
+        return None
+    active = _ACTIVE_HOSTED_MUTATION_ATTEMPT.get()
+    if not isinstance(active, _HostedMutationAttemptContext):
+        raise RuntimeError("hosted adoption recovery requires an active attempt")
+    receipt = hosted_mutation_journal.prepare_sidecar_completion_receipt(
+        recovery=recovery,
+        child_id=sidecar_id,
+        transition=transition,
+        attempt_secret=active.attempt.commit_secret,
+    )
+    adoption.recovery = recovery
+    adoption.transition = transition
+    adoption.receipt = receipt
+    adoption.result = outer_result
+    return recovery
+
+
+def hosted_mutation_child_commit_status(vault_root: Path) -> bool | None:
+    """Return exact child evidence presence, or None when it cannot be established."""
+
+    active = _ACTIVE_HOSTED_MUTATION_ATTEMPT.get()
+    if not isinstance(active, _HostedMutationAttemptContext) or active.recovery is None:
+        return False
+    from .governance import hosted_mutation_journal
+    from .governance import store as governance_store
+
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(
+            governance_store.sidecar_path(Path(vault_root)), timeout=0
+        )
+        row = connection.execute(
+            "SELECT count(*) FROM governance_operation_components "
+            "WHERE event_id=? AND component_kind=?",
+            (
+                f"hosted-mutation:{active.recovery.descriptor_sha256}",
+                hosted_mutation_journal.CHILD_KIND,
+            ),
+        ).fetchone()
+        return bool(row and row[0])
+    except (OSError, sqlite3.Error):
+        return None
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def complete_hosted_adoption_sidecar(
+    vault_root: Path, state: HostedAdoptionCompletion
+) -> None:
+    """Register Adoption's already-atomic proposal transition as its O child."""
+
+    if state.recovery is None:
+        return
+    if state.transition is None or state.receipt is None:
+        raise RuntimeError("hosted adoption completion was not prepared")
+    active = _ACTIVE_HOSTED_MUTATION_ATTEMPT.get()
+    if not isinstance(active, _HostedMutationAttemptContext):
+        raise RuntimeError("hosted adoption completion requires an active attempt")
+    from .governance import hosted_mutation_journal
+    from .governance import store as governance_store
+
+    child_id = "adoption-completion-0"
+    if active.next_child != 1:
+        raise RuntimeError("hosted adoption catalog child is not committed")
+    connection = governance_store.open_authorization_session_connection(Path(vault_root))
+    try:
+        hosted_mutation_journal.record_sidecar_child(
+            connection,
+            recovery=state.recovery,
+            child_id=child_id,
+            transition=state.transition,
+            receipt=state.receipt,
+            attempt_secret=active.attempt.commit_secret,
+            now=active.store.clock(),
+        )
+    finally:
+        connection.close()
+    mark_prepared_hosted_child_published(child_id)
+
+
+def current_prepared_hosted_child(
+    *,
+    kind: str,
+    plan_sha256: str,
+) -> Any | None:
+    """Return the next frozen child for a tuple publisher without advancing it."""
+
+    from .governance import hosted_mutation_journal
+
+    active = _ACTIVE_HOSTED_MUTATION_ATTEMPT.get()
+    if not isinstance(active, _HostedMutationAttemptContext) or active.recovery is None:
+        return None
+    children = active.recovery.descriptor["required_children"]
+    if active.next_child >= len(children):
+        raise RuntimeError("hosted mutation has no remaining prepared child")
+    child = children[active.next_child]
+    if child["kind"] != kind or child["plan_sha256"] != plan_sha256:
+        raise RuntimeError("hosted mutation publication changed from its prepared plan")
+    return hosted_mutation_journal.PreparedHostedMutationChild(
+        recovery=active.recovery,
+        child_id=child["id"],
+        attempt_secret=active.attempt.commit_secret,
+        now=active.store.clock(),
+    )
+
+
+def mark_prepared_hosted_child_published(child_id: str) -> None:
+    active = _ACTIVE_HOSTED_MUTATION_ATTEMPT.get()
+    if not isinstance(active, _HostedMutationAttemptContext) or active.recovery is None:
+        return
+    children = active.recovery.descriptor["required_children"]
+    if active.next_child >= len(children) or children[active.next_child]["id"] != child_id:
+        raise RuntimeError("hosted mutation child publication order changed")
+    active.next_child += 1
 
 
 class _WindowsDPAPISecretProtector:
@@ -2306,6 +2688,10 @@ class IdempotencyStore:
                 conn.execute("ALTER TABLE mutations ADD COLUMN commit_token TEXT")
             if "commit_secret" not in columns:
                 conn.execute("ALTER TABLE mutations ADD COLUMN commit_secret BLOB")
+            if "prepared_recovery_digest" not in columns:
+                conn.execute("ALTER TABLE mutations ADD COLUMN prepared_recovery_digest TEXT")
+            if "prepared_recovery_json" not in columns:
+                conn.execute("ALTER TABLE mutations ADD COLUMN prepared_recovery_json TEXT")
         if not path.exists():  # pragma: no cover - sqlite always creates the database
             raise RuntimeError("idempotency runtime database was not created")
         if os.name != "nt":
@@ -2447,6 +2833,133 @@ class IdempotencyStore:
         except (AttributeError, EOFError, ImportError, IndexError, pickle.UnpicklingError, TypeError):
             return None
         return terminal if isinstance(terminal, Mapping) else None
+
+    def persist_prepared_recovery(self, key: str, digest: str, recovery: Any) -> None:
+        """Persist authenticated private preparation without advancing mutation state."""
+
+        from .governance import hosted_mutation_journal
+        from .hosted_mutation_recovery import MAX_CANONICAL_BYTES
+
+        attempt = self._attempts.get(key)
+        if attempt is None:
+            raise self._reconciliation_error("prepared mutation attempt")
+        prepared = hosted_mutation_journal.validate_prepared_recovery(
+            recovery, attempt_secret=attempt.commit_secret
+        )
+        descriptor = prepared.descriptor
+        if (
+            descriptor["attempt_id"] != attempt.attempt_id
+            or descriptor["commit_token"] != attempt.commit_token
+            or descriptor["command_digest"] != digest
+            or descriptor["scoped_idempotency_digest"]
+            != hashlib.sha256(key.encode("utf-8")).hexdigest()
+        ):
+            raise self._reconciliation_error("prepared mutation identity")
+        encoded = prepared.to_json()
+        if len(encoded.encode("utf-8")) > MAX_CANONICAL_BYTES:
+            raise self._reconciliation_error("prepared mutation payload")
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT prepared_recovery_digest, prepared_recovery_json FROM mutations "
+                "WHERE key=? AND digest=? AND state='executing' AND attempt_id=? AND commit_token=?",
+                (key, digest, attempt.attempt_id, attempt.commit_token),
+            ).fetchone()
+            expected = (prepared.descriptor_sha256, encoded)
+            if existing == expected:
+                return
+            if existing is not None and existing != (None, None):
+                raise self._reconciliation_error("prepared mutation payload")
+            cursor = conn.execute(
+                "UPDATE mutations SET prepared_recovery_digest=?, prepared_recovery_json=?, updated_at=? "
+                "WHERE key=? AND digest=? AND state='executing' AND attempt_id=? AND commit_token=? "
+                "AND prepared_recovery_digest IS NULL AND prepared_recovery_json IS NULL",
+                (
+                    prepared.descriptor_sha256,
+                    encoded,
+                    self.clock(),
+                    key,
+                    digest,
+                    attempt.attempt_id,
+                    attempt.commit_token,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise self._reconciliation_error("prepared mutation payload")
+
+    def load_prepared_recovery(self, key: str, digest: str) -> Any | None:
+        """Load and reauthenticate bounded private preparation for exact recovery."""
+
+        from .governance import hosted_mutation_journal
+        from .hosted_mutation_recovery import MAX_CANONICAL_BYTES
+
+        with self._connect() as conn:
+            header = conn.execute(
+                "SELECT length(CAST(prepared_recovery_json AS BLOB)) FROM mutations "
+                "WHERE key=? AND digest=?",
+                (key, digest),
+            ).fetchone()
+            if header is None or header[0] is None:
+                return None
+            if type(header[0]) is not int or not 1 <= header[0] <= MAX_CANONICAL_BYTES:
+                raise self._reconciliation_error("prepared mutation payload")
+            row = conn.execute(
+                "SELECT prepared_recovery_digest, prepared_recovery_json, attempt_id, "
+                "commit_token, commit_secret FROM mutations WHERE key=? AND digest=?",
+                (key, digest),
+            ).fetchone()
+        if row is None or not isinstance(row[1], str):
+            raise self._reconciliation_error("prepared mutation payload")
+        attempt = self._attempts.get(key)
+        if attempt is None or (attempt.attempt_id, attempt.commit_token) != (row[2], row[3]):
+            attempt = _ExecutionAttempt(
+                attempt_id=row[2] if isinstance(row[2], str) else "",
+                commit_token=row[3] if isinstance(row[3], str) else "",
+                commit_secret=row[4] if isinstance(row[4], bytes) else b"",
+                handle=None,
+            )
+        secret = self._unprotected_commit_secret(digest, attempt)
+        if secret is None:
+            raise self._reconciliation_error("prepared mutation secret")
+        try:
+            prepared = hosted_mutation_journal.prepared_recovery_from_json(row[1])
+            prepared = hosted_mutation_journal.validate_prepared_recovery(
+                prepared, attempt_secret=secret
+            )
+        except (ValueError, RuntimeError):
+            raise self._reconciliation_error("prepared mutation payload") from None
+        if (
+            prepared.descriptor_sha256 != row[0]
+            or prepared.descriptor["attempt_id"] != attempt.attempt_id
+            or prepared.descriptor["commit_token"] != attempt.commit_token
+            or prepared.descriptor["command_digest"] != digest
+            or prepared.descriptor["scoped_idempotency_digest"]
+            != hashlib.sha256(key.encode("utf-8")).hexdigest()
+        ):
+            raise self._reconciliation_error("prepared mutation identity")
+        return prepared
+
+    def _prepared_recovery_authority(self, key: str, digest: str) -> tuple[Any, bytes] | None:
+        prepared = self.load_prepared_recovery(key, digest)
+        if prepared is None:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT attempt_id, commit_token, commit_secret FROM mutations "
+                "WHERE key=? AND digest=?",
+                (key, digest),
+            ).fetchone()
+        if row is None:
+            raise self._reconciliation_error("prepared mutation secret")
+        attempt = _ExecutionAttempt(
+            attempt_id=row[0] if isinstance(row[0], str) else "",
+            commit_token=row[1] if isinstance(row[1], str) else "",
+            commit_secret=row[2] if isinstance(row[2], bytes) else b"",
+            handle=None,
+        )
+        secret = self._unprotected_commit_secret(digest, attempt)
+        if secret is None:
+            raise self._reconciliation_error("prepared mutation secret")
+        return prepared, secret
 
     def _validate_existing_runtime_paths(self) -> None:
         """Reject attacker-controlled SQLite/pickle paths before opening them."""
@@ -2705,7 +3218,7 @@ class IdempotencyStore:
                 with active_mutation_claim_context(
                     claim_token=attempt.commit_token,
                     command_digest=digest if re.fullmatch(r"[0-9a-f]{64}", digest) else None,
-                ):
+                ), _active_hosted_mutation_attempt_context(self, key, digest, attempt):
                     try:
                         leaf_started = True
                         result = operation()
@@ -4562,18 +5075,42 @@ class LeaseManager:
                 if root is None or not _is_receipt_vault_root(root):
                     return False
                 evidence = graph_sync.read_graph_commit_receipt(root, claim_token)
-                if not (
-                    evidence is not None
-                    and evidence.verify(
-                        commit_secret,
-                        idempotency_key_digest=receipt_key_digest or "0" * 64,
-                        command_digest=expected_digest,
-                        attempt_id=attempt_id,
-                        commit_token=claim_token,
-                    )
+                if evidence is not None and evidence.verify(
+                    commit_secret,
+                    idempotency_key_digest=receipt_key_digest or "0" * 64,
+                    command_digest=expected_digest,
+                    attempt_id=attempt_id,
+                    commit_token=claim_token,
                 ):
+                    return evidence
+                if key is None:
                     return None
-                return evidence
+                from .governance import hosted_mutation_journal
+                from .governance import store as governance_store
+
+                prepared = self.idempotency.load_prepared_recovery(key, expected_digest)
+                if prepared is None:
+                    return None
+                if any(
+                    child.get("kind") == "sidecar"
+                    for child in prepared.descriptor["required_children"]
+                ):
+                    from . import adoption_proposals
+
+                    adoption_proposals.recover_hosted_completion_receipt(
+                        root,
+                        prepared,
+                        attempt_secret=commit_secret,
+                        now=self.idempotency.clock(),
+                    )
+                return hosted_mutation_journal.read_committed_publication_evidence(
+                    governance_db_path=governance_store.sidecar_path(root),
+                    idempotency_db_path=self.idempotency.path,
+                    selector=hosted_mutation_journal.PublicationSelectorEvidence(
+                        descriptor_sha256=prepared.descriptor_sha256,
+                        child_id=None,
+                    ),
+                )
             except Exception:  # noqa: BLE001 - absence is fail-closed
                 return None
 
@@ -4633,6 +5170,35 @@ class LeaseManager:
                 if isinstance(result, _CanonicalResume):
                     evidence = result.evidence
                     result = result.result
+                    from .governance import hosted_mutation_journal
+
+                    if isinstance(
+                        evidence, hosted_mutation_journal.CommittedPublicationEvidence
+                    ):
+                        if key is None:
+                            return _OUTCOME_UNKNOWN_TERMINAL
+                        prepared = self.idempotency.load_prepared_recovery(key, digest)
+                        if prepared is None:
+                            return _OUTCOME_UNKNOWN_TERMINAL
+                        verified = hosted_mutation_journal.verify_complete_canonical_evidence(
+                            prepared, evidence
+                        )
+                        leaf_result = hosted_mutation_journal.render_verified_result(
+                            prepared, verified, egress_filter=lambda value: value
+                        )
+                        result = committed_terminal(
+                            leaf_result,
+                            request_id=request_id,
+                            receipt_id=receipt,
+                            idempotency_key=effective_public_idempotency_key,
+                        )
+                        if root is not None and _is_receipt_vault_root(root):
+                            required = graph_sync.read_checkpoint(root)
+                            if required is not None:
+                                result = {
+                                    **result,
+                                    "_graph_sync_checkpoint": required.as_dict(),
+                                }
                     # A canonical row without its retained terminal needs
                     # the exact receipt *and* its matching local secret to
                     # establish what crossed the multi-store cut.  A cleanup
@@ -4929,6 +5495,34 @@ class LeaseManager:
                 commit_evidence=exact_commit_evidence,
                 legacy_graph_pending_proof=legacy_graph_pending_proof,
             )
+            if key is not None and receipt_vault_root is not None:
+                prepared_authority = self.idempotency._prepared_recovery_authority(
+                    key, digest
+                )
+                if prepared_authority is not None:
+                    if not isinstance(result, Mapping):
+                        raise _PostCommitOutcomeUncertain()
+                    prepared_recovery, attempt_secret = prepared_authority
+                    from .governance import hosted_mutation_journal
+                    from .governance import store as governance_store
+
+                    with self.writer_authority_guard(vault_root=receipt_vault_root):
+                        terminal_connection = (
+                            governance_store.open_authorization_session_connection(
+                                receipt_vault_root
+                            )
+                        )
+                        try:
+                            hosted_mutation_journal.record_terminal(
+                                terminal_connection,
+                                recovery=prepared_recovery,
+                                attempt_secret=attempt_secret,
+                                terminal=result,
+                                disposition="success",
+                                now=self.idempotency.clock(),
+                            )
+                        finally:
+                            terminal_connection.close()
             if (
                 vocabulary_replay_terminal is not None
                 and vocabulary_binding is not None

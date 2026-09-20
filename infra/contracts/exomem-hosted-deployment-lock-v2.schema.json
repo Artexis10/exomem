@@ -27,11 +27,22 @@
         },
         "runtimeTarget": {"$ref": "#/$defs/runtimeTarget"},
         "runtimeUpgrade": {"$ref": "#/$defs/runtimeUpgrade"},
+        "activationAcknowledgement": {"$ref": "#/$defs/activationAcknowledgement"},
         "composition": {"$ref": "#/$defs/composition"},
         "rollback": {"$ref": "#/$defs/rollback"}
       }
     },
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "activationAcknowledgement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "platformNamespace", "trustBundleSha256"],
+      "properties": {
+        "protocol": {"const": "exomem.hosted-activation-ack/v1"},
+        "platformNamespace": {"type": "string", "pattern": "^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$"},
+        "trustBundleSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
     "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "runtimeImage": {"type": "string", "pattern": "^ghcr\\.io/artexis10/exomem@sha256:[0-9a-f]{64}$"},
     "provisionerImage": {"type": "string", "pattern": "^ghcr\\.io/artexis10/exomem-provisioner@sha256:[0-9a-f]{64}$"},

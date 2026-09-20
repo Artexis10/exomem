@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 import httpx
+import uvicorn
 
+from .activation_ack_api import ActivationAckService, create_activation_ack_app
 from .adapters import (
     HelmCliAdapter,
     KubernetesCellAdapter,
@@ -50,6 +53,8 @@ class LiveProviderComponents:
     plane: LiveLifecyclePlane
     driver: CellLifecycleDriver
     capacity: LiveCapacityAdmission
+    cell: KubernetesCellAdapter
+    runtime: PrivateCellApiAdapter
 
 
 class CapacityVerifierSettings(Protocol):
@@ -136,6 +141,7 @@ def build_live_provider_components(
     custom_objects: Any,
     requester: Any,
     external_probe: Any,
+    stream_request: Any | None = None,
 ) -> LiveProviderComponents:
     """Build only real adapters; production has no emulator selection flag."""
 
@@ -178,6 +184,11 @@ def build_live_provider_components(
         core_v1=core_v1,
         storage_v1=storage_v1,
     )
+    runtime = PrivateCellApiAdapter(
+        request=requester,
+        internal_origin=settings.internal_origin,
+        stream_request=stream_request,
+    )
     plane = LiveLifecyclePlane(
         repository=repository,
         registry=KubernetesProviderRegistry(
@@ -195,10 +206,7 @@ def build_live_provider_components(
             chart_version=settings.cell_chart_version,
             core_v1=core_v1,
         ),
-        runtime=PrivateCellApiAdapter(
-            request=requester,
-            internal_origin=settings.internal_origin,
-        ),
+        runtime=runtime,
         routes=TraefikRoutingAdapter(
             custom_objects=custom_objects,
             control_hostname=settings.control_hostname,
@@ -250,7 +258,58 @@ def build_live_provider_components(
             config=lifecycle_config,
         ),
         capacity=capacity,
+        cell=cell,
+        runtime=runtime,
     )
+
+
+def build_activation_ack_server(
+    app: Any,
+    *,
+    certificate_path: str,
+    key_path: str,
+) -> uvicorn.Server:
+    """Build the fixed worker-only TLS listener without access logging."""
+
+    return uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host="0.0.0.0",
+            port=8443,
+            ssl_certfile=certificate_path,
+            ssl_keyfile=key_path,
+            access_log=False,
+            server_header=False,
+            date_header=False,
+            log_config=None,
+            lifespan="off",
+            limit_concurrency=9,
+            backlog=8,
+            timeout_keep_alive=1,
+            h11_max_incomplete_event_size=8 * 1024,
+        )
+    )
+
+
+async def run_worker_with_activation_ack(
+    worker: Awaitable[None],
+    listener: Awaitable[None],
+) -> None:
+    """Stop and join the paired worker/listener when either one exits."""
+
+    tasks = (asyncio.create_task(worker), asyncio.create_task(listener))
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            task.result()
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _run_worker() -> None:
@@ -297,6 +356,7 @@ async def _run_worker() -> None:
             custom_objects=custom_objects,
             requester=requester,
             external_probe=external_probe,
+            stream_request=http.stream,
         )
         worker = build_routine_operation_worker(
             repository=repository,
@@ -305,11 +365,38 @@ async def _run_worker() -> None:
             capacity_admission=components.capacity,
         )
         try:
-            await run_polling_loop(
+            polling = run_polling_loop(
                 worker,
                 poll_seconds=provider.poll_seconds,
                 idle_poll_seconds=provider.idle_poll_seconds,
             )
+            if provider.activation_ack_protocol is None:
+                await polling
+            else:
+                assert provider.activation_ack_tls_cert_path is not None
+                assert provider.activation_ack_tls_key_path is not None
+                target = components.lock.selected_runtime(provider.runtime_selection).runtimeTarget
+                ack_service = ActivationAckService(
+                    cell_lookup=repository,
+                    cell=components.cell,
+                    runtime=components.runtime,
+                    runtime_release=target.releaseVersion,
+                    runtime_protocol_version=target.protocolVersion,
+                )
+                ack_app = create_activation_ack_app(ack_service)
+                ack_server = build_activation_ack_server(
+                    ack_app,
+                    certificate_path=provider.activation_ack_tls_cert_path,
+                    key_path=provider.activation_ack_tls_key_path,
+                )
+
+                async def serve_activation_ack() -> None:
+                    try:
+                        await ack_server.serve()
+                    finally:
+                        await ack_app.state.activation_ack_drain()
+
+                await run_worker_with_activation_ack(polling, serve_activation_ack())
         finally:
             await database.dispose()
             await asyncio.to_thread(api_client.close)

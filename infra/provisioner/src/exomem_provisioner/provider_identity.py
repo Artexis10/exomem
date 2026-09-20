@@ -16,6 +16,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
+from .activation_ack_configuration import (
+    activation_ack_trust_name,
+    validate_activation_ack_binding,
+)
+
 _ENVELOPE: Final = re.compile(r"^[A-Za-z0-9_-]{40,4096}$")
 _BASE32_CHUNK: Final = re.compile(r"^[a-z2-7]{1,52}$")
 _IDENTITY_ID: Final = re.compile(r"^[A-Za-z0-9_.:/-]{1,64}$")
@@ -171,6 +176,24 @@ _CELL_TRAEFIK_OBJECTS: Final[dict[str, tuple[str, str, str]]] = {
 }
 
 
+def _activation_ack_objects(binding: object) -> dict[str, tuple[str, str, str]]:
+    """Return the two additional authenticated objects for one trusted binding."""
+
+    validated = validate_activation_ack_binding(binding)
+    return {
+        "activationAckTrustConfigMap": (
+            "v1",
+            "ConfigMap",
+            activation_ack_trust_name(validated),
+        ),
+        "activationAckEgressNetworkPolicy": (
+            "networking.k8s.io/v1",
+            "NetworkPolicy",
+            "{resource}-activation-ack-egress",
+        ),
+    }
+
+
 def cell_provider_recovery_envelopes(
     codec: ProviderRecoveryIdentityCodec,
     *,
@@ -180,6 +203,7 @@ def cell_provider_recovery_envelopes(
     fence_generation: int,
     resource_name: str,
     operation_resource_name: str,
+    activation_acknowledgement: object | None = None,
 ) -> dict[str, str]:
     """Sign each exact cell object separately; envelopes are never reusable."""
 
@@ -194,7 +218,10 @@ def cell_provider_recovery_envelopes(
         "resource": resource_name,
         "operation_resource": operation_resource_name,
     }
-    for key, (api_version, kind, name_template) in _CELL_KUBERNETES_OBJECTS.items():
+    kubernetes_objects = dict(_CELL_KUBERNETES_OBJECTS)
+    if activation_acknowledgement is not None:
+        kubernetes_objects.update(_activation_ack_objects(activation_acknowledgement))
+    for key, (api_version, kind, name_template) in kubernetes_objects.items():
         name = name_template.format_map(names) if name_template else resource_name
         namespace = "" if kind == "Namespace" else resource_name
         reference = ProviderReference.kubernetes(
@@ -236,10 +263,14 @@ def authenticate_cell_provider_recovery_envelopes(
     fence_generation: int,
     resource_name: str,
     operation_resource_name: str,
+    activation_acknowledgement: object | None = None,
 ) -> dict[str, str]:
     """Verify the exact complete envelope set before any provider mutation."""
 
-    expected_keys = set(_CELL_KUBERNETES_OBJECTS) | set(_CELL_TRAEFIK_OBJECTS)
+    kubernetes_objects = dict(_CELL_KUBERNETES_OBJECTS)
+    if activation_acknowledgement is not None:
+        kubernetes_objects.update(_activation_ack_objects(activation_acknowledgement))
+    expected_keys = set(kubernetes_objects) | set(_CELL_TRAEFIK_OBJECTS)
     if (
         not isinstance(envelopes, dict)
         or set(envelopes) != expected_keys
@@ -258,7 +289,7 @@ def authenticate_cell_provider_recovery_envelopes(
         "operation_id": operation_id,
         "fence_generation": fence_generation,
     }
-    for key, (api_version, kind, name_template) in _CELL_KUBERNETES_OBJECTS.items():
+    for key, (api_version, kind, name_template) in kubernetes_objects.items():
         name = name_template.format_map(names) if name_template else resource_name
         verifier.authenticate(
             values[key],

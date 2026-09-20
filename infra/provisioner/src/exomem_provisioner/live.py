@@ -777,6 +777,7 @@ class LiveLifecyclePlane:
         self._owned: dict[str, OpaqueProviderMetadata] = {}
         self._snapshots: dict[str, KubernetesProviderSnapshot] = {}
         self._recovery_envelopes: dict[str, dict[str, str]] = {}
+        self._activation_ack_trust: dict[str, str] = {}
         self._helm_requests: dict[str, dict[str, Any]] = {}
         self._operation_ids: dict[str, str] = {}
         self._initializing_recovery: set[str] = set()
@@ -787,6 +788,29 @@ class LiveLifecyclePlane:
 
     def _owner(self, metadata: OpaqueProviderMetadata) -> OpaqueProviderMetadata:
         return self._owned.get(self._key(metadata), metadata)
+
+    def _bound_helm_values(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        config: LifecycleConfig,
+    ) -> dict[str, Any]:
+        binding = request.get("_activationAcknowledgement")
+        trust_pem = None
+        if binding is not None:
+            try:
+                trust_pem = self._activation_ack_trust[self._key(metadata)]
+            except KeyError as error:
+                raise MetadataConflict(
+                    "activation acknowledgement trust bundle is unavailable",
+                    reason=ConflictReason.ACTIVATION_ACK_TRUST_BUNDLE_UNAVAILABLE,
+                ) from error
+        return _fixed_helm_values(
+            self._owner(metadata),
+            request,
+            config,
+            activation_ack_trust_pem=trust_pem,
+        )
 
     def _snapshot(self, metadata: OpaqueProviderMetadata) -> KubernetesProviderSnapshot:
         try:
@@ -1171,6 +1195,7 @@ class LiveLifecyclePlane:
                 fence_generation=current.fence_generation,
                 resource_name=current.resource_name,
                 operation_resource_name=provider_operation_resource_name(current.operation_id),
+                activation_acknowledgement=request.get("_activationAcknowledgement"),
             )
         except ProviderIdentityConflict as error:
             raise MetadataConflict(
@@ -1178,6 +1203,11 @@ class LiveLifecyclePlane:
                 reason=ConflictReason.PROVIDER_RECOVERY_ENVELOPE_UNAUTHENTICATED,
             ) from error
         self._recovery_envelopes[self._key(current)] = recovery_envelopes
+        binding = request.get("_activationAcknowledgement")
+        if binding is not None:
+            self._activation_ack_trust[self._key(current)] = (
+                await self._cell.read_activation_ack_trust_bundle(binding)
+            )
         self._operation_ids[self._key(current)] = context.operation_id
         resources = await self._repository.list_resources(
             tenant_id=context.tenant_id,
@@ -1237,6 +1267,9 @@ class LiveLifecyclePlane:
                         resource_name=owned.resource_name,
                         operation_resource_name=provider_operation_resource_name(
                             owned.operation_id
+                        ),
+                        activation_acknowledgement=helm_request.get(
+                            "_activationAcknowledgement"
                         ),
                     )
                 except ProviderIdentityConflict as error:
@@ -1339,7 +1372,7 @@ class LiveLifecyclePlane:
     ) -> None:
         reservation_class = await self._require_capacity_reservation(metadata, request)
         envelopes = self._recovery_envelopes[self._key(metadata)]
-        helm_values = _fixed_helm_values(self._owner(metadata), request, self._config)
+        helm_values = self._bound_helm_values(metadata, request, self._config)
         await self._registry.ensure_namespace(
             metadata,
             envelopes["namespace"],
@@ -1422,7 +1455,7 @@ class LiveLifecyclePlane:
     ) -> bool:
         if request.get("provisionMode") != "serve":
             return False
-        desired = _fixed_helm_values(self._owner(metadata), request, config)
+        desired = self._bound_helm_values(metadata, request, config)
         current = await self._helm.current_release_values(self._owner(metadata))
         for key in ("image", "expectedRelease", "expectedProtocol"):
             if not isinstance(current.get(key), str):
@@ -1563,7 +1596,7 @@ class LiveLifecyclePlane:
                     "original Helm request was not authenticated",
                     reason=ConflictReason.ORIGINAL_HELM_REQUEST_UNAUTHENTICATED,
                 ) from error
-            values = _fixed_helm_values(self._owner(metadata), helm_request, config)
+            values = self._bound_helm_values(metadata, helm_request, config)
             values = await self._authorization_helm_values(metadata, helm_request, values)
             values["workloadMode"] = "initialize"
             await self._helm.ensure_release(self._owner(metadata), values)
@@ -1575,7 +1608,7 @@ class LiveLifecyclePlane:
                 )
             if not snapshot.init_complete:
                 return False
-        values = _fixed_helm_values(self._owner(metadata), helm_request, config)
+        values = self._bound_helm_values(metadata, helm_request, config)
         values = await self._authorization_helm_values(metadata, helm_request, values)
         values["workloadMode"] = "serve"
         await self._helm.ensure_release(self._owner(metadata), values)
@@ -1668,7 +1701,7 @@ class LiveLifecyclePlane:
         values = (
             self._rollforward_helm_values(metadata, request, self._config)
             if "compatibilityDigest" in request
-            else _fixed_helm_values(owner, request, self._config)
+            else self._bound_helm_values(metadata, request, self._config)
         )
         values = await self._authorization_helm_values(metadata, request, values)
         values["workloadMode"] = "serve"
@@ -2001,7 +2034,7 @@ class LiveLifecyclePlane:
             if context.checkpoint.startswith("gpi1:"):
                 self._initializing_recovery.add(key)
             original = self._helm_requests[key]
-            values = _fixed_helm_values(owner, original, self._config)
+            values = self._bound_helm_values(metadata, original, self._config)
             values["workloadMode"] = "initialize"
             # The initializer only establishes storage. Governance is executed
             # by the target-image coordinator after this Job is gone.
@@ -2705,7 +2738,7 @@ class LiveLifecyclePlane:
         merged = dict(original)
         merged["workerPolicy"] = dict(request["workerPolicy"])
         merged["runtimeTarget"] = dict(request["runtimeTarget"])
-        return _fixed_helm_values(self._owner(metadata), merged, config)
+        return self._bound_helm_values(metadata, merged, config)
 
     async def canonical_vault_fingerprint(
         self,

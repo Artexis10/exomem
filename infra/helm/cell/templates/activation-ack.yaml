@@ -1,0 +1,51 @@
+{{- if eq (include "exomem-cell.activationAckEnabled" .) "true" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "exomem-ack-ca-%s" (substr 0 40 .Values.activationAcknowledgement.trustBundleSha256) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "exomem-cell.labels" . | nindent 4 }}
+  annotations:
+    {{- include "exomem-cell.providerAnnotationsFor" (dict "root" . "key" "activationAckTrustConfigMap") | nindent 4 }}
+immutable: true
+data:
+  ca.pem: {{ .Values.activationAcknowledgement.trustBundlePem | quote }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Values.resourceName }}-activation-ack-egress
+  labels:
+    {{- include "exomem-cell.labels" . | nindent 4 }}
+  annotations:
+    {{- include "exomem-cell.providerAnnotationsFor" (dict "root" . "key" "activationAckEgressNetworkPolicy") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "exomem-cell.selectorLabels" . | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.activationAcknowledgement.platformNamespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: exomem-provisioner-worker
+      ports:
+        - protocol: TCP
+          port: 8443
+{{- end }}

@@ -53,6 +53,11 @@ _PROVISIONER_CLOSURE = (
     ".dockerignore",
 )
 _RECORDS_COMPATIBILITY_MAX_TTL = timedelta(hours=24)
+_RUNTIME_ACTIVATION_ACK_CAPABILITY = "src/exomem/hosted_deployment_capabilities.json"
+_PROVISIONER_ACTIVATION_ACK_CAPABILITY = (
+    "infra/provisioner/src/exomem_provisioner/hosted_deployment_capabilities.json"
+)
+_ACTIVATION_ACK_CAPABILITY = {"activationAcknowledgement": "exomem.hosted-activation-ack/v1"}
 
 
 class CompositionError(ValueError):
@@ -75,6 +80,28 @@ def _load_candidate_module() -> Any:
 
 
 hosted_image_candidate = _load_candidate_module()
+
+
+def _load_activation_ack_configuration() -> Any:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "provisioner/src/exomem_provisioner/activation_ack_configuration.py"
+    )
+    spec = importlib.util.spec_from_file_location("activation_ack_configuration", path)
+    if spec is None or spec.loader is None:
+        _error("activation acknowledgement configuration validator is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        raise CompositionError(
+            "activation acknowledgement configuration validator is unavailable"
+        ) from exc
+    return module
+
+
+activation_ack_configuration = _load_activation_ack_configuration()
 
 
 @dataclass(frozen=True)
@@ -108,6 +135,8 @@ class CompositionRequest:
     rollback_runtime: CandidateInput | None = None
     runtime_upgrade: HashedInput | None = None
     substrate_trust: HashedInput | None = None
+    activation_ack_trust_bundle: Path | None = None
+    activation_ack_platform_namespace: str | None = None
 
 
 def _canonical(value: object) -> bytes:
@@ -459,6 +488,64 @@ def _git(repository: Path, arguments: list[str]) -> subprocess.CompletedProcess[
         raise CompositionError("Git source proof could not run") from exc
 
 
+def candidate_declares_activation_ack(
+    repository: Path, candidate_commit: str, *, kind: str
+) -> bool:
+    """Read the exact declaration from the authenticated candidate source commit."""
+
+    path = (
+        _RUNTIME_ACTIVATION_ACK_CAPABILITY
+        if kind == "runtime"
+        else _PROVISIONER_ACTIVATION_ACK_CAPABILITY
+    )
+    result = _git(repository, ["show", f"{candidate_commit}:{path}"])
+    if result.returncode != 0:
+        return False
+    if not 1 <= len(result.stdout) <= 1024:
+        _error(f"{kind} activation acknowledgement capability exceeds its size bound")
+    try:
+        value = json.loads(result.stdout.decode("utf-8"), object_pairs_hook=_reject_duplicates)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CompositionError(
+            f"{kind} activation acknowledgement capability is not strict JSON"
+        ) from exc
+    if value != _ACTIVATION_ACK_CAPABILITY or result.stdout != _canonical(value):
+        _error(f"{kind} activation acknowledgement capability declaration is invalid")
+    return True
+
+
+def _activation_ack_binding(request: CompositionRequest) -> dict[str, str] | None:
+    bundle = request.activation_ack_trust_bundle
+    namespace = request.activation_ack_platform_namespace
+    if (bundle is None) != (namespace is None):
+        _error(
+            "activation acknowledgement trust bundle and platform namespace are required together"
+        )
+    if bundle is None:
+        return None
+    raw = _read_regular(
+        bundle,
+        label="activation acknowledgement trust bundle",
+        maximum=activation_ack_configuration.MAX_ACTIVATION_ACK_TRUST_BYTES,
+    )
+    try:
+        pem = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CompositionError("activation acknowledgement trust bundle is not UTF-8") from exc
+    digest = hashlib.sha256(raw).hexdigest()
+    try:
+        activation_ack_configuration.validate_activation_ack_trust_pem(pem, digest)
+        return activation_ack_configuration.validate_activation_ack_binding(
+            {
+                "protocol": activation_ack_configuration.ACTIVATION_ACK_PROTOCOL,
+                "platformNamespace": namespace,
+                "trustBundleSha256": digest,
+            }
+        )
+    except ValueError as exc:
+        raise CompositionError(str(exc)) from exc
+
+
 def verify_source_closure(
     repository: Path, candidate_commit: str, composition_commit: str, paths: tuple[str, ...]
 ) -> dict[str, object]:
@@ -741,12 +828,19 @@ def validate_deployment_lock(value: object) -> None:
             "composition",
             "rollback",
         },
-        optional={"runtimeUpgrade"},
+        optional={"runtimeUpgrade", "activationAcknowledgement"},
     )
     if lock["artifact"] != "exomem-hosted-deployment-lock" or lock["schemaVersion"] != 2:
         _error("deployment lock identity is invalid")
     if lock["admissionMode"] not in {"expand", "contract"}:
         _error("deployment lock admission mode is invalid")
+    if "activationAcknowledgement" in lock:
+        try:
+            activation_ack_configuration.validate_activation_ack_binding(
+                lock["activationAcknowledgement"]
+            )
+        except ValueError as exc:
+            raise CompositionError(str(exc)) from exc
     target = _target(lock["runtimeTarget"], label="deployment lock runtime target")
     if "runtimeUpgrade" in lock:
         _runtime_upgrade(lock["runtimeUpgrade"])
@@ -874,7 +968,7 @@ def _validate_deployment_lock_v3(value: dict[str, Any]) -> None:
             "rollback",
             "recordsCompatibility",
         },
-        optional={"runtimeUpgrade"},
+        optional={"runtimeUpgrade", "activationAcknowledgement"},
     )
     v2 = dict(lock)
     compatibility = cast(dict[str, Any], v2.pop("recordsCompatibility"))
@@ -993,6 +1087,17 @@ def compose_locks(request: CompositionRequest) -> dict[str, object]:
     provisioner_image, provisioner_source = _candidate_identity(
         provisioner_candidate, kind="provisioner"
     )
+    binding = _activation_ack_binding(request)
+    runtime_capable = candidate_declares_activation_ack(
+        request.repository, runtime_source, kind="runtime"
+    )
+    provisioner_capable = candidate_declares_activation_ack(
+        request.repository, provisioner_source, kind="provisioner"
+    )
+    if binding is not None and not (runtime_capable and provisioner_capable):
+        _error("activation acknowledgement binding requires both candidate declarations")
+    if binding is None and runtime_capable:
+        _error("declaring forward runtime requires activation acknowledgement binding")
     forward, _ = _load_hashed(request.forward_contract, label="forward runtime contract")
     runtime_target, contract_image, contract_source = _contract(
         forward, label="forward runtime contract"
@@ -1123,6 +1228,8 @@ def compose_locks(request: CompositionRequest) -> dict[str, object]:
         common["recordsCompatibility"] = records_compatibility
     if runtime_upgrade is not None:
         common["runtimeUpgrade"] = runtime_upgrade
+    if binding is not None:
+        common["activationAcknowledgement"] = binding
     expand = {**copy.deepcopy(common), "admissionMode": "expand"}
     contract = {**copy.deepcopy(common), "admissionMode": "contract"}
     pair = {
@@ -1172,6 +1279,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--records-compatibility", type=_hashed_argument)
     parser.add_argument("--runtime-upgrade", type=_hashed_argument)
     parser.add_argument("--substrate-trust", type=_hashed_argument)
+    parser.add_argument("--activation-ack-trust-bundle", type=Path)
+    parser.add_argument("--activation-ack-platform-namespace")
     _optional_candidate_arguments(parser, "rollback-runtime")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -1217,6 +1326,8 @@ def main(argv: list[str] | None = None) -> int:
         rollback_runtime=rollback_runtime,
         runtime_upgrade=args.runtime_upgrade,
         substrate_trust=args.substrate_trust,
+        activation_ack_trust_bundle=args.activation_ack_trust_bundle,
+        activation_ack_platform_namespace=args.activation_ack_platform_namespace,
     )
     try:
         compose_locks(request)

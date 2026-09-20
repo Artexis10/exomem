@@ -568,6 +568,7 @@ def move_file(
                 lifecycle_writes: tuple[PlannedWrite, ...],
                 required_guards,
                 bound_destination: PathGuard,
+                planned_commit: semantic_writes.MoveCommit,
             ) -> None:
                 nonlocal catalog_target
                 bound_destination.recheck(vault_root)
@@ -623,6 +624,17 @@ def move_file(
                         code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                         reason=str(error),
                     ) from error
+                catalog_publication.prepare_hosted_catalog_recovery(
+                    catalog_target,
+                    canonical_result=MoveFileResult(
+                        old_path=old_rel,
+                        new_path=new_rel,
+                        wikilinks_updated=wikilinks_updated,
+                        files_touched=list(files_touched),
+                        warnings=list(warnings),
+                        semantic=planned_commit.as_dict(),
+                    ).as_dict(),
+                )
                 destination_writes = (
                     [PlannedWrite(path=new_abs, content=moved_source)]
                     if moved_source != source
@@ -733,6 +745,16 @@ def move_file(
                 code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                 reason=str(error),
             ) from error
+        catalog_publication.prepare_hosted_catalog_recovery(
+            catalog_target,
+            canonical_result=MoveFileResult(
+                old_path=old_rel,
+                new_path=new_rel,
+                wikilinks_updated=wikilinks_updated,
+                files_touched=list(files_touched),
+                warnings=list(warnings),
+            ).as_dict(),
+        )
         _held_rename(vault_root, old_rel, new_rel)
         try:
             if writes:

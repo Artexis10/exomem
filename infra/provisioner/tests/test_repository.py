@@ -14,6 +14,8 @@ from exomem_provisioner.config import ProvisionerSettings
 from exomem_provisioner.crypto import AesGcmEnvelopeCodec
 from exomem_provisioner.database import ProvisionerDatabase
 from exomem_provisioner.models import (
+    CapacityReservation,
+    CapacityReservationClass,
     CellOperationLock,
     CredentialMetadata,
     Operation,
@@ -22,6 +24,7 @@ from exomem_provisioner.models import (
     ResourceKind,
     TenantFence,
 )
+from exomem_provisioner.provider_identity import cell_resource_name
 from exomem_provisioner.repository import (
     AdmissionPolicy,
     AdmissionRejected,
@@ -29,6 +32,7 @@ from exomem_provisioner.repository import (
     IdempotencyConflict,
     ImmutableMetadataConflict,
     OperationRepository,
+    RepositoryConflict,
     StaleFence,
     _claim_statement,
     canonical_request_sha256,
@@ -121,6 +125,53 @@ async def test_submit_replays_exact_request_and_conflicts_changed_body(
 
 
 @pytest.mark.asyncio
+async def test_submit_replays_original_private_activation_ack_binding_after_trust_rotation(
+    repository: OperationRepository,
+) -> None:
+    public = _request()
+    first = await repository.submit(
+        "provision",
+        "activation-ack-rotation",
+        {
+            **public,
+            "_providerRecoveryEnvelopes": {"initJob": "original-envelope"},
+            "_activationAcknowledgement": {
+                "protocol": "exomem.hosted-activation-ack/v1",
+                "platformNamespace": "exomem-platform",
+                "trustBundleSha256": "a" * 64,
+            },
+        },
+    )
+
+    replay = await repository.submit(
+        "provision",
+        "activation-ack-rotation",
+        {
+            **public,
+            "_providerRecoveryEnvelopes": {"initJob": "rotated-envelope"},
+            "_activationAcknowledgement": {
+                "protocol": "exomem.hosted-activation-ack/v1",
+                "platformNamespace": "exomem-platform",
+                "trustBundleSha256": "b" * 64,
+            },
+        },
+    )
+
+    assert replay.id == first.id
+    assert replay.canonical_request_sha256 == first.canonical_request_sha256
+    assert (await repository.load_request(first.id))["_activationAcknowledgement"][
+        "trustBundleSha256"
+    ] == "a" * 64
+
+    with pytest.raises(IdempotencyConflict):
+        await repository.submit(
+            "provision",
+            "activation-ack-rotation",
+            {**public, "_otherPrivateField": "different-public-request"},
+        )
+
+
+@pytest.mark.asyncio
 async def test_fleet_operation_projection_never_returns_request_secrets(
     repository: OperationRepository,
 ) -> None:
@@ -156,6 +207,68 @@ async def _fleet_history_row(
         row.created_at = datetime(2026, 8, 21, tzinfo=UTC) + timedelta(seconds=offset)
         row.finalized_at = row.created_at if state is OperationState.FINAL else None
     return operation.id
+
+
+async def _seed_activation_ack_cell(repository: OperationRepository) -> None:
+    provision_id = await _fleet_history_row(repository, "provision", "provision-alpha")
+    async with repository._sessions() as session, session.begin():
+        session.add(
+            CapacityReservation(
+                tenant_id="tenant-alpha",
+                cell_id="cell-alpha",
+                resource_name=cell_resource_name("cell-alpha"),
+                reservation_class=CapacityReservationClass.USER,
+                reserving_operation_id=provision_id,
+                reserving_provider_operation_id="provision-alpha",
+                reserving_fence_generation=7,
+            )
+        )
+
+
+async def test_activation_ack_lookup_returns_only_current_successful_owned_cell(
+    repository: OperationRepository,
+) -> None:
+    await _seed_activation_ack_cell(repository)
+
+    context = await repository.lookup_activation_ack_cell("cell-alpha")
+
+    assert context.metadata.tenant_id == "tenant-alpha"
+    assert context.metadata.subject_id == "cell-alpha"
+    assert context.metadata.operation_id == "provision-alpha"
+    assert context.metadata.fence_generation == 7
+
+
+@pytest.mark.parametrize("action", ["quiesce", "stop", "discard", "rollforward"])
+async def test_activation_ack_lookup_refuses_conflicting_lifecycle_work(
+    repository: OperationRepository,
+    action: str,
+) -> None:
+    await _seed_activation_ack_cell(repository)
+    await repository.submit(
+        action,
+        f"pending-{action}",
+        _request(operationId=f"pending-{action}", fenceGeneration=8),
+    )
+
+    with pytest.raises(RepositoryConflict, match="lifecycle state is unavailable"):
+        await repository.lookup_activation_ack_cell("cell-alpha")
+
+
+@pytest.mark.parametrize("action", ["renew-authorization", "rotate-credential", "health"])
+async def test_activation_ack_lookup_allows_cas_safe_concurrent_work(
+    repository: OperationRepository,
+    action: str,
+) -> None:
+    await _seed_activation_ack_cell(repository)
+    await repository.submit(
+        action,
+        f"pending-{action}",
+        _request(operationId=f"pending-{action}", fenceGeneration=8),
+    )
+
+    assert (await repository.lookup_activation_ack_cell("cell-alpha")).metadata.subject_id == (
+        "cell-alpha"
+    )
 
 
 @pytest.mark.parametrize("action,cell_id", [("destroy", None), ("discard", "cell-alpha")])

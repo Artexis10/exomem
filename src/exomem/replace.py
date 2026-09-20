@@ -714,6 +714,13 @@ def replace(
             operation="replacement",
             predecessor_path=rel_old_with_ext,
             predecessor_content_hash=predecessor_hash,
+            hosted_canonical_result=ReplaceResult(
+                rel_old_with_ext,
+                prepared.destination,
+                list(prepared.warnings),
+                memory_refs.ReferenceIndex(root).ref_for_path(rel_old_with_ext),
+                memory_refs.memory_ref(prepared.identity),
+            ).as_dict(),
         )
     except (
         relation_review.RelationReviewError,

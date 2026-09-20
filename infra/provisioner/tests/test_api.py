@@ -488,6 +488,66 @@ async def test_exact_header_selects_v2_models_before_operation_creation(
 
 
 @pytest.mark.asyncio
+async def test_admission_persists_trusted_activation_ack_binding_with_provider_envelopes(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "activation-ack-api.sqlite"
+    settings = _settings(path)
+    lock_path = Path(settings.deployment_lock_path or "")
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    binding = {
+        "protocol": "exomem.hosted-activation-ack/v1",
+        "platformNamespace": "exomem-platform",
+        "trustBundleSha256": "9" * 64,
+    }
+    lock["activationAcknowledgement"] = binding
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+    database = ProvisionerDatabase(settings)
+    await database.create_for_tests()
+    repository = OperationRepository(
+        database.session_factory,
+        codec=AesGcmEnvelopeCodec.from_secret(settings.envelope_key.get_secret_value()),
+        claim_seconds=settings.claim_seconds,
+    )
+    app = create_app(
+        settings=settings,
+        readiness_probe=database.ready,
+        repository=repository,
+        provider_identity_codec=ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root"),
+    )
+    body = _base_body(operationId="activation-ack-api")
+    body.pop("releaseVersion")
+    body.pop("protocolVersion")
+    body["runtimeTarget"] = {
+        "releaseVersion": "0.35.1",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v1",
+        "gatewayContractDigest": "a" * 64,
+        "commandFingerprint": "c" * 64,
+        "schemaDigest": "d" * 64,
+        "compatibilityDigest": "e" * 64,
+    }
+    headers = _headers("activation-ack-api")
+    headers["X-Exomem-Provisioner-Protocol"] = WIRE_PROTOCOL_V2
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="https://provisioner.test"
+        ) as client:
+            accepted = await client.post("/cells/provision", headers=headers, json=body)
+
+        assert accepted.status_code == 202
+        operation = await repository.get("provision", "activation-ack-api")
+        assert operation is not None
+        persisted = await repository.load_request(operation.id)
+        assert persisted["_activationAcknowledgement"] == binding
+        assert {"activationAckTrustConfigMap", "activationAckEgressNetworkPolicy"} <= set(
+            persisted["_providerRecoveryEnvelopes"]
+        )
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
 async def test_rollforward_is_v2_only_strict_and_idempotently_persisted(
     api: tuple[httpx.AsyncClient, OperationRepository, Path],
 ) -> None:

@@ -31,6 +31,7 @@
 - [ ] 5.2 Update cell/platform values schemas, exact-shape tenant and provisioner admission policies, Secret/ConfigMap ownership verification, fixed destination egress/DNS and callback ingress. Render and exercise acceptance/refusal against a real API server.
 - [ ] 5.3 Document and preflight production certificate creation, encrypted custody, SAN/expiry validation and overlap rotation. Generate a separate disposable CA for tests. Production transport credentials and target deployment remain separately verified actions.
 - [ ] 5.4 Add and test preflight classification of clean, protocol-qualified and legacy pending/uncertain targets. Preserve legacy unknown mutation outcomes even when exact activation-only reconciliation restores parity; never invent their missing receipts or replace their identity. Bind the capability to compatible runtime/provisioner/chart releases and deployment locks. Describe forward recovery after an activation advance and refuse incompatible rollback; regenerate signed target and final consumer evidence only for the released exact source.
+- [ ] 5.5 Implement the closed deployment-lock capability/trust extension, both signed-source declarations, exact conditional trust/egress recovery envelopes, retained encrypted operation binding, and unchanged-public-request replay across trust rotation. Verify capable-forward refusal without binding, legacy shape preservation, active-versus-rollback selection, and original trust retention.
 
 ## 6. Verify and deliver the repair
 

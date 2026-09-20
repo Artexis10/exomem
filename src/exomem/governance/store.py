@@ -907,14 +907,22 @@ def pinned_component_keys(
             "SELECT DISTINCT c.component_kind, c.component_key "
             "FROM governance_operation_components c "
             "JOIN governance_operation_journals j ON j.event_id=c.event_id "
-            "WHERE j.phase IN ('allocating', 'pending')"
+            "WHERE j.phase IN ('allocating', 'pending') "
+            "OR (j.operation='hosted_mutation_commit_v1' "
+            "AND j.principal_id='writer_canonical_v1')"
         ).fetchall()
+        from . import hosted_mutation_journal
+
+        hosted_pins = hosted_mutation_journal.retained_dependency_pins(active)
     finally:
         if owns_connection:
             active.close()
     grouped: dict[str, set[str]] = {}
     for kind, key in rows:
         grouped.setdefault(str(kind), set()).add(str(key))
+    grouped.setdefault("hosted-dependency", set()).update(
+        str(key) for key in hosted_pins["component_keys"]
+    )
     return {kind: frozenset(keys) for kind, keys in grouped.items()}
 
 

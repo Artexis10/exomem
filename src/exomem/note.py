@@ -1933,6 +1933,12 @@ def note(
             relation_review_hash=relation_review_hash,
             relation_review_reason=relation_review_reason,
             operation="create",
+            hosted_canonical_result={
+                "path": destination,
+                "ref": memory_refs.memory_ref(identity),
+                "warnings": list(warnings),
+                "slug": filename_slug,
+            },
         )
     except (semantic_writes.SemanticWriteError, relation_review.RelationReviewError) as error:
         raise NoteError(

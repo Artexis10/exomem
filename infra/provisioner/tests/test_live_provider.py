@@ -245,6 +245,46 @@ def test_live_worker_settings_require_one_selected_lock_and_bound_internal_origi
         _settings()
 
 
+def test_activation_ack_listener_configuration_is_atomic_and_versioned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _settings().activation_ack_protocol is None
+    enabled = _settings(
+        activation_ack_protocol="exomem.hosted-activation-ack/v1",
+        activation_ack_tls_cert_path="/run/exomem/activation-ack/tls.crt",
+        activation_ack_tls_key_path="/run/exomem/activation-ack/tls.key",
+    )
+    assert enabled.activation_ack_tls_cert_path == "/run/exomem/activation-ack/tls.crt"
+    monkeypatch.setenv(
+        "EXOMEM_PROVIDER_ACTIVATION_ACK_PROTOCOL",
+        "exomem.hosted-activation-ack/v1",
+    )
+    monkeypatch.setenv(
+        "EXOMEM_PROVIDER_ACTIVATION_ACK_TLS_CERT_PATH",
+        "/run/exomem/activation-ack/tls.crt",
+    )
+    monkeypatch.setenv(
+        "EXOMEM_PROVIDER_ACTIVATION_ACK_TLS_KEY_PATH",
+        "/run/exomem/activation-ack/tls.key",
+    )
+    assert _settings().activation_ack_protocol == "exomem.hosted-activation-ack/v1"
+    monkeypatch.delenv("EXOMEM_PROVIDER_ACTIVATION_ACK_PROTOCOL")
+    monkeypatch.delenv("EXOMEM_PROVIDER_ACTIVATION_ACK_TLS_CERT_PATH")
+    monkeypatch.delenv("EXOMEM_PROVIDER_ACTIVATION_ACK_TLS_KEY_PATH")
+    with pytest.raises(ValidationError):
+        _settings(activation_ack_protocol="exomem.hosted-activation-ack/v2")
+    with pytest.raises(ValidationError):
+        _settings(activation_ack_protocol="exomem.hosted-activation-ack/v1")
+    with pytest.raises(ValidationError):
+        _settings(activation_ack_tls_cert_path="/run/exomem/activation-ack/tls.crt")
+    with pytest.raises(ValidationError):
+        _settings(
+            activation_ack_protocol="exomem.hosted-activation-ack/v1",
+            activation_ack_tls_cert_path="relative.crt",
+            activation_ack_tls_key_path="/run/exomem/activation-ack/tls.key",
+        )
+
+
 def test_live_worker_loads_the_selected_lock_and_rejects_an_unavailable_lock(
     tmp_path: Path,
 ) -> None:

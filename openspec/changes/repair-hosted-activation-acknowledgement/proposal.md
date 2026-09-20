@@ -9,6 +9,7 @@ The first governed write on a newly provisioned hosted cell commits the catalog 
 - Bind exact mutation recovery evidence to the canonical publication before external acknowledgement can fail; split prepared outcomes from effect execution and terminal rendering at shared mutator boundaries.
 - Recover the same publication and mutation identity across lost responses, renewal races, custody refresh and pod replacement. Preserve exact external/store parity and all non-activation authority fields.
 - Refuse unsupported acknowledgement wiring before canonical mutation; retain explicit recoverable state if acknowledgement is interrupted after commit.
+- Bind acknowledgement capability and the public TLS trust digest in the existing deployment lock, verify support from both signed candidate source commits, and preserve each admitted operation's original binding across retries and certificate rotation.
 - Prove the real mounted-image path, including capture, cited recall, refresh and restart, before owner launch. This is a prerequisite repair within the existing owner-first launch sequence.
 
 ## Capabilities

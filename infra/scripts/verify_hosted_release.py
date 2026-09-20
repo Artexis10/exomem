@@ -1437,6 +1437,52 @@ def verify_v3_rollback_runtime_candidate(
         raise ValueError("verified rollback runtime candidate differs from the v3 lock")
 
 
+def _verify_activation_ack_binding(
+    selected: dict[str, Any],
+    *,
+    repository: Path,
+    trust_bundle: Path | None,
+    composer: Any,
+) -> None:
+    components = selected["components"]
+    binding = selected.get("activationAcknowledgement")
+    runtime_capable = composer.candidate_declares_activation_ack(
+        repository, components["runtime"]["sourceCommit"], kind="runtime"
+    )
+    provisioner_capable = composer.candidate_declares_activation_ack(
+        repository, components["provisioner"]["sourceCommit"], kind="provisioner"
+    )
+    if binding is None:
+        if runtime_capable:
+            raise ValueError(
+                "declaring forward runtime requires activation acknowledgement binding"
+            )
+        if trust_bundle is not None:
+            raise ValueError(
+                "legacy deployment lock cannot accept activation acknowledgement trust"
+            )
+        return
+    if not (runtime_capable and provisioner_capable):
+        raise ValueError("activation acknowledgement binding requires both candidate declarations")
+    if trust_bundle is None:
+        raise ValueError("activation acknowledgement trust bundle is required")
+    validated_binding = composer.activation_ack_configuration.validate_activation_ack_binding(
+        binding
+    )
+    raw_trust = composer._read_regular(
+        trust_bundle,
+        label="activation acknowledgement trust bundle",
+        maximum=composer.activation_ack_configuration.MAX_ACTIVATION_ACK_TRUST_BYTES,
+    )
+    try:
+        trust_pem = raw_trust.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("activation acknowledgement trust bundle is not UTF-8") from exc
+    composer.activation_ack_configuration.validate_activation_ack_trust_pem(
+        trust_pem, validated_binding["trustBundleSha256"]
+    )
+
+
 def verify_selected_deployment_lock(
     *,
     phase: str,
@@ -1448,6 +1494,7 @@ def verify_selected_deployment_lock(
     rollback_runtime_candidate: Path | None = None,
     rollback_runtime_image_bundle: Path | None = None,
     rollback_runtime_candidate_bundle: Path | None = None,
+    activation_ack_trust_bundle: Path | None = None,
 ) -> dict[str, Any]:
     """Reverify a selected member plus its candidate attestations and source closures."""
 
@@ -1477,6 +1524,12 @@ def verify_selected_deployment_lock(
     components = selected["components"]
     target = selected["runtimeTarget"]
     closure = selected["composition"]["sourceClosure"]
+    _verify_activation_ack_binding(
+        selected,
+        repository=repository,
+        trust_bundle=activation_ack_trust_bundle,
+        composer=composer,
+    )
     composer.verify_source_closure(
         repository,
         components["runtime"]["sourceCommit"],
@@ -1617,6 +1670,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rollback-runtime-candidate", type=Path)
     parser.add_argument("--rollback-runtime-image-bundle", type=Path)
     parser.add_argument("--rollback-runtime-candidate-bundle", type=Path)
+    parser.add_argument("--activation-ack-trust-bundle", type=Path)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--runtime-gate", type=Path)
     parser.add_argument("--substrate-selection", type=Path)
@@ -1646,6 +1700,8 @@ def main(argv: list[str] | None = None) -> int:
             selected_arguments["rollback_runtime_candidate_bundle"] = (
                 args.rollback_runtime_candidate_bundle
             )
+        if args.activation_ack_trust_bundle is not None:
+            selected_arguments["activation_ack_trust_bundle"] = args.activation_ack_trust_bundle
         verify_selected_deployment_lock(
             **selected_arguments,
         )

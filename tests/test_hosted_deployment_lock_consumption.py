@@ -4,15 +4,21 @@ import hashlib
 import importlib.util
 import json
 from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from jsonschema import Draft202012Validator
 
 ROOT = Path(__file__).resolve().parents[1]
 PREPARE = ROOT / "infra/scripts/prepare_hosted_release.py"
 VERIFIER = ROOT / "infra/scripts/verify_hosted_release.py"
+COMPOSER = ROOT / "infra/scripts/hosted_composition_lock.py"
 V1_CORPUS = ROOT / "infra/provisioner/tests/fixtures/provisioner-wire-v1.json"
 FORWARD_CONTRACT = (
     ROOT / "infra/contracts/exomem-hosted-deployment-lock-evidence-v2/forward-contract.json"
@@ -44,6 +50,24 @@ def _module(path: Path = PREPARE):
 
 def _canonical(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def _ca_pem() -> bytes:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    now = datetime.now(UTC)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Verifier test CA")])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return certificate.public_bytes(serialization.Encoding.PEM)
 
 
 def test_historical_rollback_manifest_remains_strict_release_evidence() -> None:
@@ -227,6 +251,24 @@ def test_lock_schema_admits_the_governance_migration_mode_and_still_refuses_unkn
     errors = list(validator.iter_errors(pair))
     assert errors
     assert all(error.json_path.endswith("migrationMode") for error in errors)
+
+
+def test_lock_schema_accepts_only_the_closed_non_null_activation_ack_binding() -> None:
+    validator = Draft202012Validator(json.loads(LOCK_SCHEMA.read_text(encoding="utf-8")))
+    pair = _pair()
+    binding = {
+        "protocol": "exomem.hosted-activation-ack/v1",
+        "platformNamespace": "exomem-platform",
+        "trustBundleSha256": "a" * 64,
+    }
+    for member in pair["locks"]:  # type: ignore[union-attr]
+        member["activationAcknowledgement"] = binding
+    assert not list(validator.iter_errors(pair))
+
+    for invalid in (None, {**binding, "unknown": True}, {"protocol": binding["protocol"]}):
+        for member in pair["locks"]:  # type: ignore[union-attr]
+            member["activationAcknowledgement"] = invalid
+        assert list(validator.iter_errors(pair))
 
 
 def _v3_member() -> dict[str, object]:
@@ -691,6 +733,83 @@ def test_rollback_substrate_consumer_requires_the_exact_pinned_commit(
         verifier._verify_substrate_v1_consumer("d" * 40, "gh")
 
 
+def test_verifier_rechecks_committed_capabilities_and_exact_bound_trust(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = _module(VERIFIER)
+    composer = _module(COMPOSER)
+    selected = _member("expand")
+    trust = tmp_path / "ack-ca.pem"
+    trust.write_bytes(_ca_pem())
+    binding = {
+        "protocol": "exomem.hosted-activation-ack/v1",
+        "platformNamespace": "exomem-platform",
+        "trustBundleSha256": hashlib.sha256(trust.read_bytes()).hexdigest(),
+    }
+    selected["activationAcknowledgement"] = binding
+    declarations: list[tuple[str, str]] = []
+
+    def declares(_repository: Path, commit: str, *, kind: str) -> bool:
+        declarations.append((kind, commit))
+        return True
+
+    monkeypatch.setattr(composer, "candidate_declares_activation_ack", declares)
+
+    verifier._verify_activation_ack_binding(
+        selected,
+        repository=tmp_path,
+        trust_bundle=trust,
+        composer=composer,
+    )
+
+    components = selected["components"]  # type: ignore[assignment]
+    assert declarations == [
+        ("runtime", components["runtime"]["sourceCommit"]),  # type: ignore[index]
+        ("provisioner", components["provisioner"]["sourceCommit"]),  # type: ignore[index]
+    ]
+    trust.write_bytes(_ca_pem())
+    with pytest.raises(ValueError, match="digest differs"):
+        verifier._verify_activation_ack_binding(
+            selected,
+            repository=tmp_path,
+            trust_bundle=trust,
+            composer=composer,
+        )
+
+
+@pytest.mark.parametrize(("runtime_capable", "provisioner_capable"), ((False, True), (True, False)))
+def test_verifier_requires_both_authenticated_candidate_declarations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_capable: bool,
+    provisioner_capable: bool,
+) -> None:
+    verifier = _module(VERIFIER)
+    composer = _module(COMPOSER)
+    selected = _member("expand")
+    trust = tmp_path / "ack-ca.pem"
+    trust.write_bytes(_ca_pem())
+    selected["activationAcknowledgement"] = {
+        "protocol": "exomem.hosted-activation-ack/v1",
+        "platformNamespace": "exomem-platform",
+        "trustBundleSha256": hashlib.sha256(trust.read_bytes()).hexdigest(),
+    }
+    declarations = iter((runtime_capable, provisioner_capable))
+    monkeypatch.setattr(
+        composer,
+        "candidate_declares_activation_ack",
+        lambda *_args, **_kwargs: next(declarations),
+    )
+
+    with pytest.raises(ValueError, match="both candidate declarations"):
+        verifier._verify_activation_ack_binding(
+            selected,
+            repository=tmp_path,
+            trust_bundle=trust,
+            composer=composer,
+        )
+
+
 def test_selected_v3_lock_requires_and_reverifies_the_rollback_runtime_artifacts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -717,7 +836,8 @@ def test_selected_v3_lock_requires_and_reverifies_the_rollback_runtime_artifacts
     composer = SimpleNamespace(
         verify_source_closure=lambda _repository, candidate, composition, paths: (
             source_closures.append((candidate, composition, paths))
-        )
+        ),
+        candidate_declares_activation_ack=lambda *_args, **_kwargs: False,
     )
     candidate_tool = SimpleNamespace(
         load_candidate=lambda _path: {
@@ -861,7 +981,10 @@ def test_selected_v3_lock_discovers_the_signed_rollback_candidate_from_its_relea
         _load_pair=lambda _path: {},
         _select_member=lambda _pair, **_kwargs: (selected, "a" * 64),
     )
-    composer = SimpleNamespace(verify_source_closure=lambda *_args: None)
+    composer = SimpleNamespace(
+        verify_source_closure=lambda *_args: None,
+        candidate_declares_activation_ack=lambda *_args, **_kwargs: False,
+    )
     candidate_tool = SimpleNamespace(
         load_candidate=lambda _path: {
             "kind": "runtime",
@@ -982,6 +1105,36 @@ def test_prepare_v2_derives_all_deploy_inputs_from_one_exact_pair_member(tmp_pat
         "controlHostname": "control.example.test",
         "transferHostname": "transfer.example.test",
     }
+
+
+def test_prepare_v2_preserves_exact_activation_ack_binding_and_digest(tmp_path: Path) -> None:
+    prepare = _module()
+    pair_path = tmp_path / "pair.json"
+    pair, _ = _write_pair(pair_path)
+    binding = {
+        "protocol": "exomem.hosted-activation-ack/v1",
+        "platformNamespace": "exomem-platform",
+        "trustBundleSha256": "9" * 64,
+    }
+    for member in pair["locks"]:  # type: ignore[index]
+        member["activationAcknowledgement"] = binding  # type: ignore[index]
+    pair_path.write_bytes(_canonical(pair))
+    selected = pair["locks"][0]  # type: ignore[index]
+    member_sha256 = hashlib.sha256(_canonical(selected)).hexdigest()
+
+    prepare.prepare_v2(
+        lock_pair_path=pair_path,
+        values_path=tmp_path / "values.json",
+        phase="expand",
+        member_sha256=member_sha256,
+        control_hostname="control.example.test",
+        transfer_hostname="transfer.example.test",
+    )
+
+    provisioner = json.loads((tmp_path / "values.json").read_text())["provisioner"]
+    assert json.loads(provisioner["deploymentLockJson"])["activationAcknowledgement"] == binding
+    assert provisioner["deploymentLockSha256"] == member_sha256
+    assert "activation_ack_protocol" not in prepare.prepare_v2.__annotations__
 
 
 def test_prepare_v3_requires_runtime_selection_and_emits_only_the_operator_value(

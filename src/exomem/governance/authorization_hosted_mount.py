@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import stat
@@ -53,9 +54,7 @@ def _projected_payloads(source: Path) -> dict[str, bytes]:
         if set(os.listdir(source)) != expected_entries:
             raise HostedCustodyMountUnavailable
         generation_info = os.lstat(source / generation)
-        if not stat.S_ISDIR(generation_info.st_mode) or stat.S_ISLNK(
-            generation_info.st_mode
-        ):
+        if not stat.S_ISDIR(generation_info.st_mode) or stat.S_ISLNK(generation_info.st_mode):
             raise HostedCustodyMountUnavailable
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
         generation_fd = os.open(source / generation, flags)
@@ -64,8 +63,8 @@ def _projected_payloads(source: Path) -> dict[str, bytes]:
             for name in _FILENAMES:
                 if os.readlink(source / name) != f"..data/{name}":
                     raise HostedCustodyMountUnavailable
-                file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(
-                    os, "O_NOFOLLOW", 0
+                file_flags = (
+                    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
                 )
                 descriptor = os.open(name, file_flags, dir_fd=generation_fd)
                 try:
@@ -96,8 +95,7 @@ def _projected_payloads(source: Path) -> dict[str, bytes]:
                 finally:
                     os.close(descriptor)
             if os.readlink(source / "..data") != generation or any(
-                os.readlink(source / name) != f"..data/{name}"
-                for name in _FILENAMES
+                os.readlink(source / name) != f"..data/{name}" for name in _FILENAMES
             ):
                 raise HostedCustodyMountUnavailable
             return payloads
@@ -224,11 +222,21 @@ def republish_projected_custody(source: Path, destination: Path) -> None:
     cross-validation and refuse writes until something republished it correctly.
     """
 
-    source = Path(source)
+    publish_custody_payloads(_projected_payloads(Path(source)), Path(destination))
+
+
+def publish_custody_payloads(
+    payloads: dict[str, bytes], destination: Path, *, now: int | None = None
+) -> None:
+    """Stage and replace a whole bundle through the single publisher."""
     destination = Path(destination)
     staged: list[Path] = []
     try:
-        payloads = _projected_payloads(source)
+        if set(payloads) != set(_FILENAMES) or any(
+            not isinstance(raw, bytes) or not 1 <= len(raw) <= MAX_CUSTODY_FILE_BYTES
+            for raw in payloads.values()
+        ):
+            raise HostedCustodyMountUnavailable
         info = os.lstat(destination)
         if (
             not stat.S_ISDIR(info.st_mode)
@@ -238,7 +246,7 @@ def republish_projected_custody(source: Path, destination: Path) -> None:
             or info.st_gid != os.getegid()
         ):
             raise HostedCustodyMountUnavailable
-        _refuse_authority_identity_change(destination, payloads)
+        _refuse_authority_identity_change(destination, payloads, now=now)
         # The sidecar is the only writer and never republishes concurrently with
         # itself, so any staging file already present is an orphan from a crashed
         # attempt. Left alone they accumulate without bound in a 256 KiB tmpfs.
@@ -294,7 +302,9 @@ def republish_projected_custody(source: Path, destination: Path) -> None:
         raise HostedCustodyMountUnavailable from None
 
 
-def _refuse_authority_identity_change(destination: Path, payloads: dict[str, bytes]) -> None:
+def _refuse_authority_identity_change(
+    destination: Path, payloads: dict[str, bytes], *, now: int | None = None
+) -> None:
     """Keep an activated private authority generation bound to its identity.
 
     The projected bundle remains read-only.  We inspect the fixed authority
@@ -306,18 +316,23 @@ def _refuse_authority_identity_change(destination: Path, payloads: dict[str, byt
         from ..vocabulary_authority import authority_artifact_paths
         from . import authorization_custody
 
-        old = {
-            name: (destination / name).read_bytes()
-            for name in ("keyring.json", "control.json")
-        }
+        old = {name: (destination / name).read_bytes() for name in ("keyring.json", "control.json")}
         old_keyring = authorization_custody.parse_keyring(old["keyring.json"])
         new_keyring = authorization_custody.parse_keyring(payloads["keyring.json"])
         new_control = authorization_custody.parse_control_record(
-            payloads["control.json"], keyring=new_keyring, now=int(time.time())
+            payloads["control.json"],
+            keyring=new_keyring,
+            now=int(time.time()) if now is None else now,
         )
         try:
-            old_control = authorization_custody.parse_control_record(
-                old["control.json"], keyring=old_keyring, now=int(time.time())
+            # Authenticate the old floor at issuance; it need not still grant
+            # serving permission when a fresh renewal arrives.
+            historical_time = json.loads(old["control.json"])["issued_at"]
+            old_control = authorization_custody._parse_control_record(
+                old["control.json"],
+                keyring=old_keyring,
+                now=historical_time,
+                allow_expired=True,
             )
         except authorization_custody.AuthorizationCustodyUnavailable:
             # `control.json` is published before `keyring.json`.  A crash in
@@ -432,13 +447,30 @@ def main(argv: list[str] | None = None) -> int:
         arguments.remove("--watch")
     if arguments:
         return 2
+    from ..hosted_activation_ack_client import (
+        ActivationAcknowledgementUnavailable,
+        is_hosted_activation_ack_enabled,
+    )
+
+    try:
+        acknowledgement_enabled = is_hosted_activation_ack_enabled()
+    except ActivationAcknowledgementUnavailable:
+        return 2
     if watch:
+        if acknowledgement_enabled:
+            from ..hosted_activation_sidecar import run_hosted_activation_sidecar
+
+            return run_hosted_activation_sidecar(SOURCE_ROOT, HOSTED_CUSTODY_ROOT)
         # The init container has already published the first generation; a
         # second copy would refuse against its own non-empty destination.
         return watch_projected_custody(SOURCE_ROOT, HOSTED_CUSTODY_ROOT)
     try:
+        if acknowledgement_enabled:
+            from ..hosted_activation_sidecar import initialize_socket_directory
+
+            initialize_socket_directory()
         copy_projected_custody(SOURCE_ROOT, HOSTED_CUSTODY_ROOT)
-    except HostedCustodyMountUnavailable:
+    except (HostedCustodyMountUnavailable, RuntimeError):
         return 2
     return 0
 

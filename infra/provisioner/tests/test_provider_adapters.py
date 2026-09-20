@@ -9,6 +9,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from kubernetes.client import ApiClient, V1ListMeta, V1PodList
 
 from exomem_provisioner.adapters import (
@@ -51,6 +55,55 @@ def _metadata(**overrides: object) -> OpaqueProviderMetadata:
 def _credential(offset: int = 0) -> str:
     raw = bytes((index + offset) % 256 for index in range(32))
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _activation_ack_ca_pem() -> str:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    now = datetime.now(UTC)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Exomem test CA")])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return certificate.public_bytes(serialization.Encoding.PEM).decode("ascii")
+
+
+@pytest.mark.asyncio
+async def test_cell_adapter_reads_only_exact_immutable_platform_activation_ack_trust() -> None:
+    pem = _activation_ack_ca_pem()
+    binding = {
+        "protocol": "exomem.hosted-activation-ack/v1",
+        "platformNamespace": "exomem-platform",
+        "trustBundleSha256": hashlib.sha256(pem.encode("utf-8")).hexdigest(),
+    }
+    calls: list[tuple[str, str]] = []
+
+    def read_config_map(name: str, namespace: str):
+        calls.append((name, namespace))
+        return SimpleNamespace(
+            metadata=SimpleNamespace(
+                name=name,
+                namespace=namespace,
+                deletion_timestamp=None,
+            ),
+            immutable=True,
+            data={"ca.pem": pem},
+        )
+
+    adapter = KubernetesCellAdapter(
+        core_v1=SimpleNamespace(read_namespaced_config_map=read_config_map),
+        apps_v1=SimpleNamespace(),
+    )
+
+    assert await adapter.read_activation_ack_trust_bundle(binding) == pem
+    assert calls == [("exomem-ack-ca-" + binding["trustBundleSha256"][:40], "exomem-platform")]
 
 
 def _kube(value: dict[str, object], kind: str):
@@ -380,6 +433,10 @@ async def test_cell_adapter_creates_external_secret_then_reads_the_exact_bundle(
     credentials, annotations = await adapter.read_credential_bundle(metadata)
     assert credentials == {"1": _credential()}
     assert annotations["exomem.io/security-revision"] == "1"
+    assert (await adapter.read_credential_bundle_authority(metadata))[0] == credentials
+    unverified = KubernetesCellAdapter(core_v1=core, apps_v1=SimpleNamespace())
+    with pytest.raises(MetadataConflict, match="did not authenticate"):
+        await unverified.read_credential_bundle_authority(metadata)
     core.secret.metadata.annotations["exomem.io/recovery-envelope"] = "forged"
     with pytest.raises(MetadataConflict, match="did not authenticate"):
         await adapter.read_credential_bundle(metadata)
@@ -1046,6 +1103,11 @@ async def test_kubernetes_cell_adapter_persists_one_authenticated_authorization_
 
     stored = await adapter.read_authorization_session_bundle(metadata)
     assert stored == files
+    authority = await adapter.read_authorization_session_authority(metadata)
+    assert authority.files == files
+    assert authority.recovery_envelope == envelopes["authorizationSessionSecret"]
+    assert authority.revision == revision
+    assert authority.resource_version == "7"
     assert (
         core.secret.metadata.annotations["exomem.io/recovery-envelope"]
         == envelopes["authorizationSessionSecret"]
@@ -1086,7 +1148,7 @@ async def test_kubernetes_cell_adapter_persists_one_authenticated_authorization_
         },
     )
 
-    with pytest.raises(MetadataConflict, match="predecessor differs"):
+    with pytest.raises(MetadataConflict, match="changed concurrently"):
         await adapter.write_authorization_session_bundle(
             metadata,
             successor_files,

@@ -1143,24 +1143,53 @@ def apply_proposal(
     # crash between the mutation and its completion record stays visible and a
     # blind retry cannot duplicate the write (mirrors the run's `applying`).
     _persist_proposal(store, run["run_id"], {**proposal, "status": "applying"})
-    try:
-        result = _route_apply(
-            root, kind, payload, why=str(why).strip(), expected_hash=expected_hash
-        )
-    except Exception:
-        # A clean refusal (drift, CAS) wrote nothing: restore `proposed` so the
-        # reviewer can refresh and retry.
-        _persist_proposal(store, run["run_id"], proposal)
-        raise
+    from . import writer_lease
 
-    proposal["status"] = "applied"
-    proposal["applied"] = {
-        "at": _now_iso(),
-        "result_path": result.get("result_path"),
-        "result_ref": result.get("result_ref"),
-        "why": str(why).strip(),
-    }
-    _persist_proposal(store, run["run_id"], proposal)
+    applied_at = _now_iso()
+    with writer_lease.hosted_adoption_completion_context(
+        run_id=str(run["run_id"]),
+        proposal=proposal,
+        why=str(why).strip(),
+        applied_at=applied_at,
+    ) as hosted_completion:
+        try:
+            result = _route_apply(
+                root, kind, payload, why=str(why).strip(), expected_hash=expected_hash
+            )
+            if hosted_completion.recovery is not None:
+                if (
+                    hosted_completion.transition is None
+                    or hosted_completion.receipt is None
+                ):
+                    raise RuntimeError("hosted adoption completion was not prepared")
+                proposal = hosted_completion.transition
+                _persist_proposal(
+                    store,
+                    run["run_id"],
+                    proposal,
+                    completion_receipt=hosted_completion.receipt,
+                )
+                writer_lease.complete_hosted_adoption_sidecar(root, hosted_completion)
+            else:
+                proposal["status"] = "applied"
+                proposal["applied"] = {
+                    "at": applied_at,
+                    "result_path": result.get("result_path"),
+                    "result_ref": result.get("result_ref"),
+                    "why": str(why).strip(),
+                }
+                _persist_proposal(store, run["run_id"], proposal)
+        except Exception:
+            # Reset only when there is exact evidence that no qualified child
+            # committed.  An uncertain/committed child keeps `applying` and its
+            # receipt for same-attempt recovery.
+            committed = writer_lease.hosted_mutation_child_commit_status(root)
+            if hosted_completion.recovery is None or (
+                committed is False
+                and not writer_lease.active_mutation_committed()
+            ):
+                _persist_proposal(store, run["run_id"], proposal)
+            raise
 
     return {
         "applied": True,
@@ -1176,14 +1205,128 @@ def apply_proposal(
     }
 
 
-def _persist_proposal(store: Any, run_id: str, proposal: dict) -> None:
+def _persist_proposal(
+    store: Any,
+    run_id: str,
+    proposal: dict,
+    *,
+    completion_receipt: dict[str, object] | None = None,
+) -> None:
     """Replace one proposal record in proposals.json by proposal_id."""
     saved = store.load_proposals(run_id)
     for idx, existing in enumerate(saved.get("proposals") or []):
         if existing.get("proposal_id") == proposal.get("proposal_id"):
             saved["proposals"][idx] = proposal
             break
+    if completion_receipt is not None:
+        receipts = saved.setdefault("_hosted_completion_receipts", {})
+        if not isinstance(receipts, dict):
+            raise AdoptionProposalError(
+                "APPLY_IN_FLIGHT", "hosted completion receipt storage is invalid"
+            )
+        receipts[str(proposal.get("proposal_id") or "")] = completion_receipt
     store.save_proposals(run_id, saved)
+
+
+def recover_hosted_completion_receipt(
+    root: Path,
+    recovery: Any,
+    *,
+    attempt_secret: bytes,
+    now: float,
+) -> bool:
+    """Register an atomically stored Adoption O-child without replaying its leaf."""
+
+    from .governance import hosted_mutation_journal
+    from .governance import store as governance_store
+
+    descriptor = getattr(recovery, "descriptor", None)
+    if not isinstance(descriptor, dict):
+        return False
+    sidecars = [
+        child
+        for child in descriptor.get("required_children", [])
+        if isinstance(child, dict) and child.get("kind") == "sidecar"
+    ]
+    if not sidecars:
+        return False
+    if len(sidecars) != 1 or sidecars[0].get("id") != "adoption-completion-0":
+        raise hosted_mutation_journal.HostedMutationJournalError(
+            "hosted adoption completion manifest is invalid"
+        )
+    child_id = "adoption-completion-0"
+    prepared = recovery.prepared_results.get(child_id)
+    if not isinstance(prepared, dict):
+        raise hosted_mutation_journal.HostedMutationJournalError(
+            "hosted adoption completion payload is unavailable"
+        )
+    run_id = prepared.get("run_id")
+    proposal_id = prepared.get("proposal_id")
+    prior = prepared.get("prior")
+    transition = prepared.get("transition")
+    if (
+        not isinstance(run_id, str)
+        or not run_id
+        or not isinstance(proposal_id, str)
+        or not proposal_id
+        or not isinstance(prior, dict)
+        or not isinstance(transition, dict)
+    ):
+        raise hosted_mutation_journal.HostedMutationJournalError(
+            "hosted adoption completion payload is invalid"
+        )
+    store = AdoptionRunStore(Path(root))
+    connection = governance_store.open_authorization_session_connection(Path(root))
+    try:
+        hosted_mutation_journal.verify_sidecar_prerequisites(
+            connection,
+            recovery=recovery,
+            child_id=child_id,
+            attempt_secret=attempt_secret,
+        )
+        saved = store.load_proposals(run_id)
+        matches = [
+            proposal
+            for proposal in saved.get("proposals", [])
+            if isinstance(proposal, dict) and proposal.get("proposal_id") == proposal_id
+        ]
+        receipts = saved.get("_hosted_completion_receipts")
+        receipt = receipts.get(proposal_id) if isinstance(receipts, dict) else None
+        if len(matches) != 1:
+            raise hosted_mutation_journal.HostedMutationJournalError(
+                "hosted adoption completion receipt is unavailable"
+            )
+        if matches[0] == transition and isinstance(receipt, dict):
+            pass
+        elif matches[0] == {**prior, "status": "applying"} and receipt is None:
+            receipt = hosted_mutation_journal.prepare_sidecar_completion_receipt(
+                recovery=recovery,
+                child_id=child_id,
+                transition=transition,
+                attempt_secret=attempt_secret,
+            )
+            _persist_proposal(
+                store,
+                run_id,
+                transition,
+                completion_receipt=receipt,
+            )
+        else:
+            raise hosted_mutation_journal.HostedMutationJournalError(
+                "hosted adoption completion receipt is unavailable"
+            )
+        hosted_mutation_journal.record_sidecar_child(
+            connection,
+            recovery=recovery,
+            child_id=child_id,
+            transition=transition,
+            receipt=receipt,
+            attempt_secret=attempt_secret,
+            now=now,
+        )
+    finally:
+        connection.close()
+    return True
 
 
 def _bullet(relation_type: str, to_path: str) -> str:

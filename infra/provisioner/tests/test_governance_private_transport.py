@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
+from contextlib import asynccontextmanager
 from dataclasses import replace
+from pathlib import Path
 
 import httpx
 import pytest
@@ -14,6 +17,199 @@ from exomem_provisioner.lifecycle import LifecycleConfig, MetadataConflict, Opaq
 
 METADATA = OpaqueProviderMetadata("tenant-alpha", "cell-alpha", "operation-alpha", 7)
 CREDENTIAL = "a" * 43
+
+
+class _ChunkStream(httpx.AsyncByteStream):
+    def __init__(self, chunks: list[bytes], *, delay: float = 0) -> None:
+        self.chunks = chunks
+        self.delay = delay
+        self.yielded = 0
+        self.closed = False
+
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            if self.delay:
+                await asyncio.sleep(self.delay)
+            self.yielded += 1
+            yield chunk
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def _proof_response() -> dict[str, object]:
+    path = (
+        Path(__file__).parents[3]
+        / "tests/fixtures/hosted-activation-ack-v1/intermediate-child-proof.json"
+    )
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+async def test_activation_proof_uses_bare_bounded_fixed_private_route() -> None:
+    proof = _proof_response()
+    request_body = {
+        key: value
+        for key, value in proof.items()
+        if key not in {"publication_evidence", "signing_key_id", "mac"}
+    }
+    observed: dict[str, object] = {}
+
+    @asynccontextmanager
+    async def stream_request(method: str, url: str, **kwargs: object):
+        observed.update(method=method, url=url, **kwargs)
+        yield httpx.Response(
+            200,
+            stream=_ChunkStream([json.dumps(proof).encode("utf-8")]),
+        )
+
+    adapter = PrivateCellApiAdapter(
+        request=lambda *_args, **_kwargs: None,
+        stream_request=stream_request,
+        internal_origin="https://{namespace}.cells.invalid",
+    )
+    result = await adapter.activation_proof(
+        METADATA,
+        credential=CREDENTIAL,
+        protocol_version="1",
+        request=request_body,
+        timeout_seconds=0.5,
+    )
+
+    assert result == proof
+    assert observed["method"] == "POST"
+    assert observed["url"] == (
+        f"https://{METADATA.resource_name}.cells.invalid/private/exomem/v1/activation/proof"
+    )
+    assert observed["content"] == json.dumps(
+        request_body,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    assert observed["headers"]["Content-Type"] == "application/json"  # type: ignore[index]
+    assert observed["headers"]["Accept"] == "application/json"  # type: ignore[index]
+    assert observed["follow_redirects"] is False
+    assert observed["timeout"].connect == 0.5  # type: ignore[union-attr]
+    assert observed["timeout"].read == 0.5  # type: ignore[union-attr]
+
+
+async def test_activation_proof_rejects_wrapped_or_oversized_response() -> None:
+    request_body = {
+        key: value
+        for key, value in _proof_response().items()
+        if key not in {"publication_evidence", "signing_key_id", "mac"}
+    }
+
+    for response_body in (
+        json.dumps({"success": True, "data": _proof_response()}).encode(),
+        b"{" + b" " * (16 * 1024) + b"}",
+    ):
+        @asynccontextmanager
+        async def stream_request(_response: bytes = response_body, **_kwargs: object):
+            yield httpx.Response(200, stream=_ChunkStream([_response]))
+
+        adapter = PrivateCellApiAdapter(
+            request=lambda *_args, **_kwargs: None,
+            stream_request=stream_request,
+            internal_origin="https://cells.invalid",
+        )
+        with pytest.raises(MetadataConflict, match="activation proof response is invalid"):
+            await adapter.activation_proof(
+                METADATA,
+                credential=CREDENTIAL,
+                protocol_version="1",
+                request=request_body,
+                timeout_seconds=0.5,
+            )
+
+
+async def test_activation_proof_stops_oversized_stream_before_consuming_remainder() -> None:
+    stream = _ChunkStream([b"x" * 4096 for _ in range(20)])
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        adapter = PrivateCellApiAdapter(
+            request=http.request,
+            stream_request=http.stream,
+            internal_origin="https://cells.invalid",
+        )
+        with pytest.raises(MetadataConflict, match="activation proof response is invalid"):
+            await adapter.activation_proof(
+                METADATA,
+                credential=CREDENTIAL,
+                protocol_version="1",
+                request={
+                    key: value
+                    for key, value in _proof_response().items()
+                    if key not in {"publication_evidence", "signing_key_id", "mac"}
+                },
+                timeout_seconds=0.5,
+            )
+
+    assert stream.yielded <= 5
+    assert stream.closed is True
+
+
+async def test_activation_proof_rejects_oversized_headers_before_reading_body() -> None:
+    stream = _ChunkStream([json.dumps(_proof_response()).encode()])
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"X-Oversized": "x" * 8192}, stream=stream)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        adapter = PrivateCellApiAdapter(
+            request=http.request,
+            stream_request=http.stream,
+            internal_origin="https://cells.invalid",
+        )
+        with pytest.raises(MetadataConflict, match="activation proof response is invalid"):
+            await adapter.activation_proof(
+                METADATA,
+                credential=CREDENTIAL,
+                protocol_version="1",
+                request={
+                    key: value
+                    for key, value in _proof_response().items()
+                    if key not in {"publication_evidence", "signing_key_id", "mac"}
+                },
+                timeout_seconds=0.5,
+            )
+
+    assert stream.yielded == 0
+    assert stream.closed is True
+
+
+async def test_activation_proof_total_deadline_closes_trickling_stream() -> None:
+    raw = json.dumps(_proof_response()).encode()
+    stream = _ChunkStream([raw[index : index + 1] for index in range(len(raw))], delay=0.01)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        adapter = PrivateCellApiAdapter(
+            request=http.request,
+            stream_request=http.stream,
+            internal_origin="https://cells.invalid",
+        )
+        with pytest.raises(MetadataConflict, match="activation proof response is invalid"):
+            await adapter.activation_proof(
+                METADATA,
+                credential=CREDENTIAL,
+                protocol_version="1",
+                request={
+                    key: value
+                    for key, value in _proof_response().items()
+                    if key not in {"publication_evidence", "signing_key_id", "mac"}
+                },
+                timeout_seconds=0.03,
+            )
+
+    assert stream.yielded < len(raw)
+    assert stream.closed is True
 
 
 def _health_config() -> LifecycleConfig:

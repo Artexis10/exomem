@@ -37,7 +37,12 @@ from .schemas import (
     RollforwardPreservationResult,
     request_plaintext,
 )
-from .wire_protocol import FINAL_MODELS_BY_PROTOCOL, REQUEST_MODELS_BY_PROTOCOL, runtime_identity
+from .wire_protocol import (
+    FINAL_MODELS_BY_PROTOCOL,
+    REQUEST_MODELS_BY_PROTOCOL,
+    WIRE_PROTOCOL_V2,
+    runtime_identity,
+)
 
 ReadinessProbe = Callable[[], Awaitable[bool]]
 Clock = Callable[[], datetime]
@@ -134,6 +139,7 @@ def create_app(
         lock.components.provisioner.wireProtocol if lock is not None else settings.protocol
     )
     admission = None
+    activation_acknowledgement: dict[str, str] | None = None
     if lock is not None:
         selected_runtime = lock.selected_runtime(settings.runtime_selection)
         forward_target = selected_runtime.runtimeTarget.model_dump(mode="json")
@@ -145,6 +151,10 @@ def create_app(
             forward_target=forward_target,
             legacy_targets=legacy_targets_from(lock.legacy_targets),
         )
+        if selected_runtime.activationAcknowledgement is not None:
+            activation_acknowledgement = selected_runtime.activationAcknowledgement.model_dump(
+                mode="json"
+            )
 
     @app.exception_handler(RequestValidationError)
     async def validation_failure(_request: Request, _error: RequestValidationError) -> JSONResponse:
@@ -233,6 +243,13 @@ def create_app(
                 if provider_identity_codec is not None and "cellId" in request_data:
                     cell_id = str(request_data["cellId"])
                     operation_id = str(request_data["operationId"])
+                    if (
+                        activation_acknowledgement is not None
+                        and wire_protocol == WIRE_PROTOCOL_V2
+                    ):
+                        request_data["_activationAcknowledgement"] = dict(
+                            activation_acknowledgement
+                        )
                     request_data["_providerRecoveryEnvelopes"] = cell_provider_recovery_envelopes(
                         provider_identity_codec,
                         tenant_id=str(request_data["tenantId"]),
@@ -241,6 +258,9 @@ def create_app(
                         fence_generation=cast(int, request_data["fenceGeneration"]),
                         resource_name=cell_resource_name(cell_id),
                         operation_resource_name=provider_operation_resource_name(operation_id),
+                        activation_acknowledgement=request_data.get(
+                            "_activationAcknowledgement"
+                        ),
                     )
                 expiry_rejection = (
                     _new_export_expiry_rejection(

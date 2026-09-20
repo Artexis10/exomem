@@ -119,17 +119,25 @@ def test_v3_lock_requires_reader_two_and_explicit_compatible_rollback_runtime(tm
 def test_v3_runtime_selection_returns_one_consistent_rollback_unit(tmp_path: Path) -> None:
     path = tmp_path / "selected-lock.json"
     payload = _v3_lock()
+    payload["activationAcknowledgement"] = {
+        "protocol": "exomem.hosted-activation-ack/v1",
+        "platformNamespace": "exomem-platform",
+        "trustBundleSha256": "9" * 64,
+    }
     rollback = payload["recordsCompatibility"]["rollbackRuntime"]  # type: ignore[index]
     rollback["image"] = f"ghcr.io/artexis10/exomem@sha256:{'f' * 64}"
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     lock = load_deployment_lock(path)
     selected = lock.selected_runtime("rollback")
+    active = lock.selected_runtime("active")
 
     assert selected.image == rollback["image"]
     assert selected.runtimeTarget.model_dump(mode="json") == rollback["runtimeTarget"]
     assert selected.recordsReaderVersion == 2
     assert selected.lifecycleActionsEnabled is False
+    assert selected.activationAcknowledgement is None
+    assert active.activationAcknowledgement == lock.activationAcknowledgement
     assert lock.matches_runtime_request(
         {"runtimeTarget": rollback["runtimeTarget"]},
         wire_protocol="exomem-cell-provisioner.v2",

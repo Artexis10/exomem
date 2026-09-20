@@ -13,6 +13,7 @@ import re
 import tempfile
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -22,6 +23,11 @@ import httpx
 from kubernetes.client import ApiClient
 from urllib3.exceptions import HTTPError
 
+from .activation_ack_configuration import (
+    activation_ack_trust_name,
+    validate_activation_ack_binding,
+    validate_activation_ack_trust_pem,
+)
 from .authorization_membership import (
     AUTHORIZATION_SESSION_FILES,
     AUTHORIZATION_SESSION_SECRET_NAME,
@@ -33,6 +39,7 @@ from .conflict_reason import ConflictReason
 from .credentials import validate_machine_credential
 from .driver import DriverRetryable, LostAcknowledgement
 from .governance_readiness import verify_governance_readiness
+from .hosted_activation_ack_protocol import ProtocolError, decode_message, encode_message
 from .job_execution import JOB_SPEC_SERVER_DEFAULTS, metadata_matches, pod_spec_matches
 from .lifecycle import (
     HealthObservation,
@@ -58,6 +65,16 @@ class BoundVolumeRecoveryObservation:
 
     recorded: RecordedVolume
     stability_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorizationSessionSecretSnapshot:
+    """One provider-authenticated authorization Secret generation."""
+
+    files: dict[str, bytes]
+    recovery_envelope: str
+    revision: str
+    resource_version: str
 
 
 def _api_status(error: Exception) -> int | None:
@@ -483,6 +500,39 @@ class KubernetesCellAdapter:
         self._apps = apps_v1
         self._identity_verifier = identity_verifier
 
+    async def read_activation_ack_trust_bundle(self, binding: object) -> str:
+        """Read the immutable platform bundle retained by a bound operation."""
+
+        try:
+            validated = validate_activation_ack_binding(binding)
+            name = activation_ack_trust_name(validated)
+            config_map = await asyncio.to_thread(
+                self._core.read_namespaced_config_map,
+                name,
+                validated["platformNamespace"],
+            )
+            metadata = getattr(config_map, "metadata", None)
+            data = getattr(config_map, "data", None)
+            if (
+                getattr(metadata, "name", None) != name
+                or getattr(metadata, "namespace", None) != validated["platformNamespace"]
+                or getattr(metadata, "deletion_timestamp", None) is not None
+                or getattr(config_map, "immutable", None) is not True
+                or not isinstance(data, dict)
+                or set(data) != {"ca.pem"}
+                or not isinstance(data["ca.pem"], str)
+            ):
+                raise ValueError("activation acknowledgement trust ConfigMap is not exact")
+            return validate_activation_ack_trust_pem(
+                data["ca.pem"],
+                validated["trustBundleSha256"],
+            )
+        except Exception as error:
+            raise MetadataConflict(
+                "activation acknowledgement trust bundle is unavailable",
+                reason=ConflictReason.ACTIVATION_ACK_TRUST_CONFIG_MAP_INVALID,
+            ) from error
+
     async def volume_claim_bound(self, metadata: OpaqueProviderMetadata) -> bool:
         namespace = metadata.resource_name
         name = metadata.resource_name + "-data"
@@ -803,6 +853,18 @@ class KubernetesCellAdapter:
             ) from error
         return values, annotations
 
+    async def read_credential_bundle_authority(
+        self, metadata: OpaqueProviderMetadata
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        """Read credentials only when provider recovery identity is mandatory."""
+
+        if self._identity_verifier is None:
+            raise MetadataConflict(
+                "credential Secret provider recovery identity did not authenticate",
+                reason=ConflictReason.CREDENTIAL_SECRET_RECOVERY_IDENTITY_UNAUTHENTICATED,
+            )
+        return await self.read_credential_bundle(metadata)
+
     async def write_authorization_session_bundle(
         self,
         metadata: OpaqueProviderMetadata,
@@ -909,6 +971,30 @@ class KubernetesCellAdapter:
                 getattr(getattr(current, "metadata", None), "annotations", None) or {}
             )
             _require_annotations(current_annotations, metadata)
+            if self._identity_verifier is not None:
+                try:
+                    self._identity_verifier.authenticate(
+                        str(current_annotations.get("exomem.io/recovery-envelope", "")),
+                        provider="kubernetes",
+                        provider_reference=ProviderReference.kubernetes(
+                            provider="kubernetes",
+                            api_version="v1",
+                            kind="Secret",
+                            namespace=metadata.resource_name,
+                            name=AUTHORIZATION_SESSION_SECRET_NAME,
+                        ),
+                        tenant_id=metadata.tenant_id,
+                        cell_id=metadata.subject_id,
+                        operation_id=metadata.operation_id,
+                        fence_generation=metadata.fence_generation,
+                    )
+                except ProviderIdentityConflict as error:
+                    raise MetadataConflict(
+                        "authorization Secret provider recovery identity did not authenticate",
+                        reason=(
+                            ConflictReason.AUTHORIZATION_SECRET_RECOVERY_IDENTITY_UNAUTHENTICATED
+                        ),
+                    ) from error
             current_encoded = dict(getattr(current, "data", None) or {})
             try:
                 current_files = {
@@ -932,15 +1018,20 @@ class KubernetesCellAdapter:
             resource_version = getattr(getattr(current, "metadata", None), "resource_version", None)
             if (
                 current_annotations.get("exomem.io/recovery-envelope") != recovery_envelope
-                or current_revision != expected_revision
+                or current_revision is None
                 or current_annotations.get("exomem.io/authorization-session-revision")
-                != expected_revision
+                != current_revision
                 or not isinstance(resource_version, str)
                 or not resource_version
             ):
                 raise MetadataConflict(
                     "authorization session bundle predecessor differs",
                     reason=ConflictReason.AUTHORIZATION_SESSION_BUNDLE_PREDECESSOR_DIFFERS,
+                )
+            if current_revision != expected_revision:
+                raise MetadataConflict(
+                    "authorization session bundle changed concurrently",
+                    reason=ConflictReason.AUTHORIZATION_SESSION_BUNDLE_CHANGED_CONCURRENTLY,
                 )
             body["metadata"]["resourceVersion"] = resource_version
             if effect_guard is not None:
@@ -1046,10 +1137,12 @@ class KubernetesCellAdapter:
                 reason=ConflictReason.AUTHORIZATION_SESSION_POD_GENERATION_COULD_NOT_BE_STAGED,
             ) from error
 
-    async def read_authorization_session_bundle(
+    async def _read_authorization_session_authority(
         self,
         metadata: OpaqueProviderMetadata,
-    ) -> dict[str, bytes] | None:
+        *,
+        require_provider_identity: bool,
+    ) -> AuthorizationSessionSecretSnapshot | None:
         try:
             secret = await asyncio.to_thread(
                 self._core.read_namespaced_secret,
@@ -1062,6 +1155,11 @@ class KubernetesCellAdapter:
             raise
         annotations = dict(getattr(secret.metadata, "annotations", None) or {})
         _require_annotations(annotations, metadata)
+        if self._identity_verifier is None and require_provider_identity:
+            raise MetadataConflict(
+                "authorization Secret provider recovery identity did not authenticate",
+                reason=ConflictReason.AUTHORIZATION_SECRET_RECOVERY_IDENTITY_UNAUTHENTICATED,
+            )
         if self._identity_verifier is not None:
             try:
                 self._identity_verifier.authenticate(
@@ -1109,7 +1207,47 @@ class KubernetesCellAdapter:
                 "authorization session bundle shape is invalid",
                 reason=ConflictReason.AUTHORIZATION_SESSION_BUNDLE_SHAPE_IS_INVALID,
             )
-        return files
+        recovery_envelope = annotations.get("exomem.io/recovery-envelope")
+        revision = hashlib.sha256(
+            files["keyring.json"] + files["control.json"] + files["serving-membership.json"]
+        ).hexdigest()
+        resource_version = getattr(getattr(secret, "metadata", None), "resource_version", None)
+        if require_provider_identity and (
+            not isinstance(recovery_envelope, str)
+            or not recovery_envelope
+            or annotations.get("exomem.io/authorization-session-revision") != revision
+            or not isinstance(resource_version, str)
+            or not resource_version
+        ):
+            raise MetadataConflict(
+                "authorization session bundle shape is invalid",
+                reason=ConflictReason.AUTHORIZATION_SESSION_BUNDLE_SHAPE_IS_INVALID,
+            )
+        return AuthorizationSessionSecretSnapshot(
+            files=files,
+            recovery_envelope=str(recovery_envelope or ""),
+            revision=revision,
+            resource_version=str(resource_version or ""),
+        )
+
+    async def read_authorization_session_authority(
+        self,
+        metadata: OpaqueProviderMetadata,
+    ) -> AuthorizationSessionSecretSnapshot | None:
+        return await self._read_authorization_session_authority(
+            metadata,
+            require_provider_identity=True,
+        )
+
+    async def read_authorization_session_bundle(
+        self,
+        metadata: OpaqueProviderMetadata,
+    ) -> dict[str, bytes] | None:
+        snapshot = await self._read_authorization_session_authority(
+            metadata,
+            require_provider_identity=False,
+        )
+        return None if snapshot is None else snapshot.files
 
     async def scale(
         self,
@@ -2111,6 +2249,7 @@ class KubernetesMaintenanceLeaseAdapter:
 
 
 CellRequester = Callable[..., Awaitable[Any]]
+CellStreamRequester = Callable[..., AbstractAsyncContextManager[Any]]
 
 
 class PrivateCellApiAdapter:
@@ -2125,10 +2264,17 @@ class PrivateCellApiAdapter:
     )
     _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
-    def __init__(self, *, request: CellRequester, internal_origin: str) -> None:
+    def __init__(
+        self,
+        *,
+        request: CellRequester,
+        internal_origin: str,
+        stream_request: CellStreamRequester | None = None,
+    ) -> None:
         if not internal_origin.startswith("http://") and not internal_origin.startswith("https://"):
             raise ValueError("internal cell origin must use HTTP or HTTPS")
         self._request = request
+        self._stream_request = stream_request
         self._origin = internal_origin.rstrip("/")
 
     def __repr__(self) -> str:
@@ -2244,6 +2390,82 @@ class PrivateCellApiAdapter:
                 reason=ConflictReason.PRIVATE_CELL_LIFECYCLE_RESPONSE_DATA_IS_INVALID,
             )
         return data
+
+    async def activation_proof(
+        self,
+        metadata: OpaqueProviderMetadata,
+        *,
+        credential: str,
+        protocol_version: str,
+        request: Mapping[str, object],
+        timeout_seconds: float,
+    ) -> dict[str, object]:
+        """Fetch one bare, bounded challenged publication proof."""
+
+        try:
+            if self._stream_request is None or not 0 < timeout_seconds <= 1:
+                raise ProtocolError
+            body = encode_message(request, "proofRequest")
+            headers = self._headers(
+                metadata,
+                credential=credential,
+                protocol_version=protocol_version,
+            )
+            headers.update(
+                {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                }
+            )
+            timeout = httpx.Timeout(
+                timeout_seconds,
+                connect=min(0.5, timeout_seconds),
+            )
+            async with asyncio.timeout(timeout_seconds):
+                async with self._stream_request(
+                    "POST",
+                    self._url(metadata, "activation/proof"),
+                    headers=headers,
+                    content=body,
+                    timeout=timeout,
+                    follow_redirects=False,
+                ) as response:
+                    if (
+                        response.status_code != 200
+                        or sum(len(name) + len(value) + 4 for name, value in response.headers.raw)
+                        > 8 * 1024
+                        or response.headers.get("content-encoding", "identity") != "identity"
+                    ):
+                        raise ProtocolError
+                    content_length = response.headers.get("content-length")
+                    if content_length is not None:
+                        try:
+                            if not 0 <= int(content_length) <= 16 * 1024:
+                                raise ProtocolError
+                        except ValueError:
+                            raise ProtocolError from None
+                    chunks: list[bytes] = []
+                    received = 0
+                    async for chunk in response.aiter_raw(4096):
+                        received += len(chunk)
+                        if received > 16 * 1024:
+                            raise ProtocolError
+                        if chunk:
+                            chunks.append(chunk)
+                    raw = b"".join(chunks)
+            return decode_message(raw, "proofResponse")
+        except (
+            ProtocolError,
+            TimeoutError,
+            httpx.TransportError,
+            UnicodeError,
+            ValueError,
+            TypeError,
+        ):
+            raise MetadataConflict(
+                "activation proof response is invalid",
+                reason=ConflictReason.PRIVATE_CELL_LIFECYCLE_RESPONSE_IS_INVALID,
+            ) from None
 
     async def health(
         self,

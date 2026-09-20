@@ -30,6 +30,7 @@ from . import (
     schema_v4,
     store,
 )
+from .transaction import digest as canonical_digest
 
 
 class CatalogPublicationError(RuntimeError):
@@ -149,6 +150,66 @@ def catalog_component_values(
         catalog_descriptor=prepared.catalog_descriptor,
     )
     return expected, target
+
+
+def hosted_catalog_plan_sha256(prepared: PreparedMarkdownCatalogPublication) -> str:
+    """Digest the exact content-free catalog predecessor and successor plan."""
+
+    expected, target = catalog_component_values(prepared)
+    return canonical_digest(
+        {
+            "kind": "catalog",
+            "expected": expected,
+            "target": target,
+            "mutation_count": prepared.mutation_count,
+        }
+    )
+
+
+def prepare_hosted_catalog_recovery(
+    prepared: PreparedMarkdownCatalogPublication | None,
+    *,
+    canonical_result: dict[str, object],
+    child_id: str = "catalog-0",
+) -> object | None:
+    """Freeze a one-publication canonical result before callers write bytes."""
+
+    if prepared is None:
+        return None
+    from .. import writer_lease
+
+    command = writer_lease.active_mutation_command_name()
+    selector_digest = writer_lease.active_mutation_command_digest()
+    if command is None or selector_digest is None:
+        return None
+
+    control = prepared.expected_control
+    return writer_lease.prepare_catalog_attempt_recovery(
+        vault_root=prepared.vault_root,
+        command=command,
+        selector_digest=selector_digest,
+        cell_id=control.cell_id,
+        logical_vault_id=control.logical_vault_id,
+        registry_attachment_id=control.registry_attachment_id,
+        attachment_epoch=control.attachment_epoch,
+        activation_store_id=str(control.activation_store_id),
+        catalog_plan_sha256=hosted_catalog_plan_sha256(prepared),
+        canonical_result=canonical_result,
+        dependency_manifest={
+            "catalog_generations": [
+                prepared.expected.catalog_generation,
+                prepared.target_publication.active.catalog_generation,
+            ],
+            "projection_namespaces": [
+                prepared.expected.projection_namespace_id,
+                prepared.target_publication.active.projection_namespace_id,
+            ],
+            "publications": [
+                prepared.expected.activation_state_digest,
+                prepared.target_publication.active.activation_state_digest,
+            ],
+        },
+    )
 
 
 def current_catalog_component_value(
@@ -1550,7 +1611,14 @@ def publish_markdown_batch(
     if prepared is None:
         return None
     connection: sqlite3.Connection | None = None
+    hosted_child = None
     try:
+        from .. import writer_lease
+
+        hosted_child = writer_lease.current_prepared_hosted_child(
+            kind="catalog",
+            plan_sha256=hosted_catalog_plan_sha256(prepared),
+        )
         target_manifest = projection_store.stage_variant_store(
             prepared.vault_root,
             key=prepared.target_key,
@@ -1619,11 +1687,14 @@ def publish_markdown_batch(
                     now=prepared.activated_at,
                 )
             ),
+            hosted_child=hosted_child,
         )
         if result != prepared.target_publication:
             raise CatalogPublicationError(
                 "the committed governance catalog does not match its reviewed target"
             )
+        if hosted_child is not None:
+            writer_lease.mark_prepared_hosted_child_published(hosted_child.child_id)
         return result
     except (
         authorization_custody.AuthorizationCustodyUnavailable,
@@ -1650,6 +1721,10 @@ def publish_markdown_batch(
                 )
                 target = schema_v4.load_active_tuple_pointer(connection)
                 if target == prepared.target_publication.active:
+                    if hosted_child is not None:
+                        writer_lease.mark_prepared_hosted_child_published(
+                            hosted_child.child_id
+                        )
                     return prepared.target_publication
             except (
                 authorization_custody.AuthorizationCustodyUnavailable,

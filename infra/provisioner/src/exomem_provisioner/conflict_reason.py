@@ -82,6 +82,8 @@ class ConflictReason(StrEnum):
     ORIGINAL_AUTHORIZATION_SESSION_IDENTITY_UNAVAILABLE = (
         "original-authorization-session-identity-unavailable"
     )
+    ACTIVATION_ACK_TRUST_BUNDLE_UNAVAILABLE = "activation-ack-trust-bundle-unavailable"
+    ACTIVATION_ACK_TRUST_CONFIG_MAP_INVALID = "activation-ack-trust-config-map-invalid"
     RUNTIME_ATTESTATION_AUTHORITY_UNAVAILABLE = "runtime-attestation-authority-unavailable"
     RUNTIME_DRAIN_NOT_ACKNOWLEDGED = "runtime-drain-not-acknowledged"
 
