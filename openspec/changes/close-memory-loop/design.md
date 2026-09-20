@@ -219,6 +219,16 @@ disambiguation without a user nudge. The scale gate uses a unique authored alias
 to exercise useful role work at every corpus size; it does not establish that
 the common-prefix relevance case is solved.
 
+The first managed candidate trial did not meet live acceptance despite passing
+the warm snapshot and scale gates. Concurrent startup readers built the same
+private-identity inventory; generation churn forced an all-domain locked scan
+and activation failed closed on contention. A later request also exposed large
+unattributed leaf time. Live acceptance therefore includes promotion, current
+governance and background contention, with timings retained on failures. Any
+inventory prewarm must bind its proof to the shared identity generation and
+revalidate at promotion; merely carrying the existing unversioned cache would
+weaken physical-alias checks. These remain delivery work before enablement.
+
 | Contract | Owner | Programme integration |
 | --- | --- | --- |
 | Activation, roles, host continuity | Canonical `context-activation`, `context-roles`, `context-activation-continuity`; active `make-anchor-resolution-sound` | Reconcile current merges and convention work before wiring activation; preserve their requirements |

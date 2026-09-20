@@ -62,28 +62,27 @@ _KB_WRITE = re.compile(
 
 REMINDER = (
     "[Exomem capture check] Reuse evidence; skip transient code/test/CI. "
-    "Capture new durable outcomes under live policy. "
+    "Capture durable outcomes per live policy. "
     "Decompose before routing; open notes have no priority. Keep hypotheses attributed/uncertain. "
     "Check coverage once/episode. Stable preference/recurring routine/historical baseline/"
-    "durable affiliation needs stability or recurrence plus reusable comparison/interpretation/"
-    "decision value; "
-    "fleeting/one-off/incidental/trivial/tentative events stay quiet. At balanced/maximal, "
+    "durable affiliation needs stability or recurrence plus reusable comparison/interpretation/decision value; "
+    "fleeting/one-off/incidental/trivial/tentative events: quiet. At balanced/maximal, "
     "after primary work, before the final response, "
     'review_memory(mode="attention", categories=["entity_recurrence"], limit=3) once per session; '
-    "no local scan; no model. Active agent resolves entity registry/knowledge packs: "
+    "no local scan; no model. Active agent uses active entity registry and selected knowledge packs: "
     'connect_memory(operation="resolve-entity"); stop on ambiguity; single incidental mention stays '
-    "in context. Uniquely resolved Entity: facet, else compiled observation/proactive_capture; "
-    "affiliation relation/link_acceptance; compatible Records only. Hydrate via edit_memory before "
-    "duplicating; else "
+    "in context. Uniquely resolved Entity: narrow additive entity facet, else concise compiled "
+    "observation/proactive_capture; "
+    "affiliation relation/link_acceptance; compatible Records only. Hydrate: edit_memory first; else "
     'connect_memory(operation="create-entity") only for stable recurring identity beyond source. '
     "Entity creation/substantial curation: confirmed "
     "restructure_execution. Recheck on confirmed batch terminal receipt; closure-only eighth recheck. "
-    "Distilled notes, not transcripts. replace_memory supersedes contradicted "
+    "Distil; no transcripts. replace_memory supersedes contradicted "
     "conclusions, not corrections beside them. Stated intent -> "
     "Planning/plan_memory; observed outcome -> Records/record_memory. Generated draft stays "
     "ephemeral; selected is not write consent: proactive_capture keeps exact Source/Evidence bytes "
     "by role, not MIME. No handle: non-committing handoff; delivery needs Evidence receipt/Record; "
-    "no remote byte inference. Missing schema: "
+    "no remote byte inference. No schema: "
     "structural_suggestions/restructure_execution; relations: link_acceptance. Else/no "
     "Knowledge Base: stop."
 )

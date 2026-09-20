@@ -18,7 +18,7 @@ from starlette.testclient import TestClient
 from exomem import commands, server, working_set_index, working_set_runtime
 from exomem.__main__ import main as cli_main
 
-TURN = "I'm planning to tow the Cargo Sled north — how much depot stock is left?"
+TURN = "I'm planning to tow the Cargo Sled north — what are its constraints?"
 
 #: Blocks that must agree across the three doors. `timings` is excluded because
 #: wall time is not a contract, and `due_state` because the shared advisory
@@ -40,8 +40,14 @@ PARITY_BLOCKS = (
 def activation_vault(vault: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     from test_working_set_index import _seed_planning, _seed_structure
 
+    from exomem import lexstore
+
     _seed_structure(vault)
     _seed_planning(vault)
+    # All doors must see the same published catalog. Activation deliberately
+    # does not repair it; CLI/REST initialization must not change the evidence
+    # halfway through a parity assertion.
+    lexstore.ensure_fresh(vault)
     working_set_runtime.reset_caches_for_tests()
     working_set_index.WorkingSetIndex(vault).rebuild()
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
@@ -131,6 +137,8 @@ def test_three_doors_return_the_same_packet(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     direct = commands.op_activate_context(activation_vault, turn=TURN, max_chars=2000)
+    assert direct["abstained"] is False
+    assert direct["units"]
 
     code, out = _run_cli(
         ["activate", TURN, "--max-chars", "2000", "--json"], capsys
