@@ -282,6 +282,21 @@ def cold_start_budget() -> float:
     return DEFAULT_COLD_START_SECONDS
 
 
+def cold_start_window(timeout: float | None = None, floor: float | None = None) -> float:
+    """The window a replacement gets to report ready while nothing else serves.
+
+    One source of truth for every wait that begins after the previous worker
+    has stopped: the supervisor's cold start, its promotion and cold-start
+    waits during a handoff, and the operator client's polling deadline. The
+    floor is a parameter so a test can shrink the window without shortening the
+    production one.
+    """
+    return max(
+        COLD_START_FLOOR_SECONDS if floor is None else floor,
+        cold_start_budget() if timeout is None else timeout,
+    )
+
+
 class Supervisor:
     """Serialize replacement while the ingress retains client connections."""
 
@@ -296,6 +311,7 @@ class Supervisor:
         transition_timeout: float = 40,
         standby_warm_timeout: float | None = None,
         cold_start_timeout: float | None = None,
+        cold_start_floor: float | None = None,
     ):
         self.records = ReleaseRecords(directory)
         self.initial_target = initial_target
@@ -309,6 +325,9 @@ class Supervisor:
         self.cold_start_timeout = (
             cold_start_budget() if cold_start_timeout is None else cold_start_timeout
         )
+        self.cold_start_floor = (
+            COLD_START_FLOOR_SECONDS if cold_start_floor is None else cold_start_floor
+        )
         self.lock = asyncio.Lock()
         self.phase = "unavailable"
         self.transition_task: asyncio.Task | None = None
@@ -317,6 +336,10 @@ class Supervisor:
         #: went away can still read what happened.
         self.transition_id: str | None = None
         self.last_transition: dict[str, Any] | None = None
+
+    def _replacement_budget(self) -> float:
+        """How long a replacement may take to report ready with nothing serving."""
+        return cold_start_window(self.cold_start_timeout, self.cold_start_floor)
 
     async def start(self) -> None:
         if self.records.pending() is not None:
@@ -327,9 +350,7 @@ class Supervisor:
         target = await self.runtime.inspect(target)
         # A window shorter than the cold worker's warm stops it mid-warm, and
         # the unit restarts into the same cold catalog.
-        client = await self.runtime.start(
-            target, timeout=max(COLD_START_FLOOR_SECONDS, self.cold_start_timeout)
-        )
+        client = await self.runtime.start(target, timeout=self._replacement_budget())
         self.records.accept(target)
         self.ingress.resume(client)
         self.phase = "ready"

@@ -1058,3 +1058,301 @@ def test_a_later_failure_does_not_inherit_an_earlier_promotion_record(tmp_path):
         assert "promotion" not in result["handoff"], result["handoff"]
 
     asyncio.run(scenario())
+
+
+class _SlowReplacementRuntime(_StandbyRuntime):
+    """A replacement that is alive, on the right release, and not ready yet.
+
+    This is the production case the 2026-09-20 outage was: the promoted worker
+    delegated its retrieval catalog to a background repair, so `/health/ready`
+    stayed `not_ready` for minutes while the process itself was healthy. Like
+    the real runtime, the readiness wait here is bounded by the budget the
+    supervisor hands it and by nothing else.
+    """
+
+    def __init__(self, ready_after: float = 0.6):
+        super().__init__()
+        self.ready_after = ready_after
+        self.replacement_timeouts: list[float] = []
+
+    async def _await_readiness(self, timeout: float) -> None:
+        self.replacement_timeouts.append(timeout)
+        async with asyncio.timeout(timeout):
+            await asyncio.sleep(self.ready_after)
+
+    async def start(self, target, timeout):
+        self.events.append("start")
+        assert self.pid == 0, "replacement overlapped the worker"
+        await self._await_readiness(timeout)
+        self.pid = 200
+        return "new-upstream"
+
+    async def promote_standby(self, *, migrated, timeout):
+        self.events.append("promote")
+        assert self.pid == 0, "promotion overlapped the previous worker"
+        self.promoted = migrated
+        self.pid = 200
+        # Ownership changes hands when the POST is accepted, before readiness.
+        self.promotion_record = {"ok": True, "snapshot": "advanced", "migrated": migrated}
+        await self._await_readiness(timeout)
+        return "new-upstream", self.promotion_record
+
+
+def _slow_supervisor(tmp_path, *, ready_after=0.6, transition_timeout=0.3, cold=3.0):
+    module = _manager()
+    ingress, runtime = _Ingress(), _SlowReplacementRuntime(ready_after)
+    target = {"python": sys.executable, "version": "1.2.3"}
+    manager = module.Supervisor(
+        module.private_directory(tmp_path / "managed"),
+        initial_target=target,
+        ingress=ingress,
+        runtime=runtime,
+        identity={"unit": "sample.service", "invocation": "abc", "boot": "boot"},
+        transition_timeout=transition_timeout,
+        cold_start_timeout=cold,
+        cold_start_floor=0.0,
+    )
+    return manager, ingress, runtime, target
+
+
+def test_a_cold_replacement_is_awaited_under_the_cold_start_budget(tmp_path):
+    """Once the old worker is stopped there is no rollback left to protect.
+
+    Failing at the cutover budget turns "unavailable for another minute" into
+    "unavailable until a person resumes", and the resume runs into the same
+    wall: it kills the repair and restarts it from zero.
+    """
+
+    async def scenario():
+        manager, ingress, runtime, target = _slow_supervisor(tmp_path)
+        runtime.standby_capable = False
+        result = await manager.upgrade(target)
+        assert result["ok"] is True
+        assert manager.records.active() == target
+        assert manager.records.pending() is None
+        assert ingress.events[-1] == ("resume", "new-upstream")
+        # The replacement wait is sized by the cold-start budget, not by
+        # whatever is left of the 40 s cutover budget.
+        assert runtime.replacement_timeouts == [3.0]
+
+    asyncio.run(scenario())
+
+
+def test_status_shows_the_transition_in_flight_while_the_replacement_warms(tmp_path):
+    """An operator polling through the longer wait must not read a finished state."""
+
+    async def scenario():
+        manager, ingress, runtime, target = _slow_supervisor(tmp_path)
+        runtime.standby_capable = False
+        seen: list[dict] = []
+        original = runtime._await_readiness
+
+        async def observed(timeout):
+            seen.append(manager.status())
+            await original(timeout)
+
+        runtime._await_readiness = observed
+        result = await manager.upgrade(target)
+        assert result["ok"] is True
+        assert seen and seen[0]["phase"] == "upgrading"
+        assert seen[0]["pending"]["phase"] == "starting"
+
+    asyncio.run(scenario())
+
+
+def test_a_promoted_standby_is_awaited_rather_than_stopped_mid_repair(tmp_path):
+    """The promoted worker holds the writer lease; it is not a spare candidate.
+
+    A client write during the standby warm makes promotion report `advanced`,
+    which is exactly the case the short promote wait applied to.
+    """
+
+    async def scenario():
+        manager, ingress, runtime, target = _slow_supervisor(tmp_path)
+        result = await manager.upgrade(target)
+        assert result["ok"] is True
+        assert result["handoff"]["promotion"]["snapshot"] == "advanced"
+        assert runtime.promoted is False, "this promotion ran no migration"
+        # The worker that already owns state is never stopped for being slow.
+        assert runtime.events == ["inspect", "start-standby", "stop", "promote"]
+        assert "discard-standby" not in runtime.events
+        assert runtime.replacement_timeouts == [3.0]
+
+    asyncio.run(scenario())
+
+
+def test_resume_awaits_the_same_slow_replacement_under_the_cold_start_budget(tmp_path):
+    """`--resume` is the recovery path; it must not re-kill the repair it resumes."""
+
+    async def scenario():
+        manager, ingress, runtime, target = _slow_supervisor(tmp_path)
+        runtime.pid = 0
+        manager.records.begin(target, worker_pid=0)
+        manager.records.phase("failed", worker_pid=0)
+        result = await manager.upgrade(None, resume=True)
+        assert result["ok"] is True
+        assert result["handoff"]["standby"] == "unsupported"
+        assert manager.records.pending() is None
+        assert manager.records.active() == target
+        assert runtime.replacement_timeouts == [3.0]
+
+    asyncio.run(scenario())
+
+
+def test_a_replacement_that_never_reports_ready_still_fails_terminally(tmp_path):
+    """Later, not never: the terminal behaviour is unchanged, only its timing."""
+    import time as _time
+
+    async def scenario():
+        manager, ingress, runtime, target = _slow_supervisor(
+            tmp_path, ready_after=30.0, transition_timeout=0.25, cold=0.6
+        )
+        started = _time.monotonic()
+        result = await manager.upgrade(target)
+        elapsed = _time.monotonic() - started
+        assert result["ok"] is False
+        assert elapsed >= 0.45, (
+            f"the replacement wait ended after {elapsed:.3f}s; it was cut short by "
+            "the cutover budget instead of the cold-start budget"
+        )
+        assert manager.phase == "recovery-required"
+        assert ingress.events[-1] == "unavailable"
+        assert manager.records.pending()["phase"] == "failed"
+        assert manager.records.active() is None
+        assert result["handoff"]["promotion"]["snapshot"] == "advanced"
+
+    asyncio.run(scenario())
+
+
+def test_a_replacement_that_exits_before_readiness_still_fails_promptly(tmp_path):
+    """A longer wait is only for a live candidate that has not finished warming."""
+    import time as _time
+
+    module = _manager()
+
+    class _ExitedChild:
+        pid = 4242
+        returncode = 1
+
+    async def scenario():
+        runtime = module.WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1)
+
+        async def spawn(command, *, standby=False):
+            runtime.child = _ExitedChild()
+
+        runtime._spawn = spawn
+        started = _time.monotonic()
+        with pytest.raises(RuntimeError, match="exited before readiness"):
+            await runtime.start({"python": sys.executable, "version": "1.2.3"}, timeout=300)
+        assert _time.monotonic() - started < 5
+
+    asyncio.run(scenario())
+
+
+def test_admission_during_the_longer_wait_stays_bounded_and_explicit(tmp_path):
+    """Pausing already answers an outlasting request; it never queues unbounded.
+
+    `ServiceIngress._queue` gives a paused request `queue_timeout` seconds and
+    then replies that it was not dispatched, so the longer replacement wait
+    needs no change of admission answer.
+    """
+    from exomem.service_ingress import IngressLimits, ServiceIngress
+
+    module = _manager()
+
+    async def scenario():
+        ingress = ServiceIngress(IngressLimits(queue_timeout=0.05))
+        ingress.resume("old-upstream")
+        runtime = _SlowReplacementRuntime(ready_after=0.6)
+        runtime.standby_capable = False
+        target = {"python": sys.executable, "version": "1.2.3"}
+        manager = module.Supervisor(
+            module.private_directory(tmp_path / "managed"),
+            initial_target=target,
+            ingress=ingress,
+            runtime=runtime,
+            identity={"unit": "sample.service", "invocation": "abc", "boot": "boot"},
+            transition_timeout=0.3,
+            cold_start_timeout=3.0,
+            cold_start_floor=0.0,
+        )
+        waiting = asyncio.Event()
+        original = runtime._await_readiness
+
+        async def observed(timeout):
+            waiting.set()
+            await original(timeout)
+
+        runtime._await_readiness = observed
+        upgrade = asyncio.create_task(manager.upgrade(target))
+        await asyncio.wait_for(waiting.wait(), 5)
+
+        sent: list[dict] = []
+
+        async def receive():
+            return {
+                "type": "http.request",
+                "body": b'{"jsonrpc":"2.0","id":"call-9","method":"tools/call"}',
+                "more_body": False,
+            }
+
+        async def send(message):
+            sent.append(message)
+
+        await asyncio.wait_for(
+            ingress(
+                {
+                    "type": "http",
+                    "http_version": "1.1",
+                    "method": "POST",
+                    "scheme": "http",
+                    "path": "/mcp",
+                    "raw_path": b"/mcp",
+                    "query_string": b"",
+                    "headers": [(b"host", b"service.example")],
+                },
+                receive,
+                send,
+            ),
+            2,
+        )
+        body = b"".join(
+            message.get("body", b"")
+            for message in sent
+            if message["type"] == "http.response.body"
+        )
+        error = json.loads(body)
+        assert error["id"] == "call-9"
+        # Bounded by the queue budget and explicit about not being dispatched --
+        # and the queue answer, not "worker unavailable": ingress stays paused.
+        assert error["error"]["message"] == "Request not dispatched: queue wait timed out"
+        result = await asyncio.wait_for(upgrade, 5)
+        assert result["ok"] is True
+        await ingress.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_the_operator_polling_deadline_covers_the_cold_start_budget(monkeypatch):
+    """The client must not report failure while the supervisor legitimately waits."""
+    from exomem import service_upgrade
+
+    module = _manager()
+    monkeypatch.delenv(module.STANDBY_WARM_ENV, raising=False)
+    monkeypatch.delenv(module.COLD_START_ENV, raising=False)
+    budget = service_upgrade._transition_budget()
+    assert budget >= module.standby_warm_budget() + module.cold_start_window()
+    monkeypatch.setenv(module.COLD_START_ENV, "900")
+    assert service_upgrade._transition_budget() >= budget + 600
+
+
+def test_a_successful_handoff_reports_how_long_the_replacement_took(tmp_path):
+    async def scenario():
+        manager, ingress, runtime, target = _slow_supervisor(tmp_path, ready_after=0.3)
+        result = await manager.upgrade(target)
+        assert result["ok"] is True
+        ready_after = result["handoff"]["ready_after_ms"]
+        assert ready_after >= 250, ready_after
+        assert ready_after <= result["handoff"]["unavailable_ms"]
+
+    asyncio.run(scenario())
