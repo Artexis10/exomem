@@ -38,6 +38,25 @@ _DATABASE_SUFFIX = ".vocabulary-authority.sqlite"
 _MARKER_VERSION = 2
 
 
+def _activation_acknowledgement_is_deployed() -> bool:
+    """Report whether this deployment advances the activation epoch per write.
+
+    An incomplete capability does not advance anything, so the partial shape the
+    client refuses is reported here as absent rather than raised: this is a
+    compatibility question, not the enforcement point for the capability itself.
+    """
+
+    from .hosted_activation_ack_client import (
+        ActivationAcknowledgementUnavailable,
+        is_hosted_activation_ack_enabled,
+    )
+
+    try:
+        return is_hosted_activation_ack_enabled()
+    except ActivationAcknowledgementUnavailable:
+        return False
+
+
 @dataclass(frozen=True, slots=True)
 class AuthorityArtifactPaths:
     marker_path: Path
@@ -501,6 +520,20 @@ class VocabularyAuthority:
         floor = getattr(custody.control, "vocabulary_authority_floor", 1)
         if isinstance(floor, bool) or floor not in {1, 2}:
             raise VocabularyAuthorityUnavailable
+        if floor == 2 and _activation_acknowledgement_is_deployed():
+            # The persisted activation generation is the activation epoch, and
+            # `_activation_matches` demands exact equality on every later check.
+            # Acknowledgement advances that epoch on every governed write, so the
+            # two together would invalidate every outstanding grant and
+            # reservation one write after the authority was activated.
+            #
+            # Refusing costs an operator an explicit message at configuration
+            # time. Allowing it costs a cell its whole vocabulary authority,
+            # silently, on the next capture. Until the generation stops tracking
+            # the epoch, they cannot both be on.
+            raise VocabularyAuthorityConflict(
+                "vocabulary authority floor 2 cannot run with activation acknowledgement"
+            )
         return floor
 
     def _marker(self, custody: object) -> dict[str, Any] | None:

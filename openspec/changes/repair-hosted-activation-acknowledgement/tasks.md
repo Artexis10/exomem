@@ -41,7 +41,7 @@
   - [ ] 5.4.2 Call it from the governance migration coordinator and the live lifecycle path before any acknowledgement work starts, and surface the classification in the operation's recorded evidence.
   - [ ] 5.4.3 Describe forward recovery after an activation advance and refuse an incompatible rollback; regenerate signed target and final consumer evidence only for the released exact source. Preserve legacy unknown mutation outcomes even when exact activation-only reconciliation restores parity; never invent their missing receipts or replace their identity. Bind the capability to compatible runtime/provisioner/chart releases and deployment locks. Describe forward recovery after an activation advance and refuse incompatible rollback; regenerate signed target and final consumer evidence only for the released exact source.
 - [x] 5.5 Implement the closed deployment-lock capability/trust extension, both signed-source declarations, exact conditional trust/egress recovery envelopes, retained encrypted operation binding, and unchanged-public-request replay across trust rotation. Verify capable-forward refusal without binding, legacy shape preservation, active-versus-rollback selection, and original trust retention.
-- [ ] 5.6 Decouple the vocabulary-authority generation from the activation epoch, or refuse `vocabulary_authority_floor == 2` on a cell with acknowledgement capability. Per-write activation advancement invalidates every grant and reservation stamped with the pinned generation. Alpha cells mint at floor 1, so this is latent; add a test that fails if floor 2 and acknowledgement capability are ever combined.
+- [x] 5.6 Decouple the vocabulary-authority generation from the activation epoch, or refuse `vocabulary_authority_floor == 2` on a cell with acknowledgement capability. Taken by refusal, in `VocabularyAuthority._custody_floor`: the two are named incompatible at the single point where the floor is read, so the failure is an explicit message at configuration time rather than a cell silently losing its authority mid-capture. Decoupling the generation stays the better long-term fix and is now the only thing standing between floor 2 and the capability. Per-write activation advancement invalidates every grant and reservation stamped with the pinned generation. Alpha cells mint at floor 1, so this is latent; add a test that fails if floor 2 and acknowledgement capability are ever combined.
 
 ## 6. Verify and deliver the repair
 
@@ -85,7 +85,10 @@ Deliberately left unchecked, with the reason:
   issued artifact, which needs the SOPS age recipients. The selection
   completeness check already counts the TLS kind, so that route cannot land
   unnoticed. The trust half was already governed and needed no new work.
-- 5.4, 6.1-6.4 — not started.
+- 5.4 — 5.4.1 done: the classifier exists and is green. 5.4.2 wiring and 5.4.3
+  rollback/forward-recovery remain.
+- 5.6 — done by refusal; see the task note.
+- 6.1-6.4 — not started.
 
 Two interactions found while recovering this work are not covered by design.md and
 must be closed before 6.3:
