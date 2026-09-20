@@ -804,6 +804,85 @@ def enroll_hosted_governance_bundle(
     )
 
 
+def advance_hosted_activation_bundle(
+    files: Mapping[str, bytes],
+    *,
+    expected_cell_id: str,
+    expected_logical_vault_id: str,
+    expected_replica_id: str,
+    expected_software_version: str | None,
+    expected_schema_version: int,
+    expected_recovery_envelope: str,
+    expected_registry_attachment_id: str,
+    activation_store_id: str,
+    predecessor_epoch: int,
+    predecessor_digest: str,
+    successor_epoch: int,
+    successor_digest: str,
+    now: int,
+) -> HostedAuthorizationBundle:
+    """Transform fresh serving custody after a caller verifies publication proof.
+
+    This function performs no publication and grants no acknowledgement
+    authority. The caller must authenticate the current cell, verify challenged
+    committed-publication evidence, and CAS against the inspected source revision.
+    Membership, keys, attachment and lifetime remain byte-for-byte unchanged.
+    """
+    store_id = _required_identifier(activation_store_id)
+    attachment_id = _required_identifier(expected_registry_attachment_id)
+    before_epoch = _required_time(predecessor_epoch)
+    after_epoch = _required_time(successor_epoch)
+    if (
+        expected_schema_version != 4
+        or after_epoch != before_epoch + 1
+        or any(
+            not isinstance(value, str) or _SHA256.fullmatch(value) is None
+            for value in (predecessor_digest, successor_digest)
+        )
+    ):
+        raise MetadataConflict(
+            "authorization activation successor is invalid",
+            reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_TRANSITION_IS_INVALID,
+        )
+    identity = {
+        "expected_cell_id": expected_cell_id,
+        "expected_logical_vault_id": expected_logical_vault_id,
+        "expected_replica_id": expected_replica_id,
+        "expected_software_version": expected_software_version,
+        "expected_schema_version": expected_schema_version,
+        "expected_recovery_envelope": expected_recovery_envelope,
+        "now": now,
+    }
+    source = inspect_hosted_authorization_bundle(files, **identity)
+    current = (source.activation_epoch, source.activation_state_digest)
+    if (
+        not source.governance_enrolled
+        or source.registry_attachment_id != attachment_id
+        or source.activation_store_id != store_id
+        or source.replica_state != "SERVING"
+        or source.issuance_stopped
+        or current not in {(before_epoch, predecessor_digest), (after_epoch, successor_digest)}
+    ):
+        raise MetadataConflict(
+            "authorization activation predecessor differs",
+            reason=ConflictReason.AUTHORIZATION_MEMBERSHIP_TRANSITION_IS_INVALID,
+        )
+    if current == (after_epoch, successor_digest):
+        return source
+    # Read only immutable bytes authenticated by inspect, not the input mapping.
+    keyring = json.loads(source.keyring)
+    control = json.loads(source.control)
+    signer = next(
+        entry for entry in keyring["accepted_keys"] if entry["key_id"] == control["signing_key_id"]
+    )
+    key = base64.b64decode(signer["key"].encode("ascii") + b"=", altchars=b"-_", validate=True)
+    control.update(activation_epoch=after_epoch, activation_state_digest=successor_digest)
+    control["mac"] = _mac(key, _control_mac_input(control))
+    return inspect_hosted_authorization_bundle(
+        {**source.files, "control.json": _canonical(control)}, **identity
+    )
+
+
 def transition_hosted_authorization_bundle(
     files: Mapping[str, bytes],
     *,

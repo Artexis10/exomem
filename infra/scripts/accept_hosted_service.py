@@ -187,7 +187,7 @@ def _mcp_error_detail(payload: object, *, secrets_to_remove: Sequence[str] = ())
     candidates = [payload]
     detail = ""
     for _depth in range(5):
-        children = []
+        children: list[object] = []
         for candidate in candidates[:16]:
             if isinstance(candidate, str) and len(candidate) <= 4096:
                 match = re.search(r"\b[A-Z][A-Z0-9_]{2,95}: [^\r\n]+", candidate)
