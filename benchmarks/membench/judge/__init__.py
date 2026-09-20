@@ -33,6 +33,7 @@ from membench.judge.blinding import (
     leakage_scan,
     normalize_for_judge,
     shuffled,
+    structural_leakage_scan,
 )
 from membench.judge.handshake import (
     HandshakeRequest,
@@ -75,5 +76,6 @@ __all__ = [
     "normalize_for_judge",
     "parse_judge_verdict",
     "shuffled",
+    "structural_leakage_scan",
     "write_requests",
 ]
