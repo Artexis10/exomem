@@ -959,13 +959,26 @@ class _LinkProjector:
 
     @classmethod
     def create(
-        cls, root: Path, manifest: collections.CollectionManifest, *, policy: Any | None = None
+        cls,
+        root: Path,
+        manifest: collections.CollectionManifest,
+        *,
+        policy: Any | None = None,
+        allow_cold_index: bool = True,
     ) -> _LinkProjector:
         # Keep the common numeric/event query path independent of vault-wide
         # link lookup. Even link-bearing collections defer that lookup until a
         # bare title or memory identity actually needs it.
+        #
+        # `allow_cold_index=False` (bounded-latency callers only, e.g. late
+        # link projection) starts already in the existing "index incomplete"
+        # state instead of "not yet attempted": a bare title or memory
+        # reference then resolves exactly as it already does whenever a cold
+        # walk hits its cap mid-scan -- withheld, never a new public state --
+        # and `vault.walk_vault_md` is never called. Path-shaped links never
+        # needed the index and keep resolving and being authorized as today.
         empty = vault.WikilinkResolver.from_entries(root, ())
-        return cls(root, manifest, empty, {}, {}, None, {}, policy)
+        return cls(root, manifest, empty, {}, {}, None if allow_cold_index else False, {}, policy)
 
     def _candidate_index_available(self) -> bool:
         if self.candidate_index_complete is not None:
@@ -1210,9 +1223,19 @@ def query_collection(
     collection: str | Path | collections.CollectionManifest,
     *,
     semantic_profile: str = "records",
+    late_link_projection: bool = False,
     **kwargs: Any,
 ) -> record_formats.RecordQueryResult:
-    """Query released Records only; authorization happens before adapter parsing."""
+    """Query released Records only; authorization happens before adapter parsing.
+
+    `late_link_projection` is an internal opt-in, not a request parameter --
+    no public tool surface declares it, so nothing in a caller's input can
+    ever set it. It only ever comes from an internal caller such as the
+    current-state lookup, and it asks `record_formats.query_collection` to
+    defer link governance until after the row limit and to skip a cold
+    vault-wide candidate-index build meanwhile; see its docstring for the
+    preconditions that must hold before that request is actually honoured.
+    """
     root = Path(vault_root)
     with egress.disclosure_boundary(root, "record_query", join_existing=True) as collector:
         policy = egress.policy_module.load(root)
@@ -1229,7 +1252,9 @@ def query_collection(
             )
         if not _authorize(root, manifest.storage.source, receipt=True, policy=policy):
             raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
-        links = _LinkProjector.create(root, manifest, policy=policy)
+        links = _LinkProjector.create(
+            root, manifest, policy=policy, allow_cold_index=not late_link_projection
+        )
         view = kwargs.get("view")
         if view is not None:
             _authorize_saved_view(root, manifest, view, links)
@@ -1239,6 +1264,7 @@ def query_collection(
             authorize_path=lambda path: _authorize(root, path, receipt=True, policy=policy),
             project_values=links,
             project_child_value=links.project_presentation_value,
+            late_link_projection=late_link_projection,
             **kwargs,
         )
         egress.emit_boundary_receipt(collector)

@@ -2078,6 +2078,151 @@ def _source_versions_for_returned_rows(
     )
 
 
+def _field_is_link(spec: collections.FieldSpec) -> bool:
+    """True for a link field or an array of links -- the only types link
+    governance ever transforms; every other type passes through unchanged."""
+    if spec.type == "link":
+        return True
+    return spec.type == "array" and spec.items is not None and spec.items.type == "link"
+
+
+def _late_link_projection_safe(
+    manifest: collections.CollectionManifest,
+    *,
+    filters: list[dict] | None,
+    columns: list[str] | None,
+    sort_by: str | None,
+    date_column: str | None,
+    date_from: str | None,
+    date_to: str | None,
+    aggregate: str | None,
+    expand_children: bool,
+    expand_child: str | None,
+) -> bool:
+    """The query function's OWN safety check for an already-opted-in caller.
+
+    `late_link_projection=True` is never inferred from a caller's `columns`,
+    `sort_by` or any other request-shaped argument -- it is an explicit,
+    internal-only opt-in (see `query_collection`'s docstring). This is what
+    that opt-in must still clear before it is honoured, so a caller asking
+    for it cannot accidentally get an unsafe result.
+
+    Link projection is *not* the identity function on every non-link type:
+    `_LinkProjector.__call__` also drops a field's key outright whenever the
+    field is an array (any item type, link or not) and its value governs to
+    empty -- see its `spec.type == "array" and not value` branch. A dropped
+    key and a present key holding an empty value can sort or filter
+    differently, so raw and governed row *selection* (sort, date range,
+    limit/offset) only provably agree for a `sort_by` / effective date field
+    that is scalar, non-array *and* non-link: there the projector never
+    changes the value at all, and even the degenerate case of an
+    already-`None` raw value is harmless, because a dropped key and a key
+    holding `None` both read back as `None` through `_get_field` -- key
+    presence cannot diverge either. This opt-in exists for exactly one
+    caller shape today (the current-state lookup, which asks for every
+    field via `columns=None` and only sorts on a plain scalar date), not as
+    a general column-projected or array-sorted alternative to the eager
+    path, so any explicit `columns` also refuses here (see
+    `_late_projected_result`'s docstring for why). When this returns False,
+    the ordinary eager path runs -- the correct behaviour for that query,
+    not a degraded one.
+    """
+    if filters or aggregate is not None:
+        return False
+    if expand_children or expand_child is not None:
+        return False
+    if columns:
+        return False
+    fields = manifest.schema.fields
+    roots: set[str] = set()
+    if sort_by:
+        roots.add(sort_by.split(".", 1)[0])
+    effective_date_column = date_column or ("date" if (date_from or date_to) else None)
+    if effective_date_column:
+        roots.add(effective_date_column.split(".", 1)[0])
+    return not any(
+        name in fields and (_field_is_link(fields[name]) or fields[name].type == "array")
+        for name in roots
+    )
+
+
+def _late_projected_result(
+    rows: list[dict[str, Any]],
+    *,
+    path: str,
+    format: str,
+    sort_by: str | None,
+    descending: bool,
+    limit: int | None,
+    offset: int,
+    date_from: str | None,
+    date_to: str | None,
+    date_column: str | None,
+    columns: list[str] | None,
+    project_values: Callable[[Mapping[str, Any]], dict[str, Any]],
+) -> query_data.QueryDataResult:
+    """Window on raw values, then run the SAME governed projector exactly
+    once per surviving row -- record parsing stays O(collection), but link
+    governance's work is now O(limit), never once per stored record.
+
+    Row selection (sort, date range, limit/offset) is sound on raw values
+    here only because `_late_link_projection_safe` already proved `sort_by`
+    and the effective date column are scalar, non-array, non-link fields:
+    the projector cannot change either field's `_get_field` value or its
+    key's presence there (see that function's docstring for why array and
+    link fields are unsafe), so raw and governed ordering agree for those
+    two fields regardless of what any other field in the row governs to.
+
+    `_late_link_projection_safe` also refuses whenever the caller supplied a
+    non-empty `columns`, so in practice `columns` here is always falsy --
+    this function is not a general column-projected substitute for the
+    eager path, only for the "return every field" shape. Two properties
+    follow from that restriction, and hold permanently, not just today:
+    (1) the returned `columns` is inferred from the returned (governed,
+    already-windowed) rows only, unlike eager's `columns=None` inference,
+    which runs over every matched row before windowing -- a collection with
+    heterogeneous fields across records can therefore report a narrower
+    `columns` list here than eager would for the same query; (2) the
+    response-size cap (`_bounded_response_rows`, inside the `evaluate_rows`
+    call below) runs on the raw, ungoverned window before this function
+    governs it, not on the final governed rows the way eager's cap does --
+    governance only ever removes data, so this can only make the cap more
+    conservative than eager's, never less, and never a disclosure
+    difference; it is simply not exercised by the one caller today, whose
+    rows are small.
+    """
+    windowed = query_data.evaluate_rows(
+        rows,
+        path=path,
+        format=format,
+        filters=[],
+        columns=None,
+        sort_by=sort_by,
+        descending=descending,
+        limit=limit,
+        offset=offset,
+        aggregate=None,
+        date_from=date_from,
+        date_to=date_to,
+        date_column=date_column,
+    )
+    governed = [project_values(row) for row in windowed.rows]
+    if columns:
+        out_rows = [{c: query_data._get_field(r, c) for c in columns} for r in governed]
+        out_cols = list(columns)
+    else:
+        out_rows = governed
+        out_cols = query_data._infer_columns(governed)
+    out_rows, response_truncated = query_data._bounded_response_rows(out_rows)
+    return replace(
+        windowed,
+        rows=out_rows,
+        columns=out_cols,
+        returned=len(out_rows),
+        truncated=windowed.truncated or response_truncated,
+    )
+
+
 def query_collection(
     vault_root: Path,
     manifest: collections.CollectionManifest,
@@ -2101,8 +2246,20 @@ def query_collection(
     project_child_value: Callable[[Any, collections.RecordPresentationColumn], Any] | None = None,
     source_versions_limit: int | None = None,
     source_versions_for_rows: bool = False,
+    late_link_projection: bool = False,
 ) -> RecordQueryResult:
-    """Query a fresh canonical adapter snapshot with a snapshot-bound cursor."""
+    """Query a fresh canonical adapter snapshot with a snapshot-bound cursor.
+
+    `late_link_projection` is an internal-only opt-in from a trusted caller
+    (never a value a public tool's request parameters can reach -- no tool
+    surface declares this parameter). Even then it is honoured only when
+    `_late_link_projection_safe` clears it for this exact query; otherwise
+    the ordinary eager path below runs unchanged, which is correct, not
+    degraded. When it is honoured, `adapter.read()` returns raw values (no
+    governance at parse time) and link governance instead runs once, after
+    filtering/sorting/limiting, over only the rows the query actually
+    returns -- see `_late_projected_result`.
+    """
     view_provenance: dict[str, Any] | None = None
     if view is not None:
         if (
@@ -2149,8 +2306,23 @@ def query_collection(
         aggregate=aggregate,
         date_column=date_column,
     )
+    use_late_projection = late_link_projection and _late_link_projection_safe(
+        manifest,
+        filters=filters,
+        columns=columns,
+        sort_by=sort_by,
+        date_column=date_column,
+        date_from=date_from,
+        date_to=date_to,
+        aggregate=aggregate,
+        expand_children=expand_children,
+        expand_child=expand_child,
+    )
     adapter = load_adapter(
-        vault_root, manifest, authorize_path=authorize_path, project_values=project_values
+        vault_root,
+        manifest,
+        authorize_path=authorize_path,
+        project_values=None if use_late_projection else project_values,
     )
     parsed = adapter.read()
     _enforce_selected_child_cap(parsed.records, selected_child, manifest)
@@ -2208,21 +2380,37 @@ def query_collection(
         if adapter.mutable:
             identity_columns.append("item_version")
         effective_columns = list(dict.fromkeys([*columns, *identity_columns]))
-    result = query_data.evaluate_rows(
-        rows,
-        path=manifest.storage.source,
-        format=manifest.storage.strategy,
-        filters=filters,
-        columns=effective_columns,
-        sort_by=sort_by,
-        descending=descending,
-        limit=limit,
-        offset=offset,
-        aggregate=aggregate,
-        date_from=date_from,
-        date_to=date_to,
-        date_column=date_column,
-    )
+    if use_late_projection and project_values is not None:
+        result = _late_projected_result(
+            rows,
+            path=manifest.storage.source,
+            format=manifest.storage.strategy,
+            sort_by=sort_by,
+            descending=descending,
+            limit=limit,
+            offset=offset,
+            date_from=date_from,
+            date_to=date_to,
+            date_column=date_column,
+            columns=effective_columns,
+            project_values=project_values,
+        )
+    else:
+        result = query_data.evaluate_rows(
+            rows,
+            path=manifest.storage.source,
+            format=manifest.storage.strategy,
+            filters=filters,
+            columns=effective_columns,
+            sort_by=sort_by,
+            descending=descending,
+            limit=limit,
+            offset=offset,
+            aggregate=aggregate,
+            date_from=date_from,
+            date_to=date_to,
+            date_column=date_column,
+        )
     if aggregate is None and result.truncated and result.returned == 0:
         raise collections.CollectionError(
             "RECORD_RESPONSE_TOO_LARGE", "first result row exceeds the response cap"
