@@ -30,7 +30,12 @@
 
 - [ ] 5.1 Add the worker's internal 8443 TLS listener and ClusterIP Service, trusted fixed endpoint configuration, dedicated certificate Secret and public trust ConfigMap distribution. Add the socket/credential/trust mounts without making runtime custody writable or sharing a Kubernetes/global bearer token.
 - [ ] 5.2 Update cell/platform values schemas, exact-shape tenant and provisioner admission policies, Secret/ConfigMap ownership verification, fixed destination egress/DNS and callback ingress. Render and exercise acceptance/refusal against a real API server.
-- [ ] 5.3 Document and preflight production certificate creation, encrypted custody, SAN/expiry validation and overlap rotation. Generate a separate disposable CA for tests. Production transport credentials and target deployment remain separately verified actions.
+- [ ] 5.3 Document and preflight production certificate creation, encrypted custody, SAN/expiry validation and overlap rotation. Generate a separate disposable CA for tests. Production transport credentials and target deployment remain separately verified actions. Decision 9 settles the shape; these are its parts.
+  - [ ] 5.3.1 Add the `sops_k8s_tls_secret` destination kind to `infra/scripts/secret_handoff.py` and its matrix validation, sealing `tls.crt` and `tls.key` into one `kubernetes.io/tls` artifact under one lock. Keep the existing `(namespace, kubernetes_secret)` uniqueness guard intact.
+  - [ ] 5.3.2 Add the matrix entries: the server pair to `k3s.activation-ack-tls.active` targeting `exomem-activation-ack` in the platform namespace, and the CA private key to an escrow-only destination.
+  - [ ] 5.3.3 Add `validate_activation_ack_server_certificate` to `activation_ack_configuration.py`: single leaf, not a CA, `serverAuth`, SAN exactly `exomem-activation-ack.<platformNamespace>.svc.cluster.local`, chains to a CA in the bundle, bounded total lifetime and a remaining-lifetime floor. Leave `validate_activation_ack_trust_pem` structural and time-free.
+  - [ ] 5.3.4 Add the issuance script in the shape of `provider_recovery_keypair_handoff.py`: generate or reuse the CA, issue the leaf with AKI and SKI so `x509.verification` accepts it, validate before publishing, hand off atomically.
+  - [ ] 5.3.5 Add the rotation runbook section covering both tiers, and a per-run disposable test CA marked so the preflight refuses it as live readiness.
 - [ ] 5.4 Add and test preflight classification of clean, protocol-qualified and legacy pending/uncertain targets, and of remaining attestation window; refuse to begin work that cannot complete inside the window. Preserve legacy unknown mutation outcomes even when exact activation-only reconciliation restores parity; never invent their missing receipts or replace their identity. Bind the capability to compatible runtime/provisioner/chart releases and deployment locks. Describe forward recovery after an activation advance and refuse incompatible rollback; regenerate signed target and final consumer evidence only for the released exact source.
 - [x] 5.5 Implement the closed deployment-lock capability/trust extension, both signed-source declarations, exact conditional trust/egress recovery envelopes, retained encrypted operation binding, and unchanged-public-request replay across trust rotation. Verify capable-forward refusal without binding, legacy shape preservation, active-versus-rollback selection, and original trust retention.
 - [ ] 5.6 Decouple the vocabulary-authority generation from the activation epoch, or refuse `vocabulary_authority_floor == 2` on a cell with acknowledgement capability. Per-write activation advancement invalidates every grant and reservation stamped with the pinned generation. Alpha cells mint at floor 1, so this is latent; add a test that fails if floor 2 and acknowledgement capability are ever combined.
@@ -70,7 +75,10 @@ Deliberately left unchecked, with the reason:
   has no activation-ack listener, Service or certificate Secret at all.
 - 5.2 — in progress; its two tests are red by design until the platform admission
   policy lands.
-- 5.3, 5.4, 6.1-6.4 — not started.
+- 5.3 — designed, not implemented. Decision 9 records the destination kind, the
+  expiry placement, the two rotation tiers and the test-CA marker; 5.3.1-5.3.5 are
+  its executable parts. The trust half is already governed and needs no new work.
+- 5.4, 6.1-6.4 — not started.
 
 Two interactions found while recovering this work are not covered by design.md and
 must be closed before 6.3:

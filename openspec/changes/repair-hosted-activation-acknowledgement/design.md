@@ -161,6 +161,58 @@ activation epoch, or floor 2 must be refused on a cell with acknowledgement
 capability, and whichever is chosen needs a test that fails if the two are ever
 combined.
 
+### 9. Certificate custody for the acknowledgement listener
+
+The trust half is already governed and needs no new mechanism.
+`hosted_composition_lock.py --activation-ack-trust-bundle` reads a CA-only PEM,
+digests it into `activationAcknowledgement.trustBundleSha256`, and the cell chart
+projects the same bytes into the immutable ConfigMap `exomem-ack-ca-<digest[:40]>`.
+The CA public half is not secret and never enters the destination matrix.
+
+The server half does need a governed route. `load_matrix` refuses two
+`sops_k8s_secret` destinations that share a `(namespace, kubernetes_secret)` pair,
+deliberately, so two independent handoffs cannot fight over one object under
+server-side apply. A `kubernetes.io/tls` Secret is only valid with `tls.crt` and
+`tls.key` present together, so the answer is a destination kind
+`sops_k8s_tls_secret` that seals both values in one artifact under one lock, not a
+relaxation of the uniqueness guard. The CA private key takes an escrow-only
+destination, so the next server certificate can be issued under the same trust root
+without any cell-visible change. Issuance is a dedicated script in the shape of
+`provider_recovery_keypair_handoff.py`; the source kind is generated, and the
+generic stdin path refuses it. The subject alternative name is exactly
+`exomem-activation-ack.<platformNamespace>.svc.cluster.local`, which is the
+ClusterIP Service the cell's sidecar dials.
+
+**Expiry is not a render-time check.** `validate_activation_ack_trust_pem` stays
+structural: bounded bytes, CA-only, no private-key material. It runs at chart render
+and at release verification, so a not-expired assertion there would turn an expired
+CA into a cluster that cannot render its own charts — precisely when an operator is
+trying to roll a new one. Time-dependent validation belongs in issuance and in the
+5.4 preflight, where the failure reads "rotate now" rather than "you cannot deploy".
+
+**Rotation has two tiers, and only one of them is expensive.** Renewing the server
+certificate under the same CA changes no digest, no lock and no cell; this is the
+routine expiry path and should be the normal answer. Rotating the CA changes the
+bundle digest, therefore the ConfigMap name, therefore the lock, therefore every
+cell. It runs as a three-bundle overlap: publish a bundle carrying both CAs, let
+cells adopt it, switch the server certificate to the new CA, then publish a bundle
+carrying only the new CA. The bundle validator already admits up to
+`MAX_ACTIVATION_ACK_CA_CERTIFICATES` certificates, which is what makes the overlap
+expressible at all.
+
+**A test certificate must not be able to pass as live readiness.** Tests generate a
+disposable CA per run and never read `infra/secrets`. Issuance marks a test CA in
+its subject and the preflight refuses a live certificate carrying that marker. What
+it prevents is a disposable CA quietly serving production; what it costs when it
+fires wrongly is one refused issuance with an explicit reason, paid by the operator
+at issuance time rather than by a tenant in production.
+
+Measured while designing this: `x509.verification.PolicyBuilder().build_server_verifier()`
+refuses a leaf that carries no Authority Key Identifier (`2.5.29.35`), even when the
+chain and SAN are otherwise correct. Internal issuance must add AKI and SKI so the
+library verification path can be used; hand-rolled signature checking is the worse
+option here.
+
 ## Risks / Trade-offs
 
 - Two stores can temporarily disagree after canonical commit. Exact recoverable outcome evidence, predecessor-bound external CAS and blocked content serving cover that cut; a success-shaped response does not.
