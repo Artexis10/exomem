@@ -71,7 +71,7 @@ REMINDER = (
     "after primary work, before the final response, "
     'review_memory(mode="attention", categories=["entity_recurrence"], limit=3) once/session; '
     "no scan/model. Resolve active entity registry/selected knowledge packs: "
-    'connect_memory(operation="resolve-entity"); stop on ambiguity; incidental mention stays '
+    'connect_memory(operation="resolve-entity"); stop on ambiguity; single incidental mention stays '
     "in context. Uniquely resolved Entity: narrow Entity facet, else compiled observation/proactive_capture; "
     "affiliation relation/link_acceptance; compatible Records only. Hydrate via edit_memory before "
     "duplicating; else "
