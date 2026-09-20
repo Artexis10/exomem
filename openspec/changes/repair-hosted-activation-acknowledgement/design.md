@@ -217,6 +217,39 @@ library verification path can be used. Hand-rolled signature checking is the wor
 option here, and `validate_activation_ack_server_certificate` now takes the library
 path with these requirements encoded in its tests.
 
+### 10. One listener name, derived in one place
+
+Independent review on 2026-09-20 found that the certificate this change issues
+could not be verified by the client it is issued for. The cell's HTTP client
+dialled `exomem-activation-ack.<namespace>.svc`; the issuer and validator
+produced the fully-qualified `exomem-activation-ack.<namespace>.svc.cluster.local`.
+Reproduced with a real TLS handshake: the short name fails hostname
+verification against the issued certificate.
+
+The consequence is total for a capability-bound cell. The handshake failure
+becomes `ActivationAckHttpError`, the custody acknowledgement service cannot
+serve, `authorization_custody` raises `AuthorizationCustodyUnavailable`, and no
+governed registry CAS can commit — which is the exact defect this change
+exists to repair, reintroduced by its own transport.
+
+Nothing caught it because each side had a test that pinned its own spelling.
+`tests/test_hosted_activation_ack_http.py` asserted the short form the client
+built; the issuer and configuration suites asserted the fully-qualified form
+the certificate carried. Both suites were green and agreed with nothing.
+
+The name now lives in `hosted_activation_ack_protocol.py`, the module that is
+byte-mirrored between the runtime and the provisioner and already holds the
+wire contract. Both sides call `listener_dns_name`, so they cannot spell it
+differently again, and the existing copy test keeps the two files identical.
+The fully-qualified form is the one kept: every other in-tree service reference
+uses it, and the short form appeared exactly once outside tests.
+
+`infra/provisioner/tests/test_activation_ack_listener_identity.py` is the test
+that was missing. It asks the real client factory for its hostname, feeds that
+to the validator, and completes a real TLS handshake against a certificate the
+issuer minted. It can only pass if the two sides agree, which is the property
+that matters and the one neither suite was asserting.
+
 ## Risks / Trade-offs
 
 - Two stores can temporarily disagree after canonical commit. Exact recoverable outcome evidence, predecessor-bound external CAS and blocked content serving cover that cut; a success-shaped response does not.

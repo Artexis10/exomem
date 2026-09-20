@@ -24,7 +24,11 @@ class Destination:
     target: str
     namespace: str
     secret_name: str
-    key: str
+    # A TLS destination carries no single key: both halves are fixed by
+    # Kubernetes, so `keys` is what the applied Secret must contain exactly.
+    kind: str
+    keys: frozenset[str]
+    secret_type: str
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -56,16 +60,23 @@ def _load_destination(matrix_path: Path, destination_id: str) -> Destination:
     if len(matches) != 1:
         raise SecretApplyError("secret destination is not uniquely allowlisted")
     item = matches[0]
-    if item.get("kind") != "sops_k8s_secret" or item.get("slot") != "active":
+    kind = item.get("kind")
+    if kind not in {"sops_k8s_secret", "sops_k8s_tls_secret"} or item.get("slot") != "active":
         raise SecretApplyError("secret destination is not an active Kubernetes Secret")
-    required = ("target", "namespace", "kubernetes_secret", "key")
+    required = ("target", "namespace", "kubernetes_secret")
+    if kind == "sops_k8s_secret":
+        required += ("key",)
     if any(not isinstance(item.get(field), str) or not item[field] for field in required):
         raise SecretApplyError("secret destination is invalid")
     return Destination(
         target=item["target"],
         namespace=item["namespace"],
         secret_name=item["kubernetes_secret"],
-        key=item["key"],
+        kind=kind,
+        keys=frozenset({"tls.crt", "tls.key"} if kind == "sops_k8s_tls_secret" else {item["key"]}),
+        secret_type=(
+            "kubernetes.io/tls" if kind == "sops_k8s_tls_secret" else "Opaque"
+        ),
     )
 
 
@@ -112,16 +123,15 @@ def _validate_plaintext(raw: bytes, destination: Destination, version: str) -> b
         and set(document) == {"apiVersion", "kind", "metadata", "type", "stringData"}
         and document.get("apiVersion") == "v1"
         and document.get("kind") == "Secret"
-        and document.get("type") == "Opaque"
+        and document.get("type") == destination.secret_type
         and isinstance(metadata, dict)
         and set(metadata) == {"name", "namespace", "labels"}
         and metadata.get("name") == destination.secret_name
         and metadata.get("namespace") == destination.namespace
         and metadata.get("labels") == expected_labels
         and isinstance(document.get("stringData"), dict)
-        and set(document["stringData"]) == {destination.key}
-        and isinstance(document["stringData"][destination.key], str)
-        and bool(document["stringData"][destination.key])
+        and set(document["stringData"]) == set(destination.keys)
+        and all(isinstance(value, str) and value for value in document["stringData"].values())
     )
     if not valid:
         raise SecretApplyError("SOPS plaintext has an invalid Kubernetes shape")

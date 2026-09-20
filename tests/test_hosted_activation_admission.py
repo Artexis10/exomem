@@ -7,7 +7,6 @@ from pathlib import Path
 import yaml
 from test_hosted_helm_contract import PLATFORM, _find, _render
 
-
 PROTOCOL = "exomem.hosted-activation-ack/v1"
 PLATFORM_NAMESPACE = "exomem-platform"
 TRUST_SHA256 = "c" * 64

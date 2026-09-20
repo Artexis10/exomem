@@ -166,15 +166,19 @@ def _read_escrowed_authority(*, artifact: Path, sops_bin: str) -> ec.EllipticCur
             check=False,
             timeout=30,
         )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise CertificateHandoffError("authority decrypt failed") from error
+    except (OSError, subprocess.TimeoutExpired):
+        # `TimeoutExpired.stdout` holds the partially decrypted document, so the
+        # chain is severed rather than attached: this boundary is content-free,
+        # and a structured logger that serializes `__cause__` would leak it.
+        raise CertificateHandoffError("authority decrypt failed") from None
     if result.returncode != 0:
         raise CertificateHandoffError("authority decrypt failed")
     try:
         document = json.loads(result.stdout)
         material = document["ca_private_key"]
-    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as error:
-        raise CertificateHandoffError("escrowed authority is malformed") from error
+    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError):
+        # `UnicodeDecodeError.object` is the whole plaintext byte string.
+        raise CertificateHandoffError("escrowed authority is malformed") from None
     if not isinstance(material, str):
         raise CertificateHandoffError("escrowed authority is malformed")
     try:

@@ -12,7 +12,13 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from . import hosted_security
-from .hosted_activation_ack_protocol import PROTOCOL, ProtocolError, decode_message, encode_message
+from .hosted_activation_ack_protocol import (
+    PROTOCOL,
+    ProtocolError,
+    decode_message,
+    encode_message,
+    listener_dns_name,
+)
 
 TRUST_CA_PATH = Path("/run/exomem/activation-ack-trust/ca.pem")
 PORT = 8443
@@ -185,7 +191,7 @@ class HostedActivationAckHttpClient:
     ) -> HostedActivationAckHttpClient:
         if not isinstance(namespace, str) or _DNS_LABEL.fullmatch(namespace) is None:
             raise ActivationAckHttpError
-        hostname = f"exomem-activation-ack.{namespace}.svc"
+        hostname = listener_dns_name(namespace)
         try:
             context = ssl.create_default_context(cafile=str(TRUST_CA_PATH))
         except OSError:

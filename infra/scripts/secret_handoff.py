@@ -19,6 +19,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+
 _VERSION = re.compile(r"v[1-9][0-9]*\Z")
 _SAFE_NAME = re.compile(r"[a-zA-Z0-9_.-]+\Z")
 _MAX_SECRET_BYTES = 8192
@@ -853,6 +856,16 @@ def seal_k8s_tls_secret(
         raise HandoffError("TLS certificate carries private-key material")
     if "PRIVATE KEY" not in key_text:
         raise HandoffError("TLS private key is not a private key")
+    # The in-tree issuer always supplies a matched pair, and Kubernetes would
+    # refuse a mismatched one at create. This is a public function on a governed
+    # boundary, so it does not rely on either.
+    try:
+        leaf = x509.load_pem_x509_certificate(certificate)
+        key = serialization.load_pem_private_key(private_key, password=None)
+    except ValueError as error:
+        raise HandoffError("TLS pair is not readable PEM") from error
+    if leaf.public_key() != key.public_key():
+        raise HandoffError("TLS certificate and private key are not a pair")
     document = {
         "apiVersion": "v1",
         "kind": "Secret",

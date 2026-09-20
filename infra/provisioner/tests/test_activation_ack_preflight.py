@@ -68,14 +68,31 @@ def test_a_lapsed_window_on_a_cell_that_has_served_is_stranded() -> None:
         assert result.may_begin is False
         assert result.remaining_seconds == -1
 
-    # A cell that never served can still be minted, so a lapsed window is not
-    # terminal for it and the ordinary classification applies.
+    # A cell with no serving attestation at all can still be minted, so a
+    # lapsed window is not terminal for it. `None` is the only way to say that:
+    # an unrecognised state is bad input, not a quiet "never served".
     fresh = _classify(
-        store_activation=AHEAD, replica_state="PENDING", attestation_expires_at=NOW - 1
+        store_activation=AHEAD, replica_state=None, attestation_expires_at=NOW - 1
     )
     assert fresh.status == PROTOCOL_QUALIFIED
     assert fresh.may_begin is False
     assert "cannot complete inside the remaining attestation window" in fresh.reason
+
+
+def test_an_unrecognised_replica_state_is_refused_rather_than_read_as_never_served() -> None:
+    """Failing open here would discard STRANDED on the cells that have it.
+
+    A caller paging on `status == STRANDED` would instead see a cell that has
+    served and whose window has lapsed reported as clean or recoverable.
+    """
+
+    for state in ("Serving", "serving", "READY", "", "PENDING"):
+        with pytest.raises(ValueError, match="known serving-membership state"):
+            _classify(replica_state=state)
+
+    # The two the attestation can actually carry, and the honest absence.
+    for state in ("SERVING", "DRAINING", None):
+        assert _classify(replica_state=state).status == CLEAN
 
 
 def test_work_that_cannot_finish_inside_the_window_never_starts() -> None:
@@ -83,10 +100,12 @@ def test_work_that_cannot_finish_inside_the_window_never_starts() -> None:
 
     assert _classify(required_seconds=HOUR).may_begin is True
     assert _classify(required_seconds=HOUR + 1).may_begin is False
-    assert _classify(required_seconds=0).may_begin is True
 
-    with pytest.raises(ValueError):
-        _classify(required_seconds=-1)
+    # A zero budget is a green light that promises nothing finishes, so it is
+    # refused rather than treated as "no work to do".
+    for budget in (0, -1):
+        with pytest.raises(ValueError, match="must be positive"):
+            _classify(required_seconds=budget)
 
 
 def test_the_capability_must_be_bound_to_compatible_releases() -> None:

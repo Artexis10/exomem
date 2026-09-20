@@ -5,20 +5,56 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from cryptography import x509
 from cryptography.x509.oid import ExtendedKeyUsageOID
 from cryptography.x509.verification import PolicyBuilder, Store, VerificationError
 
+
+def _protocol():
+    """Load the shared wire-contract module without requiring a package.
+
+    Scripts load this file directly with `spec_from_file_location`, which gives
+    it no parent package, so a relative import raises. The sibling file is the
+    byte-identical copy of the runtime's protocol module, and the listener's
+    DNS name lives there so the client and the issuer cannot spell it
+    differently.
+    """
+
+    try:
+        from . import hosted_activation_ack_protocol  # noqa: PLC0415
+
+        return hosted_activation_ack_protocol
+    except ImportError:
+        import importlib.util
+        import sys
+
+        path = Path(__file__).with_name("hosted_activation_ack_protocol.py")
+        spec = importlib.util.spec_from_file_location(
+            "exomem_activation_ack_protocol_copy", path
+        )
+        if spec is None or spec.loader is None:  # pragma: no cover - packaging fault
+            raise
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+
+
+_PROTOCOL = _protocol()
+SERVICE_NAME = _PROTOCOL.SERVICE_NAME
+listener_dns_name = _PROTOCOL.listener_dns_name
+
+
 ACTIVATION_ACK_PROTOCOL = "exomem.hosted-activation-ack/v1"
 MAX_ACTIVATION_ACK_TRUST_BYTES = 262_144
 MAX_ACTIVATION_ACK_CA_CERTIFICATES = 16
 
-# The ClusterIP Service the cell's custody sidecar dials. The name is fixed by the
-# platform chart, so the certificate's only subject alternative name is derived
-# from it rather than configured: a listener answering to any other name would be
-# one the cell's pinned trust bundle was never issued for.
-ACTIVATION_ACK_SERVICE_NAME = "exomem-activation-ack"
+# The ClusterIP Service the cell's custody sidecar dials. Both the name and the
+# fully-qualified form the certificate carries come from the shared protocol
+# module, so the client and the issuer cannot spell them differently again.
+ACTIVATION_ACK_SERVICE_NAME = SERVICE_NAME
 MAX_ACTIVATION_ACK_CERTIFICATE_BYTES = 65_536
 # A mis-issued leaf stays bounded; the routine renewal path costs nothing because
 # it reuses the CA and touches no cell.
@@ -128,7 +164,7 @@ def activation_ack_server_dns_name(platform_namespace: str) -> str:
 
     if not isinstance(platform_namespace, str) or not _DNS_LABEL.fullmatch(platform_namespace):
         raise ValueError("activation acknowledgement platform namespace is invalid")
-    return f"{ACTIVATION_ACK_SERVICE_NAME}.{platform_namespace}.svc.cluster.local"
+    return listener_dns_name(platform_namespace)
 
 
 def _leaf_subject_contains_test_marker(certificates: list[x509.Certificate]) -> bool:
@@ -189,9 +225,10 @@ def validate_activation_ack_server_certificate(
         constraints = leaf.extensions.get_extension_for_class(x509.BasicConstraints).value
         usage = leaf.extensions.get_extension_for_class(x509.KeyUsage).value
         extended = leaf.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
-        names = leaf.extensions.get_extension_for_class(
-            x509.SubjectAlternativeName
-        ).value.get_values_for_type(x509.DNSName)
+        # Every general name, not only the DNS ones. Reading DNS names alone
+        # let an IP address, a URI or an RFC822 name ride along unexamined, and
+        # the listener is supposed to answer to exactly one name.
+        names = list(leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value)
         leaf.extensions.get_extension_for_class(x509.AuthorityKeyIdentifier)
     except x509.ExtensionNotFound as error:
         raise ValueError(
@@ -205,7 +242,7 @@ def validate_activation_ack_server_certificate(
         )
     if ExtendedKeyUsageOID.SERVER_AUTH not in extended:
         raise ValueError("activation acknowledgement server certificate is not a server key")
-    if names != [expected]:
+    if names != [x509.DNSName(expected)]:
         raise ValueError(
             "activation acknowledgement server certificate does not name the listener Service"
         )

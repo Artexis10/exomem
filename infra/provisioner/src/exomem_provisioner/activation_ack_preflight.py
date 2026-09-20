@@ -22,7 +22,6 @@ cannot finish inside it converts a recoverable stall into a stranded cell.
 
 from __future__ import annotations
 
-import hmac
 from dataclasses import dataclass
 from typing import Final
 
@@ -31,7 +30,12 @@ PROTOCOL_QUALIFIED: Final = "protocol-qualified"
 LEGACY_UNCERTAIN: Final = "legacy-uncertain"
 STRANDED: Final = "stranded"
 
-# A cell that has served cannot re-mint a lapsed attestation.
+# The closed vocabulary an inspected serving-membership attestation can carry;
+# `authorization_membership` refuses any other value when it reads the bundle.
+# A cell that has served cannot re-mint a lapsed attestation, and both of these
+# mean it has served. `None` is the only way to say "no attestation yet", so an
+# unrecognised string is bad input rather than a quiet "never served" -- which
+# would discard the STRANDED verdict on exactly the cells that have it.
 _SERVED_STATES: Final = frozenset({"SERVING", "DRAINING"})
 
 
@@ -54,9 +58,10 @@ def _tuples_match(
     right_store, right_epoch, right_digest = right
     if left_store != right_store or left_epoch != right_epoch:
         return False
-    if left_digest is None or right_digest is None:
-        return left_digest is right_digest
-    return hmac.compare_digest(left_digest, right_digest)
+    # Plain equality on purpose. The store id and epoch above are compared the
+    # same way, an activation state digest is not a secret, and
+    # `hmac.compare_digest` raises on a non-ASCII string rather than refusing.
+    return left_digest == right_digest
 
 
 def classify_activation_ack_target(
@@ -65,18 +70,21 @@ def classify_activation_ack_target(
     store_activation: tuple[str | None, int | None, str | None],
     capability_bound: bool,
     release_compatible: bool,
-    replica_state: str,
+    replica_state: str | None,
     attestation_expires_at: int,
     now: int,
     required_seconds: int,
 ) -> ActivationAckPreflight:
     """Name what this cell is and whether acknowledgement work may start on it."""
 
-    if required_seconds < 0:
-        raise ValueError("required work budget must not be negative")
+    if required_seconds <= 0:
+        # A zero budget is a green light that promises nothing finishes.
+        raise ValueError("required work budget must be positive")
+    if replica_state is not None and replica_state not in _SERVED_STATES:
+        raise ValueError("replica state is not a known serving-membership state")
     remaining = attestation_expires_at - now
     outstanding = not _tuples_match(custody_activation, store_activation)
-    served = replica_state in _SERVED_STATES
+    served = replica_state is not None
 
     if remaining <= 0 and served:
         return ActivationAckPreflight(

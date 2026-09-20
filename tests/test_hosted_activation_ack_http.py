@@ -419,8 +419,11 @@ def test_production_factory_fixes_dns_port_ca_and_rejects_invalid_namespaces(mon
 
     client = HostedActivationAckHttpClient.for_platform_namespace("platform-1", cell_id="cell-1")
 
-    assert client._endpoint == ("exomem-activation-ack.platform-1.svc", 8443)
-    assert client._server_hostname == "exomem-activation-ack.platform-1.svc"
+    # The fully-qualified name, because that is what the listener's certificate
+    # carries. Pinning the short form here is what made every handshake fail
+    # hostname verification while both sides' own tests passed.
+    assert client._endpoint == ("exomem-activation-ack.platform-1.svc.cluster.local", 8443)
+    assert client._server_hostname == "exomem-activation-ack.platform-1.svc.cluster.local"
     assert calls == ["/run/exomem/activation-ack-trust/ca.pem"]
     for invalid in ("", "UPPER", "-prefix", "suffix-", "a" * 64, "two.labels"):
         with pytest.raises(ActivationAckHttpError):

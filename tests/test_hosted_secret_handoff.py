@@ -1134,6 +1134,44 @@ def _matrix_with_tls_pair(tmp_path: Path) -> Path:
     return path
 
 
+def _real_tls_pair() -> tuple[bytes, bytes]:
+    """A genuine certificate and its key.
+
+    The seal refuses a pair that does not match, so these cases cannot use
+    placeholder PEM text: the check under test is exactly the one that would
+    reject it.
+    """
+
+    import datetime as dt
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "handoff-test")])
+    now = dt.datetime.now(dt.UTC)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - dt.timedelta(minutes=5))
+        .not_valid_after(now + dt.timedelta(days=90))
+        .sign(key, hashes.SHA256())
+    )
+    return (
+        certificate.public_bytes(serialization.Encoding.PEM),
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ),
+    )
+
+
 def test_matrix_accepts_a_tls_pair_destination_and_pins_both_halves(tmp_path: Path) -> None:
     module = _load_module()
     matrix = module.load_matrix(_matrix_with_tls_pair(tmp_path))
@@ -1210,8 +1248,7 @@ def test_tls_pair_seals_one_kubernetes_tls_secret_without_leaking_either_half(
     destination = matrix.secrets["activation_ack_tls_pair"].destinations[
         "k3s.activation-ack-tls.active"
     ]
-    certificate = b"-----BEGIN CERTIFICATE-----\nZmFrZS1jZXJ0\n-----END CERTIFICATE-----\n"
-    private_key = b"-----BEGIN PRIVATE KEY-----\nZmFrZS1rZXk=\n-----END PRIVATE KEY-----\n"
+    certificate, private_key = _real_tls_pair()
 
     module.seal_k8s_tls_secret(
         destination=destination,
@@ -1267,6 +1304,20 @@ def test_tls_seal_refuses_a_swapped_or_contaminated_pair(
                 repository_root=tmp_path,
                 sops_bin="sops",
             )
+    # A real certificate with someone else's real key: both halves are
+    # well-formed, so only the pair check catches it.
+    certificate, _ = _real_tls_pair()
+    _, other_key = _real_tls_pair()
+    with pytest.raises(module.HandoffError, match="are not a pair"):
+        module.seal_k8s_tls_secret(
+            destination=destination,
+            certificate=certificate,
+            private_key=other_key,
+            version="v4",
+            repository_root=tmp_path,
+            sops_bin="sops",
+        )
+
     assert not (tmp_path / "infra/secrets/platform/activation-ack-tls.v4.sops.json").exists()
 
 

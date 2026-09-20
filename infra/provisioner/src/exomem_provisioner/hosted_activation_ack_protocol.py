@@ -11,6 +11,22 @@ import re
 from collections.abc import Callable, Mapping
 
 PROTOCOL = "exomem.hosted-activation-ack/v1"
+SERVICE_NAME = "exomem-activation-ack"
+
+
+def listener_dns_name(platform_namespace: str) -> str:
+    """The one name the listener answers to and its certificate carries.
+
+    Both sides derive it here rather than spelling it. They used to spell it
+    separately and drifted: the cell pinned the short `.svc` form while the
+    certificate was issued for the fully-qualified one, so every handshake
+    failed hostname verification and no capability-bound cell could commit a
+    governed write. Callers that need to reject a malformed namespace validate
+    it before calling; this returns the name, it does not police the input.
+    """
+
+    return f"{SERVICE_NAME}.{platform_namespace}.svc.cluster.local"
+
 _MAX_INTEGER = (1 << 63) - 1
 _MAX_DEPTH = 8
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
