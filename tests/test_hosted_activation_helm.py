@@ -77,3 +77,70 @@ def test_cell_refuses_unbound_or_ambiguous_acknowledgement(activation_cell_value
     path.write_text(yaml.safe_dump(values))
     rendered = _render_process(CELL, CELL / "values.validation.yaml", namespace="cell-alpha-test", extra_args=("--values", str(path)))
     assert rendered.returncode != 0
+
+
+def _platform_worker(documents: list[dict]) -> dict:
+    return _find(documents, "Deployment", "exomem-provisioner-worker")["spec"]["template"]["spec"]
+
+
+def test_capable_platform_serves_the_acknowledgement_listener(tmp_path):
+    from test_hosted_activation_admission import PLATFORM_NAMESPACE, _activation_lock_values
+    from test_hosted_helm_contract import PLATFORM
+
+    override, _ = _activation_lock_values(tmp_path)
+    documents = _render(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace=PLATFORM_NAMESPACE,
+        extra_args=("--values", str(override)),
+    )
+
+    service = _find(documents, "Service", "exomem-activation-ack")
+    assert service["spec"]["type"] == "ClusterIP"
+    assert service["spec"]["selector"]["app.kubernetes.io/name"] == "exomem-provisioner-worker"
+    assert service["spec"]["ports"] == [
+        {"name": "activation-ack", "protocol": "TCP", "port": 8443, "targetPort": "activation-ack"}
+    ]
+
+    worker = _platform_worker(documents)
+    container, = worker["containers"]
+    assert {"name": "activation-ack", "containerPort": 8443, "protocol": "TCP"} in container["ports"]
+
+    env = {item["name"]: item.get("value") for item in container["env"]}
+    assert env["EXOMEM_PROVIDER_ACTIVATION_ACK_PROTOCOL"] == PROTOCOL
+    assert env["EXOMEM_PROVIDER_ACTIVATION_ACK_TLS_CERT_PATH"] == (
+        "/run/exomem/activation-ack-tls/tls.crt"
+    )
+    assert env["EXOMEM_PROVIDER_ACTIVATION_ACK_TLS_KEY_PATH"] == (
+        "/run/exomem/activation-ack-tls/tls.key"
+    )
+
+    mount = next(m for m in container["volumeMounts"] if m["name"] == "activation-ack-tls")
+    assert mount["mountPath"] == "/run/exomem/activation-ack-tls"
+    assert mount["readOnly"] is True
+    volume = next(v for v in worker["volumes"] if v["name"] == "activation-ack-tls")
+    assert volume["secret"]["secretName"] == "exomem-activation-ack-tls"
+    assert volume["secret"]["defaultMode"] == 0o400
+
+    # The private key never reaches the general admission API.
+    api = _find(documents, "Deployment", "exomem-provisioner-api")["spec"]["template"]["spec"]
+    assert all(v["name"] != "activation-ack-tls" for v in api["volumes"])
+
+
+def test_legacy_platform_has_no_acknowledgement_listener():
+    import json as _json
+
+    from test_hosted_activation_admission import PLATFORM_NAMESPACE
+    from test_hosted_helm_contract import PLATFORM
+
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace=PLATFORM_NAMESPACE)
+    assert not any(
+        document.get("kind") == "Service"
+        and document.get("metadata", {}).get("name") == "exomem-activation-ack"
+        for document in documents
+    )
+    worker = _platform_worker(documents)
+    container, = worker["containers"]
+    assert all(port.get("containerPort") != 8443 for port in container.get("ports", []))
+    assert "ACTIVATION_ACK" not in _json.dumps(container["env"])
+    assert all(volume["name"] != "activation-ack-tls" for volume in worker["volumes"])

@@ -5,6 +5,7 @@
 {{- $lockFile := include "exomem.hostedDeploymentLockFileName" . -}}
 {{- $runtimeSelection := include "exomem.hostedRuntimeSelection" . -}}
 {{- $runtimeTarget := $lock.runtimeTarget -}}
+{{- $ackEnabled := hasKey $lock "activationAcknowledgement" -}}
 {{- if eq $runtimeSelection "rollback" -}}
 {{- $runtimeTarget = $lock.recordsCompatibility.rollbackRuntime.runtimeTarget -}}
 {{- end -}}
@@ -303,6 +304,18 @@ spec:
               value: /tmp/helm/config
             - name: HELM_DATA_HOME
               value: /tmp/helm/data
+{{- if $ackEnabled }}
+            - name: EXOMEM_PROVIDER_ACTIVATION_ACK_PROTOCOL
+              value: {{ $lock.activationAcknowledgement.protocol | quote }}
+            - name: EXOMEM_PROVIDER_ACTIVATION_ACK_TLS_CERT_PATH
+              value: /run/exomem/activation-ack-tls/tls.crt
+            - name: EXOMEM_PROVIDER_ACTIVATION_ACK_TLS_KEY_PATH
+              value: /run/exomem/activation-ack-tls/tls.key
+          ports:
+            - name: activation-ack
+              containerPort: 8443
+              protocol: TCP
+{{- end }}
           resources:
             requests:
               cpu: 50m
@@ -333,10 +346,26 @@ spec:
               mountPath: /etc/exomem/capacity/private-alpha-capacity-v1.json
               subPath: private-alpha-capacity-v1.json
               readOnly: true
+{{- if $ackEnabled }}
+            - name: activation-ack-tls
+              mountPath: /run/exomem/activation-ack-tls
+              readOnly: true
+{{- end }}
       volumes:
         - name: temporary
           emptyDir:
             sizeLimit: 64Mi
+{{- if $ackEnabled }}
+        {{- /*
+          Server key material for the internal acknowledgement listener. Mounted
+          only here: the admission API has no reason to hold it, and 0400 keeps it
+          unreadable to anything but the worker's own user.
+        */}}
+        - name: activation-ack-tls
+          secret:
+            secretName: exomem-activation-ack-tls
+            defaultMode: 0400
+{{- end }}
         - name: deployment-lock
           configMap:
             name: {{ $lockName }}

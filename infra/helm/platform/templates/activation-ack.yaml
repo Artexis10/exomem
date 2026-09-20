@@ -1,0 +1,31 @@
+{{- $lock := include "exomem.hostedDeploymentLock" . | mustFromJson -}}
+{{- if hasKey $lock "activationAcknowledgement" }}
+{{- /*
+  The fixed internal destination a capable cell's custody sidecar dials. Its DNS
+  identity is what the server certificate is issued for and what the deployment
+  lock binds, so the name and port are not configurable: a cell that resolved a
+  different name would be talking to something the trust bundle does not cover.
+
+  It selects the worker rather than the admission API deliberately. The worker is
+  the only component holding Kubernetes and runtime-control authority, and the
+  acknowledgement handler needs the authorization Secret CAS. Putting the listener
+  on the general admission API would widen that API's privileges instead.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: exomem-activation-ack
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: exomem-activation-ack
+    app.kubernetes.io/part-of: exomem-hosted
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: exomem-provisioner-worker
+  ports:
+    - name: activation-ack
+      protocol: TCP
+      port: 8443
+      targetPort: activation-ack
+{{- end }}
