@@ -1074,11 +1074,16 @@ class _SlowReplacementRuntime(_StandbyRuntime):
         super().__init__()
         self.ready_after = ready_after
         self.replacement_timeouts: list[float] = []
+        # As the real runtime does: the last thing the unready replacement said
+        # about itself, recorded while waiting and never gating the wait.
+        self.replacement_waiting: str | None = None
 
     async def _await_readiness(self, timeout: float) -> None:
         self.replacement_timeouts.append(timeout)
+        self.replacement_waiting = "retrieval_unavailable (repair: rebuilding)"
         async with asyncio.timeout(timeout):
             await asyncio.sleep(self.ready_after)
+        self.replacement_waiting = None
 
     async def start(self, target, timeout):
         self.events.append("start")
@@ -1222,6 +1227,100 @@ def test_a_replacement_that_never_reports_ready_still_fails_terminally(tmp_path)
         assert result["handoff"]["promotion"]["snapshot"] == "advanced"
 
     asyncio.run(scenario())
+
+
+def test_a_failed_handoff_records_the_window_it_burned_and_what_it_waited_on(tmp_path):
+    """A failure at two seconds and one at the whole window need different answers.
+
+    Neither field gates anything; they exist so the record says which of the
+    two happened instead of only that the budget ran out.
+    """
+
+    async def scenario():
+        manager, ingress, runtime, target = _slow_supervisor(
+            tmp_path, ready_after=30.0, transition_timeout=0.25, cold=0.6
+        )
+        result = await manager.upgrade(target)
+        assert result["ok"] is False
+        assert result["handoff"]["ready_after_ms"] >= 450, result["handoff"]
+        assert (
+            result["handoff"]["waiting"] == "retrieval_unavailable (repair: rebuilding)"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_a_failure_before_the_stop_claims_no_replacement_measurement(tmp_path):
+    """`ready_after_ms` is measured from the stop, so there is none before it."""
+
+    async def scenario():
+        manager, ingress, runtime, target = _slow_supervisor(tmp_path)
+        runtime.standby_capable = False
+
+        async def stuck():
+            await asyncio.Event().wait()
+
+        ingress.detach_streams = stuck
+        result = await asyncio.wait_for(manager.upgrade(target), 5)
+        assert result["ok"] is False
+        assert "ready_after_ms" not in result["handoff"], result["handoff"]
+        assert "waiting" not in result["handoff"], result["handoff"]
+
+    asyncio.run(scenario())
+
+
+def test_the_unready_reason_reads_only_the_readiness_contracts_vocabulary(tmp_path):
+    module = _manager()
+    assert module.unready_reason(None) is None
+    assert module.unready_reason({"status": "ready", "reasons": []}) is None
+    # A serving worker's own account, with the repair phase when it has one.
+    assert (
+        module.unready_reason(
+            {
+                "reasons": ["retrieval_unavailable"],
+                "retrieval": {"state": "unavailable", "repair": {"phase": "rebuilding"}},
+            }
+        )
+        == "retrieval_unavailable (repair: rebuilding)"
+    )
+    assert (
+        module.unready_reason(
+            {"reasons": ["retrieval_warming"], "retrieval": {"repair": {"phase": "idle"}}}
+        )
+        == "retrieval_warming"
+    )
+    # A standby answers with cutover components instead.
+    assert (
+        module.unready_reason(
+            {"cutover": {"components": {"lexical": "ready", "graph_snapshot": "waiting"}}}
+        )
+        == "graph_snapshot"
+    )
+
+
+def test_recording_what_a_replacement_waits_on_never_raises(tmp_path):
+    """The note is an observation; a malformed answer must not fail a handoff."""
+    module = _manager()
+
+    class _Unparseable:
+        status_code = 503
+
+        def json(self):
+            raise ValueError("not JSON")
+
+    class _Unexpected:
+        status_code = 500
+
+        def json(self):
+            raise AssertionError("a non-readiness status must not be parsed")
+
+    runtime = module.WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1)
+    runtime.replacement_waiting = "unreachable"
+    runtime._note_replacement_waiting(_Unparseable())
+    runtime._note_replacement_waiting(_Unexpected())
+    runtime._note_replacement_waiting(object())
+    # Unchanged, and nothing raised.
+    assert runtime.replacement_waiting == "unreachable"
 
 
 def test_a_replacement_that_exits_before_readiness_still_fails_promptly(tmp_path):

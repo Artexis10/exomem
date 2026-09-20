@@ -325,9 +325,23 @@ match and the manifest is complete, the step is recorded as skipped:
 
 `handoff.unavailable_ms` is the window nobody was served in — pause to resume —
 and is the number to compare across releases. `handoff.ready_after_ms` is the
-part of it spent waiting for the replacement, from the old worker's stop to the
-replacement's readiness; when the two are close, the cutover itself was cheap
-and the replacement's own warm is what the outage was.
+part of it spent waiting for the replacement. It is measured from the old
+worker's stop, so it includes the offline migrator's own run when a migration
+ran; `migration.state` says whether it did. When it is close to
+`unavailable_ms`, the cutover itself was cheap and the replacement's own warm
+is what the outage was.
+
+Both fields appear on a failed handoff too, and there `handoff.waiting` carries
+what the replacement last reported waiting on — a readiness reason such as
+`retrieval_unavailable`, with the lexical repair phase when there is one, or
+the cutover component a candidate was still warming. Together they separate a
+replacement that burned the whole window on a background repair from one that
+died two seconds after the stop, which need different responses. Both are
+recorded from the readiness contract's own fixed vocabulary and are
+observations only: no budget, wait or outcome depends on them. A failure before
+the old worker stopped carries neither, because there was no replacement to
+measure.
+
 `migration.state` is `ran` with the reason (`descriptors_changed`, or the
 manifest state that was not complete) when it runs. `promotion.snapshot` is
 `current` when the checkpoint the standby proved is still the one on disk,
