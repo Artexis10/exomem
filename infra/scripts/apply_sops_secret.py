@@ -63,7 +63,7 @@ def _load_destination(matrix_path: Path, destination_id: str) -> Destination:
     kind = item.get("kind")
     if kind not in {"sops_k8s_secret", "sops_k8s_tls_secret"} or item.get("slot") != "active":
         raise SecretApplyError("secret destination is not an active Kubernetes Secret")
-    required = ("target", "namespace", "kubernetes_secret")
+    required: tuple[str, ...] = ("target", "namespace", "kubernetes_secret")
     if kind == "sops_k8s_secret":
         required += ("key",)
     if any(not isinstance(item.get(field), str) or not item[field] for field in required):
