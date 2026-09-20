@@ -376,15 +376,18 @@ def stage(
 
 
 def _transition_budget() -> float:
-    """How long an accepted transition may take: standby warm plus cutover.
+    """How long an accepted transition may take: warm, cutover, cold start.
 
     The supervisor warms the candidate beside the serving worker before it
-    pauses anything, so the operator's patience has to cover that warm budget as
-    well as the cutover budget, with room for a busy host.
+    pauses anything, and once it has stopped the old worker it waits out the
+    cold-start window for the replacement to report ready. Reporting failure
+    while the supervisor is still legitimately waiting is what sends an
+    operator to `--resume` in the middle of a handoff that was going to
+    succeed, so this covers both budgets, with room for a busy host.
     """
-    from .service_manager import standby_warm_budget
+    from .service_manager import cold_start_window, standby_warm_budget
 
-    return standby_warm_budget() + 120.0
+    return standby_warm_budget() + cold_start_window() + 120.0
 
 
 def _wait_for_target(

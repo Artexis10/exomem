@@ -516,12 +516,16 @@ class Supervisor:
                         "error": "could not record the transition; current worker is still serving",
                     }
             try:
+                # The cutover budget bounds everything that happens while
+                # abandoning the upgrade is still cheap. Past the stop there is
+                # no worker to give admission back to, so it ends there.
                 async with asyncio.timeout(deadline.remaining(40)):
                     await self.ingress.detach_streams()
                     # Resume always repeats the stop proof, including a timed-out
                     # migrator or failed candidate retained by this supervisor.
                     self.records.phase("stopping")
                     await self.runtime.stop(timeout=deadline.remaining(10))
+                    stopped_at = time.monotonic()
                     # The migrator is the only writer between the two workers,
                     # and it runs only when the target declares a state
                     # migration. A skipped step is recorded, never silent.
@@ -533,29 +537,40 @@ class Supervisor:
                     if migrate:
                         self.records.phase("migrating", worker_pid=0)
                         await self.runtime.migrate(target, timeout=deadline.remaining(15))
-                    if standby is not None:
-                        self.records.phase("promoting", worker_pid=0)
-                        client, promotion = await self.runtime.promote_standby(
-                            migrated=migrate, timeout=deadline.remaining(30)
-                        )
-                        handoff["promotion"] = promotion
-                    else:
-                        self.records.phase("starting", worker_pid=0)
-                        client = await self.runtime.start(target, timeout=deadline.remaining(30))
-                    self.records.phase("ready", worker_pid=self.runtime.pid)
-                    self.records.accept(target)
-                    self.ingress.resume(client)
-                    self.phase = "ready"
-                    handoff["unavailable_ms"] = round(
-                        (time.monotonic() - paused_at) * 1000.0, 1
+                # Nothing is serving from here, and no rollback remains: the only
+                # question left is whether the replacement becomes ready, so it
+                # gets the same window a cold start gets. Ending the wait sooner
+                # buys nothing -- it converts "unavailable for another minute"
+                # into "unavailable until an operator resumes", and the resume
+                # runs into the same wall, killing the background repair it is
+                # waiting on and restarting it from zero. Ingress stays paused:
+                # `_queue` already answers a request that outlasts its own
+                # budget with a bounded, explicit, undispatched refusal.
+                replacement_budget = self._replacement_budget()
+                if standby is not None:
+                    self.records.phase("promoting", worker_pid=0)
+                    client, promotion = await self.runtime.promote_standby(
+                        migrated=migrate, timeout=replacement_budget
                     )
-                    return {
-                        "ok": True,
-                        "phase": "ready",
-                        "active": target,
-                        "worker_pid": self.runtime.pid,
-                        "handoff": handoff,
-                    }
+                    handoff["promotion"] = promotion
+                else:
+                    self.records.phase("starting", worker_pid=0)
+                    client = await self.runtime.start(target, timeout=replacement_budget)
+                handoff["ready_after_ms"] = round((time.monotonic() - stopped_at) * 1000.0, 1)
+                self.records.phase("ready", worker_pid=self.runtime.pid)
+                self.records.accept(target)
+                self.ingress.resume(client)
+                self.phase = "ready"
+                handoff["unavailable_ms"] = round(
+                    (time.monotonic() - paused_at) * 1000.0, 1
+                )
+                return {
+                    "ok": True,
+                    "phase": "ready",
+                    "active": target,
+                    "worker_pid": self.runtime.pid,
+                    "handoff": handoff,
+                }
             except Exception:  # noqa: BLE001 - every post-stop failure must retain recovery state
                 self.phase = "recovery-required"
                 self.ingress.unavailable()
