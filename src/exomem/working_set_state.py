@@ -143,6 +143,15 @@ def _from_records(
             sort_by=date_column,
             descending=True,
             limit=1,
+            # Bound the work: govern only the one row this lookup returns,
+            # never every record in the collection, and never build link
+            # governance's vault-wide candidate index to do it -- a bare
+            # title or memory-reference link then resolves exactly as it
+            # already does whenever that index is incomplete (withheld), so
+            # this can only withhold more than the ordinary eager path,
+            # never disclose more. See record_formats.query_collection's
+            # `late_link_projection` docstring for the exact contract.
+            late_link_projection=True,
         )
     except Exception:  # noqa: BLE001 - a refused or unreadable collection falls through
         log.debug("current state: records query failed", exc_info=True)

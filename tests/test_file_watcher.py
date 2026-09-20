@@ -84,6 +84,59 @@ def test_external_pending_ack_does_not_clear_a_newer_event(vault: Path) -> None:
     assert freshness.external_pending(vault) is False
 
 
+def test_reconcile_once_announces_and_clears_seed_pending(vault: Path) -> None:
+    """The pending-seed seam `commands.op_activate_context` relies on to tell
+    "actively seeding, worth waiting for" apart from "cold and nothing is
+    coming" (`freshness.recall_seed_pending`): announced immediately before
+    the boot-time seed walk starts for each scope, and cleared the instant
+    that walk ends. Observed from INSIDE the walk generator itself, so this
+    proves the announce happens before the walk starts, not merely before
+    `seed()` is called."""
+    watcher = file_watcher.FileWatcher(vault)
+    assert freshness.recall_seed_pending(vault, "kb") is False
+    assert freshness.recall_seed_pending(vault, "vault") is False
+
+    observed_during_walk: list[bool] = []
+    real_walk_entries = watcher._walk_entries
+
+    def _spying_walk_entries(scope: str):
+        observed_during_walk.append(freshness.recall_seed_pending(vault, scope))
+        yield from real_walk_entries(scope)
+
+    watcher._walk_entries = _spying_walk_entries  # type: ignore[method-assign]
+
+    watcher._reconcile_once(seed=True)
+
+    # One walk per scope; pending was True for each while its own walk ran.
+    assert observed_during_walk == [True, True]
+    assert freshness.recall_seed_pending(vault, "kb") is False
+    assert freshness.recall_seed_pending(vault, "vault") is False
+    assert freshness.recall_is_live(vault, "kb") is True
+    assert freshness.recall_is_live(vault, "vault") is True
+
+
+def test_seed_pending_clears_even_when_the_walk_raises(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scope whose seed walk fails must not strand `recall_seed_pending`
+    `True` forever -- that would make the request path's cold-walk fallback
+    (`managed_cold` requiring `recall_seed_pending`) permanently unreachable
+    for exactly the scope that most needs it."""
+    watcher = file_watcher.FileWatcher(vault)
+
+    def _broken_walk_entries(_scope: str):
+        raise RuntimeError("simulated seed walk failure")
+        yield  # pragma: no cover - generator-shaped test double
+
+    monkeypatch.setattr(watcher, "_walk_entries", _broken_walk_entries)
+
+    watcher._reconcile_once(seed=True)
+
+    assert freshness.recall_seed_pending(vault, "kb") is False
+    assert freshness.recall_seed_pending(vault, "vault") is False
+    assert freshness.recall_is_live(vault, "kb") is False
+
+
 def test_out_of_kb_markdown_event_repairs_vault_wide_graph(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

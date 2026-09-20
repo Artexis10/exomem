@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime
+import inspect
 import json
 from collections.abc import Callable
 from dataclasses import replace
@@ -15,7 +17,16 @@ from record_fixtures import (
 )
 from record_presentation_fixtures import manifest_text
 
-from exomem import memory_refs, record_formats, record_governance, records, vault
+from exomem import (
+    memory_refs,
+    plan_progress,
+    planning,
+    record_formats,
+    record_governance,
+    record_memory,
+    records,
+    vault,
+)
 from exomem import structured_collections as collections
 from exomem.governance import egress, receipts
 from exomem.governance.principal import RequestPrincipal, request_scope
@@ -1740,6 +1751,447 @@ def test_missing_and_withheld_link_targets_have_identical_public_query_state(tmp
         withheld.snapshot,
         withheld.continuation,
     )
+
+
+def test_query_requesting_a_link_field_still_resolves_and_withholds_it(tmp_path: Path) -> None:
+    """G1: an ordinary query (no `late_link_projection` opt-in -- nothing in
+    the public surface can set it, see the guard test below) keeps full,
+    eager link governance exactly as on base: an authorized bare-title
+    target still resolves and an unauthorized (here, missing) one is still
+    withheld from the row.
+    """
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    (tmp_path / "Knowledge Base" / "Vehicle.md").write_text("# Vehicle\n", encoding="utf-8")
+    (fixture / "Events" / "2026-07-20-bare.md").write_text(
+        "---\n"
+        "type: record\n"
+        f"collection_id: {manifest.collection_id}\n"
+        "record_id: 33333333-3333-4333-8333-333333333333\n"
+        "schema_version: 1\n"
+        "occurred_on: 2026-07-20\n"
+        'asset: "[[Vehicle]]"\n'
+        'receipt: "[[Missing Receipt]]"\n'
+        "status: completed\n"
+        "---\n",
+        encoding="utf-8",
+    )
+
+    result = record_governance.query_collection(
+        tmp_path,
+        manifest,
+        columns=["asset", "receipt"],
+        sort_by="occurred_on",
+        descending=True,
+        limit=1,
+    )
+
+    row = result.rows[0]
+    assert row["asset"] == "[[Vehicle]]"
+    assert row["receipt"] is None
+
+
+def test_public_tool_surfaces_cannot_set_late_link_projection() -> None:
+    """`late_link_projection` is an internal opt-in on `query_collection`,
+    never a request parameter: no public tool entry point declares it, so
+    nothing in a caller's input can ever reach or set it.
+    """
+    for entry_point in (record_memory.record_memory, planning.query, plan_progress.review):
+        assert "late_link_projection" not in inspect.signature(entry_point).parameters, (
+            f"{entry_point.__qualname__} must not expose late_link_projection"
+        )
+    with pytest.raises(TypeError, match="late_link_projection"):
+        record_memory.record_memory(
+            Path("/nonexistent"), "query", collection="x", late_link_projection=True
+        )
+
+
+def _empty_columns_fixture(tmp_path: Path) -> collections.CollectionManifest:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Activity\n", encoding="utf-8")
+    (fixture / "Events" / "2026-07-20-bare.md").write_text(
+        "---\n"
+        "type: record\n"
+        f"collection_id: {manifest.collection_id}\n"
+        "record_id: 33333333-3333-4333-8333-333333333333\n"
+        "schema_version: 1\n"
+        "occurred_on: 2026-07-20\n"
+        'asset: "[[Vehicle]]"\n'
+        'receipt: "[[Missing Receipt]]"\n'
+        "status: completed\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    return manifest
+
+
+def test_empty_columns_through_record_memory_still_withholds_link_fields(tmp_path: Path) -> None:
+    """B1 (base-identical): `columns=[]` (falsy, so `evaluate_rows` treats it
+    as "no column restriction" and returns the full row) must still return
+    the fully *governed* row through the actual public record_memory tool
+    surface -- an unresolvable bare-title `asset`/`receipt` withheld, never
+    the raw wikilink text.
+    """
+    manifest = _empty_columns_fixture(tmp_path)
+
+    result = record_memory.record_memory(
+        tmp_path,
+        "query",
+        collection=manifest.path,
+        columns=[],
+        sort_by="occurred_on",
+        descending=True,
+        limit=1,
+    )
+
+    row = result["rows"][0]
+    assert "asset" not in row or row["asset"] is None
+    assert "receipt" not in row or row["receipt"] is None
+    assert row["status"] == "completed"
+
+
+def _parts_collection(tmp_path: Path) -> collections.CollectionManifest:
+    """A Records collection with an array-of-link field, for B2/M3/parity."""
+    coll_dir = tmp_path / "Knowledge Base" / "Records" / "parts"
+    coll_dir.mkdir(parents=True)
+    (coll_dir / "_collection.md").write_text(
+        "---\n"
+        "type: collection\n"
+        "exomem_id: 44444444-5555-4666-8777-888888888888\n"
+        "title: Parts inventory\n"
+        "semantic_profile: records\n"
+        "collection_version: 1\n"
+        "schema_version: 1\n"
+        "lifecycle: active\n"
+        "storage:\n"
+        "  strategy: markdown-items\n"
+        "  source: Items\n"
+        "  format_version: 1\n"
+        "item_schema:\n"
+        "  natural_key: [observed_on]\n"
+        "  fields:\n"
+        "    observed_on:\n"
+        "      type: date\n"
+        "      required: true\n"
+        "    status:\n"
+        "      type: string\n"
+        "    parts:\n"
+        "      type: array\n"
+        "      items:\n"
+        "        type: link\n"
+        "---\n\nParts inventory fixture.\n",
+        encoding="utf-8",
+    )
+    (coll_dir / "Items").mkdir()
+    return collections.load_manifest(tmp_path, coll_dir / "_collection.md")
+
+
+def _coll_dir(tmp_path: Path, manifest: collections.CollectionManifest) -> Path:
+    return (tmp_path / manifest.path).parent
+
+
+def _write_parts_item(coll_dir: Path, name: str, **fields: object) -> None:
+    lines = ["---", "type: record", f"collection_id: {fields.pop('collection_id')}"]
+    for key, value in fields.items():
+        if isinstance(value, list):
+            rendered = json.dumps(value)
+            lines.append(f"{key}: {rendered}")
+        elif isinstance(value, str) and value.startswith("[["):
+            lines.append(f'{key}: "{value}"')
+        else:
+            lines.append(f"{key}: {value}")
+    lines.append("---\n")
+    (coll_dir / "Items" / name).write_text("\n".join(lines), encoding="utf-8")
+
+
+def test_dotted_array_of_link_column_matches_between_eager_and_late_projection(
+    tmp_path: Path,
+) -> None:
+    """B2 (base-identical): a dotted column into an array-of-link field
+    (`parts.0`) must withhold an unresolvable bare-title element. An
+    explicit `columns` restriction now refuses late projection outright
+    (`_late_link_projection_safe` requires `columns` to be empty -- see
+    NEW-1/NEW-2 in review round 3), so `late_link_projection=True` here is a
+    no-op that falls back to the identical eager path: this proves that
+    fallback, not a genuine late-projected dotted-column read (which no
+    caller shape uses -- see the array-of-string sort test below and the
+    large-row byte-cap test for what NEW-1/NEW-3 actually needed fixed).
+    """
+    manifest = _parts_collection(tmp_path)
+    _write_parts_item(
+        _coll_dir(tmp_path, manifest),
+        "a.md",
+        collection_id=manifest.collection_id,
+        record_id="11111111-1111-4111-8111-111111111111",
+        schema_version=1,
+        observed_on="2026-07-20",
+        status="active",
+        parts=["[[Missing Part A]]"],
+    )
+
+    eager = record_governance.query_collection(
+        tmp_path, manifest, columns=["status", "parts.0"], sort_by="observed_on", limit=1
+    )
+    late = record_governance.query_collection(
+        tmp_path,
+        manifest,
+        columns=["status", "parts.0"],
+        sort_by="observed_on",
+        limit=1,
+        late_link_projection=True,
+    )
+
+    assert eager.rows == late.rows
+    assert eager.rows[0]["parts.0"] is None
+    assert eager.rows[0]["status"] == "active"
+
+
+def test_empty_array_field_is_identical_with_or_without_an_unrelated_link_column(
+    tmp_path: Path,
+) -> None:
+    """M3 (base-identical): link governance pops an *empty* array field
+    (`spec.type == "array" and not value`) for every array field, link
+    items or not -- `services`/`parts` must come back the same (absent /
+    None) whether or not an unrelated link column is also requested. Both
+    queries here pass a non-empty `columns`, so `_late_link_projection_safe`
+    always refuses (see NEW-1/NEW-2 in review round 3) and
+    `late_link_projection=True` is a no-op over the identical eager path --
+    this loop proves that no-op holds, not a genuine late-projected read.
+    """
+    manifest = _parts_collection(tmp_path)
+    _write_parts_item(
+        _coll_dir(tmp_path, manifest),
+        "b.md",
+        collection_id=manifest.collection_id,
+        record_id="22222222-2222-4222-8222-222222222222",
+        schema_version=1,
+        observed_on="2026-07-21",
+        status="active",
+        parts=[],
+    )
+
+    for late in (False, True):
+        only_status = record_governance.query_collection(
+            tmp_path,
+            manifest,
+            columns=["parts"],
+            sort_by="observed_on",
+            limit=1,
+            late_link_projection=late,
+        )
+        with_status = record_governance.query_collection(
+            tmp_path,
+            manifest,
+            columns=["parts", "status"],
+            sort_by="observed_on",
+            limit=1,
+            late_link_projection=late,
+        )
+        assert only_status.rows[0]["parts"] == with_status.rows[0]["parts"] is None, late
+
+
+def test_late_projection_selects_the_same_row_as_eager_when_sort_field_is_sometimes_absent(
+    tmp_path: Path,
+) -> None:
+    """Selection parity: `next_due_on` is optional, scalar and link-free, and
+    `columns` is left empty (the only shape `_late_link_projection_safe`
+    admits -- see NEW-1/NEW-2 in review round 3). With some records leaving
+    `next_due_on` unset, the rows `late_link_projection=True` selects (sort,
+    then limit, on raw values) must equal the rows the eager path selects
+    (sort, then limit, on governed values) -- proving selection does not
+    depend on projection for a scalar, non-array, non-link sort field, and
+    proving this query shape genuinely takes the late path (an empty
+    `columns` is required, not merely tolerated).
+    """
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    (fixture / "Events" / "2026-07-10-no-due-date.md").write_text(
+        "---\n"
+        "type: record\n"
+        f"collection_id: {manifest.collection_id}\n"
+        "record_id: 55555555-5555-4555-8555-555555555555\n"
+        "schema_version: 1\n"
+        "occurred_on: 2026-07-10\n"
+        'asset: "[[Assets/Vehicle]]"\n'
+        "status: completed\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    (fixture / "Events" / "2026-07-11-with-due-date.md").write_text(
+        "---\n"
+        "type: record\n"
+        f"collection_id: {manifest.collection_id}\n"
+        "record_id: 66666666-6666-4666-8666-666666666666\n"
+        "schema_version: 1\n"
+        "occurred_on: 2026-07-11\n"
+        'asset: "[[Assets/Vehicle]]"\n'
+        "status: completed\n"
+        "next_due_on: 2026-09-01\n"
+        "---\n",
+        encoding="utf-8",
+    )
+
+    eager = record_governance.query_collection(
+        tmp_path,
+        manifest,
+        sort_by="next_due_on",
+        descending=True,
+        limit=5,
+    )
+    late = record_governance.query_collection(
+        tmp_path,
+        manifest,
+        sort_by="next_due_on",
+        descending=True,
+        limit=5,
+        late_link_projection=True,
+    )
+
+    eager_ids = [row["record_id"] for row in eager.rows]
+    late_ids = [row["record_id"] for row in late.rows]
+    assert late_ids == eager_ids
+    assert "55555555-5555-4555-8555-555555555555" in eager_ids
+    assert "66666666-6666-4666-8666-666666666666" in eager_ids
+
+
+def test_current_state_shape_still_takes_the_late_projection_path(tmp_path: Path) -> None:
+    """Review round 3: `_late_link_projection_safe` was narrowed (refuses a
+    non-empty `columns` or an array-typed sort/date root) to close NEW-1 and
+    NEW-3. `working_set_state._from_records` (exercised end-to-end by R1,
+    R2 and the M4 tests) asks for `columns=None` and sorts by a plain
+    scalar `date` field, so it must still clear this check -- asserted
+    directly here (white-box), not just inferred from R1's "no vault walk"
+    and R2's "exactly one projector call" side effects, so a future
+    narrowing of this precondition cannot silently fall the current-state
+    lookup back to the eager path without a visible failure right here.
+    """
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+
+    assert record_formats._late_link_projection_safe(
+        manifest,
+        filters=None,
+        columns=None,
+        sort_by="occurred_on",
+        date_column=None,
+        date_from=None,
+        date_to=None,
+        aggregate=None,
+        expand_children=False,
+        expand_child=None,
+    )
+
+
+def test_explicit_columns_refuses_late_projection_and_matches_eager_byte_cap(
+    tmp_path: Path,
+) -> None:
+    """NEW-1 (resolved by construction, not by column-projected byte
+    capping): the late path's inner window step runs with `columns=None`,
+    so its 64 KiB response-byte cap always sees raw *all-field* rows, never
+    the small column-projected rows eager caps. `_late_link_projection_safe`
+    now refuses whenever `columns` is non-empty, so requesting a narrow
+    `columns=["status"]` over 60 records that each carry a large unrelated
+    field must fall back to the identical eager path -- same rows, same
+    `truncated` flag, same continuation presence -- rather than the
+    late path's byte cap triggering early on the large raw rows.
+    """
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    large_value = "x" * 1800
+    start = datetime.date(2026, 1, 1)
+    for index in range(60):
+        occurred_on = (start + datetime.timedelta(days=index)).isoformat()
+        (fixture / "Events" / f"{occurred_on}-bulk.md").write_text(
+            "---\n"
+            "type: record\n"
+            f"collection_id: {manifest.collection_id}\n"
+            f"record_id: bbbbbbbb-bbbb-4bbb-8bbb-{index:012d}\n"
+            "schema_version: 1\n"
+            f"occurred_on: {occurred_on}\n"
+            'asset: "[[Assets/Vehicle]]"\n'
+            "status: completed\n"
+            f"provider: {large_value}\n"
+            "---\n",
+            encoding="utf-8",
+        )
+
+    eager = record_governance.query_collection(
+        tmp_path, manifest, columns=["status"], sort_by="occurred_on", limit=100
+    )
+    late = record_governance.query_collection(
+        tmp_path,
+        manifest,
+        columns=["status"],
+        sort_by="occurred_on",
+        limit=100,
+        late_link_projection=True,
+    )
+
+    assert late.rows == eager.rows
+    assert len(eager.rows) >= 60, "the 60 large-row records must all be present, unbounded by size"
+    assert eager.truncated is False
+    assert late.truncated is False
+    assert (late.continuation is None) == (eager.continuation is None) is True
+
+
+def test_sort_by_array_field_refuses_late_projection_and_matches_eager_order(
+    tmp_path: Path,
+) -> None:
+    """NEW-3 (resolved by construction): `_LinkProjector.__call__` pops any
+    array field (link items or not) whose governed value is empty, so an
+    empty raw `[]` and its governed, dropped-key `None` can sort
+    differently. `_late_link_projection_safe` now also refuses when the
+    sort/date root field is array-typed, so sorting by `services` (array of
+    plain strings -- non-link, but still unsafe) must fall back to the
+    identical eager path and return eager-identical row order.
+    """
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    (fixture / "Events" / "2026-07-01-empty-services.md").write_text(
+        "---\n"
+        "type: record\n"
+        f"collection_id: {manifest.collection_id}\n"
+        "record_id: cccccccc-cccc-4ccc-8ccc-cccccccccccc\n"
+        "schema_version: 1\n"
+        "occurred_on: 2026-07-01\n"
+        'asset: "[[Assets/Vehicle]]"\n'
+        "services: []\n"
+        "status: completed\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    (fixture / "Events" / "2026-07-02-with-services.md").write_text(
+        "---\n"
+        "type: record\n"
+        f"collection_id: {manifest.collection_id}\n"
+        "record_id: dddddddd-dddd-4ddd-8ddd-dddddddddddd\n"
+        "schema_version: 1\n"
+        "occurred_on: 2026-07-02\n"
+        'asset: "[[Assets/Vehicle]]"\n'
+        "services: [oil change]\n"
+        "status: completed\n"
+        "---\n",
+        encoding="utf-8",
+    )
+
+    eager = record_governance.query_collection(
+        tmp_path, manifest, sort_by="services", descending=True, limit=5
+    )
+    late = record_governance.query_collection(
+        tmp_path,
+        manifest,
+        sort_by="services",
+        descending=True,
+        limit=5,
+        late_link_projection=True,
+    )
+
+    eager_ids = [row["record_id"] for row in eager.rows]
+    late_ids = [row["record_id"] for row in late.rows]
+    assert late_ids == eager_ids
+    assert "cccccccc-cccc-4ccc-8ccc-cccccccccccc" in eager_ids
+    assert "dddddddd-dddd-4ddd-8ddd-dddddddddddd" in eager_ids
 
 
 def test_precommit_refusal_leaves_canonical_and_manifest_unchanged(

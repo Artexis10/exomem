@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 
 import pytest
@@ -741,3 +742,161 @@ def test_the_standbys_corpus_build_writes_nothing_under_the_vault_or_the_state_r
     assert service_standby.build_semantic_corpus(vault) is True
     assert census(vault) == before_vault
     assert census(state) == before_state
+
+
+def _promotion_vault(tmp_path: Path, monkeypatch) -> Path:
+    """A standby-shaped promotion: real lease state, ownership and residue stubbed."""
+    from exomem import writer_lease
+
+    vault_root = tmp_path / "vault"
+    (vault_root / "Knowledge Base" / "Notes").mkdir(parents=True)
+    (vault_root / "Knowledge Base" / "Notes" / "note.md").write_text(
+        "# Note\n", encoding="utf-8"
+    )
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state"),
+        mutation_timeout_seconds=5.0,
+    )
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch)
+    service_standby.enter_standby()
+    service_standby.register_activation(_Activation())
+    service_standby.prove_graph_snapshot(vault_root)
+    return vault_root
+
+
+def test_promotion_keeps_a_carried_inventory_whose_generation_still_matches(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """(a) Nothing moved under the standby, so its inventory survives promotion."""
+    from exomem import reserved_paths
+
+    vault_root = _promotion_vault(tmp_path, monkeypatch)
+    warmed = reserved_paths._baseline_identity_catalogue(vault_root)
+    scheduled: list[Path] = []
+    monkeypatch.setattr(
+        reserved_paths, "schedule_identity_catalogue_warm", scheduled.append
+    )
+
+    record = service_standby.promote(vault_root, migrated=False)
+
+    assert record["identity_catalogue"] == "current"
+    assert "identity_catalogue_cause" not in record
+    assert reserved_paths.identity_catalogue_ready(vault_root) is True
+    assert reserved_paths._baseline_identity_catalogue(vault_root) is warmed
+    assert scheduled == []
+
+
+def test_promotion_drops_a_carried_inventory_whose_generation_moved(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """(b) The outgoing worker published, so the carried inventory is not reusable."""
+    from exomem import reserved_paths
+
+    vault_root = _promotion_vault(tmp_path, monkeypatch)
+    reserved_paths._baseline_identity_catalogue(vault_root)
+    with reserved_paths._subsystem_authority_scope("embedding_index"):
+        with reserved_paths._identity_coordination_scope(
+            vault_root, descriptor_ids=("embeddings-store",)
+        ):
+            pass
+    scheduled: list[Path] = []
+    monkeypatch.setattr(
+        reserved_paths, "schedule_identity_catalogue_warm", scheduled.append
+    )
+
+    record = service_standby.promote(vault_root, migrated=False)
+
+    assert record["identity_catalogue"] == "rebuild-after-promotion"
+    assert record["identity_catalogue_cause"] == "generation-moved"
+    assert reserved_paths.identity_catalogue_ready(vault_root) is False
+    assert scheduled == [vault_root]
+
+
+def test_promotion_drops_a_carried_inventory_that_was_never_proved(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """(c) An inventory bound to no generation is refused exactly like a stale one."""
+    from exomem import reserved_paths
+
+    vault_root = _promotion_vault(tmp_path, monkeypatch)
+    built = reserved_paths._baseline_identity_catalogue(vault_root)
+    vault_key = reserved_paths._vault_identity_key(vault_root)
+    with reserved_paths._PUBLISHED_IDENTITY_LOCK:
+        reserved_paths._BASELINE_IDENTITY_CATALOGUES[vault_key] = dataclass_replace(
+            built, generation=None
+        )
+    scheduled: list[Path] = []
+    monkeypatch.setattr(
+        reserved_paths, "schedule_identity_catalogue_warm", scheduled.append
+    )
+
+    record = service_standby.promote(vault_root, migrated=False)
+
+    assert record["identity_catalogue"] == "rebuild-after-promotion"
+    assert record["identity_catalogue_cause"] == "unproved"
+    assert reserved_paths.identity_catalogue_ready(vault_root) is False
+    assert scheduled == [vault_root]
+
+
+def test_promotion_completes_when_the_identity_gate_refuses_revalidation(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A refused coordination scope must not strand a lease-holding process."""
+    from exomem import reserved_paths
+    from exomem.cli_ops import OpError
+
+    vault_root = _promotion_vault(tmp_path, monkeypatch)
+    reserved_paths._baseline_identity_catalogue(vault_root)
+    scheduled: list[Path] = []
+    monkeypatch.setattr(
+        reserved_paths, "schedule_identity_catalogue_warm", scheduled.append
+    )
+
+    def refused_scope(*_args: object, **_kwargs: object):
+        raise OpError(
+            "MUTATION_BUSY",
+            "vault mutation boundary is busy",
+            "Retry after the current mutation completes.",
+        )
+
+    monkeypatch.setattr(
+        reserved_paths, "_identity_coordination_scope", refused_scope
+    )
+
+    record = service_standby.promote(vault_root, migrated=False)
+
+    assert record["identity_catalogue"] == "rebuild-after-promotion"
+    assert record["identity_catalogue_cause"] == "gate-busy"
+    assert service_standby.promoted() is True
+    assert reserved_paths.identity_catalogue_ready(vault_root) is False
+    assert scheduled == [vault_root]
+
+
+def test_promotion_names_an_unreadable_token_as_the_cause(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The fourth refusal: the token exists but cannot be parsed."""
+    from exomem import reserved_paths, writer_lease
+
+    vault_root = _promotion_vault(tmp_path, monkeypatch)
+    reserved_paths._baseline_identity_catalogue(vault_root)
+    token = writer_lease._reserved_identity_generation_path(
+        writer_lease.active_manager().config.state_dir, vault_root
+    )
+    token.parent.mkdir(parents=True, exist_ok=True)
+    token.write_text("not-a-generation", encoding="ascii")
+    scheduled: list[Path] = []
+    monkeypatch.setattr(
+        reserved_paths, "schedule_identity_catalogue_warm", scheduled.append
+    )
+
+    record = service_standby.promote(vault_root, migrated=False)
+
+    assert record["identity_catalogue"] == "rebuild-after-promotion"
+    assert record["identity_catalogue_cause"] == "token-unreadable"
+    assert reserved_paths.identity_catalogue_ready(vault_root) is False
+    assert scheduled == [vault_root]

@@ -227,6 +227,77 @@ def test_supervisor_start_with_receipt_does_not_launch_a_worker(tmp_path):
     asyncio.run(scenario())
 
 
+class _ColdRuntime(_Runtime):
+    def __init__(self):
+        super().__init__()
+        self.pid = 0
+        self.start_timeouts = []
+
+    async def start(self, target, timeout):
+        self.start_timeouts.append(timeout)
+        return await super().start(target, timeout)
+
+
+def _cold_supervisor(tmp_path, **kwargs):
+    module = _manager()
+    ingress, runtime = _Ingress(), _ColdRuntime()
+    manager = module.Supervisor(
+        module.private_directory(tmp_path / "managed"),
+        initial_target={"python": sys.executable, "version": "1.2.3"},
+        ingress=ingress,
+        runtime=runtime,
+        identity={"unit": "sample.service", "invocation": "abc", "boot": "boot"},
+        **kwargs,
+    )
+    return manager, runtime
+
+
+def test_a_cold_start_waits_its_own_budget_because_no_worker_is_serving(tmp_path):
+    # A cold worker warms the same catalogs a standby does, and there is no
+    # serving worker to protect. A shorter fixed readiness window stops it
+    # mid-warm and the unit restarts into the same cold catalog.
+    async def scenario():
+        manager, runtime = _cold_supervisor(tmp_path, cold_start_timeout=900.0)
+        await manager.start()
+        assert runtime.start_timeouts == [900.0]
+        assert manager.phase == "ready"
+
+    asyncio.run(scenario())
+
+
+def test_a_short_cold_start_budget_never_drops_below_the_floor(tmp_path):
+    async def scenario():
+        manager, runtime = _cold_supervisor(tmp_path, cold_start_timeout=7.0)
+        await manager.start()
+        assert runtime.start_timeouts == [120.0]
+
+    asyncio.run(scenario())
+
+
+def test_the_standby_warm_budget_does_not_size_the_cold_start_window(tmp_path):
+    # How long a hung cold worker stays invisible is a different question from
+    # how long a standby may warm beside a serving one, so lengthening the
+    # standby budget must not lengthen hang detection on a cold start.
+    module = _manager()
+
+    async def scenario():
+        manager, runtime = _cold_supervisor(tmp_path, standby_warm_timeout=5000.0)
+        await manager.start()
+        assert runtime.start_timeouts == [module.DEFAULT_COLD_START_SECONDS]
+
+    asyncio.run(scenario())
+
+
+def test_the_cold_start_budget_is_a_parameter_with_an_environment_override(monkeypatch):
+    module = _manager()
+    monkeypatch.delenv(module.COLD_START_ENV, raising=False)
+    assert module.cold_start_budget() == module.DEFAULT_COLD_START_SECONDS
+    monkeypatch.setenv(module.COLD_START_ENV, "450")
+    assert module.cold_start_budget() == 450.0
+    monkeypatch.setenv(module.COLD_START_ENV, "not-a-number")
+    assert module.cold_start_budget() == module.DEFAULT_COLD_START_SECONDS
+
+
 def test_systemd_identity_rejects_a_different_main_pid(tmp_path):
     module = _manager()
     properties = {

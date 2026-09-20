@@ -1344,3 +1344,59 @@ def test_two_directly_linked_anchors_are_complementary(
     assert titles <= set(resolved), sorted(resolved)
     for title in titles:
         assert "graph_corroboration" in resolved[title].evidence, resolved[title]
+
+
+def test_managed_activation_abstains_while_the_identity_inventory_is_cold(
+    seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A cold private-identity inventory is built by a whole-vault walk under the
+    # all-domain identity gate. An interactive turn must not be the caller that
+    # pays for it: it abstains as warming and the build runs in the background.
+    from exomem import readiness, reserved_paths, working_set_runtime
+
+    working_set_index.WorkingSetIndex(seeded).rebuild()
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    monkeypatch.setattr(reserved_paths, "identity_catalogue_ready", lambda root: False)
+    warmed: list[Path] = []
+    monkeypatch.setattr(reserved_paths, "schedule_identity_catalogue_warm", warmed.append)
+
+    state, index, stale = working_set_runtime.ensure_index(seeded)
+
+    assert (state, index, stale) == (working_set_runtime.WARMING, None, False)
+    assert warmed == [seeded]
+
+
+def test_managed_activation_serves_once_the_identity_inventory_is_ready(
+    seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import readiness, reserved_paths, working_set_runtime
+
+    working_set_index.WorkingSetIndex(seeded).rebuild()
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    monkeypatch.setattr(reserved_paths, "identity_catalogue_ready", lambda root: True)
+    warmed: list[Path] = []
+    monkeypatch.setattr(reserved_paths, "schedule_identity_catalogue_warm", warmed.append)
+
+    state, index, _stale = working_set_runtime.ensure_index(seeded)
+
+    assert state == working_set_runtime.READY
+    assert index is not None
+    assert warmed == []
+
+
+def test_unmanaged_activation_ignores_identity_inventory_readiness(
+    seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import readiness, reserved_paths, working_set_runtime
+
+    working_set_index.WorkingSetIndex(seeded).rebuild()
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: False)
+    monkeypatch.setattr(reserved_paths, "identity_catalogue_ready", lambda root: False)
+    warmed: list[Path] = []
+    monkeypatch.setattr(reserved_paths, "schedule_identity_catalogue_warm", warmed.append)
+
+    state, index, _stale = working_set_runtime.ensure_index(seeded)
+
+    assert state == working_set_runtime.READY
+    assert index is not None
+    assert warmed == []

@@ -248,6 +248,12 @@ def _live_descendants(
 #: separate from the cutover budget and is measured in minutes, not seconds.
 STANDBY_WARM_ENV = "EXOMEM_STANDBY_WARM_SECONDS"
 DEFAULT_STANDBY_WARM_SECONDS = 300.0
+#: A cold worker warms the same catalogs a standby does, so its default budget
+#: matches. It is a separate knob because it answers a separate question: how
+#: long a hung cold worker stays invisible, with nothing else serving.
+COLD_START_ENV = "EXOMEM_COLD_START_SECONDS"
+DEFAULT_COLD_START_SECONDS = 300.0
+COLD_START_FLOOR_SECONDS = 120.0
 
 
 def standby_warm_budget() -> float:
@@ -263,6 +269,19 @@ def standby_warm_budget() -> float:
     return DEFAULT_STANDBY_WARM_SECONDS
 
 
+def cold_start_budget() -> float:
+    """How long a cold worker may warm before its readiness window closes."""
+    raw = os.environ.get(COLD_START_ENV, "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 0.0
+        if math.isfinite(value) and value > 0:
+            return value
+    return DEFAULT_COLD_START_SECONDS
+
+
 class Supervisor:
     """Serialize replacement while the ingress retains client connections."""
 
@@ -276,6 +295,7 @@ class Supervisor:
         identity: dict[str, Any],
         transition_timeout: float = 40,
         standby_warm_timeout: float | None = None,
+        cold_start_timeout: float | None = None,
     ):
         self.records = ReleaseRecords(directory)
         self.initial_target = initial_target
@@ -285,6 +305,9 @@ class Supervisor:
         self.transition_timeout = transition_timeout
         self.standby_warm_timeout = (
             standby_warm_budget() if standby_warm_timeout is None else standby_warm_timeout
+        )
+        self.cold_start_timeout = (
+            cold_start_budget() if cold_start_timeout is None else cold_start_timeout
         )
         self.lock = asyncio.Lock()
         self.phase = "unavailable"
@@ -302,7 +325,11 @@ class Supervisor:
             return
         target = self.records.active() or self.initial_target
         target = await self.runtime.inspect(target)
-        client = await self.runtime.start(target, timeout=120)
+        # A window shorter than the cold worker's warm stops it mid-warm, and
+        # the unit restarts into the same cold catalog.
+        client = await self.runtime.start(
+            target, timeout=max(COLD_START_FLOOR_SECONDS, self.cold_start_timeout)
+        )
         self.records.accept(target)
         self.ingress.resume(client)
         self.phase = "ready"

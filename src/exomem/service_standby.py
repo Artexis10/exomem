@@ -564,6 +564,24 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
     # enqueueing the repair the adoption owes is a write, and this process has
     # no standing to make it until the lease says the vault is its own.
     _acquire_ownership()
+    # The private-identity inventory this process built while warming was proved
+    # against a generation the outgoing worker was still advancing, and that
+    # worker's publications are invisible here. The shared token is the only
+    # evidence the carried inventory still covers the vault; when it disagrees
+    # the inventory is dropped and rebuilt off the request thread, so the first
+    # interactive caller after promotion does not pay for a whole-vault walk.
+    from . import reserved_paths
+
+    identity_cause = reserved_paths.identity_catalogue_refusal(Path(vault_root))
+    if identity_cause is None:
+        record["identity_catalogue"] = "current"
+    else:
+        # Name the cause: a vault that moved under the standby and a gate that
+        # was merely busy refuse identically, and the record is the only place
+        # the difference survives.
+        record["identity_catalogue"] = "rebuild-after-promotion"
+        record["identity_catalogue_cause"] = identity_cause
+        reserved_paths.schedule_identity_catalogue_warm(Path(vault_root))
     applied, residue_failure = _apply_residue(Path(vault_root), adoption)
     record["residue_applied"] = applied
     if residue_failure:
