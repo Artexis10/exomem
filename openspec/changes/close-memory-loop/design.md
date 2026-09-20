@@ -229,6 +229,43 @@ inventory prewarm must bind its proof to the shared identity generation and
 revalidate at promotion; merely carrying the existing unversioned cache would
 weaken physical-alias checks. These remain delivery work before enablement.
 
+The repair that followed keeps the interactive path out of every one of those
+costs rather than making each cheaper. Cold construction of the private-identity
+inventory is single-flight; followers wait on an in-process event under a budget
+sized to the build and capped by the caller's request deadline, because that
+wait holds no gate and blocks no writer. The inventory records the generation it
+was proved against. Revalidation happens once, at promotion, inside the
+coordination scope after ownership is taken: every owner publish advances the
+generation, so revalidating on each reuse would cost a whole-vault walk after
+every write, and within one process role the live publication layer already
+covers cooperative churn. After the lease is held nothing may escape promotion,
+so a moved generation, an unproved inventory, an unreadable token and a busy
+gate are all a mismatch: the inventory is dropped, a background rebuild is
+scheduled, promotion completes and the record names the cause. The standby's own
+warm-time reads before promotion remain a known residual, unchanged from before.
+
+Activation reports warming while that inventory is cold and, in a managed
+runtime, while recall is not yet live; the file watcher's first reconcile makes
+it live off the boot path, so this is a bounded window. The request deadline
+applies on every door: only the MCP door binds one, while the shipped host hook
+calls REST and the CLI with timeouts of a few seconds, so activation binds its
+own when none exists. Stage boundaries gate on a named reserve, and exhaustion
+returns an unavailable abstention with timings and the skipped stage, never a
+partial packet. A stage already running is not interrupted; bounding each stage
+is what the other repairs are for.
+
+Current state governs only the row it returns. The first attempt inferred, inside
+the shared Records query, that link governance could be skipped from the
+caller's columns and sort fields; an empty column list and a dotted column each
+defeated the inference and disclosed withheld link targets. Skipping is now an
+explicit internal option no tool surface can set, selection runs on raw values
+only for scalar non-array sort and date fields with no explicit columns, and the
+unchanged projector governs the surviving rows. The candidate index is never
+built cold on this path, so a bare-title link is withheld there.
+
+A cold worker now gets the standby warm budget before its readiness window
+closes; a fixed shorter window restarted the unit into the same cold catalog.
+
 | Contract | Owner | Programme integration |
 | --- | --- | --- |
 | Activation, roles, host continuity | Canonical `context-activation`, `context-roles`, `context-activation-continuity`; active `make-anchor-resolution-sound` | Reconcile current merges and convention work before wiring activation; preserve their requirements |

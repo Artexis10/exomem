@@ -320,6 +320,54 @@ fast abstention or compiler-only timing.
 - **THEN** the compiler may serve their context without reporting ambiguity
 - **AND** genuinely disjoint collections still participate in ambiguity checks
 
+### Requirement: Interactive activation does bounded work under a deadline on every door
+
+An activation request SHALL stop starting work once its request deadline can no
+longer afford another stage. When no request deadline is bound by the door,
+activation SHALL bind its own for the duration of the call and restore the prior
+state afterwards, so the MCP, REST and CLI doors are all bounded. Each stage
+SHALL start only when a named reserve remains. A request that exhausts its
+deadline SHALL return an unavailable abstention that discloses nothing, creates
+no reusable packet cache entry, names the first stage it did not run and carries
+its timings; it SHALL NOT return a partially compiled packet. Every abstention,
+including disabled, unresolved, warming and unavailable outcomes, SHALL carry
+its timings.
+
+In a managed runtime, activation SHALL NOT project recall freshness, walk the
+vault, or build the private-identity inventory on the request thread. While
+recall is not yet live or the private-identity inventory is cold, activation
+SHALL abstain as warming and leave that work to the background owner. A live
+recall-policy mismatch SHALL fail fast through the existing live checkpoint
+rather than reproject synchronously. Freshness that cannot be established SHALL
+produce an unavailable abstention; later stages SHALL NOT re-attempt it.
+Unmanaged and offline activation SHALL be unchanged.
+
+The current-state lookup SHALL govern only the rows it returns. It SHALL NOT
+build the vault-wide link candidate index on the request thread; a bare-title or
+memory-reference link whose resolution would need that index SHALL take the
+existing withheld state, and a path-shaped link SHALL keep resolving and being
+authorized. A governance step SHALL be skipped only through an explicit internal
+option that no tool surface can set, never by inference from caller-supplied
+query arguments.
+
+#### Scenario: Every shipped client has given up on the request
+
+- **WHEN** an activation arrives through a door that binds no request deadline and its work outlasts the activation door budget
+- **THEN** the next stage boundary abstains as unavailable, names the stage it skipped and returns the timings of the stages that ran
+- **AND** no packet content is disclosed and no packet cache entry is created
+
+#### Scenario: A managed service has just started
+
+- **WHEN** an activation arrives before recall is live or while the private-identity inventory is cold
+- **THEN** it abstains as warming without projecting freshness or walking the vault on the request thread
+- **AND** the background owner builds the missing state once for all concurrent callers
+
+#### Scenario: A current-state record carries an unrelated bare-title link
+
+- **WHEN** the newest record of a stateful collection holds a scalar state field and an unrelated link written as a bare title
+- **THEN** current state reports the scalar statement and governs exactly that row
+- **AND** no vault-wide candidate index is built and the bare-title link is withheld exactly as a missing target would be
+
 ### Requirement: Integration acceptance does not substitute scorer fixtures for product behaviour
 
 The existing benchmark SHALL retain its thresholds and negative controls while exercising normal capture writers, canonical layouts, index publication and the actual compiler. Scorer unit tests and oracle packets SHALL be labelled as instrument tests. Public fixtures SHALL be synthetic; private originals SHALL remain outside public artifacts. Paid comparative experiments SHALL remain separately authorized and SHALL NOT gate this programme's deterministic and ordinary-use acceptance.
