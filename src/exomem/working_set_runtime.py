@@ -45,7 +45,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-from . import context_roles, reserved_paths, sidecar_store, working_set, working_set_index
+from . import context_roles, sidecar_store, working_set, working_set_index
 
 log = logging.getLogger(__name__)
 
@@ -422,12 +422,18 @@ def ensure_index(
     index = working_set_index.WorkingSetIndex(root)
     if not index.available():
         return DISABLED, None, False
-    if _managed() and not reserved_paths.identity_catalogue_ready(root):
-        # A cold private-identity inventory is built by a whole-vault walk under
-        # the all-domain identity gate, and every governed read below needs it.
-        # An interactive turn abstains and the walk runs in the background.
-        reserved_paths.schedule_identity_catalogue_warm(root)
-        return WARMING, None, False
+    if _managed():
+        # Imported here: the unmanaged CLI starts a process per call and never
+        # reaches this gate, so it should not pay for the module at import.
+        from . import reserved_paths
+
+        if not reserved_paths.identity_catalogue_ready(root):
+            # A cold private-identity inventory is built by a whole-vault walk
+            # under the all-domain identity gate, and every governed read below
+            # needs it. An interactive turn abstains and the walk runs in the
+            # background.
+            reserved_paths.schedule_identity_catalogue_warm(root)
+            return WARMING, None, False
     if not index.readable():
         return UNAVAILABLE, None, False
     if not index.anchors():
