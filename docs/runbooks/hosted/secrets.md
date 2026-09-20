@@ -431,6 +431,91 @@ sops decrypt \
       --vercel-project "$substrate_root"
 ```
 
+## Activation acknowledgement listener certificate
+
+The provisioner worker serves the acknowledgement listener on 8443 behind the
+`exomem-activation-ack` ClusterIP Service, and a tenant cell's custody sidecar
+dials it by that DNS name. The listener's server certificate lives in the
+`exomem-activation-ack-tls` Secret; the authority's public certificate is the
+trust bundle whose digest the deployment lock pins and whose bytes each cell
+projects into an immutable ConfigMap.
+
+Certificates are never piped in. `infra/scripts/activation_ack_certificate_handoff.py`
+generates the key material, validates the result, and hands it off atomically;
+the matrix source kind refuses the generic handoff for these entries.
+
+### First issuance
+
+```bash
+infra/scripts/activation_ack_certificate_handoff.py \
+  --matrix "$matrix" \
+  --repository-root "$repo_root" \
+  --version v1 \
+  --platform-namespace exomem-platform \
+  --trust-bundle "$repo_root/infra/secrets/public/activation-ack-ca.pem" \
+  --new-authority
+```
+
+This publishes the TLS pair to `k3s.activation-ack-tls.active`, the authority's
+private key to `escrow.activation-ack-ca.active`, and writes the CA-only trust
+bundle. It prints only public facts: the DNS name, the expiry, the serial, and
+the `trustBundleSha256` the deployment lock must carry. A refusal prints one
+content-free line and exits 2.
+
+Feed the printed bundle to the composition lock with
+`--activation-ack-trust-bundle` and `--activation-ack-platform-namespace`, then
+add the two matrix entries and a `k3s.activation-ack-tls.active` line to
+`infra/contracts/active-secret-selection-v1.json`. Publish a new signed
+active-secret registry pair before the next apply. An active Kubernetes
+destination with no selection entry makes the registry incomplete, so the
+matrix entries and the selection land in the same change as the first issuance.
+
+### Routine renewal, which touches no cell
+
+The certificate expires long before the authority does. Renewing under the same
+authority changes no digest, no lock and no cell:
+
+```bash
+infra/scripts/activation_ack_certificate_handoff.py \
+  --matrix "$matrix" \
+  --repository-root "$repo_root" \
+  --version "${next_version:?set the next unused destination version}" \
+  --platform-namespace exomem-platform \
+  --trust-bundle "$repo_root/infra/secrets/public/activation-ack-ca.pem" \
+  --authority "$repo_root/infra/secrets/escrow/activation-ack-ca.v1.sops.json"
+```
+
+Bump the selection to the new version, re-sign the registry, apply, and confirm
+the worker is serving the new serial. Nothing on the cell side moves. Renew well
+before the certificate enters its rotation window; the handoff refuses to issue
+a certificate that is already inside it, and preflight refuses to deploy one.
+
+### Authority rotation, which does touch every cell
+
+Rotating the authority changes the bundle digest, therefore the trust ConfigMap
+name, therefore the deployment lock, therefore every cell. Overlap in three
+bundles so no cell is ever without a usable trust root:
+
+1. Issue the new authority into a **separate** bundle file, then publish a
+   combined bundle holding the old and new CA certificates. Roll that lock out
+   and confirm every cell carries the combined trust ConfigMap.
+2. Issue a certificate under the new authority and apply it. Cells accept it
+   because the combined bundle already trusts the new CA.
+3. Publish a bundle holding only the new CA, roll that lock out, and retire the
+   old authority's escrow artifact.
+
+Do not skip step 1. A single-bundle swap replaces the trust root and the
+certificate at the same moment, and any cell that has not yet taken the new lock
+refuses the listener until it does.
+
+### Test certificates
+
+Tests generate a disposable authority per run and never read `infra/secrets`.
+`--test-authority` marks the authority's subject, and both the certificate
+validator and deployment preflight refuse a certificate under a marked
+authority unless the caller explicitly opts in. A test certificate is therefore
+never live readiness, whatever it was handed to.
+
 ## Partial-handoff recovery
 
 The workflow is deliberately non-transactional across SOPS files and Vercel.

@@ -1368,7 +1368,11 @@ def test_active_secret_selection_is_complete_and_the_signer_publishes_a_verified
         destination_id
         for secret in matrix["secrets"].values()
         for destination_id, destination in secret["destinations"].items()
-        if destination.get("kind") == "sops_k8s_secret" and destination.get("slot") == "active"
+        # Both Kubernetes destination kinds count. A TLS pair reaches the cluster
+        # through the same signed active registry, so leaving its kind out here
+        # would let a route be added that nothing ever checks for completeness.
+        if destination.get("kind") in {"sops_k8s_secret", "sops_k8s_tls_secret"}
+        and destination.get("slot") == "active"
     }
     assert len(expected) == 34
     assert selection["schema_version"] == 1
