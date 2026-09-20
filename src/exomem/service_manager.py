@@ -282,6 +282,99 @@ def cold_start_budget() -> float:
     return DEFAULT_COLD_START_SECONDS
 
 
+#: The shape a replacement's own words must have to be recorded verbatim --
+#: equivalent to a full match of `[A-Za-z0-9_. ():-]+`, bounded at 80
+#: characters. `runtime_readiness` builds `reasons` and the repair phase from
+#: fixed vocabularies, but it does so *in the replacement*, which during an
+#: upgrade is by construction a different release than this supervisor. A
+#: future or older worker that put an exception message, a traceback or a path
+#: in `reasons` would otherwise reach an operator-facing handoff verbatim,
+#: which is exactly what the failure path refuses to do with error text.
+_REASON_CHARACTERS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_. ():-"
+)
+_REASON_MAX_CHARACTERS = 80
+#: What an unrecognizable answer is recorded as. Saying the replacement
+#: reported something unreadable is useful; repeating it is not.
+UNRECOGNIZED_REASON = "unrecognized"
+
+
+def _recognized_reason(value: str | None) -> str | None:
+    """Admit a replacement's answer only in the shape a record may carry."""
+    if value is None:
+        return None
+    if 0 < len(value) <= _REASON_MAX_CHARACTERS and set(value) <= _REASON_CHARACTERS:
+        return value
+    return UNRECOGNIZED_REASON
+
+
+def unready_reason(payload: Any) -> str | None:
+    """Name what an unready worker last reported waiting on, or ``None``.
+
+    Observation only. Nothing in the handoff branches on this, no budget is
+    derived from it, and no wait ends earlier or later because it is present,
+    absent or unchanged. It exists so a failed handoff record says what the
+    replacement was doing instead of only that it ran out of time.
+
+    The values it looks for -- `reasons` entries, the lexical repair phase, the
+    cutover component names -- come from vocabularies the readiness contract
+    fixes. It does not trust that: the worker answering is a different release
+    from this supervisor, so whatever it says is re-clamped here, and anything
+    outside that shape is recorded as `UNRECOGNIZED_REASON` rather than
+    repeated into the record.
+    """
+    if not isinstance(payload, dict):
+        return None
+    raw_reasons = payload.get("reasons")
+    reason = (
+        next((entry for entry in raw_reasons if isinstance(entry, str) and entry), None)
+        if isinstance(raw_reasons, list)
+        else None
+    )
+    phase = None
+    retrieval = payload.get("retrieval")
+    if isinstance(retrieval, dict):
+        repair = retrieval.get("repair")
+        if isinstance(repair, dict):
+            raw_phase = repair.get("phase")
+            if isinstance(raw_phase, str) and raw_phase and raw_phase != "idle":
+                phase = raw_phase
+    value = None
+    if reason and phase:
+        value = f"{reason} (repair: {phase})"
+    elif reason or phase:
+        value = reason or phase
+    else:
+        # A standby answers with cutover components rather than serving reasons.
+        cutover = payload.get("cutover")
+        components = cutover.get("components") if isinstance(cutover, dict) else None
+        if isinstance(components, dict):
+            waiting = [
+                name
+                for name, state in components.items()
+                if isinstance(name, str) and state != "ready"
+            ]
+            if waiting:
+                value = waiting[0]
+    # One exit, so nothing -- including the composed string -- leaves unclamped.
+    return _recognized_reason(value)
+
+
+def cold_start_window(timeout: float | None = None, floor: float | None = None) -> float:
+    """The window a replacement gets to report ready while nothing else serves.
+
+    One source of truth for every wait that begins after the previous worker
+    has stopped: the supervisor's cold start, its promotion and cold-start
+    waits during a handoff, and the operator client's polling deadline. The
+    floor is a parameter so a test can shrink the window without shortening the
+    production one.
+    """
+    return max(
+        COLD_START_FLOOR_SECONDS if floor is None else floor,
+        cold_start_budget() if timeout is None else timeout,
+    )
+
+
 class Supervisor:
     """Serialize replacement while the ingress retains client connections."""
 
@@ -296,6 +389,7 @@ class Supervisor:
         transition_timeout: float = 40,
         standby_warm_timeout: float | None = None,
         cold_start_timeout: float | None = None,
+        cold_start_floor: float | None = None,
     ):
         self.records = ReleaseRecords(directory)
         self.initial_target = initial_target
@@ -309,6 +403,9 @@ class Supervisor:
         self.cold_start_timeout = (
             cold_start_budget() if cold_start_timeout is None else cold_start_timeout
         )
+        self.cold_start_floor = (
+            COLD_START_FLOOR_SECONDS if cold_start_floor is None else cold_start_floor
+        )
         self.lock = asyncio.Lock()
         self.phase = "unavailable"
         self.transition_task: asyncio.Task | None = None
@@ -317,6 +414,10 @@ class Supervisor:
         #: went away can still read what happened.
         self.transition_id: str | None = None
         self.last_transition: dict[str, Any] | None = None
+
+    def _replacement_budget(self) -> float:
+        """How long a replacement may take to report ready with nothing serving."""
+        return cold_start_window(self.cold_start_timeout, self.cold_start_floor)
 
     async def start(self) -> None:
         if self.records.pending() is not None:
@@ -327,9 +428,7 @@ class Supervisor:
         target = await self.runtime.inspect(target)
         # A window shorter than the cold worker's warm stops it mid-warm, and
         # the unit restarts into the same cold catalog.
-        client = await self.runtime.start(
-            target, timeout=max(COLD_START_FLOOR_SECONDS, self.cold_start_timeout)
-        )
+        client = await self.runtime.start(target, timeout=self._replacement_budget())
         self.records.accept(target)
         self.ingress.resume(client)
         self.phase = "ready"
@@ -444,6 +543,10 @@ class Supervisor:
             # rollback.
             if getattr(self.runtime, "promotion_record", None) is not None:
                 self.runtime.promotion_record = None
+            # Same reason: an earlier attempt's note would tell whoever resumes
+            # that this replacement was waiting on something it never reached.
+            if getattr(self.runtime, "replacement_waiting", None) is not None:
+                self.runtime.replacement_waiting = None
             pending = self.records.pending()
             if bool(pending) != resume:
                 return {
@@ -467,6 +570,10 @@ class Supervisor:
             self.phase = "upgrading"
             handoff, standby = await self._warm_standby(target, resume=resume)
             deadline = Deadline(self.transition_timeout)
+            # Bound before the try so the failure path can tell a handoff that
+            # burned the whole replacement window from one that died at the
+            # stop, without claiming a measurement it never took.
+            stopped_at: float | None = None
             # The window operators care about: nobody is served between here and
             # the resume below.
             paused_at = time.monotonic()
@@ -495,12 +602,16 @@ class Supervisor:
                         "error": "could not record the transition; current worker is still serving",
                     }
             try:
+                # The cutover budget bounds everything that happens while
+                # abandoning the upgrade is still cheap. Past the stop there is
+                # no worker to give admission back to, so it ends there.
                 async with asyncio.timeout(deadline.remaining(40)):
                     await self.ingress.detach_streams()
                     # Resume always repeats the stop proof, including a timed-out
                     # migrator or failed candidate retained by this supervisor.
                     self.records.phase("stopping")
                     await self.runtime.stop(timeout=deadline.remaining(10))
+                    stopped_at = time.monotonic()
                     # The migrator is the only writer between the two workers,
                     # and it runs only when the target declares a state
                     # migration. A skipped step is recorded, never silent.
@@ -512,29 +623,46 @@ class Supervisor:
                     if migrate:
                         self.records.phase("migrating", worker_pid=0)
                         await self.runtime.migrate(target, timeout=deadline.remaining(15))
-                    if standby is not None:
-                        self.records.phase("promoting", worker_pid=0)
-                        client, promotion = await self.runtime.promote_standby(
-                            migrated=migrate, timeout=deadline.remaining(30)
-                        )
-                        handoff["promotion"] = promotion
-                    else:
-                        self.records.phase("starting", worker_pid=0)
-                        client = await self.runtime.start(target, timeout=deadline.remaining(30))
-                    self.records.phase("ready", worker_pid=self.runtime.pid)
-                    self.records.accept(target)
-                    self.ingress.resume(client)
-                    self.phase = "ready"
-                    handoff["unavailable_ms"] = round(
-                        (time.monotonic() - paused_at) * 1000.0, 1
+                # Nothing is serving from here, and no rollback remains: the only
+                # question left is whether the replacement becomes ready, so it
+                # gets the same window a cold start gets. Ending the wait sooner
+                # buys nothing -- it converts "unavailable for another minute"
+                # into "unavailable until an operator resumes", and the resume
+                # runs into the same wall, killing the background repair it is
+                # waiting on and restarting it from zero. Ingress stays paused:
+                # `_queue` already answers a request that outlasts its own
+                # budget with a bounded, explicit, undispatched refusal.
+                replacement_budget = self._replacement_budget()
+                if standby is not None:
+                    self.records.phase("promoting", worker_pid=0)
+                    client, promotion = await self.runtime.promote_standby(
+                        migrated=migrate, timeout=replacement_budget
                     )
-                    return {
-                        "ok": True,
-                        "phase": "ready",
-                        "active": target,
-                        "worker_pid": self.runtime.pid,
-                        "handoff": handoff,
-                    }
+                    handoff["promotion"] = promotion
+                else:
+                    self.records.phase("starting", worker_pid=0)
+                    client = await self.runtime.start(target, timeout=replacement_budget)
+                handoff["ready_after_ms"] = round((time.monotonic() - stopped_at) * 1000.0, 1)
+                self.records.phase("ready", worker_pid=self.runtime.pid)
+                self.records.accept(target)
+                self.ingress.resume(client)
+                self.phase = "ready"
+                handoff["unavailable_ms"] = round(
+                    (time.monotonic() - paused_at) * 1000.0, 1
+                )
+                return {
+                    "ok": True,
+                    "phase": "ready",
+                    "active": target,
+                    "worker_pid": self.runtime.pid,
+                    "handoff": handoff,
+                }
+            # `CancelledError` deliberately does not reach this handler: it is
+            # not an `Exception`, and a cancelled transition is a supervisor
+            # shutdown, not a failed upgrade. `serve()`'s `finally` owns that
+            # case -- it cancels the transition task, makes ingress
+            # unavailable, discards the standby and stops the worker -- and
+            # writing a `failed` record here would misreport a shutdown as one.
             except Exception:  # noqa: BLE001 - every post-stop failure must retain recovery state
                 self.phase = "recovery-required"
                 self.ingress.unavailable()
@@ -545,6 +673,22 @@ class Supervisor:
                 promotion = getattr(self.runtime, "promotion_record", None)
                 if promotion is not None:
                     handoff["promotion"] = promotion
+                # How long the replacement was given, and its own account of
+                # what it was doing with it. A handoff that burned the whole
+                # window on a background repair and one that died two seconds
+                # after the stop need entirely different responses.
+                if stopped_at is not None:
+                    handoff["ready_after_ms"] = round(
+                        (time.monotonic() - stopped_at) * 1000.0, 1
+                    )
+                # Its own key: `waiting` belongs to a discarded standby's
+                # component, and the handoff that discards a candidate and then
+                # fails to start its replacement is the incident shape -- both
+                # facts matter to whoever reads the record, so neither
+                # displaces the other.
+                waiting = getattr(self.runtime, "replacement_waiting", None)
+                if waiting:
+                    handoff["replacement_waiting"] = waiting
                 # Error text from subprocesses can contain configuration or
                 # vault content. Retain phase and identity, not arbitrary text.
                 self.records.phase("failed", worker_pid=self.runtime.pid)
@@ -698,6 +842,9 @@ class WorkerRuntime:
         )
         self.standby_capable = False
         self.standby_waiting: str | None = None
+        #: What the replacement last reported waiting on after the old worker
+        #: stopped. Recorded for the handoff; it gates nothing.
+        self.replacement_waiting: str | None = None
         self.promotion_record: dict[str, Any] | None = None
         declared = environment_files if environment_files else (
             [environment_file] if environment_file else []
@@ -708,6 +855,22 @@ class WorkerRuntime:
     @property
     def pid(self) -> int:
         return self.child.pid if self.child is not None and self.child.returncode is None else 0
+
+    def _note_replacement_waiting(self, response: Any) -> None:
+        """Remember an unready replacement's own account of what it is doing.
+
+        Deliberately total: any malformed, absent or unparseable answer leaves
+        the last note alone rather than raising. An observation that could fail
+        a handoff would be worse than no observation.
+        """
+        try:
+            if response.status_code not in {200, 503}:
+                return
+            reason = unready_reason(response.json())
+        except Exception:  # noqa: BLE001 - observing must never fail a handoff
+            return
+        if reason:
+            self.replacement_waiting = reason
 
     def _other_sessions(self, *, standby: bool) -> frozenset[int]:
         """The co-owned session a stop or spawn proof must leave alone."""
@@ -906,6 +1069,9 @@ class WorkerRuntime:
         import httpx
 
         deadline = Deadline(timeout)
+        # The record always names something: a replacement that never answered
+        # its readiness probe is a fact an operator needs, not an absent field.
+        self.replacement_waiting = "unreachable"
         remove_stale_socket(self.socket_path)
         await self._spawn(
             [
@@ -943,7 +1109,9 @@ class WorkerRuntime:
                     and ready.status_code == 200
                     and ready.json().get("status") == "ready"
                 ):
+                    self.replacement_waiting = None
                     return self.client
+                self._note_replacement_waiting(ready)
             except (httpx.HTTPError, TimeoutError):
                 pass
             await asyncio.sleep(min(0.1, deadline.remaining(0.1)))
@@ -1096,9 +1264,13 @@ class WorkerRuntime:
         deadline = Deadline(timeout)
         # A migrated promotion re-runs the whole source proof inside this POST
         # -- seconds on a large vault, and it grows with the corpus -- so the
-        # call gets the cutover budget rather than a fixed ten seconds. Capping
-        # it lower would time out the request while the promotion it asked for
-        # was still running, and discard a standby that was about to succeed.
+        # call gets the cold-start budget this method is handed rather than a
+        # fixed ten seconds. Capping it lower would time out the request while
+        # the promotion it asked for was still running, and discard a standby
+        # that was about to succeed. Without a migration the POST only acquires
+        # ownership, so it keeps the tight cap that surfaces an unresponsive
+        # candidate quickly; the readiness wait below gets the whole budget
+        # either way.
         promote_budget = deadline.remaining(timeout if migrated else 10)
         async with asyncio.timeout(promote_budget):
             response = await self.standby_client.post(
@@ -1110,6 +1282,7 @@ class WorkerRuntime:
         # readiness so an exhausted wait cannot lose the fact that it happened.
         record = response.json()
         self.promotion_record = record
+        self.replacement_waiting = "unreachable"
         try:
             while True:
                 if self.standby.returncode is not None:
@@ -1123,7 +1296,9 @@ class WorkerRuntime:
                         and ready.status_code == 200
                         and ready.json().get("status") == "ready"
                     ):
+                        self.replacement_waiting = None
                         break
+                    self._note_replacement_waiting(ready)
                 except (httpx.HTTPError, TimeoutError, ValueError):
                     pass
                 await asyncio.sleep(min(0.1, deadline.remaining(0.1)))
@@ -1136,7 +1311,7 @@ class WorkerRuntime:
             self._assume_promoted()
             raise RuntimeError(
                 "promotion was accepted but the worker did not report readiness "
-                "inside the cutover budget"
+                "inside the cold-start budget"
             ) from None
         self._assume_promoted()
         return self.client, record
