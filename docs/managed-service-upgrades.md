@@ -84,9 +84,19 @@ For status or recovery, read the runtime directory from the rendered unit's
 
 The private control socket is owner-only. A failed transition after the old
 worker stops leaves a recovery record and the public ingress unavailable;
-`--resume` rolls forward the recorded target after process-exit proof. Do not
-start an older release over a possibly migrated state root. Supervisor or host
-restarts interrupt public connections and require normal client reconnection.
+`--resume` rolls forward the recorded target after process-exit proof, and
+waits out the same cold-start budget for the replacement to report ready. Do
+not start an older release over a possibly migrated state root. Supervisor or
+host restarts interrupt public connections and require normal client
+reconnection.
+
+A handoff that is taking minutes is not the same thing as a failed one. Read
+`--status` before reaching for `--resume`: a transition still in flight reports
+`phase: upgrading` with a `transition` id and a `pending` record naming the
+step it is on, and its outcome appears under `last_transition` when it
+finishes. Resuming a transition that is still running is refused, but a repair
+the replacement is doing in the background is the kind of work that outlasts
+an impatient operator's first look.
 
 Changing the stable supervisor, bind host, port or `service.env` is an offline
 maintenance operation. Prepare the replacement package, environment file or
@@ -181,6 +191,18 @@ offline migrator if the target declares a state migration, promote the standby
 over its private control surface, and resume. The unavailable window is the
 drain plus the promotion, not a cold start.
 
+Two budgets divide that sequence, at the stop. Everything up to and including
+the migrator runs under the cutover budget, because until the old worker is
+signalled the supervisor can still abandon the upgrade and give admission back
+to a worker that is serving. Once it has stopped there is no such worker, so
+the wait for the replacement to report ready — the promoted standby, or a cold
+one-worker start — runs under the cold-start budget instead. Ending that wait
+early buys nothing: it turns "unavailable for another minute" into "unavailable
+until an operator resumes", and the resume waits on the same replacement. A
+candidate that *exits* before readiness, or that answers with a different
+release, still fails immediately; only a live candidate on the right release is
+waited out.
+
 `/health/ready` reports this as a `cutover` block beside the serving `status`:
 
 ```json
@@ -251,9 +273,23 @@ list after a promotion means the worker is paying the whole warm again.
 | Budget | Default | Override |
 | --- | --- | --- |
 | Standby warm | 300 s | `EXOMEM_STANDBY_WARM_SECONDS` in the unit's environment file |
-| Cutover (pause to resume) | 40 s | supervisor `transition_timeout` |
+| Cutover (pause to the migrator) | 40 s | supervisor `transition_timeout` |
 | Drain of active finite requests | 30 s | within the cutover budget |
+| Replacement readiness after the stop | 300 s, never under 120 s | `EXOMEM_COLD_START_SECONDS` |
 | Detached stream reattachment | 40 s | ingress `reattach_budget` |
+
+The cold-start budget sizes every wait that begins after the previous worker
+has stopped: the supervisor's own start, the promotion of a standby, and the
+cold one-worker start — in a fresh upgrade and in `--resume` alike. It is one
+window, so an operator who lengthens it for a large vault lengthens all of
+them. A promoted worker that is still building a component it could not warm as
+a standby — a retrieval catalog delegated to background repair, for instance —
+answers `/health/ready` with `not_ready` for as long as that repair takes, and
+that is what this budget has to cover.
+
+Admission is unchanged through the longer wait: ingress stays paused, and a
+request that outlasts its own 45-second queue budget is answered explicitly as
+undispatched rather than held. It is never left queued without a bound.
 
 A candidate that does not reach cutover readiness inside the warm budget is
 stopped, the handoff record names the component it was waiting on, and the
@@ -270,7 +306,8 @@ connection open for it would turn any client read timeout into a false failure
 while promotion proceeded regardless. Poll `--status` for the outcome: it
 carries `transition` (in flight) and `last_transition` (the finished record,
 including the handoff). `scripts/upgrade.sh` does this for you, with a deadline
-covering the warm plus the cutover budgets.
+covering the warm, the cutover and the cold-start budgets — a client that gives
+up sooner would report a failure for a handoff that was still going to succeed.
 
 ### The migration record
 
@@ -287,7 +324,11 @@ match and the manifest is complete, the step is recorded as skipped:
 ```
 
 `handoff.unavailable_ms` is the window nobody was served in — pause to resume —
-and is the number to compare across releases. `migration.state` is `ran` with the reason (`descriptors_changed`, or the
+and is the number to compare across releases. `handoff.ready_after_ms` is the
+part of it spent waiting for the replacement, from the old worker's stop to the
+replacement's readiness; when the two are close, the cutover itself was cheap
+and the replacement's own warm is what the outage was.
+`migration.state` is `ran` with the reason (`descriptors_changed`, or the
 manifest state that was not complete) when it runs. `promotion.snapshot` is
 `current` when the checkpoint the standby proved is still the one on disk,
 `advanced` when it moved, and `rebuild-after-promotion` when the re-proof failed
@@ -325,8 +366,14 @@ stream.
 
 Admission during handoff allows at most 64 queued requests, 64 MiB total and
 32 MiB per request. A queued request has 45 seconds from reservation, including
-body intake. The worker handoff has a 40-second deadline, with up to 30 seconds
-for active finite requests to drain. If draining expires, the old worker keeps
+body intake. The cutover has a 40-second deadline, with up to 30 seconds for
+active finite requests to drain. If draining expires, the old worker keeps
 serving. Requests refused before dispatch report that they were not executed;
-requests already dispatched are never replayed. Clients and intermediaries need
-timeouts longer than the handoff budget to wait through a replacement.
+requests already dispatched are never replayed.
+
+A queued request's 45 seconds is deliberately shorter than the replacement
+readiness budget, so no client waits on a handoff without an answer: a request
+that outlasts it is told explicitly that it was not dispatched and can be
+retried. Clients and intermediaries need timeouts longer than the queue budget
+to wait through an ordinary handoff; none of them should wait out a slow
+replacement's whole warm.
