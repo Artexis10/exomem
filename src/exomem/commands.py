@@ -5978,8 +5978,18 @@ def op_activate_context(
     # duration of this one call. `try/finally` guarantees it cannot leak
     # onto a later, unrelated call on a reused thread — including when the
     # body below raises (e.g. the anchor-override `ValueError`).
+    #
+    # Only for a MANAGED runtime. `ACTIVATION_DOOR_BUDGET_SECONDS` exists to
+    # match the shipped hook's REST/CLI door timeouts against a managed
+    # server, where a request that gives up mid-stage costs nothing real: the
+    # background watcher keeps converging and the NEXT request succeeds. An
+    # unmanaged process (a bare offline `exomem` invocation, no watcher, no
+    # background convergence) has no such follow-up — cutting it off at 6s
+    # would just turn a legitimately slower one-off cold walk into a hard
+    # failure with nothing left to retry against. Unmanaged activation keeps
+    # running unbounded, exactly as it did before request budgets existed.
     bound_token = None
-    if request_budget_module.current() is None:
+    if readiness_module.runtime_managed() and request_budget_module.current() is None:
         bound_token = request_budget_module.set_current(
             request_budget_module.RequestBudget(
                 seconds=request_budget_module.ACTIVATION_DOOR_BUDGET_SECONDS
@@ -6092,23 +6102,22 @@ def _op_activate_context_body(
     # half find() never has to, because find()'s own catalog-admission gate
     # already proves the registry live before it ever reaches that rule.
     #
-    # REVIEWER NOTE — unreviewed judgment, flagged for review. The final rule
-    # is in three parts, all sharing one `recall_is_live` read so they can
-    # never disagree about which case a request is in:
+    # The final rule is in three parts, all sharing one `recall_is_live` read
+    # so they can never disagree about which case a request is in:
     #   - ESTABLISHED and MISMATCHED (was live, now a different policy
     #     identity): `require_live_recall=True` below fails fast — no
     #     reprojection, no walk. Regression test:
     #     `test_managed_activation_fails_fast_on_a_mismatched_recall_identity`.
-    #   - NEVER LIVE (`managed_cold`, this round's fix): construct NO
+    #   - NEVER LIVE and ACTIVELY SEEDING (`managed_cold`): construct NO
     #     projection at all — not even the offline-style cold-walk fallback.
     #     A prior round's fix (the `recall_is_live` term above) stopped the
     #     mismatched case from reprojecting, but left this case falling
     #     through to `FreshnessSnapshot`'s offline branch, which calls
     #     `freshness._cold_recall_projection_scope_snapshot` — a full
-    #     directory walk of the KB scope, ON THE REQUEST THREAD, before
-    #     `ensure_index` ever gets to say `index_warming` (measured: 82 KB
-    #     directory enumerations for one cold managed request). `ensure_index`
-    #     below still runs and still reports `index_warming` honestly when the
+    #     directory walk of the KB scope, ON THE REQUEST THREAD, racing the
+    #     watcher's own walk of the same tree (measured: 82 KB directory
+    #     enumerations for one cold managed request). `ensure_index` below
+    #     still runs and still reports `index_warming` honestly when the
     #     anchor index is ALSO cold (existing test
     #     `test_cold_activation_abstains_before_starting_retrieval` stays
     #     green: same reason, same `_schedule_build` call, same
@@ -6116,23 +6125,38 @@ def _op_activate_context_body(
     #     warm anyway, activation abstains `index_warming` explicitly right
     #     after readiness, rather than serving lexical/role evidence against a
     #     recall registry it cannot prove current.
+    #
+    #     `managed_cold` requires `freshness.recall_seed_pending(vault_root,
+    #     "kb")`, not merely `not recall_live`, precisely so this abstention
+    #     stays bounded rather than becoming a second, silent way to hang
+    #     forever. "Not live yet" alone is true both while the watcher's boot
+    #     walk is genuinely in flight (seconds) AND whenever nothing is
+    #     seeding the scope at all — the watcher never started (e.g. the KB
+    #     directory does not exist yet) or its one seed attempt already
+    #     raised and nothing retries before the next 300s periodic reconcile.
+    #     Gating on `recall_is_live` alone could not tell those apart, and the
+    #     second case would abstain `index_warming` on every request
+    #     indefinitely instead of resolving. `recall_seed_pending` is
+    #     announced just before `freshness.seed(...)` starts its walk
+    #     (`file_watcher.py`'s `_reconcile_once`, `seed=True`) and cleared in
+    #     a `finally` the instant that walk ends, success or failure — so it
+    #     is `True` for exactly the bounded window worth waiting out, and
+    #     `False` the moment there is nothing left to wait for. When it is
+    #     `False`, `managed_cold` is `False` too and this request instead
+    #     takes the "not managed_cold" branch below with
+    #     `require_live_recall=False` — the same offline-style cold-walk
+    #     fallback a non-managed runtime always used, which cannot hang.
     #   - LIVE and MATCHING: `require_live_recall=True` resolves from the live
     #     registry with no walk — the ordinary fast path, unchanged.
-    # A registry that has never gone live becomes live within a bounded
-    # window of managed-service startup, not permanently: `FileWatcher`
-    # seeds every scope (including "kb") and marks it live "immediately" on
-    # its own daemon thread — `freshness.seed(...)` at
-    # `file_watcher.py:1224`, inside `_reconcile_once(seed=True)`, run from
-    # `_run_reconcile` via `_start_reconcile_thread`/`FileWatcher.start()`.
-    # The watcher itself is instantiated as part of the managed server's own
-    # bootstrap at `server_runtime.py:894`. `managed_cold` is therefore a
-    # bounded warming window that resolves itself shortly after the server
-    # comes up, exactly like the anchor index's own `index_warming` window —
-    # not a permanent abstention.
     managed_runtime = readiness_module.runtime_managed()
     event_indexes_on = freshness_module.event_indexes_enabled()
     recall_live = freshness_module.recall_is_live(vault_root, "kb")
-    managed_cold = managed_runtime and event_indexes_on and not recall_live
+    managed_cold = (
+        managed_runtime
+        and event_indexes_on
+        and not recall_live
+        and freshness_module.recall_seed_pending(vault_root, "kb")
+    )
     require_live_recall = managed_runtime and event_indexes_on and recall_live
 
     freshness_key: Any = ""

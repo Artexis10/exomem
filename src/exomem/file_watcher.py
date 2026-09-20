@@ -1221,7 +1221,16 @@ class FileWatcher:
                 break
             try:
                 if seed:
-                    freshness.seed(self._vault_root, scope, self._walk_entries(scope))
+                    # Bracket the walk itself, not the outer per-scope `try`,
+                    # so the pending mark clears on EVERY exit — including the
+                    # `except Exception` below catching a mid-walk failure —
+                    # and never covers `freshness.reconcile`'s own periodic
+                    # (non-seed) pass, which this seam is not about.
+                    freshness.announce_seed_pending(self._vault_root, scope)
+                    try:
+                        freshness.seed(self._vault_root, scope, self._walk_entries(scope))
+                    finally:
+                        freshness.clear_seed_pending(self._vault_root, scope)
                 else:
                     delta = freshness.reconcile(
                         self._vault_root,

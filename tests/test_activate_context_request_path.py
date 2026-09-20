@@ -215,6 +215,10 @@ def test_managed_cold_start_never_constructs_the_recall_projection(
     working_set_runtime.reset_caches_for_tests()
 
     monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    # A genuinely in-flight boot seed, not merely "never live": `managed_cold`
+    # requires both (see `test_managed_never_live_and_not_seed_pending_falls_
+    # through_to_cold_walk` for the other half of that distinction).
+    monkeypatch.setattr(freshness, "recall_seed_pending", lambda *_a, **_k: True)
     scheduled: list[Path] = []
     monkeypatch.setattr(working_set_runtime, "_schedule_build", scheduled.append)
 
@@ -252,6 +256,7 @@ def test_managed_cold_start_abstains_warming_even_with_a_ready_anchor_index(
     serve lexical/role evidence against a registry it cannot prove current —
     the READY-but-cold branch `ensure_index`'s own state alone cannot cover."""
     monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    monkeypatch.setattr(freshness, "recall_seed_pending", lambda *_a, **_k: True)
     scheduled: list[Path] = []
     monkeypatch.setattr(working_set_runtime, "_schedule_build", scheduled.append)
 
@@ -286,6 +291,26 @@ def test_managed_cold_start_abstains_warming_even_with_a_ready_anchor_index(
     assert "working_set.freshness" not in packet["timings"]["stages"]
     assert "timings" in packet
     assert working_set_runtime._PACKET_CACHE == {}
+
+
+def test_managed_never_live_and_not_seed_pending_falls_through_to_cold_walk(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`managed_cold` requires an ACTIVELY PENDING seed, not merely "never
+    live" — a managed runtime whose recall registry has never gone live but
+    for which nothing is currently seeding it (no watcher running here, so
+    `recall_seed_pending` is `False` by construction) must not abstain
+    `index_warming` forever. It instead falls through to the same
+    offline-style cold-walk fallback an unmanaged runtime always used, and
+    serves normally rather than hanging on a seed that will never arrive."""
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    assert freshness.recall_seed_pending(activation_vault, "kb") is False
+
+    packet = commands.op_activate_context(activation_vault, turn=TURN, include_timings=True)
+
+    assert packet["abstained"] is False
+    assert packet["units"]
+    assert "working_set.freshness" in packet["timings"]["stages"]
 
 
 def test_offline_activation_is_unchanged_by_the_require_live_recall_rule(
@@ -722,15 +747,48 @@ def test_a_pre_bound_budget_is_used_unchanged_not_replaced(
     assert budget.skipped == []
 
 
+def test_unmanaged_runtime_never_binds_a_door_budget(
+    activation_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The MINOR fix: `ACTIVATION_DOOR_BUDGET_SECONDS` binds only for a
+    MANAGED runtime. An unmanaged process (the default here — no watcher, no
+    background convergence a later request could benefit from) must be left
+    running unbounded rather than having a budget tuned for the managed
+    doors' shipped hook timeouts turn a legitimately slower one-off cold walk
+    into a hard failure with nothing left to retry against."""
+    assert readiness.runtime_managed() is False
+    assert request_budget.current() is None
+
+    bound_calls: list[float] = []
+    real_set_current = request_budget.set_current
+
+    def _spy_set_current(budget):
+        if budget is not None:
+            bound_calls.append(budget.seconds)
+        return real_set_current(budget)
+
+    monkeypatch.setattr(request_budget, "set_current", _spy_set_current)
+
+    packet = commands.op_activate_context(activation_vault, turn=TURN)
+
+    assert packet["abstained"] is False
+    assert packet["units"]
+    assert bound_calls == []
+    assert request_budget.current() is None
+
+
 def test_no_bound_budget_still_gates_a_boundary_via_the_door_budget(
     activation_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The REST/CLI shape: no MCP budget is bound. `op_activate_context`
-    binds its own `ACTIVATION_DOOR_BUDGET_SECONDS` budget for the call. A
-    controllable clock on `RequestBudget.remaining` (not the global
-    `time.monotonic`, which every other subsystem in the process also reads)
-    proves the door budget actually gates a mid-call boundary rather than
-    merely existing unused."""
+    binds its own `ACTIVATION_DOOR_BUDGET_SECONDS` budget for the call, but
+    only for a MANAGED runtime (an unmanaged process has no background
+    convergence a later request could benefit from, so it is left
+    unbounded). A controllable clock on `RequestBudget.remaining` (not the
+    global `time.monotonic`, which every other subsystem in the process also
+    reads) proves the door budget actually gates a mid-call boundary rather
+    than merely existing unused."""
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
     assert request_budget.current() is None
 
     real_remaining = request_budget.RequestBudget.remaining
@@ -769,11 +827,14 @@ def test_no_bound_budget_still_gates_a_boundary_via_the_door_budget(
 
 
 def test_the_door_bound_budget_is_restored_after_an_exception(
-    activation_vault: Path, budget_free
+    activation_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The anchor-override refusal path raises `ValueError` from INSIDE
     `_op_activate_context_body`; the public wrapper's `try/finally` must
-    still clean up the door-bound budget it bound."""
+    still clean up the door-bound budget it bound. Managed, so the wrapper
+    actually binds a door budget for this call to clean up in the first
+    place."""
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
     assert request_budget.current() is None
 
     with pytest.raises(ValueError):
