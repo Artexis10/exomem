@@ -29,7 +29,7 @@ def test_registered_proof_route_uses_existing_private_authentication(tmp_path, m
     assert authenticated.json()["code"] == "MALFORMED_REQUEST"
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_reserved_route_returns_bare_proof(proof_case):
     request, arguments = proof_case
     endpoint = ActivationProofEndpoint(lambda body: prove_publication(body, **arguments))
@@ -46,7 +46,7 @@ async def test_reserved_route_returns_bare_proof(proof_case):
         endpoint.close()
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_cancelled_proof_retains_slot_until_underlying_work_stops(proof_case):
     request, arguments = proof_case
     entered, release = threading.Event(), threading.Event()
@@ -76,7 +76,7 @@ async def test_cancelled_proof_retains_slot_until_underlying_work_stops(proof_ca
         endpoint.close()
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_proof_route_rejects_oversized_body_before_execution():
     called = []
     endpoint = ActivationProofEndpoint(lambda body: called.append(body))
