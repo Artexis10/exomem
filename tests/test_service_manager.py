@@ -968,7 +968,8 @@ def test_a_migrated_promotion_gets_the_cutover_budget_not_a_ten_second_cap(
     migrated_budget = asyncio.run(scenario(True))
     assert migrated_budget > 10, (
         f"a migrated promotion was capped at {migrated_budget}s; the re-proof needs "
-        "the cutover budget"
+        "the whole budget the call is handed, which in production is the cold-start "
+        "budget"
     )
 
     plain_budget = asyncio.run(scenario(False))
@@ -1336,6 +1337,111 @@ def test_the_unready_reason_reads_only_the_readiness_contracts_vocabulary(tmp_pa
         )
         == "graph_snapshot"
     )
+    # The worker answering is a different release from this supervisor, so its
+    # vocabulary is re-clamped here rather than trusted. Anything outside the
+    # shape a record may carry is named as unreadable, never repeated.
+    assert (
+        module.unready_reason({"reasons": ["/srv/vault/notes/quarterly.md missing"]})
+        == module.UNRECOGNIZED_REASON
+    )
+    assert (
+        module.unready_reason({"reasons": ["retrieval_unavailable\nTraceback"]})
+        == module.UNRECOGNIZED_REASON
+    )
+    assert (
+        module.unready_reason({"reasons": ["x" * 81]}) == module.UNRECOGNIZED_REASON
+    )
+    assert module.unready_reason({"reasons": ["x" * 80]}) == "x" * 80
+    # The composed string is clamped too, not just its parts.
+    assert (
+        module.unready_reason(
+            {
+                "reasons": ["retrieval_unavailable"],
+                "retrieval": {"repair": {"phase": "rebuilding; rm -rf /"}},
+            }
+        )
+        == module.UNRECOGNIZED_REASON
+    )
+    assert (
+        module.unready_reason(
+            {"cutover": {"components": {"/etc/passwd": "waiting"}}}
+        )
+        == module.UNRECOGNIZED_REASON
+    )
+
+
+_WARMING_READY = {
+    "status": "not_ready",
+    "reasons": ["retrieval_unavailable"],
+    "retrieval": {"state": "unavailable", "repair": {"phase": "rebuilding"}},
+}
+
+
+class _WarmingClient:
+    """A live worker on the right release that is not ready yet."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def get(self, path):
+        if path == "/health":
+            return _FakeResponse(200, {"version": "1.2.3"})
+        return _FakeResponse(503, _WARMING_READY)
+
+    async def post(self, path, json=None):
+        return _FakeResponse(
+            200, {"ok": True, "snapshot": "advanced", "revalidated": True}
+        )
+
+    async def aclose(self):
+        pass
+
+
+def test_the_real_cold_readiness_loop_records_what_the_worker_is_waiting_on(
+    tmp_path, monkeypatch
+):
+    """The recorder is wired into the production loop, not only unit-tested.
+
+    Without this a refactor could drop the call site and leave every handoff
+    record saying only that the budget ran out.
+    """
+    import httpx
+
+    module = _manager()
+    monkeypatch.setattr(httpx, "AsyncClient", _WarmingClient)
+
+    async def scenario():
+        runtime = module.WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1)
+
+        async def spawn(command, *, standby=False):
+            runtime.child = _FakeChild()
+
+        runtime._spawn = spawn
+        with pytest.raises(TimeoutError):
+            await runtime.start({"python": sys.executable, "version": "1.2.3"}, timeout=0.3)
+        assert runtime.replacement_waiting == "retrieval_unavailable (repair: rebuilding)"
+
+    asyncio.run(scenario())
+
+
+def test_the_real_promotion_readiness_loop_records_what_the_worker_is_waiting_on(
+    tmp_path, monkeypatch
+):
+    module = _manager()
+    monkeypatch.setattr(module, "_descendants", lambda **kwargs: {})
+
+    async def scenario():
+        runtime = module.WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1)
+        runtime.standby = _FakeChild()
+        runtime.standby_client = _WarmingClient()
+        with pytest.raises(RuntimeError, match="readiness"):
+            await runtime.promote_standby(migrated=False, timeout=0.3)
+        # The promotion was accepted, so this is the serving worker's own
+        # account of what it is still doing.
+        assert runtime.promotion_record["snapshot"] == "advanced"
+        assert runtime.replacement_waiting == "retrieval_unavailable (repair: rebuilding)"
+
+    asyncio.run(scenario())
 
 
 def test_recording_what_a_replacement_waits_on_never_raises(tmp_path):

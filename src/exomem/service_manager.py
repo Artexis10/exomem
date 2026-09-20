@@ -282,6 +282,32 @@ def cold_start_budget() -> float:
     return DEFAULT_COLD_START_SECONDS
 
 
+#: The shape a replacement's own words must have to be recorded verbatim --
+#: equivalent to a full match of `[A-Za-z0-9_. ():-]+`, bounded at 80
+#: characters. `runtime_readiness` builds `reasons` and the repair phase from
+#: fixed vocabularies, but it does so *in the replacement*, which during an
+#: upgrade is by construction a different release than this supervisor. A
+#: future or older worker that put an exception message, a traceback or a path
+#: in `reasons` would otherwise reach an operator-facing handoff verbatim,
+#: which is exactly what the failure path refuses to do with error text.
+_REASON_CHARACTERS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_. ():-"
+)
+_REASON_MAX_CHARACTERS = 80
+#: What an unrecognizable answer is recorded as. Saying the replacement
+#: reported something unreadable is useful; repeating it is not.
+UNRECOGNIZED_REASON = "unrecognized"
+
+
+def _recognized_reason(value: str | None) -> str | None:
+    """Admit a replacement's answer only in the shape a record may carry."""
+    if value is None:
+        return None
+    if 0 < len(value) <= _REASON_MAX_CHARACTERS and set(value) <= _REASON_CHARACTERS:
+        return value
+    return UNRECOGNIZED_REASON
+
+
 def unready_reason(payload: Any) -> str | None:
     """Name what an unready worker last reported waiting on, or ``None``.
 
@@ -290,10 +316,12 @@ def unready_reason(payload: Any) -> str | None:
     absent or unchanged. It exists so a failed handoff record says what the
     replacement was doing instead of only that it ran out of time.
 
-    Every value it can return comes from a fixed vocabulary the readiness
-    contract defines -- `reasons` entries, the lexical repair phase, the
-    cutover component names -- so no configuration or vault content can reach
-    a record through it.
+    The values it looks for -- `reasons` entries, the lexical repair phase, the
+    cutover component names -- come from vocabularies the readiness contract
+    fixes. It does not trust that: the worker answering is a different release
+    from this supervisor, so whatever it says is re-clamped here, and anything
+    outside that shape is recorded as `UNRECOGNIZED_REASON` rather than
+    repeated into the record.
     """
     if not isinstance(payload, dict):
         return None
@@ -311,22 +339,25 @@ def unready_reason(payload: Any) -> str | None:
             raw_phase = repair.get("phase")
             if isinstance(raw_phase, str) and raw_phase and raw_phase != "idle":
                 phase = raw_phase
+    value = None
     if reason and phase:
-        return f"{reason} (repair: {phase})"
-    if reason or phase:
-        return reason or phase
-    # A standby answers with cutover components rather than serving reasons.
-    cutover = payload.get("cutover")
-    components = cutover.get("components") if isinstance(cutover, dict) else None
-    if isinstance(components, dict):
-        waiting = [
-            name
-            for name, state in components.items()
-            if isinstance(name, str) and state != "ready"
-        ]
-        if waiting:
-            return waiting[0]
-    return None
+        value = f"{reason} (repair: {phase})"
+    elif reason or phase:
+        value = reason or phase
+    else:
+        # A standby answers with cutover components rather than serving reasons.
+        cutover = payload.get("cutover")
+        components = cutover.get("components") if isinstance(cutover, dict) else None
+        if isinstance(components, dict):
+            waiting = [
+                name
+                for name, state in components.items()
+                if isinstance(name, str) and state != "ready"
+            ]
+            if waiting:
+                value = waiting[0]
+    # One exit, so nothing -- including the composed string -- leaves unclamped.
+    return _recognized_reason(value)
 
 
 def cold_start_window(timeout: float | None = None, floor: float | None = None) -> float:
