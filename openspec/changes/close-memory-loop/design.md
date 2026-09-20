@@ -244,12 +244,19 @@ gate are all a mismatch: the inventory is dropped, a background rebuild is
 scheduled, promotion completes and the record names the cause. The standby's own
 warm-time reads before promotion remain a known residual, unchanged from before.
 
-Activation reports warming while that inventory is cold and, in a managed
-runtime, while recall is not yet live; the file watcher's first reconcile makes
-it live off the boot path, so this is a bounded window. The request deadline
-applies on every door: only the MCP door binds one, while the shipped host hook
-calls REST and the CLI with timeouts of a few seconds, so activation binds its
-own when none exists. Stage boundaries gate on a named reserve, and exhaustion
+Activation reports warming while that inventory is cold, and schedules the
+background build itself, so activation traffic alone converges that gate. For
+recall it reports warming only while the file watcher has announced a seed in
+progress. The first version waited for recall to be live, which only the watcher
+makes true, and the watcher is optional: the hosted runtime disables it when
+workers are off or the cell lacks the grant, while the managed flag and the
+event-index flag are independent of it. There activation abstained forever where
+it had previously served. A gate must therefore either trigger its own
+convergence or see its owner working; otherwise the request takes the path it
+took before. The request deadline applies on every door of a managed service:
+only the MCP door binds one, while the shipped host hook calls REST and the CLI
+with timeouts of a few seconds, so activation binds its own when none exists. An
+unmanaged call binds none, because its process ends with its caller. Stage boundaries gate on a named reserve, and exhaustion
 returns an unavailable abstention with timings and the skipped stage, never a
 partial packet. A stage already running is not interrupted; bounding each stage
 is what the other repairs are for.
@@ -263,8 +270,10 @@ only for scalar non-array sort and date fields with no explicit columns, and the
 unchanged projector governs the surviving rows. The candidate index is never
 built cold on this path, so a bare-title link is withheld there.
 
-A cold worker now gets the standby warm budget before its readiness window
-closes; a fixed shorter window restarted the unit into the same cold catalog.
+A cold worker's readiness window now has its own budget, defaulting to the
+standby warm budget's value; a fixed shorter window restarted the unit into the
+same cold catalog. It is a separate setting because it answers a separate
+question: how long a hung cold worker stays invisible with nothing else serving.
 
 | Contract | Owner | Programme integration |
 | --- | --- | --- |

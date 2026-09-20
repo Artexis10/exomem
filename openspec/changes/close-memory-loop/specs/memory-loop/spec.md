@@ -323,20 +323,27 @@ fast abstention or compiler-only timing.
 ### Requirement: Interactive activation does bounded work under a deadline on every door
 
 An activation request SHALL stop starting work once its request deadline can no
-longer afford another stage. When no request deadline is bound by the door,
-activation SHALL bind its own for the duration of the call and restore the prior
-state afterwards, so the MCP, REST and CLI doors are all bounded. Each stage
-SHALL start only when a named reserve remains. A request that exhausts its
-deadline SHALL return an unavailable abstention that discloses nothing, creates
-no reusable packet cache entry, names the first stage it did not run and carries
-its timings; it SHALL NOT return a partially compiled packet. Every abstention,
+longer afford another stage. In a managed runtime, when the door binds no request
+deadline, activation SHALL bind its own for the duration of the call and restore
+the prior state afterwards, so every door of a server that can outlive its client
+is bounded. An unmanaged call, whose process ends with its caller, SHALL bind
+none. Each stage SHALL start only when a named reserve remains. A request that
+exhausts its deadline SHALL return an unavailable abstention that discloses
+nothing, names the first stage it did not run and carries its timings; it SHALL
+NOT return a partially compiled packet, and SHALL NOT create a reusable packet
+cache entry for one. Every abstention,
 including disabled, unresolved, warming and unavailable outcomes, SHALL carry
 its timings.
 
-In a managed runtime, activation SHALL NOT project recall freshness, walk the
-vault, or build the private-identity inventory on the request thread. While
-recall is not yet live or the private-identity inventory is cold, activation
-SHALL abstain as warming and leave that work to the background owner. A live
+In a managed runtime, activation SHALL NOT build the private-identity inventory
+on the request thread: while that inventory is cold it SHALL abstain as warming
+and SHALL itself schedule the background build, so activation traffic alone
+converges it. Activation SHALL abstain as warming for recall only while a
+background owner has announced that it is seeding that scope, and SHALL NOT then
+project recall freshness or walk the vault on the request thread. Where no owner
+has announced a seed, or an announced seed concluded without making recall live,
+activation SHALL proceed exactly as unmanaged activation does. A warming
+abstention SHALL NOT depend on work that nothing is doing. A live
 recall-policy mismatch SHALL fail fast through the existing live checkpoint
 rather than reproject synchronously. Freshness that cannot be established SHALL
 produce an unavailable abstention; later stages SHALL NOT re-attempt it.
@@ -352,15 +359,22 @@ query arguments.
 
 #### Scenario: Every shipped client has given up on the request
 
-- **WHEN** an activation arrives through a door that binds no request deadline and its work outlasts the activation door budget
+- **WHEN** an activation arrives at a managed service through a door that binds no request deadline and its work outlasts the activation door budget
 - **THEN** the next stage boundary abstains as unavailable, names the stage it skipped and returns the timings of the stages that ran
 - **AND** no packet content is disclosed and no packet cache entry is created
 
 #### Scenario: A managed service has just started
 
-- **WHEN** an activation arrives before recall is live or while the private-identity inventory is cold
+- **WHEN** an activation arrives while the file watcher is seeding recall or while the private-identity inventory is cold
 - **THEN** it abstains as warming without projecting freshness or walking the vault on the request thread
-- **AND** the background owner builds the missing state once for all concurrent callers
+- **AND** the missing state is built once in the background for all concurrent callers
+- **AND** a later activation serves once that work has concluded
+
+#### Scenario: A managed service runs without a file watcher
+
+- **WHEN** an activation arrives at a managed service whose file watcher is disabled and recall has never gone live
+- **THEN** it serves through the same path unmanaged activation takes, under its request deadline
+- **AND** it never reports warming for recall
 
 #### Scenario: A current-state record carries an unrelated bare-title link
 
