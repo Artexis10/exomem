@@ -118,10 +118,11 @@ REFERENTS_RATIO_SLACK_MS = 25.0
 CEIL_WORKING_SET_MS = 1000.0
 CEIL_WORKING_SET_RATIO = 1.5
 WORKING_SET_RATIO_SLACK_MS = 50.0
-#: A turn that names one synthetic entity exactly, so an anchor resolves and the
-#: lanes actually run. A turn that abstained would measure nothing.
+#: A unique authored alias isolates scale measurement from the deliberately
+#: repetitive synthetic names. Resolver quality has separate acceptance cases;
+#: this gate must run useful role lanes, never time an empty abstention.
 WORKING_SET_TURN = (
-    "I'm planning to meet Synthetic Person 00007 — what are the constraints?"
+    "I'm planning to meet Activation Scale Contact — what are the constraints?"
 )
 
 
@@ -641,6 +642,19 @@ def _measure_working_set(vault: Path) -> tuple[float, dict]:
     """
     from exomem import commands, working_set_index, working_set_runtime
 
+    # The generated entities otherwise all share the words "Synthetic Person",
+    # which can trigger disambiguation before any role work runs.
+    person = next((vault / "Knowledge Base/Entities/People").glob("synthetic-person-00007-*.md"))
+    person.write_text(
+        person.read_text(encoding="utf-8").replace(
+            "entity_type: person\n",
+            "entity_type: person\naliases: [Activation Scale Contact]\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
     working_set_runtime.reset_caches_for_tests()
     working_set_index.WorkingSetIndex(vault).rebuild()
 

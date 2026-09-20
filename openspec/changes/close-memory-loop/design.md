@@ -213,6 +213,12 @@ remains in force. Missing or stale unit publication reports a failed lane and
 never repairs inline. Service latency acceptance seeds the event-maintained
 registry; offline cold-start filesystem proof is measured separately.
 
+Shared name prefixes can still produce conservative ambiguity despite an exact
+name. Ordinary-client relevance acceptance must cover that case and agent
+disambiguation without a user nudge. The scale gate uses a unique authored alias
+to exercise useful role work at every corpus size; it does not establish that
+the common-prefix relevance case is solved.
+
 | Contract | Owner | Programme integration |
 | --- | --- | --- |
 | Activation, roles, host continuity | Canonical `context-activation`, `context-roles`, `context-activation-continuity`; active `make-anchor-resolution-sound` | Reconcile current merges and convention work before wiring activation; preserve their requirements |
