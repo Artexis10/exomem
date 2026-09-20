@@ -30,7 +30,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from . import context_roles, working_set_index, working_set_resolve, working_set_state
+from . import (
+    context_roles,
+    request_budget,
+    working_set_index,
+    working_set_resolve,
+    working_set_state,
+)
 
 log = logging.getLogger(__name__)
 
@@ -358,9 +364,16 @@ def run_lanes(
         definition = registry.roles.get(role_id)
         if definition is None:
             continue
+        lane_stage = f"working_set.lanes.{role_id}"
+        if budget_exhausted(lane_stage):
+            # Discards any items/missing entries already gathered from prior
+            # lanes in this same loop: there is no partial packet, only a
+            # compiled one or an abstained one, and `compile_packet`'s caller
+            # already abstains (not cached) on any exception raised here.
+            raise BudgetExhausted(lane_stage)
         failed = False
         result = LaneResult(())
-        with _span(timings, f"working_set.lanes.{role_id}"):
+        with _span(timings, lane_stage):
             try:
                 result = _lane(
                     root,
@@ -692,6 +705,52 @@ def _span(timings: Any, name: str):
     return find_types.timing_span(timings, name)
 
 
+class BudgetExhausted(RuntimeError):
+    """The request budget could not afford the next compilation stage.
+
+    Raised from deep inside `compile_packet`/`run_lanes` rather than
+    threaded back up as a return value, so it reaches
+    `working_set_runtime.serve`'s existing `except Exception` around
+    `compile_packet` — which already abstains with reason `unavailable`
+    and, critically, already returns BEFORE the cache write below it, so a
+    budget-truncated call is never cached by construction. A dedicated type
+    (rather than a bare `RuntimeError`) exists only so a deliberate skip
+    reads distinctly from a genuine compilation bug in logs and tracebacks.
+    """
+
+
+def budget_exhausted(stage: str) -> bool:
+    """True when the active request budget cannot afford to start `stage`.
+
+    One helper shared by every stage boundary in the activation request path
+    — `op_activate_context` calls it directly for its own commands.py-level
+    stages (freshness, readiness, lexical, release, guard); `compile_packet`
+    and `run_lanes` call it for the stages they own (semantic evidence,
+    anchor resolution, role selection, current state, each role lane, packet
+    build). Reads the SAME in-flight `RequestBudget` either way, via the
+    `request_budget` module's context-local `current()` — there is one
+    budget per request regardless of which module asks.
+
+    Gated on `can_afford(request_budget.ACTIVATION_STAGE_RESERVE_SECONDS)`,
+    matching every other budget consumer's pattern of a named reserve
+    (`can_afford(PACK_RESERVE_SECONDS)` and friends) rather than "any
+    positive number of milliseconds": 1ms of remaining budget is enough to
+    START a stage but never enough to finish one.
+
+    Records the skip on the budget itself (`note_skipped`), so it is safe to
+    call at every boundary without special-casing: `RequestBudget.note_skipped`
+    dedupes by name, and every caller of this helper either returns or raises
+    immediately on `True`, so control flow never reaches a second boundary
+    once the budget is gone — the FIRST stage that could not be afforded is
+    the only one ever recorded.
+    """
+    budget = request_budget.current()
+    if budget is None or budget.can_afford(request_budget.ACTIVATION_STAGE_RESERVE_SECONDS):
+        return False
+    budget.note_skipped(stage)
+    return True
+
+
 def signature_evidence(index: working_set_index.WorkingSetIndex, turn: str):
     """Optional semantic corroboration over anchors, never the recall corpus.
 
@@ -751,6 +810,8 @@ def compile_packet(
         **registry.generation_block(),
     }
 
+    if budget_exhausted("working_set.semantic"):
+        raise BudgetExhausted("working_set.semantic")
     with _span(timings, "working_set.semantic"):
         if anchor:
             vectors, query_vector, semantic_state = {}, None, "agent_choice"
@@ -758,6 +819,8 @@ def compile_packet(
             vectors, query_vector, semantic_state = signature_evidence(index, turn)
     generation["semantic_evidence"] = semantic_state
 
+    if budget_exhausted("working_set.resolve"):
+        raise BudgetExhausted("working_set.resolve")
     with _span(timings, "working_set.resolve"):
         # `analysis` is needed on BOTH branches. The override replaces which
         # anchor the turn is about; it does not replace which lenses the turn asks
@@ -799,6 +862,8 @@ def compile_packet(
             ambiguity=resolution.ambiguity,
         )
 
+    if budget_exhausted("working_set.roles"):
+        raise BudgetExhausted("working_set.roles")
     with _span(timings, "working_set.roles"):
         anchor_kinds = tuple(dict.fromkeys(anchor.kind for anchor in resolution.resolved_anchors))
         roles = context_roles.select_roles(registry, anchor_kinds=anchor_kinds, analysis=analysis)
@@ -809,11 +874,14 @@ def compile_packet(
     # spec's restated "Bounded role lanes" requirement — "no lane SHALL run for
     # a partial anchor").
     lane_anchors = resolution.resolved_anchors
+    if budget_exhausted("working_set.current_state"):
+        raise BudgetExhausted("working_set.current_state")
     # Resolved ONCE: the Records lane and the packet's `current_state[]` block are
     # two views of the same collection reads.
-    current_state = working_set_state.current_state_for(
-        root, anchors=resolution.resolved_anchors, purpose=purpose
-    )
+    with _span(timings, "working_set.current_state"):
+        current_state = working_set_state.current_state_for(
+            root, anchors=resolution.resolved_anchors, purpose=purpose
+        )
     items, missing = run_lanes(
         root,
         anchors=lane_anchors,
@@ -824,6 +892,8 @@ def compile_packet(
         freshness_snapshot=freshness_snapshot,
     )
 
+    if budget_exhausted("working_set.budget"):
+        raise BudgetExhausted("working_set.budget")
     with _span(timings, "working_set.budget"):
         packet = build_packet(
             items=items,

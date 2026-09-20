@@ -49,6 +49,24 @@ RERANK_COLD_RESERVE_SECONDS = 25.0
 PACK_RESERVE_SECONDS = 10.0
 #: Graph neighbourhood enrichment inside the pack.
 GRAPH_ENRICH_RESERVE_SECONDS = 5.0
+#: `op_activate_context`'s own budget when no MCP-dispatch budget is already
+#: bound — the REST and CLI doors, where `current()` is always None because
+#: `RequestBudget` is otherwise bound in exactly one place, the MCP request
+#: context. Set just above the longest shipped client timeout so a request
+#: every shipped client has already abandoned stops server-side too, instead
+#: of continuing to spend server time nobody is waiting for: the shipped
+#: auto-activation hook's REST rung times out at 4.0s and its CLI rung at
+#: 5.0s (`REST_TIMEOUT_SECONDS`/`CLI_TIMEOUT_SECONDS` in
+#: `_hooks/exomem_retrieve_nudge.py`).
+ACTIVATION_DOOR_BUDGET_SECONDS = 6.0
+#: Minimum headroom `working_set.budget_exhausted` requires before starting
+#: the NEXT activation stage boundary. Every other budget consumer in this
+#: module gates on a named reserve (`can_afford(PACK_RESERVE_SECONDS)` and
+#: friends) rather than "any positive number of milliseconds", because 1ms of
+#: remaining budget is enough to START a stage but never enough to finish
+#: one. One constant covers every activation boundary, including the guard;
+#: there is no per-stage tuning.
+ACTIVATION_STAGE_RESERVE_SECONDS = 1.0
 
 #: Operators may lengthen or shorten the origin budget. Clients may not: the
 #: client that most needs the bound is the one that cannot be trusted to set

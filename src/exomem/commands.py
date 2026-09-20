@@ -78,6 +78,7 @@ from . import (
     vault,
     vocabulary_resolution,
 )
+from . import freshness as freshness_module
 from . import get_page as get_page_module
 from . import hosted_legacy_schemas as hosted_legacy_schemas_module
 from . import knowledge_packs as knowledge_packs_module
@@ -5966,6 +5967,52 @@ def op_activate_context(
              continuity?}. `generation.continuity` reports whether a token you
              passed was `applied`, `stale` or `absent`.
     """
+    # `RequestBudget` is bound in exactly one place, the MCP dispatch
+    # middleware: `request_budget.current()` is always None on the REST and
+    # CLI doors, which makes every stage-boundary check below dead code
+    # there — and those are the doors the shipped auto-activation hook uses
+    # (`_hooks/exomem_retrieve_nudge.py`: REST rung 4.0s, CLI rung 5.0s).
+    # Rather than binding a general REST/CLI budget (which would change
+    # `find`/pack behaviour for every other operation), activation binds its
+    # OWN short-lived budget here, only when none is already bound, for the
+    # duration of this one call. `try/finally` guarantees it cannot leak
+    # onto a later, unrelated call on a reused thread — including when the
+    # body below raises (e.g. the anchor-override `ValueError`).
+    bound_token = None
+    if request_budget_module.current() is None:
+        bound_token = request_budget_module.set_current(
+            request_budget_module.RequestBudget(
+                seconds=request_budget_module.ACTIVATION_DOOR_BUDGET_SECONDS
+            )
+        )
+    try:
+        return _op_activate_context_body(
+            vault_root,
+            turn,
+            max_chars,
+            purpose=purpose,
+            continuity=continuity,
+            anchor=anchor,
+            include_timings=include_timings,
+        )
+    finally:
+        if bound_token is not None:
+            request_budget_module.reset_current(bound_token)
+
+
+def _op_activate_context_body(
+    vault_root: Path,
+    turn: str = "",
+    max_chars: int = working_set_module.DEFAULT_BUDGET_CHARS,
+    purpose: str | None = None,
+    continuity: str | None = None,
+    anchor: str | None = None,
+    include_timings: bool = False,
+) -> dict:
+    """`op_activate_context`'s implementation, called with a budget already
+    bound (either the caller's MCP budget, or the door budget the public
+    wrapper just bound). Kept separate so the wrapper's `try/finally` never
+    has to wrap this function's many early returns."""
     timings = find_types.FindTimings() if include_timings else None
     budget = working_set_module.clamp_budget(max_chars)
     turn = str(turn or "")
@@ -5977,26 +6024,155 @@ def op_activate_context(
         "roles_hash": "",
         "continuity": working_set_runtime_module.unevaluated_continuity(continuity),
     }
-    if not turn.strip():
-        return working_set_module.abstained_packet(
-            reason="unresolved", max_chars=budget, generation=generation_stub
+
+    def _abstain(
+        reason: str,
+        *,
+        generation: Mapping[str, Any] | None = None,
+        budget_caused: bool = False,
+    ) -> dict:
+        """One abstained packet, always carrying timings when they were asked
+        for. Every early exit below must keep `serve`'s own promise — abstain,
+        never raise — including its promise to retain timings, which used to
+        stop at the first abstention this function built itself.
+
+        `budget_caused` attaches the SAME advisory `budget` block `op_find`
+        exposes (`RequestBudget.as_response_block()`) under `request_budget`
+        — not the packet's own pre-existing `budget` key, which already means
+        the character budget (`limit_chars`/`used_chars`) and would be
+        overwritten by a same-named block of a completely different shape.
+        Only set for an abstention `working_set.budget_exhausted` itself
+        caused, never for an unrelated failure that also resolves to
+        `unavailable` (release-plane/guard exceptions), so a caller reading
+        `request_budget` can trust it names the real cause.
+        """
+        packet = working_set_module.abstained_packet(
+            reason=reason,
+            max_chars=budget,
+            generation=generation_stub if generation is None else generation,
         )
+        if timings is not None:
+            packet["timings"] = timings.as_dict()
+        if budget_caused:
+            active_budget = request_budget_module.current()
+            block = active_budget.as_response_block() if active_budget is not None else None
+            if block is not None:
+                packet["request_budget"] = block
+        return packet
+
+    if not turn.strip():
+        return _abstain("unresolved")
     if working_set_index_module.disabled():
         # The tool stays on the surface under the kill switch so the published
         # tool-surface digest is independent of the environment; it just abstains.
-        return working_set_module.abstained_packet(
-            reason="disabled", max_chars=budget, generation=generation_stub
-        )
+        return _abstain("disabled")
+
+    # The request budget is checked before EVERY stage below, not only here:
+    # `working_set_module.budget_exhausted(stage)` is the one shared helper,
+    # called again at each later boundary (readiness, lexical, release,
+    # then — inside `compile_packet`/`run_lanes` — semantic evidence, anchor
+    # resolution, role selection, current state, each role lane, and packet
+    # build) and finally before the guard. There is no safe point to
+    # interrupt a stage already running (see `rerank_max_candidates`'s
+    # docstring for the same constraint on a synchronous model call), so a
+    # budget that runs out mid-flight is caught at the NEXT boundary rather
+    # than only at entry — an entry-only check cannot fire for a request
+    # whose client gave up while the server kept working well past the
+    # 50s `request_budget.MCP_REQUEST_BUDGET_SECONDS` origin budget (or, on
+    # the REST/CLI doors, the `ACTIVATION_DOOR_BUDGET_SECONDS` the public
+    # wrapper bound above).
+    if working_set_module.budget_exhausted("working_set.freshness"):
+        return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
+
+    # A managed reader with a live event index never reprojects broad entries
+    # or cold-walks the vault on the request thread. `require_live_recall`
+    # binds this request's freshness snapshot to the same fail-fast rule
+    # `find()` derives for itself (managed runtime + live event indexes) for
+    # the ESTABLISHED-but-MISMATCHED case; `managed_cold` covers the other
+    # half find() never has to, because find()'s own catalog-admission gate
+    # already proves the registry live before it ever reaches that rule.
+    #
+    # REVIEWER NOTE — unreviewed judgment, flagged for review. The final rule
+    # is in three parts, all sharing one `recall_is_live` read so they can
+    # never disagree about which case a request is in:
+    #   - ESTABLISHED and MISMATCHED (was live, now a different policy
+    #     identity): `require_live_recall=True` below fails fast — no
+    #     reprojection, no walk. Regression test:
+    #     `test_managed_activation_fails_fast_on_a_mismatched_recall_identity`.
+    #   - NEVER LIVE (`managed_cold`, this round's fix): construct NO
+    #     projection at all — not even the offline-style cold-walk fallback.
+    #     A prior round's fix (the `recall_is_live` term above) stopped the
+    #     mismatched case from reprojecting, but left this case falling
+    #     through to `FreshnessSnapshot`'s offline branch, which calls
+    #     `freshness._cold_recall_projection_scope_snapshot` — a full
+    #     directory walk of the KB scope, ON THE REQUEST THREAD, before
+    #     `ensure_index` ever gets to say `index_warming` (measured: 82 KB
+    #     directory enumerations for one cold managed request). `ensure_index`
+    #     below still runs and still reports `index_warming` honestly when the
+    #     anchor index is ALSO cold (existing test
+    #     `test_cold_activation_abstains_before_starting_retrieval` stays
+    #     green: same reason, same `_schedule_build` call, same
+    #     `working_set.readiness` stage). When the anchor index happens to be
+    #     warm anyway, activation abstains `index_warming` explicitly right
+    #     after readiness, rather than serving lexical/role evidence against a
+    #     recall registry it cannot prove current.
+    #   - LIVE and MATCHING: `require_live_recall=True` resolves from the live
+    #     registry with no walk — the ordinary fast path, unchanged.
+    # A registry that has never gone live becomes live within a bounded
+    # window of managed-service startup, not permanently: `FileWatcher`
+    # seeds every scope (including "kb") and marks it live "immediately" on
+    # its own daemon thread — `freshness.seed(...)` at
+    # `file_watcher.py:1224`, inside `_reconcile_once(seed=True)`, run from
+    # `_run_reconcile` via `_start_reconcile_thread`/`FileWatcher.start()`.
+    # The watcher itself is instantiated as part of the managed server's own
+    # bootstrap at `server_runtime.py:894`. `managed_cold` is therefore a
+    # bounded warming window that resolves itself shortly after the server
+    # comes up, exactly like the anchor index's own `index_warming` window —
+    # not a permanent abstention.
+    managed_runtime = readiness_module.runtime_managed()
+    event_indexes_on = freshness_module.event_indexes_enabled()
+    recall_live = freshness_module.recall_is_live(vault_root, "kb")
+    managed_cold = managed_runtime and event_indexes_on and not recall_live
+    require_live_recall = managed_runtime and event_indexes_on and recall_live
 
     freshness_key: Any = ""
     lexical_freshness = None
     snapshot = None
-    try:
-        snapshot = find_module.FreshnessSnapshot(vault_root)
-        freshness_key = snapshot.projection_key("kb")
-        lexical_freshness = snapshot.for_scope("kb")
-    except Exception:  # noqa: BLE001 - unavailable freshness never grants disclosure
-        freshness_key = ""
+    if not managed_cold:
+        with find_types.timing_span(timings, "working_set.freshness"):
+            try:
+                snapshot = find_module.FreshnessSnapshot(
+                    vault_root, require_live_recall=require_live_recall, timings=timings
+                )
+                freshness_key = snapshot.projection_key("kb")
+                lexical_freshness = snapshot.for_scope("kb")
+            except find_module.RetrievalIndexWarming as exc:
+                # A managed identity mismatch fails fast into the same typed
+                # warming/unavailable outcome a cold catalogue gets below — never a
+                # silent degrade to an empty freshness key, which would let the
+                # request keep serving against a registry it could not prove
+                # current for this principal's access policy.
+                reason = (
+                    working_set_runtime_module.WARMING
+                    if exc.status == "warming"
+                    else working_set_runtime_module.UNAVAILABLE
+                )
+                return _abstain(reason)
+            except Exception:  # noqa: BLE001 - unavailable freshness never grants disclosure
+                # Abstain right here rather than continuing in a half-state:
+                # freshness that could not be established grants nothing, and
+                # every later stage that needs it would either re-attempt the
+                # same unbounded work (lexical's `snapshot.recall_checkpoint`,
+                # and `_units_lane`'s own fallback `FreshnessSnapshot`
+                # reconstruction — `working_set.py`'s `_units_lane`, left
+                # unchanged for its other callers) or silently run without
+                # it. `snapshot` is therefore never None when lanes run on
+                # this path, so that fallback is unreachable from here.
+                log.warning("activation freshness unavailable; abstaining", exc_info=True)
+                return _abstain(working_set_runtime_module.UNAVAILABLE)
+
+    if working_set_module.budget_exhausted("working_set.readiness"):
+        return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
 
     # A cold managed index can only return an empty warming packet. Check it
     # before optional retrieval evidence loads the hybrid corpus and models.
@@ -6015,12 +6191,17 @@ def op_activate_context(
     if index is not None:
         index.close()
     if state != working_set_runtime_module.READY or index is None:
-        packet = working_set_module.abstained_packet(
-            reason=state, max_chars=budget, generation=generation_stub
-        )
-        if timings is not None:
-            packet["timings"] = timings.as_dict()
-        return packet
+        return _abstain(state)
+
+    if managed_cold:
+        # The anchor index happened to be warm even though the recall
+        # registry has never gone live: lexical evidence and role lanes
+        # would have nothing current to read against, so activation
+        # abstains here rather than either reprojecting or cold-walking.
+        return _abstain(working_set_runtime_module.WARMING)
+
+    if working_set_module.budget_exhausted("working_set.lexical"):
+        return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
 
     # Activation's search domain is its small anchor catalogue.
     # Ordinary hybrid recall loads note-chunk and media matrices even for a
@@ -6045,15 +6226,15 @@ def op_activate_context(
                     freshness=lexical_freshness,
                     recall_checkpoint=(snapshot.recall_checkpoint("kb") if snapshot else None),
                 )
+        if working_set_module.budget_exhausted("working_set.release"):
+            return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
         with find_types.timing_span(timings, "working_set.release"):
             release = egress_module.annotate_hits(
                 vault_root, hits, limit=ACTIVATE_RETRIEVAL_LIMIT, purpose=purpose
             )
     except Exception:  # noqa: BLE001 - the release plane failing means abstain, not serve
         log.warning("activation release plane unavailable; abstaining", exc_info=True)
-        return working_set_module.abstained_packet(
-            reason="unavailable", max_chars=budget, generation=generation_stub
-        )
+        return _abstain("unavailable")
     packet = working_set_runtime_module.serve(
         vault_root,
         turn=turn,
@@ -6075,17 +6256,27 @@ def op_activate_context(
     # than about the ref the caller passed.
     if anchor and _abstention_reason(packet) == "unresolved":
         raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
+    # Only gated when `packet` actually carries content: an already-abstained
+    # packet (e.g. `compile_packet` gave up at an earlier budget boundary)
+    # has nothing for the guard to spend time on, so checking again here
+    # would just record a second, redundant `note_skipped` for a stage that
+    # was never really at risk — `note_skipped` should name the ONE stage
+    # that first ran out of room, not every boundary crossed afterward while
+    # carrying nothing.
+    if not packet.get("abstained") and working_set_module.budget_exhausted("working_set.guard"):
+        return _abstain(
+            working_set_runtime_module.UNAVAILABLE,
+            generation=packet.get("generation") or generation_stub,
+            budget_caused=True,
+        )
     # Unconditional: every served packet crosses the guard. A guard that only ran
     # when the retrieval lane happened to succeed is not a guard.
     try:
-        guarded = egress_module.guard_working_set(vault_root, packet, release, purpose=purpose)
+        with find_types.timing_span(timings, "working_set.guard"):
+            guarded = egress_module.guard_working_set(vault_root, packet, release, purpose=purpose)
     except Exception:  # noqa: BLE001 - a guard that cannot decide must not disclose
         log.warning("activation egress guard failed; abstaining", exc_info=True)
-        return working_set_module.abstained_packet(
-            reason="unavailable",
-            max_chars=budget,
-            generation=packet.get("generation") or generation_stub,
-        )
+        return _abstain("unavailable", generation=packet.get("generation") or generation_stub)
     # The release plane's own decision, reused rather than re-derived: the
     # override anchor was the packet's ONLY anchor, so the guard emptying the
     # packet IS the answer to "may this audience see that ref".
@@ -6105,11 +6296,7 @@ def op_activate_context(
     if anchor and (guarded is None or _abstention_reason(guarded) == "withheld"):
         raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
     if guarded is None:
-        return working_set_module.abstained_packet(
-            reason="withheld",
-            max_chars=budget,
-            generation=packet.get("generation") or generation_stub,
-        )
+        return _abstain("withheld", generation=packet.get("generation") or generation_stub)
     packet = guarded
     token = working_set_runtime_module.mint_continuity(
         packet, identity=working_set_runtime_module.identity_for(vault_root)
