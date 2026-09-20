@@ -1015,10 +1015,24 @@ def register_hosted_routes(
         run_in_threadpool_func=run_in_threadpool,
     )
 
-    from .hosted_activation_ack_client import is_hosted_activation_ack_enabled
+    from .hosted_activation_ack_client import (
+        ActivationAcknowledgementUnavailable,
+        is_hosted_activation_ack_enabled,
+    )
 
     activation_proof_endpoint = None
-    if is_hosted_activation_ack_enabled():
+    try:
+        acknowledgement_capable = is_hosted_activation_ack_enabled()
+    except ActivationAcknowledgementUnavailable:
+        # A hosted cell without the capability must refuse governed writes, and
+        # it already does: writer_lease raises here before the first canonical
+        # effect, and authorization_custody raises again at acknowledgement.
+        # Refusing to *build the server* would instead take down reads, recall
+        # and session issuance, and would make a deployment whose lock does not
+        # yet carry the capability unable to start at all rather than merely
+        # unable to write. Registration is not the enforcement point.
+        acknowledgement_capable = False
+    if acknowledgement_capable:
         from .governance.store import sidecar_path
         from .hosted_activation_proof import (
             ActivationProofEndpoint,
