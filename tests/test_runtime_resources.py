@@ -312,6 +312,17 @@ def test_cold_product_getters_reserve_sync_status_capacity(
             ]
             try:
                 assert await anyio.to_thread.run_sync(started.wait)
+                # `started` proves only that ONE caller is inside the loader.
+                # The refusal below is about a FULL gate, so wait for all four
+                # admissions: a caller whose worker thread starts late would
+                # otherwise lose its slot to the fifth call, which then blocks
+                # instead of being refused.
+                for _ in range(200):
+                    gate = runtime_resources._gate
+                    if gate is not None and gate.admitted_count() == 4:
+                        break
+                    await asyncio.sleep(0.01)
+                assert runtime_resources._gate.admitted_count() == 4
                 status_started = time.monotonic()
                 status = await asyncio.wait_for(
                     anyio.to_thread.run_sync(resource_status.collect, tmp_path), 1
