@@ -831,6 +831,55 @@ def test_a_managed_runtime_reports_a_stale_index_rather_than_walking(
     assert len(scheduled) == 1
 
 
+def _join_scheduled_builds() -> None:
+    import threading
+
+    for thread in threading.enumerate():
+        if thread.name == "exomem-working-set-warm":
+            thread.join(timeout=30)
+            assert not thread.is_alive(), "the scheduled index build did not finish"
+
+
+def test_a_scheduled_build_records_the_stamp_so_the_next_request_stops_asking(
+    seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A managed runtime hands the stale walk to a background build.
+
+    That build has to record the freshness key it was scheduled for. Without it
+    the catalogue reads as stale forever: every request reports `index_stale`
+    and, with no build in flight, schedules another whole-vault walk.
+    """
+    from exomem import readiness, working_set_runtime
+
+    working_set_runtime.reset_caches_for_tests()
+    index = working_set_index.WorkingSetIndex(seeded)
+    index.rebuild(freshness_stamp="old")
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+
+    first = working_set_runtime.serve(
+        seeded, turn="the cargo sled", max_chars=2000, freshness_key="new"
+    )
+    assert first["generation"]["index_stale"] is True
+    _join_scheduled_builds()
+    assert working_set_index.WorkingSetIndex(seeded).freshness_stamp() == "new"
+
+    real_schedule = working_set_runtime._schedule_build
+    scheduled: list[Path] = []
+
+    def recording(root: Path, **kwargs: object) -> None:
+        scheduled.append(root)
+        real_schedule(root, **kwargs)
+
+    monkeypatch.setattr(working_set_runtime, "_schedule_build", recording)
+    second = working_set_runtime.serve(
+        seeded, turn="the cargo sled", max_chars=2000, freshness_key="new"
+    )
+    _join_scheduled_builds()
+
+    assert second["generation"]["index_stale"] is False
+    assert scheduled == []
+
+
 # --------------------------------------------------------------------------- #
 # Review round: hub scope and single-flight cold build
 # --------------------------------------------------------------------------- #
