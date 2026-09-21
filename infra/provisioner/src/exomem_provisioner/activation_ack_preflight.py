@@ -22,11 +22,22 @@ and a marked cell keeps the verdict whatever the live inputs now say. The
 classifier asks for the mark by setting `mark_legacy_uncertain`; it cannot write
 one itself, and clearing one is an operator adjudication, not a computation.
 
-Whether the attestation window has room. A cell that cannot acknowledge cannot
-sign its readiness attestation, so the window stops being renewed; once it
-lapses on a cell that has served, minting is fenced off and the cell is lost.
-An outstanding acknowledgement is therefore a countdown, and starting work that
-cannot finish inside it converts a recoverable stall into a stranded cell.
+Whether the attestation window has room. Renewal is independent of
+acknowledgement -- `mint_hosted_replica_readiness_attestation` never compares
+the store's activation tuple to `control.json`, so an outstanding
+acknowledgement is not a countdown. A window observed short therefore means
+renewal has already stopped for some other reason, and on a cell that has
+served a lapsed window cannot be re-minted at all.
+
+That verdict is deliberately not wired into the migration coordinator. A
+drained cell more than one window past its drain is the state
+`refresh_drained_source_bundle` exists to repair: it reissues the window,
+which is safe precisely because the cell has stopped serving. `DRAINING` is in
+`_SERVED_STATES`, so `STRANDED` here would refuse exactly those cells instead.
+The coordinator's own floor (`_SOURCE_WINDOW_FLOOR_SECONDS`) is the check that
+belongs on that path, and it repairs rather than refuses. See design Decision
+14; `test_activation_ack_preflight.py` pins the conflict so it is seen before
+anyone wires this in.
 """
 
 from __future__ import annotations

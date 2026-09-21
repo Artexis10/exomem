@@ -115,12 +115,23 @@ def test_capable_platform_serves_the_acknowledgement_listener(tmp_path):
         "/run/exomem/activation-ack-tls/tls.key"
     )
 
-    mount = next(m for m in container["volumeMounts"] if m["name"] == "activation-ack-tls")
-    assert mount["mountPath"] == "/run/exomem/activation-ack-tls"
-    assert mount["readOnly"] is True
+    # Each key by subPath, never a directory mount. Secret projection publishes
+    # a key as a symlink into ..data/, and `_read_certificate` refuses a symlink,
+    # which would refuse the listener -- and with it the worker -- on every start.
+    mounts = sorted(
+        (m for m in container["volumeMounts"] if m["name"] == "activation-ack-tls"),
+        key=lambda m: m["mountPath"],
+    )
+    assert [(m["mountPath"], m["subPath"], m["readOnly"]) for m in mounts] == [
+        ("/run/exomem/activation-ack-tls/tls.crt", "tls.crt", True),
+        ("/run/exomem/activation-ack-tls/tls.key", "tls.key", True),
+    ]
     volume = next(v for v in worker["volumes"] if v["name"] == "activation-ack-tls")
     assert volume["secret"]["secretName"] == "exomem-activation-ack-tls"
-    assert volume["secret"]["defaultMode"] == 0o400
+    # Not 0400: this pod sets no fsGroup, so the projection stays root-owned and
+    # the worker's own UID 10001 would be denied its own certificate.
+    assert volume["secret"]["defaultMode"] == 0o444
+    assert "fsGroup" not in worker.get("securityContext", {})
 
     # The private key never reaches the general admission API.
     api = _find(documents, "Deployment", "exomem-provisioner-api")["spec"]["template"]["spec"]

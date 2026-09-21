@@ -347,8 +347,23 @@ spec:
               subPath: private-alpha-capacity-v1.json
               readOnly: true
 {{- if $ackEnabled }}
+            {{- /*
+              subPath per key, not a directory mount, for the same reason as the
+              capacity contract above: Secret projection publishes each key as a
+              symlink into ..data/, and _read_certificate() refuses a symlink
+              outright. A directory mount here refuses the listener on every
+              worker start, and the refusal leaves the worker unable to run at
+              all. The Secret is not immutable, so the lost live-update is real:
+              a rotated certificate is picked up at the next restart, which is
+              what the rotation procedure already does.
+            */}}
             - name: activation-ack-tls
-              mountPath: /run/exomem/activation-ack-tls
+              mountPath: /run/exomem/activation-ack-tls/tls.crt
+              subPath: tls.crt
+              readOnly: true
+            - name: activation-ack-tls
+              mountPath: /run/exomem/activation-ack-tls/tls.key
+              subPath: tls.key
               readOnly: true
 {{- end }}
       volumes:
@@ -358,13 +373,21 @@ spec:
 {{- if $ackEnabled }}
         {{- /*
           Server key material for the internal acknowledgement listener. Mounted
-          only here: the admission API has no reason to hold it, and 0400 keeps it
-          unreadable to anything but the worker's own user.
+          only here: the admission API has no reason to hold it.
+
+          0444, not 0400. This pod sets no fsGroup and no runAsUser -- it relies
+          on the image's USER 10001 -- so kubelet leaves the projection owned by
+          root, and 0400 is readable by root alone. The worker would get EACCES
+          on both the preflight read and the TLS listener's own load. 0444 is
+          what the cell chart already uses for the credential and
+          authorization-session-source Secrets a non-root container reads; the
+          exposure it buys is to other processes in this pod, and the Secret is
+          scoped to this Deployment.
         */}}
         - name: activation-ack-tls
           secret:
             secretName: exomem-activation-ack-tls
-            defaultMode: 0400
+            defaultMode: 0444
 {{- end }}
         - name: deployment-lock
           configMap:

@@ -275,3 +275,49 @@ async def test_an_unavailable_trust_bundle_is_refused(tmp_path: Path) -> None:
             read_trust_bundle=_reader(other_trust),
             now=now,
         )
+
+
+async def test_a_kubernetes_secret_projection_layout_refuses_and_a_subpath_mount_does_not(
+    tmp_path: Path,
+) -> None:
+    """Why the chart mounts each key by subPath instead of the whole directory.
+
+    kubelet writes a Secret volume as an atomic-swap tree: the real bytes live
+    under a timestamped directory, `..data` points at it, and every key is a
+    symlink into `..data/`. A directory mount therefore hands this preflight a
+    symlink, it refuses, and the refusal takes the whole worker down rather than
+    just the listener. The same shape mounted by subPath is a regular file.
+
+    This is the deployment half of the plain-symlink refusal above; the chart
+    half is asserted in `tests/test_hosted_activation_helm.py`.
+    """
+
+    now = dt.datetime.now(dt.UTC).replace(microsecond=0)
+    binding, trust_pem, certificate_path = _material(tmp_path, issued_at=now)
+
+    mount = tmp_path / "projection"
+    revision = mount / "..2026_09_21_00_00_00.000000000"
+    revision.mkdir(parents=True)
+    (revision / "tls.crt").write_bytes(certificate_path.read_bytes())
+    (mount / "..data").symlink_to(revision.name)
+    (mount / "tls.crt").symlink_to(Path("..data") / "tls.crt")
+
+    with pytest.raises(ActivationAckStartupRefusal, match="symlink"):
+        await preflight_activation_ack_listener(
+            binding=binding,
+            certificate_path=str(mount / "tls.crt"),
+            read_trust_bundle=_reader(trust_pem),
+            now=now,
+        )
+
+    # What the chart actually mounts: kubelet bind-mounts the key as a regular
+    # file at the mount path, so the same projected bytes pass.
+    materialized = tmp_path / "subpath-tls.crt"
+    materialized.write_bytes((revision / "tls.crt").read_bytes())
+    report = await preflight_activation_ack_listener(
+        binding=binding,
+        certificate_path=str(materialized),
+        read_trust_bundle=_reader(trust_pem),
+        now=now,
+    )
+    assert report["dns_name"] == activation_ack_server_dns_name(NAMESPACE)

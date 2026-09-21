@@ -200,3 +200,26 @@ def test_an_unprovisioned_activation_tuple_matches_only_another_absent_one() -> 
     assert _classify(custody_activation=absent, store_activation=absent).status == CLEAN
     assert _classify(custody_activation=absent, store_activation=TUPLE).status == PROTOCOL_QUALIFIED
     assert _classify(custody_activation=TUPLE, store_activation=absent).status == PROTOCOL_QUALIFIED
+
+
+def test_a_long_drained_cell_is_stranded_here_and_repairable_on_the_migration_path() -> None:
+    """Pin why this classifier is not wired into the migration coordinator.
+
+    `refresh_drained_source_bundle` exists to reissue the window of a cell that
+    drained more than one window ago -- safe exactly because the cell stopped
+    serving, and without it "a migration starting more than one window after
+    the drain strands its cell". `DRAINING` is in `_SERVED_STATES`, so this
+    classifier calls that same cell STRANDED and refuses it.
+
+    Both are right for their own caller. The classifier answers "is this cell
+    recoverable as it stands", and a lapsed window on a cell that has served is
+    not re-mintable. The coordinator answers "can this migration proceed", and
+    it holds the one action that changes the answer. Wiring the classifier onto
+    that path would replace a repair with a refusal on precisely the cells the
+    repair is for. See design Decision 14.
+    """
+    drained = _classify(replica_state="DRAINING", attestation_expires_at=NOW - 1)
+
+    assert drained.status == STRANDED
+    assert drained.may_begin is False
+    assert drained.remaining_seconds == -1
