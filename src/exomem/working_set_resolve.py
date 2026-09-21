@@ -327,35 +327,34 @@ def candidates_for(
         # NOT: it is the single-authored-rare-word case, a genuinely weaker,
         # different fact, never a second vote for the same one.
         #
-        # Name contact (`close-memory-loop`, root cause 2) is two or more
-        # shared AUTHORED name terms, or exactly one that is independently
-        # rare (the same `term_anchor_counts` yardstick `rare_term` measures
-        # against): a single COMMON word shared with a long title — "project"
-        # against "Northern Corridor Winter Freight Logistics Project" — is
-        # not a turn naming that anchor, and let an unnamed hub sharing one
-        # ordinary word plus broad section vocabulary take over a packet.
-        # `term_anchor_counts` absent means the one shared term cannot be
-        # shown rare, so it earns nothing — never a fabricated rarity.
+        # Name contact (`close-memory-loop`, root cause 2, correction round
+        # 1) is TWO OR MORE shared AUTHORED name terms — never one, however
+        # rare `term_anchor_counts` shows that one term to be. The first
+        # attempt at this rule also granted `lexical_overlap` for a single
+        # shared name term that was independently rare, reasoning that
+        # "named by few anchors" meant "a rare word" — but rarity among
+        # ANCHOR NAMES is not rarity of the WORD: a common English word can
+        # easily name three or fewer anchors in a small catalogue while
+        # remaining an everyday word no turn "names" an anchor by using. The
+        # orchestrator's offline measurement against production-scale state
+        # confirmed exactly that shape still resolved an unnamed hub. A
+        # single shared name term — rare or not — can now only ever earn
+        # `rare_term` below, and `_status_for`'s own third clause already
+        # requires a second, independently reached CONTACT kind (never a
+        # mere qualifier) before `rare_term` resolves anything alone.
         row_terms_folded = frozenset(fold_plural(term) for term in row.terms)
         name_terms_folded = frozenset(
             fold_plural(term) for term in tokens_of(" ".join((row.title, *row.aliases)))
         )
         shared_broad = turn_terms_folded & row_terms_folded
         shared_name = turn_terms_folded & name_terms_folded
-        single_shared_name_term_is_rare = False
-        if len(shared_name) == 1:
-            (only_shared_name_term,) = shared_name
-            single_name_term_count = term_counts.get(only_shared_name_term)
-            single_shared_name_term_is_rare = (
-                single_name_term_count is not None
-                and single_name_term_count <= RARE_TERM_MAX_ANCHORS
-            )
-        if len(shared_broad) >= min_terms and (
-            len(shared_name) >= 2 or single_shared_name_term_is_rare
-        ):
+        if len(shared_broad) >= min_terms and len(shared_name) >= 2:
             evidence.add("lexical_overlap")
-        elif single_shared_name_term_is_rare:
-            evidence.add("rare_term")
+        elif len(shared_name) == 1:
+            (only_shared_name_term,) = shared_name
+            count = term_counts.get(only_shared_name_term)
+            if count is not None and count <= RARE_TERM_MAX_ANCHORS:
+                evidence.add("rare_term")
         if bands.get(row.anchor_id):
             evidence.add("vector_band")
         if claims_winner is not None and claims_winner == row.path:
