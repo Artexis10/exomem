@@ -648,12 +648,51 @@ _EXOMEM_PATH_PREFIXES = ("exomem://vault/", "exomem://source/")
 MAX_DIRECT_TEXT_REFERENCES = 64
 
 
+def _strip_trailing_marker(text: str) -> str:
+    """Strip a genuine trailing `#fragment`/`|alias` from unencoded `text`,
+    without truncating a literal `#` or `|` INSIDE a `.md` filename.
+
+    A real vault filename may contain either character. The one synthetic
+    marker this module ever appends to an otherwise plain, unencoded string
+    — a current-state ref's `#current` suffix, a `path.md#Heading` anchor —
+    always comes AFTER that filename's own `.md` extension. Splitting on the
+    first `#`/`|` found ANYWHERE truncated a filename that had either
+    character of its own before any marker was ever appended. Splitting only
+    on one found after the first `.md` instead keeps both intact: an
+    in-filename `#`/`|` survives, and a genuine trailing marker still gets
+    stripped.
+    """
+    md_at = text.lower().find(".md")
+    search_from = md_at + 3 if md_at != -1 else 0
+    cut = len(text)
+    for marker in ("|", "#"):
+        found = text.find(marker, search_from)
+        if found != -1:
+            cut = min(cut, found)
+    return text[:cut]
+
+
 def _unwrap_reference(raw: str) -> tuple[str, bool]:
     """`(path-ish text, explicitly-a-reference)` for one reference string.
 
     Shared by the withheld-key comparison and by the reference COLLECTION in
     `annotate_page`, so both read a wikilink, an `exomem://` ref and a plain
     path exactly the same way.
+
+    An `exomem://` reference's path component is percent-encoded by
+    `context_refs._encode`, which leaves `.`/`/` unescaped but DOES encode a
+    literal `#` or `|` (`%23`/`%7C`) — a real filename may contain either. The
+    structural fragment delimiter the pipeline appends (`#unit-<hash>`,
+    `#current`) is always the one UNENCODED `#` in the raw text. Splitting
+    only ever happens on that raw, still-encoded text, BEFORE decoding: an
+    encoded `%23`/`%7C` inside the path is inert to a split that has already
+    happened, so it survives decoding as the literal character it names
+    instead of truncating the path or being mistaken for an alias separator.
+    The plain-path form is never percent-encoded, so `#`/`|` in it are only
+    ever disambiguated positionally — see `_strip_trailing_marker`. The
+    wikilink form is unencoded too, and split as written: a wikilink target
+    is a page TITLE, which this module has never had to reconcile against a
+    `.md` filename the way a plain path or a decoded URI does.
     """
     text = raw.strip()
     if not text:
@@ -662,16 +701,28 @@ def _unwrap_reference(raw: str) -> tuple[str, bool]:
     if text.startswith("[[") and text.endswith("]]"):
         text = text[2:-2].strip()
         explicit = True
-    lowered = text.lower()
-    for prefix in _EXOMEM_PATH_PREFIXES:
-        if lowered.startswith(prefix):
-            text = unquote(text[len(prefix) :])
+        # Wikilink display alias (`[[target|label]]`) and heading anchor
+        # (`[[target#Section]]`) are presentation, not identity. Unencoded
+        # text, so splitting after the fact is exact.
+        text = text.split("|", 1)[0]
+        text = text.split("#", 1)[0]
+    else:
+        lowered = text.lower()
+        matched_prefix = next(
+            (prefix for prefix in _EXOMEM_PATH_PREFIXES if lowered.startswith(prefix)),
+            None,
+        )
+        if matched_prefix is not None:
+            remainder = text[len(matched_prefix) :]
+            remainder = remainder.split("#", 1)[0]
+            text = unquote(remainder)
             explicit = True
-            break
-    # Wikilink display alias (`[[target|label]]`) and heading anchor
-    # (`path.md#Section`) are presentation, not identity.
-    text = text.split("|", 1)[0]
-    text = text.split("#", 1)[0]
+        else:
+            # A plain path (`path.md#Section`) or an unrecognised scheme:
+            # never percent-decoded. `_strip_trailing_marker` only cuts on a
+            # `#`/`|` found AFTER the filename's own `.md`, so one that is
+            # part of the filename itself (before any `.md`) survives.
+            text = _strip_trailing_marker(text)
     text = text.replace("\\", "/").strip().strip("/")
     return text, explicit
 
@@ -2293,7 +2344,7 @@ def guard_working_set(
         _record_blocked_outcome(who.audience_id)
         return None
 
-    named_paths, prose_names = _working_set_paths(guarded)
+    named_paths, prose_names, invalid_refs = _working_set_paths(guarded)
     tombstoned = {
         path for path in named_paths if path and lifecycle.is_tombstoned(vault_root, path)
     }
@@ -2304,7 +2355,24 @@ def guard_working_set(
         # above this line made a sidecar hiccup abstain a request that had no
         # release decision to take. Governed vaults fall through and keep failing
         # closed.
+        #
+        # `invalid_refs` is deliberately NOT part of this condition: an
+        # ungoverned vault has no release decision to withhold from in the
+        # first place, so a malformed reference here changes nothing.
         return guarded
+
+    # A candidate whose own shape marked it as a page reference (an
+    # `exomem://` scheme, or a `.md` suffix once its fragment was stripped)
+    # but that never validated as a genuine in-vault path is never decided as
+    # a path -- `_working_set_paths` never added it to `named_paths`, so
+    # nothing here is ever handed to `_decide_path` and nothing here ever
+    # reaches the filesystem. `invalid_refs` withholds the item that carried
+    # it directly (`_value_names_an_invalid_reference`, applied per item
+    # below), rather than through `frozen`/`_names_withheld`: that matcher
+    # compares CANONICAL keys, and `_canonical_reference` returns `None` for
+    # a candidate that unwraps to an empty string (`exomem://vault/` alone),
+    # which can never equal any canonical key, including its own -- adding
+    # such a candidate to `withheld` would silently fail to match it.
 
     # Prose resolution happens only now, when the decision loop below (or the
     # already-withheld set) will actually use it.
@@ -2380,7 +2448,8 @@ def guard_working_set(
     guarded["anchors"] = [
         anchor
         for anchor in (
-            _guarded_anchor(item, frozen, decisions) for item in original_anchors
+            _guarded_anchor(item, frozen, decisions, invalid_refs)
+            for item in original_anchors
         )
         if anchor is not None
     ]
@@ -2391,7 +2460,9 @@ def guard_working_set(
     ]
     guarded["units"] = [
         unit
-        for unit in (_guarded_unit(item, frozen, decisions) for item in original_units)
+        for unit in (
+            _guarded_unit(item, frozen, decisions, invalid_refs) for item in original_units
+        )
         if unit is not None
     ]
     _note_removal("units", len(original_units), len(guarded["units"]))
@@ -2403,6 +2474,7 @@ def guard_working_set(
                 dict(item)
                 for item in values
                 if not _names_withheld(item, frozen, reference_field=True)
+                and not _value_names_an_invalid_reference(item, invalid_refs)
             ]
             if section in ("pointers", "current_state"):
                 _note_removal(section, len(values), len(kept))
@@ -2465,10 +2537,19 @@ def _unwrapped_vault_path(candidate: str) -> str | None:
     names.
 
     A reference that does not unwrap to a genuine path INSIDE the vault (an
-    encoded `..` segment, a drive-letter or POSIX-absolute path, a scheme
-    `_unwrap_reference` does not understand, an empty path) is left
-    undecidable rather than guessed at: nothing becomes decidable here that
-    was not a real in-vault path.
+    encoded `..` segment, a drive-letter path, a scheme `_unwrap_reference`
+    does not understand, an empty path) is left undecidable rather than
+    guessed at: nothing becomes decidable here that was not a real in-vault
+    path. `_unwrap_reference` itself is what neutralises a POSIX-style
+    absolute path (a literal or percent-encoded leading `/`): its own
+    trailing `strip("/")` turns `/etc/passwd.md` into the relative
+    `etc/passwd.md` before this function ever sees it. The
+    `PurePosixPath(...).is_absolute()` check below can therefore never fire
+    on that shape today; it is kept as defence in depth against a future
+    change to that stripping, not as this function's actual protection. What
+    this function alone catches is a Windows-style drive-letter path (a
+    single letter, a colon, then a separator), which `strip("/")` does not
+    touch.
     """
     unwrapped, _explicit = _unwrap_reference(candidate)
     if not unwrapped or not unwrapped.endswith(".md"):
@@ -2484,8 +2565,64 @@ def _unwrapped_vault_path(candidate: str) -> str | None:
     return unwrapped
 
 
-def _working_set_paths(packet: Mapping[str, Any]) -> tuple[set[str], set[str]]:
-    """`(vault paths, wikilink names)` the packet names.
+def _is_non_page_reference(candidate: str) -> bool:
+    """True for a reference that is legitimately not a page at all.
+
+    A memory-id reference (`exomem://memory/<uuid>#...`) names a durable
+    memory record, not a vault path, and never has one — it is skipped
+    rather than withheld. `memory_refs.parse_memory_ref` is the real parser
+    the memory-ref pipeline uses, applied to the candidate with its fragment
+    stripped first (it accepts no trailing `#...`).
+    """
+    fragment_stripped = candidate.split("#", 1)[0]
+    return memory_refs.parse_memory_ref(fragment_stripped) is not None
+
+
+def _classify_path_candidate(candidate: str) -> tuple[str, str | None]:
+    """Classify one packet reference candidate for `_working_set_paths`.
+
+    Returns `("path", real_path)` when `candidate` unwraps to a genuine, safe
+    in-vault `.md` path the release plane can decide.
+
+    Returns `("invalid", candidate)` when `candidate`'s own shape marks it as
+    a page reference — an `exomem://` reference scheme, or a `.md` suffix
+    once its fragment is stripped — but it does not validate as one. This is
+    the never-drop case: an encoded `..` segment, a drive-letter
+    path, an unrecognised `exomem://` authority or an empty path must never
+    be silently skipped, because skipping decides nothing and a page named
+    ONLY through this reference (no separate `path`/`anchor` field, no
+    `release.withheld_paths` entry — the neighbourhood/Records/supersession
+    case `guard_working_set` walks past hit projection) would then be served
+    with no decision ever having been made about it. The caller withholds
+    the ITEM carrying this candidate instead, without ever calling
+    `_decide_path` — and therefore never `stat()` — on it.
+
+    Returns `("skip", None)` for anything that is legitimately not a page
+    reference (a memory-id reference, the synthetic `project:<key>` anchor
+    id, an opaque non-path identifier such as a hand-authored unit id) or is
+    simply empty.
+    """
+    text = candidate.strip()
+    if not text:
+        return "skip", None
+    if _is_non_page_reference(text):
+        return "skip", None
+    fragment_stripped = text.split("#", 1)[0]
+    looks_page_bearing = text.lower().startswith("exomem://") or fragment_stripped.endswith(
+        ".md"
+    )
+    if not looks_page_bearing:
+        return "skip", None
+    unwrapped = _unwrapped_vault_path(candidate)
+    if unwrapped is not None:
+        return "path", unwrapped
+    return "invalid", candidate
+
+
+def _working_set_paths(
+    packet: Mapping[str, Any],
+) -> tuple[set[str], set[str], set[str]]:
+    """`(vault paths, wikilink names, invalid page references)` the packet names.
 
     Kept apart because they are not the same kind of thing. A path field holds a
     vault-relative path the release plane can decide directly; a wikilink inside
@@ -2493,14 +2630,23 @@ def _working_set_paths(packet: Mapping[str, Any]) -> tuple[set[str], set[str]]:
     `_decide_path` returns no decision, which reads as "withheld" and withheld
     every unit that linked anything — permitted and dangling links alike. The
     caller resolves names to paths first, and only real paths are ever decided.
+
+    `invalid` is the third kind: a candidate that was clearly MEANT to name a
+    page (see `_classify_path_candidate`) but does not unwrap to a genuine
+    in-vault path. It is never added to `paths` — nothing here is ever handed
+    to `_decide_path`, so nothing here ever reaches the filesystem — but the
+    caller must still withhold the item that carried it.
     """
     paths: set[str] = set()
     names: set[str] = set()
+    invalid: set[str] = set()
 
     def _add(candidate: str) -> None:
-        unwrapped = _unwrapped_vault_path(candidate)
-        if unwrapped is not None:
-            paths.add(unwrapped)
+        kind, value = _classify_path_candidate(candidate)
+        if kind == "path" and value is not None:
+            paths.add(value)
+        elif kind == "invalid":
+            invalid.add(candidate)
 
     def _collect(value: Any) -> None:
         if isinstance(value, Mapping):
@@ -2529,11 +2675,41 @@ def _working_set_paths(packet: Mapping[str, Any]) -> tuple[set[str], set[str]]:
             for item in value:
                 _collect(item)
         elif isinstance(value, str) and value.endswith(".md"):
-            paths.add(value)
+            # A bare `.md`-shaped string reached through a nested field with
+            # no dedicated handling above (e.g. `provenance.superseded_by`).
+            # Routed through the SAME validation `_add` applies to a named
+            # path field: an unvalidated `paths.add(value)` here handed
+            # `_decide_path` an unchecked string straight from packet data,
+            # `../../x.md` included.
+            _add(value)
 
     for section in ("anchors", "units", "pointers", "current_state", "ambiguity", "missing"):
         _collect(packet.get(section))
-    return paths, names
+    return paths, names, invalid
+
+
+def _value_names_an_invalid_reference(value: Any, invalid_refs: frozenset[str]) -> bool:
+    """True when `value` (a field, a list of them, or a whole item) contains
+    one of `_working_set_paths`'s `invalid` candidates, by EXACT text match.
+
+    `_names_withheld` cannot stand in for this: it compares CANONICAL keys,
+    and `_canonical_reference` returns `None` for a candidate that unwraps to
+    an empty string (`exomem://vault/` alone, with nothing after it) — which
+    can never equal any canonical key, including its own. `invalid_refs`
+    holds the exact candidate text `_working_set_paths` classified, so
+    matching it exactly, the same way it was found, is the reliable
+    comparison, not a re-derived key that a degenerate candidate cannot
+    produce.
+    """
+    if not invalid_refs:
+        return False
+    if isinstance(value, str):
+        return value in invalid_refs
+    if isinstance(value, Mapping):
+        return any(_value_names_an_invalid_reference(v, invalid_refs) for v in value.values())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(_value_names_an_invalid_reference(v, invalid_refs) for v in value)
+    return False
 
 
 class WorkingSetResolutionUnavailable(RuntimeError):
@@ -2607,6 +2783,7 @@ def _guarded_anchor(
     anchor: Mapping[str, Any],
     withheld: frozenset[str],
     decisions: Mapping[str, Decision | None],
+    invalid_refs: frozenset[str] = frozenset(),
 ) -> dict[str, Any] | None:
     if (
         _names_withheld(anchor.get("path"), withheld)
@@ -2615,6 +2792,10 @@ def _guarded_anchor(
         # [[kill-switch-for-risky-releases]])" names the withheld page as plainly
         # as a path field would.
         or _names_withheld(anchor.get("title"), withheld, reference_field=True)
+        # An un-unwrappable candidate never joins `withheld` -- see
+        # `guard_working_set` -- so it is checked by exact match here instead.
+        or anchor.get("path") in invalid_refs
+        or anchor.get("ref") in invalid_refs
     ):
         return None
     out = dict(anchor)
@@ -2643,13 +2824,18 @@ def _guarded_unit(
     unit: Mapping[str, Any],
     withheld: frozenset[str],
     decisions: Mapping[str, Decision | None],
+    invalid_refs: frozenset[str] = frozenset(),
 ) -> dict[str, Any] | None:
     provenance = unit.get("provenance")
     path = str(provenance.get("path") or "") if isinstance(provenance, Mapping) else ""
     anchor = str(provenance.get("anchor") or "") if isinstance(provenance, Mapping) else ""
+    # An un-unwrappable candidate never joins `withheld` -- see
+    # `guard_working_set` -- so it is checked by exact match here instead.
+    if unit.get("ref") in invalid_refs:
+        return None
     if _names_withheld(unit.get("ref"), withheld, reference_field=True):
         return None
-    if path and _names_withheld(path, withheld):
+    if path and (path in invalid_refs or _names_withheld(path, withheld)):
         return None
     # The unit's own PROSE. A wikilink inside authored text is an unambiguous
     # reference wherever it appears, so a permitted unit that quotes a withheld
@@ -2673,14 +2859,20 @@ def _guarded_unit(
     # A unit whose ANCHOR is withheld is dropped rather than kept with the anchor
     # filtered out of its provenance: an unattributable claim in working memory is
     # worse than a missing one, and the audience cannot see the anchor anyway.
-    if anchor and _names_withheld(anchor, withheld, reference_field=True):
+    if anchor and (anchor in invalid_refs or _names_withheld(anchor, withheld, reference_field=True)):
         return None
     out = dict(unit)
     if isinstance(provenance, Mapping):
+        # `superseded_by` (and any other list-shaped provenance field) gets
+        # the SAME treatment an invalid top-level ref gets, at list-entry
+        # granularity: an un-unwrappable target strips that key exactly as a
+        # withheld one does (`_value_names_an_invalid_reference` walks it the
+        # same way `_names_withheld` already does), never `_decide_path`'d.
         out["provenance"] = {
             key: value
             for key, value in provenance.items()
             if not _names_withheld(value, withheld, reference_field=True)
+            and not _value_names_an_invalid_reference(value, invalid_refs)
         }
     decision = decisions.get(path)
     if decision is not None and decision.release_strip:
