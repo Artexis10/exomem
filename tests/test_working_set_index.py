@@ -719,7 +719,7 @@ def test_a_managed_runtime_abstains_with_index_warming_and_warms_once(
     monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
     scheduled: list[Path] = []
     monkeypatch.setattr(
-        working_set_runtime, "_schedule_build", lambda root: scheduled.append(root)
+        working_set_runtime, "_schedule_build", lambda root, **_kwargs: scheduled.append(root)
     )
 
     packet = working_set_runtime.serve(seeded, turn="the cargo sled", max_chars=2000)
@@ -741,7 +741,9 @@ def test_cold_activation_abstains_before_starting_retrieval(
 
     monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
     scheduled: list[Path] = []
-    monkeypatch.setattr(working_set_runtime, "_schedule_build", scheduled.append)
+    monkeypatch.setattr(
+        working_set_runtime, "_schedule_build", lambda root, **_kwargs: scheduled.append(root)
+    )
     retrieval_calls: list[dict] = []
 
     def costly_retrieval(*args, **kwargs):
@@ -795,7 +797,9 @@ def test_broken_activation_sidecar_is_unavailable_not_warming(
         path.write_bytes(b"not a sqlite database")
     monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
     scheduled: list[Path] = []
-    monkeypatch.setattr(working_set_runtime, "_schedule_build", scheduled.append)
+    monkeypatch.setattr(
+        working_set_runtime, "_schedule_build", lambda root, **_kwargs: scheduled.append(root)
+    )
     retrieval_calls: list[dict] = []
     monkeypatch.setattr(
         commands.find_module, "find", lambda *args, **kwargs: retrieval_calls.append(kwargs) or []
@@ -817,9 +821,11 @@ def test_a_managed_runtime_reports_a_stale_index_rather_than_walking(
     working_set_index.WorkingSetIndex(seeded).rebuild(freshness_stamp="old")
 
     monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
-    scheduled: list[Path] = []
+    scheduled: list[tuple[Path, str]] = []
     monkeypatch.setattr(
-        working_set_runtime, "_schedule_build", lambda root: scheduled.append(root)
+        working_set_runtime,
+        "_schedule_build",
+        lambda root, *, freshness_stamp="": scheduled.append((root, freshness_stamp)),
     )
 
     packet = working_set_runtime.serve(
@@ -828,7 +834,92 @@ def test_a_managed_runtime_reports_a_stale_index_rather_than_walking(
 
     assert packet["generation"]["index_stale"] is True
     assert packet["generation"]["index_generation"] >= 1
-    assert len(scheduled) == 1
+    # The build is scheduled FOR the key the request was stale against.
+    assert [stamp for _root, stamp in scheduled] == ["new"]
+
+
+def _join_scheduled_builds() -> None:
+    import threading
+
+    for thread in threading.enumerate():
+        if thread.name == "exomem-working-set-warm":
+            thread.join(timeout=30)
+            assert not thread.is_alive(), "the scheduled index build did not finish"
+
+
+def test_a_scheduled_build_records_the_stamp_so_the_next_request_stops_asking(
+    seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A managed runtime hands the stale walk to a background build.
+
+    That build has to record the freshness key it was scheduled for. Without it
+    the catalogue reads as stale forever: every request reports `index_stale`
+    and, with no build in flight, schedules another whole-vault walk.
+    """
+    from exomem import readiness, working_set_runtime
+
+    working_set_runtime.reset_caches_for_tests()
+    index = working_set_index.WorkingSetIndex(seeded)
+    index.rebuild(freshness_stamp="old")
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+
+    first = working_set_runtime.serve(
+        seeded, turn="the cargo sled", max_chars=2000, freshness_key="new"
+    )
+    assert first["generation"]["index_stale"] is True
+    _join_scheduled_builds()
+    assert working_set_index.WorkingSetIndex(seeded).freshness_stamp() == "new"
+
+    real_schedule = working_set_runtime._schedule_build
+    scheduled: list[Path] = []
+
+    def recording(root: Path, **kwargs: object) -> None:
+        scheduled.append(root)
+        real_schedule(root, **kwargs)
+
+    monkeypatch.setattr(working_set_runtime, "_schedule_build", recording)
+    second = working_set_runtime.serve(
+        seeded, turn="the cargo sled", max_chars=2000, freshness_key="new"
+    )
+    _join_scheduled_builds()
+
+    # The marker is only ever present as True; its absence is "current".
+    assert "index_stale" not in second["generation"]
+    assert scheduled == []
+
+
+def test_a_cold_scheduled_build_records_the_stamp_too(
+    seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cold-start build is the same gate: it records the key it ran for.
+
+    Otherwise the first request after a managed cold start finds a fresh
+    catalogue with no key, reads it as stale, and pays for a second whole-vault
+    walk that finds nothing to do.
+    """
+    from exomem import readiness, working_set_runtime
+
+    working_set_runtime.reset_caches_for_tests()
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    assert not working_set_index.WorkingSetIndex(seeded).anchors()
+
+    state, _index, _stale = working_set_runtime.ensure_index(seeded, freshness_stamp="cold-key")
+    assert state == working_set_runtime.WARMING
+    _join_scheduled_builds()
+    assert working_set_index.WorkingSetIndex(seeded).freshness_stamp() == "cold-key"
+
+    real_schedule = working_set_runtime._schedule_build
+    scheduled: list[Path] = []
+
+    def recording(root: Path, **kwargs: object) -> None:
+        scheduled.append(root)
+        real_schedule(root, **kwargs)
+
+    monkeypatch.setattr(working_set_runtime, "_schedule_build", recording)
+    state, _index, stale = working_set_runtime.ensure_index(seeded, freshness_stamp="cold-key")
+
+    assert (state, stale) == (working_set_runtime.READY, False)
+    assert scheduled == []
 
 
 # --------------------------------------------------------------------------- #
