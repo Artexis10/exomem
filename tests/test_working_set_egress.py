@@ -605,6 +605,102 @@ def test_two_serves_differing_only_in_retrieval_paths_are_compiled_separately(
     assert "retrieval" not in _evidence(without)
 
 
+def _project_member_packet() -> dict:
+    """A resolved PROJECT anchor whose material -- exactly like `_packet()`'s
+    hub -- comes from its member pages' own paths: one withheld
+    (`RESTRICTED_PATH`), one open (`OPEN_PATH`). The project anchor's own
+    `path` is empty by construction (a project key has no page of its own);
+    what identifies each unit and pointer to the guard is its member page's
+    `provenance.path`/`ref`, precisely as any other neighbourhood-sourced
+    unit already works.
+    """
+    return {
+        "anchors": [
+            {
+                "ref": "project:harbor-survey",
+                "path": "",
+                "title": "Harbor Survey",
+                "kind": "project",
+                "status": "resolved",
+                "evidence": ["exact_alias"],
+            },
+        ],
+        "roles": [{"id": "constraints", "source": "anchor_default", "lane": "units"}],
+        "units": [
+            {
+                "ref": OPEN_PATH,
+                "role": "constraints",
+                "text": "Draft may not exceed 4 metres at low tide.",
+                "lifecycle": "active",
+                "updated": "2026-09-09",
+                "provenance": {
+                    "path": OPEN_PATH,
+                    "level": "unit",
+                    "anchor": "project:harbor-survey",
+                },
+            },
+            {
+                "ref": RESTRICTED_PATH,
+                "role": "constraints",
+                "text": "Draft may not exceed 2 metres at neap tide, classified survey.",
+                "lifecycle": "active",
+                "updated": "2026-09-10",
+                "provenance": {
+                    "path": RESTRICTED_PATH,
+                    "level": "unit",
+                    "anchor": "project:harbor-survey",
+                },
+            },
+        ],
+        "pointers": [
+            {"ref": OPEN_PATH, "role": "constraints", "title": "Visible member", "reason": "budget"},
+            {
+                "ref": RESTRICTED_PATH,
+                "role": "constraints",
+                "title": "Withheld member",
+                "reason": "budget",
+            },
+        ],
+        "current_state": [],
+        "missing": [],
+        "ambiguity": [],
+        "budget": {"limit_chars": 4000, "used_chars": 80},
+        "generation": {
+            "freshness_key": "k",
+            "index_generation": 3,
+            "roles_hash": "abc",
+            "roles_source": "shipped",
+        },
+        "abstained": False,
+    }
+
+
+def test_a_withheld_project_member_page_yields_no_unit_and_no_pointer(
+    vault: Path,
+) -> None:
+    """`close-memory-loop` requirement A: no new disclosure path. A project
+    anchor's member pages are now recorded as its index-time `links`
+    (previously a project anchor built with no path and no links carried no
+    material at all), so they reach the units lane's `allowed_parent_paths`
+    exactly like any other neighbourhood page -- and MUST cross the SAME
+    unconditional egress guard as any other neighbourhood page, never a new
+    disclosure path of their own, exactly as `test_no_field_of_the_packet_
+    names_a_withheld_page` already proves for an ordinary hub. A project
+    with one withheld member and one visible member must keep only the
+    visible member's unit and pointer.
+    """
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, _project_member_packet(), _release())
+
+    assert guarded is not None
+    assert [unit["ref"] for unit in guarded["units"]] == [OPEN_PATH]
+    assert [pointer["ref"] for pointer in guarded["pointers"]] == [OPEN_PATH]
+    assert RESTRICTED_PATH not in str(guarded)
+
+
 # --------------------------------------------------------------------------- #
 # Micro-round: a broken resolver is a release-plane failure, not a silent pass
 # --------------------------------------------------------------------------- #
