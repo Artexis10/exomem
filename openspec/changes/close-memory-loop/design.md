@@ -278,6 +278,19 @@ a deciding-alone kind now sorts ahead of every anchor that does not, so
 MAX_CANDIDATES/MAX_ANCHORS truncation can no longer drop the one anchor a
 turn actually named in favour of several weaker multi-kind candidates.
 
+Correction round 1's independent review found two further gaps in the same
+five rules. **C1**: the possessive fold (R4) could itself manufacture a
+false `exact_alias`/`rare_term` from an ordinary contraction of a common
+function word ("it's" → "it", "let's" → "let"); a de-possessived form that
+itself lands in `STOPWORDS` is now dropped from the phrase set and the
+folded lexical term sets (kept verbatim instead when building n-gram token
+sequences, so a position stays filled) on both the turn and the anchor
+side. **C3**: `STOPWORDS` was missing almost every preposition and
+subordinating conjunction, so a turn sharing only one such function word
+with an anchor's title (e.g. "... before the trip" against a plan titled
+"Before Launch Review") still earned `rare_term`; the missing closed-class
+English function words were added.
+
 The final guard unwraps a packet reference to its vault path before deciding
 it, rather than deciding the reference text itself. A unit's own `ref` is the
 compiler's opaque `exomem://vault/<path>#unit-<hash>` identifier, never a
