@@ -11,6 +11,7 @@ depended on a withheld neighbour.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -190,6 +191,83 @@ def test_evidence_that_depended_on_a_withheld_neighbour_is_dropped(vault: Path) 
     anchor = guarded["anchors"][0]
     assert "graph_corroboration" not in anchor["evidence"]
     assert "lexical_overlap" in anchor["evidence"]
+    assert "neighbourhood" not in anchor
+
+
+def test_evidence_that_depended_on_a_withheld_neighbour_is_dropped_when_not_already_withheld(
+    vault: Path,
+) -> None:
+    """Correction round 3's BLOCKER, reproduced: the sibling test above
+    masks it because `_release()` defaults `withheld_paths=(RESTRICTED_PATH,)`
+    -- the neighbour is ALREADY independently withheld before this guard
+    ever runs. Here it is named ONLY through `neighbourhood`
+    (`release.withheld_paths` empty), exactly the "walked past hit
+    projection" case this guard exists for
+    (`probe_v3_neighbourhood.py`). `neighbourhood` is a LIST, not a
+    Mapping, and was not in `_WORKING_SET_PATH_FIELDS`/
+    `_WORKING_SET_PROSE_FIELDS`/`_PATH_LIST_FIELDS`, so nothing in
+    `_collect` ever reached it: the withheld neighbour was never decided,
+    `_guarded_anchor`'s own `_names_withheld(neighbourhood, ...)` check
+    never fired, and the anchor kept `"graph_corroboration"` in its
+    evidence although the corroborating page is withheld. The
+    `neighbourhood` list itself was still popped either way, so no path,
+    title or text leaked -- what leaked is the CLAIM.
+
+    Needs an ACTIVE policy (`write_scope`/`write_rule`): the sibling test
+    above relies entirely on `_release()`'s own `withheld_paths` to mark
+    the page withheld under an otherwise-empty policy, so removing that
+    default here would just hit the ungoverned-vault fast path and prove
+    nothing.
+
+    Uses a MINIMAL packet -- one anchor, every other section empty --
+    rather than `_packet()`: `_packet()`'s own `pointers`/`units`/
+    `current_state`/`ambiguity` sections independently name
+    `RESTRICTED_PATH` through their own `ref`/`path`/`anchor` fields, which
+    decides it regardless of whether `neighbourhood` is ever scanned at
+    all and would silently mask exactly the bug this test exists to catch
+    -- the same isolation the reviewer's own probe uses.
+    """
+    write_scope(vault)  # default paths="Notes/Patterns/**" -> matches RESTRICTED_PATH
+    write_rule(vault, ceiling=0, audience="external")
+
+    packet = {
+        "anchors": [
+            {
+                "ref": OPEN_PATH,
+                "path": OPEN_PATH,
+                "title": "Open hub",
+                "kind": "hub",
+                "status": "resolved",
+                "evidence": ["exact_alias", "graph_corroboration"],
+                "neighbourhood": [RESTRICTED_PATH],
+            },
+        ],
+        "roles": [],
+        "units": [],
+        "pointers": [],
+        "current_state": [],
+        "missing": [],
+        "ambiguity": [],
+        "budget": {"limit_chars": 4000, "used_chars": 0},
+        "generation": {
+            "freshness_key": "k",
+            "index_generation": 1,
+            "roles_hash": "abc",
+            "roles_source": "shipped",
+        },
+        "abstained": False,
+    }
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _release(withheld=()))
+
+    assert guarded is not None
+    anchor = guarded["anchors"][0]
+    assert "graph_corroboration" not in anchor["evidence"], (
+        "LEAK: corroboration evidence survived although the corroborating "
+        "neighbour is a withheld page"
+    )
+    assert "exact_alias" in anchor["evidence"]
     assert "neighbourhood" not in anchor
 
 
@@ -2462,3 +2540,259 @@ def test_an_aliased_or_heading_anchored_wikilink_still_names_its_withheld_target
 
     assert guarded is not None
     assert guarded["units"] == [], f"LEAK: {spelling!r} named a withheld page and was served"
+
+
+# --------------------------------------------------------------------------- #
+# Correction round 3: `anchor["neighbourhood"]` (a LIST, unreached by round 2's
+# field-name-scoped `_collect`) and the item invariant that replaces per-field
+# shape reasoning: an item is served only if (a) no reference it carries is
+# withheld/invalid, and (b) at least one PAGE-shaped reference it carries was
+# decided and admitted. `_is_page_shaped` classifies a candidate as a page
+# reference at all before it can count for either half — an opaque,
+# non-page-shaped `ref` (a hand-authored id like `unit-open`) is neither
+# decided nor invalid, so it can never make an item's other, genuine page
+# references insufficient. `_WORKING_SET_PATH_LIST_FIELDS` closes the
+# `neighbourhood`/`anchor_neighbourhood` gap.
+# --------------------------------------------------------------------------- #
+
+
+def test_an_opaque_unit_ref_does_not_starve_a_unit_admitted_through_path_and_anchor(
+    vault: Path,
+) -> None:
+    """The reviewer's LANDMINE, reproduced exactly (`probe_v3_opaque_ref.py`).
+
+    `"ref": "unit-open"` is an opaque, non-URI, non-path id — the OLD/legacy
+    fixture style. Before this round, `_working_set_paths` treated ANY
+    non-empty path-bearing-field string as a decidable candidate
+    (`_matches_explicit_non_page_shape` was the only skip); `unit-open` names
+    no page, could never resolve to a real filesystem reading, and so joined
+    `unresolvable` — which `guard_working_set` withholds the whole item for,
+    even though the unit's own `path`/`anchor` name a perfectly permitted page
+    that has nothing to do with the active policy. Item invariant (b) fixes
+    this at its root: an opaque `ref` is no longer a candidate at all (neither
+    decided nor invalid), so the unit is carried by `path`/`anchor` instead,
+    exactly as `working_set.py::_provenance` guarantees for every real unit.
+    """
+    write_scope(vault)  # default paths="Notes/Patterns/**" -- unrelated to OPEN_PATH
+    write_rule(vault, ceiling=0, audience="external")
+
+    packet = {
+        "anchors": [],
+        "roles": [],
+        "units": [
+            {
+                "ref": "unit-open",
+                "role": "resources",
+                "text": "An entirely ordinary, permitted unit with no relation to any withheld page.",
+                "lifecycle": "active",
+                "updated": "2026-09-01",
+                "provenance": {"path": OPEN_PATH, "level": "unit", "anchor": OPEN_PATH},
+            }
+        ],
+        "pointers": [],
+        "current_state": [],
+        "missing": [],
+        "ambiguity": [],
+        "budget": {"limit_chars": 4000, "used_chars": 40},
+        "generation": {
+            "freshness_key": "k",
+            "index_generation": 1,
+            "roles_hash": "abc",
+            "roles_source": "shipped",
+        },
+        "abstained": False,
+    }
+    release = egress.AnnotatedHits(hits=[_hit(OPEN_PATH)], withheld_paths=frozenset(), active=True, blocked=False)
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, release)
+
+    assert guarded is not None
+    assert [unit["ref"] for unit in guarded["units"]] == [
+        "unit-open"
+    ], "OVER-RESTRICTION: an opaque ref wrongly starved a unit admitted through its own path/anchor"
+
+
+def _all_strings(value: Any) -> list[str]:
+    """Every string reachable anywhere inside `value` — blind to field names,
+    the opposite of `_working_set_paths`'s own field-scoped `_collect`, so
+    reusing it here would just restate the thing under test rather than
+    independently checking it."""
+    found: list[str] = []
+    if isinstance(value, str):
+        found.append(value)
+    elif isinstance(value, Mapping):
+        for item in value.values():
+            found.extend(_all_strings(item))
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            found.extend(_all_strings(item))
+    return found
+
+
+def _real_page_readings(packet: Mapping[str, Any], real_paths: set[str]) -> set[str]:
+    """Every EXISTING vault page any string anywhere in `packet`'s decided
+    sections names under any reading, computed independently of
+    `_working_set_paths`'s own field-name scoping: it walks every string with
+    no regard for which key held it, and reuses only `_interpretations_for`
+    (the reading-GENERATOR, not the field-SCOPING this pin exists to check)
+    to turn each one into candidate paths, keeping only readings that are
+    real files on disk -- ground truth `_working_set_paths` cannot supply
+    for itself."""
+    sections = (
+        packet.get(section)
+        for section in ("anchors", "units", "pointers", "current_state", "ambiguity", "missing")
+    )
+    named: set[str] = set()
+    for section in sections:
+        for text in _all_strings(section):
+            named.update(egress._interpretations_for(text) & real_paths)
+    return named
+
+
+def test_every_existing_page_any_field_names_is_reached_by_the_decide_loop(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Correction round 3's PIN. A REAL packet, compiled by the REAL
+    compiler on a fixture vault rich enough to carry anchors of several
+    kinds (hub, resource, project, collection), units with identity and
+    constraint provenance and a prose wikilink, pointers, and current_state
+    -- then every string anywhere in it is walked with NO field-name
+    enumeration in this test's own expectation logic
+    (`_all_strings`/`_real_page_readings`), and every reading that names a
+    page that genuinely exists on disk must be in `_working_set_paths`'s
+    flat `paths` set. This is the general property the BLOCKER violated for
+    one specific field (`neighbourhood`) and the LANDMINE's `_is_page_shaped`
+    filter must not violate for a different reason (a page-shaped candidate
+    silently dropped rather than decided or marked unresolvable) -- a test
+    that would catch ANY future field carrying an undecided page reference,
+    not just this round's two.
+
+    Empirical finding, checked directly (see `_WORKING_SET_PATH_LIST_FIELDS`'s
+    own docstring): `neighbourhood`/`anchor_neighbourhood` are NOT currently
+    serialized by `ResolvedAnchor.as_dict()` into any real compiled packet's
+    anchor dict -- confirmed again here, by asserting the key is simply
+    absent from every anchor this real compile produces. A real-compiler
+    packet therefore cannot organically exercise that one gap; the dedicated,
+    isolated, red-then-green test
+    (`test_evidence_that_depended_on_a_withheld_neighbour_is_dropped_when_not_already_withheld`)
+    and `test_neighbourhood_survives_when_grafted_onto_a_real_anchor` below
+    (a real packet with that one field added back, the shape a future anchor
+    COULD carry) cover it instead. This test covers every field the real
+    compiler DOES emit today, and stands as the general safety net for
+    whatever it emits tomorrow.
+    """
+    from test_latency_gate import _seed_freshness_live
+    from test_working_set_index import _seed_planning, _seed_structure
+
+    from exomem import commands, lexstore, working_set_index, working_set_runtime
+
+    _seed_structure(vault)
+    _seed_planning(vault)
+    kb = vault / "Knowledge Base"
+    (kb / "Products" / "Tow Bar.md").write_text(
+        "---\ntype: note\nstatus: active\nupdated: 2026-09-07\n---\n\n"
+        "# Tow Bar\n\n## Summary\n\nThe bar that couples the sled.\n\n"
+        "## Constraints\n\nNever tow without checking [[Cargo Sled]] first.\n",
+        encoding="utf-8",
+    )
+
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).reset()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
+
+    captured: dict[str, Any] = {}
+    real_guard = egress.guard_working_set
+
+    def capturing_guard(vault_root, packet, release, **kwargs):
+        captured["packet"] = packet
+        return real_guard(vault_root, packet, release, **kwargs)
+
+    monkeypatch.setattr(egress, "guard_working_set", capturing_guard)
+
+    with request_scope(_external()):
+        commands.op_activate_context(
+            vault,
+            turn="what are the constraints on the tow bar near the northern corridor depot",
+        )
+
+    packet = captured["packet"]
+    assert packet["anchors"], "fixture produced no anchors -- pin cannot exercise the walk"
+    assert packet["units"], "fixture produced no units -- pin cannot exercise the walk"
+    assert not any("neighbourhood" in anchor for anchor in packet["anchors"]), (
+        "neighbourhood IS now serialized into a real anchor dict -- the empirical "
+        "finding this test and _WORKING_SET_PATH_LIST_FIELDS's docstring both rely "
+        "on no longer holds and both need updating, not just this assertion"
+    )
+
+    real_paths = {
+        str(path.relative_to(vault)).replace("\\", "/")
+        for path in vault.rglob("*.md")
+    }
+    expected = _real_page_readings(packet, real_paths)
+    decided_paths, _names, _interpretations, _unresolvable = egress._working_set_paths(packet)
+
+    missing = expected - decided_paths
+    assert not missing, (
+        f"LEAK RISK: {sorted(missing)} name real vault pages somewhere in the packet "
+        "but the decide loop never saw them -- an ungoverned field"
+    )
+
+
+def test_neighbourhood_survives_when_grafted_onto_a_real_anchor(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The BLOCKER's shape, on a REAL compiled packet rather than a
+    hand-built one: since `neighbourhood` is not currently serialized (see
+    the pin test above), this grafts it onto a real anchor from a real
+    compile -- the shape a FUTURE anchor could legitimately carry -- and
+    proves the general walker (not a field-name list) still reaches it. RED
+    against `2a7835b2` for the same reason the dedicated BLOCKER test is:
+    `neighbourhood` is a LIST under a key `_collect` had no branch for.
+    """
+    from test_latency_gate import _seed_freshness_live
+    from test_working_set_index import _seed_planning, _seed_structure
+
+    from exomem import commands, lexstore, working_set_index, working_set_runtime
+
+    _seed_structure(vault)
+    _seed_planning(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).reset()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
+
+    captured: dict[str, Any] = {}
+    real_guard = egress.guard_working_set
+
+    def capturing_guard(vault_root, packet, release, **kwargs):
+        captured["packet"] = packet
+        return real_guard(vault_root, packet, release, **kwargs)
+
+    monkeypatch.setattr(egress, "guard_working_set", capturing_guard)
+
+    with request_scope(_external()):
+        commands.op_activate_context(vault, turn="the cargo sled near the northern corridor")
+
+    packet = captured["packet"]
+    assert packet["anchors"], "fixture produced no anchors -- pin cannot exercise the graft"
+    packet = dict(packet)
+    packet["anchors"] = [dict(anchor) for anchor in packet["anchors"]]
+    packet["anchors"][0]["neighbourhood"] = [RESTRICTED_PATH]
+
+    real_paths = {
+        str(path.relative_to(vault)).replace("\\", "/")
+        for path in vault.rglob("*.md")
+    }
+    assert RESTRICTED_PATH in real_paths, "test setup error: RESTRICTED_PATH is not in the base fixture vault"
+    expected = _real_page_readings(packet, real_paths)
+    decided_paths, _names, _interpretations, _unresolvable = egress._working_set_paths(packet)
+
+    assert RESTRICTED_PATH in expected, "test setup error: the graft did not name a real-shaped page"
+    assert RESTRICTED_PATH in decided_paths, (
+        "LEAK: a grafted `neighbourhood` entry naming a real page was never handed "
+        "to the decide loop"
+    )
