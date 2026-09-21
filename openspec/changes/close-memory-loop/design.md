@@ -244,6 +244,18 @@ earn the separate, weaker `rare_term` kind when it is independently rare,
 and `rare_term` still needs its own second, independently reached contact
 kind (never a mere qualifier) to resolve anything alone — unchanged.
 
+The final guard unwraps a packet reference to its vault path before deciding
+it, rather than deciding the reference text itself. A unit's own `ref` is the
+compiler's opaque `exomem://vault/<path>#unit-<hash>` identifier, never a
+vault-relative path on its own; treating that identifier as though it already
+were one always fails to stat, and the resulting fail-closed decision can
+collapse onto the real page's canonical key and withhold a page the reference
+never named. A reference that does not unwrap to a path inside the vault —
+an encoded parent-directory traversal, an absolute path, a scheme the guard
+does not recognise, an empty path, a memory-id reference — stays undecidable
+and fails closed exactly as before; unwrapping never makes anything servable
+that was not already a real vault path.
+
 The request shares one freshness snapshot and full recall checkpoint across
 lexical evidence and role queries. Catalogue reads still prove their checkpoint,
 policy and schema inside the query transaction. Unit roles query the maintained
