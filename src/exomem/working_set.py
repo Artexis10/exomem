@@ -843,7 +843,7 @@ def compile_packet(
                 vectors=vectors,
                 query_vector=query_vector,
                 retrieval_paths=retrieval_paths,
-                routing_targets=_routing_targets(root),
+                routing_targets=_routing_targets(root, generation["index_generation"]),
                 used_paths=_used_paths(root, rows),
                 term_anchor_counts=index.term_anchor_counts(),
             )
@@ -880,7 +880,10 @@ def compile_packet(
     # two views of the same collection reads.
     with _span(timings, "working_set.current_state"):
         current_state = working_set_state.current_state_for(
-            root, anchors=resolution.resolved_anchors, purpose=purpose
+            root,
+            anchors=resolution.resolved_anchors,
+            purpose=purpose,
+            index_generation=generation["index_generation"],
         )
     items, missing = run_lanes(
         root,
@@ -909,19 +912,27 @@ def compile_packet(
     return packet
 
 
-def _routing_targets(vault_root: Path) -> tuple[Any, ...]:
-    """Records routing targets for `claims_match`, via the existing claims rule."""
-    try:
-        from . import collection_claims, record_governance, structured_collections
+def _routing_targets(vault_root: Path, index_generation: int) -> tuple[Any, ...]:
+    """Records routing targets for `claims_match`, via the existing claims rule.
 
-        manifests = structured_collections.discover_collections(vault_root)
+    Read from the manifests the index update published for this generation, so
+    the request path enumerates no directory to build them. These claims are
+    RESOLUTION EVIDENCE — they can corroborate that a turn is about an anchor,
+    never decide what may be disclosed — so serving them as stale as the index
+    means a turn reaches more or less evidence, exactly the contract anchors
+    themselves already have. The governed read that current state performs does
+    NOT share this staleness: it re-reads its manifest (see
+    `working_set_state._governing_manifest`).
+    """
+    try:
+        from . import collection_claims, record_governance
+
+        manifests = working_set_index.records_manifests(vault_root, index_generation)
     except Exception:  # noqa: BLE001 - no targets simply means no claims evidence
         log.debug("activation: routing targets unavailable", exc_info=True)
         return ()
     targets: list[Any] = []
     for manifest in manifests:
-        if str(getattr(manifest, "semantic_profile", "")) != "records":
-            continue
         claims = record_governance.effective_claims(manifest, None)
         if not claims:
             continue

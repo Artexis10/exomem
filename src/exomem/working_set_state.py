@@ -51,10 +51,18 @@ def current_state_for(
     *,
     anchors: Sequence[Any],
     purpose: str | None = None,
+    index_generation: int | None = None,
 ) -> tuple[dict[str, Any], ...]:
-    """Resolve each stateful anchor's current state, Records first."""
+    """Resolve each stateful anchor's current state, Records first.
+
+    `index_generation` names the activation index generation whose published
+    manifests this lookup may route with. Routing is evidence and may be that
+    stale; the collection it routes to is then read from disk again before any
+    governed query runs against it. Left unset — a caller with no index at all
+    — the manifests are discovered directly, exactly as they always were.
+    """
     root = Path(vault_root)
-    manifests = _records_manifests(root)
+    manifests = _records_manifests(root, index_generation)
     out: list[dict[str, Any]] = []
     for anchor in anchors:
         if getattr(anchor, "kind", "") not in STATEFUL_KINDS:
@@ -69,7 +77,24 @@ def current_state_for(
     return tuple(out)
 
 
-def _records_manifests(vault_root: Path) -> tuple[Any, ...]:
+def _records_manifests(vault_root: Path, index_generation: int | None) -> tuple[Any, ...]:
+    """The Records manifests this lookup may ROUTE with — never govern with.
+
+    Served from the activation index's published set when the caller named a
+    generation, which is what keeps the request path off the filesystem: the
+    sweep that produced it ran during the index update. Everything read from
+    here is a claim used to decide WHICH collection a stateful anchor belongs
+    to; the collection's governance is read fresh in `_governing_manifest`
+    before a single record is queried.
+    """
+    if index_generation is not None:
+        from . import working_set_index
+
+        try:
+            return working_set_index.records_manifests(vault_root, index_generation)
+        except Exception:  # noqa: BLE001 - an unreadable manifest costs its state entry
+            log.debug("current state: collection discovery failed", exc_info=True)
+            return ()
     from . import structured_collections
 
     try:
@@ -82,6 +107,35 @@ def _records_manifests(vault_root: Path) -> tuple[Any, ...]:
         for manifest in manifests
         if str(getattr(manifest, "semantic_profile", "")) == "records"
     )
+
+
+def _governing_manifest(vault_root: Path, routed: Any) -> Any | None:
+    """Re-read the routed collection's own manifest, for the governed query.
+
+    The routing above may be as stale as the index; this may not. A manifest is
+    a governance document — its profile, its schema, its policies decide what a
+    query may return — so the collection that is about to be queried is read
+    from disk on THIS request, not taken from a set discovered whenever the
+    index last ran. One guarded read of one manifest (typically zero to two per
+    request), never a sweep.
+
+    Fails closed for its own collection only: a manifest that has vanished, no
+    longer parses, or no longer declares the Records profile yields no
+    current-state entry for that collection, and the packet still serves.
+    """
+    rel = str(getattr(routed, "path", "") or "")
+    if not rel:
+        return None
+    from . import structured_collections
+
+    try:
+        manifest = structured_collections.load_manifest(vault_root, rel)
+    except Exception:  # noqa: BLE001 - an unreadable manifest costs its state entry
+        log.debug("current state: collection manifest could not be re-read", exc_info=True)
+        return None
+    if str(getattr(manifest, "semantic_profile", "")) != "records":
+        return None
+    return manifest
 
 
 def _claiming_manifest(anchor: Any, manifests: Sequence[Any]) -> Any | None:
@@ -128,7 +182,11 @@ def _from_records(
     *,
     purpose: str | None,
 ) -> dict[str, Any] | None:
-    manifest = _claiming_manifest(anchor, manifests)
+    routed = _claiming_manifest(anchor, manifests)
+    if routed is None:
+        return None
+    # The routing decision above may be stale; what is governed below may not.
+    manifest = _governing_manifest(vault_root, routed)
     if manifest is None:
         return None
     from . import record_governance

@@ -52,12 +52,21 @@ TURN = "I'm planning to tow the Cargo Sled north — what are its constraints?"
 
 COLLECTION_ID = "6f0f2b4c-1d3f-4a71-9c3d-2f9b5d2a7c11"
 
-#: The filesystem-call ceiling one warm request may spend. Measured at 116 calls
-#: after the fix on the fixture vault below; the ceiling sits far above that so
-#: it never fails for an unrelated few dozen reads, and far below the ~3,000 a
-#: single `rglob` sweep of a real vault costs -- which is the regression it
-#: exists to catch.
-WARM_REQUEST_FILESYSTEM_CALL_CEILING = 600
+#: The directory-enumeration ceiling for one warm request, and the tripwire a
+#: reintroduced sweep has to trip. Measured on the fixture vault below: 72
+#: enumerations before this change, 3 after -- all three inside the one
+#: collection the request's own answer came from. The ceiling is generous
+#: against those 3 and still an order of magnitude under the 72, so an
+#: unrelated extra read never fails it and a returning sweep always does.
+#:
+#: Deliberately NOT a ceiling on total filesystem calls. The same request makes
+#: ~1,950 of them (3,587 before), and roughly 1,100 are `Path.resolve()` inside
+#: `state_paths.vault_state_dir`, which costs one `lstat` per component of the
+#: vault's absolute path -- so a total-call ceiling would measure how deep the
+#: temporary directory is on the machine running it. That cost is real and is
+#: reported as a finding, but it is not this contract and must not be pinned by
+#: a number that moves with the test environment.
+WARM_REQUEST_ENUMERATION_CEILING = 8
 
 
 def _manifest_text(*, profile: str = "records", identifier: str = COLLECTION_ID) -> str:
@@ -319,8 +328,14 @@ def _warm_activation(vault: Path, warm_managed_cell) -> None:
 def test_warm_activation_request_enumerates_no_directory(
     vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
 ) -> None:
-    """T1/T2/T8: a warm request walks no directory, runs no discovery sweep,
-    and spends a pinned, bounded number of filesystem calls."""
+    """T1/T2/T8: a warm request sweeps nothing.
+
+    "Nothing" is exact: the only directory it may enumerate is the storage of
+    the one collection its own answer came from — a markdown-items collection
+    is READ by listing its items, so that enumeration is the answer, bounded by
+    that collection and nothing else. Every other directory is a sweep, and a
+    sweep is what turns a 54 ms call into a 23 s one on a busy interpreter.
+    """
     _seed_structure(vault)
     _seed_planning(vault)
     _write_collection(vault)
@@ -339,12 +354,24 @@ def test_warm_activation_request_enumerates_no_directory(
         f"enumeration count would prove nothing ({scheduled})"
     )
     assert packet["abstained"] is False, packet.get("abstention")
-    assert calls.enumerations == 0, calls.report()
+    assert _records_state(packet), (
+        "the measured request must actually reach the Records current-state "
+        "lookup, or it proves nothing about the sweep that lookup used to run"
+    )
+
+    storage = str(vault / "Knowledge Base" / "Records" / "Depot Stock")
+    outside = [
+        path
+        for path in calls.enumerated
+        if path != storage and not path.startswith(storage + os.sep)
+    ]
+    assert outside == [], calls.report()
+    assert calls.unattributable == 0, calls.report()
+    assert calls.enumerations <= WARM_REQUEST_ENUMERATION_CEILING, calls.report()
     assert discovery.calls == [], (
         "a warm activation request must read the manifests the index already "
         f"discovered, never sweep for them again: {discovery.calls}"
     )
-    assert calls.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, calls.report()
 
 
 # --------------------------------------------------------------------------- #

@@ -32,6 +32,7 @@ import re
 import sqlite3
 import threading
 import unicodedata
+from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -900,7 +901,14 @@ def _page_anchor_kind(rel: str, frontmatter: Mapping[str, Any], *, kb: str) -> s
 
 
 def _collection_candidates(vault_root: Path) -> tuple[list[_Candidate], list[_Candidate]]:
-    """Records manifests (+ their claims) and active Planning items."""
+    """Records manifests (+ their claims) and active Planning items.
+
+    This is the ONE place activation enumerates the vault for collection
+    manifests, and it runs off the request path — a background warm or a
+    watcher-driven update. What it discovers is held for `_write` to publish
+    under the generation that write produces, so a request thread can read the
+    manifests instead of sweeping for them again.
+    """
     from . import structured_collections
 
     records: list[_Candidate] = []
@@ -909,7 +917,9 @@ def _collection_candidates(vault_root: Path) -> tuple[list[_Candidate], list[_Ca
         manifests = structured_collections.discover_collections(Path(vault_root))
     except Exception:  # noqa: BLE001 - an unreadable manifest costs its anchor, not the build
         log.debug("activation index: collection discovery failed", exc_info=True)
+        _note_discovered_manifests(vault_root, None)
         return records, plans
+    _note_discovered_manifests(vault_root, manifests)
     for manifest in manifests:
         rel = str(getattr(manifest, "path", "") or "")
         if not rel:
@@ -1061,6 +1071,142 @@ def _resolve_links(
 
 _CACHE_LOCK = threading.Lock()
 _ROW_CACHE: dict[Path, tuple[tuple[int, int, int], tuple[AnchorRow, ...]]] = {}
+
+
+# --------------------------------------------------------------------------- #
+# The collection-manifest registry
+# --------------------------------------------------------------------------- #
+
+#: Generations kept per vault: the current one, and one previous so a request
+#: that read the generation just before an update completed is still served
+#: from the registry rather than paying for a sweep of its own.
+MANIFEST_REGISTRY_GENERATIONS = 2
+#: Vaults kept, least-recently-published evicted first. One server serves one
+#: vault; the bound exists so a process that touches many (the test suite, a
+#: multi-vault tool) cannot grow this without limit.
+MANIFEST_REGISTRY_VAULTS = 8
+
+_MANIFEST_REGISTRY_LOCK = threading.Lock()
+#: vault identity -> index generation -> that generation's manifests.
+_MANIFEST_REGISTRY: OrderedDict[str, OrderedDict[int, tuple[Any, ...]]] = OrderedDict()
+#: vault identity -> what the last discovery in this process saw, before the
+#: write that will give it a generation. Written only by the index update (see
+#: `_collection_candidates`), promoted by `_write` once the generation is known.
+_PENDING_MANIFESTS: OrderedDict[str, tuple[Any, ...]] = OrderedDict()
+
+
+def _vault_key(vault_root: Path) -> str:
+    return str(Path(vault_root).absolute())
+
+
+def publish_collection_manifests(
+    vault_root: Path, generation: int, manifests: Sequence[Any]
+) -> None:
+    """Publish one index generation's collection manifests for request threads.
+
+    The value is frozen into a tuple BEFORE the lock is taken, so a reader can
+    only ever see a whole generation or no generation at all — there is no
+    moment at which a half-built entry is reachable. Nothing under the lock
+    touches the filesystem.
+    """
+    entry = tuple(manifests)
+    key = _vault_key(vault_root)
+    with _MANIFEST_REGISTRY_LOCK:
+        generations = _MANIFEST_REGISTRY.get(key)
+        if generations is None:
+            generations = OrderedDict()
+            _MANIFEST_REGISTRY[key] = generations
+        generations[int(generation)] = entry
+        generations.move_to_end(int(generation))
+        while len(generations) > MANIFEST_REGISTRY_GENERATIONS:
+            generations.popitem(last=False)
+        _MANIFEST_REGISTRY.move_to_end(key)
+        while len(_MANIFEST_REGISTRY) > MANIFEST_REGISTRY_VAULTS:
+            _MANIFEST_REGISTRY.popitem(last=False)
+
+
+def published_collection_manifests(
+    vault_root: Path, generation: int
+) -> tuple[Any, ...] | None:
+    """This generation's published manifests, or `None` when there are none.
+
+    `None` and `()` are different answers and must stay so: a vault with no
+    collections publishes an empty tuple, and reading that as "nothing was
+    published" would charge every request a sweep that can only ever find
+    nothing.
+    """
+    key = _vault_key(vault_root)
+    with _MANIFEST_REGISTRY_LOCK:
+        generations = _MANIFEST_REGISTRY.get(key)
+        if generations is None:
+            return None
+        return generations.get(int(generation))
+
+
+def collection_manifests(vault_root: Path, generation: int) -> tuple[Any, ...]:
+    """The manifests activation reads, without enumerating a single directory.
+
+    Served from what the index update published for this generation. A miss —
+    the first request in a process, a one-process-per-call CLI, an index another
+    process has since moved on — computes once through the ordinary discovery
+    and publishes the result, so the miss is paid once rather than per request.
+    A discovery that fails raises, exactly as calling it directly would: the
+    callers here already treat unavailable manifests as no evidence.
+    """
+    published = published_collection_manifests(vault_root, generation)
+    if published is not None:
+        return published
+    from . import structured_collections
+
+    manifests = tuple(structured_collections.discover_collections(Path(vault_root)))
+    publish_collection_manifests(vault_root, generation, manifests)
+    return manifests
+
+
+def records_manifests(vault_root: Path, generation: int) -> tuple[Any, ...]:
+    """Just the Records-profile manifests, which is all activation asks for."""
+    return tuple(
+        manifest
+        for manifest in collection_manifests(vault_root, generation)
+        if str(getattr(manifest, "semantic_profile", "")) == "records"
+    )
+
+
+def _note_discovered_manifests(vault_root: Path, manifests: Sequence[Any] | None) -> None:
+    """Hold what an index update just discovered until its write names a
+    generation. A failed discovery clears the slot rather than leaving the
+    previous sweep's result to be published under a newer generation."""
+    key = _vault_key(vault_root)
+    with _MANIFEST_REGISTRY_LOCK:
+        if manifests is None:
+            _PENDING_MANIFESTS.pop(key, None)
+            return
+        _PENDING_MANIFESTS[key] = tuple(manifests)
+        _PENDING_MANIFESTS.move_to_end(key)
+        while len(_PENDING_MANIFESTS) > MANIFEST_REGISTRY_VAULTS:
+            _PENDING_MANIFESTS.popitem(last=False)
+
+
+def _publish_pending_manifests(vault_root: Path, generation: int) -> None:
+    """Publish the discovery this write was built from, under its generation.
+
+    Called on EVERY completed write, including the one that found nothing
+    changed. That is what makes the registry's freshness independent of whether
+    the generation moved: a manifest edit that somehow left the generation
+    where it was is still republished by the update that saw it.
+    """
+    with _MANIFEST_REGISTRY_LOCK:
+        pending = _PENDING_MANIFESTS.get(_vault_key(vault_root))
+    if pending is None:
+        return
+    publish_collection_manifests(vault_root, generation, pending)
+
+
+def reset_collection_manifests_for_tests() -> None:
+    """Drop every published and pending manifest set."""
+    with _MANIFEST_REGISTRY_LOCK:
+        _MANIFEST_REGISTRY.clear()
+        _PENDING_MANIFESTS.clear()
 
 
 class WorkingSetIndex:
@@ -1460,9 +1606,14 @@ class WorkingSetIndex:
             # either; only the stamp advances, so the next request stops asking.
             if freshness_stamp is not None:
                 self._stamp(conn, freshness_stamp)
+            unchanged_generation = sidecar_store.read_meta_token(conn)[1]
+            # Published even here: this update DID re-read the manifests, so the
+            # registry entry for this generation is current whether or not the
+            # generation moved.
+            _publish_pending_manifests(self.vault_root, unchanged_generation)
             return {
                 "anchors": len(existing),
-                "generation": sidecar_store.read_meta_token(conn)[1],
+                "generation": unchanged_generation,
                 "unchanged": True,
             }
         vectors = _signature_vectors(candidates)
@@ -1548,6 +1699,7 @@ class WorkingSetIndex:
             return {"anchors": 0, "generation": 0, "unavailable": True}
         with _CACHE_LOCK:
             _ROW_CACHE.pop(self.path, None)
+        _publish_pending_manifests(self.vault_root, generation)
         return {"anchors": len(candidates), "generation": generation}
 
     def _stamp(self, conn: sqlite3.Connection, freshness_stamp: str) -> None:
