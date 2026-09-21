@@ -83,6 +83,59 @@ def _platform_worker(documents: list[dict]) -> dict:
     return _find(documents, "Deployment", "exomem-provisioner-worker")["spec"]["template"]["spec"]
 
 
+def _cell_statefulset(tmp_path, *, activation_ack: bool) -> dict:
+    """Render the cell StatefulSet pod spec in either capability mode.
+
+    Shared with `test_hosted_activation_admission`, which compares the counts
+    the tenant policy pins against the ones this actually produces. The trust
+    PEM only has to be a real CA certificate whose digest matches the binding;
+    nothing here verifies a handshake.
+    """
+
+    extra_args: tuple[str, ...] = ()
+    if activation_ack:
+        import datetime as dt
+        import importlib.util
+        import sys
+
+        from cryptography.hazmat.primitives import serialization
+
+        spec = importlib.util.spec_from_file_location(
+            "activation_ack_certificate_handoff_render",
+            "infra/scripts/activation_ack_certificate_handoff.py",
+        )
+        assert spec is not None and spec.loader is not None
+        issuer = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = issuer
+        spec.loader.exec_module(issuer)
+        _key, authority = issuer.build_authority(
+            now=dt.datetime.now(dt.UTC).replace(microsecond=0),
+            lifetime_days=3650,
+            common_name="Exomem activation acknowledgement CA",
+        )
+        pem = authority.public_bytes(serialization.Encoding.PEM).decode("ascii")
+        values = {
+            "activationAcknowledgement": {
+                "protocol": PROTOCOL,
+                "platformNamespace": "exomem-platform",
+                "trustBundleSha256": hashlib.sha256(pem.encode()).hexdigest(),
+                "trustBundlePem": pem,
+            },
+            "providerRecoveryEnvelopes": {
+                "activationAckTrustConfigMap": "r" * 64,
+                "activationAckEgressNetworkPolicy": "s" * 64,
+            },
+        }
+        path = tmp_path / "ack-render-values.yaml"
+        path.write_text(yaml.safe_dump(values))
+        extra_args = ("--values", str(path))
+
+    documents = _render(
+        CELL, CELL / "values.validation.yaml", namespace="cell-alpha-test", extra_args=extra_args
+    )
+    return _find(documents, "StatefulSet", "cell-alpha")["spec"]["template"]["spec"]
+
+
 def test_capable_platform_serves_the_acknowledgement_listener(tmp_path):
     from test_hosted_activation_admission import PLATFORM_NAMESPACE, _activation_lock_values
     from test_hosted_helm_contract import PLATFORM
