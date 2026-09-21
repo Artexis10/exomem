@@ -134,6 +134,20 @@ def _publications(vault: Path) -> int:
         connection.close()
 
 
+def _store_activation_epoch(vault: Path) -> int:
+    """The epoch the governance store itself reports, not the one custody holds."""
+
+    connection = store.open_connection(vault)
+    try:
+        return int(
+            connection.execute(
+                "SELECT activation_epoch FROM governance_activation_store"
+            ).fetchone()[0]
+        )
+    finally:
+        connection.close()
+
+
 def test_a_process_killed_before_the_catalog_commit_leaves_the_bytes_but_no_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -270,3 +284,53 @@ def test_the_child_really_dies_at_the_barrier_and_not_somewhere_convenient(
 
     assert result.returncode != CRASH_EXIT
     assert "child completed without reaching the cut" in result.stderr
+
+
+def test_a_committed_unacknowledged_write_does_not_close_the_attestation_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fuse Decision 7 was written to defuse does not exist.
+
+    That decision reasoned: a cell whose store leads custody cannot sign its
+    readiness attestation, the provisioner's hourly renewal needs that
+    signature, so the window lapses within the hour and the cell is lost. Task
+    3.4 proposed widening the readiness proof and its provisioner validator --
+    an authority boundary -- to rescue it.
+
+    Two things are true instead. The renewal never reaches `_ready_custody`:
+    `schema_v4.load_active_state` is the only comparison of the store's
+    activation tuple against `control.json`, and none of its callers sit on the
+    minting path. And the one input to that path which *is* recomputed on a pod
+    restart -- `_mutation_authority_ready`, from
+    `probe_hosted_mutation_authority` -- still admits on a diverged cell, which
+    is what this test pins.
+
+    The divergence here is the real one, not a hand-written control record: a
+    child process commits the governed write and dies before acknowledging it,
+    so the store genuinely leads custody by one epoch. Synthesising it by
+    setting `activation_epoch=0` instead proves nothing -- the schema's
+    `CHECK(activation_epoch>0)` rejects that as malformed rather than behind,
+    and it reads like a refusal.
+
+    What a pending acknowledgement does block is `_ready_custody`, and so
+    `/ready`, session issuance and content serving. That is the defect this
+    change repairs, and it is an outage rather than an unrecoverable loss.
+    """
+
+    from exomem.server_runtime import probe_hosted_mutation_authority
+
+    vault, now = _prepare(tmp_path, monkeypatch)
+    assert probe_hosted_mutation_authority(vault) == (True, "HOSTED_READY")
+    baseline = _publications(vault)
+
+    result = _run_child(tmp_path, vault, "catalog-publication-after-commit-before-registry")
+    assert result.returncode == CRASH_EXIT, result.stderr
+
+    # The store advanced and custody did not: this is the stranding shape.
+    assert _publications(vault) == baseline + 1
+    assert _epoch(vault, now=now + 1) == 1
+    assert _store_activation_epoch(vault) == 2
+
+    # And the startup probe -- the thing a restarting pod re-runs -- still admits.
+    writer_lease.reset_managers_for_tests()
+    assert probe_hosted_mutation_authority(vault) == (True, "HOSTED_READY")

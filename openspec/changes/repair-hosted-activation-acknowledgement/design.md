@@ -178,18 +178,32 @@ restart", because a restart re-runs the startup probe against the diverged
 state. That is a narrower risk with a different shape, and it would not
 justify widening the readiness proof and its provisioner validator.
 
-What is still open is only the restart variant: `_mutation_authority_ready` is
-set once at startup by `probe_hosted_mutation_authority`, so a pod that
-restarts while an acknowledgement is pending re-runs that probe against the
-diverged state. The probe calls `require_mutation_admission` and
-`hosted_mutation_guard`, neither of which obviously reaches the activation
-tuple on a hosted cell, but that has not been settled the same way.
+The restart variant is closed too, by measurement rather than reading.
+`_mutation_authority_ready` is the one input to the minting gate that a pod
+restart recomputes, via `probe_hosted_mutation_authority`. Against a genuinely
+diverged cell -- a child process that commits the governed write and dies
+before acknowledging it, so the store leads custody by one epoch -- that probe
+still returns `(True, "HOSTED_READY")`. Pinned by
+`test_a_committed_unacknowledged_write_does_not_close_the_attestation_path` in
+`tests/test_hosted_activation_ack_crash_cuts.py`.
 
-Task 3.4 therefore begins with the experiment, not the implementation: a real
-hosted vault whose store leads `control.json`, restarted, asking whether the
-attestation still mints. Decisions 7's window arithmetic in the preflight classifier stands
-either way -- refusing work that cannot finish inside the remaining window
-costs nothing and is right whatever renews it.
+One false start is worth recording, because it points the wrong way and looks
+right. Synthesising the divergence by writing a custody record with
+`activation_epoch=0` does make the probe refuse -- but the store's schema
+carries `CHECK(activation_epoch>0)`, so that is a malformed record being
+rejected, not a cell that is behind. The measurement only means anything
+against a divergence the system actually produced.
+
+**Task 3.4 is therefore withdrawn.** It proposed widening the readiness proof
+and its provisioner validator, and its entire justification was an attestation
+window that is not in fact at risk. Removing it is the finding. What a pending
+acknowledgement really blocks is `_ready_custody`, and so `/ready`, session
+issuance and content serving -- the defect this change already repairs through
+the acknowledgement protocol itself.
+
+Decision 7's window arithmetic in the preflight classifier stands regardless:
+refusing to begin work that cannot finish inside the remaining window costs
+nothing and is right whatever renews it.
 
 ### 8. Activation epoch is an authorization generation for vocabulary authority v2
 
