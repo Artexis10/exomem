@@ -474,7 +474,6 @@ def test_registry_never_serves_a_partial_entry_and_keeps_bounded_generations(
     the registry holds at most the bounded number of generations per vault."""
     _seed_without_collection(vault)
     _write_collection(vault)
-    index = _built_index(vault)
     manifests = structured_collections.discover_collections(vault)
     assert manifests
 
@@ -517,8 +516,6 @@ def test_registry_never_serves_a_partial_entry_and_keeps_bounded_generations(
     ]
     assert kept == [4, 5], kept
     assert len(kept) == working_set_index.MANIFEST_REGISTRY_GENERATIONS
-
-    del index
 
 
 def test_registry_served_packet_matches_the_compute_once_packet(vault: Path) -> None:
