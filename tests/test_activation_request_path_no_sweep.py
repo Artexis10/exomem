@@ -37,6 +37,7 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import _VAULT_WALKING_THREAD_NAMES
 from test_working_set_index import _seed_planning, _seed_structure
 
 from exomem import (
@@ -173,22 +174,30 @@ def _compile(vault: Path, index: working_set_index.WorkingSetIndex) -> dict:
     return working_set.compile_packet(vault, turn=TURN, index=index)
 
 
-def _drain_background_walks(timeout: float = 60.0) -> None:
-    """Let the warm-up's own background threads finish before measuring.
+def _drain_background_walks(timeout: float = 10.0) -> None:
+    """Let the warm-up's own vault-walking threads finish before measuring.
 
     The warm-up writes: it seeds the watcher, rebuilds the lexical store and
     builds the activation index, and a governed write legitimately starts a
-    background graph rebuild. That rebuild walks the vault, on its own thread,
-    for its own reasons — and measuring a request while it is still running
-    charges the request for it. Draining first is what makes the measurement
-    the request's, rather than a race with whatever the fixture started.
+    background graph rebuild. None of that is the request's cost, and the
+    counter below already excludes it by counting only the request thread —
+    but a rebuild that lands mid-request can still move the index generation
+    under it, which would send the request to compute a manifest set it should
+    have been served. Draining first removes that race too.
+
+    Only the threads that WALK — `conftest`'s own list, which is where a new
+    vault-walking daemon has to be declared. Joining every `exomem-` thread
+    instead waits on the long-lived ones that never exit (the reaper, the mode
+    watcher), which is a suite timeout rather than a drain. Best-effort by
+    design: if a walk is genuinely still running the measurement proceeds and
+    the thread filter keeps it honest.
     """
     deadline = time.monotonic() + timeout
     while True:
         alive = [
             thread
             for thread in threading.enumerate()
-            if thread.name.startswith("exomem-") and thread.is_alive()
+            if thread.name in _VAULT_WALKING_THREAD_NAMES and thread.is_alive()
         ]
         if not alive or time.monotonic() >= deadline:
             return
