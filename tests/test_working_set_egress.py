@@ -2796,3 +2796,251 @@ def test_neighbourhood_survives_when_grafted_onto_a_real_anchor(
         "LEAK: a grafted `neighbourhood` entry naming a real page was never handed "
         "to the decide loop"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Correction round 4: `_is_page_shaped` gated EVERY field the same way,
+# leaving a bare or oddly-suffixed TYPED value (`secret`, `secret.markdown`)
+# invisible -- not decided, not invalid -- in `provenance.path`/`.anchor`, a
+# pointer's `ref`, a `current_state` entry's `anchor`. T1: `path`/`anchor`
+# (wherever they appear) and list-shaped reference fields are TYPED page
+# fields, never gated by shape. T2: `_is_page_shaped` gates only a `ref` on
+# an item that ALSO carries a `path`/`anchor` of its own (kept for
+# `unit-open`-style opaque legacy ids). T3: the item invariant's (b) half is
+# satisfied only by a typed page field, never by `ref` alone on an item that
+# has one. T4: an empty string is still skipped.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("case", ["bare_stem", "wrong_extension"])
+def test_a_bare_or_wrong_extension_source_is_withheld_even_with_an_admitted_ref(
+    vault: Path, case: str
+) -> None:
+    """The reviewer's items 1+2, combined and reproduced exactly: `ref` is
+    admitted and page-shaped (satisfies (b) under round 3's rules), but the
+    unit's REAL source -- named only through `provenance.path`/`.anchor` --
+    is a bare stem (no slash, no `.md`) or a wrong-extension value (`.markdown`,
+    not `.md`). Before this round `_is_page_shaped` gated `path`/`anchor`
+    the same as `ref`, so neither shape ever became a candidate: not
+    decided, not invalid, invisible to the guard entirely, and the unit was
+    served with prose actually sourced from the withheld page.
+    """
+    write_scope(vault)  # default paths="Notes/Patterns/**" -> matches RESTRICTED_PATH
+    write_rule(vault, ceiling=0, audience="external")
+
+    stem = _stem_of(RESTRICTED_PATH)
+    source_value = stem if case == "bare_stem" else f"{stem}.markdown"
+    packet = {
+        "anchors": [],
+        "roles": [],
+        "units": [
+            {
+                "ref": OPEN_PATH,
+                "role": "resources",
+                "text": "the payload text actually sourced from the withheld page",
+                "lifecycle": "active",
+                "updated": "2026-09-01",
+                "provenance": {"path": source_value, "level": "unit", "anchor": source_value},
+            }
+        ],
+        "pointers": [],
+        "current_state": [],
+        "missing": [],
+        "ambiguity": [],
+        "budget": {"limit_chars": 4000, "used_chars": 40},
+        "generation": {
+            "freshness_key": "k",
+            "index_generation": 1,
+            "roles_hash": "abc",
+            "roles_source": "shipped",
+        },
+        "abstained": False,
+    }
+    release = egress.AnnotatedHits(hits=[_hit(OPEN_PATH)], withheld_paths=frozenset(), active=True, blocked=False)
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, release)
+
+    assert guarded is not None
+    assert guarded["units"] == [], (
+        f"LEAK ({case}): a {source_value!r} path/anchor naming a withheld page was "
+        "invisible to the guard although `ref` alone satisfied the old (b) check"
+    )
+
+
+@pytest.mark.parametrize("section", ["pointers", "current_state", "ambiguity", "missing"])
+def test_a_bare_word_naming_a_withheld_pages_stem_withholds_its_item(
+    vault: Path, section: str
+) -> None:
+    """The reviewer's item 4, precise: a pointer/current_state/ambiguity/
+    missing entry whose ONLY reference is a bare word matching a withheld
+    page's stem must be dropped -- `release.withheld_paths` is EMPTY, so
+    only `_working_set_paths` treating the bare word as a typed candidate
+    (T1) and deciding it against the real, policy-withheld page catches
+    this. Before this round these sections were filtered against
+    `withheld`/`invalid_refs`, but a bare word never populated either set
+    in the first place, so the filter had nothing to match against.
+
+    `missing` never carries a reference in any packet the real compiler
+    emits (`working_set.py`'s only shape there is `{"role", "reason"}`) --
+    included anyway because `guard_working_set`'s per-section loop treats
+    all four identically, and this property should hold for whichever
+    section a future field lands in, not just the three the compiler
+    populates today.
+    """
+    secret_rel = "Knowledge Base/Notes/Patterns/secret.md"
+    _write_page(
+        vault / secret_rel,
+        "---\ntype: note\nstatus: active\n---\n\nTOP SECRET\n",
+    )
+    write_scope(vault)  # default paths="Notes/Patterns/**" -> covers secret_rel
+    write_rule(vault, ceiling=0, audience="external")
+
+    entries = {
+        "pointers": {"ref": "secret", "role": "resources", "title": "t", "why": "w", "reason": "budget"},
+        "current_state": {
+            "anchor": "secret",
+            "source": "records",
+            "as_of": "2026-09-10",
+            "statement": "state: hidden",
+        },
+        "ambiguity": {"ref": "secret", "title": "t", "kind": "resource", "neighbourhood_size": 0},
+        "missing": {"ref": "secret", "role": "resources", "reason": "budget"},
+    }
+    packet = {
+        "anchors": [],
+        "roles": [],
+        "units": [],
+        "pointers": [],
+        "current_state": [],
+        "missing": [],
+        "ambiguity": [],
+        "budget": {"limit_chars": 4000, "used_chars": 40},
+        "generation": {
+            "freshness_key": "k",
+            "index_generation": 1,
+            "roles_hash": "abc",
+            "roles_source": "shipped",
+        },
+        "abstained": False,
+    }
+    packet[section] = [entries[section]]
+    release = egress.AnnotatedHits(hits=[_hit(OPEN_PATH)], withheld_paths=frozenset(), active=True, blocked=False)
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, release)
+
+    assert guarded is not None
+    assert guarded[section] == [], (
+        f"LEAK: a bare word naming a withheld page's stem survived in {section!r}"
+    )
+
+
+def test_the_records_lane_current_state_units_ref_never_substitutes_for_its_withheld_anchor(
+    vault: Path,
+) -> None:
+    """The records-lane `current_state` unit shape
+    (`working_set_state.py`'s own construction: `provenance.path=""`,
+    `ref="<collection path>#current"`, `provenance.anchor=<collection
+    path>`) must still be served when scoped elsewhere, and withheld when
+    ITS OWN collection is withheld. `ref` is merely TOLERATED here (T2) --
+    `anchor` is this unit's typed field (T3) -- so `ref` naming an entirely
+    different, admitted page could never paper over a withheld anchor, and
+    an admitted `ref`/`anchor` pair with an empty `path` must not be
+    over-restricted either, now that empty-`path` items are handled
+    specially for anchors too (T1's `path or anchor` fallback).
+    """
+    write_scope(vault)  # default paths="Notes/Patterns/**" -> matches RESTRICTED_PATH, not OPEN_PATH
+    write_rule(vault, ceiling=0, audience="external")
+
+    def _records_unit(anchor_path: str) -> dict:
+        return {
+            "ref": f"{anchor_path}#current",
+            "role": "current_state",
+            "text": "status: active",
+            "lifecycle": "active",
+            "updated": "2026-09-01",
+            "provenance": {"path": "", "level": "page", "anchor": anchor_path, "source": "profile"},
+        }
+
+    def _packet(anchor_path: str) -> dict:
+        return {
+            "anchors": [],
+            "roles": [],
+            "units": [_records_unit(anchor_path)],
+            "pointers": [],
+            "current_state": [],
+            "missing": [],
+            "ambiguity": [],
+            "budget": {"limit_chars": 4000, "used_chars": 40},
+            "generation": {
+                "freshness_key": "k",
+                "index_generation": 1,
+                "roles_hash": "abc",
+                "roles_source": "shipped",
+            },
+            "abstained": False,
+        }
+
+    release = egress.AnnotatedHits(hits=[_hit(OPEN_PATH)], withheld_paths=frozenset(), active=True, blocked=False)
+
+    with request_scope(_external()):
+        served = egress.guard_working_set(vault, _packet(OPEN_PATH), release)
+    assert served is not None
+    assert len(served["units"]) == 1, "OVER-RESTRICTION: an unrelated records-lane unit was withheld"
+
+    with request_scope(_external()):
+        withheld = egress.guard_working_set(vault, _packet(RESTRICTED_PATH), release)
+    assert withheld is not None
+    assert withheld["units"] == [], "LEAK: the records-lane unit's own withheld anchor was not honoured"
+
+
+def test_a_units_wikilink_in_any_prose_field_not_just_text_withholds_it(vault: Path) -> None:
+    """Follow-up closed in the same round, same walker: `_guarded_unit`
+    checked only `unit["text"]` for a withheld wikilink, while the
+    collector (`_working_set_paths`) scans EVERY field in
+    `_WORKING_SET_PROSE_FIELDS` (`text`, `statement`, `why`, `title`) on any
+    item type. A unit carries only `text` in every packet the real compiler
+    emits today, so this is a synthetic shape -- proving the checked-field
+    list is now driven by the same shared constant the collector uses,
+    rather than one hardcoded field name silently falling behind it the way
+    `neighbourhood` did for a different field in the BLOCKER.
+    """
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    spelling = f"[[{_stem_of(RESTRICTED_PATH)}]]"
+    packet = {
+        "anchors": [],
+        "roles": [],
+        "units": [
+            {
+                "ref": OPEN_PATH,
+                "role": "resources",
+                "text": "an ordinary sentence",
+                "title": f"see {spelling} for background",
+                "lifecycle": "active",
+                "updated": "2026-09-01",
+                "provenance": {"path": OPEN_PATH, "level": "unit", "anchor": OPEN_PATH},
+            }
+        ],
+        "pointers": [],
+        "current_state": [],
+        "missing": [],
+        "ambiguity": [],
+        "budget": {"limit_chars": 4000, "used_chars": 40},
+        "generation": {
+            "freshness_key": "k",
+            "index_generation": 1,
+            "roles_hash": "abc",
+            "roles_source": "shipped",
+        },
+        "abstained": False,
+    }
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _prose_release())
+
+    assert guarded is not None
+    assert guarded["units"] == [], "LEAK: a withheld wikilink in a unit's `title` field survived"
