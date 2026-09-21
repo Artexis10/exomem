@@ -804,9 +804,15 @@ def compile_packet(
     limit = clamp_budget(max_chars)
     index = index or working_set_index.WorkingSetIndex(root)
     registry = context_roles.load_roles(root)
+    # The WHOLE sidecar token, in place of the generation read this used to
+    # make. It is the same single sidecar read — `generation()` is
+    # `read_meta_token(...)[1]` — and the other two fields are what identify
+    # the sidecar that issued the number, which is how the manifest registry
+    # tells a rebuilt counter from an older one.
+    index_token = index.token()
     generation: dict[str, Any] = {
         "freshness_key": freshness_key,
-        "index_generation": index.generation(),
+        "index_generation": index_token[1],
         **registry.generation_block(),
     }
 
@@ -843,7 +849,9 @@ def compile_packet(
                 vectors=vectors,
                 query_vector=query_vector,
                 retrieval_paths=retrieval_paths,
-                routing_targets=_routing_targets(root),
+                routing_targets=_routing_targets(
+                    root, index_token[1], index_token=index_token
+                ),
                 used_paths=_used_paths(root, rows),
                 term_anchor_counts=index.term_anchor_counts(),
             )
@@ -880,7 +888,11 @@ def compile_packet(
     # two views of the same collection reads.
     with _span(timings, "working_set.current_state"):
         current_state = working_set_state.current_state_for(
-            root, anchors=resolution.resolved_anchors, purpose=purpose
+            root,
+            anchors=resolution.resolved_anchors,
+            purpose=purpose,
+            index_generation=index_token[1],
+            index_token=index_token,
         )
     items, missing = run_lanes(
         root,
@@ -909,19 +921,34 @@ def compile_packet(
     return packet
 
 
-def _routing_targets(vault_root: Path) -> tuple[Any, ...]:
-    """Records routing targets for `claims_match`, via the existing claims rule."""
-    try:
-        from . import collection_claims, record_governance, structured_collections
+def _routing_targets(
+    vault_root: Path,
+    index_generation: int,
+    *,
+    index_token: tuple[int, int, int] | None = None,
+) -> tuple[Any, ...]:
+    """Records routing targets for `claims_match`, via the existing claims rule.
 
-        manifests = structured_collections.discover_collections(vault_root)
+    Read from the manifests the index update published for this generation, so
+    the request path enumerates no directory to build them. These claims are
+    RESOLUTION EVIDENCE — they can corroborate that a turn is about an anchor,
+    never decide what may be disclosed — so serving them as stale as the index
+    means a turn reaches more or less evidence, exactly the contract anchors
+    themselves already have. The governed read that current state performs does
+    NOT share this staleness: it re-reads its manifest (see
+    `working_set_state._governing_manifest`).
+    """
+    try:
+        from . import collection_claims, record_governance
+
+        manifests = working_set_index.records_manifests(
+            vault_root, index_generation, token=index_token
+        )
     except Exception:  # noqa: BLE001 - no targets simply means no claims evidence
         log.debug("activation: routing targets unavailable", exc_info=True)
         return ()
     targets: list[Any] = []
     for manifest in manifests:
-        if str(getattr(manifest, "semantic_profile", "")) != "records":
-            continue
         claims = record_governance.effective_claims(manifest, None)
         if not claims:
             continue

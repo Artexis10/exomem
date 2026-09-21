@@ -188,7 +188,11 @@ def _observe_boundary_ms(name: str, value_ms: float) -> None:
 def canonical_mutation_identity(vault_or_cell: os.PathLike[str] | str) -> str:
     """Return a stable, non-display identity for a vault path or opaque cell ID."""
     if isinstance(vault_or_cell, os.PathLike):
-        resolved = Path(vault_or_cell).expanduser().resolve(strict=False)
+        from . import state_paths
+
+        # Identity, not evidence: the same path resolves to the same vault for
+        # the whole of a request, so it goes through the request-scoped memo.
+        resolved = state_paths.resolved_vault_path(vault_or_cell)
         return f"vault:{os.path.normcase(str(resolved))}"
     value = str(vault_or_cell).strip()
     if not value:
@@ -1921,7 +1925,12 @@ class VaultMutationCoordinator:
             raise ValueError("mutation lock poll interval must be positive")
         if long_holder_seconds <= 0:
             raise ValueError("mutation long-holder threshold must be positive")
-        self.state_root = Path(state_root).expanduser().resolve(strict=False)
+        from . import state_paths
+
+        # Where the lock files live is configuration, resolved once per request
+        # like every other placement answer. The lock files themselves are
+        # never memoised: `hold` reads their real state every time.
+        self.state_root = state_paths.resolved_vault_path(state_root)
         self.identity = canonical_mutation_identity(vault_or_cell)
         digest = hashlib.sha256(self.identity.encode("utf-8")).hexdigest()
         lock_root = self.state_root / "mutation-locks"

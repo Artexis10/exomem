@@ -991,8 +991,15 @@ def _store_key(vault_root: Path) -> Path:
     through the other spelling, and `cache_token` then answers "fts5" for a
     store that is not serving FTS5. Cache keys built from that token collide
     across two different scorers.
+
+    The resolution goes through the request-scoped placement memo, so a request
+    that asks for the store repeatedly resolves the path once; `expanduser` is
+    off because this key has never expanded `~` and turning that on here would
+    silently re-point a `~`-spelled vault at a different store.
     """
-    return vault_root.resolve()
+    from . import state_paths
+
+    return state_paths.resolved_vault_path(vault_root, expanduser=False)
 
 
 def get_store(vault_root: Path) -> LexicalStore:

@@ -270,6 +270,54 @@ only for scalar non-array sort and date fields with no explicit columns, and the
 unchanged projector governs the surviving rows. The candidate index is never
 built cold on this path, so a bare-title link is withheld there.
 
+That still left the request path enumerating the vault twice per request merely
+to find which collections exist. Collection discovery walks the knowledge base
+for manifests and checks every candidate path component; on a vault holding a
+few dozen manifests across roughly a thousand directories it measures 54 ms in
+an idle interpreter and 23,041 ms with one busy pure-Python thread in the same
+process. The sweep is thousands of short system calls, each releasing the
+interpreter lock and then waiting up to the switch interval to get it back from
+a CPU-bound thread, so the cost is a convoy rather than I/O. A managed worker
+always has busy threads: the two stages that swept — resolution's routing
+targets and current state's manifest set — measured seconds against the tens of
+milliseconds they take offline, requests exceeded the activation budget, and an
+abandoned request became the busy thread for the next one. Timeouts, thread
+priorities and switch-interval tuning address the symptom; the repair is that
+the request path stops enumerating the filesystem.
+
+Discovery belongs where it already runs off the request path: the index update.
+It publishes the manifests it discovered for request threads, keyed by vault and
+by the whole identity of the sidecar that issued the generation, and every
+completed update republishes, so freshness does not depend on whether the
+generation moved. The identity matters because a generation only means
+something within the sidecar that issued it: a sidecar rebuilt from scratch
+restarts its counter, and a registry that compared the numbers alone served a
+dead sidecar's manifests and stranded the live one's on the sweep. The two readers are split by what
+staleness costs each. Routing claims are resolution evidence and may be exactly
+as stale as the index, which is the contract every anchor already has: a
+collection added since the last update supplies more or less evidence for a
+turn, never a disclosure. Governed current state may not be stale, so it takes
+only the manifest paths from that published set and re-reads the one collection
+it routes to before querying it — a governance-relevant manifest edit is
+honoured on the very next request, and a manifest that has vanished or no longer
+parses yields no rows for that collection while the packet still serves. A
+generation with nothing published computes the set once and publishes it, so a
+caller that never had an index keeps its existing behaviour.
+
+The sweep was only the largest instance of the cost, not the cost itself. The
+convoy is paid per system call, so anything a request repeats thousands of
+times is the same defect in a smaller package — and resolving a path costs one
+call per component, which one measured request paid 72 times over just to ask
+where this vault's machine-local state lives. Those answers are placement
+decisions about configuration, not observations of content, so they are
+memoised for the duration of one request and recomputed for the next: the memo
+is request-scoped rather than process-scoped precisely because a longer-lived
+one would answer for a vault that had since moved, and placement is the
+invariant that keeps machine-local state out of the vault. Only placement is
+memoised; a stat signature, a marker generation and the existence of a
+directory stay live, because a request that memoised evidence would answer
+from a past it had already been told was over.
+
 A cold worker's readiness window now has its own budget, defaulting to the
 standby warm budget's value; a fixed shorter window restarted the unit into the
 same cold catalog. It is a separate setting because it answers a separate

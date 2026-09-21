@@ -399,11 +399,13 @@ def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
 
 
 def reset_caches_for_tests() -> None:
-    """Drop the packet cache and any in-flight build marker."""
+    """Drop the packet cache, any in-flight build marker, and the manifests the
+    index published for request threads."""
     with _CACHE_LOCK:
         _PACKET_CACHE.clear()
         _BUILDS.clear()
         _INLINE_LOCKS.clear()
+    working_set_index.reset_collection_manifests_for_tests()
 
 
 def ensure_index(
