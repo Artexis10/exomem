@@ -3252,6 +3252,10 @@ def publish_catalog_generation(
     )
     _crash_point("catalog-publication-after-commit-before-registry")
     _acknowledge_registry(active, acknowledge_registry)
+    # The last cut a caller can lose: everything is durable and acknowledged,
+    # and only the response has not been delivered. A fresh process has to read
+    # that as complete, not as an attempt to redo.
+    _crash_point("catalog-publication-after-registry-before-result")
     return _publication_result(connection, active)
 
 

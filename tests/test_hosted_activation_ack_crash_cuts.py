@@ -334,3 +334,65 @@ def test_a_committed_unacknowledged_write_does_not_close_the_attestation_path(
     # And the startup probe -- the thing a restarting pod re-runs -- still admits.
     writer_lease.reset_managers_for_tests()
     assert probe_hosted_mutation_authority(vault) == (True, "HOSTED_READY")
+
+
+def test_a_cut_after_the_acknowledgement_leaves_a_complete_mutation_and_a_usable_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The last cut a caller can lose, and the one that is not a defect.
+
+    Everything is durable and the registry has been acknowledged; only the
+    response never arrived. This is what separates the acknowledgement from
+    the publication before it, measured rather than asserted:
+
+    * after the cut *before* the registry, the next ordinary write on that page
+      is refused `GOVERNANCE_CATALOG_PUBLICATION_BLOCKED` -- the page cannot be
+      written at all until the outstanding publication is recovered;
+    * after this cut, the next ordinary write simply succeeds.
+
+    So the acknowledgement is the line between a recoverable stall that strands
+    a page and a mutation that is complete with its receipt lost. A client that
+    retries is still refused rather than published twice.
+    """
+
+    from exomem import semantic_writes
+
+    vault, now = _prepare(tmp_path, monkeypatch)
+    baseline = _publications(vault)
+
+    result = _run_child(tmp_path, vault, "catalog-publication-after-registry-before-result")
+
+    assert result.returncode == CRASH_EXIT, result.stderr
+    assert (vault / RELATIVE).read_text(encoding="utf-8") == AFTER
+    # Published *and* acknowledged: custody caught up, unlike every cut above.
+    assert _publications(vault) == baseline + 1
+    assert _epoch(vault, now=now + 1) == 2
+
+    # The caller never heard back, so it retries. The write path still knows
+    # the difference between a retry and a recovery.
+    with pytest.raises(semantic_writes.SemanticWriteError) as refusal:
+        semantic_writes.preflight_existing(
+            vault,
+            path=RELATIVE,
+            after_source=AFTER,
+            operation="edit",
+            expected_before_hash=vault_module.content_hash(BEFORE),
+        )
+    assert refusal.value.code == "STALE_SEMANTIC_WRITE"
+    assert _publications(vault) == baseline + 1
+    assert _epoch(vault, now=now + 1) == 2
+
+    # And the page is not stranded: an ordinary later edit goes through.
+    later = AFTER.replace("after", "later")
+    preflight = semantic_writes.preflight_existing(
+        vault,
+        path=RELATIVE,
+        after_source=later,
+        operation="edit",
+        expected_before_hash=vault_module.content_hash(AFTER),
+    )
+    semantic_writes.commit_existing(vault, preflight=preflight)
+
+    assert (vault / RELATIVE).read_text(encoding="utf-8") == later
+    assert _publications(vault) == baseline + 2
+    assert _epoch(vault, now=now + 1) == 3
