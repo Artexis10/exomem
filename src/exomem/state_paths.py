@@ -59,10 +59,17 @@ _SLUG_MAX = 24
 # moved, for a `EXOMEM_STATE_ROOT` that had since changed, in a request that
 # never asked for it — and placement is the invariant that keeps machine-local
 # state out of the vault, so a stale answer there is not a stale answer about
-# content. A memo that lives exactly as long as one request cannot go stale
-# within its own lifetime for any reason a request can observe: the vault does
-# not move mid-request, and the environment that selects the state root is part
-# of the key anyway.
+# content.
+#
+# What a memoised answer IS, precisely: a resolution taken at one instant. It
+# is not a claim that nothing underneath it can change — `Path.resolve()` reads
+# symlink topology, which is filesystem evidence, and a symlink can be flipped
+# between two calls of one request. That is why the placement REFUSAL is not
+# memoised at all: `validate_vault_state_directory` resolves afresh on every
+# call, so a state root that has become a descendant of the vault is refused
+# the moment it is asked about. What the memo holds is the composed answer to
+# "where does this vault's state live", which is re-derived for the next
+# request and re-validated by every caller that acts on it.
 #
 # Outside a scope there is no memo and nothing is remembered, so every caller
 # that has not opted in behaves byte-identically to before.
@@ -74,11 +81,10 @@ _MISSING = object()
 #: One request's memoised resolutions, or `None` when no scope is open.
 #: A `ContextVar` rather than thread-local state: it is per-thread already (a
 #: new thread starts from the default, so a scope cannot leak into one) and it
-#: follows an `async` task the way a request does. Tasks started inside a scope
-#: inherit the same dictionary by reference, which is intended — they are the
-#: same request — and needs no lock: the only operations on it are a `get` and
-#: a single `setitem`, and the worst a race can cost is computing one answer
-#: twice.
+#: follows one request through `await` points. It needs no lock: the only
+#: operations on it are a `get` and a single `setitem`, and the worst a race
+#: can cost is computing one answer twice. See `resolution_scope` for why
+#: nothing may hand it to a task of its own.
 _RESOLUTION_MEMO: ContextVar[dict[tuple[Any, ...], Any] | None] = ContextVar(
     "exomem_state_resolution_memo", default=None
 )
@@ -102,6 +108,14 @@ def resolution_scope() -> Iterator[None]:
     Nested scopes reuse the outer memo, so a component that opens its own scope
     inside a request neither starts a second one nor discards the first when it
     leaves. Exceptions are never memoised: a refusal is re-decided every time.
+
+    Nothing may start a thread or an `asyncio` task inside a scope and expect
+    the memo to apply to it. A thread gets the default — no memo, full work,
+    which is safe. A task created inside a scope inherits the memo by reference
+    and would keep answering from it after the scope had exited, which is not:
+    the contract is that a memoised answer lives for one request and no longer.
+    Nothing does this today (the only opener is synchronous), and a component
+    that needs the memo in work of its own opens its own scope there.
     """
     if _RESOLUTION_MEMO.get() is not None:
         yield
@@ -133,7 +147,7 @@ def _placement_environment() -> tuple[str, ...]:
 
     Part of every memo key, so a scope that spans an environment change (a test
     repointing `EXOMEM_STATE_ROOT`, a process re-reading its configuration) gets
-    the new answer rather than the one it happened to ask for first. Six
+    the new answer rather than the one it happened to ask for first. Eight
     dictionary lookups; no syscalls.
     """
     return (
@@ -143,6 +157,9 @@ def _placement_environment() -> tuple[str, ...]:
         os.environ.get("XDG_STATE_HOME", ""),
         os.environ.get("HOME", ""),
         os.environ.get("USERPROFILE", ""),
+        # What `ntpath.expanduser` falls back to when USERPROFILE is unset.
+        os.environ.get("HOMEDRIVE", ""),
+        os.environ.get("HOMEPATH", ""),
     )
 
 
@@ -167,7 +184,7 @@ def resolved_vault_path(vault_root: Path | str, *, expanduser: bool = True) -> P
         return candidate.resolve(strict=False)
 
     return _memoized(
-        ("resolved_vault_path", str(vault_root), expanduser, _placement_environment()),
+        ("resolved_vault_path", os.fspath(vault_root), expanduser, _placement_environment()),
         compute,
     )
 
@@ -254,8 +271,16 @@ def validate_vault_state_directory(vault_root: Path, directory: Path) -> Path:
     I/O, so a forged complete manifest below the vault is never authority.
     """
 
-    resolved_vault = resolved_vault_path(vault_root)
-    resolved_directory = resolved_vault_path(directory)
+    # Resolved UNMEMOISED, every time, including inside a resolution scope.
+    # `ensure_vault_state_dir` calls this again after the hosted creation
+    # precisely so the check sees the world as it is when it runs, and a
+    # memoised answer cannot: a symlinked state root flipped into the vault
+    # between two calls was allowed the second time. A resolution reads symlink
+    # topology, which is filesystem evidence, and placement is what keeps
+    # machine-local state out of the vault — so this refusal is re-decided on
+    # every call and only the COMPOSED `vault_state_dir` answer is memoised.
+    resolved_vault = Path(vault_root).expanduser().resolve(strict=False)
+    resolved_directory = Path(directory).expanduser().resolve(strict=False)
     try:
         resolved_directory.relative_to(resolved_vault)
     except ValueError:
@@ -275,7 +300,7 @@ def vault_state_dir(vault_root: Path) -> Path:
     memoised.
     """
     return _memoized(
-        ("vault_state_dir", str(vault_root), _placement_environment()),
+        ("vault_state_dir", os.fspath(vault_root), _placement_environment()),
         lambda: _compute_vault_state_dir(vault_root),
     )
 

@@ -34,6 +34,7 @@ import threading
 import unicodedata
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -917,9 +918,9 @@ def _collection_candidates(vault_root: Path) -> tuple[list[_Candidate], list[_Ca
         manifests = structured_collections.discover_collections(Path(vault_root))
     except Exception:  # noqa: BLE001 - an unreadable manifest costs its anchor, not the build
         log.debug("activation index: collection discovery failed", exc_info=True)
-        _note_discovered_manifests(vault_root, None)
+        _note_discovered_manifests(None)
         return records, plans
-    _note_discovered_manifests(vault_root, manifests)
+    _note_discovered_manifests(manifests)
     for manifest in manifests:
         rel = str(getattr(manifest, "path", "") or "")
         if not rel:
@@ -1100,21 +1101,36 @@ _MANIFEST_REGISTRY_LOCK = threading.Lock()
 #: request-path readers and adding a sidecar read to each -- worth doing if the
 #: hosted runtime ever recreates vaults in place.
 _MANIFEST_REGISTRY: OrderedDict[str, OrderedDict[int, tuple[Any, ...]]] = OrderedDict()
-#: vault identity -> what the last discovery in this process saw, before the
-#: write that will give it a generation. Written only by the index update (see
-#: `_collection_candidates`), promoted by `_write` once the generation is known.
+#: What the discovery inside ONE `_write` call saw, before the write that will
+#: give it a generation. A single-element box installed by `_write` before it
+#: collects and read by it after, so the set an update discovered belongs to
+#: that update and to nothing else.
 #:
-#: Two overlapping updates of one vault share this slot, and the later
-#: discovery wins for both. That can publish a set that is FRESHER than its
-#: generation claims, never staler: a sweep that started later cannot have seen
-#: an older vault. Fresher is safe for routing evidence (it is evidence, and
-#: more of it is not a disclosure) and irrelevant to governed reads, which
-#: re-read their manifest regardless.
-_PENDING_MANIFESTS: OrderedDict[str, tuple[Any, ...]] = OrderedDict()
+#: Keyed per vault, this was shared: a concurrent update whose discovery FAILED
+#: cleared the set another update was holding, and that generation was then
+#: never published at all — every request at it went back to the sweep. A
+#: `ContextVar` is per-thread and per-task, and discovery and publication
+#: happen in the same call on the same thread, so no update can reach another's
+#: box. Each `_write` installs a fresh one, which is why nothing resets it: a
+#: box left behind is replaced before it can be read again.
+_PENDING_MANIFESTS: ContextVar[list[tuple[Any, ...] | None] | None] = ContextVar(
+    "exomem_working_set_pending_manifests", default=None
+)
 
 
 def _vault_key(vault_root: Path) -> str:
-    return str(Path(vault_root).absolute())
+    """One vault, one key, however the caller spelled it.
+
+    Keyed on the unresolved path, a symlinked or dotted spelling of one vault
+    silently got its own entry: every request through that spelling missed,
+    swept, and published into a second copy nothing else read. On the read side
+    this runs inside the request's resolution scope, so it costs one resolution
+    per request; on the publish side it is the index update, which can afford
+    one.
+    """
+    from . import state_paths
+
+    return str(state_paths.resolved_vault_path(vault_root, expanduser=False))
 
 
 def publish_collection_manifests(
@@ -1135,9 +1151,13 @@ def publish_collection_manifests(
             generations = OrderedDict()
             _MANIFEST_REGISTRY[key] = generations
         generations[int(generation)] = entry
-        generations.move_to_end(int(generation))
-        while len(generations) > MANIFEST_REGISTRY_GENERATIONS:
-            generations.popitem(last=False)
+        # By HIGHEST generation, never by publish recency. Evicting the least
+        # recently published let a straggler that had captured an older
+        # generation republish under its stale number and push the live
+        # generations out, putting the sweep it had just paid for back on the
+        # next request thread.
+        for stale in sorted(generations)[:-MANIFEST_REGISTRY_GENERATIONS]:
+            generations.pop(stale, None)
         _MANIFEST_REGISTRY.move_to_end(key)
         while len(_MANIFEST_REGISTRY) > MANIFEST_REGISTRY_VAULTS:
             _MANIFEST_REGISTRY.popitem(last=False)
@@ -1177,8 +1197,23 @@ def collection_manifests(vault_root: Path, generation: int) -> tuple[Any, ...]:
     from . import structured_collections
 
     manifests = tuple(structured_collections.discover_collections(Path(vault_root)))
-    publish_collection_manifests(vault_root, generation, manifests)
+    # A straggler that captured an older generation serves itself and leaves
+    # the registry alone. Storing its answer would be a write on behalf of a
+    # generation nobody is serving any more, and the entry it would occupy
+    # belongs to the generations that are.
+    if not _below_highest_held(vault_root, generation):
+        publish_collection_manifests(vault_root, generation, manifests)
     return manifests
+
+
+def _below_highest_held(vault_root: Path, generation: int) -> bool:
+    """Whether this vault already holds a generation newer than `generation`."""
+    key = _vault_key(vault_root)
+    with _MANIFEST_REGISTRY_LOCK:
+        generations = _MANIFEST_REGISTRY.get(key)
+        if not generations:
+            return False
+        return int(generation) < max(generations)
 
 
 def records_manifests(vault_root: Path, generation: int) -> tuple[Any, ...]:
@@ -1190,19 +1225,17 @@ def records_manifests(vault_root: Path, generation: int) -> tuple[Any, ...]:
     )
 
 
-def _note_discovered_manifests(vault_root: Path, manifests: Sequence[Any] | None) -> None:
-    """Hold what an index update just discovered until its write names a
-    generation. A failed discovery clears the slot rather than leaving the
-    previous sweep's result to be published under a newer generation."""
-    key = _vault_key(vault_root)
-    with _MANIFEST_REGISTRY_LOCK:
-        if manifests is None:
-            _PENDING_MANIFESTS.pop(key, None)
-            return
-        _PENDING_MANIFESTS[key] = tuple(manifests)
-        _PENDING_MANIFESTS.move_to_end(key)
-        while len(_PENDING_MANIFESTS) > MANIFEST_REGISTRY_VAULTS:
-            _PENDING_MANIFESTS.popitem(last=False)
+def _note_discovered_manifests(manifests: Sequence[Any] | None) -> None:
+    """Hold what THIS update just discovered until its write names a generation.
+
+    A failed discovery empties its own update's box and no other's. Outside a
+    `_write` there is no box and this does nothing, which is what keeps a
+    stubbed `_collection_candidates` from publishing anything.
+    """
+    box = _PENDING_MANIFESTS.get()
+    if box is None:
+        return
+    box[0] = None if manifests is None else tuple(manifests)
 
 
 def _publish_pending_manifests(vault_root: Path, generation: int) -> None:
@@ -1213,18 +1246,21 @@ def _publish_pending_manifests(vault_root: Path, generation: int) -> None:
     the generation moved: a manifest edit that somehow left the generation
     where it was is still republished by the update that saw it.
     """
-    with _MANIFEST_REGISTRY_LOCK:
-        pending = _PENDING_MANIFESTS.get(_vault_key(vault_root))
+    box = _PENDING_MANIFESTS.get()
+    pending = None if box is None else box[0]
     if pending is None:
         return
     publish_collection_manifests(vault_root, generation, pending)
 
 
 def reset_collection_manifests_for_tests() -> None:
-    """Drop every published and pending manifest set."""
+    """Drop every published manifest set.
+
+    The pending box is not touched: it belongs to one in-flight `_write` on one
+    thread, and there is none in flight when a test calls this.
+    """
     with _MANIFEST_REGISTRY_LOCK:
         _MANIFEST_REGISTRY.clear()
-        _PENDING_MANIFESTS.clear()
 
 
 class WorkingSetIndex:
@@ -1599,6 +1635,11 @@ class WorkingSetIndex:
         conn = self._connect()
         if conn is None:
             return {"anchors": 0, "generation": 0, "unavailable": True}
+        # This update's own box for what its discovery finds, installed before
+        # collecting and read at every publish point below. A fresh one per
+        # write is what keeps two concurrent updates of one vault out of each
+        # other's way, so it is never reset: the next write replaces it.
+        _PENDING_MANIFESTS.set([None])
         candidates, edges, page_names, term_counts = self._collect()
         existing = {
             anchor_id: signature

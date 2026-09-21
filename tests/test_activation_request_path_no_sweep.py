@@ -73,9 +73,12 @@ WARM_REQUEST_ENUMERATION_CEILING = 8
 #: (scandir 59, stat 133, lstat 2,382, open 93); 2,472 with the manifests off
 #: the request path (scandir 3, lstat 2,246); 587 once the vault's state
 #: location is resolved once per request instead of 72 times (scandir 3, stat
-#: 131, lstat 361, open 92).
+#: 131, lstat 361, open 92) — and 673 once independent review had the
+#: placement VALIDATION taken back out of the memo (scandir 3, stat 131, lstat
+#: 446, open 93), which is what that refusal costs when it is re-decided on
+#: every call instead of once.
 #:
-#: The ceiling is roughly twice the 587 measured. Two reasons for that much
+#: The ceiling is a little under twice the 673 measured. Two reasons for that much
 #: slack rather than less: several remaining `Path.resolve()` sites still cost
 #: one `lstat` per path component, so the number moves with how deep the
 #: temporary directory is on the machine running the suite; and a ceiling that
