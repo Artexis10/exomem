@@ -41,6 +41,7 @@ from test_working_set_index import _seed_planning, _seed_structure
 from exomem import (
     commands,
     reserved_paths,
+    state_paths,
     structured_collections,
     working_set,
     working_set_index,
@@ -54,19 +55,29 @@ COLLECTION_ID = "6f0f2b4c-1d3f-4a71-9c3d-2f9b5d2a7c11"
 
 #: The directory-enumeration ceiling for one warm request, and the tripwire a
 #: reintroduced sweep has to trip. Measured on the fixture vault below: 72
-#: enumerations before this change, 3 after -- all three inside the one
-#: collection the request's own answer came from. The ceiling is generous
-#: against those 3 and still an order of magnitude under the 72, so an
-#: unrelated extra read never fails it and a returning sweep always does.
-#:
-#: Deliberately NOT a ceiling on total filesystem calls. The same request makes
-#: ~1,950 of them (3,587 before), and roughly 1,100 are `Path.resolve()` inside
-#: `state_paths.vault_state_dir`, which costs one `lstat` per component of the
-#: vault's absolute path -- so a total-call ceiling would measure how deep the
-#: temporary directory is on the machine running it. That cost is real and is
-#: reported as a finding, but it is not this contract and must not be pinned by
-#: a number that moves with the test environment.
+#: enumerations before the manifests moved off the request path, 3 after -- all
+#: three inside the one collection the request's own answer came from. The
+#: ceiling is generous against those 3 and still an order of magnitude under
+#: the 72, so an unrelated extra read never fails it and a returning sweep
+#: always does.
 WARM_REQUEST_ENUMERATION_CEILING = 8
+
+#: The total filesystem-call ceiling for one warm request.
+#:
+#: The convoy is paid PER GIL-RELEASING SYSTEM CALL, not per enumeration, so
+#: removing the sweep was only half the bill: the same request still resolved
+#: the vault's state location on every call that needed it, at one `lstat` per
+#: path component, which is why this number is worth pinning at all.
+#:
+#: It was not pinnable before the request-scoped resolution memo, because the
+#: per-component cost scaled with how deep the temporary directory happened to
+#: be on the machine running the suite. Inside a scope that resolution happens
+#: once per request, so what remains is the request's own reads and the ceiling
+#: stops measuring the test environment. Measured on the fixture vault below;
+#: the ceiling is set at roughly twice that, which is loose enough to absorb a
+#: few dozen unrelated reads and far tighter than the ~1,950 this request cost
+#: before the memo and the ~3,590 it cost before either repair.
+WARM_REQUEST_FILESYSTEM_CALL_CEILING = 750
 
 
 def _manifest_text(*, profile: str = "records", identifier: str = COLLECTION_ID) -> str:
@@ -372,6 +383,180 @@ def test_warm_activation_request_enumerates_no_directory(
         "a warm activation request must read the manifests the index already "
         f"discovered, never sweep for them again: {discovery.calls}"
     )
+
+
+def test_warm_activation_request_resolves_the_state_location_once(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
+) -> None:
+    """The request resolves where its state lives once, and spends a pinned
+    number of filesystem calls in total.
+
+    `vault_state_key` resolves the vault path, which costs one `lstat` per
+    component and was being paid by every caller that needed a state
+    directory — hundreds of times in one request. The answer cannot change
+    within a request: it is a placement decision about configuration, not an
+    observation of content. So it is computed once per request and reused,
+    and this pins that it is.
+    """
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _write_collection(vault)
+    _warm_activation(vault, warm_managed_cell)
+
+    scheduled = _no_background_walks(monkeypatch)
+    key_calls: list[str] = []
+    real_key = state_paths.vault_state_key
+
+    def counting_key(vault_root: Path) -> str:
+        key_calls.append(str(vault_root))
+        return real_key(vault_root)
+
+    monkeypatch.setattr(state_paths, "vault_state_key", counting_key)
+    calls = _FilesystemCalls(vault)
+    calls.install(monkeypatch)
+
+    packet = commands.op_activate_context(vault, turn=TURN)
+
+    assert scheduled == [], scheduled
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert len(key_calls) <= 1, (
+        "the vault's state location was resolved from scratch "
+        f"{len(key_calls)} times in one request: {sorted(set(key_calls))}"
+    )
+    assert calls.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, calls.report()
+
+
+def test_resolution_scope_holds_no_cache_outside_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Outside a scope the memo does not exist: every call does the full work.
+
+    The memo's whole safety argument is that its lifetime is one request. A
+    module-level cache with the same contents would be a different, far more
+    dangerous object — it would answer for a vault that had since moved, in a
+    process that never asked — so "no scope, no memo" is pinned directly.
+    """
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    calls: list[str] = []
+    real_key = state_paths.vault_state_key
+
+    def counting_key(root: Path) -> str:
+        calls.append(str(root))
+        return real_key(root)
+
+    monkeypatch.setattr(state_paths, "vault_state_key", counting_key)
+
+    first = state_paths.vault_state_dir(vault_root)
+    second = state_paths.vault_state_dir(vault_root)
+
+    assert first == second
+    assert len(calls) == 2, calls
+
+    calls.clear()
+    with state_paths.resolution_scope():
+        scoped_first = state_paths.vault_state_dir(vault_root)
+        scoped_second = state_paths.vault_state_dir(vault_root)
+    assert scoped_first == scoped_second == first
+    assert len(calls) == 1, calls
+
+    calls.clear()
+    state_paths.vault_state_dir(vault_root)
+    assert len(calls) == 1, "the scope outlived itself"
+
+
+def test_resolution_scope_does_not_leak_into_another_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One request's memo is one request's. A thread that opened no scope of
+    its own does the full work, so nothing can be answered from a scope it was
+    never part of."""
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    calls: list[str] = []
+    real_key = state_paths.vault_state_key
+
+    def counting_key(root: Path) -> str:
+        calls.append(str(root))
+        return real_key(root)
+
+    monkeypatch.setattr(state_paths, "vault_state_key", counting_key)
+
+    with state_paths.resolution_scope():
+        state_paths.vault_state_dir(vault_root)
+        state_paths.vault_state_dir(vault_root)
+        assert len(calls) == 1, calls
+
+        other: list[int] = []
+
+        def elsewhere() -> None:
+            state_paths.vault_state_dir(vault_root)
+            state_paths.vault_state_dir(vault_root)
+            other.append(len(calls))
+
+        thread = threading.Thread(target=elsewhere, name="scope-leak-probe")
+        thread.start()
+        thread.join(timeout=10.0)
+
+    assert other == [3], (
+        "a thread with no scope of its own must do the full resolution every "
+        f"time, so the counter should have advanced by two: {calls}"
+    )
+
+
+def test_nested_resolution_scopes_share_one_memo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An inner scope reuses the outer memo rather than starting a second one,
+    and leaving the inner scope does not discard what the outer one holds."""
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    calls: list[str] = []
+    real_key = state_paths.vault_state_key
+
+    def counting_key(root: Path) -> str:
+        calls.append(str(root))
+        return real_key(root)
+
+    monkeypatch.setattr(state_paths, "vault_state_key", counting_key)
+
+    with state_paths.resolution_scope():
+        state_paths.vault_state_dir(vault_root)
+        with state_paths.resolution_scope():
+            state_paths.vault_state_dir(vault_root)
+        state_paths.vault_state_dir(vault_root)
+
+    assert len(calls) == 1, calls
+
+
+def test_a_failed_resolution_is_never_memoised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal is re-decided every time it is asked for.
+
+    Memoising a raised placement refusal would let one request's first failure
+    answer for the rest of it, and the direction of that error is the unsafe
+    one: this validation is what stops machine-local state being written inside
+    the vault.
+    """
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    attempts: list[str] = []
+    real_validate = state_paths.validate_vault_state_directory
+
+    def refusing(root: Path, directory: Path) -> Path:
+        attempts.append(str(directory))
+        raise ValueError("EXOMEM_STATE_ROOT must resolve outside the vault")
+
+    monkeypatch.setattr(state_paths, "validate_vault_state_directory", refusing)
+
+    with state_paths.resolution_scope():
+        for _ in range(3):
+            with pytest.raises(ValueError):
+                state_paths.vault_state_dir(vault_root)
+
+    assert len(attempts) == 3, attempts
+    assert real_validate is not None
 
 
 # --------------------------------------------------------------------------- #
