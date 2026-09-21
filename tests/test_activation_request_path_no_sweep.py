@@ -475,6 +475,13 @@ def test_warm_activation_request_resolves_the_state_location_once(
         "the vault's state location was resolved from scratch "
         f"{len(key_calls)} times in one request: {sorted(set(key_calls))}"
     )
+    storage = str(vault / "Knowledge Base" / "Records" / "Depot Stock")
+    outside = [
+        path
+        for path in calls.enumerated
+        if path != storage and not path.startswith(storage + os.sep)
+    ]
+    assert outside == [], calls.report()
     assert calls.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, calls.report()
 
 
@@ -755,7 +762,9 @@ def test_registry_never_serves_a_partial_entry_and_keeps_bounded_generations(
     assert len(kept) == working_set_index.MANIFEST_REGISTRY_GENERATIONS
 
 
-def test_registry_served_packet_matches_the_compute_once_packet(vault: Path) -> None:
+def test_registry_served_packet_matches_the_compute_once_packet(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """T7: the warm path serves exactly the packet the cold path compiles.
 
     The first call in a process finds no published entry for the current
@@ -766,10 +775,206 @@ def test_registry_served_packet_matches_the_compute_once_packet(vault: Path) -> 
     _seed_without_collection(vault)
     _write_collection(vault)
     index = _built_index(vault)
+    # The rebuild above publishes, so without this the "cold" compile is a
+    # registry HIT and the comparison is between two hits -- a tautology, and
+    # the one path that still runs discovery on a request thread would have no
+    # coverage at all.
+    working_set_index.reset_collection_manifests_for_tests()
+
+    misses: list[int] = []
+    real_published = working_set_index.published_collection_manifests
+
+    def counting(vault_root: Path, generation: int):
+        entry = real_published(vault_root, generation)
+        if entry is None:
+            misses.append(generation)
+        return entry
+
+    monkeypatch.setattr(working_set_index, "published_collection_manifests", counting)
 
     cold = _compile(vault, index)
+    cold_misses = list(misses)
     warm = _compile(vault, index)
 
+    assert cold_misses, "the first compile was served from the registry, not computed"
+    assert misses == cold_misses, "the second compile missed too; it was not warm"
     assert cold["abstained"] is False, cold.get("abstention")
     assert cold == warm
     assert _records_state(warm)
+
+
+# --------------------------------------------------------------------------- #
+# Independent review, round 2 -- what the corrections have to hold
+# --------------------------------------------------------------------------- #
+
+
+def test_a_state_root_flipped_into_the_vault_is_refused_on_the_next_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The placement refusal must observe the filesystem, memo or no memo.
+
+    `ensure_vault_state_dir` validates AFTER the hosted creation on purpose, so
+    that check has to see the world as it is when it runs. A memoised
+    validation cannot: the reviewer flipped a symlinked state root into the
+    vault between two calls and the second was allowed inside a scope while
+    being refused outside one. Placement is what keeps machine-local state out
+    of the vault, so the refusal is re-decided every time it is asked for.
+    """
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    inside = vault_root / "state"
+    inside.mkdir()
+    link = tmp_path / "state-root"
+    link.symlink_to(elsewhere)
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(link))
+
+    with state_paths.resolution_scope():
+        state_paths.ensure_vault_state_dir(vault_root)
+        link.unlink()
+        link.symlink_to(inside)
+        with pytest.raises(ValueError):
+            state_paths.ensure_vault_state_dir(vault_root)
+
+    # And identically with no scope at all, which is the behaviour being kept.
+    link.unlink()
+    link.symlink_to(elsewhere)
+    state_paths.ensure_vault_state_dir(vault_root)
+    link.unlink()
+    link.symlink_to(inside)
+    with pytest.raises(ValueError):
+        state_paths.ensure_vault_state_dir(vault_root)
+
+
+def test_publishing_an_older_generation_never_evicts_a_newer_one(vault: Path) -> None:
+    """The registry keeps the HIGHEST generations, not the most recent writes.
+
+    Evicting by publish recency let a slow request that had captured an older
+    generation miss, sweep, republish under its own stale number and push the
+    live generations out — putting the sweep it had just paid for back on the
+    next request thread. Two stale republishes were enough to hold nothing but
+    stale entries.
+    """
+    _seed_without_collection(vault)
+    _write_collection(vault)
+    manifests = structured_collections.discover_collections(vault)
+    working_set_index.reset_collection_manifests_for_tests()
+
+    working_set_index.publish_collection_manifests(vault, 5, manifests)
+    working_set_index.publish_collection_manifests(vault, 6, manifests)
+    working_set_index.publish_collection_manifests(vault, 4, manifests)
+    working_set_index.publish_collection_manifests(vault, 3, manifests)
+
+    kept = [
+        generation
+        for generation in range(1, 8)
+        if working_set_index.published_collection_manifests(vault, generation) is not None
+    ]
+    assert kept == [5, 6], kept
+
+
+def test_a_below_highest_miss_serves_the_request_without_storing_anything(
+    vault: Path,
+) -> None:
+    """A straggler computes for itself and leaves the registry alone.
+
+    Storing its answer would evict nothing under the rule above, but it would
+    still be a write on behalf of a generation nobody is serving any more. The
+    request gets its manifests; the registry keeps holding what the index
+    published.
+    """
+    _seed_without_collection(vault)
+    _write_collection(vault)
+    manifests = structured_collections.discover_collections(vault)
+    working_set_index.reset_collection_manifests_for_tests()
+    working_set_index.publish_collection_manifests(vault, 9, manifests)
+
+    served = working_set_index.collection_manifests(vault, 4)
+
+    assert [m.path for m in served] == [m.path for m in manifests]
+    assert working_set_index.published_collection_manifests(vault, 4) is None
+    assert working_set_index.published_collection_manifests(vault, 9) is not None
+
+
+def test_two_spellings_of_one_vault_share_a_registry_entry(vault: Path) -> None:
+    """A vault is its resolved path, not the spelling a caller happened to use.
+
+    Keyed on the unresolved path, a symlinked or dotted spelling silently gets
+    its own entry: every request through it misses, sweeps, and publishes into
+    a second copy nothing else reads.
+    """
+    _seed_without_collection(vault)
+    _write_collection(vault)
+    manifests = structured_collections.discover_collections(vault)
+    working_set_index.reset_collection_manifests_for_tests()
+
+    working_set_index.publish_collection_manifests(vault, 11, manifests)
+    other_spelling = vault / ".." / vault.name
+
+    assert working_set_index.published_collection_manifests(other_spelling, 11) is not None
+
+
+def test_a_failed_discovery_does_not_erase_another_update_s_pending_set(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One update's discovery failure is its own, not the other update's.
+
+    The set an update discovered was held per vault, so a concurrent update
+    whose discovery failed cleared the slot the first one was about to publish
+    — and that generation then had no entry at all, sending every request at it
+    back to the sweep.
+    """
+    _seed_without_collection(vault)
+    _write_collection(vault)
+    working_set_index.reset_collection_manifests_for_tests()
+
+    real_discover = structured_collections.discover_collections
+    real_projects = working_set_index._project_candidates
+    failed_update_ran = threading.Event()
+    discovery_held = threading.Event()
+
+    def branching(root: Path, **kwargs: object):
+        if threading.current_thread().name == "failing-update":
+            # Fail only once the other update is holding its discovered set.
+            discovery_held.wait(timeout=30)
+            raise structured_collections.CollectionError("BOOM", "discovery failed")
+        return real_discover(root, **kwargs)
+
+    def pausing(vault_root: Path):
+        if threading.current_thread().name == "succeeding-update":
+            # Hold this update AFTER its discovery and before its publish, so
+            # the other update's failure lands squarely in between.
+            discovery_held.set()
+            failed_update_ran.wait(timeout=30)
+        return real_projects(vault_root)
+
+    monkeypatch.setattr(structured_collections, "discover_collections", branching)
+    monkeypatch.setattr(working_set_index, "_project_candidates", pausing)
+
+    reports: dict[str, dict] = {}
+
+    def succeeding() -> None:
+        reports["ok"] = working_set_index.WorkingSetIndex(vault).rebuild()
+
+    def failing() -> None:
+        try:
+            reports["failed"] = working_set_index.WorkingSetIndex(vault).rebuild()
+        finally:
+            failed_update_ran.set()
+
+    winner = threading.Thread(target=succeeding, name="succeeding-update")
+    loser = threading.Thread(target=failing, name="failing-update")
+    winner.start()
+    loser.start()
+    loser.join(timeout=60)
+    winner.join(timeout=60)
+
+    generation = reports["ok"]["generation"]
+    published = working_set_index.published_collection_manifests(vault, generation)
+
+    assert published is not None, (
+        "the update that discovered the manifests published nothing: another "
+        "update's failure cleared the set it was holding"
+    )
+    assert [manifest.path for manifest in published]
