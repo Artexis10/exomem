@@ -216,9 +216,12 @@ capped to a bounded, most-recently-updated set with a deterministic
 tie-break — as its links, so its neighbourhood is nonempty and unit roles
 can read from it exactly as they already do for any hub or resource. The
 kept member set changing moves the anchor's own source signature, so an
-incremental index update republishes it. A member page reaches a packet
-through the SAME units-lane read and the SAME unconditional release-plane
-guard as any other neighbourhood page; no new disclosure path is
+incremental index update republishes it. A member page reaches the SERVED
+packet only through the SAME units-lane read and the SAME release-plane
+guard every other neighbourhood page already crosses — unconditionally
+run, but not unconditionally admitting: a member page the current audience
+may not see contributes no unit and no pointer, exactly as any other
+withheld neighbourhood page does today; no new disclosure path is
 introduced. Planning items are surfaced for a resolved project anchor only
 if a plan candidate itself carries a project key; the shipped Planning item
 schema does not, so this remains unimplemented pending that field existing.
@@ -228,12 +231,18 @@ count: a single word the turn shares with an anchor, when that anchor's
 title is long, previously satisfied the overlap predicate on its own once
 combined with any one broad (tag/section) word — so an unnamed page sharing
 one ordinary word could take over a packet ahead of the anchor the turn
-actually named. Lexical overlap now additionally requires either two or
-more of the shared broad terms to be among the anchor's own authored
-title/alias terms, or exactly one authored term shared and that term
-independently rare by the same `rare_term` yardstick. A single common
-authored term plus broad overlap now earns no lexical evidence at all,
-never a fabricated rarity when the rarity table is unavailable.
+actually named. A first attempt required the shared word to be independently
+rare, reasoning that a word naming few anchors in the catalogue is a rare
+word; measured against production-scale state this was wrong — rarity among
+anchor NAMES is not rarity of the word itself, an ordinary English word can
+easily name three or fewer anchors in a small catalogue, and the unnamed
+page still resolved. Lexical overlap now requires two or more of the shared
+broad terms to be among the anchor's own authored title/alias terms; a
+single shared authored term, however rare `term_anchor_counts` shows it,
+can never grant lexical overlap. A single shared authored term can still
+earn the separate, weaker `rare_term` kind when it is independently rare,
+and `rare_term` still needs its own second, independently reached contact
+kind (never a mere qualifier) to resolve anything alone — unchanged.
 
 The request shares one freshness snapshot and full recall checkpoint across
 lexical evidence and role queries. Catalogue reads still prove their checkpoint,

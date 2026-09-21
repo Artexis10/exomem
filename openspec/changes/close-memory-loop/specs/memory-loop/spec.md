@@ -235,8 +235,9 @@ Activation SHALL resolve anchors, apply task-conditioned roles and bounded typed
 
 - **WHEN** a turn names a project and the project's member pages declare that
   project as their own scope
-- **THEN** the resolved project anchor's role lanes serve material from those
-  member pages, bounded and most-recently-updated first
+- **THEN** the resolved project anchor's role lanes serve material from
+  those member pages that the release plane admits for the current
+  audience, bounded and most-recently-updated first
 - **AND** a member page the current audience may not see contributes no unit
   and no pointer, through the same release-plane guard as any other
   neighbourhood page
@@ -268,11 +269,15 @@ ranked result limit. Repeated or inflected forms of one stem SHALL NOT provide
 the second match. This restriction SHALL NOT change ordinary recall.
 Categorical lexical-overlap evidence SHALL additionally require genuine name
 contact: two or more of the shared broad terms among the anchor's own
-authored title/alias terms, or exactly one authored term shared that is
-independently rare by the same yardstick rare-term evidence uses. A single
-common authored term shared with an otherwise-unrelated anchor SHALL NOT by
-itself grant lexical-overlap or rare-term evidence, and an unavailable
-rarity table SHALL NOT be read as proof of rarity.
+authored title/alias terms. A single shared authored term SHALL NOT by
+itself grant lexical-overlap evidence, however independently rare that one
+term is by the same yardstick rare-term evidence uses — rarity among the
+catalogue's anchor names is not rarity of the word, and treating the two as
+the same let an ordinary word that happens to name few anchors resolve an
+unnamed anchor. A single shared authored term MAY still grant the separate,
+weaker rare-term evidence when it is independently rare; an unavailable
+rarity table SHALL NOT be read as proof of rarity, and rare-term evidence
+alone or with only a qualifier SHALL NOT resolve an anchor.
 Independently resolved items sharing a nonempty canonical page or collection
 SHALL be treated as complementary rather than competing senses. Empty paths
 SHALL NOT establish that relationship. Disconnected same-kind groups SHALL
@@ -341,8 +346,19 @@ fast abstention or compiler-only timing.
   term is not independently rare
 - **THEN** the anchor earns no lexical-overlap or rare-term evidence from
   that overlap and does not resolve on it alone
-- **AND** two or more shared authored terms, or one shared authored term
-  that is independently rare, still grant lexical-overlap evidence as before
+- **AND** two or more shared authored terms still grant lexical-overlap
+  evidence as before
+
+#### Scenario: A single rare name word is contact, never overlap, and needs its own corroboration
+
+- **WHEN** a turn shares exactly one authored title/alias term with an
+  anchor that IS independently rare by the anchor-name-count yardstick,
+  completed to the broad-term band by a section or tag word, with only a
+  turn-cue qualifier and no independently reached contact
+- **THEN** the anchor earns rare-term evidence, never lexical-overlap, and
+  stays partial
+- **AND** the same anchor with its own page in retrieval instead resolves,
+  via rare-term evidence, never lexical-overlap
 
 #### Scenario: A collection contains complementary Planning items
 
