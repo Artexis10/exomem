@@ -1423,3 +1423,225 @@ def test_an_alias_spelling_resolves_to_every_page_bearing_it(vault: Path) -> Non
         "Knowledge Base/Notes/Patterns/withheld-dossier.md",
         "Knowledge Base/Notes/Insights/permitted-dossier.md",
     }
+
+
+# --------------------------------------------------------------------------- #
+# Round five: a unit's REF is an opaque URI, not a vault-relative path — the
+# activation-egress unit-ref defect. `_units_lane` hands `_working_set_paths`
+# the `exomem://vault/<percent-encoded path>#unit-<hash>` URI
+# `context_refs.vault_ref` builds, never a plain path. Handing that literal
+# URI text to `_decide_path` as though it already were a vault-relative path
+# always fails to stat, and the fail-closed `None` collapses onto the REAL
+# page's canonical key through `_canonical_reference` — so under ANY active
+# governance policy, even one scoped to an unrelated folder, every unit reads
+# as withheld and the whole packet abstains.
+# --------------------------------------------------------------------------- #
+
+
+def _write_page(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+_CARGO_SLED_PAGE = """---
+type: note
+status: active
+updated: 2026-09-02
+---
+
+# Cargo Sled
+
+## Summary
+
+A towed cargo sled rated for 400 kg. Attaches via the [[Tow Cable]].
+
+## Constraints
+
+Never exceed 400 kg.
+"""
+
+_TOW_CABLE_PAGE = """---
+type: note
+status: active
+updated: 2026-09-04
+---
+
+# Tow Cable
+
+## Summary
+
+A hand-cranked winch cable used to tow the cargo sled.
+
+## Constraints
+
+Rated for loads under 150 kg.
+"""
+
+
+def _prepare_end_to_end_vault(vault: Path) -> None:
+    """Build the working-set index and freshness state a real activation needs."""
+    from test_latency_gate import _seed_freshness_live
+
+    from exomem import lexstore, working_set_index, working_set_runtime
+
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).reset()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
+
+
+def _reset_governance_state(vault: Path) -> None:
+    from exomem import working_set_runtime
+    from exomem.governance import membership, policy as policy_module
+
+    policy_module._CACHE.clear()
+    membership.clear_memo()
+    egress.clear_decision_memo()
+    working_set_runtime.reset_caches_for_tests()
+
+
+def test_a_policy_scoped_elsewhere_serves_units_end_to_end(tmp_path: Path) -> None:
+    """The defect this closes: ANY active policy abstained every packet.
+
+    A policy scoped to a folder that has nothing to do with the anchored page
+    must leave that page's units served, exactly like the ungoverned baseline.
+    """
+    from test_working_set_index import _seed_structure
+
+    from exomem import commands
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _seed_structure(vault)
+    _prepare_end_to_end_vault(vault)
+
+    turn = "what are the constraints on the cargo sled"
+    with request_scope(_external()):
+        baseline = commands.op_activate_context(vault, turn=turn)
+    assert baseline["abstained"] is False
+    assert len(baseline["units"]) == 3
+
+    write_scope(vault)  # default paths="Notes/Patterns/**" -- unrelated to Products/
+    write_rule(vault, ceiling=0, audience="external")
+    _reset_governance_state(vault)
+
+    with request_scope(_external()):
+        governed = commands.op_activate_context(vault, turn=turn)
+
+    assert governed["abstained"] is False, governed.get("abstention")
+    assert [a["path"] for a in governed["anchors"]] == [
+        a["path"] for a in baseline["anchors"]
+    ]
+    assert len(governed["units"]) == 3
+    assert {u["ref"] for u in governed["units"]} == {u["ref"] for u in baseline["units"]}
+
+
+def test_a_policy_scoped_to_one_page_withholds_only_that_page_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """Both directions, with the real ref shape, in one packet.
+
+    Two linked pages resolve as two anchors from one turn. A policy scoped to
+    ONE of them must withhold that page's anchor and units while leaving the
+    other page's anchor and units served — never the whole packet, and never
+    the wrong page.
+    """
+    from exomem import commands
+
+    vault = tmp_path / "vault"
+    kb = vault / "Knowledge Base"
+    _write_page(kb / "Products" / "Cargo Sled.md", _CARGO_SLED_PAGE)
+    _write_page(kb / "Products" / "Tow Cable.md", _TOW_CABLE_PAGE)
+    _prepare_end_to_end_vault(vault)
+
+    turn = "what are the constraints on the cargo sled and the tow cable"
+    write_scope(vault, paths="Products/Cargo Sled.md")
+    write_rule(vault, ceiling=0, audience="external")
+    _reset_governance_state(vault)
+
+    with request_scope(_external()):
+        governed = commands.op_activate_context(vault, turn=turn)
+
+    assert governed["abstained"] is False, governed.get("abstention")
+    served_paths = {a["path"] for a in governed["anchors"]}
+    assert served_paths == {"Knowledge Base/Products/Tow Cable.md"}
+    assert "Knowledge Base/Products/Cargo Sled.md" not in str(governed)
+    unit_paths = {u["provenance"]["path"] for u in governed["units"]}
+    assert unit_paths == {"Knowledge Base/Products/Tow Cable.md"}
+
+
+def _unit_with_ref(ref: str) -> dict:
+    return {
+        "ref": ref,
+        "role": "resources",
+        "text": "A unit.",
+        "lifecycle": "active",
+        "updated": "2026-09-01",
+        "provenance": {"category": "constraint", "kind": "constraint"},
+    }
+
+
+def test_working_set_paths_decides_a_units_real_page_not_its_opaque_uri() -> None:
+    """Guard-level reproduction, isolated from recall/anchor resolution.
+
+    `_units_lane` never hands `_working_set_paths` a plain path for `ref` — it
+    hands the opaque `exomem://vault/<percent-encoded path>#unit-<hash>` URI
+    `context_refs.vault_ref` builds. `_working_set_paths` must resolve that URI
+    to the real path it names before anything downstream decides it.
+    """
+    from exomem import context_refs
+
+    real_path = "Knowledge Base/Products/Cargo Sled.md"
+    ref = f"{context_refs.vault_ref(real_path)}#unit-{'a' * 16}"
+    packet = {"units": [_unit_with_ref(ref)]}
+
+    paths, names = egress._working_set_paths(packet)
+
+    assert paths == {real_path}
+    assert names == set()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "percent_encoded_parent_traversal",
+        "absolute_drive_letter_path",
+        "unknown_exomem_authority",
+        "empty_path",
+        "memory_id_ref",
+    ],
+)
+def test_working_set_paths_stays_undecidable_for_an_unresolvable_reference(
+    case: str,
+) -> None:
+    """A reference that cannot be unwrapped to an in-vault path decides nothing.
+
+    Each ref is built with the same real URI shape the pipeline emits (the
+    `context_refs`/`memory_refs` helpers, never a hand-typed plain path), so
+    this proves `_working_set_paths` never makes anything decidable that was
+    not a real in-vault path — nothing here may collapse onto some OTHER
+    real page's canonical key either.
+    """
+    import uuid
+
+    from exomem import context_refs, memory_refs
+
+    fragment = f"#unit-{'a' * 16}"
+    refs = {
+        "percent_encoded_parent_traversal": (
+            context_refs.vault_ref("../../etc/passwd.md") + fragment
+        ),
+        "absolute_drive_letter_path": (
+            context_refs.vault_ref("C:/Windows/System32/config/SAM.md") + fragment
+        ),
+        "unknown_exomem_authority": f"{context_refs.SCHEME}://config/Foo.md{fragment}",
+        "empty_path": context_refs.vault_ref("") + fragment,
+        "memory_id_ref": memory_refs.memory_ref(str(uuid.uuid4())),
+    }
+    packet = {"units": [_unit_with_ref(refs[case])]}
+
+    paths, names = egress._working_set_paths(packet)
+
+    assert paths == set()
+    assert names == set()
