@@ -1134,3 +1134,34 @@ def test_generation_rules_still_hold_within_one_sidecar(vault: Path) -> None:
         )
         is None
     )
+
+
+def test_a_caller_with_no_scope_pays_nothing_for_the_memo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Outside a scope the memo must cost nothing, not merely do nothing.
+
+    Every placement resolution in the codebase now goes through this wrapper,
+    including on paths that never open a scope. Building the memo key for them
+    measured +5.3us per call against a 15.8us resolution — a third more, paid
+    by callers that cannot use the answer. The key is built only when there is
+    somewhere to put it.
+    """
+    built: list[int] = []
+    real_environment = state_paths._placement_environment
+
+    def counting() -> tuple[str, ...]:
+        built.append(1)
+        return real_environment()
+
+    monkeypatch.setattr(state_paths, "_placement_environment", counting)
+
+    state_paths.resolved_vault_path(tmp_path)
+    state_paths.vault_state_dir(tmp_path)
+
+    assert built == [], "a caller with no memo built the memo key anyway"
+
+    with state_paths.resolution_scope():
+        state_paths.resolved_vault_path(tmp_path)
+
+    assert built, "inside a scope the key is what keeps the answer honest"

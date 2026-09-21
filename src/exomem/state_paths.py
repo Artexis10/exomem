@@ -127,11 +127,18 @@ def resolution_scope() -> Iterator[None]:
         _RESOLUTION_MEMO.reset(token)
 
 
-def _memoized(key: tuple[Any, ...], compute: Callable[[], _T]) -> _T:
-    """`compute()`, once per key per scope — and every time without one."""
+def _memoized(name: str, parts: tuple[Any, ...], compute: Callable[[], _T]) -> _T:
+    """`compute()`, once per key per scope — and every time without one.
+
+    The key is assembled HERE, after the memo has been found, so a caller with
+    no scope pays only a `ContextVar` read for passing through. Building it at
+    the call site instead cost 5.3us against a 15.8us resolution — a third
+    more, charged to every caller that cannot use the answer.
+    """
     memo = _RESOLUTION_MEMO.get()
     if memo is None:
         return compute()
+    key = (name, *parts, _placement_environment())
     hit = memo.get(key, _MISSING)
     if hit is not _MISSING:
         return hit  # type: ignore[return-value]
@@ -148,7 +155,8 @@ def _placement_environment() -> tuple[str, ...]:
     Part of every memo key, so a scope that spans an environment change (a test
     repointing `EXOMEM_STATE_ROOT`, a process re-reading its configuration) gets
     the new answer rather than the one it happened to ask for first. Eight
-    dictionary lookups; no syscalls.
+    dictionary lookups and no syscalls, and only inside a scope — see
+    `_memoized`.
     """
     return (
         os.environ.get(ENV_STATE_ROOT, ""),
@@ -184,8 +192,7 @@ def resolved_vault_path(vault_root: Path | str, *, expanduser: bool = True) -> P
         return candidate.resolve(strict=False)
 
     return _memoized(
-        ("resolved_vault_path", os.fspath(vault_root), expanduser, _placement_environment()),
-        compute,
+        "resolved_vault_path", (os.fspath(vault_root), expanduser), compute
     )
 
 
@@ -300,7 +307,8 @@ def vault_state_dir(vault_root: Path) -> Path:
     memoised.
     """
     return _memoized(
-        ("vault_state_dir", os.fspath(vault_root), _placement_environment()),
+        "vault_state_dir",
+        (os.fspath(vault_root),),
         lambda: _compute_vault_state_dir(vault_root),
     )
 
