@@ -361,6 +361,45 @@ exempted from this and stays skipped exactly as before; unwrapping never
 makes anything servable that was not already a real vault path, and never
 withholds a reference that was never a page to begin with.
 
+Correction round three replaced the per-field shape reasoning above with an
+ITEM INVARIANT, after a corroboration-evidence leak the field-name-scoped
+walk above did not reach: `anchor["neighbourhood"]` is a LIST of real vault
+paths under a key that is neither a named path field, authored prose, nor a
+known reference-list field, so nothing in the walk decided it, and a
+withheld neighbour named only there kept `graph_corroboration` in a served
+anchor's evidence. `neighbourhood`/`anchor_neighbourhood` now join the
+reference-list fields the walk decides — defensively: as of this round
+neither key is actually serialized into any real compiled packet's anchor
+dict, but the guard already committed to stripping `neighbourhood` before
+publication regardless, and a silently-ungoverned field reaching a future
+anchor shape is exactly the failure mode field-name scoping risks.
+
+More generally: an item (anchor or unit) is served only when (a) no
+reference it carries is withheld or invalid, and (b) at least one
+PAGE-SHAPED reference it carries was decided and admitted. A candidate must
+first be page-shaped — a markdown suffix after fragment-stripping, an
+`exomem://vault|source/` scheme, a wikilink bracket pair, or a path
+separator — to count for either half; an opaque, hand-authored id (a legacy
+`unit-open`-style ref) names no page at all, so it is neither decided nor
+invalid and can never make an item's OTHER, genuine references insufficient.
+Before this, ANY non-empty path-bearing-field string that could not be
+resolved to a path joined `unresolvable`, which withheld the whole item —
+including a unit named by such an opaque ref but carried by a perfectly
+permitted `path`/`anchor`, under a policy that had nothing to do with it. A
+unit's `path`/`anchor` are unconditional for every lane
+(`working_set.py::_provenance`), so (b) needs no exemption there; an anchor
+whose `ref` is an explicit non-page shape (`project:<key>`, `plan:...`) is
+exempted from (b) at its own call site instead, since such an anchor
+legitimately has no page of its own (`path=""` by construction — a
+project/plan anchor's whole identity IS its synthetic id).
+
+Closing one field-name gap does not prove no other one exists. The PIN test
+compiles a real packet with the real compiler on a fixture vault, walks
+every string value anywhere in it with no field-name enumeration of its
+own, and asserts that every one naming a page that genuinely exists on disk
+was handed to the decide loop — a safety net for any future ungoverned
+field, not just this round's `neighbourhood`.
+
 The request shares one freshness snapshot and full recall checkpoint across
 lexical evidence and role queries. Catalogue reads still prove their checkpoint,
 policy and schema inside the query transaction. Unit roles query the maintained
