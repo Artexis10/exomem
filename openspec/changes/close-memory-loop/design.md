@@ -250,11 +250,35 @@ compiler's opaque `exomem://vault/<path>#unit-<hash>` identifier, never a
 vault-relative path on its own; treating that identifier as though it already
 were one always fails to stat, and the resulting fail-closed decision can
 collapse onto the real page's canonical key and withhold a page the reference
-never named. A reference that does not unwrap to a path inside the vault —
-an encoded parent-directory traversal, an absolute path, a scheme the guard
-does not recognise, an empty path, a memory-id reference — stays undecidable
-and fails closed exactly as before; unwrapping never makes anything servable
-that was not already a real vault path.
+never named.
+
+Unwrapping a scheme'd reference splits its fragment off the raw, still
+percent-encoded text FIRST, then decodes the remaining path — never the
+reverse. A real filename may itself contain a `#` or `|`, and encoding
+percent-escapes either before the pipeline appends its own unencoded
+fragment; decoding before splitting let that escaped character reappear and
+be mistaken for the delimiter, truncating the path to something shorter than
+the real page. The same positional care applies to an unencoded plain path
+compared against that decoded form: a genuine trailing marker (a
+current-state ref's `#current`, a heading anchor) always follows the
+filename's own `.md` extension, so only a `#`/`|` found after it is a
+delimiter — one found before it is part of the filename and survives.
+
+A reference that does not unwrap to a path inside the vault — an encoded
+parent-directory traversal, an absolute path, a scheme the guard does not
+recognise, an empty path — never becomes decidable, and is never handed to
+the filesystem to find out. It is also never silently dropped: dropping it
+served a page named ONLY through that one un-unwrappable reference (no
+separate path field, and hit projection never independently withheld it) —
+served, because dropping decided nothing, and nothing decided reads as
+nothing withheld. The guard withholds the ITEM that carried such a
+reference directly, by the reference's own exact text, without deriving a
+canonical key a degenerate candidate cannot produce. A reference that is
+legitimately not a page at all — a memory-id reference, the synthetic
+project-anchor identifier — is exempted from this and stays skipped exactly
+as before; unwrapping never makes anything servable that was not already a
+real vault path, and never withholds a reference that was never a page to
+begin with.
 
 The request shares one freshness snapshot and full recall checkpoint across
 lexical evidence and role queries. Catalogue reads still prove their checkpoint,
