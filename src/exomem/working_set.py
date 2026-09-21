@@ -841,7 +841,7 @@ def compile_packet(
             # caller asked about a sense that does not exist here. It abstains,
             # and `op_activate_context` turns that into the one refusal an
             # unknown and a withheld ref share.
-            resolution = working_set_resolve.resolve(chosen)
+            resolution = working_set_resolve.resolve(chosen, turn_tokens=analysis.tokens)
         else:
             candidates = working_set_resolve.candidates_for(
                 analysis,
@@ -859,7 +859,7 @@ def compile_packet(
                 candidates, retrieval_paths=retrieval_paths
             )
             candidates = working_set_resolve.apply_continuity(candidates, continuity_refs)
-            resolution = working_set_resolve.resolve(candidates)
+            resolution = working_set_resolve.resolve(candidates, turn_tokens=analysis.tokens)
 
     if resolution.status != "resolved":
         return abstained_packet(

@@ -81,7 +81,21 @@ log = logging.getLogger(__name__)
 #: at all, "i'd" and "i’d" tokenised as different words, "well-known" and
 #: "well‑known" did too) and must rebuild rather than answer from those
 #: stale rows.
-SCHEMA_VERSION = 7
+#: v8 (fix/activation-competing-senses, correction round 1) adds words to
+#: `STOPWORDS`: "let" (C1) and the closed-class function words C3 adds
+#: (before/after/into/etc. — see that commit for the full list).
+#: `derived_short_name`'s stopwords-only rejection reads `STOPWORDS`
+#: directly and runs at index-build time (`_finalize_anchor_aliases`), so a
+#: v7 sidecar's derived short names were computed against the SMALLER word
+#: list and would otherwise survive unrebuilt: a title whose leading name is
+#: now entirely closed-class words (implausible for "let" alone, more
+#: plausible once C3's larger list lands) would keep a derived alias a fresh
+#: build would refuse to derive. `term_anchor_counts` is unaffected —
+#: `_title_alias_term_owners` never filters by `STOPWORDS` — but the bump
+#: covers both commits in this round since C3 needs one for the SAME table
+#: and a schema version is an all-or-nothing per-round bump, not a per-word
+#: one.
+SCHEMA_VERSION = 8
 SIDECAR_NAME = ".working-set.sqlite"
 DISABLE_ENV = "EXOMEM_DISABLE_WORKING_SET"
 _TRUE = frozenset({"1", "true", "yes", "on"})
@@ -412,6 +426,32 @@ def fold_plural(term: str) -> str:
     return folded
 
 
+def fold_possessive(token: str) -> str:
+    """Strip a trailing possessive `'s` or a bare trailing `'` from one word
+    (fix/activation-competing-senses, R4): "gamma's" and "gamma'" both fold
+    to "gamma", so a possessive turn token can reach a plainly-named anchor
+    the same way a plural turn token already reaches a singularly-named one
+    via `fold_plural`.
+
+    Called on text already through `normalize()`, which already folds a
+    typographic apostrophe to the plain ASCII one — this function only ever
+    strips a trailing `'s`/`'`, never detects a curly quote of its own.
+
+    Mirrors `fold_plural`'s floor: never folds a token of three characters or
+    fewer, so `'s` on a one-letter token ("x's", three characters) is left
+    whole rather than stripped down to a bare, meaningless single letter.
+    The floor is on the ORIGINAL token's own length, exactly as `fold_plural`
+    checks the original term's length rather than the folded result's.
+    """
+    if len(token) <= 3:
+        return token
+    if token.endswith("'s"):
+        return token[:-2]
+    if token.endswith("'"):
+        return token[:-1]
+    return token
+
+
 #: Function words, shared with the resolver's lexical comparison
 #: (`working_set_resolve` imports this rather than keeping a second copy —
 #: doing so would let the two drift, and a derived-name validity check that
@@ -430,6 +470,27 @@ STOPWORDS: frozenset[str] = frozenset(
         "left", "like", "make", "many", "more", "most", "need", "now", "one", "only",
         "other", "over", "should", "some", "such", "than", "too", "use", "very",
         "want", "way", "well", "about",
+        # Correction round 1, C1: "let" (a hortative auxiliary in its own
+        # right, "let's" == "let us") is the one word the possessive-fold
+        # BLOCKER's own required red test ("let's ship" must not reach an
+        # anchor titled "Let") needs added here -- `fold_possessive("let's")`
+        # folds to "let", and the C1 fix only drops a fold that LANDS IN
+        # STOPWORDS, so the word itself has to be one.
+        "let",
+        # Correction round 1, C3 (REQUIRED, measured on a live-shaped vault):
+        # this list had almost no prepositions or conjunctions, so a turn
+        # sharing only ONE such function word with an anchor's title earned
+        # `rare_term` -- "... before the trip" resolving an unrelated plan
+        # whose title merely contains "before". CLOSED-CLASS English
+        # function words only (prepositions, subordinating conjunctions,
+        # modal/auxiliary verb forms, common pronouns) -- never a content
+        # word, however common.
+        "before", "after", "into", "onto", "during", "while", "between",
+        "under", "through", "without", "within", "against", "because", "if",
+        "would", "could", "been", "were", "also", "both", "each", "since",
+        "until", "upon", "per", "via", "being", "am", "he", "she", "his",
+        "her", "us", "shall", "may", "might", "must", "off", "down",
+        "across", "toward", "towards", "among", "around",
     }
 )
 

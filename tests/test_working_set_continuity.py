@@ -754,19 +754,37 @@ def test_a_listed_partial_candidate_is_not_promoted_on_the_next_turn(
 ) -> None:
     """The MAJOR the merge exposed: main's rule lists `partial` candidates in
     `anchors[]` beside resolved ones, and continuity used to be minted from
-    every one of them. On this fixture `TURN` resolves two anchors and lists
-    Depot Ledger as `partial` (`["category_match", "rare_term"]`, never a
-    contact kind strong enough alone). A second turn that reaches Depot Ledger
-    by that same weak evidence, carrying the first turn's token, must still
-    leave it `partial` -- and an anchor the first turn actually RESOLVED
-    (Cargo Sled, via `exact_alias`), reached by the second turn through only a
-    single weak contact kind that alone stays `partial`, must still gain
-    `continuity` and resolve, so the fix does not also break the feature.
+    every one of them. On this fixture `turn1` resolves two anchors and lists
+    Depot Ledger as `partial` (weak evidence, never a contact kind strong
+    enough alone). A second turn that reaches Depot Ledger by that same weak
+    evidence, carrying the first turn's token, must still leave it `partial`
+    -- and an anchor the first turn actually RESOLVED (Cargo Sled, via
+    `exact_alias`), reached by the second turn through only a single weak
+    contact kind that alone stays `partial`, must still gain `continuity` and
+    resolve, so the fix does not also break the feature.
+
+    `turn1` is `TURN` plus one extra, free-standing "depot" (fix/activation-
+    competing-senses, R2): "depot stock" is itself the Records collection
+    "Depot stock"'s own spelled-out name, so R2 correctly stops that single
+    occurrence of "depot" from separately leaking `rare_term` to Depot
+    Ledger, an unrelated page that only shares the word -- the exact shape
+    R2 exists to fix (see `test_r2_a_word_inside_a_spelled_multiword_name_
+    earns_no_rare_term_for_a_different_anchor` in test_working_set_resolve.py).
+    This fixture's own precondition is that Depot Ledger is STILL weakly
+    reachable, so it needs a second, free-standing "depot" mention outside
+    "depot stock"'s span (R2's own documented escape hatch) to keep meaning
+    what it always meant, without changing anything else this test exercises
+    (Cargo Sled's resolution, the collection's own resolution, the turn's
+    cues).
     """
     ledger_ref = "Knowledge Base/Systems/Depot Ledger.md"
     sled_ref = "Knowledge Base/Products/Cargo Sled.md"
+    turn1 = (
+        "I'm planning to tow the Cargo Sled north — how much depot stock "
+        "is left at the depot?"
+    )
 
-    first = commands.op_activate_context(activation_vault, turn=TURN)
+    first = commands.op_activate_context(activation_vault, turn=turn1)
     by_ref = {a["ref"]: a for a in first["anchors"]}
     assert by_ref[ledger_ref]["status"] == "partial", by_ref[ledger_ref]
     assert by_ref[sled_ref]["status"] == "resolved", by_ref[sled_ref]

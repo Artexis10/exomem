@@ -1188,6 +1188,33 @@ def test_fold_plural_folds_simple_and_ies_plurals() -> None:
     assert working_set_index.fold_plural("glass") == "glass"
 
 
+# --------------------------------------------------------------------------- #
+# fix/activation-competing-senses, R4: possessive fold.
+# --------------------------------------------------------------------------- #
+
+
+def test_fold_possessive_strips_a_trailing_apostrophe_s() -> None:
+    assert working_set_index.fold_possessive("gamma's") == "gamma"
+    assert working_set_index.fold_possessive("dana's") == "dana"
+
+
+def test_fold_possessive_strips_a_bare_trailing_apostrophe() -> None:
+    assert working_set_index.fold_possessive("teams'") == "teams"
+
+
+def test_fold_possessive_never_folds_a_token_of_three_characters_or_fewer() -> None:
+    # "x's" is three characters; folding it would strip it to a bare,
+    # meaningless single letter, so the floor (mirroring `fold_plural`'s)
+    # leaves it whole -- unlike a four-character possessive, which does fold.
+    assert working_set_index.fold_possessive("x's") == "x's"
+    assert working_set_index.fold_possessive("it's") == "it"
+
+
+def test_fold_possessive_is_a_no_op_on_an_ordinary_token() -> None:
+    assert working_set_index.fold_possessive("gamma") == "gamma"
+    assert working_set_index.fold_possessive("aliases") == "aliases"
+
+
 # MAJOR 5 (review round 3): `fold_plural` was broken for a majority of
 # ordinary plurals -- "notes"/"note" did not fold, nor did
 # releases/files/names/pages/changes/sources/services, "alias"/"aliases"

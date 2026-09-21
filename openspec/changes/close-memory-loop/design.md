@@ -246,6 +246,51 @@ earn the separate, weaker `rare_term` kind when it is independently rare,
 and `rare_term` still needs its own second, independently reached contact
 kind (never a mere qualifier) to resolve anything alone — unchanged.
 
+`fix/activation-competing-senses` corrected five further soundness gaps a
+real vault's own spelling and phrasing exposed, all in `working_set_resolve`.
+**R1, same-kind name subsumption**: when a turn spells a longer name in
+full ("Dana Whitfield"), a shorter same-kind anchor whose own `exact_alias`
+phrase is a strict contiguous sub-phrase of the longer one ("Dana") is a
+free rider on that mention, not a second competing sense, and is demoted to
+`partial` rather than making the turn `ambiguous` — unless it is also
+resolved on other evidence, or the turn uses it free-standing elsewhere
+("compare alpha hosted with alpha"), in which case it is left alone.
+Cross-kind pairs are untouched. **R2, consumed words earn no `rare_term`**:
+a turn term whose every occurrence lies inside the token span of a
+DIFFERENT anchor's own spelled-out multi-token name (e.g. a Records
+collection literally titled "Alpha Hosted") is consumed and cannot
+separately be the one shared name term that earns `rare_term` for an
+unrelated anchor that merely shares that word; it still counts for the
+anchor whose own alias did the covering. **R3, a named anchor carries the
+packet**: once some resolved anchor anywhere holds a deciding-alone kind
+(`exact_alias`/`agent_choice`), a same-kind competing group none of whose
+members holds one is demoted to `partial` instead of aborting the whole
+turn — a group in which any member IS a named anchor stays `ambiguous`
+exactly as before, and with no named anchor anywhere behaviour is
+unchanged. **R4, possessive fold**: a trailing `'s`/`'` is stripped from a
+turn token (never fewer than four characters) for both phrase building and
+the lexical term sets, on both the turn and the anchor side of the
+comparison, so "gamma's" reaches "Gamma" — or a title itself authored with
+a possessive, such as "Dana's Plan" — the way "gamma"/"dana" already would;
+a possessive spelled out verbatim in the turn still matches an anchor
+authored the same way. **R5, named anchors order first**: an anchor holding
+a deciding-alone kind now sorts ahead of every anchor that does not, so
+MAX_CANDIDATES/MAX_ANCHORS truncation can no longer drop the one anchor a
+turn actually named in favour of several weaker multi-kind candidates.
+
+Correction round 1's independent review found two further gaps in the same
+five rules. **C1**: the possessive fold (R4) could itself manufacture a
+false `exact_alias`/`rare_term` from an ordinary contraction of a common
+function word ("it's" → "it", "let's" → "let"); a de-possessived form that
+itself lands in `STOPWORDS` is now dropped from the phrase set and the
+folded lexical term sets (kept verbatim instead when building n-gram token
+sequences, so a position stays filled) on both the turn and the anchor
+side. **C3**: `STOPWORDS` was missing almost every preposition and
+subordinating conjunction, so a turn sharing only one such function word
+with an anchor's title (e.g. "... before the trip" against a plan titled
+"Before Launch Review") still earned `rare_term`; the missing closed-class
+English function words were added.
+
 The final guard unwraps a packet reference to its vault path before deciding
 it, rather than deciding the reference text itself. A unit's own `ref` is the
 compiler's opaque `exomem://vault/<path>#unit-<hash>` identifier, never a
