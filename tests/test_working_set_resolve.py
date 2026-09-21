@@ -1158,3 +1158,265 @@ def test_r1_identical_exact_alias_phrase_pair_stays_ambiguous() -> None:
     by_id = {a.anchor_id: a for a in resolution.anchors}
     assert by_id["one.md"].status == "resolved"
     assert by_id["two.md"].status == "resolved"
+
+
+# --------------------------------------------------------------------------- #
+# fix/activation-competing-senses, R2: consumed words earn no `rare_term`. A
+# turn term whose every occurrence lies inside a DIFFERENT anchor's own
+# spelled-out multi-token name is consumed and cannot separately leak
+# `rare_term` to a stranger that merely shares that one word.
+# --------------------------------------------------------------------------- #
+
+
+def test_r2_a_word_inside_a_spelled_multiword_name_earns_no_rare_term_for_a_different_anchor() -> None:
+    """Problem 2: turn "alpha hosted" spells project "Alpha Hosted" in full
+    (`exact_alias`, a MULTI-token phrase covering both "alpha" and "hosted").
+    An unrelated hub sharing only the single name term "hosted" must not
+    leak `rare_term` from a word the turn only ever used as part of a
+    DIFFERENT anchor's own spelled-out name.
+    """
+    named = _term_row("hosted.md", "Alpha Hosted", terms=("alpha", "hosted"))
+    stranger = _term_row("stranger.md", "Hosted Roster", terms=("hosted", "roster"))
+    analysis = resolve_module.analyze_turn("alpha hosted")
+    candidates = resolve_module.candidates_for(
+        analysis, (named, stranger), term_anchor_counts={"hosted": 2}
+    )
+
+    by_id = {c.path: c for c in candidates}
+    assert "exact_alias" in by_id["hosted.md"].evidence
+    assert "stranger.md" not in by_id
+
+
+def test_r2_the_consuming_anchor_keeps_its_own_evidence() -> None:
+    """The anchor whose OWN multi-token alias covers a term's only turn
+    position is not blocked from also earning `rare_term` for that same term
+    -- R2 only ever blocks a DIFFERENT anchor. Here "the ridge" is the
+    anchor's own alias (a leading stopword keeps it out of `shared_name`
+    while still covering "ridge"'s only position via the exact-alias phrase).
+    """
+    row = _term_row(
+        "ridge.md", "Ridge overview", terms=("ridge", "overview"), aliases=("the ridge",)
+    )
+    analysis = resolve_module.analyze_turn("the ridge is closed")
+    candidates = resolve_module.candidates_for(
+        analysis, (row,), term_anchor_counts={"ridge": 1}
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].evidence == frozenset({"exact_alias", "rare_term"})
+
+
+def test_r2_a_term_that_also_occurs_outside_the_covered_span_still_earns_rare_term() -> None:
+    """"hosted" occurs twice: once inside "Alpha Hosted"'s own spelled name
+    (covered) and once standing alone (not covered) -- not every occurrence
+    is consumed, so the stranger still earns `rare_term` for it.
+    """
+    named = _term_row("hosted.md", "Alpha Hosted", terms=("alpha", "hosted"))
+    stranger = _term_row("stranger.md", "Hosted Roster", terms=("hosted", "roster"))
+    analysis = resolve_module.analyze_turn("compare alpha hosted with the hosted setup")
+    candidates = resolve_module.candidates_for(
+        analysis, (named, stranger), term_anchor_counts={"hosted": 2}
+    )
+
+    by_id = {c.path: c for c in candidates}
+    assert "rare_term" in by_id["stranger.md"].evidence
+
+
+def test_r2_single_token_aliases_consume_nothing() -> None:
+    """A one-word exact-alias match (never multi-token) never covers any
+    position at all, so it cannot block a different anchor's `rare_term` on
+    that same word."""
+    solo = _row("solo.md", "Alpha", kind="project", terms=("alpha",))
+    other = _term_row("other.md", "Alpha Workshop", terms=("alpha", "workshop"))
+    analysis = resolve_module.analyze_turn("alpha notes")
+    candidates = resolve_module.candidates_for(
+        analysis, (solo, other), term_anchor_counts={"alpha": 2}
+    )
+
+    by_id = {c.path: c for c in candidates}
+    assert "exact_alias" in by_id["solo.md"].evidence
+    assert "rare_term" in by_id["other.md"].evidence
+
+
+# --------------------------------------------------------------------------- #
+# fix/activation-competing-senses, R3: a named anchor carries the packet. When
+# some RESOLVED anchor holds a deciding-alone kind, a competing group of same-
+# kind anchors none of which holds one is demoted to `partial` (not an
+# abstention); a competing group with such a member stays ambiguous exactly
+# as today.
+# --------------------------------------------------------------------------- #
+
+
+def test_r3_named_anchor_carries_the_packet_past_a_weak_same_kind_competition() -> None:
+    """Problem 3: "fix the flaky gate test in alpha". Project `alpha`
+    resolves on `exact_alias`. Two unrelated entities each resolve on
+    `rare_term` + `retrieval` (the word "gate"), same kind, unlinked -- their
+    own competition must not abstain the whole turn; they are demoted to
+    `partial` and the turn resolves on the named project.
+    """
+    resolution = resolve_module.resolve(
+        (
+            _facts("alpha", kind="project", evidence=("exact_alias",)),
+            _facts("d1", kind="entity", evidence=("rare_term", "retrieval")),
+            _facts("d2", kind="entity", evidence=("rare_term", "retrieval")),
+        )
+    )
+
+    assert resolution.status == "resolved"
+    by_id = {a.anchor_id: a for a in resolution.anchors}
+    assert by_id["alpha"].status == "resolved"
+    # Demoted, never vanished.
+    assert by_id["d1"].status == "partial"
+    assert by_id["d2"].status == "partial"
+    assert resolution.ambiguity == ()
+
+
+def test_r3_no_deciding_alone_anchor_anywhere_stays_ambiguous() -> None:
+    """With no named anchor anywhere, behaviour is unchanged: the agent may
+    still be asked to choose between two weak, competing senses."""
+    resolution = resolve_module.resolve(
+        (
+            _facts(
+                "north", kind="hub", evidence=("lexical_overlap", "claims_match"),
+                neighbourhood=("a",),
+            ),
+            _facts(
+                "south", kind="hub", evidence=("lexical_overlap", "claims_match"),
+                neighbourhood=("b",),
+            ),
+        )
+    )
+
+    assert resolution.status == "ambiguous"
+
+
+def test_r3_a_competing_group_with_a_named_member_stays_ambiguous() -> None:
+    """A named anchor elsewhere does not rescue a DIFFERENT competing group
+    that itself contains a named (deciding-alone) member -- that group is a
+    genuine ambiguity exactly as today (two pages the turn really did both
+    name)."""
+    resolution = resolve_module.resolve(
+        (
+            _facts("solo", kind="project", evidence=("exact_alias",)),
+            _facts("north", kind="hub", evidence=("exact_alias",), neighbourhood=("a",)),
+            _facts("south", kind="hub", evidence=("exact_alias",), neighbourhood=("b",)),
+        )
+    )
+
+    assert resolution.status == "ambiguous"
+    assert {item["ref"] for item in resolution.ambiguity} == {"north", "south"}
+    by_id = {a.anchor_id: a for a in resolution.anchors}
+    assert by_id["solo"].status == "resolved"
+
+
+# --------------------------------------------------------------------------- #
+# fix/activation-competing-senses, R4: possessive fold. A trailing `'s`/`'`
+# is stripped from a turn token for phrase building and the lexical term
+# sets, on both sides of the comparison, so "gamma's" reaches "Gamma" the
+# way "gamma" already would.
+# --------------------------------------------------------------------------- #
+
+
+def test_r4_a_possessive_turn_token_resolves_a_single_word_name_via_exact_alias() -> None:
+    """Orchestrator ruling: `candidates_for` builds `phrases = ngrams |
+    tokens`, so a single turn token IS a phrase -- a de-possessived unigram
+    must reach a plain single-word `exact_alias` exactly as a de-possessived
+    multi-word phrase reaches a spelled-out one.
+    """
+    row = _row("dana.md", "Dana", kind="entity")
+    analysis = resolve_module.analyze_turn("draft dana's email")
+    candidates = resolve_module.candidates_for(analysis, (row,))
+    resolution = resolve_module.resolve(candidates)
+
+    assert len(candidates) == 1
+    assert "exact_alias" in candidates[0].evidence
+    assert resolution.anchors[0].status == "resolved"
+
+
+def test_r4_a_possessive_turn_token_reaches_a_multiword_spelled_name_via_lexical_contact() -> None:
+    """Problem 4: "should I replace the gamma's sensor" tokenises to
+    "gamma's"; the hub named "Gamma Fleet" shares only the word "gamma" via
+    the possessive-stripped form -- the de-possessived lexical term set lets
+    it earn `rare_term`/`lexical_overlap` via ordinary name contact, where
+    before it earned neither.
+    """
+    row = _term_row("gamma.md", "Gamma Fleet", terms=("gamma", "fleet"))
+    analysis = resolve_module.analyze_turn("should i replace the gamma's sensor")
+    candidates = resolve_module.candidates_for(
+        analysis, (row,), term_anchor_counts={"gamma": 1}
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].evidence & {"rare_term", "lexical_overlap"}
+
+
+def test_r4_a_title_authored_with_a_possessive_still_matches_verbatim() -> None:
+    """A title authored WITH a possessive must still match a turn spelling
+    it out verbatim -- the de-possessived reading is ADDED, never a
+    replacement for the literal one."""
+    row = _row("plan.md", "Dana's Plan", kind="hub")
+    analysis = resolve_module.analyze_turn("what about dana's plan")
+    candidates = resolve_module.candidates_for(analysis, (row,))
+
+    assert "exact_alias" in candidates[0].evidence
+    assert "dana's plan" in candidates[0].exact_alias_phrases
+
+
+def test_r4_a_multiword_name_is_reachable_via_the_de_possessived_phrase() -> None:
+    """The de-possessived reading, not just the verbatim one: turn "the
+    dana's plan is done" names hub "Dana Plan" (no possessive in the
+    anchor's own title) via the turn's own de-possessived phrase "dana
+    plan"."""
+    row = _row("plan.md", "Dana Plan", kind="hub")
+    analysis = resolve_module.analyze_turn("the dana's plan is done")
+    candidates = resolve_module.candidates_for(analysis, (row,))
+
+    assert "exact_alias" in candidates[0].evidence
+    assert "dana plan" in candidates[0].exact_alias_phrases
+
+
+def test_r4_lexical_term_sets_are_folded_symmetrically() -> None:
+    """"decide by reading whether anchor-side name terms need the same fold
+    for symmetry" (packet): a title authored "Dana's Plan" shares the name
+    term "dana" with a turn saying plain "dana", on the ANCHOR side of the
+    lexical comparison, not just the turn side.
+    """
+    row = _term_row(
+        "plan2.md", "Dana's Plan", terms=("dana's", "plan")
+    )
+    analysis = resolve_module.analyze_turn("what happened with dana today")
+    candidates = resolve_module.candidates_for(
+        analysis, (row,), term_anchor_counts={"dana": 1}
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].evidence & {"rare_term", "lexical_overlap"}
+
+
+# --------------------------------------------------------------------------- #
+# fix/activation-competing-senses, R5: named anchors order first. An anchor
+# holding a deciding-alone kind must survive MAX_ANCHORS truncation ahead of
+# weaker multi-kind candidates.
+# --------------------------------------------------------------------------- #
+
+
+def test_r5_a_named_anchor_survives_max_anchors_truncation_ahead_of_weak_candidates() -> None:
+    """Red test (packet): more than `MAX_ANCHORS` weak two-kind candidates
+    plus one `exact_alias`-only anchor. Without R5's ordering, the weak
+    candidates (two deciding kinds each) sort ahead of the named one (one
+    kind) by the existing `-len(deciding_kinds)` key alone, and MAX_ANCHORS
+    truncation can drop the one anchor the turn actually named.
+    """
+    weak = tuple(
+        _facts(f"weak{i}", kind="hub", evidence=("lexical_overlap", "claims_match"))
+        for i in range(resolve_module.MAX_ANCHORS + 1)
+    )
+    named = _facts("named", kind="project", evidence=("exact_alias",))
+
+    resolution = resolve_module.resolve((*weak, named))
+
+    assert len(resolution.anchors) == resolve_module.MAX_ANCHORS
+    by_id = {a.anchor_id: a for a in resolution.anchors}
+    assert "named" in by_id
+    assert by_id["named"].status == "resolved"
+    assert resolution.status == "resolved"

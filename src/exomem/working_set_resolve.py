@@ -24,6 +24,7 @@ from .working_set_index import (
     RARE_TERM_MAX_ANCHORS,
     STOPWORDS,
     fold_plural,
+    fold_possessive,
     normalize,
     tokens_of,
 )
@@ -269,14 +270,22 @@ def analyze_turn(turn: str) -> TurnAnalysis:
     # anchors that share a word can only ever reach the first of them. Callers
     # that want a term set take one from these tokens themselves.
     tokens = tokens_of(text)
+    # R4 (fix/activation-competing-senses): n-grams of the DE-POSSESSIVED
+    # token sequence, IN ADDITION to the verbatim ones -- "should I replace
+    # the gamma's sensor" must be able to reach a spelled-out "Gamma
+    # Fleet" through the phrase "gamma fleet" it would never form verbatim,
+    # while "Dana's Plan", authored with a possessive, must still match a
+    # turn spelling it out the same way (the verbatim pass, unchanged).
+    folded_tokens = tuple(fold_possessive(token) for token in tokens)
     ngrams: list[str] = []
     seen: set[str] = set()
-    for size in range(2, MAX_NGRAM + 1):
-        for start in range(0, max(0, len(tokens) - size + 1)):
-            phrase = " ".join(tokens[start : start + size])
-            if phrase not in seen:
-                seen.add(phrase)
-                ngrams.append(phrase)
+    for token_sequence in (tokens, folded_tokens):
+        for size in range(2, MAX_NGRAM + 1):
+            for start in range(0, max(0, len(token_sequence) - size + 1)):
+                phrase = " ".join(token_sequence[start : start + size])
+                if phrase not in seen:
+                    seen.add(phrase)
+                    ngrams.append(phrase)
     cues = tuple(
         name
         for name, patterns in CUE_PATTERNS.items()
@@ -312,18 +321,70 @@ def candidates_for(
     config = config or DEFAULT_RANKING
     term_counts = term_anchor_counts or {}
     turn_terms = frozenset(analysis.tokens) - _STOPWORDS
-    turn_terms_folded = frozenset(fold_plural(term) for term in turn_terms)
-    phrases = frozenset(analysis.ngrams) | frozenset(analysis.tokens)
+    # R4 (fix/activation-competing-senses): possessive fold, applied on the
+    # TURN side of the lexical comparison -- "gamma's" must contribute the
+    # term "gamma" the same way a plural turn token already folds to its
+    # singular. `fold_possessive` before `fold_plural`: strip the
+    # grammatical possessive marker first, then normalise number.
+    turn_terms_folded = frozenset(fold_plural(fold_possessive(term)) for term in turn_terms)
+    # A single turn TOKEN is a phrase too (`phrases` also feeds unigram
+    # `exact_alias` matches), so its de-possessived spelling joins the
+    # phrase set alongside the verbatim one -- "dana's" must reach a plain
+    # single-word `exact_alias` on "Dana" exactly as "dana" already would.
+    # `analysis.ngrams` already carries the de-possessived MULTI-token
+    # phrases (`analyze_turn`); this adds the one-token case `analyze_turn`
+    # never builds n-grams for.
+    phrases = (
+        frozenset(analysis.ngrams)
+        | frozenset(analysis.tokens)
+        | frozenset(fold_possessive(token) for token in analysis.tokens)
+    )
     cue_categories = analysis.cue_categories
     claims_winner = _claims_winner(analysis, routing_targets)
     bands = _vector_bands(rows, vectors, query_vector, config) if query_vector is not None else {}
     min_terms = max(1, int(config.working_set_lexical_min_terms))
 
+    # R2 (fix/activation-competing-senses), pass 1 of 2: each row's own
+    # matched `exact_alias` phrases, and the turn TOKEN POSITIONS any
+    # MULTI-token (two or more tokens) one covers. A single-token phrase
+    # covers nothing: "consumption" is a property of a SPELLED-OUT name, not
+    # of one shared word standing alone
+    # (`test_r2_single_token_aliases_consume_nothing`). Linear in
+    # rows x phrases, no index read: positions come from the turn's own
+    # tokens, already in hand.
+    row_exact_phrases: dict[str, frozenset[str]] = {}
+    own_covered: dict[str, frozenset[int]] = {}
+    covered_positions: set[int] = set()
+    for row in rows:
+        names = {normalize(row.title), *row.aliases} - {""}
+        matched = names & phrases
+        row_exact_phrases[row.anchor_id] = frozenset(matched)
+        positions: set[int] = set()
+        for phrase in matched:
+            phrase_tokens = phrase.split(" ")
+            if len(phrase_tokens) < 2:
+                continue
+            for start, end in _phrase_spans(analysis.tokens, phrase_tokens):
+                positions.update(range(start, end))
+        own_covered[row.anchor_id] = frozenset(positions)
+        covered_positions.update(positions)
+
+    # Position of every non-stopword turn token, by its FOLDED form — used
+    # only by the consumption check below, the SAME comparison key
+    # `only_shared_name_term` already uses (fold_possessive then fold_plural,
+    # matching `turn_terms_folded`'s own construction above).
+    term_positions: dict[str, list[int]] = {}
+    for index, token in enumerate(analysis.tokens):
+        if token in _STOPWORDS:
+            continue
+        term_positions.setdefault(fold_plural(fold_possessive(token)), []).append(index)
+
+    # Pass 2 of 2: the ordinary per-row evidence assembly, reusing pass 1's
+    # own matched phrases rather than recomputing them.
     out: list[CandidateFacts] = []
     for row in rows:
         evidence: set[str] = set()
-        names = {normalize(row.title), *row.aliases} - {""}
-        matched_phrases = names & phrases
+        matched_phrases = row_exact_phrases[row.anchor_id]
         if matched_phrases:
             evidence.add("exact_alias")
         # `lexical_overlap` and `rare_term` are mutually exclusive on one
@@ -356,9 +417,14 @@ def candidates_for(
         # `rare_term` below, and `_status_for`'s own third clause already
         # requires a second, independently reached CONTACT kind (never a
         # mere qualifier) before `rare_term` resolves anything alone.
-        row_terms_folded = frozenset(fold_plural(term) for term in row.terms)
+        # R4 (fix/activation-competing-senses): the SAME possessive fold on
+        # the ANCHOR side too, for symmetry with the turn side above -- a
+        # title authored "Dana's Plan" shares the name term "dana" with a
+        # turn saying plain "dana", not just the other way around.
+        row_terms_folded = frozenset(fold_plural(fold_possessive(term)) for term in row.terms)
         name_terms_folded = frozenset(
-            fold_plural(term) for term in tokens_of(" ".join((row.title, *row.aliases)))
+            fold_plural(fold_possessive(term))
+            for term in tokens_of(" ".join((row.title, *row.aliases)))
         )
         shared_broad = turn_terms_folded & row_terms_folded
         shared_name = turn_terms_folded & name_terms_folded
@@ -368,7 +434,23 @@ def candidates_for(
             (only_shared_name_term,) = shared_name
             count = term_counts.get(only_shared_name_term)
             if count is not None and count <= RARE_TERM_MAX_ANCHORS:
-                evidence.add("rare_term")
+                # R2: a turn term all of whose occurrences lie inside the
+                # token span of a DIFFERENT anchor's own spelled-out
+                # multi-token name is consumed and cannot be the single
+                # shared name term that earns `rare_term` here — the turn
+                # never used the word as a lead to THIS anchor, only as
+                # part of spelling out the other one's. Still counts for the
+                # anchor whose own alias did the covering (`position not in
+                # own_covered[row.anchor_id]` below is false for that row,
+                # so `consumed` is false and `rare_term` is granted).
+                positions = term_positions.get(only_shared_name_term, ())
+                consumed = bool(positions) and all(
+                    position in covered_positions
+                    and position not in own_covered[row.anchor_id]
+                    for position in positions
+                )
+                if not consumed:
+                    evidence.add("rare_term")
         if bands.get(row.anchor_id):
             evidence.add("vector_band")
         if claims_winner is not None and claims_winner == row.path:
@@ -400,7 +482,7 @@ def candidates_for(
                 neighbourhood=row.neighbourhood,
                 anchor_neighbourhood=row.anchor_neighbourhood,
                 evidence=frozenset(evidence),
-                exact_alias_phrases=frozenset(matched_phrases),
+                exact_alias_phrases=matched_phrases,
             )
         )
     out.sort(key=_candidate_order)
@@ -582,12 +664,21 @@ def override_candidates(rows: Sequence[AnchorFacts], ref: str) -> tuple[Candidat
 
 
 def _candidate_order(candidate: CandidateFacts) -> tuple:
-    """Deterministic order: deciding kinds, then the usage tie-break, then id.
+    """Deterministic order: named anchors first, then deciding kinds, then
+    the usage tie-break, then id.
 
-    `usage_prior` appears here and ONLY here — it orders otherwise-equal
+    R5 (fix/activation-competing-senses): an anchor holding a deciding-alone
+    kind (`exact_alias`/`agent_choice` — the turn spelled its own name, or
+    the agent IS the decider) sorts before every anchor that does not, ahead
+    of the existing keys. Without this, `-len(deciding_kinds)` alone could
+    sort several weak two-kind candidates ahead of the one anchor the turn
+    actually named, and `candidates_for`'s MAX_CANDIDATES / `resolve`'s
+    MAX_ANCHORS truncation — both keyed by this SAME function — could drop
+    it. `usage_prior` appears here and ONLY here — it orders otherwise-equal
     candidates and never changes a status.
     """
     return (
+        0 if candidate.deciding_kinds & DECIDING_ALONE_KINDS else 1,
         -len(candidate.deciding_kinds),
         0 if "exact_alias" in candidate.evidence else 1,
         0 if "usage_prior" in candidate.evidence else 1,
@@ -637,7 +728,11 @@ def _status_for(candidate: CandidateFacts) -> str:
 
 
 def _phrase_spans(tokens: Sequence[str], phrase_tokens: Sequence[str]) -> list[tuple[int, int]]:
-    """Every contiguous span in `tokens` whose slice equals `phrase_tokens`.
+    """Every contiguous span in `tokens` whose slice equals `phrase_tokens`,
+    verbatim OR after `fold_possessive` (fix/activation-competing-senses,
+    R4): the de-possessived and verbatim spellings of one turn token occupy
+    the SAME position, so a phrase built from either reading still finds the
+    turn's own "gamma's" when it goes looking for "gamma".
 
     A plain sliding-window scan, bounded by the turn's own length — never an
     index read. Shared by R1 (a phrase's occurrences in the raw turn) and R2
@@ -646,11 +741,14 @@ def _phrase_spans(tokens: Sequence[str], phrase_tokens: Sequence[str]) -> list[t
     width = len(phrase_tokens)
     if width == 0 or width > len(tokens):
         return []
-    return [
-        (start, start + width)
-        for start in range(len(tokens) - width + 1)
-        if tuple(tokens[start : start + width]) == tuple(phrase_tokens)
-    ]
+    phrase = tuple(phrase_tokens)
+    folded_phrase = tuple(fold_possessive(token) for token in phrase)
+    spans = []
+    for start in range(len(tokens) - width + 1):
+        window = tuple(tokens[start : start + width])
+        if window == phrase or tuple(fold_possessive(token) for token in window) == folded_phrase:
+            spans.append((start, start + width))
+    return spans
 
 
 def _is_strict_subphrase(short: str, long: str) -> bool:
@@ -788,16 +886,47 @@ def resolve(
     anchors = anchors[:MAX_ANCHORS]
     anchors = _demote_subsumed_same_kind_aliases(anchors, turn_tokens)
     resolved = [anchor for anchor in anchors if anchor.status == "resolved"]
-    ambiguity = _ambiguity(resolved)
+    groups = _competing_groups(resolved)
+    # R3 (fix/activation-competing-senses): a named anchor carries the
+    # packet. Gated on whether SOME resolved anchor anywhere holds a
+    # deciding-alone kind (`exact_alias`/`agent_choice`) — with none
+    # anywhere, behaviour is unchanged (the agent may still be asked to
+    # choose between two weak senses, exactly as today).
+    has_named_anchor = any(DECIDING_ALONE_KINDS & set(anchor.evidence) for anchor in resolved)
+    ambiguity: list[dict[str, Any]] = []
+    demoted_refs: set[str] = set()
+    for kind, group in groups:
+        group_has_named = any(DECIDING_ALONE_KINDS & set(member.evidence) for member in group)
+        if group_has_named or not has_named_anchor:
+            # A real competing sense (a group the turn itself named two
+            # members of), or -- with no named anchor anywhere to carry the
+            # packet instead -- today's unchanged behaviour.
+            ambiguity.extend(_ambiguity_dicts(kind, group))
+        else:
+            # None of this group's members is a named anchor, and a named
+            # anchor exists elsewhere to carry the packet: demote the whole
+            # weak, unlinked group to `partial` rather than aborting the
+            # turn on a competition the named anchor makes irrelevant.
+            demoted_refs.update(anchor_ref(member) for member in group)
+    if demoted_refs:
+        anchors = tuple(
+            replace(anchor, status="partial")
+            if anchor.status == "resolved" and anchor_ref(anchor) in demoted_refs
+            else anchor
+            for anchor in anchors
+        )
+        resolved = [anchor for anchor in anchors if anchor.status == "resolved"]
     if ambiguity:
-        return Resolution(status="ambiguous", anchors=tuple(anchors), ambiguity=ambiguity)
+        return Resolution(status="ambiguous", anchors=tuple(anchors), ambiguity=tuple(ambiguity))
     if resolved:
         return Resolution(status="resolved", anchors=tuple(anchors))
     return Resolution(status="unresolved", anchors=tuple(anchors))
 
 
-def _ambiguity(resolved: Sequence[ResolvedAnchor]) -> tuple[dict[str, Any], ...]:
-    """Disconnected groups of resolved anchors of ONE kind compete.
+def _competing_groups(
+    resolved: Sequence[ResolvedAnchor],
+) -> tuple[tuple[str, tuple[ResolvedAnchor, ...]], ...]:
+    """Disconnected groups of resolved anchors of ONE kind that compete.
 
     Restricted to a single anchor kind deliberately. A person and a product
     resolved by the same turn are complementary — that is the whole point of a
@@ -829,9 +958,13 @@ def _ambiguity(resolved: Sequence[ResolvedAnchor]) -> tuple[dict[str, Any], ...]
     trivially disjoint and are reported as competing, which is the right outcome
     for two keys with no structure to judge them by.
 
-    The reported `neighbourhood_size` stays the FULL one: the brain is being told
-    how large each neighbourhood is, not how the rule was evaluated.
+    Examines EVERY kind (fix/activation-competing-senses, R3): the original
+    returned on the FIRST kind it found a disconnected group in, so a
+    demotable weak group of one kind could hide a real ambiguity of another
+    kind the loop never reached, and vice versa. `resolve` decides, per
+    returned group, whether it is real ambiguity or an R3 demotion.
     """
+    groups: list[tuple[str, tuple[ResolvedAnchor, ...]]] = []
     for kind in sorted({anchor.kind for anchor in resolved}):
         group = [anchor for anchor in resolved if anchor.kind == kind]
         if len(group) < 2:
@@ -853,23 +986,32 @@ def _ambiguity(resolved: Sequence[ResolvedAnchor]) -> tuple[dict[str, Any], ...]
                     reached.add(index)
                     pending.append(index)
         if len(reached) != len(group):
-            # A canonical path is one agent choice even when several Planning
-            # items inhabit it. Preserve each item's title in that choice.
-            choices: dict[str, list[ResolvedAnchor]] = {}
-            for anchor in group:
-                choices.setdefault(anchor_ref(anchor), []).append(anchor)
-            return tuple(
-                {
-                    "ref": ref,
-                    "title": "; ".join(dict.fromkeys(item.title for item in members)),
-                    "kind": kind,
-                    "neighbourhood_size": len(
-                        frozenset().union(*(item.neighbourhood for item in members))
-                    ),
-                }
-                for ref, members in choices.items()
-            )
-    return ()
+            groups.append((kind, tuple(group)))
+    return tuple(groups)
+
+
+def _ambiguity_dicts(kind: str, group: Sequence[ResolvedAnchor]) -> tuple[dict[str, Any], ...]:
+    """One competing group's own `ambiguity` block entries.
+
+    A canonical path is one agent choice even when several Planning items
+    inhabit it. Preserve each item's title in that choice. The reported
+    `neighbourhood_size` stays the FULL one: the brain is being told how
+    large each neighbourhood is, not how the rule was evaluated.
+    """
+    choices: dict[str, list[ResolvedAnchor]] = {}
+    for anchor in group:
+        choices.setdefault(anchor_ref(anchor), []).append(anchor)
+    return tuple(
+        {
+            "ref": ref,
+            "title": "; ".join(dict.fromkeys(item.title for item in members)),
+            "kind": kind,
+            "neighbourhood_size": len(
+                frozenset().union(*(item.neighbourhood for item in members))
+            ),
+        }
+        for ref, members in choices.items()
+    )
 
 
 def facts_from_rows(rows: Iterable[Any]) -> tuple[AnchorFacts, ...]:

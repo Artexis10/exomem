@@ -294,3 +294,94 @@ def test_a_graph_hop_only_hit_does_not_grant_the_linked_hub_retrieval(
     by_path = {a.get("path"): a for a in packet.get("anchors", ()) or ()}
     hub = by_path.get("Knowledge Base/Notes/Insights/major4-hub.md")
     assert hub is None or "retrieval" not in (hub.get("evidence") or ()), hub
+
+
+# --------------------------------------------------------------------------- #
+# fix/activation-competing-senses, R3, end to end
+# --------------------------------------------------------------------------- #
+
+
+def test_r3_a_named_project_carries_the_packet_past_two_weak_unrelated_entities(
+    tmp_path: Path,
+) -> None:
+    """Problem 3, end to end through the real resolver + index +
+    `working_set.compile_packet` -- the same deterministic pattern
+    `test_a_tag_every_hub_carries_is_not_a_name_for_the_others` above uses
+    (a hand-fed `retrieval_paths` set rather than the real bm25/find
+    pipeline, so the two "unrelated weak entities" shape stays deterministic
+    instead of depending on live ranking).
+
+    Turn "fix the flaky gate test in alpha" names project `alpha` by
+    `exact_alias`. Two unrelated entity pages, "North Gate" and "South
+    Gate", each resolve only on `rare_term` + `retrieval` (the single shared
+    word "gate") -- same kind, no structural link between them. Before R3
+    this same-kind weak competition made the whole turn `ambiguous` and
+    withheld the named project's own material; after R3 the two weak
+    entities are demoted to `partial` and the turn resolves on the project.
+
+    The units LANE itself needs the maintained semantic-recall catalog,
+    which a raw `tmp_path` vault (no `vault`/`activation_vault` fixture) is
+    never warm for -- the same reason `test_a_partial_anchor_besides_a_
+    resolved_one_contributes_nothing_to_units` above only ever proves
+    non-leakage over `packet["units"]`, vacuously true when it is empty,
+    rather than proving it non-empty. That catalog-warming behaviour is
+    unrelated to R3 (it is a units-LANE readiness concern, not an anchor-
+    resolution one), so this test follows the same established precedent:
+    it proves the RESOLUTION verdict R3 changes (resolved, not ambiguous,
+    the weak pair demoted) and non-leakage, not that the lane itself is
+    warm here.
+    """
+    from test_working_set_index import _write
+
+    from exomem import working_set, working_set_index
+
+    vault = tmp_path / "vault"
+    _write(
+        vault / "Knowledge Base" / "_Schema" / "project-keys.yaml",
+        """projects:
+  alpha:
+    folder: Alpha
+    category: engineering
+""",
+    )
+    _write(
+        vault / "Knowledge Base" / "Notes" / "Engineering" / "alpha-notes.md",
+        "---\ntitle: Alpha notes\nproject: alpha\nstatus: active\nupdated: 2026-09-01\n---\n\n"
+        "# Alpha notes\n\n## Decision\n\nThe alpha gate test suite runs nightly.\n",
+    )
+    north_gate = "Knowledge Base/Entities/People/North Gate.md"
+    south_gate = "Knowledge Base/Entities/People/South Gate.md"
+    _write(
+        vault / north_gate,
+        "---\ntitle: North Gate\ntype: entity\nstatus: active\nupdated: 2026-09-01\n---\n\n"
+        "# North Gate\n\n## Summary\n\nRuns a review gate for a different, unrelated team.\n",
+    )
+    _write(
+        vault / south_gate,
+        "---\ntitle: South Gate\ntype: entity\nstatus: active\nupdated: 2026-09-01\n---\n\n"
+        "# South Gate\n\n## Summary\n\nRuns a review gate for yet another unrelated team.\n",
+    )
+
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild()
+    packet = working_set.compile_packet(
+        vault,
+        turn="fix the flaky gate test in alpha",
+        retrieval_paths=frozenset({north_gate, south_gate}),
+        index=index,
+    )
+
+    assert packet["abstained"] is False, packet
+    by_path = {a["path"]: a for a in packet["anchors"]}
+    project_anchor = next(a for a in packet["anchors"] if a["kind"] == "project")
+    assert project_anchor["status"] == "resolved", project_anchor
+    north = by_path.get(north_gate)
+    south = by_path.get(south_gate)
+    assert north is None or north["status"] == "partial", north
+    assert south is None or south["status"] == "partial", south
+    assert packet["ambiguity"] == []
+    # The two weak, demoted entities supply no material of their own.
+    assert all(unit.get("provenance", {}).get("path") != north_gate for unit in packet["units"])
+    assert all(unit.get("provenance", {}).get("path") != south_gate for unit in packet["units"])
+    assert all(pointer.get("ref") != north_gate for pointer in packet["pointers"])
+    assert all(pointer.get("ref") != south_gate for pointer in packet["pointers"])

@@ -412,6 +412,32 @@ def fold_plural(term: str) -> str:
     return folded
 
 
+def fold_possessive(token: str) -> str:
+    """Strip a trailing possessive `'s` or a bare trailing `'` from one word
+    (fix/activation-competing-senses, R4): "gamma's" and "gamma'" both fold
+    to "gamma", so a possessive turn token can reach a plainly-named anchor
+    the same way a plural turn token already reaches a singularly-named one
+    via `fold_plural`.
+
+    Called on text already through `normalize()`, which already folds a
+    typographic apostrophe to the plain ASCII one — this function only ever
+    strips a trailing `'s`/`'`, never detects a curly quote of its own.
+
+    Mirrors `fold_plural`'s floor: never folds a token of three characters or
+    fewer, so `'s` on a one-letter token ("x's", three characters) is left
+    whole rather than stripped down to a bare, meaningless single letter.
+    The floor is on the ORIGINAL token's own length, exactly as `fold_plural`
+    checks the original term's length rather than the folded result's.
+    """
+    if len(token) <= 3:
+        return token
+    if token.endswith("'s"):
+        return token[:-2]
+    if token.endswith("'"):
+        return token[:-1]
+    return token
+
+
 #: Function words, shared with the resolver's lexical comparison
 #: (`working_set_resolve` imports this rather than keeping a second copy —
 #: doing so would let the two drift, and a derived-name validity check that
