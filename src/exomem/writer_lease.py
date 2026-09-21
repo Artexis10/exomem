@@ -324,6 +324,17 @@ _ACTIVE_POST_TERMINAL_FANOUT: ContextVar[list[Any] | None] = ContextVar(
 )
 
 
+def _crash_point(point: str) -> None:
+    """Crash-injection seam around the outer terminal boundary.
+
+    The canonical mutation is durable well before its terminal row is, and
+    only a fresh process can show what a same-key retry sees in that window.
+    A no-op in production, like `schema_v4._crash_point`.
+    """
+
+    del point
+
+
 def defer_until_terminal_persisted(work: Callable[[], list[object]]) -> bool:
     """Queue `work` to run after this mutation's terminal is persisted.
 
@@ -3311,6 +3322,9 @@ class IdempotencyStore:
             # nothing and must not be stamped pending forever.
             if acknowledgement_expected is not None and acknowledgement_expected():
                 terminal_result = _awaiting_derived_acknowledgement(terminal_result)
+            # The canonical mutation is committed and acknowledged; the outer
+            # terminal that lets a same-key retry replay it is not written yet.
+            _crash_point("before-outer-terminal-persistence")
             try:
                 terminal_result = self._persist_completed_from_canonical(
                     key, digest, terminal_result
