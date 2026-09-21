@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -11,7 +12,10 @@ import httpx
 import uvicorn
 
 from .activation_ack_api import ActivationAckService, create_activation_ack_app
-from .activation_ack_startup import preflight_activation_ack_listener
+from .activation_ack_startup import (
+    preflight_activation_ack_listener,
+    watch_activation_ack_certificate,
+)
 from .adapters import (
     HelmCliAdapter,
     KubernetesCellAdapter,
@@ -406,9 +410,25 @@ async def _run_worker() -> None:
                 )
 
                 async def serve_activation_ack() -> None:
+                    # The startup preflight above fires once. uvicorn resolves
+                    # the certificate once too, and this Deployment has no
+                    # probes, so without a recurring check a worker that
+                    # started with hours left would serve an expired
+                    # certificate indefinitely. The watcher never refuses; it
+                    # is cancelled with the listener it observes.
+                    watch = asyncio.create_task(
+                        watch_activation_ack_certificate(
+                            binding=selected.activationAcknowledgement,
+                            certificate_path=provider.activation_ack_tls_cert_path,
+                            read_trust_bundle=components.cell.read_activation_ack_trust_bundle,
+                        )
+                    )
                     try:
                         await ack_server.serve()
                     finally:
+                        watch.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await watch
                         await ack_app.state.activation_ack_drain()
 
                 await run_worker_with_activation_ack(polling_loop(), serve_activation_ack())

@@ -24,14 +24,25 @@ The rotation floor is deliberately *not* fatal. Refusing to serve because a
 valid certificate has nine days left would cause that outage now to prevent a
 handshake failure in nine days -- the wrong-firing cost far exceeds what it
 prevents. It is logged instead, loudly, every time the worker starts.
+
+"Every time the worker starts" is not often enough on its own. uvicorn
+resolves the certificate once, this Deployment carries no probes, and a worker
+that started with hours left would serve an expired certificate indefinitely
+while the one warning it emitted scrolled away. `watch_activation_ack_certificate`
+re-runs this check for as long as the listener serves, so the warning is a
+recurring signal rather than a startup artifact. It never refuses: a periodic
+check that could stop the worker would reintroduce exactly the cost the floor
+declines to pay.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Final
 
 from .activation_ack_configuration import (
     MAX_ACTIVATION_ACK_CERTIFICATE_BYTES,
@@ -141,3 +152,62 @@ async def preflight_activation_ack_listener(
             },
         )
     return report
+
+
+#: How often the serving listener re-reads its own certificate. The renewal
+#: that matters is measured in days, so an hour is frequent enough to alert on
+#: and cheap enough to ignore: one file read and one ConfigMap read.
+ACTIVATION_ACK_CERTIFICATE_RECHECK_SECONDS: Final = 3_600.0
+
+
+async def watch_activation_ack_certificate(
+    *,
+    binding: ActivationAcknowledgementBinding | None,
+    certificate_path: str,
+    read_trust_bundle: Callable[[dict[str, str]], Awaitable[str]],
+    minimum_remaining: timedelta = MIN_ACTIVATION_ACK_CERTIFICATE_REMAINING,
+    interval_seconds: float = ACTIVATION_ACK_CERTIFICATE_RECHECK_SECONDS,
+) -> None:
+    """Keep re-running the startup preflight while the listener serves.
+
+    Never raises for a certificate problem. The startup preflight refuses a
+    certificate the cells could not verify because nothing is serving yet and
+    the operator is the one who pays. Once the worker is up that trade reverses:
+    stopping it mid-flight would take every cell lifecycle operation down to
+    report a certificate that is still working. So this observes and logs.
+
+    Cancellation propagates, which is how the caller stops it.
+    """
+
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await preflight_activation_ack_listener(
+                binding=binding,
+                certificate_path=certificate_path,
+                read_trust_bundle=read_trust_bundle,
+                minimum_remaining=minimum_remaining,
+            )
+        except asyncio.CancelledError:
+            raise
+        except ActivationAckStartupRefusal:
+            # The certificate the listener is serving would now be refused at
+            # startup. It may still be completing handshakes -- an expired
+            # trust anchor breaks verification at the cells, not here -- so
+            # this is the only place the fleet-wide failure is visible before
+            # the cells go quiet.
+            _LOG.warning(
+                "",
+                extra={
+                    "event": "activation-ack-certificate-unusable",
+                    "state": "serving-certificate-would-be-refused",
+                },
+            )
+        except Exception:  # noqa: BLE001 - an observer must not stop observing
+            _LOG.warning(
+                "",
+                extra={
+                    "event": "activation-ack-certificate-uncheckable",
+                    "state": "recheck-failed",
+                },
+            )

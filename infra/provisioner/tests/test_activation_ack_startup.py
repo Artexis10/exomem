@@ -12,6 +12,7 @@ capable cell now to prevent something days away.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import hashlib
 import importlib.util
@@ -30,6 +31,7 @@ from exomem_provisioner.activation_ack_configuration import (
 from exomem_provisioner.activation_ack_startup import (
     ActivationAckStartupRefusal,
     preflight_activation_ack_listener,
+    watch_activation_ack_certificate,
 )
 from exomem_provisioner.config import ActivationAcknowledgementBinding
 
@@ -391,3 +393,62 @@ async def test_an_expiring_authority_raises_the_rotation_warning_a_healthy_leaf_
         if getattr(record, "event", None) == "activation-ack-certificate-rotation-due"
     ]
     assert [record.state for record in due] == ["1d-remaining"]
+
+
+async def test_the_serving_watcher_keeps_warning_and_never_stops_the_worker(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The recurring half of the rotation warning.
+
+    A worker that starts with hours left warns once and then serves an expired
+    certificate indefinitely: uvicorn resolves it once and this Deployment has
+    no probes. The watcher re-runs the same preflight for as long as the
+    listener serves.
+
+    It must never raise. Stopping the worker to report a certificate that is
+    still completing handshakes is the cost the startup floor already declined
+    to pay, and the watcher is the wrong place to start paying it.
+    """
+
+    now = dt.datetime.now(dt.UTC).replace(microsecond=0)
+    binding, trust_pem, certificate_path = _material(tmp_path, issued_at=now)
+
+    async def unusable(_binding: dict[str, str]) -> str:
+        raise RuntimeError("activation acknowledgement trust bundle is unavailable")
+
+    with caplog.at_level(logging.WARNING, logger="exomem_provisioner.activation_ack_startup"):
+        watch = asyncio.create_task(
+            watch_activation_ack_certificate(
+                binding=binding,
+                certificate_path=str(certificate_path),
+                read_trust_bundle=unusable,
+                interval_seconds=0,
+            )
+        )
+        for _ in range(50):
+            await asyncio.sleep(0)
+        assert not watch.done()  # a refused certificate does not end the watch
+        watch.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await watch
+
+    events = {getattr(record, "event", None) for record in caplog.records}
+    assert "activation-ack-certificate-unusable" in events
+
+    # And a healthy certificate produces no warning at all.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="exomem_provisioner.activation_ack_startup"):
+        healthy = asyncio.create_task(
+            watch_activation_ack_certificate(
+                binding=binding,
+                certificate_path=str(certificate_path),
+                read_trust_bundle=_reader(trust_pem),
+                interval_seconds=0,
+            )
+        )
+        for _ in range(50):
+            await asyncio.sleep(0)
+        healthy.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await healthy
+    assert [record for record in caplog.records if record.levelno >= logging.WARNING] == []
