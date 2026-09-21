@@ -24,6 +24,7 @@ def _facts(
     evidence: tuple[str, ...] = (),
     neighbourhood: tuple[str, ...] = (),
     anchor_neighbourhood: tuple[str, ...] | None = None,
+    exact_alias_phrases: tuple[str, ...] = (),
 ) -> resolve_module.CandidateFacts:
     """One candidate. Listed neighbours are anchors unless stated otherwise.
 
@@ -44,6 +45,7 @@ def _facts(
             neighbourhood if anchor_neighbourhood is None else anchor_neighbourhood
         ),
         evidence=frozenset(evidence),
+        exact_alias_phrases=frozenset(exact_alias_phrases),
     )
 
 
@@ -1004,3 +1006,155 @@ def test_two_hubs_named_in_one_turn_with_no_shared_anchor_are_ambiguous() -> Non
         "Alpha Initiative",
         "Beta Initiative",
     }
+
+
+# --------------------------------------------------------------------------- #
+# fix/activation-competing-senses, R1: same-kind name subsumption. A shorter
+# spelled name wholly inside a longer spelled name is a free rider on the
+# longer mention, not a second competing sense.
+# --------------------------------------------------------------------------- #
+
+
+def test_r1_a_shorter_spelled_name_inside_a_longer_one_is_demoted_to_partial() -> None:
+    """Problem 1: turn spells "Dana Whitfield"; both the full name and the
+    bare first name resolve on `exact_alias`, same kind, no structural link --
+    the shorter one is a free rider on the fuller mention, not a second
+    competing sense, so the turn resolves instead of abstaining.
+    """
+    candidates = resolve_module.candidates_for(
+        resolve_module.analyze_turn("Dana Whitfield mentioned this again"),
+        (
+            _row("full.md", "Dana Whitfield", kind="entity"),
+            _row("short.md", "Dana", kind="entity"),
+        ),
+    )
+    resolution = resolve_module.resolve(candidates)
+
+    assert resolution.status == "resolved"
+    by_id = {a.anchor_id: a for a in resolution.anchors}
+    assert by_id["full.md"].status == "resolved"
+    assert by_id["short.md"].status == "partial"
+
+
+def test_r1_free_standing_mention_is_not_demoted() -> None:
+    """"compare alpha hosted with alpha": "alpha" also occurs on its own,
+    outside "alpha hosted"'s span, so it is a free-standing mention and stays
+    resolved -- both anchors then genuinely compete (unlinked, same kind) and
+    the turn abstains as ambiguous rather than silently dropping one.
+    """
+    analysis = resolve_module.analyze_turn("compare alpha hosted with alpha")
+    candidates = resolve_module.candidates_for(
+        analysis,
+        (
+            _row("hosted.md", "Alpha Hosted", kind="project"),
+            _row("alpha.md", "Alpha", kind="project"),
+        ),
+    )
+    resolution = resolve_module.resolve(candidates, turn_tokens=analysis.tokens)
+
+    by_id = {a.anchor_id: a for a in resolution.anchors}
+    assert by_id["alpha.md"].status == "resolved"
+    assert by_id["hosted.md"].status == "resolved"
+    assert resolution.status == "ambiguous"
+
+
+def test_r1_without_turn_tokens_the_free_standing_exception_is_unavailable() -> None:
+    """The documented default for every existing direct `resolve()` caller in
+    this file, which never passes `turn_tokens`: the base subsumption rule
+    applies with no free-standing exception, rather than silently changing
+    behaviour for callers that supply no turn context.
+    """
+    resolution = resolve_module.resolve(
+        (
+            _facts(
+                "hosted.md",
+                kind="project",
+                evidence=("exact_alias",),
+                exact_alias_phrases=("alpha hosted",),
+            ),
+            _facts(
+                "alpha.md",
+                kind="project",
+                evidence=("exact_alias",),
+                exact_alias_phrases=("alpha",),
+            ),
+        )
+    )
+
+    by_id = {a.anchor_id: a for a in resolution.anchors}
+    assert by_id["alpha.md"].status == "partial"
+    assert by_id["hosted.md"].status == "resolved"
+    assert resolution.status == "resolved"
+
+
+def test_r1_cross_kind_pair_untouched() -> None:
+    """A product and a page named after it are complementary, not competing --
+    R1's subsumption rule only ever compares SAME-kind anchors."""
+    candidates = resolve_module.candidates_for(
+        resolve_module.analyze_turn("dana whitfield"),
+        (
+            _row("full.md", "Dana Whitfield", kind="entity"),
+            _row("short.md", "Dana", kind="resource"),
+        ),
+    )
+    resolution = resolve_module.resolve(candidates)
+
+    by_id = {a.anchor_id: a for a in resolution.anchors}
+    assert by_id["full.md"].status == "resolved"
+    assert by_id["short.md"].status == "resolved"
+    assert resolution.status == "resolved"
+
+
+def test_r1_an_anchor_resolved_by_other_evidence_too_is_not_demoted() -> None:
+    """`exact_alias` plus an independent second kind already resolves without
+    it -- removing `exact_alias` and re-checking `_status_for` finds the
+    anchor still resolved, so subsumption must leave it alone."""
+    resolution = resolve_module.resolve(
+        (
+            _facts(
+                "short.md",
+                kind="entity",
+                evidence=("exact_alias", "lexical_overlap", "claims_match"),
+                exact_alias_phrases=("dana",),
+            ),
+            _facts(
+                "full.md",
+                kind="entity",
+                evidence=("exact_alias",),
+                exact_alias_phrases=("dana whitfield",),
+            ),
+        )
+    )
+
+    by_id = {a.anchor_id: a for a in resolution.anchors}
+    assert by_id["short.md"].status == "resolved"
+    assert by_id["full.md"].status == "resolved"
+
+
+def test_r1_identical_exact_alias_phrase_pair_stays_ambiguous() -> None:
+    """Two anchors sharing the IDENTICAL phrase are not a subsumption pair --
+    "strict" containment excludes equality -- and remain genuinely competing.
+    """
+    resolution = resolve_module.resolve(
+        (
+            _facts(
+                "one.md",
+                kind="entity",
+                evidence=("exact_alias",),
+                exact_alias_phrases=("dana whitfield",),
+                neighbourhood=("a",),
+            ),
+            _facts(
+                "two.md",
+                kind="entity",
+                evidence=("exact_alias",),
+                exact_alias_phrases=("dana whitfield",),
+                neighbourhood=("b",),
+            ),
+        )
+    )
+
+    assert resolution.status == "ambiguous"
+    by_id = {a.anchor_id: a for a in resolution.anchors}
+    assert by_id["one.md"].status == "resolved"
+    assert by_id["two.md"].status == "resolved"

@@ -169,6 +169,14 @@ class CandidateFacts:
     neighbourhood: frozenset[str]
     evidence: frozenset[str]
     anchor_neighbourhood: frozenset[str] = frozenset()
+    #: The turn phrases (the `names & phrases` intersection) that earned this
+    #: candidate's `exact_alias`, if any. Never serialised into a packet --
+    #: `resolve`'s R1 same-kind subsumption rule is the only reader (fix/
+    #: activation-competing-senses): a shorter spelled name wholly inside a
+    #: longer spelled name is a free rider on the longer mention, not a
+    #: second competing sense, and telling the two apart needs the actual
+    #: matched phrase text, not just the fact that `exact_alias` fired.
+    exact_alias_phrases: frozenset[str] = frozenset()
 
     @property
     def deciding_kinds(self) -> frozenset[str]:
@@ -190,6 +198,11 @@ class ResolvedAnchor:
     categories: tuple[str, ...]
     neighbourhood: frozenset[str]
     anchor_neighbourhood: frozenset[str] = frozenset()
+    #: Carried over from `CandidateFacts` for R1's own use inside `resolve`
+    #: (see that field's docstring). `as_dict` below enumerates its own
+    #: fields explicitly and does not list this one, so it never reaches a
+    #: served packet.
+    exact_alias_phrases: frozenset[str] = frozenset()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -310,7 +323,8 @@ def candidates_for(
     for row in rows:
         evidence: set[str] = set()
         names = {normalize(row.title), *row.aliases} - {""}
-        if names & phrases:
+        matched_phrases = names & phrases
+        if matched_phrases:
             evidence.add("exact_alias")
         # `lexical_overlap` and `rare_term` are mutually exclusive on one
         # anchor (review round 4, BLOCKER): both were being read off the SAME
@@ -386,6 +400,7 @@ def candidates_for(
                 neighbourhood=row.neighbourhood,
                 anchor_neighbourhood=row.anchor_neighbourhood,
                 evidence=frozenset(evidence),
+                exact_alias_phrases=frozenset(matched_phrases),
             )
         )
     out.sort(key=_candidate_order)
@@ -580,7 +595,7 @@ def _candidate_order(candidate: CandidateFacts) -> tuple:
     )
 
 
-def _status_for(candidate: CandidateFacts) -> str:
+def _status_for_evidence(evidence: frozenset[str]) -> str:
     """The three-clause soundness rule (design.md decision 1), plus continuity.
 
     `resolved` iff: `exact_alias` or `agent_choice` (either decides alone —
@@ -595,8 +610,14 @@ def _status_for(candidate: CandidateFacts) -> str:
     still never creates a candidate and never resolves alone or with
     qualifiers only). Retrieved contact alone, however many retrieved kinds
     and qualifiers co-occur, is never more than `partial`.
+
+    Takes the evidence set directly, not a `CandidateFacts`/`ResolvedAnchor`,
+    so R1's same-kind subsumption rule (`resolve`) can re-run this same
+    clause against a candidate's evidence with `exact_alias` removed, to ask
+    "would this anchor still resolve on its OTHER evidence alone" — without
+    building a throwaway `CandidateFacts` just to hold a modified set.
     """
-    deciding = candidate.deciding_kinds
+    deciding = evidence - TIE_BREAK_KINDS
     if deciding & DECIDING_ALONE_KINDS:
         return "resolved"
     if deciding & {"lexical_overlap", "claims_match"} and len(deciding) >= 2:
@@ -610,8 +631,134 @@ def _status_for(candidate: CandidateFacts) -> str:
     return "unresolved"
 
 
-def resolve(candidates: Sequence[CandidateFacts]) -> Resolution:
-    """Derive anchor statuses and the turn's verdict from categorical evidence."""
+def _status_for(candidate: CandidateFacts) -> str:
+    """`_status_for_evidence`, applied to one candidate's own evidence."""
+    return _status_for_evidence(candidate.evidence)
+
+
+def _phrase_spans(tokens: Sequence[str], phrase_tokens: Sequence[str]) -> list[tuple[int, int]]:
+    """Every contiguous span in `tokens` whose slice equals `phrase_tokens`.
+
+    A plain sliding-window scan, bounded by the turn's own length — never an
+    index read. Shared by R1 (a phrase's occurrences in the raw turn) and R2
+    (the token positions a multi-token `exact_alias` phrase covers).
+    """
+    width = len(phrase_tokens)
+    if width == 0 or width > len(tokens):
+        return []
+    return [
+        (start, start + width)
+        for start in range(len(tokens) - width + 1)
+        if tuple(tokens[start : start + width]) == tuple(phrase_tokens)
+    ]
+
+
+def _is_strict_subphrase(short: str, long: str) -> bool:
+    """Is `short`'s own token sequence a proper, contiguous run inside `long`'s?
+
+    Equality is excluded on purpose ("strict"): two anchors that earned the
+    identical `exact_alias` phrase are not one subsuming the other — see
+    `test_r1_identical_exact_alias_phrase_pair_stays_ambiguous`.
+    """
+    if short == long:
+        return False
+    short_tokens = short.split(" ")
+    long_tokens = long.split(" ")
+    if len(short_tokens) >= len(long_tokens):
+        return False
+    return bool(_phrase_spans(long_tokens, short_tokens))
+
+
+def _has_free_standing_mention(
+    shorter_phrases: frozenset[str], longer_phrases: frozenset[str], turn_tokens: Sequence[str]
+) -> bool:
+    """Does any occurrence of a shorter-anchor phrase fall outside every
+    occurrence of a longer-anchor phrase in the RAW turn ("compare alpha
+    hosted with alpha")? If so the shorter anchor is a free-standing mention
+    of its own, not merely a fragment of the longer name, and R1 must not
+    demote it.
+    """
+    longer_spans = [
+        span for phrase in longer_phrases for span in _phrase_spans(turn_tokens, phrase.split(" "))
+    ]
+    for phrase in shorter_phrases:
+        for start, end in _phrase_spans(turn_tokens, phrase.split(" ")):
+            if not any(l_start <= start and end <= l_end for l_start, l_end in longer_spans):
+                return True
+    return False
+
+
+def _demote_subsumed_same_kind_aliases(
+    anchors: Sequence[ResolvedAnchor], turn_tokens: Sequence[str]
+) -> tuple[ResolvedAnchor, ...]:
+    """R1 (fix/activation-competing-senses): a shorter spelled name wholly
+    inside a longer spelled name is a free rider on the longer mention, not a
+    second competing sense. Turn spells "Dana Whitfield": person anchor
+    "Dana Whitfield" resolves on `exact_alias`; person anchor "Dana" ALSO
+    resolves on `exact_alias` (the turn phrase "dana" is the same word), same
+    kind, no structural link — `_ambiguity` would otherwise report them as
+    competing and the whole packet would abstain.
+
+    Demotes anchor A (to `partial`) when, for some other RESOLVED anchor B of
+    the SAME kind: every `exact_alias` phrase A earned is a strict contiguous
+    token sub-phrase of some phrase B earned, AND A is resolved ONLY because
+    of `exact_alias` (removing it and re-running the soundness rule on what
+    remains still does not resolve). Cross-kind pairs are untouched — a
+    product and a page named after it are complementary, the existing rule
+    already says so, and `_ambiguity` never compares across kinds either.
+
+    Position-aware exception: if A's phrase ALSO occurs in the turn at a
+    token position not covered by any occurrence of B's longer phrase
+    ("compare alpha hosted with alpha"), A is a free-standing mention of its
+    own and is NOT demoted. This needs the raw turn tokens, which most
+    existing `resolve()` callers never pass — `turn_tokens` empty simply
+    means the exception can never fire, and the base subsumption rule alone
+    decides (a documented default, not a silent behaviour change: see
+    `test_r1_without_turn_tokens_the_free_standing_exception_is_unavailable`).
+    """
+    result = list(anchors)
+    resolved_indices = [i for i, anchor in enumerate(result) if anchor.status == "resolved"]
+    for i in resolved_indices:
+        candidate = result[i]
+        if not candidate.exact_alias_phrases:
+            continue
+        without_alias = frozenset(candidate.evidence) - {"exact_alias"}
+        if _status_for_evidence(without_alias) == "resolved":
+            continue
+        for j in resolved_indices:
+            if i == j:
+                continue
+            other = result[j]
+            if other.kind != candidate.kind or not other.exact_alias_phrases:
+                continue
+            subsumed = all(
+                any(
+                    _is_strict_subphrase(phrase, longer)
+                    for longer in other.exact_alias_phrases
+                )
+                for phrase in candidate.exact_alias_phrases
+            )
+            if not subsumed:
+                continue
+            if turn_tokens and _has_free_standing_mention(
+                candidate.exact_alias_phrases, other.exact_alias_phrases, turn_tokens
+            ):
+                continue
+            result[i] = replace(result[i], status="partial")
+            break
+    return tuple(result)
+
+
+def resolve(
+    candidates: Sequence[CandidateFacts], *, turn_tokens: Sequence[str] = ()
+) -> Resolution:
+    """Derive anchor statuses and the turn's verdict from categorical evidence.
+
+    `turn_tokens` is the raw turn's own tokens (`TurnAnalysis.tokens`), used
+    only by R1's position-aware free-standing-mention exception; production
+    callers pass `analysis.tokens`, and omitting it (as most direct unit-test
+    callers do) simply leaves that exception unavailable.
+    """
     for candidate in candidates:
         unknown = sorted(candidate.evidence - frozenset(EVIDENCE_KINDS))
         if unknown:
@@ -635,9 +782,11 @@ def resolve(candidates: Sequence[CandidateFacts]) -> Resolution:
                 categories=candidate.categories,
                 neighbourhood=candidate.neighbourhood,
                 anchor_neighbourhood=candidate.anchor_neighbourhood,
+                exact_alias_phrases=candidate.exact_alias_phrases,
             )
         )
     anchors = anchors[:MAX_ANCHORS]
+    anchors = _demote_subsumed_same_kind_aliases(anchors, turn_tokens)
     resolved = [anchor for anchor in anchors if anchor.status == "resolved"]
     ambiguity = _ambiguity(resolved)
     if ambiguity:
