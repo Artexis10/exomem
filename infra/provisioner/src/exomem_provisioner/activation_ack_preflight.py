@@ -98,7 +98,10 @@ def classify_activation_ack_target(
     attestation_expires_at: int,
     now: int,
     required_seconds: int,
-    legacy_uncertain_mark: bool = False,
+    # Required, not defaulted. A caller that forgets the mark would silently get
+    # a verdict recomputed from live inputs, which is the single failure
+    # Decision 12 exists to close. Forgetting it must be a TypeError.
+    legacy_uncertain_mark: bool,
 ) -> ActivationAckPreflight:
     """Name what this cell is and whether acknowledgement work may start on it."""
 
@@ -110,6 +113,13 @@ def classify_activation_ack_target(
     remaining = attestation_expires_at - now
     outstanding = not _tuples_match(custody_activation, store_activation)
     served = replica_state is not None
+    # Decided before any verdict, because the mark must not depend on which
+    # verdict wins. A cell can be both stranded and legacy-uncertain, and the
+    # strand is not permanent: the restore paths in this repo can hand it a
+    # fresh window, after which nothing distinguishes it from a cell whose
+    # mutation outcome was always known. That is exactly the cell the mark is
+    # for, so it must be requested on the way past.
+    newly_uncertain = outstanding and not capability_bound and not legacy_uncertain_mark
 
     if remaining <= 0 and served:
         return ActivationAckPreflight(
@@ -118,6 +128,7 @@ def classify_activation_ack_target(
             remaining_seconds=remaining,
             acknowledgement_outstanding=outstanding,
             reason="the attestation window lapsed on a cell that has served",
+            mark_legacy_uncertain=newly_uncertain,
         )
 
     if legacy_uncertain_mark:
@@ -150,7 +161,7 @@ def classify_activation_ack_target(
             remaining_seconds=remaining,
             acknowledgement_outstanding=True,
             reason="a committed mutation has no acknowledgement and no protocol to recover it",
-            mark_legacy_uncertain=True,
+            mark_legacy_uncertain=newly_uncertain,
         )
 
     if capability_bound and not release_compatible:

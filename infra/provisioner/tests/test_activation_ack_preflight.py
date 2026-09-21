@@ -26,6 +26,7 @@ def _classify(**overrides):
         "attestation_expires_at": NOW + HOUR,
         "now": NOW,
         "required_seconds": 300,
+        "legacy_uncertain_mark": False,
     }
     arguments.update(overrides)
     return classify_activation_ack_target(**arguments)
@@ -223,3 +224,58 @@ def test_a_long_drained_cell_is_stranded_here_and_repairable_on_the_migration_pa
     assert drained.status == STRANDED
     assert drained.may_begin is False
     assert drained.remaining_seconds == -1
+
+
+def test_a_stranded_cell_still_asks_for_the_mark_so_a_restore_cannot_launder_it() -> None:
+    """The strand is not permanent, and the uncertainty behind it is.
+
+    A cell can be both past its window and legacy-uncertain. The strand is the
+    louder verdict and wins the status, but this repo has restore paths that
+    can hand such a cell a fresh window. Reclassified afterwards, with the
+    capability deployed by then, it would read `protocol-qualified` and
+    `may_begin=True` -- a genuinely unknown mutation outcome reporting itself
+    as recoverable, which is the one thing Decision 12 exists to prevent.
+
+    So the mark is decided from the inputs, not from which verdict wins.
+    """
+
+    stranded = _classify(
+        store_activation=AHEAD, capability_bound=False, attestation_expires_at=NOW - 1
+    )
+
+    assert stranded.status == STRANDED
+    assert stranded.may_begin is False
+    assert stranded.mark_legacy_uncertain is True
+
+    # Already recorded: nothing to ask for a second time, on either verdict.
+    assert (
+        _classify(
+            store_activation=AHEAD,
+            capability_bound=False,
+            attestation_expires_at=NOW - 1,
+            legacy_uncertain_mark=True,
+        ).mark_legacy_uncertain
+        is False
+    )
+    assert (
+        _classify(
+            store_activation=AHEAD, capability_bound=False, legacy_uncertain_mark=True
+        ).mark_legacy_uncertain
+        is False
+    )
+
+
+def test_forgetting_the_recorded_mark_is_a_type_error_not_a_reclassification() -> None:
+    """The default that was there would have reclassified from live inputs."""
+
+    with pytest.raises(TypeError):
+        classify_activation_ack_target(
+            custody_activation=TUPLE,
+            store_activation=AHEAD,
+            capability_bound=True,
+            release_compatible=True,
+            replica_state="SERVING",
+            attestation_expires_at=NOW + HOUR,
+            now=NOW,
+            required_seconds=300,
+        )
