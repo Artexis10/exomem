@@ -74,7 +74,11 @@ _MISSING = object()
 #: One request's memoised resolutions, or `None` when no scope is open.
 #: A `ContextVar` rather than thread-local state: it is per-thread already (a
 #: new thread starts from the default, so a scope cannot leak into one) and it
-#: follows an `async` task the way a request does.
+#: follows an `async` task the way a request does. Tasks started inside a scope
+#: inherit the same dictionary by reference, which is intended — they are the
+#: same request — and needs no lock: the only operations on it are a `get` and
+#: a single `setitem`, and the worst a race can cost is computing one answer
+#: twice.
 _RESOLUTION_MEMO: ContextVar[dict[tuple[Any, ...], Any] | None] = ContextVar(
     "exomem_state_resolution_memo", default=None
 )
