@@ -366,6 +366,13 @@ fast abstention or compiler-only timing.
 - **THEN** the compiler may serve their context without reporting ambiguity
 - **AND** genuinely disjoint collections still participate in ambiguity checks
 
+#### Scenario: A unit crosses the release plane by its real page, not its opaque ref
+
+- **WHEN** a packet unit carries the compiler's opaque `exomem://vault/<path>#unit-<hash>` reference under an active governance policy
+- **THEN** the release plane decides the real vault page that reference names, not the literal reference text
+- **AND** a policy scoped to an unrelated page leaves the unit served, and a policy scoped to only the unit's own page withholds that unit without withholding an unrelated one
+- **AND** a reference that does not unwrap to a path inside the vault stays undecidable and withheld exactly as before
+
 ### Requirement: Interactive activation does bounded work under a deadline on every door
 
 An activation request SHALL stop starting work once its request deadline can no
