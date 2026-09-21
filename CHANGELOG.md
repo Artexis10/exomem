@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.90.4](https://github.com/Artexis10/exomem/compare/v0.90.3...v0.90.4) (2026-09-21)
+
+
+### Bug Fixes
+
+* **egress:** decide every page a packet reference could denote before release ([#1340](https://github.com/Artexis10/exomem/issues/1340)) ([835e6f8](https://github.com/Artexis10/exomem/commit/835e6f8cf7dbcc0958c4d298e64573c517a15225))
+
 ## [0.90.3](https://github.com/Artexis10/exomem/compare/v0.90.2...v0.90.3) (2026-09-21)
 
 
