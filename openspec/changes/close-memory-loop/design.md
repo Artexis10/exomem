@@ -301,6 +301,16 @@ returns an unavailable abstention with timings and the skipped stage, never a
 partial packet. A stage already running is not interrupted; bounding each stage
 is what the other repairs are for.
 
+A converging gate must also record what it converged to. On a managed runtime a
+stale anchor catalogue is refreshed by a scheduled background build, and that
+build records the freshness key it was scheduled for, as the unmanaged inline
+update always did. The first version scheduled the build without the key: the
+catalogue read as stale on every request for the life of the process, and each
+request that found no build in flight scheduled another whole-vault walk beside
+the request threads. A packet that reports a stale catalogue is transient and is
+never cached, because a build that finds nothing changed leaves the catalogue's
+identity as it was and a cached copy would keep reporting staleness afterwards.
+
 Current state governs only the row it returns. The first attempt inferred, inside
 the shared Records query, that link governance could be skipped from the
 caller's columns and sort fields; an empty column list and a dotted column each
