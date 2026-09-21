@@ -24,6 +24,7 @@ from test_governance_egress import (
     write_scope,
 )
 
+from exomem import context_refs
 from exomem.governance import egress
 from exomem.governance.principal import request_scope
 
@@ -1594,42 +1595,48 @@ def test_working_set_paths_decides_a_units_real_page_not_its_opaque_uri() -> Non
     `context_refs.vault_ref` builds. `_working_set_paths` must resolve that URI
     to the real path it names before anything downstream decides it.
     """
-    from exomem import context_refs
-
     real_path = "Knowledge Base/Products/Cargo Sled.md"
     ref = f"{context_refs.vault_ref(real_path)}#unit-{'a' * 16}"
     packet = {"units": [_unit_with_ref(ref)]}
 
-    paths, names = egress._working_set_paths(packet)
+    paths, names, invalid = egress._working_set_paths(packet)
 
     assert paths == {real_path}
     assert names == set()
+    assert invalid == set()
 
 
 @pytest.mark.parametrize(
-    "case",
+    ("case", "expect_invalid"),
     [
-        "percent_encoded_parent_traversal",
-        "absolute_drive_letter_path",
-        "unknown_exomem_authority",
-        "empty_path",
-        "memory_id_ref",
+        ("percent_encoded_parent_traversal", True),
+        ("absolute_drive_letter_path", True),
+        ("unknown_exomem_authority", True),
+        ("empty_path", True),
+        ("memory_id_ref", False),
     ],
 )
-def test_working_set_paths_stays_undecidable_for_an_unresolvable_reference(
-    case: str,
+def test_working_set_paths_classifies_an_unresolvable_reference(
+    case: str, expect_invalid: bool
 ) -> None:
-    """A reference that cannot be unwrapped to an in-vault path decides nothing.
+    """A reference that cannot be unwrapped to an in-vault path is never
+    silently decided as a path — but it is not always the same kind of
+    "not a path" (`_classify_path_candidate`).
+
+    A candidate whose own shape marks it as a page reference (an `exomem://`
+    scheme, or a `.md` suffix once its fragment is stripped) but that fails
+    to validate is `invalid`: the caller must withhold the item that carries
+    it, never silently drop it (the exact hole a reviewer found in round 1 —
+    dropping it served a page named only through that reference). A
+    reference that is legitimately not a page at all (the memory-id form)
+    stays `skip`ped, exactly as today, and is never in either set.
 
     Each ref is built with the same real URI shape the pipeline emits (the
-    `context_refs`/`memory_refs` helpers, never a hand-typed plain path), so
-    this proves `_working_set_paths` never makes anything decidable that was
-    not a real in-vault path — nothing here may collapse onto some OTHER
-    real page's canonical key either.
+    `context_refs`/`memory_refs` helpers, never a hand-typed plain path).
     """
     import uuid
 
-    from exomem import context_refs, memory_refs
+    from exomem import memory_refs
 
     fragment = f"#unit-{'a' * 16}"
     refs = {
@@ -1643,9 +1650,282 @@ def test_working_set_paths_stays_undecidable_for_an_unresolvable_reference(
         "empty_path": context_refs.vault_ref("") + fragment,
         "memory_id_ref": memory_refs.memory_ref(str(uuid.uuid4())),
     }
-    packet = {"units": [_unit_with_ref(refs[case])]}
+    ref = refs[case]
+    packet = {"units": [_unit_with_ref(ref)]}
 
-    paths, names = egress._working_set_paths(packet)
+    paths, names, invalid = egress._working_set_paths(packet)
 
     assert paths == set()
     assert names == set()
+    assert invalid == ({ref} if expect_invalid else set())
+
+
+# --------------------------------------------------------------------------- #
+# Round six: correction round 1. A reviewer found two defects in round five's
+# fix. (1) `_unwrap_reference` percent-decoded a scheme'd ref's remainder
+# BEFORE splitting on `#`/`|`; a real filename containing an ENCODED `#`
+# (`%23`) or `|` (`%7C`) reappeared after decoding and the split truncated
+# the path, so `_unwrapped_vault_path` returned `None` for a real page. (2)
+# round five's fix then DROPPED that candidate instead of withholding the
+# item that carried it — the old, pre-round-five code failed closed on this
+# shape (the bogus literal URI text always failed to decide, and fail-closed
+# withheld it); round five's fix failed OPEN (dropped -> never decided ->
+# served if nothing else independently withheld the page). This section
+# proves both fixes: the decode order (a URI ref and its plain path produce
+# the SAME canonical key and the SAME release decision even for a filename
+# containing `#`, `|`, `%`, a space or a non-ASCII character) and the
+# never-drop rule (an un-unwrappable but page-shaped reference withholds its
+# item, and never reaches `_decide_path`/the filesystem).
+# --------------------------------------------------------------------------- #
+
+#: `(id, filename)`. Each name is chosen so a naive decode-then-split
+#: recovers the WRONG (truncated) path: `%23`/`%7C` decode to characters the
+#: old code split on again, `%25` decodes to a bare `%`, `%20` to a space,
+#: and the non-ASCII name exercises decoding generally.
+_TRICKY_FILENAMES = [
+    ("hash", "secret#page.md"),
+    ("pipe", "secret|page.md"),
+    ("percent", "100%.md"),
+    ("space", "secret page.md"),
+    ("non_ascii", "café.md"),
+]
+
+
+def _write_page(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _ref_only_packet(ref: str) -> dict:
+    """A packet whose page is named ONLY through one unit's opaque `ref` —
+    no `path`/`anchor` field on the item, matching the reviewer's probe: the
+    neighbourhood/Records/supersession case `guard_working_set`'s own
+    docstring says the compiler walks past hit projection, so
+    `release.withheld_paths` does not already carry the page either."""
+    return {
+        "anchors": [],
+        "roles": [],
+        "units": [
+            {
+                "ref": ref,
+                "role": "resources",
+                "text": "the payload text",
+                "lifecycle": "active",
+                "updated": "2026-09-01",
+                "provenance": {"level": "unit"},
+            }
+        ],
+        "pointers": [{"ref": ref, "role": "resources", "title": "t", "reason": "budget"}],
+        "current_state": [],
+        "missing": [],
+        "ambiguity": [],
+        "budget": {"limit_chars": 4000, "used_chars": 40},
+        "generation": {
+            "freshness_key": "k",
+            "index_generation": 1,
+            "roles_hash": "abc",
+            "roles_source": "shipped",
+        },
+        "abstained": False,
+    }
+
+
+def _empty_release() -> egress.AnnotatedHits:
+    """Hit projection never touched the page: it is named ONLY via the ref."""
+    return egress.AnnotatedHits(hits=[], withheld_paths=frozenset(), active=True)
+
+
+@pytest.mark.parametrize(("case", "filename"), _TRICKY_FILENAMES, ids=[c for c, _ in _TRICKY_FILENAMES])
+def test_a_page_withheld_only_through_its_units_ref_stays_withheld(
+    tmp_path: Path, case: str, filename: str
+) -> None:
+    """The reviewer's blocker, reproduced and closed.
+
+    Round five's fix DROPPED a unit ref it could not resolve to a path, which
+    served this exact page: it is withheld by an active policy, named only
+    through the unit's own opaque ref (no separate `path`/`anchor`, empty
+    `release.withheld_paths`), and its filename contains a character
+    `context_refs._encode` percent-encodes.
+    """
+    vault = tmp_path / "vault"
+    rel_path = f"Knowledge Base/Notes/Patterns/{filename}"
+    _write_page(
+        vault / rel_path,
+        "---\ntype: note\nstatus: active\n---\n\n# Secret\n\nthe payload text\n",
+    )
+    write_scope(vault)  # default paths="Notes/Patterns/**" -> matches rel_path
+    write_rule(vault, ceiling=0, audience="external")
+
+    ref = f"{context_refs.vault_ref(rel_path)}#unit-{'a' * 16}"
+    packet = _ref_only_packet(ref)
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _empty_release())
+
+    assert guarded is not None
+    assert guarded["units"] == []
+    assert guarded["pointers"] == []
+    assert "the payload text" not in str(guarded)
+
+
+@pytest.mark.parametrize(("case", "filename"), _TRICKY_FILENAMES, ids=[c for c, _ in _TRICKY_FILENAMES])
+def test_a_page_admitted_only_through_its_units_ref_is_served(
+    tmp_path: Path, case: str, filename: str
+) -> None:
+    """No return of the over-restriction: the same five filenames, admitted."""
+    vault = tmp_path / "vault"
+    rel_path = f"Knowledge Base/Notes/Insights/{filename}"
+    _write_page(
+        vault / rel_path,
+        "---\ntype: note\nstatus: active\n---\n\n# Open\n\nthe payload text\n",
+    )
+    write_scope(vault)  # Notes/Patterns/** -- unrelated to Notes/Insights
+    write_rule(vault, ceiling=0, audience="external")
+
+    ref = f"{context_refs.vault_ref(rel_path)}#unit-{'a' * 16}"
+    packet = _ref_only_packet(ref)
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _empty_release())
+
+    assert guarded is not None
+    assert [unit["ref"] for unit in guarded["units"]] == [ref]
+    assert [pointer["ref"] for pointer in guarded["pointers"]] == [ref]
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["percent_encoded_parent_traversal", "empty_path", "unknown_exomem_authority"],
+)
+def test_an_unresolvable_reference_withholds_its_item_without_a_filesystem_call(
+    tmp_path: Path, case: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The never-drop rule, proven at the boundary that touches disk.
+
+    `_decide_path` is the ONLY thing in this module that calls `.stat()`.
+    Wrapping it records every path it is asked to decide; an un-unwrappable
+    reference must never appear there — a `../` string must not reach the
+    filesystem — and the item carrying it must still be withheld.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    write_scope(vault)
+    write_rule(vault, ceiling=0, audience="external")
+
+    fragment = f"#unit-{'a' * 16}"
+    refs = {
+        "percent_encoded_parent_traversal": (
+            context_refs.vault_ref("../../etc/passwd.md") + fragment
+        ),
+        "empty_path": context_refs.vault_ref("") + fragment,
+        "unknown_exomem_authority": f"{context_refs.SCHEME}://config/Foo.md{fragment}",
+    }
+    ref = refs[case]
+    packet = _ref_only_packet(ref)
+
+    decided_paths: list[str] = []
+    real_decide_path = egress._decide_path
+
+    def _recording_decide_path(vault_root, rel_path, **kwargs):
+        decided_paths.append(rel_path)
+        return real_decide_path(vault_root, rel_path, **kwargs)
+
+    monkeypatch.setattr(egress, "_decide_path", _recording_decide_path)
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _empty_release())
+
+    assert guarded is not None
+    assert guarded["units"] == []
+    assert guarded["pointers"] == []
+    assert decided_paths == []
+
+
+def test_a_superseded_by_traversal_string_fails_closed_without_a_filesystem_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's follow-up 2: a bare `.md`-shaped list entry, unvalidated.
+
+    `provenance.superseded_by` is a list of references reached through
+    `_collect`'s generic branch, not through `_add`'s named-field path. A
+    traversal string there must be treated exactly like an invalid `ref`:
+    stripped from the field (the existing asymmetry for a withheld
+    `superseded_by` target keeps the unit and drops the pointer, same as a
+    withheld wikilink target there), and never stat'ed.
+    """
+    vault = tmp_path / "vault"
+    open_path = "Knowledge Base/Notes/Insights/open.md"
+    _write_page(
+        vault / open_path, "---\ntype: note\nstatus: active\n---\n\n# Open\n\nfine\n"
+    )
+    write_scope(vault)
+    write_rule(vault, ceiling=0, audience="external")
+
+    packet = {
+        "anchors": [],
+        "roles": [],
+        "units": [
+            {
+                "ref": f"{context_refs.vault_ref(open_path)}#unit-{'a' * 16}",
+                "role": "resources",
+                "text": "An open unit.",
+                "lifecycle": "superseded",
+                "updated": "2026-09-01",
+                "provenance": {
+                    "path": open_path,
+                    "level": "unit",
+                    "anchor": open_path,
+                    "superseded_by": ["../../x.md"],
+                },
+            }
+        ],
+        "pointers": [],
+        "current_state": [],
+        "missing": [],
+        "ambiguity": [],
+        "budget": {"limit_chars": 4000, "used_chars": 40},
+        "generation": {
+            "freshness_key": "k",
+            "index_generation": 1,
+            "roles_hash": "abc",
+            "roles_source": "shipped",
+        },
+        "abstained": False,
+    }
+
+    decided_paths: list[str] = []
+    real_decide_path = egress._decide_path
+
+    def _recording_decide_path(vault_root, rel_path, **kwargs):
+        decided_paths.append(rel_path)
+        return real_decide_path(vault_root, rel_path, **kwargs)
+
+    monkeypatch.setattr(egress, "_decide_path", _recording_decide_path)
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _empty_release())
+
+    assert guarded is not None
+    assert len(guarded["units"]) == 1
+    assert "superseded_by" not in guarded["units"][0]["provenance"]
+    assert "../../x.md" not in decided_paths
+    assert not any(".." in decided for decided in decided_paths)
+
+
+@pytest.mark.parametrize(("case", "filename"), _TRICKY_FILENAMES, ids=[c for c, _ in _TRICKY_FILENAMES])
+def test_canonical_reference_agrees_for_a_uri_ref_and_its_plain_path(
+    case: str, filename: str
+) -> None:
+    """Key parity for `_unwrap_reference`'s other callers.
+
+    `_canonical_reference`/`_withheld_keys` are what `_names_withheld` uses to
+    compare a withheld PATH against an item's own reference field. If the
+    decode-order fix only worked inside `_unwrapped_vault_path`, those
+    callers would still compute a different (truncated) key for the URI form
+    than for the plain path of the very same page, and the withheld-set
+    comparison the whole guard depends on would silently miss it.
+    """
+    real_path = f"Knowledge Base/Notes/Patterns/{filename}"
+    uri_ref = f"{context_refs.vault_ref(real_path)}#unit-{'a' * 16}"
+
+    assert egress._canonical_reference(uri_ref) == egress._canonical_reference(real_path)
