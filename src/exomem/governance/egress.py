@@ -2675,8 +2675,13 @@ def guard_working_set(
     return guarded
 
 
-#: Packet fields whose values are, or contain, vault paths.
-_WORKING_SET_PATH_FIELDS = ("ref", "path", "anchor")
+#: TYPED PAGE FIELDS (correction round 4, T1): `path` and `anchor`, wherever
+#: they appear (on the item itself, or under its `provenance`). Every
+#: non-empty value here IS a page reference regardless of shape -- decided
+#: under every existing reading, and withholding its item if none exists.
+#: `_is_page_shaped` plays no part here; that classifier is for `ref` alone,
+#: and only on an item that ALSO carries one of these (T2).
+_WORKING_SET_STRICT_PATH_FIELDS = ("path", "anchor")
 #: Packet fields carrying authored PROSE that may name a page in wikilink syntax.
 #: Harvested so a page mentioned only inside a sentence still gets a release
 #: decision: `release.withheld_paths` carries what hit projection happened to
@@ -2791,6 +2796,17 @@ def _is_page_shaped(text: str) -> bool:
     either. Every real vault path the compiler emits carries a directory
     (`Knowledge Base/...`), so this only ever excludes a genuinely opaque
     string, never a real page reference.
+
+    Correction round 4, T2: this classifier now gates exactly ONE thing --
+    a `ref` on an item that ALSO carries its own `path`/`anchor` (a unit, an
+    ordinary anchor), where a non-page-shaped value really is just an
+    opaque id and must be ignored. A TYPED page field (`path`/`anchor`
+    themselves, a path-list entry, or `ref` on an item with no `path`/
+    `anchor` of its own) is never checked against this at all: `secret` and
+    `secret.markdown` are not page-shaped either, but in a typed field they
+    ARE the page reference, bare or oddly-suffixed or not -- the round-4
+    BLOCKER this round closed was exactly `_add` applying this gate to
+    every field alike.
     """
     stripped = text.strip()
     if not stripped:
@@ -2868,6 +2884,48 @@ def _interpretations_for(candidate: str) -> frozenset[str]:
     return frozenset(reading for reading in readings if _is_safe_relative_path(reading))
 
 
+def _item_has_own_page_field(item: Mapping[str, Any]) -> bool:
+    """True when `item` carries a non-empty `path` or `anchor` of its own —
+    at the item's own top level (an anchor, a current_state entry), or
+    under its `provenance` (a unit) — correction round 4's T1 test for
+    whether this item's `ref` is a TYPED page field (T1, no item has one of
+    these AND lacks its own path/anchor) or merely a TOLERATED one (T2,
+    page-shape-gated, alongside a real `path`/`anchor`).
+
+    A pointer and an ambiguity entry carry neither field at all
+    (`working_set.py::_pointer`, `working_set_resolve.py::_ambiguity`), so
+    their `ref` is always typed. A unit's `provenance.path`/`.anchor` are
+    unconditional for every real lane (`working_set.py::_provenance`, line
+    ~307), so a unit's `ref` is usually merely tolerated -- except the one
+    packet shape the test suite carries forward from an earlier round
+    (`_ref_only_packet`, `guard_working_set`'s own docstring: "the
+    compiler walks further" than hit projection), where a unit is named
+    ONLY through its `ref`; this function reports that unit as having no
+    page field of its own too, so its `ref` is typed there as well,
+    exactly like a pointer's. An ordinary anchor's own `path` is real, so
+    its `ref` is tolerated too (and in practice always equals `path`, so
+    this changes nothing for one); a project/plan anchor's `path` is empty
+    by construction (`path=""`), so THIS function alone would call its
+    `ref` typed — but its `ref` is `project:<key>`/`plan:<rel>#<title>`, an
+    explicit non-page shape (`_matches_explicit_non_page_shape`) that
+    `_add` exempts from candidate-hood before strict/tolerant is even
+    consulted, and the item invariant exempts it again at
+    `_guarded_anchor`'s own call site (it legitimately has no page of its
+    own at all, typed or not).
+    """
+    for key in _WORKING_SET_STRICT_PATH_FIELDS:
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+    provenance = item.get("provenance")
+    if isinstance(provenance, Mapping):
+        for key in _WORKING_SET_STRICT_PATH_FIELDS:
+            value = provenance.get(key)
+            if isinstance(value, str) and value.strip():
+                return True
+    return False
+
+
 def _working_set_paths(
     packet: Mapping[str, Any],
 ) -> tuple[set[str], set[str], dict[str, frozenset[str]], set[str]]:
@@ -2892,38 +2950,56 @@ def _working_set_paths(
     candidate whose readings are not every-one-admitted.
 
     "Path-bearing field" is scoped by FIELD NAME, never by string shape: the
-    named scalar fields (`_WORKING_SET_PATH_FIELDS`), authored prose's
-    wikilinks (`_WORKING_SET_PROSE_FIELDS`), and a known reference-LIST
-    field's entries (`_PATH_LIST_FIELDS` — `superseded_by` and its like, the
-    same fields hit projection's `_strip_withheld_provenance` treats as path
-    lists). An ordinary scalar or list value under any OTHER key — `kind`,
-    `status`, `role`, `reason`, `lifecycle`, `updated`, `as_of`, an
-    `evidence` tag list, `category`, `source` — is never a candidate. A
-    blanket catch-all that treated EVERY string reachable anywhere in the
-    packet as a candidate turned those ordinary tag values into bogus
-    "unresolvable" entries, which then wrongly withheld a sibling
-    pointer/anchor/current_state item whose OWN field happened to share that
-    exact word (`_value_names_an_invalid_reference` compares a whole item's
-    every field against `invalid_refs`) — an over-restriction bug, caught by
-    the very first end-to-end test run of this rewrite, not a defect a
-    reviewer reported.
+    TYPED page fields (`_WORKING_SET_STRICT_PATH_FIELDS` — `path`/`anchor`,
+    T1), authored prose's wikilinks (`_WORKING_SET_PROSE_FIELDS`), a known
+    reference-LIST field's entries (`_PATH_LIST_FIELDS` — `superseded_by`
+    and its like, the same fields hit projection's
+    `_strip_withheld_provenance` treats as path lists — also typed, T1), and
+    `ref`, which is typed (T1) on an item that carries no `path`/`anchor` of
+    its own (a pointer, an ambiguity entry) and merely TOLERATED (T2,
+    `_is_page_shaped`-gated) on one that does (a unit, an ordinary anchor) —
+    see correction round 4's item invariant below. An ordinary scalar or
+    list value under any OTHER key — `kind`, `status`, `role`, `reason`,
+    `lifecycle`, `updated`, `as_of`, an `evidence` tag list, `category`,
+    `source` — is never a candidate. A blanket catch-all that treated EVERY
+    string reachable anywhere in the packet as a candidate turned those
+    ordinary tag values into bogus "unresolvable" entries, which then
+    wrongly withheld a sibling pointer/anchor/current_state item whose OWN
+    field happened to share that exact word
+    (`_value_names_an_invalid_reference` compares a whole item's every field
+    against `invalid_refs`) — an over-restriction bug, caught by the very
+    first end-to-end test run of this rewrite, not a defect a reviewer
+    reported.
+
+    Correction round 4's T1/T2 split, after the reviewer found `_is_page_shaped`
+    gating EVERY field the same way left a bare or oddly-suffixed value
+    (`secret`, `secret.markdown`) simply invisible in a TYPED field: not
+    decided, not invalid, so a unit whose real source was named only that
+    way was served in full once ANY other admitted reference (its own
+    tolerated `ref`) satisfied the item invariant's (b) half, and a
+    pointer/current_state/ambiguity entry whose ONLY reference was such a
+    value was never checked against the withheld/invalid sets at all.
+    `_is_page_shaped` now gates only the one place T2 needs it — a `ref`
+    beside a real `path`/`anchor`, where an opaque legacy id
+    (`unit-open`) must still be ignored rather than decided.
     """
     paths: set[str] = set()
     names: set[str] = set()
     interpretations: dict[str, frozenset[str]] = {}
     unresolvable: set[str] = set()
 
-    def _add(candidate: str) -> None:
+    def _add(candidate: str, *, strict: bool) -> None:
         text = candidate.strip()
         if not text or _matches_explicit_non_page_shape(text):
             return
-        if not _is_page_shaped(text):
-            # Names no page at all (the LANDMINE fix): an opaque,
-            # hand-authored id (`unit-open`) is neither decided nor
-            # invalid -- it simply never becomes a candidate, so it can
-            # never make an item's OTHER, genuine page references
-            # insufficient. See `_is_page_shaped` and the item invariant
-            # in `guard_working_set`.
+        if not strict and not _is_page_shaped(text):
+            # T2: a `ref` beside a real `path`/`anchor` names no page at all
+            # when it is not even page-shaped (the LANDMINE fix) -- an
+            # opaque, hand-authored id (`unit-open`) is neither decided nor
+            # invalid, so it can never make an item's OTHER, genuine page
+            # references insufficient. `strict` fields (T1) never take this
+            # branch: EVERY non-empty, non-exempt value in one is a
+            # candidate, page-shaped or not.
             return
         readings = _interpretations_for(candidate)
         if not readings:
@@ -2932,11 +3008,21 @@ def _working_set_paths(
         interpretations[candidate] = readings
         paths.update(readings)
 
-    def _collect(value: Any) -> None:
+    def _collect(value: Any, *, ref_strict: bool) -> None:
         if isinstance(value, Mapping):
             for key, item in value.items():
-                if key in _WORKING_SET_PATH_FIELDS and isinstance(item, str):
-                    _add(item)
+                if key == "ref" and isinstance(item, str):
+                    # T1/T2: typed (strict) when this item carries no
+                    # `path`/`anchor` of its own; merely tolerated
+                    # (page-shape-gated) when it does. `ref_strict` is
+                    # computed once per ITEM, below, from that item's own
+                    # (and its `provenance`'s) fields.
+                    _add(item, strict=ref_strict)
+                elif key in _WORKING_SET_STRICT_PATH_FIELDS and isinstance(item, str):
+                    # T1: `path`/`anchor` are typed page fields wherever
+                    # they appear -- on the item itself, or (a unit) under
+                    # its `provenance` -- never gated by shape.
+                    _add(item, strict=True)
                 elif key in _WORKING_SET_PROSE_FIELDS and isinstance(item, str):
                     for raw_target in _WIKILINK_ANYWHERE.findall(item):
                         # `_unwrap_reference` is the SAME helper the matcher uses,
@@ -2954,7 +3040,7 @@ def _working_set_paths(
                         if not target:
                             continue
                         if _is_markdown_path(target):
-                            _add(target)
+                            _add(target, strict=True)
                         else:
                             names.add(target)
                 elif key in _WORKING_SET_PATH_LIST_FIELDS and isinstance(item, list):
@@ -2963,13 +3049,13 @@ def _working_set_paths(
                     # as path lists for hit projection, PLUS an anchor's own
                     # `neighbourhood`/`anchor_neighbourhood` (the BLOCKER: a
                     # LIST is not a Mapping, so nothing else in `_collect`
-                    # ever reached it). Each entry gets the SAME candidate
-                    # handling `_add` applies to a named path field (R1's
-                    # default), not a restated `.endswith(".md")` pre-filter
-                    # that would miss a bare-stem or scheme'd reference here.
+                    # ever reached it). T1: typed like `path`/`anchor`, never
+                    # gated by shape -- not a restated `.endswith(".md")`
+                    # pre-filter that would miss a bare-stem or scheme'd
+                    # reference here.
                     for entry in item:
                         if isinstance(entry, str):
-                            _add(entry)
+                            _add(entry, strict=True)
                 elif isinstance(item, Mapping):
                     # Only a nested MAPPING (`provenance`, ...) can hold
                     # another path/prose/path-list field of its own. An
@@ -2988,13 +3074,19 @@ def _working_set_paths(
                     # reintroduced; scoping by FIELD NAME instead of by
                     # string shape is what the round-2 baseline's
                     # `.endswith(".md")` filter was accidentally also doing.
-                    _collect(item)
+                    # `ref_strict` carries over unchanged: `ref` never
+                    # appears inside a nested mapping like `provenance` in
+                    # any packet shape the compiler emits, but the flag is
+                    # this ITEM's own regardless of nesting depth.
+                    _collect(item, ref_strict=ref_strict)
         elif isinstance(value, (list, tuple)):
             for item in value:
-                _collect(item)
+                _collect(item, ref_strict=ref_strict)
 
     for section in ("anchors", "units", "pointers", "current_state", "ambiguity", "missing"):
-        _collect(packet.get(section))
+        for item in packet.get(section) or ():
+            if isinstance(item, Mapping):
+                _collect(item, ref_strict=not _item_has_own_page_field(item))
     return paths, names, interpretations, unresolvable
 
 
@@ -3089,36 +3181,48 @@ def _resolved_prose_names(vault_root: Path, names: set[str]) -> dict[str, tuple[
     return out
 
 
-def _is_admitted_page_reference(value: str, invalid_refs: frozenset[str]) -> bool:
-    """True when `value` is a page-shaped reference that was decided and
+def _is_admitted_typed_reference(value: str, invalid_refs: frozenset[str]) -> bool:
+    """True when `value` is a TYPED page field's value that was decided and
     ADMITTED -- the item invariant's (b) half: "at least one page
     reference it carries was decided and admitted" (correction round 3's
     LANDMINE fix, replacing the per-field shape reasoning R1-R3 were
-    reaching for).
+    reaching for; correction round 4's T1/T3 restricts (b) to TYPED page
+    fields only -- `path`/`anchor`, or a `ref` acting as one on an item
+    with no `path`/`anchor` of its own -- since a merely TOLERATED `ref`
+    beside a real `path`/`anchor` (T2) never satisfies (b) at all, even
+    when it happens to be page-shaped and admitted: T3 is explicit that
+    (b) is never satisfied by `ref` ALONE on an item that already has a
+    typed field).
+
+    No `_is_page_shaped` gate here (round 4's fix): `_working_set_paths`
+    decided this value WITHOUT one, since it came from a typed field
+    (`strict=True`) -- `secret`/`secret.markdown` are exactly as candidate
+    as `Knowledge Base/Notes/real-page.md` there. Re-applying the gate here
+    would incorrectly call a genuinely decided-and-admitted bare-word
+    candidate "not admitted" merely for not looking like a path.
 
     An explicit non-page shape (memory-id ref, `project:<key>`,
     `plan:...`) is excluded FIRST, unconditionally: it was never a
     candidate at all (`_matches_explicit_non_page_shape`,
     `_working_set_paths`'s `_add`), so it must never satisfy (b) on its
     own even though its own raw text can look path-shaped by coincidence
-    (a memory ref's `exomem://memory/<uuid>` scheme contains a `/`, which
-    `_is_page_shaped` alone cannot tell apart from a real vault path).
-    Such a reference names no page, so it is neither for (b) nor against
-    it; the item it belongs to must be carried by another field instead
-    (a unit by its `path`/`anchor`, which the compiler guarantees --
+    (a memory ref's `exomem://memory/<uuid>` scheme contains a `/`). Such a
+    reference names no page, so it is neither for (b) nor against it; the
+    item it belongs to must be carried by another field instead (a unit by
+    its `path`/`anchor`, which the compiler guarantees --
     `working_set.py::_provenance` -- or an anchor whose `ref` IS the
     explicit non-page shape is exempted from (b) altogether at its own
     call site, since a project/plan anchor legitimately has no page of
     its own).
 
-    A page-shaped candidate that is NOT in `invalid_refs` was, by
-    construction, decided (`_working_set_paths` tracks every page-shaped
-    string) and every existing reading it produced was admitted (R3) --
-    genuinely "decided and admitted," not merely "never checked."
+    A candidate that is NOT in `invalid_refs` was, by construction,
+    decided (`_working_set_paths` tracks every typed-field string) and
+    every existing reading it produced was admitted (R3) -- genuinely
+    "decided and admitted," not merely "never checked."
     """
     if not value or _matches_explicit_non_page_shape(value):
         return False
-    return _is_page_shaped(value) and value not in invalid_refs
+    return value not in invalid_refs
 
 
 def _guarded_anchor(
@@ -3141,22 +3245,20 @@ def _guarded_anchor(
     ):
         return None
     anchor_ref = str(anchor.get("ref") or "")
-    if not _matches_explicit_non_page_shape(anchor_ref) and not (
-        _is_admitted_page_reference(anchor_ref, invalid_refs)
-        or _is_admitted_page_reference(str(anchor.get("path") or ""), invalid_refs)
-    ):
-        # Item invariant (b): at least one page reference this anchor
-        # carries must have been decided and admitted. EXEMPTED when
-        # `ref` is an explicit non-page shape (`project:<key>`,
-        # `plan:...`): such an anchor legitimately has no page of its
-        # own (`path=""` by construction --
-        # `working_set_index.py::~1108`, `path=""`, `ref=anchor_id`) --
-        # its whole identity IS the synthetic id, so requiring a page
-        # reference would withhold every project/plan anchor
-        # unconditionally. A memory-id `ref` has no such exemption here
-        # because an ANCHOR (unlike a unit) has no separate
-        # provenance-guaranteed path/anchor fallback field.
-        return None
+    anchor_path = str(anchor.get("path") or "")
+    if not _matches_explicit_non_page_shape(anchor_ref):
+        # Item invariant (b), correction round 4's T1/T3: satisfied ONLY by
+        # this anchor's own TYPED page field -- `path` when it carries one
+        # (an ordinary anchor), or `ref` itself when it does not (a
+        # project/plan anchor's exemption is the branch above; a
+        # hypothetical future anchor kind with no `path` falls here
+        # instead, matching `_working_set_paths`'s own `ref_strict`
+        # computation for it exactly). `ref` is NEVER checked when `path`
+        # is real (T3): an ordinary anchor's `ref` always equals its
+        # `path` in practice, so this changes nothing for one.
+        typed_value = anchor_path or anchor_ref
+        if not _is_admitted_typed_reference(typed_value, invalid_refs):
+            return None
     out = dict(anchor)
     # Private resolution state: never published, at any release level.
     neighbourhood = out.pop("neighbourhood", None)
@@ -3218,11 +3320,24 @@ def _guarded_unit(
     # The asymmetry below is deliberate. A withheld target in
     # `provenance.superseded_by` STRIPS that field and keeps the unit, because a
     # provenance field is a list of references and removing one entry leaves the
-    # rest meaning what it meant. The same target in `text` drops the WHOLE unit,
-    # because prose cannot be edited surgically: cutting the link out of a
-    # sentence leaves a claim whose warrant nobody can check, and rewriting the
-    # sentence would be the server authoring text.
-    if _names_withheld(unit.get("text"), withheld, reference_field=True):
+    # rest meaning what it meant. The same target in a prose field drops the
+    # WHOLE unit, because prose cannot be edited surgically: cutting the link
+    # out of a sentence leaves a claim whose warrant nobody can check, and
+    # rewriting the sentence would be the server authoring text.
+    #
+    # Correction round 4's follow-up: checked over EVERY prose field
+    # `_working_set_paths`'s own collector scans (`_WORKING_SET_PROSE_FIELDS`
+    # — `text`, `statement`, `why`, `title`), not just `text` alone. A unit
+    # carries only `text` today, so this changes nothing a real packet emits
+    # yet — but hardcoding one field name here, while the collector that
+    # DECIDES a wikilink's target is driven by the shared list, is the same
+    # kind of drift the BLOCKER already punished once: the field that
+    # withholds an item silently falling behind the field that decided what
+    # it names.
+    if any(
+        _names_withheld(unit.get(field), withheld, reference_field=True)
+        for field in _WORKING_SET_PROSE_FIELDS
+    ):
         return None
     # A unit whose ANCHOR is withheld is dropped rather than kept with the anchor
     # filtered out of its provenance: an unattributable claim in working memory is
@@ -3231,22 +3346,27 @@ def _guarded_unit(
         return None
     # Item invariant (b): at least one page reference this unit carries
     # must have been decided and admitted (correction round 3's LANDMINE
-    # fix). An opaque, non-page-shaped `ref` (`unit-open`, a hand-authored
-    # or legacy id) is neither decided nor invalid on its own
-    # (`_is_page_shaped`) and so cannot satisfy this alone -- but a unit's
-    # `path`/`anchor` always names its own real source page regardless of
-    # what shape `ref` takes (`working_set.py::_provenance`,
-    # `{"path": item.path, ..., "anchor": item.anchor}`, unconditional for
-    # every lane this guard's field walk understands), so a real unit is
-    # still carried by (b) through those fields even when `ref` names no
-    # page at all. No exemption is needed the way an anchor needs one for
-    # `project:`/`plan:`: nothing here has an empty `path`/`anchor` by
-    # design the way a project anchor's `path` does.
-    if not (
-        _is_admitted_page_reference(str(unit.get("ref") or ""), invalid_refs)
-        or _is_admitted_page_reference(path, invalid_refs)
-        or _is_admitted_page_reference(anchor, invalid_refs)
-    ):
+    # fix). Correction round 4's T3: satisfied ONLY by a TYPED page field,
+    # never by `ref` ALONE on an item that already has one -- `path`/
+    # `anchor` are almost always real for a unit
+    # (`working_set.py::_provenance`, `{"path": item.path, ..., "anchor":
+    # item.anchor}`, unconditional for every real lane), so `ref` is
+    # merely TOLERATED there (T2) and never checked for (b) once either
+    # one is present. A unit named ONLY through its own `ref` -- no
+    # `path`/`anchor` at all, the shape a packet carries when the compiler
+    # walks past hit projection (`_ref_only_packet` in the test suite) --
+    # has no typed field to fall back to but its own `ref`, and
+    # `_working_set_paths` decided it strictly for exactly this reason
+    # (`_item_has_own_page_field` returns False, so `ref_strict=True`);
+    # checking it here too keeps that shape servable.
+    unit_ref = str(unit.get("ref") or "")
+    if path or anchor:
+        satisfied_b = _is_admitted_typed_reference(
+            path, invalid_refs
+        ) or _is_admitted_typed_reference(anchor, invalid_refs)
+    else:
+        satisfied_b = _is_admitted_typed_reference(unit_ref, invalid_refs)
+    if not satisfied_b:
         return None
     out = dict(unit)
     if isinstance(provenance, Mapping):
