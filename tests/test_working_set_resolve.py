@@ -1523,3 +1523,23 @@ def test_r5_a_named_anchor_survives_max_anchors_truncation_ahead_of_weak_candida
     assert "named" in by_id
     assert by_id["named"].status == "resolved"
     assert resolution.status == "resolved"
+
+
+# --------------------------------------------------------------------------- #
+# Correction round 1, C3 (REQUIRED, orchestrator): `STOPWORDS` was missing
+# almost every preposition and conjunction, so a turn sharing only one such
+# function word with an anchor's title earned `rare_term` -- a turn ending
+# "... before the trip" resolving an unrelated "Before Launch Review" plan.
+# --------------------------------------------------------------------------- #
+
+
+def test_c3_a_function_word_alone_does_not_earn_rare_term() -> None:
+    row = _term_row(
+        "plan.md", "Before Launch Review", terms=("before", "launch", "review")
+    )
+    analysis = resolve_module.analyze_turn("please pack before the trip")
+    candidates = resolve_module.candidates_for(
+        analysis, (row,), term_anchor_counts={"before": 1}
+    )
+
+    assert candidates == ()

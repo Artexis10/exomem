@@ -477,6 +477,20 @@ STOPWORDS: frozenset[str] = frozenset(
         # folds to "let", and the C1 fix only drops a fold that LANDS IN
         # STOPWORDS, so the word itself has to be one.
         "let",
+        # Correction round 1, C3 (REQUIRED, measured on a live-shaped vault):
+        # this list had almost no prepositions or conjunctions, so a turn
+        # sharing only ONE such function word with an anchor's title earned
+        # `rare_term` -- "... before the trip" resolving an unrelated plan
+        # whose title merely contains "before". CLOSED-CLASS English
+        # function words only (prepositions, subordinating conjunctions,
+        # modal/auxiliary verb forms, common pronouns) -- never a content
+        # word, however common.
+        "before", "after", "into", "onto", "during", "while", "between",
+        "under", "through", "without", "within", "against", "because", "if",
+        "would", "could", "been", "were", "also", "both", "each", "since",
+        "until", "upon", "per", "via", "being", "am", "he", "she", "his",
+        "her", "us", "shall", "may", "might", "must", "off", "down",
+        "across", "toward", "towards", "among", "around",
     }
 )
 
