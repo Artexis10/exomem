@@ -33,6 +33,7 @@ import io
 import os
 import shutil
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -62,22 +63,25 @@ COLLECTION_ID = "6f0f2b4c-1d3f-4a71-9c3d-2f9b5d2a7c11"
 #: always does.
 WARM_REQUEST_ENUMERATION_CEILING = 8
 
-#: The total filesystem-call ceiling for one warm request.
+#: The total filesystem-call ceiling for one warm request, on the request
+#: thread, after the background lanes the fixture started have drained.
 #:
 #: The convoy is paid PER GIL-RELEASING SYSTEM CALL, not per enumeration, so
-#: removing the sweep was only half the bill: the same request still resolved
-#: the vault's state location on every call that needed it, at one `lstat` per
-#: path component, which is why this number is worth pinning at all.
+#: removing the manifest sweep was only half the bill. Measured on this
+#: fixture, same method for all three: 2,667 calls before either repair
+#: (scandir 59, stat 133, lstat 2,382, open 93); 2,472 with the manifests off
+#: the request path (scandir 3, lstat 2,246); 587 once the vault's state
+#: location is resolved once per request instead of 72 times (scandir 3, stat
+#: 131, lstat 361, open 92).
 #:
-#: It was not pinnable before the request-scoped resolution memo, because the
-#: per-component cost scaled with how deep the temporary directory happened to
-#: be on the machine running the suite. Inside a scope that resolution happens
-#: once per request, so what remains is the request's own reads and the ceiling
-#: stops measuring the test environment. Measured on the fixture vault below;
-#: the ceiling is set at roughly twice that, which is loose enough to absorb a
-#: few dozen unrelated reads and far tighter than the ~1,950 this request cost
-#: before the memo and the ~3,590 it cost before either repair.
-WARM_REQUEST_FILESYSTEM_CALL_CEILING = 750
+#: The ceiling is roughly twice the 587 measured. Two reasons for that much
+#: slack rather than less: several remaining `Path.resolve()` sites still cost
+#: one `lstat` per path component, so the number moves with how deep the
+#: temporary directory is on the machine running the suite; and a ceiling that
+#: fails for a few dozen unrelated extra reads would be a false alarm in
+#: someone else's lane. It is still less than half of either pre-repair
+#: number, which is what it is for.
+WARM_REQUEST_FILESYSTEM_CALL_CEILING = 1200
 
 
 def _manifest_text(*, profile: str = "records", identifier: str = COLLECTION_ID) -> str:
@@ -169,13 +173,41 @@ def _compile(vault: Path, index: working_set_index.WorkingSetIndex) -> dict:
     return working_set.compile_packet(vault, turn=TURN, index=index)
 
 
-class _FilesystemCalls:
-    """Counts the filesystem calls one request makes, process-wide.
+def _drain_background_walks(timeout: float = 60.0) -> None:
+    """Let the warm-up's own background threads finish before measuring.
 
-    Process-wide rather than thread-local on purpose: a sweep moved onto a
-    helper thread is still a sweep this request paid for. The tests that use it
-    stub the background schedulers instead, so a count that rises is the
-    request's own work and nothing else's.
+    The warm-up writes: it seeds the watcher, rebuilds the lexical store and
+    builds the activation index, and a governed write legitimately starts a
+    background graph rebuild. That rebuild walks the vault, on its own thread,
+    for its own reasons — and measuring a request while it is still running
+    charges the request for it. Draining first is what makes the measurement
+    the request's, rather than a race with whatever the fixture started.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        alive = [
+            thread
+            for thread in threading.enumerate()
+            if thread.name.startswith("exomem-") and thread.is_alive()
+        ]
+        if not alive or time.monotonic() >= deadline:
+            return
+        for thread in alive:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+
+
+class _FilesystemCalls:
+    """Counts the filesystem calls one request makes on the request thread.
+
+    The request thread is the contract: a stage either enumerated a directory
+    before answering or it did not, and a background lane that some earlier
+    write started is not this request's cost. This is the same distinction
+    `conftest.ScopeWalkSentinel` draws with `current_thread_only`, for the same
+    reason — measuring every thread made the count a race with the graph
+    rebuild rather than a fact about the request. The escape it appears to
+    leave, "move the sweep to a helper thread", is closed separately and more
+    directly: the discovery counter is process-wide, and the test asserts the
+    request scheduled no background build at all.
 
     Nothing here resolves a path (no `realpath`, no `stat`): resolution would
     re-enter the very calls being counted. Attribution is a string prefix test,
@@ -189,6 +221,7 @@ class _FilesystemCalls:
 
     def __init__(self, *roots: Path) -> None:
         self._roots = tuple(str(Path(root)) for root in roots)
+        self._owner = threading.get_ident()
         self.counts = dict.fromkeys(self.NAMES, 0)
         self.enumerated: list[str] = []
         self.unattributable = 0
@@ -241,26 +274,34 @@ class _FilesystemCalls:
         real_lstat = os.lstat
         real_open = builtins.open
 
+        def mine() -> bool:
+            return threading.get_ident() == self._owner
+
         def counting_scandir(path=".", *args: object, **kwargs: object):
-            self.counts["scandir"] += 1
-            self._note_enumeration(path)
+            if mine():
+                self.counts["scandir"] += 1
+                self._note_enumeration(path)
             return real_scandir(path, *args, **kwargs)
 
         def counting_listdir(path=None, *args: object, **kwargs: object):
-            self.counts["listdir"] += 1
-            self._note_enumeration("." if path is None else path)
+            if mine():
+                self.counts["listdir"] += 1
+                self._note_enumeration("." if path is None else path)
             return real_listdir(path, *args, **kwargs)
 
         def counting_stat(path, *args: object, **kwargs: object):
-            self.counts["stat"] += 1
+            if mine():
+                self.counts["stat"] += 1
             return real_stat(path, *args, **kwargs)
 
         def counting_lstat(path, *args: object, **kwargs: object):
-            self.counts["lstat"] += 1
+            if mine():
+                self.counts["lstat"] += 1
             return real_lstat(path, *args, **kwargs)
 
         def counting_open(*args: object, **kwargs: object):
-            self.counts["open"] += 1
+            if mine():
+                self.counts["open"] += 1
             return real_open(*args, **kwargs)
 
         monkeypatch.setattr(os, "scandir", counting_scandir)
@@ -351,6 +392,7 @@ def test_warm_activation_request_enumerates_no_directory(
     _seed_planning(vault)
     _write_collection(vault)
     _warm_activation(vault, warm_managed_cell)
+    _drain_background_walks()
 
     scheduled = _no_background_walks(monkeypatch)
     discovery = _DiscoveryCounter()
@@ -370,6 +412,10 @@ def test_warm_activation_request_enumerates_no_directory(
         "lookup, or it proves nothing about the sweep that lookup used to run"
     )
 
+    assert discovery.calls == [], (
+        "a warm activation request must read the manifests the index already "
+        f"discovered, never sweep for them again: {discovery.calls}"
+    )
     storage = str(vault / "Knowledge Base" / "Records" / "Depot Stock")
     outside = [
         path
@@ -379,10 +425,6 @@ def test_warm_activation_request_enumerates_no_directory(
     assert outside == [], calls.report()
     assert calls.unattributable == 0, calls.report()
     assert calls.enumerations <= WARM_REQUEST_ENUMERATION_CEILING, calls.report()
-    assert discovery.calls == [], (
-        "a warm activation request must read the manifests the index already "
-        f"discovered, never sweep for them again: {discovery.calls}"
-    )
 
 
 def test_warm_activation_request_resolves_the_state_location_once(
@@ -402,6 +444,7 @@ def test_warm_activation_request_resolves_the_state_location_once(
     _seed_planning(vault)
     _write_collection(vault)
     _warm_activation(vault, warm_managed_cell)
+    _drain_background_walks()
 
     scheduled = _no_background_walks(monkeypatch)
     key_calls: list[str] = []

@@ -229,9 +229,16 @@ def _active_owner_authority() -> _OwnerAuthority | None:
 
 
 def _vault_identity_key(vault_root: Path) -> str:
-    """Canonical process key shared by short/long spellings of one vault."""
+    """Canonical process key shared by short/long spellings of one vault.
 
-    return os.path.normcase(str(Path(vault_root).expanduser().resolve(strict=False)))
+    Asked several times per request and answering the same thing every time, so
+    the resolution goes through the request-scoped memo; outside a request scope
+    it is the same full resolution it always was.
+    """
+
+    from . import state_paths
+
+    return os.path.normcase(str(state_paths.resolved_vault_path(vault_root)))
 
 
 def _identity_coordination_domains(

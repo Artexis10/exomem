@@ -119,6 +119,7 @@ from . import semantic_unit_read as semantic_unit_read_module
 from . import semantic_units as semantic_units_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
+from . import state_paths as state_paths_module
 from . import structured_files as structured_files_module
 from . import traversal_profiles as traversal_profiles_module
 from . import vocabulary_evidence as vocabulary_evidence_module
@@ -5988,26 +5989,37 @@ def op_activate_context(
     # would just turn a legitimately slower one-off cold walk into a hard
     # failure with nothing left to retry against. Unmanaged activation keeps
     # running unbounded, exactly as it did before request budgets existed.
-    bound_token = None
-    if readiness_module.runtime_managed() and request_budget_module.current() is None:
-        bound_token = request_budget_module.set_current(
-            request_budget_module.RequestBudget(
-                seconds=request_budget_module.ACTIVATION_DOOR_BUDGET_SECONDS
+    #
+    # The resolution scope wraps the WHOLE call, abstentions included. Where
+    # this vault's machine-local state lives is a placement answer that a
+    # dozen components ask for independently, and resolving a path costs one
+    # `lstat` per component — 72 full resolutions in one measured request, all
+    # returning the same directory. Inside the scope the answer is computed
+    # once and reused for the rest of the request, and outside one nothing is
+    # remembered at all. It has to cover the abstention paths too: a request
+    # that abstains still resolved placement several times on its way there,
+    # and the abstention paths are the ones a struggling server takes most.
+    with state_paths_module.resolution_scope():
+        bound_token = None
+        if readiness_module.runtime_managed() and request_budget_module.current() is None:
+            bound_token = request_budget_module.set_current(
+                request_budget_module.RequestBudget(
+                    seconds=request_budget_module.ACTIVATION_DOOR_BUDGET_SECONDS
+                )
             )
-        )
-    try:
-        return _op_activate_context_body(
-            vault_root,
-            turn,
-            max_chars,
-            purpose=purpose,
-            continuity=continuity,
-            anchor=anchor,
-            include_timings=include_timings,
-        )
-    finally:
-        if bound_token is not None:
-            request_budget_module.reset_current(bound_token)
+        try:
+            return _op_activate_context_body(
+                vault_root,
+                turn,
+                max_chars,
+                purpose=purpose,
+                continuity=continuity,
+                anchor=anchor,
+                include_timings=include_timings,
+            )
+        finally:
+            if bound_token is not None:
+                request_budget_module.reset_current(bound_token)
 
 
 def _op_activate_context_body(
