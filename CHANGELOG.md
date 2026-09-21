@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.90.3](https://github.com/Artexis10/exomem/compare/v0.90.2...v0.90.3) (2026-09-21)
+
+
+### Bug Fixes
+
+* **activation:** record the freshness key on a scheduled index build and never cache a stale packet ([#1341](https://github.com/Artexis10/exomem/issues/1341)) ([a547eaa](https://github.com/Artexis10/exomem/commit/a547eaae5f50ed810ef0ac14e6c9a81d09cf5ce0))
+
 ## [0.90.2](https://github.com/Artexis10/exomem/compare/v0.90.1...v0.90.2) (2026-09-21)
 
 
