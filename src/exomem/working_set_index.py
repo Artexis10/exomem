@@ -1156,6 +1156,18 @@ def publish_collection_manifests(
         # generation republish under its stale number and push the live
         # generations out, putting the sweep it had just paid for back on the
         # next request thread.
+        #
+        # The cost of that rule, measured: a sidecar DELETED and rebuilt
+        # restarts the generation counter at 1 while this registry still holds
+        # the dead sidecar's high numbers, so the rebuild's publish is evicted
+        # immediately and every request at the new low generations misses and
+        # (by the rule in `collection_manifests`) declines to store — sweeping
+        # on the request thread until the counter climbs back past the stale
+        # entries. No production path deletes the sidecar today, and it
+        # self-heals, but this is the second symptom of one cause: the key is a
+        # generation rather than the sidecar's whole `(epoch, generation,
+        # instance)` token, which would distinguish a restarted counter from an
+        # older one and close both.
         for stale in sorted(generations)[:-MANIFEST_REGISTRY_GENERATIONS]:
             generations.pop(stale, None)
         _MANIFEST_REGISTRY.move_to_end(key)
