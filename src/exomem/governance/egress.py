@@ -43,7 +43,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote
 
@@ -2450,6 +2450,40 @@ _WORKING_SET_PATH_FIELDS = ("ref", "path", "anchor")
 _WORKING_SET_PROSE_FIELDS = ("text", "statement", "why", "title")
 
 
+def _unwrapped_vault_path(candidate: str) -> str | None:
+    """The real vault-relative `.md` path `candidate` names, or `None`.
+
+    A `ref` field carries the pipeline's opaque `exomem://vault/<percent-
+    encoded path>#unit-<hash>` URI (built by `context_refs.vault_ref` /
+    `semantic_units.py`), never a vault-relative path on its own. Handing that
+    literal URI text to `_decide_path` as though it already were one always
+    fails to stat, and the fail-closed `None` then collapses onto the REAL
+    page's canonical key through `_canonical_reference` — withholding a page
+    this reference never named. `_unwrap_reference` is the SAME normalisation
+    every other consumer of a reference string uses, applied here BEFORE the
+    `.md` / fragment handling, so this returns the page the reference actually
+    names.
+
+    A reference that does not unwrap to a genuine path INSIDE the vault (an
+    encoded `..` segment, a drive-letter or POSIX-absolute path, a scheme
+    `_unwrap_reference` does not understand, an empty path) is left
+    undecidable rather than guessed at: nothing becomes decidable here that
+    was not a real in-vault path.
+    """
+    unwrapped, _explicit = _unwrap_reference(candidate)
+    if not unwrapped or not unwrapped.endswith(".md"):
+        return None
+    if (
+        "\0" in unwrapped
+        or "://" in unwrapped
+        or (len(unwrapped) >= 2 and unwrapped[0].isalpha() and unwrapped[1] == ":")
+        or PurePosixPath(unwrapped).is_absolute()
+        or any(part in {"", ".", ".."} for part in PurePosixPath(unwrapped).parts)
+    ):
+        return None
+    return unwrapped
+
+
 def _working_set_paths(packet: Mapping[str, Any]) -> tuple[set[str], set[str]]:
     """`(vault paths, wikilink names)` the packet names.
 
@@ -2464,10 +2498,9 @@ def _working_set_paths(packet: Mapping[str, Any]) -> tuple[set[str], set[str]]:
     names: set[str] = set()
 
     def _add(candidate: str) -> None:
-        if candidate.endswith(".md"):
-            paths.add(candidate)
-        elif "#" in candidate and candidate.split("#", 1)[0].endswith(".md"):
-            paths.add(candidate.split("#", 1)[0])
+        unwrapped = _unwrapped_vault_path(candidate)
+        if unwrapped is not None:
+            paths.add(unwrapped)
 
     def _collect(value: Any) -> None:
         if isinstance(value, Mapping):
