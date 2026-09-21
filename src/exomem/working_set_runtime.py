@@ -520,7 +520,7 @@ def refresh_index(index: working_set_index.WorkingSetIndex, *, freshness_stamp: 
     update inline — the honest trade for a single-user install.
     """
     if _managed():
-        _schedule_build(index.vault_root)
+        _schedule_build(index.vault_root, freshness_stamp=freshness_stamp)
         return False
     try:
         index.update(freshness_stamp=freshness_stamp or None)
@@ -539,8 +539,18 @@ def _managed() -> bool:
         return False
 
 
-def _schedule_build(vault_root: Path) -> None:
-    """Single-flight a cold or stale build away from the request thread."""
+def _schedule_build(vault_root: Path, *, freshness_stamp: str = "") -> None:
+    """Single-flight a cold or stale build away from the request thread.
+
+    The build records the freshness key it was scheduled for, exactly as the
+    unmanaged inline update does. Without it the catalogue never stops reading
+    as stale: every request reports `index_stale` and, with no build in flight,
+    schedules another whole-vault walk. The walk starts after the key was read,
+    so what it writes is at least as new as the key it records; a vault that
+    moved again in between simply reads as stale once more. A build already in
+    flight keeps its own key, and the next request decides whether that was
+    enough.
+    """
     root = Path(vault_root).absolute()
     with _CACHE_LOCK:
         if root in _BUILDS:
@@ -549,7 +559,7 @@ def _schedule_build(vault_root: Path) -> None:
 
     def _warm() -> None:
         try:
-            working_set_index.WorkingSetIndex(root).update()
+            working_set_index.WorkingSetIndex(root).update(freshness_stamp=freshness_stamp or None)
         except Exception:  # noqa: BLE001 - the optional stage stays soft-failing
             log.warning("activation index background build failed", exc_info=True)
         finally:
@@ -704,7 +714,11 @@ def serve(
     if changed is not None:
         return changed
     if index_stale:
+        # Transient, so never cached: the scheduled build may leave the vault's
+        # rows and the sidecar token exactly as they were, and a cached copy
+        # would go on saying `index_stale` after the catalogue caught up.
         packet["generation"]["index_stale"] = True
+        return packet
     if packet["generation"].get("semantic_evidence") in {
         "warming",
         "busy",

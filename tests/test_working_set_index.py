@@ -817,9 +817,11 @@ def test_a_managed_runtime_reports_a_stale_index_rather_than_walking(
     working_set_index.WorkingSetIndex(seeded).rebuild(freshness_stamp="old")
 
     monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
-    scheduled: list[Path] = []
+    scheduled: list[tuple[Path, str]] = []
     monkeypatch.setattr(
-        working_set_runtime, "_schedule_build", lambda root: scheduled.append(root)
+        working_set_runtime,
+        "_schedule_build",
+        lambda root, *, freshness_stamp="": scheduled.append((root, freshness_stamp)),
     )
 
     packet = working_set_runtime.serve(
@@ -828,7 +830,8 @@ def test_a_managed_runtime_reports_a_stale_index_rather_than_walking(
 
     assert packet["generation"]["index_stale"] is True
     assert packet["generation"]["index_generation"] >= 1
-    assert len(scheduled) == 1
+    # The build is scheduled FOR the key the request was stale against.
+    assert [stamp for _root, stamp in scheduled] == ["new"]
 
 
 def _join_scheduled_builds() -> None:
@@ -876,7 +879,8 @@ def test_a_scheduled_build_records_the_stamp_so_the_next_request_stops_asking(
     )
     _join_scheduled_builds()
 
-    assert second["generation"]["index_stale"] is False
+    # The marker is only ever present as True; its absence is "current".
+    assert "index_stale" not in second["generation"]
     assert scheduled == []
 
 
