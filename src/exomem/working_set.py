@@ -804,9 +804,15 @@ def compile_packet(
     limit = clamp_budget(max_chars)
     index = index or working_set_index.WorkingSetIndex(root)
     registry = context_roles.load_roles(root)
+    # The WHOLE sidecar token, in place of the generation read this used to
+    # make. It is the same single sidecar read — `generation()` is
+    # `read_meta_token(...)[1]` — and the other two fields are what identify
+    # the sidecar that issued the number, which is how the manifest registry
+    # tells a rebuilt counter from an older one.
+    index_token = index.token()
     generation: dict[str, Any] = {
         "freshness_key": freshness_key,
-        "index_generation": index.generation(),
+        "index_generation": index_token[1],
         **registry.generation_block(),
     }
 
@@ -843,7 +849,9 @@ def compile_packet(
                 vectors=vectors,
                 query_vector=query_vector,
                 retrieval_paths=retrieval_paths,
-                routing_targets=_routing_targets(root, generation["index_generation"]),
+                routing_targets=_routing_targets(
+                    root, index_token[1], index_token=index_token
+                ),
                 used_paths=_used_paths(root, rows),
                 term_anchor_counts=index.term_anchor_counts(),
             )
@@ -883,7 +891,8 @@ def compile_packet(
             root,
             anchors=resolution.resolved_anchors,
             purpose=purpose,
-            index_generation=generation["index_generation"],
+            index_generation=index_token[1],
+            index_token=index_token,
         )
     items, missing = run_lanes(
         root,
@@ -912,7 +921,12 @@ def compile_packet(
     return packet
 
 
-def _routing_targets(vault_root: Path, index_generation: int) -> tuple[Any, ...]:
+def _routing_targets(
+    vault_root: Path,
+    index_generation: int,
+    *,
+    index_token: tuple[int, int, int] | None = None,
+) -> tuple[Any, ...]:
     """Records routing targets for `claims_match`, via the existing claims rule.
 
     Read from the manifests the index update published for this generation, so
@@ -927,7 +941,9 @@ def _routing_targets(vault_root: Path, index_generation: int) -> tuple[Any, ...]
     try:
         from . import collection_claims, record_governance
 
-        manifests = working_set_index.records_manifests(vault_root, index_generation)
+        manifests = working_set_index.records_manifests(
+            vault_root, index_generation, token=index_token
+        )
     except Exception:  # noqa: BLE001 - no targets simply means no claims evidence
         log.debug("activation: routing targets unavailable", exc_info=True)
         return ()

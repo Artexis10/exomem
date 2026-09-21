@@ -52,17 +52,19 @@ def current_state_for(
     anchors: Sequence[Any],
     purpose: str | None = None,
     index_generation: int | None = None,
+    index_token: tuple[int, int, int] | None = None,
 ) -> tuple[dict[str, Any], ...]:
     """Resolve each stateful anchor's current state, Records first.
 
     `index_generation` names the activation index generation whose published
-    manifests this lookup may route with. Routing is evidence and may be that
+    manifests this lookup may route with, and `index_token` the sidecar that
+    issued it — a generation means nothing without the sidecar it came from. Routing is evidence and may be that
     stale; the collection it routes to is then read from disk again before any
     governed query runs against it. Left unset — a caller with no index at all
     — the manifests are discovered directly, exactly as they always were.
     """
     root = Path(vault_root)
-    manifests = _records_manifests(root, index_generation)
+    manifests = _records_manifests(root, index_generation, index_token)
     out: list[dict[str, Any]] = []
     for anchor in anchors:
         if getattr(anchor, "kind", "") not in STATEFUL_KINDS:
@@ -77,7 +79,11 @@ def current_state_for(
     return tuple(out)
 
 
-def _records_manifests(vault_root: Path, index_generation: int | None) -> tuple[Any, ...]:
+def _records_manifests(
+    vault_root: Path,
+    index_generation: int | None,
+    index_token: tuple[int, int, int] | None = None,
+) -> tuple[Any, ...]:
     """The Records manifests this lookup may ROUTE with — never govern with.
 
     Served from the activation index's published set when the caller named a
@@ -91,7 +97,9 @@ def _records_manifests(vault_root: Path, index_generation: int | None) -> tuple[
         from . import working_set_index
 
         try:
-            return working_set_index.records_manifests(vault_root, index_generation)
+            return working_set_index.records_manifests(
+                vault_root, index_generation, token=index_token
+            )
         except Exception:  # noqa: BLE001 - an unreadable manifest costs its state entry
             log.debug("current state: collection discovery failed", exc_info=True)
             return ()

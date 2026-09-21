@@ -787,8 +787,8 @@ def test_registry_served_packet_matches_the_compute_once_packet(
     misses: list[int] = []
     real_published = working_set_index.published_collection_manifests
 
-    def counting(vault_root: Path, generation: int):
-        entry = real_published(vault_root, generation)
+    def counting(vault_root: Path, generation: int, **kwargs: object):
+        entry = real_published(vault_root, generation, **kwargs)
         if entry is None:
             misses.append(generation)
         return entry
@@ -974,7 +974,9 @@ def test_a_failed_discovery_does_not_erase_another_update_s_pending_set(
     winner.join(timeout=60)
 
     generation = reports["ok"]["generation"]
-    published = working_set_index.published_collection_manifests(vault, generation)
+    published = working_set_index.published_collection_manifests(
+        vault, generation, token=working_set_index.WorkingSetIndex(vault).token()
+    )
 
     assert published is not None, (
         "the update that discovered the manifests published nothing: another "

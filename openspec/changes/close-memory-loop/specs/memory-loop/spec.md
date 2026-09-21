@@ -371,9 +371,10 @@ or threads, and SHALL NOT retain a failed resolution.
 The set of collection
 manifests activation reads SHALL be produced where the derived index already
 discovers collections, off the request path, and published for request threads
-by index generation; a request whose generation has nothing published SHALL
-compute the set once, publish it and proceed, so a caller that never had an
-index is unchanged. The manifests used as RESOLUTION EVIDENCE MAY be as stale as
+against the identity of the derived index that produced it; a request for which
+nothing is published SHALL compute the set once, publish it and proceed, so a
+caller that never had an index is unchanged. A set published against one
+derived index SHALL NOT be served against another. The manifests used as RESOLUTION EVIDENCE MAY be as stale as
 the index, exactly as anchors are. Governed current state SHALL NOT be resolved
 against a stale manifest: it SHALL take only the manifest paths from that
 published set and SHALL re-read the manifest of each collection it queries on

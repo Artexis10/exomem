@@ -1088,19 +1088,32 @@ MANIFEST_REGISTRY_GENERATIONS = 2
 MANIFEST_REGISTRY_VAULTS = 8
 
 _MANIFEST_REGISTRY_LOCK = threading.Lock()
-#: vault identity -> index generation -> that generation's manifests.
+
+#: The identity of a vault's sidecar: its `(epoch, instance)`, generation
+#: excluded. `instance` is stamped once, at random, when a sidecar's meta table
+#: is created, so it differs for every sidecar ever built -- which is exactly
+#: what tells a rebuilt counter apart from an older one.
+_SidecarIdentity = tuple[int, int]
+
+#: The identity a caller with no token gets. Every such caller shares it, so
+#: they behave among themselves exactly as the generation-only key did, and a
+#: real sidecar's entries are never served to them or theirs to it.
+_ANONYMOUS_IDENTITY: _SidecarIdentity = (0, 0)
+
+#: vault -> (that vault's sidecar identity, generation -> manifests).
 #:
-#: Keyed on the generation alone, where `_ROW_CACHE` keys on the whole
-#: `(epoch, generation, instance)` token. The accepted hole: a vault deleted and
-#: recreated at the same path, by another process, which then advances the NEW
-#: sidecar to a generation this process happens to hold, would be served the old
-#: vault's manifests as routing evidence. Every generation this process writes
-#: republishes, so the hole needs a writer that is not this process, and a
-#: process still serving a vault that was deleted under it has larger problems
-#: than this cache. Closing it means threading the token through the two
-#: request-path readers and adding a sidecar read to each -- worth doing if the
-#: hosted runtime ever recreates vaults in place.
-_MANIFEST_REGISTRY: OrderedDict[str, OrderedDict[int, tuple[Any, ...]]] = OrderedDict()
+#: Keyed on the sidecar, not on a number, because a generation is only
+#: meaningful within the sidecar that issued it. Keyed on the number alone this
+#: had two measured failures, both of them the sweep coming back to the request
+#: thread: a sidecar deleted and rebuilt restarts its counter at 1, so its own
+#: rebuild was evicted by the dead sidecar's higher numbers and every request
+#: after it missed and declined to store; and until the counter climbed back,
+#: the dead sidecar's manifests were served as if they described this vault.
+#: `_ROW_CACHE` next door has always keyed on the whole token for the same
+#: reason.
+_MANIFEST_REGISTRY: OrderedDict[
+    str, tuple[_SidecarIdentity, dict[int, tuple[Any, ...]]]
+] = OrderedDict()
 #: What the discovery inside ONE `_write` call saw, before the write that will
 #: give it a generation. A single-element box installed by `_write` before it
 #: collects and read by it after, so the set an update discovered belongs to
@@ -1133,8 +1146,23 @@ def _vault_key(vault_root: Path) -> str:
     return str(state_paths.resolved_vault_path(vault_root, expanduser=False))
 
 
+def sidecar_identity(token: Sequence[int] | None) -> _SidecarIdentity:
+    """`(epoch, instance)` from a sidecar token, or the anonymous identity."""
+    if token is None:
+        return _ANONYMOUS_IDENTITY
+    try:
+        epoch, _generation, instance = (int(part) for part in token)
+    except (TypeError, ValueError):
+        return _ANONYMOUS_IDENTITY
+    return (epoch, instance)
+
+
 def publish_collection_manifests(
-    vault_root: Path, generation: int, manifests: Sequence[Any]
+    vault_root: Path,
+    generation: int,
+    manifests: Sequence[Any],
+    *,
+    token: Sequence[int] | None = None,
 ) -> None:
     """Publish one index generation's collection manifests for request threads.
 
@@ -1142,32 +1170,32 @@ def publish_collection_manifests(
     only ever see a whole generation or no generation at all — there is no
     moment at which a half-built entry is reachable. Nothing under the lock
     touches the filesystem.
+
+    A publish under a sidecar identity this vault has not got entries for
+    REPLACES them all. They describe a sidecar that no longer exists, and the
+    publisher is the index update, which by construction is holding the live
+    one — so the generations either side of a rebuild are not comparable and
+    the old ones are not evidence about anything.
     """
     entry = tuple(manifests)
     key = _vault_key(vault_root)
+    identity = sidecar_identity(token)
     with _MANIFEST_REGISTRY_LOCK:
-        generations = _MANIFEST_REGISTRY.get(key)
-        if generations is None:
-            generations = OrderedDict()
-            _MANIFEST_REGISTRY[key] = generations
+        held = _MANIFEST_REGISTRY.get(key)
+        if held is None or held[0] != identity:
+            generations: dict[int, tuple[Any, ...]] = {}
+            _MANIFEST_REGISTRY[key] = (identity, generations)
+        else:
+            generations = held[1]
         generations[int(generation)] = entry
-        # By HIGHEST generation, never by publish recency. Evicting the least
-        # recently published let a straggler that had captured an older
-        # generation republish under its stale number and push the live
-        # generations out, putting the sweep it had just paid for back on the
-        # next request thread.
-        #
-        # The cost of that rule, measured: a sidecar DELETED and rebuilt
-        # restarts the generation counter at 1 while this registry still holds
-        # the dead sidecar's high numbers, so the rebuild's publish is evicted
-        # immediately and every request at the new low generations misses and
-        # (by the rule in `collection_manifests`) declines to store — sweeping
-        # on the request thread until the counter climbs back past the stale
-        # entries. No production path deletes the sidecar today, and it
-        # self-heals, but this is the second symptom of one cause: the key is a
-        # generation rather than the sidecar's whole `(epoch, generation,
-        # instance)` token, which would distinguish a restarted counter from an
-        # older one and close both.
+        # By HIGHEST generation, never by publish recency, and only ever among
+        # generations of ONE sidecar. Evicting the least recently published let
+        # a straggler that had captured an older generation republish under its
+        # stale number and push the live generations out, putting the sweep it
+        # had just paid for back on the next request thread. Comparing numbers
+        # across sidecars did the same thing for a different reason, which is
+        # why a new identity replaces the entries rather than competing with
+        # them.
         for stale in sorted(generations)[:-MANIFEST_REGISTRY_GENERATIONS]:
             generations.pop(stale, None)
         _MANIFEST_REGISTRY.move_to_end(key)
@@ -1176,9 +1204,13 @@ def publish_collection_manifests(
 
 
 def published_collection_manifests(
-    vault_root: Path, generation: int
+    vault_root: Path, generation: int, *, token: Sequence[int] | None = None
 ) -> tuple[Any, ...] | None:
     """This generation's published manifests, or `None` when there are none.
+
+    A generation only means anything within the sidecar that issued it, so an
+    entry published under a different sidecar identity is not an answer to this
+    question and is reported as absent.
 
     `None` and `()` are different answers and must stay so: a vault with no
     collections publishes an empty tuple, and reading that as "nothing was
@@ -1186,14 +1218,17 @@ def published_collection_manifests(
     nothing.
     """
     key = _vault_key(vault_root)
+    identity = sidecar_identity(token)
     with _MANIFEST_REGISTRY_LOCK:
-        generations = _MANIFEST_REGISTRY.get(key)
-        if generations is None:
+        held = _MANIFEST_REGISTRY.get(key)
+        if held is None or held[0] != identity:
             return None
-        return generations.get(int(generation))
+        return held[1].get(int(generation))
 
 
-def collection_manifests(vault_root: Path, generation: int) -> tuple[Any, ...]:
+def collection_manifests(
+    vault_root: Path, generation: int, *, token: Sequence[int] | None = None
+) -> tuple[Any, ...]:
     """The manifests activation reads, without enumerating a single directory.
 
     Served from what the index update published for this generation. A miss —
@@ -1203,36 +1238,52 @@ def collection_manifests(vault_root: Path, generation: int) -> tuple[Any, ...]:
     A discovery that fails raises, exactly as calling it directly would: the
     callers here already treat unavailable manifests as no evidence.
     """
-    published = published_collection_manifests(vault_root, generation)
+    published = published_collection_manifests(vault_root, generation, token=token)
     if published is not None:
         return published
     from . import structured_collections
 
     manifests = tuple(structured_collections.discover_collections(Path(vault_root)))
-    # A straggler that captured an older generation serves itself and leaves
-    # the registry alone. Storing its answer would be a write on behalf of a
-    # generation nobody is serving any more, and the entry it would occupy
-    # belongs to the generations that are.
-    if not _below_highest_held(vault_root, generation):
-        publish_collection_manifests(vault_root, generation, manifests)
+    if _may_store(vault_root, generation, sidecar_identity(token)):
+        publish_collection_manifests(vault_root, generation, manifests, token=token)
     return manifests
 
 
-def _below_highest_held(vault_root: Path, generation: int) -> bool:
-    """Whether this vault already holds a generation newer than `generation`."""
+def _may_store(
+    vault_root: Path, generation: int, identity: _SidecarIdentity
+) -> bool:
+    """Whether a READER may keep what it just computed.
+
+    Two refusals, both of them "this request cannot prove its answer is the
+    current one":
+
+    * a straggler that captured an older generation of the SAME sidecar serves
+      itself and leaves the registry alone — storing would be a write on behalf
+      of a generation nobody is serving any more, and the entry it would occupy
+      belongs to the generations that are;
+    * a reader whose token names a different sidecar from the one this vault
+      holds entries for stores nothing and evicts nothing. Only the index
+      update, which holds the live sidecar by construction, may replace a
+      vault's entries wholesale; a reader cannot tell whether its own token
+      died under it or the registry's did.
+    """
     key = _vault_key(vault_root)
     with _MANIFEST_REGISTRY_LOCK:
-        generations = _MANIFEST_REGISTRY.get(key)
-        if not generations:
+        held = _MANIFEST_REGISTRY.get(key)
+        if held is None:
+            return True
+        if held[0] != identity:
             return False
-        return int(generation) < max(generations)
+        return not held[1] or int(generation) >= max(held[1])
 
 
-def records_manifests(vault_root: Path, generation: int) -> tuple[Any, ...]:
+def records_manifests(
+    vault_root: Path, generation: int, *, token: Sequence[int] | None = None
+) -> tuple[Any, ...]:
     """Just the Records-profile manifests, which is all activation asks for."""
     return tuple(
         manifest
-        for manifest in collection_manifests(vault_root, generation)
+        for manifest in collection_manifests(vault_root, generation, token=token)
         if str(getattr(manifest, "semantic_profile", "")) == "records"
     )
 
@@ -1250,7 +1301,9 @@ def _note_discovered_manifests(manifests: Sequence[Any] | None) -> None:
     box[0] = None if manifests is None else tuple(manifests)
 
 
-def _publish_pending_manifests(vault_root: Path, generation: int) -> None:
+def _publish_pending_manifests(
+    vault_root: Path, generation: int, *, token: Sequence[int] | None = None
+) -> None:
     """Publish the discovery this write was built from, under its generation.
 
     Called on EVERY completed write, including the one that found nothing
@@ -1262,7 +1315,7 @@ def _publish_pending_manifests(vault_root: Path, generation: int) -> None:
     pending = None if box is None else box[0]
     if pending is None:
         return
-    publish_collection_manifests(vault_root, generation, pending)
+    publish_collection_manifests(vault_root, generation, pending, token=token)
 
 
 def reset_collection_manifests_for_tests() -> None:
@@ -1677,14 +1730,16 @@ class WorkingSetIndex:
             # either; only the stamp advances, so the next request stops asking.
             if freshness_stamp is not None:
                 self._stamp(conn, freshness_stamp)
-            unchanged_generation = sidecar_store.read_meta_token(conn)[1]
+            unchanged_token = sidecar_store.read_meta_token(conn)
             # Published even here: this update DID re-read the manifests, so the
             # registry entry for this generation is current whether or not the
             # generation moved.
-            _publish_pending_manifests(self.vault_root, unchanged_generation)
+            _publish_pending_manifests(
+                self.vault_root, unchanged_token[1], token=unchanged_token
+            )
             return {
                 "anchors": len(existing),
-                "generation": unchanged_generation,
+                "generation": unchanged_token[1],
                 "unchanged": True,
             }
         vectors = _signature_vectors(candidates)
@@ -1763,6 +1818,10 @@ class WorkingSetIndex:
                     (freshness_stamp,),
                 )
             generation = sidecar_store.bump_meta(conn, "generation")
+            # The whole token, inside the same transaction that bumped it: the
+            # registry is keyed on the sidecar that issued a generation, and
+            # `bump_meta` returns only the number.
+            written_token = sidecar_store.read_meta_token(conn)
             conn.commit()
         except sqlite3.Error:
             conn.rollback()
@@ -1770,7 +1829,7 @@ class WorkingSetIndex:
             return {"anchors": 0, "generation": 0, "unavailable": True}
         with _CACHE_LOCK:
             _ROW_CACHE.pop(self.path, None)
-        _publish_pending_manifests(self.vault_root, generation)
+        _publish_pending_manifests(self.vault_root, generation, token=written_token)
         return {"anchors": len(candidates), "generation": generation}
 
     def _stamp(self, conn: sqlite3.Connection, freshness_stamp: str) -> None:

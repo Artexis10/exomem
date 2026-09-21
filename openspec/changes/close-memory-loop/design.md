@@ -287,8 +287,12 @@ the request path stops enumerating the filesystem.
 
 Discovery belongs where it already runs off the request path: the index update.
 It publishes the manifests it discovered for request threads, keyed by vault and
-index generation, and every completed update republishes, so freshness does not
-depend on whether the generation moved. The two readers are split by what
+by the whole identity of the sidecar that issued the generation, and every
+completed update republishes, so freshness does not depend on whether the
+generation moved. The identity matters because a generation only means
+something within the sidecar that issued it: a sidecar rebuilt from scratch
+restarts its counter, and a registry that compared the numbers alone served a
+dead sidecar's manifests and stranded the live one's on the sweep. The two readers are split by what
 staleness costs each. Routing claims are resolution evidence and may be exactly
 as stale as the index, which is the contract every anchor already has: a
 collection added since the last update supplies more or less evidence for a
