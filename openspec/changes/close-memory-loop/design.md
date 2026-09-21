@@ -374,31 +374,85 @@ dict, but the guard already committed to stripping `neighbourhood` before
 publication regardless, and a silently-ungoverned field reaching a future
 anchor shape is exactly the failure mode field-name scoping risks.
 
-More generally: an item (anchor or unit) is served only when (a) no
-reference it carries is withheld or invalid, and (b) at least one
-PAGE-SHAPED reference it carries was decided and admitted. A candidate must
-first be page-shaped — a markdown suffix after fragment-stripping, an
-`exomem://vault|source/` scheme, a wikilink bracket pair, or a path
-separator — to count for either half; an opaque, hand-authored id (a legacy
-`unit-open`-style ref) names no page at all, so it is neither decided nor
-invalid and can never make an item's OTHER, genuine references insufficient.
-Before this, ANY non-empty path-bearing-field string that could not be
-resolved to a path joined `unresolvable`, which withheld the whole item —
-including a unit named by such an opaque ref but carried by a perfectly
-permitted `path`/`anchor`, under a policy that had nothing to do with it. A
-unit's `path`/`anchor` are unconditional for every lane
-(`working_set.py::_provenance`), so (b) needs no exemption there; an anchor
-whose `ref` is an explicit non-page shape (`project:<key>`, `plan:...`) is
-exempted from (b) at its own call site instead, since such an anchor
-legitimately has no page of its own (`path=""` by construction — a
-project/plan anchor's whole identity IS its synthetic id).
+More generally: an item (anchor, unit, pointer, current_state or ambiguity
+entry) is served only when (a) no reference it carries is withheld or
+invalid, and (b) at least one reference it carries was decided and
+admitted. Round three drew that line by SHAPE — a candidate had to look
+page-shaped (a markdown suffix, an `exomem://` scheme, a wikilink bracket
+pair, a path separator) to count for either half. Correction round four
+found the flaw in drawing it there: `_is_page_shaped` gated every
+path-bearing field alike, so a bare or oddly-suffixed value in a field that
+IS always a page reference — `secret`, `secret.markdown`, no slash, no
+`.md` — was simply invisible: not decided, not invalid. A unit whose real
+source was named only that way was served in full once its own
+(page-shaped, unrelated, admitted) `ref` satisfied (b) alone; a
+pointer/current_state/ambiguity entry whose ONLY reference was such a value
+was never checked against the withheld or invalid sets at all, since it
+never became a candidate to check.
+
+Round four draws the line by FIELD instead, replacing shape with an
+enumerated rule (T1–T4):
+
+- **T1 — typed page fields are strict.** `path` and `anchor` — wherever
+  they appear, on the item itself or under its `provenance` — the
+  reference-list fields (`superseded_by` and its like, `neighbourhood`),
+  and `ref` on an item that carries no `path`/`anchor` of its own (a
+  pointer, an ambiguity entry, a unit named only through its own `ref` —
+  the shape a packet carries when the compiler walks past hit projection)
+  are TYPED. Every non-empty value in one IS a page reference regardless of
+  shape, unless it is one of the enumerated non-page shapes (a memory-id
+  ref, `project:<key>`, `plan:<rel>#<title>`): decided under every existing
+  reading, and withholding its item if none exists. `_is_page_shaped` plays
+  no part here.
+- **T2 — `_is_page_shaped` gates exactly one thing.** A `ref` on an item
+  that ALSO carries a `path`/`anchor` of its own (an ordinary unit, an
+  ordinary anchor) is merely TOLERATED: a non-page-shaped value there names
+  no page at all and is ignored — neither decided nor invalid — which is
+  what keeps a legacy opaque id (`unit-open`) working. A page-shaped one is
+  treated like any typed value.
+- **T3 — invariant (b) is typed-field-only.** Satisfied only by a TYPED
+  page field that was decided and admitted, never by a merely TOLERATED
+  `ref` alone. A unit's `provenance.path`/`.anchor` are unconditional for
+  every real lane (`working_set.py::_provenance`), so its `ref` is usually
+  tolerated and never checked for (b) — except the one shape with no
+  `path`/`anchor` at all, where `ref` IS the typed field (T1) and does
+  satisfy (b) there. An ordinary anchor's `path` is real, so its `ref`
+  never satisfies (b) either (and in practice always equals `path`, so this
+  changes nothing for one); a project/plan anchor's `ref` is an explicit
+  non-page shape and stays exempted from (b) altogether at its own call
+  site, exactly as round three left it — a project/plan anchor legitimately
+  has no page of its own (`path=""` by construction, its whole identity IS
+  its synthetic id).
+- **T4 — empty strings stay skipped.** The records lane's `path=""` is
+  real, not a gap to fill.
 
 Closing one field-name gap does not prove no other one exists. The PIN test
 compiles a real packet with the real compiler on a fixture vault, walks
 every string value anywhere in it with no field-name enumeration of its
 own, and asserts that every one naming a page that genuinely exists on disk
 was handed to the decide loop — a safety net for any future ungoverned
-field, not just this round's `neighbourhood`.
+field, not just this round's `neighbourhood`, and general enough that it
+did not need updating for round four's typed-field split to keep proving
+the same property against a real compiled packet.
+
+A separate, narrower gap closed in the same round: `_guarded_unit` checked
+only `unit["text"]` for a withheld wikilink, while the collector scans
+every field in `_WORKING_SET_PROSE_FIELDS` (`text`, `statement`, `why`,
+`title`) on any item type. A unit carries only `text` in every packet the
+real compiler emits today, so this changed no real behaviour — but the
+checked-field list is now driven by the same shared constant the collector
+uses, not one name that could silently fall behind it the way `neighbourhood`
+did for a different field in the BLOCKER.
+
+One further leak the reviewer reported is NOT closed by T1–T4 and remains
+open: a title that EMBEDS a withheld page's full path as a substring inside
+a longer sentence (`"SECRET hub about Knowledge Base/Notes/Patterns/
+kill-switch-for-risky-releases.md"`, not the whole title and not a
+wikilink) is not recognised by `_names_withheld`'s prose matching, which
+compares a value's own canonical reading or an extracted wikilink target,
+never an arbitrary substring of a longer string. This is a pre-existing
+limitation of the prose-matching approach, unrelated to typed-page-field
+classification, and outside this round's stated scope.
 
 The request shares one freshness snapshot and full recall checkpoint across
 lexical evidence and role queries. Catalogue reads still prove their checkpoint,
