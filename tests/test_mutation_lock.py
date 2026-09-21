@@ -2089,7 +2089,7 @@ def test_refusal_payload_keeps_every_field_the_incident_diagnosis_used(
 
 
 def test_an_overdue_hold_still_warns_and_logs_its_long_hold_event(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The long-holder warning is the loudest boundary signal and stays loud.
 
@@ -2098,9 +2098,13 @@ def test_an_overdue_hold_still_warns_and_logs_its_long_hold_event(
     """
     vault = tmp_path / "vault"
     vault.mkdir()
-    # Both numbers are under `_QUIET_HOLD_MS`, deliberately: a 50ms hold trips
-    # the slow-hold arm of `_boundary_event_level` on its own, so the release
-    # row reached INFO whether or not the overdue escalation existed at all.
+    # The slow-hold arm of `_boundary_event_level` reaches INFO on its own, so
+    # a hold that outruns the quiet band passes this test with the overdue
+    # escalation deleted.  A 2ms hold sat under the 5ms band on an idle box and
+    # over it on a loaded runner (measured 5.13ms and 10.59ms), which made the
+    # discriminator a wall clock.  Lifting the band out of reach removes the
+    # clock: the escalation is then the only arm that can raise this row.
+    monkeypatch.setattr(mutation_lock_module, "_QUIET_HOLD_MS", 60_000.0)
     coordinator = VaultMutationCoordinator(
         tmp_path / "state", vault, long_holder_seconds=0.001
     )
@@ -2120,10 +2124,8 @@ def test_an_overdue_hold_still_warns_and_logs_its_long_hold_event(
     # demoted, whatever the holder kind.
     [released] = _events(caplog, "mutation_lock_released")
     # The hold has to stay inside the band for the escalation to be the thing
-    # under test: past `_QUIET_HOLD_MS` the slow-hold arm reaches INFO on its
-    # own and this assertion would pass with the escalation deleted.  The row
-    # already carries its own measurement, so an overshoot on a loaded box is
-    # a visible red here rather than a silent loss of power.
+    # under test.  The row carries its own measurement, so this still fails
+    # loudly if the lifted band is ever removed or undercut.
     assert released.fields["hold_ms"] < mutation_lock_module._QUIET_HOLD_MS, (
         "the hold outran the quiet band; the release row reached INFO through "
         "the slow-hold arm, not through the overdue escalation"
