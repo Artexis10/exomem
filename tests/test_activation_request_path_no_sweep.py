@@ -363,7 +363,7 @@ def _no_background_walks(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """
     scheduled: list[str] = []
     monkeypatch.setattr(
-        working_set_runtime, "_schedule_build", lambda root: scheduled.append("index")
+        working_set_runtime, "_schedule_build", lambda root, **_kwargs: scheduled.append("index")
     )
     monkeypatch.setattr(
         reserved_paths,

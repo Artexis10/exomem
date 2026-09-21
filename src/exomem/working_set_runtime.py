@@ -440,7 +440,7 @@ def ensure_index(
         return UNAVAILABLE, None, False
     if not index.anchors():
         if _managed():
-            _schedule_build(root)
+            _schedule_build(root, freshness_stamp=freshness_stamp)
             return WARMING, None, False
         with _inline_lock(root.absolute()):
             # Re-check under the lock: the thread that held it may have built the

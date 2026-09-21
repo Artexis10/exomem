@@ -238,7 +238,9 @@ def test_managed_cold_start_never_constructs_the_recall_projection(
     # through_to_cold_walk` for the other half of that distinction).
     monkeypatch.setattr(freshness, "recall_seed_pending", lambda *_a, **_k: True)
     scheduled: list[Path] = []
-    monkeypatch.setattr(working_set_runtime, "_schedule_build", scheduled.append)
+    monkeypatch.setattr(
+        working_set_runtime, "_schedule_build", lambda root, **_kwargs: scheduled.append(root)
+    )
 
     def _forbidden_cold_snapshot(*_a, **_k):
         raise AssertionError(
@@ -276,7 +278,9 @@ def test_managed_cold_start_abstains_warming_even_with_a_ready_anchor_index(
     monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
     monkeypatch.setattr(freshness, "recall_seed_pending", lambda *_a, **_k: True)
     scheduled: list[Path] = []
-    monkeypatch.setattr(working_set_runtime, "_schedule_build", scheduled.append)
+    monkeypatch.setattr(
+        working_set_runtime, "_schedule_build", lambda root, **_kwargs: scheduled.append(root)
+    )
 
     def _forbidden_cold_snapshot(*_a, **_k):
         raise AssertionError(

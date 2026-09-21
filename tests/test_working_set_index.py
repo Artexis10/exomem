@@ -719,7 +719,7 @@ def test_a_managed_runtime_abstains_with_index_warming_and_warms_once(
     monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
     scheduled: list[Path] = []
     monkeypatch.setattr(
-        working_set_runtime, "_schedule_build", lambda root: scheduled.append(root)
+        working_set_runtime, "_schedule_build", lambda root, **_kwargs: scheduled.append(root)
     )
 
     packet = working_set_runtime.serve(seeded, turn="the cargo sled", max_chars=2000)
@@ -741,7 +741,9 @@ def test_cold_activation_abstains_before_starting_retrieval(
 
     monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
     scheduled: list[Path] = []
-    monkeypatch.setattr(working_set_runtime, "_schedule_build", scheduled.append)
+    monkeypatch.setattr(
+        working_set_runtime, "_schedule_build", lambda root, **_kwargs: scheduled.append(root)
+    )
     retrieval_calls: list[dict] = []
 
     def costly_retrieval(*args, **kwargs):
@@ -795,7 +797,9 @@ def test_broken_activation_sidecar_is_unavailable_not_warming(
         path.write_bytes(b"not a sqlite database")
     monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
     scheduled: list[Path] = []
-    monkeypatch.setattr(working_set_runtime, "_schedule_build", scheduled.append)
+    monkeypatch.setattr(
+        working_set_runtime, "_schedule_build", lambda root, **_kwargs: scheduled.append(root)
+    )
     retrieval_calls: list[dict] = []
     monkeypatch.setattr(
         commands.find_module, "find", lambda *args, **kwargs: retrieval_calls.append(kwargs) or []

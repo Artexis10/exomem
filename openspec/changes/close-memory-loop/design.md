@@ -302,9 +302,10 @@ partial packet. A stage already running is not interrupted; bounding each stage
 is what the other repairs are for.
 
 A converging gate must also record what it converged to. On a managed runtime a
-stale anchor catalogue is refreshed by a scheduled background build, and that
-build records the freshness key it was scheduled for, as the unmanaged inline
-update always did. The first version scheduled the build without the key: the
+cold or stale anchor catalogue is built by a scheduled background build, and
+that build records the freshness key it was scheduled for from both call sites,
+as the unmanaged inline build and update always did. A cold build that did not
+would be followed by a second whole-vault walk that finds nothing to do. The first version scheduled the build without the key: the
 catalogue read as stale on every request for the life of the process, and each
 request that found no build in flight scheduled another whole-vault walk beside
 the request threads. A packet that reports a stale catalogue is transient and is
