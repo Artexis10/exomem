@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.91.0](https://github.com/Artexis10/exomem/compare/v0.90.4...v0.91.0) (2026-09-21)
+
+
+### Features
+
+* **mcp:** tell every client at initialize to activate context before a substantive turn ([#1344](https://github.com/Artexis10/exomem/issues/1344)) ([17549e6](https://github.com/Artexis10/exomem/commit/17549e66683ddba3bab7d3b7cc7755767b7696d0))
+
+
+### Bug Fixes
+
+* **activation:** let a named anchor carry the packet past weak and nested rivals ([#1348](https://github.com/Artexis10/exomem/issues/1348)) ([4a5d97a](https://github.com/Artexis10/exomem/commit/4a5d97a5fc9f5968f81771af620eb21168c97630))
+
 ## [0.90.4](https://github.com/Artexis10/exomem/compare/v0.90.3...v0.90.4) (2026-09-21)
 
 
