@@ -357,6 +357,21 @@ authorized. A governance step SHALL be skipped only through an explicit internal
 option that no tool surface can set, never by inference from caller-supplied
 query arguments.
 
+A warm activation request SHALL NOT enumerate the vault. The set of collection
+manifests activation reads SHALL be produced where the derived index already
+discovers collections, off the request path, and published for request threads
+by index generation; a request whose generation has nothing published SHALL
+compute the set once, publish it and proceed, so a caller that never had an
+index is unchanged. The manifests used as RESOLUTION EVIDENCE MAY be as stale as
+the index, exactly as anchors are. Governed current state SHALL NOT be resolved
+against a stale manifest: it SHALL take only the manifest paths from that
+published set and SHALL re-read the manifest of each collection it queries on
+the request that queries it, so a governance-relevant manifest edit is honoured
+on the next request with no index update in between. A manifest that has
+vanished, no longer parses, or no longer declares the queried profile SHALL
+yield no current-state rows for that collection, and the packet SHALL still
+serve.
+
 #### Scenario: Every shipped client has given up on the request
 
 - **WHEN** an activation arrives at a managed service through a door that binds no request deadline and its work outlasts the activation door budget
@@ -375,6 +390,24 @@ query arguments.
 - **WHEN** an activation arrives at a managed service whose file watcher is disabled and recall has never gone live
 - **THEN** it serves through the same path unmanaged activation takes, under its request deadline
 - **AND** it never reports warming for recall
+
+#### Scenario: A warm request compiles a packet about a Records-anchored resource
+
+- **WHEN** activation serves a turn whose anchors resolve against an index that is already current
+- **THEN** it enumerates no directory other than the storage of a collection its own answer reads
+- **AND** it runs no collection discovery sweep, taking the manifests the index published instead
+
+#### Scenario: A collection is added between two index updates
+
+- **WHEN** a collection is added to the vault and activation serves a turn before any index update has discovered it
+- **THEN** that collection contributes no resolution evidence and no current state
+- **AND** it contributes both once the next index update has discovered it
+
+#### Scenario: A collection manifest is edited without an index update
+
+- **WHEN** a manifest is edited so that a governed query may no longer run against its collection, and activation serves the next turn before any index update
+- **THEN** current state reads that manifest afresh and the query does not run
+- **AND** a manifest that has vanished likewise yields no rows for that collection while the rest of the packet still serves
 
 #### Scenario: A current-state record carries an unrelated bare-title link
 
