@@ -258,16 +258,97 @@ reverse. A real filename may itself contain a `#` or `|`, and encoding
 percent-escapes either before the pipeline appends its own unencoded
 fragment; decoding before splitting let that escaped character reappear and
 be mistaken for the delimiter, truncating the path to something shorter than
-the real page. The same positional care applies to an unencoded plain path
-compared against that decoded form: a genuine trailing marker (a
-current-state ref's `#current`, a heading anchor) always follows the
-filename's own `.md` extension, so only a `#`/`|` found after it is a
-delimiter — one found before it is part of the filename and survives.
+the real page. A scheme'd reference is therefore never ambiguous: this one
+split resolves it to exactly one vault path.
+
+A PLAIN path-bearing field's string — `provenance.path`, `provenance.anchor`,
+a `superseded_by`-style list entry — is not percent-encoded, so a literal `#`
+or `|` in it cannot be told apart from a genuine trailing marker (`#current`,
+`path.md#Heading`) by inspecting the string alone. The guard resolves this
+under four rules:
+
+- **R1 — never skip by default.** A non-empty string in a path-bearing field
+  is always a candidate: decided, or withheld for being invalid. It is
+  skipped outright only for an explicitly enumerated non-page shape (a
+  memory-id reference, the synthetic `project:<key>` anchor id, the
+  `plan:<rel>#<title>` anchor id) — never guessed at from how the string
+  looks. An earlier version classified a candidate by shape (case-sensitive
+  `.endswith(".md")`, a naive first-`#` split) before deciding whether to
+  decide it at all; `secret#page.md` and `Secret.MD` were misclassified as
+  not page-shaped and served in full, unfiltered, because nothing ever
+  decided them.
+- **R2 — one markdown predicate.** Whether a path names a markdown page is
+  answered by exactly one case-insensitive function, reused everywhere this
+  question is asked (the release decision itself, and the candidate/
+  interpretation logic below) — never restated, and never case-sensitively.
+- **R3 — interpretation sets for an ambiguous plain string.** A scheme'd
+  reference has exactly one interpretation, per the split above. A plain
+  string containing `#`/`|` is genuinely ambiguous between "a filename
+  containing that character" and "a path plus a fragment/alias" — nothing in
+  an unencoded string supplies the signal the scheme'd form's encoding does.
+  The guard computes every plausible reading — the literal string, and every
+  prefix ending exactly where a `#`/`|` immediately follows a markdown
+  suffix — validates each as a safe in-vault relative path, and decides every
+  reading that exists on disk. An earlier fix guessed one reading by cutting
+  at the first `.md`: a withheld file literally named `notes.md#draft.md`
+  was decided (and served) as its differently-permitted sibling `notes.md`
+  instead of itself — the wrong file, decided with confidence. The item is
+  served only when at least one reading exists and every existing reading is
+  admitted; a reading that is merely syntactically safe but exists nowhere
+  on disk (a phantom alternate reading of an ambiguous string) is never
+  added to the withheld set on its own — doing so let a candidate's own
+  literal text collide with itself in the canonical-key comparison every
+  other field is checked against, withholding an ordinary unit under a
+  policy scoped to an entirely unrelated folder.
+- **R4 — key parity.** The withheld-key comparison expands to the canonical
+  keys of every interpretation a withheld candidate's readings produced —
+  a consequence of R3's architecture, not a separate mechanism: because both
+  the plain and the URI form of the same reference ultimately decide the
+  same real interpretation paths, a page withheld through one form is
+  withheld through the other, and a page admitted through one is admitted
+  through the other. The comparison this feeds — whether a value NAMES a
+  withheld page, checked far more broadly than the candidate/decision path
+  above (prose, titles, provenance, every consumer of the shared
+  withheld-key matcher) — takes the OPPOSITE direction from a decision: a
+  decision needs every EXISTING reading admitted to serve, but recognising
+  that a value names a withheld page needs only ONE of its readings to
+  match, since the value is being compared against an already-known
+  withheld set rather than decided against the filesystem. Removing all
+  positional splitting from a plain string's unwrap (R3) without also
+  teaching this comparison to check every reading broke it silently: a
+  provenance/title/prose field spelled with a genuine trailing marker
+  (`path.md#Heading`) stopped matching its own withheld page at all.
+
+"Path-bearing field" is scoped by field NAME, never by string shape: the
+named scalar fields, authored prose's wikilinks, and a known reference-list
+field's entries (`superseded_by` and its like — the same fields hit
+projection's own withheld-provenance filter treats as path lists). An
+ordinary scalar or list value under any OTHER key — `kind`, `status`,
+`role`, `reason`, `lifecycle`, an `evidence` tag list — is never a candidate;
+treating every string reachable anywhere in the packet as one turned an
+ordinary tag value into a bogus "unresolvable" candidate whenever it did not
+happen to exist as a file, which then wrongly withheld an unrelated
+pointer/anchor/current-state item whose own field happened to share that
+exact word.
+
+A wikilink extracted from authored prose (`[[target|label]]`,
+`[[target#Section]]`) is regex-captured WITHOUT its enclosing brackets before
+it ever reaches the unwrap step, so the alias/heading split must be told
+this text is already a wikilink target rather than detecting it from
+surrounding brackets that will never be there; omitting that signal silently
+stopped stripping the alias/heading off an extracted target, so a withheld
+page named only through such a link in otherwise permitted prose was served
+with the link intact. A wikilink target that unwraps to the empty string
+(`[[#Heading]]` alone, naming no page) is inert in both directions: it
+canonicalises to nothing, so it can neither match a withheld page nor become
+a path candidate of its own; the unit it appears in is guarded normally by
+every one of its other fields.
 
 A reference that does not unwrap to a path inside the vault — an encoded
 parent-directory traversal, an absolute path, a scheme the guard does not
-recognise, an empty path — never becomes decidable, and is never handed to
-the filesystem to find out. It is also never silently dropped: dropping it
+recognise, an empty path, or a plain string with zero safety-valid
+interpretations — never becomes decidable, and is never handed to the
+filesystem to find out. It is also never silently dropped: dropping it
 served a page named ONLY through that one un-unwrappable reference (no
 separate path field, and hit projection never independently withheld it) —
 served, because dropping decided nothing, and nothing decided reads as
@@ -275,10 +356,10 @@ nothing withheld. The guard withholds the ITEM that carried such a
 reference directly, by the reference's own exact text, without deriving a
 canonical key a degenerate candidate cannot produce. A reference that is
 legitimately not a page at all — a memory-id reference, the synthetic
-project-anchor identifier — is exempted from this and stays skipped exactly
-as before; unwrapping never makes anything servable that was not already a
-real vault path, and never withholds a reference that was never a page to
-begin with.
+project-anchor identifier, the synthetic plan-anchor identifier — is
+exempted from this and stays skipped exactly as before; unwrapping never
+makes anything servable that was not already a real vault path, and never
+withholds a reference that was never a page to begin with.
 
 The request shares one freshness snapshot and full recall checkpoint across
 lexical evidence and role queries. Catalogue reads still prove their checkpoint,
