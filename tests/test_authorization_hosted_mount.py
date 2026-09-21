@@ -538,3 +538,86 @@ def test_republish_sweeps_staging_files_a_crashed_attempt_left_behind(
 
     assert not orphan.exists()
     assert sorted(path.name for path in destination.iterdir()) == sorted(_FILES)
+
+
+def test_floor_two_custody_is_refused_at_mount_when_acknowledgement_is_deployed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The incompatibility is refused here, not on the runtime read path.
+
+    Floor 2 pins a persisted activation generation to the activation epoch and
+    demands exact equality afterwards; acknowledgement advances that epoch on
+    every governed write. Together they invalidate every grant and reservation
+    one write after activation.
+
+    It was refused from `vocabulary_authority._custody_floor`, which is reached
+    from `runtime_status`. From there `probe_hosted_mutation_authority` turns
+    any failure into `mutation_authority_ready=False`, readiness attestation
+    stops, and the window lapses on a cell that has served -- the cell paid for
+    a configuration mistake, to prevent damage that re-granting undoes. At
+    mount the same configuration is refused before the cell serves anything.
+    """
+
+    source = tmp_path / "source"
+    wrapper = tmp_path / "destination"
+    destination = wrapper / "private"
+    _projected_secret(source)
+    wrapper.mkdir(mode=0o700)
+    authorization_hosted_mount.copy_projected_custody(source, destination)
+
+    floor_two = _bundle(b"c" * 32, version=2, membership="floor-two")
+
+    monkeypatch.setattr(
+        authorization_hosted_mount, "_activation_acknowledgement_is_deployed", lambda: True
+    )
+    with pytest.raises(authorization_hosted_mount.HostedCustodyMountUnavailable):
+        authorization_hosted_mount.publish_custody_payloads(floor_two, destination)
+
+    # Floor 2 on its own is untouched: this refuses the combination, not the
+    # authority. Without acknowledgement deployed the same bundle publishes.
+    monkeypatch.setattr(
+        authorization_hosted_mount, "_activation_acknowledgement_is_deployed", lambda: False
+    )
+    authorization_hosted_mount.publish_custody_payloads(floor_two, destination)
+    for name, payload in floor_two.items():
+        assert (destination / name).read_bytes() == payload
+
+
+def test_an_incomplete_acknowledgement_capability_does_not_refuse_floor_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A half-configured capability advances no epoch, so it is no conflict.
+
+    The client refuses a partial capability, and that refusal belongs to the
+    write path. Surfacing it here would refuse a cell's custody over a question
+    this code is not the enforcement point for. Exercises the real detector
+    rather than a patched one, which is the half this moved from
+    `test_vocabulary_authority.py` with the refusal itself.
+    """
+
+    from exomem import hosted_activation_ack_client
+
+    source = tmp_path / "source"
+    wrapper = tmp_path / "destination"
+    destination = wrapper / "private"
+    _projected_secret(source)
+    wrapper.mkdir(mode=0o700)
+    authorization_hosted_mount.copy_projected_custody(source, destination)
+
+    floor_two = _bundle(b"c" * 32, version=2, membership="floor-two")
+    monkeypatch.setenv(hosted_activation_ack_client.PROTOCOL_ENV, "not-the-protocol")
+    monkeypatch.delenv(hosted_activation_ack_client.SOCKET_ENV, raising=False)
+
+    authorization_hosted_mount.publish_custody_payloads(floor_two, destination)
+    for name, payload in floor_two.items():
+        assert (destination / name).read_bytes() == payload
+
+    # The same bundle, with the capability actually deployed, is refused.
+    monkeypatch.setenv(
+        hosted_activation_ack_client.PROTOCOL_ENV, hosted_activation_ack_client.PROTOCOL
+    )
+    monkeypatch.setenv(
+        hosted_activation_ack_client.SOCKET_ENV, str(hosted_activation_ack_client.SOCKET_PATH)
+    )
+    with pytest.raises(authorization_hosted_mount.HostedCustodyMountUnavailable):
+        authorization_hosted_mount.publish_custody_payloads(floor_two, destination)

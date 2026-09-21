@@ -406,6 +406,59 @@ is governance that costs more than it protects. The real fix remains decoupling
 the persisted generation from the activation epoch, which retires the
 incompatibility rather than guarding it twice.
 
+**Amendment, 2026-09-21: the site was wrong, and the cost comparison above had
+it backwards.** Independent review traced what a refusal from `_custody_floor`
+actually costs. It is not "a tenant meets it as a failed capture".
+`_custody_floor` is reached from `runtime_status`, and from there:
+`runtime_admission` -> `require_mutation_admission` ->
+`probe_hosted_mutation_authority`, which catches every exception and returns
+`(False, "HOSTED_MUTATION_AUTHORITY_UNAVAILABLE")`. That sets
+`mutation_authority_ready=False`, which makes `_core_ready_locked()` false,
+which makes `attest_authorization_membership` refuse, which fails the hourly
+renewal, which lapses the attestation window on a cell that has served -- and a
+served cell cannot re-mint a lapsed window.
+
+So the control, when it fires *correctly*, costs the cell, to prevent damage
+(invalidated grants and reservations) that re-granting undoes. That fails the
+standing test: the wrong-firing cost exceeds what it prevents, and here even
+the right-firing cost does.
+
+Softening the raise does not help. Returning `AuthorityStatus("unavailable")`
+instead lands in the same place, because `mutations_allowed` is false either
+way and the probe closes hosted writes on both. The review's own fallback
+suggestion -- adding `VocabularyAuthorityConflict` to the `runtime_status`
+handler -- fixes only the secondary bug that an uncaught `RuntimeError` escapes
+into every other `runtime_admission` caller. It does not change the blast
+radius. The problem is the site, not the exception type.
+
+**The refusal therefore moves to the mount**, in
+`governance/authorization_hosted_mount.py`, beside the floor comparisons
+already there, and is removed from `_custody_floor` (which keeps a comment
+recording why nothing may be raised from it). The objection recorded above --
+that a content-free mount refusal surfaces as a pod that will not go ready
+without saying why -- stands, and is accepted: a pod that refuses to start is
+recoverable by reverting the configuration, and a stranded cell is not. Failing
+before the cell serves is the whole difference.
+
+What the move covers, precisely. The floor is read from
+`custody.control.vocabulary_authority_floor`, so floor 2 can only reach a cell
+as published custody -- which is the path the mount check now sits on. A cell
+handed floor-2 custody while the capability is deployed is refused before it
+serves. `activate()` also called `_custody_floor`, so that direction loses its
+refusal here, but it could only ever fire on custody that had already passed
+the mount.
+
+The reverse order is still not cleanly handled, and this move does not claim
+to fix it: a cell already running at floor 2 when the capability is deployed to
+it will refuse its next custody republish, which stops renewal rather than
+announcing the conflict. That is a worse failure than a refused start and a
+better one than silent grant invalidation, and it remains unreachable in the
+alpha -- cells mint at floor 1 and no provisioner code sets the floor. It is
+retired by decoupling the persisted generation from the activation epoch, which
+is still the real fix, rather than by a third refusal site.
+
+Both tests the old site had move with it. `test_floor_two_refuses_to_run_with_activation_acknowledgement` and `test_an_incomplete_acknowledgement_capability_does_not_refuse_floor_two` are now mount tests, the second exercising the real env-based detector rather than a patched one. `test_vocabulary_authority.py` keeps a test in their place pinning the inverse contract: `_custody_floor` returns 2 for every acknowledgement configuration, because nothing may raise from that path.
+
 ## Risks / Trade-offs
 
 - Two stores can temporarily disagree after canonical commit. Exact recoverable outcome evidence, predecessor-bound external CAS and blocked content serving cover that cut; a success-shaped response does not.

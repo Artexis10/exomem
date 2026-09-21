@@ -27,6 +27,26 @@ class HostedCustodyMountUnavailable(RuntimeError):
     """Content-free refusal for an unsafe or incomplete projected bundle."""
 
 
+def _activation_acknowledgement_is_deployed() -> bool:
+    """Report whether this deployment advances the activation epoch per write.
+
+    Imported inside the call to keep the acknowledgement client off this
+    module's import path. An incomplete capability advances nothing, so the
+    partial shape the client refuses reads as absent here: this is a
+    compatibility question, not the enforcement point for the capability.
+    """
+
+    from ..hosted_activation_ack_client import (
+        ActivationAcknowledgementUnavailable,
+        is_hosted_activation_ack_enabled,
+    )
+
+    try:
+        return is_hosted_activation_ack_enabled()
+    except ActivationAcknowledgementUnavailable:
+        return False
+
+
 def _read_exact(descriptor: int, expected_size: int) -> bytes:
     chunks: list[bytes] = []
     remaining = MAX_CUSTODY_FILE_BYTES + 1
@@ -357,6 +377,22 @@ def _refuse_authority_identity_change(
     if old_floor not in {1, 2} or new_floor not in {1, 2}:
         raise HostedCustodyMountUnavailable
     if new_floor < old_floor:
+        raise HostedCustodyMountUnavailable
+    if new_floor == 2 and _activation_acknowledgement_is_deployed():
+        # Floor 2 pins a persisted activation generation to the activation
+        # epoch and demands exact equality on every later check, while
+        # acknowledgement advances that epoch on every governed write. Together
+        # they invalidate every outstanding grant and reservation one write
+        # after the authority is activated.
+        #
+        # Refused here, at mount, rather than on the runtime read path where
+        # the incompatibility is first visible. A refusal from `_custody_floor`
+        # reaches `runtime_status`, and from there
+        # `probe_hosted_mutation_authority` turns any failure into
+        # `mutation_authority_ready=False`, which stops readiness attestation
+        # and lapses the window on a cell that has already served. That costs
+        # the cell to prevent re-grantable damage. Here the same configuration
+        # is refused before the cell serves anything, and the operator pays.
         raise HostedCustodyMountUnavailable
     if (old_floor == 2 or new_floor == 2) and old_identity != new_identity:
         raise HostedCustodyMountUnavailable

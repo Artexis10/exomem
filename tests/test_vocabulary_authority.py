@@ -973,16 +973,31 @@ def test_untrusted_sqlite_sidecar_refuses_before_opening_authority_database(tmp_
     assert authority.runtime_status().mode == "unavailable"
 
 
-def test_floor_two_refuses_to_run_with_activation_acknowledgement(
+def test_the_custody_floor_never_refuses_the_acknowledgement_combination(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Per-write epoch advancement would invalidate every grant on the next write.
+    """Nothing may raise from here, however wrong the configuration is.
 
-    The persisted activation generation is the activation epoch, and
-    `_activation_matches` demands exact equality forever after. Acknowledgement
-    advances that epoch on every governed write. Until the generation stops
-    tracking the epoch the two cannot both be on, and the refusal has to be
-    explicit rather than a cell quietly losing its authority mid-capture.
+    Floor 2 and acknowledgement are genuinely incompatible -- the persisted
+    activation generation is the activation epoch, `_activation_matches`
+    demands exact equality forever after, and acknowledgement advances that
+    epoch on every governed write -- and this function is where that first
+    becomes visible. It used to refuse here, and the refusal cost the cell.
+
+    `_custody_floor` is reached from `runtime_status`. From there
+    `runtime_admission` -> `require_mutation_admission` ->
+    `probe_hosted_mutation_authority` catches every exception and sets
+    `mutation_authority_ready=False`, which makes `_core_ready_locked()` false,
+    which makes `attest_authorization_membership` refuse, which fails the
+    hourly renewal and lapses the attestation window on a cell that has served.
+    A served cell cannot re-mint a lapsed window. Returning "unavailable"
+    instead of raising is the same outcome, because `mutations_allowed` is
+    false either way.
+
+    So the whole configuration question left this path. It is refused at
+    custody mount, before the cell serves anything, and
+    `tests/test_authorization_hosted_mount.py` owns that coverage now. See
+    design Decision 13 and its 2026-09-21 amendment.
     """
 
     from exomem import hosted_activation_ack_client
@@ -994,71 +1009,36 @@ def test_floor_two_refuses_to_run_with_activation_acknowledgement(
     control_path.parent.mkdir(parents=True)
     control_path.parent.chmod(0o700)
     control_path.write_text("control")
-    custody = _Custody(
+    floor_two = _Custody(
         control=replace(_Control(), vocabulary_authority_floor=2),
         control_path=control_path,
     )
     authority = vocabulary_authority.VocabularyAuthority(
         root,
-        custody_loader=lambda _root, *, now: custody,
+        custody_loader=lambda _root, *, now: floor_two,
         clock=lambda: NOW,
     )
 
-    # Floor 2 alone is fine: this is what an alpha cell without the capability
-    # looks like, and the rest of this suite depends on it staying fine.
-    assert authority._custody_floor(custody) == 2  # noqa: SLF001
+    assert authority._custody_floor(floor_two) == 2  # noqa: SLF001
 
+    # The capability fully deployed: still no refusal, by design.
     monkeypatch.setenv(
         hosted_activation_ack_client.PROTOCOL_ENV, hosted_activation_ack_client.PROTOCOL
     )
     monkeypatch.setenv(
         hosted_activation_ack_client.SOCKET_ENV, str(hosted_activation_ack_client.SOCKET_PATH)
     )
+    assert authority._custody_floor(floor_two) == 2  # noqa: SLF001
 
-    with pytest.raises(vocabulary_authority.VocabularyAuthorityConflict) as refusal:
-        authority._custody_floor(custody)  # noqa: SLF001
-    assert "activation acknowledgement" in str(refusal.value)
+    # Half-deployed, which advances no epoch and was never an incompatibility.
+    monkeypatch.setenv(hosted_activation_ack_client.PROTOCOL_ENV, "not-the-protocol")
+    monkeypatch.delenv(hosted_activation_ack_client.SOCKET_ENV, raising=False)
+    assert authority._custody_floor(floor_two) == 2  # noqa: SLF001
 
-    # Floor 1 is unaffected: alpha cells mint at floor 1, so the capability must
-    # not take the vocabulary authority away from them.
+    # Floor 1 is unaffected: alpha cells mint at floor 1.
     assert (
         authority._custody_floor(  # noqa: SLF001
             _Custody(control=_Control(), control_path=control_path)
         )
         == 1
     )
-
-
-def test_an_incomplete_acknowledgement_capability_does_not_refuse_floor_two(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A partial capability advances no epoch, so it is not an incompatibility.
-
-    The client refuses a half-configured capability, and that refusal belongs to
-    the write path. Letting it surface here would take the vocabulary authority
-    away from a cell over a question this code is not the enforcement point for.
-    """
-
-    from exomem import hosted_activation_ack_client
-
-    install_unit_session_boundary(monkeypatch)
-    root = tmp_path / "vault"
-    root.mkdir()
-    control_path = tmp_path / "private" / "control.json"
-    control_path.parent.mkdir(parents=True)
-    control_path.parent.chmod(0o700)
-    control_path.write_text("control")
-    custody = _Custody(
-        control=replace(_Control(), vocabulary_authority_floor=2),
-        control_path=control_path,
-    )
-    authority = vocabulary_authority.VocabularyAuthority(
-        root,
-        custody_loader=lambda _root, *, now: custody,
-        clock=lambda: NOW,
-    )
-
-    monkeypatch.setenv(hosted_activation_ack_client.PROTOCOL_ENV, "not-the-protocol")
-    monkeypatch.delenv(hosted_activation_ack_client.SOCKET_ENV, raising=False)
-
-    assert authority._custody_floor(custody) == 2  # noqa: SLF001
