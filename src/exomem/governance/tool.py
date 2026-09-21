@@ -5485,6 +5485,22 @@ def _backfill_commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
     if kwargs.get("crash_at") == "after_reservation":
         raise GovernanceCrash("after_reservation")
 
+    # Freeze the hosted recovery plan before the first durable effect. This
+    # publishes a catalog child like every other C-effect command, and without
+    # the freeze a hosted attempt interrupted after the publication has no
+    # private payload to resume from -- `exact_commit_evidence` finds nothing
+    # and the caller gets outcome-unknown for a write that actually committed.
+    # Every field is derivable here: the event id is already computed and the
+    # direction is fixed for a widening backfill.
+    catalog_publication.prepare_hosted_catalog_recovery(
+        catalog_target,
+        canonical_result={
+            "status": "committed",
+            "event_id": event_id,
+            "proposal_id": proposal_id,
+            "direction": "widening",
+        },
+    )
     receipts.begin_event(
         vault_root,
         operation="governance_companion_backfill",

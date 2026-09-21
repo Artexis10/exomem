@@ -612,3 +612,64 @@ def test_dataset_duplicate_card_refuses_without_metadata(vault: Path) -> None:
         _preview(vault, payload)
     assert caught.value.code == "STALE_COMPANION_BACKFILL"
     assert b"governance_companion:" not in (vault / card_path).read_bytes()
+
+
+def test_companion_commit_freezes_its_hosted_recovery_before_any_effect(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The companion commit publishes a catalog child, so it owes a frozen plan.
+
+    Every other C-effect caller freezes one before its first durable effect;
+    this path did not, and a hosted attempt interrupted after its publication
+    would have had no private payload for `exact_commit_evidence` to resume
+    from -- the caller would be told the outcome is unknown for a write that
+    actually committed.
+
+    The freeze has to happen before anything durable, and the result it
+    carries has to be the one the caller would have returned. Both are
+    asserted here, the ordering by capturing the receipt log at call time.
+
+    This scenario's companion sits under a reserved evidence tree, so it is
+    not a catalog page and the prepared target is `None` -- the freeze
+    correctly no-ops. What the test pins is the call site, its position
+    before the first durable effect, and the exact result it carries, which
+    are the three things the catalog case depends on.
+    """
+
+    from exomem.governance import catalog_publication
+    from exomem.governance import receipts as receipts_module
+
+    artifact_path, companion_path, _artifact, _companion = _legacy_binary(vault)
+    payload = _input(
+        vault,
+        artifact_class="binary",
+        artifact_path=artifact_path,
+        companion_path=companion_path,
+        semantics={"projects": ["client-a"], "tags": [], "types": ["source"], "classes": []},
+    )
+    preview = _preview(vault, payload, now=100.0)
+
+    seen: list[tuple[bool, dict, int]] = []
+    original = catalog_publication.prepare_hosted_catalog_recovery
+
+    def spy(prepared, *, canonical_result, **kwargs):
+        seen.append(
+            (
+                prepared is not None,
+                dict(canonical_result),
+                len(receipts_module.event_records(vault)),
+            )
+        )
+        return original(prepared, canonical_result=canonical_result, **kwargs)
+
+    monkeypatch.setattr(catalog_publication, "prepare_hosted_catalog_recovery", spy)
+
+    committed = _commit(vault, preview["proposal_id"], payload, now=101.0)
+
+    assert len(seen) == 1
+    _had_target, frozen, receipts_at_call = seen[0]
+    # The frozen result is exactly what the caller returns, so a resumed
+    # attempt renders the same outcome rather than an approximation.
+    assert frozen == committed
+    # And it was frozen before the first durable effect of this commit.
+    assert receipts_at_call == 0
