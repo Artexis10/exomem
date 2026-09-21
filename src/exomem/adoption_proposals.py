@@ -1228,6 +1228,18 @@ def _persist_proposal(
     store.save_proposals(run_id, saved)
 
 
+def _adoption_crash_point(point: str) -> None:
+    """Crash-injection seam between the durable effects of one completion.
+
+    The completion is three durable steps in three different places -- the
+    catalog transaction, the proposal file, and the component row -- and only
+    a fresh process can show what a caller finds after losing one of them.
+    A no-op in production, exactly like `schema_v4._crash_point`.
+    """
+
+    del point
+
+
 def recover_hosted_completion_receipt(
     root: Path,
     recovery: Any,
@@ -1296,6 +1308,9 @@ def recover_hosted_completion_receipt(
             raise hosted_mutation_journal.HostedMutationJournalError(
                 "hosted adoption completion receipt is unavailable"
             )
+        # The catalog is already committed and the activation already advanced;
+        # the proposal still says "applying".
+        _adoption_crash_point("after-catalog-before-proposal-completion")
         if matches[0] == transition and isinstance(receipt, dict):
             pass
         elif matches[0] == {**prior, "status": "applying"} and receipt is None:
@@ -1315,6 +1330,9 @@ def recover_hosted_completion_receipt(
             raise hosted_mutation_journal.HostedMutationJournalError(
                 "hosted adoption completion receipt is unavailable"
             )
+        # Proposal and receipt are replaced atomically on disk; the SQLite
+        # evidence binding them to this attempt is not written yet.
+        _adoption_crash_point("after-proposal-before-evidence")
         hosted_mutation_journal.record_sidecar_child(
             connection,
             recovery=recovery,
@@ -1324,6 +1342,9 @@ def recover_hosted_completion_receipt(
             attempt_secret=attempt_secret,
             now=now,
         )
+        # Everything the command aggregates is committed; the caller has not
+        # recorded its terminal outcome.
+        _adoption_crash_point("after-aggregate-before-terminal")
     finally:
         connection.close()
     return True
