@@ -515,23 +515,49 @@ def test_tag_and_section_words_alone_never_constitute_an_overlap() -> None:
     assert resolution.status == "unresolved"
 
 
-def test_one_authored_word_plus_one_section_word_plus_retrieval_still_resolves() -> None:
-    """A LEGITIMATE overlap survives the fix: one authored word ("wardrobe")
-    plus one section word ("notes", never authored) is a real two-term
-    overlap that includes an authored term, so `lexical_overlap` is granted
-    as before, and with `retrieval` alongside it the anchor still resolves.
+def test_one_rare_authored_word_plus_one_section_word_plus_retrieval_still_resolves() -> None:
+    """A LEGITIMATE overlap survives the fix: one RARE authored word
+    ("wardrobe", `close-memory-loop` root cause 2 -- a single shared name term
+    is name contact only when it is independently rare) plus one section word
+    ("notes", never authored) is a real two-term overlap whose one authored
+    term is rare, so `lexical_overlap` is granted, and with `retrieval`
+    alongside it the anchor still resolves. Without the rarity count a single
+    shared name term earns nothing at all -- see
+    `test_a_common_authored_word_plus_one_section_word_is_no_longer_overlap`.
     """
     row = _term_row(
         "wardrobe2.md", "Wardrobe inventory", terms=("wardrobe", "inventory", "notes")
     )
     analysis = resolve_module.analyze_turn("wardrobe notes")
     candidates = resolve_module.candidates_for(
-        analysis, (row,), retrieval_paths=frozenset({"wardrobe2.md"})
+        analysis,
+        (row,),
+        retrieval_paths=frozenset({"wardrobe2.md"}),
+        term_anchor_counts={"wardrobe": 1},
     )
 
     assert candidates[0].evidence == frozenset({"lexical_overlap", "retrieval"})
     resolution = resolve_module.resolve(candidates)
     assert resolution.anchors[0].status == "resolved"
+
+
+def test_a_common_authored_word_plus_one_section_word_is_no_longer_overlap() -> None:
+    """`close-memory-loop` root cause 2, the exact repro: an unnamed hub whose
+    long title shares exactly one COMMON word with the turn, completed by a
+    broad (section) word, used to earn `lexical_overlap` on that single word
+    alone -- and `_status_for` then resolved it with a mere qualifier, so an
+    unnamed hub could take over a packet. Same shape as the test above, minus
+    the rarity count: a single shared name term that cannot be shown rare is
+    no longer name contact, so this candidate earns nothing from the lexical
+    comparison and never resolves on words alone.
+    """
+    row = _term_row(
+        "wardrobe2.md", "Wardrobe inventory", terms=("wardrobe", "inventory", "notes")
+    )
+    analysis = resolve_module.analyze_turn("wardrobe notes")
+    candidates = resolve_module.candidates_for(analysis, (row,))
+
+    assert candidates == ()
 
 
 def test_two_authored_words_still_give_lexical_overlap_as_before() -> None:
