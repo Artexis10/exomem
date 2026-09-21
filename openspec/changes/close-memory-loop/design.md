@@ -300,6 +300,20 @@ parses yields no rows for that collection while the packet still serves. A
 generation with nothing published computes the set once and publishes it, so a
 caller that never had an index keeps its existing behaviour.
 
+The sweep was only the largest instance of the cost, not the cost itself. The
+convoy is paid per system call, so anything a request repeats thousands of
+times is the same defect in a smaller package — and resolving a path costs one
+call per component, which one measured request paid 72 times over just to ask
+where this vault's machine-local state lives. Those answers are placement
+decisions about configuration, not observations of content, so they are
+memoised for the duration of one request and recomputed for the next: the memo
+is request-scoped rather than process-scoped precisely because a longer-lived
+one would answer for a vault that had since moved, and placement is the
+invariant that keeps machine-local state out of the vault. Only placement is
+memoised; a stat signature, a marker generation and the existence of a
+directory stay live, because a request that memoised evidence would answer
+from a past it had already been told was over.
+
 A cold worker's readiness window now has its own budget, defaulting to the
 standby warm budget's value; a fixed shorter window restarted the unit into the
 same cold catalog. It is a separate setting because it answers a separate

@@ -357,7 +357,18 @@ authorized. A governance step SHALL be skipped only through an explicit internal
 option that no tool surface can set, never by inference from caller-supplied
 query arguments.
 
-A warm activation request SHALL NOT enumerate the vault. The set of collection
+A warm activation request SHALL NOT enumerate the vault, and SHALL resolve the
+vault's machine-local state location at most once. Both bound the same cost:
+every system call a request makes releases the interpreter lock and waits to
+reacquire it, so repeated path resolution is as expensive as a directory sweep
+when the process is busy. Resolutions memoised for a request SHALL be
+placement answers only — where state lives, given a vault path and the
+environment that selects the state root — and SHALL NOT include anything read
+as evidence, such as a file's stat signature or whether a directory exists.
+The memo SHALL NOT outlive the request, SHALL NOT be shared between requests
+or threads, and SHALL NOT retain a failed resolution.
+
+The set of collection
 manifests activation reads SHALL be produced where the derived index already
 discovers collections, off the request path, and published for request threads
 by index generation; a request whose generation has nothing published SHALL
@@ -396,6 +407,8 @@ serve.
 - **WHEN** activation serves a turn whose anchors resolve against an index that is already current
 - **THEN** it enumerates no directory other than the storage of a collection its own answer reads
 - **AND** it runs no collection discovery sweep, taking the manifests the index published instead
+- **AND** it resolves the vault's state location at most once, however many components ask for it
+- **AND** nothing it resolved is remembered once the request ends
 
 #### Scenario: A collection is added between two index updates
 
