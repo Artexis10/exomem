@@ -1266,6 +1266,17 @@ def _may_store(
       update, which holds the live sidecar by construction, may replace a
       vault's entries wholesale; a reader cannot tell whether its own token
       died under it or the registry's did.
+
+    The price of that second refusal, stated so nobody has to rediscover it: if
+    ANOTHER process recreates the sidecar, this process holds entries under the
+    dead identity and every request here misses and declines to store, so each
+    one computes for itself until this process's own index update publishes
+    under the new identity. A managed runtime reaches that through the ordinary
+    background build whenever the index looks stale; a runtime that never
+    updates would keep computing. Letting a reader replace on an identity
+    mismatch would close it — its token is the one it just read from the live
+    sidecar — at the cost of one extra computation whenever a sidecar is
+    recreated mid-request. That is a deliberate open choice, not an oversight.
     """
     key = _vault_key(vault_root)
     with _MANIFEST_REGISTRY_LOCK:
