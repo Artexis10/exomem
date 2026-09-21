@@ -669,3 +669,25 @@ def test_observe_unrelated_errors_keep_the_native_mcp_error_contract(
                 "operation": "remove",
             },
         )
+
+
+def test_the_server_tells_every_client_to_activate_context_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hosts with lifecycle hooks inject the working set before a turn; hosts
+    without them (chat apps, generic MCP clients) only ever see what the server
+    says about itself. The MCP `initialize` instructions are that channel, so
+    they must name the tool, the moment, and the verbatim-turn rule, and must
+    name only a tool the surface actually registers.
+    """
+    mcp = _build_server(tmp_path, monkeypatch)
+
+    instructions = mcp.instructions or ""
+
+    assert "activate_context" in instructions
+    assert "verbatim" in instructions
+    assert "before" in instructions.lower()
+    tools = asyncio.run(mcp.list_tools())
+    assert "activate_context" in {tool.name for tool in tools}
+    # Short enough that a client which truncates server instructions keeps it.
+    assert len(instructions) <= 900
