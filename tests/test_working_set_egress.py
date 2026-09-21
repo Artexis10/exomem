@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pytest
 from test_governance_egress import (
@@ -38,6 +39,30 @@ def _release(*, withheld=(RESTRICTED_PATH,), blocked: bool = False) -> egress.An
     )
 
 
+def _unit_ref(path: str, label: str) -> str:
+    """A realistic semantic-unit `ref`: `<vault_ref(path)>#unit-<label>`.
+
+    The SAME shape `semantic_units._bind_unit_identities` builds for an
+    unanchored unit (`f"{parent_ref}#unit-{fingerprint}"`, `parent_ref =
+    context_refs.vault_ref(path)`) — only `label` stands in for the real
+    fingerprint hash, since these fixtures only need distinct, stable refs,
+    not real content fingerprints. A hand-typed opaque `"unit-foo"` string is
+    not a shape the compiler ever emits: under R1's strict-by-default
+    candidate handling (correction round 2) it is a candidate with no page on
+    disk answering to it, so it lands in `unresolvable` and withholds its
+    item the moment any policy is active — which silently broke every
+    fixture using that shorthand once R1 stopped skipping bare non-page-shape
+    strings by default.
+    """
+    return f"{context_refs.vault_ref(path)}#unit-{label}"
+
+
+UNIT_REF_OPEN = _unit_ref(OPEN_PATH, "open")
+UNIT_REF_HIDDEN = _unit_ref(RESTRICTED_PATH, "hidden")
+UNIT_REF_WIKILINK = _unit_ref(OPEN_PATH, "wikilink")
+UNIT_REF_PROSE_LEAK = _unit_ref(OPEN_PATH, "prose-leak")
+
+
 def _packet() -> dict:
     return {
         "anchors": [
@@ -61,7 +86,7 @@ def _packet() -> dict:
         "roles": [{"id": "resources", "source": "anchor_default", "lane": "units"}],
         "units": [
             {
-                "ref": "unit-open",
+                "ref": UNIT_REF_OPEN,
                 "role": "resources",
                 "text": "An open unit.",
                 "lifecycle": "active",
@@ -69,7 +94,7 @@ def _packet() -> dict:
                 "provenance": {"path": OPEN_PATH, "level": "unit", "anchor": OPEN_PATH},
             },
             {
-                "ref": "unit-hidden",
+                "ref": UNIT_REF_HIDDEN,
                 "role": "resources",
                 "text": "A hidden unit.",
                 "lifecycle": "active",
@@ -77,7 +102,7 @@ def _packet() -> dict:
                 "provenance": {"path": RESTRICTED_PATH, "level": "unit", "anchor": RESTRICTED_PATH},
             },
             {
-                "ref": "unit-wikilink",
+                "ref": UNIT_REF_WIKILINK,
                 "role": "resources",
                 "text": "Names it only through a link.",
                 "lifecycle": "superseded",
@@ -135,7 +160,7 @@ def test_no_field_of_the_packet_names_a_withheld_page(vault: Path) -> None:
     assert RESTRICTED_PATH not in str(guarded)
     assert "kill-switch-for-risky-releases" not in str(guarded)
     assert [anchor["ref"] for anchor in guarded["anchors"]] == [OPEN_PATH]
-    assert [unit["ref"] for unit in guarded["units"]] == ["unit-open", "unit-wikilink"]
+    assert [unit["ref"] for unit in guarded["units"]] == [UNIT_REF_OPEN, UNIT_REF_WIKILINK]
     assert [pointer["ref"] for pointer in guarded["pointers"]] == [OPEN_PATH]
     assert [entry["anchor"] for entry in guarded["current_state"]] == [OPEN_PATH]
     assert [entry["ref"] for entry in guarded["ambiguity"]] == [OPEN_PATH]
@@ -146,7 +171,7 @@ def test_a_wikilink_to_a_withheld_page_is_stripped_from_provenance(vault: Path) 
         guarded = egress.guard_working_set(vault, _packet(), _release())
 
     assert guarded is not None
-    wikilink_unit = next(unit for unit in guarded["units"] if unit["ref"] == "unit-wikilink")
+    wikilink_unit = next(unit for unit in guarded["units"] if unit["ref"] == UNIT_REF_WIKILINK)
     assert "superseded_by" not in wikilink_unit["provenance"]
     # The unit itself stays, still honestly marked superseded — the successor's
     # NAME is what the audience may not have, not the fact of supersession.
@@ -276,7 +301,7 @@ def test_a_wikilink_in_unit_prose_to_a_withheld_page_drops_the_unit(vault: Path)
     packet = _packet()
     packet["units"] = [
         {
-            "ref": "unit-open",
+            "ref": UNIT_REF_OPEN,
             "role": "resources",
             "text": "An open unit with no references.",
             "lifecycle": "active",
@@ -284,7 +309,7 @@ def test_a_wikilink_in_unit_prose_to_a_withheld_page_drops_the_unit(vault: Path)
             "provenance": {"path": OPEN_PATH, "level": "unit", "anchor": OPEN_PATH},
         },
         {
-            "ref": "unit-prose-leak",
+            "ref": UNIT_REF_PROSE_LEAK,
             "role": "resources",
             "text": "Use the approach from [[kill-switch-for-risky-releases]] here.",
             "lifecycle": "active",
@@ -297,7 +322,7 @@ def test_a_wikilink_in_unit_prose_to_a_withheld_page_drops_the_unit(vault: Path)
         guarded = egress.guard_working_set(vault, packet, _release())
 
     assert guarded is not None
-    assert [unit["ref"] for unit in guarded["units"]] == ["unit-open"]
+    assert [unit["ref"] for unit in guarded["units"]] == [UNIT_REF_OPEN]
     assert "kill-switch-for-risky-releases" not in str(guarded)
 
 
@@ -326,9 +351,9 @@ def test_a_wikilink_in_a_current_state_statement_is_dropped(vault: Path) -> None
     assert "kill-switch-for-risky-releases" not in str(guarded)
 
 
-def _prose_unit(stem: str, ref: str = "unit-only-prose") -> dict:
+def _prose_unit(stem: str, ref: str | None = None) -> dict:
     return {
-        "ref": ref,
+        "ref": ref if ref is not None else _unit_ref(OPEN_PATH, "only-prose"),
         "role": "resources",
         "text": f"See [[{stem}]] for the rest.",
         "lifecycle": "active",
@@ -393,7 +418,7 @@ def test_a_prose_wikilink_to_a_permitted_page_keeps_the_unit_unchanged(
 
     permitted = "Knowledge Base/Notes/Insights/autovacuum-thresholds-prevent-table-bloat.md"
     assert (vault / permitted).is_file()
-    unit = _prose_unit(_stem_of(permitted), ref="unit-permitted-link")
+    unit = _prose_unit(_stem_of(permitted), ref=_unit_ref(OPEN_PATH, "permitted-link"))
     packet = _packet()
     packet["units"] = [unit]
 
@@ -412,7 +437,7 @@ def test_a_prose_wikilink_to_a_nonexistent_page_keeps_the_unit_unchanged(
     write_rule(vault, ceiling=0)
     _indexed(vault)
 
-    unit = _prose_unit("no-such-page-anywhere", ref="unit-dangling-link")
+    unit = _prose_unit("no-such-page-anywhere", ref=_unit_ref(OPEN_PATH, "dangling-link"))
     packet = _packet()
     packet["units"] = [unit]
 
@@ -495,7 +520,9 @@ def test_a_withheld_page_stays_withheld_however_its_apostrophe_or_hyphen_was_typ
     _indexed(vault)
 
     packet = _packet()
-    packet["units"] = [_prose_unit(prose, ref="unit-apostrophe-or-hyphen-link")]
+    packet["units"] = [
+        _prose_unit(prose, ref=_unit_ref(OPEN_PATH, "apostrophe-or-hyphen-link"))
+    ]
 
     with request_scope(_external()):
         guarded = egress.guard_working_set(vault, packet, _prose_release())
@@ -829,7 +856,7 @@ def test_an_unknown_name_still_decides_nothing(vault: Path) -> None:
     write_rule(vault, ceiling=0)
     _indexed(vault)
 
-    unit = _prose_unit("still-no-such-page", ref="unit-unknown")
+    unit = _prose_unit("still-no-such-page", ref=_unit_ref(OPEN_PATH, "unknown"))
     packet = _packet()
     packet["units"] = [unit]
 
@@ -870,7 +897,7 @@ def test_a_colliding_name_decides_every_page_that_bears_it(vault: Path) -> None:
     }, resolved
 
     packet = _packet()
-    packet["units"] = [_prose_unit("widget", ref="unit-colliding-link")]
+    packet["units"] = [_prose_unit("widget", ref=_unit_ref(OPEN_PATH, "colliding-link"))]
 
     with request_scope(_external()):
         guarded = egress.guard_working_set(vault, packet, _prose_release())
@@ -910,7 +937,7 @@ def test_a_title_spelled_wikilink_to_a_withheld_page_drops_the_unit(
     _indexed(vault)
 
     packet = _packet()
-    packet["units"] = [_prose_unit(RESTRICTED_TITLE, ref="unit-title-link")]
+    packet["units"] = [_prose_unit(RESTRICTED_TITLE, ref=_unit_ref(OPEN_PATH, "title-link"))]
 
     with request_scope(_external()):
         guarded = egress.guard_working_set(vault, packet, _prose_release())
@@ -925,7 +952,7 @@ def test_a_title_spelled_wikilink_is_caught_with_no_policy_at_all(vault: Path) -
     _indexed(vault)
 
     packet = _packet()
-    packet["units"] = [_prose_unit(RESTRICTED_TITLE, ref="unit-title-link")]
+    packet["units"] = [_prose_unit(RESTRICTED_TITLE, ref=_unit_ref(OPEN_PATH, "title-link"))]
 
     guarded = egress.guard_working_set(vault, packet, _titled_release())
 
@@ -940,7 +967,9 @@ def test_a_title_spelled_wikilink_to_a_permitted_page_keeps_the_unit(
     write_rule(vault, ceiling=0)
     _indexed(vault)
 
-    unit = _prose_unit("Autovacuum thresholds prevent table bloat", ref="unit-open-title")
+    unit = _prose_unit(
+        "Autovacuum thresholds prevent table bloat", ref=_unit_ref(OPEN_PATH, "open-title")
+    )
     packet = _packet()
     packet["units"] = [unit]
 
@@ -972,7 +1001,7 @@ def _prose_only_packet(spelling: str) -> dict:
             }
         ],
         "roles": [{"id": "resources", "source": "anchor_default", "lane": "units"}],
-        "units": [_prose_unit(spelling, ref="unit-decorated-link")],
+        "units": [_prose_unit(spelling, ref=_unit_ref(OPEN_PATH, "decorated-link"))],
         "pointers": [],
         "current_state": [],
         "missing": [],
@@ -1599,15 +1628,16 @@ def test_working_set_paths_decides_a_units_real_page_not_its_opaque_uri() -> Non
     ref = f"{context_refs.vault_ref(real_path)}#unit-{'a' * 16}"
     packet = {"units": [_unit_with_ref(ref)]}
 
-    paths, names, invalid = egress._working_set_paths(packet)
+    paths, names, interpretations, unresolvable = egress._working_set_paths(packet)
 
     assert paths == {real_path}
     assert names == set()
-    assert invalid == set()
+    assert interpretations == {ref: frozenset({real_path})}
+    assert unresolvable == set()
 
 
 @pytest.mark.parametrize(
-    ("case", "expect_invalid"),
+    ("case", "expect_unresolvable"),
     [
         ("percent_encoded_parent_traversal", True),
         ("absolute_drive_letter_path", True),
@@ -1617,19 +1647,22 @@ def test_working_set_paths_decides_a_units_real_page_not_its_opaque_uri() -> Non
     ],
 )
 def test_working_set_paths_classifies_an_unresolvable_reference(
-    case: str, expect_invalid: bool
+    case: str, expect_unresolvable: bool
 ) -> None:
     """A reference that cannot be unwrapped to an in-vault path is never
     silently decided as a path — but it is not always the same kind of
-    "not a path" (`_classify_path_candidate`).
+    "not a path" (`_interpretations_for`/`_matches_explicit_non_page_shape`,
+    correction round 2's R1/R3 rewrite of the classifier this test used to
+    name).
 
     A candidate whose own shape marks it as a page reference (an `exomem://`
-    scheme, or a `.md` suffix once its fragment is stripped) but that fails
-    to validate is `invalid`: the caller must withhold the item that carries
-    it, never silently drop it (the exact hole a reviewer found in round 1 —
-    dropping it served a page named only through that reference). A
-    reference that is legitimately not a page at all (the memory-id form)
-    stays `skip`ped, exactly as today, and is never in either set.
+    scheme) but that fails to validate has ZERO safety-valid interpretations
+    and lands in `unresolvable`: the caller must withhold the item that
+    carries it, never silently drop it (the exact hole a reviewer found in
+    round 1 — dropping it served a page named only through that reference).
+    A reference that is legitimately not a page at all (the memory-id form)
+    is an explicit non-page shape (R1) and never appears in `paths`,
+    `interpretations`, or `unresolvable`.
 
     Each ref is built with the same real URI shape the pipeline emits (the
     `context_refs`/`memory_refs` helpers, never a hand-typed plain path).
@@ -1653,11 +1686,12 @@ def test_working_set_paths_classifies_an_unresolvable_reference(
     ref = refs[case]
     packet = {"units": [_unit_with_ref(ref)]}
 
-    paths, names, invalid = egress._working_set_paths(packet)
+    paths, names, interpretations, unresolvable = egress._working_set_paths(packet)
 
     assert paths == set()
     assert names == set()
-    assert invalid == ({ref} if expect_invalid else set())
+    assert interpretations == {}
+    assert unresolvable == ({ref} if expect_unresolvable else set())
 
 
 # --------------------------------------------------------------------------- #
@@ -1929,3 +1963,502 @@ def test_canonical_reference_agrees_for_a_uri_ref_and_its_plain_path(
     uri_ref = f"{context_refs.vault_ref(real_path)}#unit-{'a' * 16}"
 
     assert egress._canonical_reference(uri_ref) == egress._canonical_reference(real_path)
+
+
+# --------------------------------------------------------------------------- #
+# Correction round 2: three more leaks, all in PLAIN-PATH fields
+# (`provenance.path`/`.anchor`), plus a wrongpath collision and an
+# over-restriction risk that round 1 did not have to worry about (a
+# scheme'd `exomem://` ref is never ambiguous; a plain string is). The rule:
+#
+# R1: default is never skip -- skip a path-bearing-field string only for an
+#     explicit enumerated non-page shape (`_matches_explicit_non_page_shape`
+#     -- a memory-id ref, `project:<key>`, `plan:<rel>#<title>`). Every
+#     other non-empty string is a candidate: decided, or `invalid`
+#     (withholds its item).
+# R2: one markdown predicate, `_is_markdown_path`, case-insensitive, the
+#     SAME one `_decide_path` itself uses -- never restated.
+# R3: interpretation SETS. A scheme'd ref has exactly one interpretation
+#     (raw-split-then-decode). A plain string containing `#`/`|` is
+#     ambiguous: its interpretations are the literal string AND every
+#     prefix ending where a `#`/`|` immediately follows a markdown suffix.
+#     Decide every interpretation that exists; the item is served only if
+#     at least one exists and every existing one is admitted.
+# R4: the item side (the withheld-key comparison) expands to canonical
+#     keys of all of a candidate's interpretations -- a consequence of R3's
+#     architecture rather than a separate mechanism.
+# --------------------------------------------------------------------------- #
+
+#: `(id, filename)`. Round 1's `_TRICKY_FILENAMES` (hash, pipe, percent,
+#: space, non_ascii) repeated for the PLAIN-PATH fields defects A/B leaked
+#: through, plus the shapes the reviewer's round-2 probes demonstrated
+#: leaking specifically there: a case-varied `.md` suffix (`Secret.MD`,
+#: defect A's naive `text.endswith(".md")`), a case-varied suffix ahead of
+#: a fragment (`x.MD#y`), a `.md`-suffixed alias target (`a.md|b.md`), the
+#: fully degenerate `.md#.md`, and `notes.md#draft.md` -- defect B's
+#: wrongpath-collision shape, repeated here with no sibling present (the
+#: dedicated collision test below adds one).
+_ROUND2_LEAK_FILENAMES = [
+    ("hash", "secret#page.md"),
+    ("pipe", "secret|note.md"),
+    ("case_md", "Secret.MD"),
+    ("case_md_fragment", "x.MD#y"),
+    ("percent", "100%.md"),
+    ("space", "secret page.md"),
+    ("non_ascii", "café.md"),
+    ("pipe_md_suffix", "a.md|b.md"),
+    ("degenerate", ".md#.md"),
+    ("md_suffix_before_hash", "notes.md#draft.md"),
+]
+
+#: An R1 explicit-non-page shape (`_matches_project_anchor_shape`), never a
+#: real page path. `_plain_field_only_packet` is used against both the
+#: fixture-backed `vault` and ad-hoc `tmp_path` vaults the round-2 tests
+#: build themselves; a `ref` pointing at a REAL page (`OPEN_PATH`) would
+#: need that page to exist in every one of those ad-hoc vaults too, and its
+#: absence there made the unit's own `ref` unresolvable -- masking the
+#: field actually under test behind an unrelated drop. A skip-shape needs
+#: no page to exist anywhere, so it isolates `field` cleanly in both.
+_PLAIN_FIELD_UNIT_REF = "project:plain-field-fixture"
+
+
+def _plain_field_only_packet(rel_path: str, field: str) -> dict:
+    """A packet whose tested page is named ONLY through one unit's
+    `provenance.<field>` -- `path` or `anchor`, the exact plain-path fields
+    correction round 2's defects A/B leaked through. The unit's own top-
+    level `ref` is an R1 skip-shape (never decided, never withheld, never
+    invalid), so this isolates the field under test: only `field` carries
+    the shape under test, matching the reviewer's probes
+    (`release.withheld_paths` empty, page named nowhere else in the
+    packet).
+    """
+    provenance: dict[str, Any] = {"level": "unit", field: rel_path}
+    return {
+        "anchors": [],
+        "roles": [],
+        "units": [
+            {
+                "ref": _PLAIN_FIELD_UNIT_REF,
+                "role": "resources",
+                "text": "the payload text",
+                "lifecycle": "active",
+                "updated": "2026-09-01",
+                "provenance": provenance,
+            }
+        ],
+        "pointers": [],
+        "current_state": [],
+        "missing": [],
+        "ambiguity": [],
+        "budget": {"limit_chars": 4000, "used_chars": 40},
+        "generation": {
+            "freshness_key": "k",
+            "index_generation": 1,
+            "roles_hash": "abc",
+            "roles_source": "shipped",
+        },
+        "abstained": False,
+    }
+
+
+def _uri_ref_only_packet(rel_path: str) -> dict:
+    """The URI-ref-only equivalent of `_plain_field_only_packet`, for R4's
+    key-parity checks: the SAME withheld/admitted page, named only through
+    the unit's own top-level `ref` in the real URI shape (round 1), never a
+    plain-path field."""
+    ref = f"{context_refs.vault_ref(rel_path)}#unit-{'a' * 16}"
+    return _ref_only_packet(ref)
+
+
+@pytest.mark.parametrize("field", ["path", "anchor", "uri_ref"])
+@pytest.mark.parametrize(
+    ("case", "filename"), _ROUND2_LEAK_FILENAMES, ids=[c for c, _ in _ROUND2_LEAK_FILENAMES]
+)
+def test_a_round_two_leak_shape_stays_withheld(
+    tmp_path: Path, field: str, case: str, filename: str
+) -> None:
+    """Every reported leak shape, in every field it can appear in.
+
+    A page withheld by an active policy, named ONLY through the field under
+    test (`provenance.path`, `provenance.anchor`, or the unit's own URI
+    `ref`), with `release.withheld_paths` empty, must stay withheld under
+    every filename the reviewer's probes demonstrated leaking.
+    """
+    vault = tmp_path / "vault"
+    rel_path = f"Knowledge Base/Notes/Patterns/{filename}"
+    _write_page(
+        vault / rel_path,
+        "---\ntype: note\nstatus: active\n---\n\n# Secret\n\nthe payload text\n",
+    )
+    write_scope(vault)  # default paths="Notes/Patterns/**" -> matches rel_path
+    write_rule(vault, ceiling=0, audience="external")
+
+    packet = (
+        _uri_ref_only_packet(rel_path)
+        if field == "uri_ref"
+        else _plain_field_only_packet(rel_path, field)
+    )
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _empty_release())
+
+    assert guarded is not None
+    assert guarded["units"] == []
+    assert guarded["pointers"] == []
+    assert "the payload text" not in str(guarded)
+
+
+@pytest.mark.parametrize("field", ["path", "anchor", "uri_ref"])
+@pytest.mark.parametrize(
+    ("case", "filename"), _ROUND2_LEAK_FILENAMES, ids=[c for c, _ in _ROUND2_LEAK_FILENAMES]
+)
+def test_a_round_two_leak_shape_is_served_when_admitted(
+    tmp_path: Path, field: str, case: str, filename: str
+) -> None:
+    """The over-restriction guard: the SAME shapes, on a page a policy
+    scoped elsewhere admits, must still be served -- not merely not-leaked.
+    """
+    vault = tmp_path / "vault"
+    rel_path = f"Knowledge Base/Notes/Insights/{filename}"
+    _write_page(
+        vault / rel_path,
+        "---\ntype: note\nstatus: active\n---\n\n# Open\n\nthe payload text\n",
+    )
+    write_scope(vault)  # Notes/Patterns/** -- unrelated to Notes/Insights
+    write_rule(vault, ceiling=0, audience="external")
+
+    packet = (
+        _uri_ref_only_packet(rel_path)
+        if field == "uri_ref"
+        else _plain_field_only_packet(rel_path, field)
+    )
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _empty_release())
+
+    assert guarded is not None
+    assert len(guarded["units"]) == 1
+    assert "the payload text" in str(guarded)
+
+
+def test_a_page_literally_named_with_a_trailing_md_marker_is_not_confused_with_its_permitted_sibling(
+    tmp_path: Path,
+) -> None:
+    """Defect B, reproduced and closed: `notes.md#draft.md` is a REAL,
+    DIFFERENT file from its sibling `notes.md` in the same folder -- and
+    the withheld one. It must be decided (and withheld) as ITSELF, never
+    silently resolved to the differently-permitted sibling by a
+    first-`.md`-cut guess (`_strip_trailing_marker`, deleted by this
+    round's R3 rewrite) -- the reviewer's `probe_v2_wrongpath_collision.py`.
+    The policy is scoped to the EXACT withheld file, never the folder, so
+    the sibling staying permitted (and NOT withheld as collateral) is
+    directly observable.
+    """
+    vault = tmp_path / "vault"
+    withheld_rel = "Knowledge Base/Notes/Patterns/notes.md#draft.md"
+    sibling_rel = "Knowledge Base/Notes/Patterns/notes.md"
+    _write_page(
+        vault / withheld_rel,
+        "---\ntype: note\nstatus: active\n---\n\n# Draft\n\nthe withheld draft text\n",
+    )
+    _write_page(
+        vault / sibling_rel,
+        "---\ntype: note\nstatus: active\n---\n\n# Notes\n\nthe permitted sibling text\n",
+    )
+    write_scope(vault, paths="Notes/Patterns/notes.md#draft.md")
+    write_rule(vault, ceiling=0, audience="external")
+
+    withheld_packet = _plain_field_only_packet(withheld_rel, "path")
+    sibling_packet = _plain_field_only_packet(sibling_rel, "path")
+
+    with request_scope(_external()):
+        withheld_guarded = egress.guard_working_set(vault, withheld_packet, _empty_release())
+    with request_scope(_external()):
+        sibling_guarded = egress.guard_working_set(vault, sibling_packet, _empty_release())
+
+    assert withheld_guarded is not None
+    assert withheld_guarded["units"] == []
+    # `guard_working_set` never reads a page's own markdown body -- it
+    # decides paths and filters packet fields -- so the leak signal is the
+    # packet's own `text` field, not the file's on-disk content.
+    assert "the payload text" not in str(withheld_guarded)
+
+    assert sibling_guarded is not None
+    assert len(sibling_guarded["units"]) == 1
+    assert "the payload text" in str(sibling_guarded)
+
+
+def test_a_page_literally_named_with_a_trailing_md_marker_stays_withheld_with_no_sibling(
+    tmp_path: Path,
+) -> None:
+    """The same withheld page, with NO `notes.md` sibling in the folder at
+    all: withholding it must not depend on a same-named sibling existing to
+    collide with -- the literal file itself is what must be decided, and
+    its only OTHER interpretation (`notes.md`) is a phantom reading that
+    exists nowhere on disk.
+    """
+    vault = tmp_path / "vault"
+    withheld_rel = "Knowledge Base/Notes/Patterns/notes.md#draft.md"
+    _write_page(
+        vault / withheld_rel,
+        "---\ntype: note\nstatus: active\n---\n\n# Draft\n\nthe withheld draft text\n",
+    )
+    write_scope(vault, paths="Notes/Patterns/notes.md#draft.md")
+    write_rule(vault, ceiling=0, audience="external")
+
+    packet = _plain_field_only_packet(withheld_rel, "path")
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _empty_release())
+
+    assert guarded is not None
+    assert guarded["units"] == []
+    assert "the payload text" not in str(guarded)
+
+
+@pytest.mark.parametrize("fragment", ["#Heading", "#current"])
+def test_a_legitimate_fragment_suffixed_plain_path_still_resolves(
+    vault: Path, fragment: str
+) -> None:
+    """`path.md#Heading`/`path.md#current` are real production shapes (a
+    heading-anchored path, a current-state unit's own real `ref` -- see
+    `test_a_policy_scoped_to_one_page_withholds_only_that_page_end_to_end`
+    and the end-to-end `#current` unit it serves). Their ONLY existing
+    interpretation is the real page before the fragment. R3's ambiguity
+    handling must not cost the ordinary case its own service: a policy
+    scoped to an unrelated folder must still serve the unit."""
+    write_scope(vault)  # Notes/Patterns/** -- unrelated to OPEN_PATH's folder
+    write_rule(vault, ceiling=0, audience="external")
+
+    packet = _plain_field_only_packet(f"{OPEN_PATH}{fragment}", "path")
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _prose_release())
+
+    assert guarded is not None
+    assert len(guarded["units"]) == 1
+
+
+def test_a_plain_path_with_zero_valid_interpretations_withholds_its_item_without_a_filesystem_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A PLAIN (non-URI) traversal string is exactly as fail-closed as
+    round 1's `exomem://`-wrapped shapes: `_is_safe_relative_path` rejects
+    every `..` segment, so a plain `../../etc/passwd.md` has ZERO
+    safety-valid interpretations and is `unresolvable` before anything is
+    ever `stat()`'d -- proven at the boundary that touches disk, the same
+    monkeypatch pattern round 1/2 established.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    write_scope(vault)
+    write_rule(vault, ceiling=0, audience="external")
+
+    packet = _plain_field_only_packet("../../etc/passwd.md", "path")
+
+    decided_paths: list[str] = []
+    real_decide_path = egress._decide_path
+
+    def _recording_decide_path(vault_root, rel_path, **kwargs):
+        decided_paths.append(rel_path)
+        return real_decide_path(vault_root, rel_path, **kwargs)
+
+    monkeypatch.setattr(egress, "_decide_path", _recording_decide_path)
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _empty_release())
+
+    assert guarded is not None
+    assert guarded["units"] == []
+    assert not any(".." in decided for decided in decided_paths)
+
+
+@pytest.mark.parametrize(
+    ("case", "text", "expect_skipped"),
+    [
+        ("memory_id", None, True),
+        ("project_anchor", "project:harbor-survey", True),
+        ("plan_anchor", "plan:Products/plan.md#Launch checklist", True),
+        ("malformed_memory_id", "exomem://memory/not-a-uuid", False),
+        ("project_near_miss_path", "project:Products/plan.md", False),
+        ("plan_near_miss_no_fragment", "plan:Products/plan.md", False),
+    ],
+)
+def test_r1_skip_shapes_and_their_near_misses(
+    case: str, text: str | None, expect_skipped: bool
+) -> None:
+    """R1's enumerated non-page shapes (`_matches_explicit_non_page_shape`)
+    are skipped outright -- never a candidate, so never in ANY of
+    `_working_set_paths`'s last three return values. A near miss of each
+    shape (a malformed memory id, `project:`/`plan:` followed by something
+    that looks like a real path or lacks the required fragment) is NOT
+    skipped: it falls through to ordinary candidate handling and lands in
+    `interpretations` (it has a safety-valid reading) or `unresolvable` (it
+    does not) -- `_working_set_paths` itself never touches the filesystem,
+    so which of the two depends only on shape, not on what exists on disk.
+    """
+    import uuid
+
+    from exomem import memory_refs
+
+    ref = memory_refs.memory_ref(str(uuid.uuid4())) if text is None else text
+    packet = {"units": [_unit_with_ref(ref)]}
+
+    paths, names, interpretations, unresolvable = egress._working_set_paths(packet)
+
+    if expect_skipped:
+        assert paths == set()
+        assert names == set()
+        assert interpretations == {}
+        assert unresolvable == set()
+    else:
+        assert ref in interpretations or ref in unresolvable, (
+            f"{ref!r} should have fallen through to ordinary candidate "
+            "handling, not been skipped"
+        )
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "#",
+        "|",
+        "%",
+        " ",
+        "##",
+        "#|",
+        "|#",
+        "%.",
+        ". ",
+        " #",
+        "#Draft.MD",
+        "|Alias.Md",
+        "#a#b",
+    ],
+)
+def test_generated_odd_filenames_decide_the_same_set_plain_and_uri(
+    tmp_path: Path, suffix: str
+) -> None:
+    """Property check, generalising past the specific named shapes above:
+    for a filename built from the reviewer's alphabet (`# | % . space`,
+    mixed-case extensions), the plain-path form and the URI `ref` form of
+    the SAME reference must agree on whether the real page is served --
+    R4's key-parity requirement -- and it must in fact be served, since
+    every one of these pages is admitted.
+    """
+    vault = tmp_path / "vault"
+    filename = f"secret{suffix}.md"
+    rel_path = f"Knowledge Base/Notes/Insights/{filename}"
+    _write_page(
+        vault / rel_path,
+        "---\ntype: note\nstatus: active\n---\n\n# Secret\n\nthe payload text\n",
+    )
+    write_scope(vault)  # Notes/Patterns/** -- unrelated to Notes/Insights
+    write_rule(vault, ceiling=0, audience="external")
+
+    plain_packet = _plain_field_only_packet(rel_path, "path")
+    uri_packet = _uri_ref_only_packet(rel_path)
+
+    with request_scope(_external()):
+        plain_guarded = egress.guard_working_set(vault, plain_packet, _empty_release())
+    with request_scope(_external()):
+        uri_guarded = egress.guard_working_set(vault, uri_packet, _empty_release())
+
+    assert plain_guarded is not None
+    assert uri_guarded is not None
+    plain_served = len(plain_guarded["units"]) == 1
+    uri_served = len(uri_guarded["units"]) == 1
+    assert plain_served == uri_served, (plain_guarded, uri_guarded)
+    assert plain_served, "the real, admitted page itself must be served"
+
+
+# --------------------------------------------------------------------------- #
+# Reviewer follow-up (i): can an un-canonicalisable wikilink target reach
+# `unit.text`/`anchor.title`'s withheld-reference checks?
+# --------------------------------------------------------------------------- #
+
+
+def test_a_degenerate_wikilink_target_in_prose_neither_leaks_nor_over_restricts(
+    vault: Path,
+) -> None:
+    """No: a wikilink target that unwraps to the empty string (`[[#Heading]]`
+    alone, naming no page at all) is inert.
+
+    `_canonical_reference` returns `None` for an empty-unwrap candidate
+    (`_unwrap_reference`'s own `if not text: return "", False`), so `_hit`
+    cannot match anything through it -- there is no key to compare.
+    `_working_set_paths`'s own wikilink collection independently skips it
+    (`if not target: continue`), so it never becomes a path candidate
+    either. It is simply invisible to this guard in both directions: never
+    a match for a withheld page, never a candidate to decide on its own.
+    The unit it appears in is guarded normally by every one of its OTHER
+    fields, and is served here because its real page (`OPEN_PATH`) is
+    permitted.
+    """
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    packet = _packet()
+    packet["units"] = [
+        {
+            "ref": _unit_ref(OPEN_PATH, "degenerate-wikilink"),
+            "role": "resources",
+            "text": "See [[#Heading]] above for context.",
+            "lifecycle": "active",
+            "updated": "2026-09-01",
+            "provenance": {"path": OPEN_PATH, "level": "unit", "anchor": OPEN_PATH},
+        },
+    ]
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _prose_release())
+
+    assert guarded is not None
+    assert len(guarded["units"]) == 1
+    assert guarded["units"][0]["text"] == "See [[#Heading]] above for context."
+
+
+# --------------------------------------------------------------------------- #
+# Found while investigating follow-up (i), not originally reported: an
+# aliased or heading-anchored wikilink extracted from prose stopped naming
+# its target once THIS round deleted `_strip_trailing_marker`.
+# `_WIKILINK_ANYWHERE.findall` always returns the bracket-stripped capture,
+# so it has ALWAYS fallen to `_unwrap_reference`'s `else` branch, never the
+# `text.startswith("[[")`-gated one round 1 moved the alias/heading split
+# into. Round 1's own tests stayed green because the `else` branch's OWN
+# `_strip_trailing_marker` split on the first `|`/`#` for any text with no
+# `.md` before it, which happened to recover a bare stem's alias/heading
+# correctly too -- a round-1-era side effect, not its design. This round's
+# R3 rewrite deleted that function with no direct replacement for a
+# wikilink target, which is what actually broke it -- a round-3 regression.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "spelling_template",
+    ["{stem}|Read more", "{stem}#Some Heading"],
+)
+def test_an_aliased_or_heading_anchored_wikilink_still_names_its_withheld_target(
+    vault: Path, spelling_template: str
+) -> None:
+    """A withheld page named ONLY via an aliased or heading-anchored
+    wikilink in an otherwise permitted unit's prose must still drop that
+    unit -- covered generally by `test_every_spelling_of_a_prose_only_
+    withheld_link_drops_the_unit`; isolated here under its own name because
+    it is the specific regression this round's investigation found and
+    fixed (`_unwrap_reference(..., is_wikilink_target=True)`), not one of
+    the reviewer's originally reported defects.
+    """
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    spelling = spelling_template.format(stem=_stem_of(RESTRICTED_PATH))
+    packet = _prose_only_packet(spelling)
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _prose_release())
+
+    assert guarded is not None
+    assert guarded["units"] == [], f"LEAK: {spelling!r} named a withheld page and was served"
