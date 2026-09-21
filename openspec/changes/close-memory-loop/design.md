@@ -195,7 +195,10 @@ repeating the one authored name word is not independent evidence. This predicate
 applies before the ranked result limit so weak hits cannot crowd out a valid
 corroborator. Ordinary recall keeps its existing any-term behavior. Planning
 items in the same nonempty canonical collection are complementary, while
-disconnected groups and pathless project identities still compete. Ambiguity
+disconnected groups still compete; for ambiguity purposes a project identity
+remains pathless (empty path, so it can neither bridge two anchors nor be
+anyone's structural neighbour) even once it carries member material, so two
+resolved project anchors still compete exactly as before. Ambiguity
 choices deduplicate canonical homes; choosing a collection retains all its
 complementary items rather than selecting the first index row.
 Missing/stale lexical publication is explicit and non-cacheable. Regression evidence
@@ -203,6 +206,34 @@ covers rare-term/vector corroboration, competing same-kind anchors, vector-only
 negatives, current policy on cached packets, model contention and forbidden
 full-corpus/CLIP acquisition. End-to-end timings include semantic evidence;
 compiler-only timing is insufficient acceptance.
+
+A resolved project anchor was previously pathless AND linkless: built with no
+page and no neighbours, so a project-naming turn resolved the anchor and
+served no material at all from any role lane. At index build/update time
+(never on the request path) a project anchor now records its own member
+pages — the pages' own declared `project`/`projects` frontmatter scope,
+capped to a bounded, most-recently-updated set with a deterministic
+tie-break — as its links, so its neighbourhood is nonempty and unit roles
+can read from it exactly as they already do for any hub or resource. The
+kept member set changing moves the anchor's own source signature, so an
+incremental index update republishes it. A member page reaches a packet
+through the SAME units-lane read and the SAME unconditional release-plane
+guard as any other neighbourhood page; no new disclosure path is
+introduced. Planning items are surfaced for a resolved project anchor only
+if a plan candidate itself carries a project key; the shipped Planning item
+schema does not, so this remains unimplemented pending that field existing.
+
+Lexical overlap also required genuine name contact, not merely a broad-term
+count: a single word the turn shares with an anchor, when that anchor's
+title is long, previously satisfied the overlap predicate on its own once
+combined with any one broad (tag/section) word — so an unnamed page sharing
+one ordinary word could take over a packet ahead of the anchor the turn
+actually named. Lexical overlap now additionally requires either two or
+more of the shared broad terms to be among the anchor's own authored
+title/alias terms, or exactly one authored term shared and that term
+independently rare by the same `rare_term` yardstick. A single common
+authored term plus broad overlap now earns no lexical evidence at all,
+never a fabricated rarity when the rarity table is unavailable.
 
 The request shares one freshness snapshot and full recall checkpoint across
 lexical evidence and role queries. Catalogue reads still prove their checkpoint,

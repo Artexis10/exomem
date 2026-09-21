@@ -231,6 +231,18 @@ Activation SHALL resolve anchors, apply task-conditioned roles and bounded typed
 - **THEN** the packet preserves the explicit resolved anchor and its relevant provenance within budget
 - **AND** popularity does not substitute an unrelated entity or turn uncertain state into a fact
 
+#### Scenario: A resolved project anchor serves its own member pages
+
+- **WHEN** a turn names a project and the project's member pages declare that
+  project as their own scope
+- **THEN** the resolved project anchor's role lanes serve material from those
+  member pages, bounded and most-recently-updated first
+- **AND** a member page the current audience may not see contributes no unit
+  and no pointer, through the same release-plane guard as any other
+  neighbourhood page
+- **AND** a project anchor with no declared members still resolves and
+  reports no material, rather than fabricating any
+
 ### Requirement: Activation semantic work stays within the anchor catalogue
 
 Activation SHALL use the derived anchor signature vectors for optional semantic
@@ -254,6 +266,13 @@ Lexical corroboration SHALL match at least two distinct content stems from the
 turn after the shared stopword filter, with that predicate applied before the
 ranked result limit. Repeated or inflected forms of one stem SHALL NOT provide
 the second match. This restriction SHALL NOT change ordinary recall.
+Categorical lexical-overlap evidence SHALL additionally require genuine name
+contact: two or more of the shared broad terms among the anchor's own
+authored title/alias terms, or exactly one authored term shared that is
+independently rare by the same yardstick rare-term evidence uses. A single
+common authored term shared with an otherwise-unrelated anchor SHALL NOT by
+itself grant lexical-overlap or rare-term evidence, and an unavailable
+rarity table SHALL NOT be read as proof of rarity.
 Independently resolved items sharing a nonempty canonical page or collection
 SHALL be treated as complementary rather than competing senses. Empty paths
 SHALL NOT establish that relationship. Disconnected same-kind groups SHALL
@@ -313,6 +332,17 @@ fast abstention or compiler-only timing.
   text match supplies only that same stem plus function words
 - **THEN** text retrieval does not resolve the anchor through a second vote
 - **AND** repeated or plural forms of the shared word do not change that result
+
+#### Scenario: A single common name word is not name contact
+
+- **WHEN** a turn shares exactly one authored title/alias term with an
+  unnamed anchor's long title, completed to the broad-term band only by a
+  section or tag word the turn also happens to share, and that one authored
+  term is not independently rare
+- **THEN** the anchor earns no lexical-overlap or rare-term evidence from
+  that overlap and does not resolve on it alone
+- **AND** two or more shared authored terms, or one shared authored term
+  that is independently rare, still grant lexical-overlap evidence as before
 
 #### Scenario: A collection contains complementary Planning items
 
