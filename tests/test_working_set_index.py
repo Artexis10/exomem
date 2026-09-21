@@ -202,7 +202,7 @@ def test_collect_caps_to_distinct_anchor_ids_not_list_positions(
         "---\ntitle: R One\nstatus: active\nupdated: 2026-09-01\n---\n\n# R One\n\nBody.\n",
         encoding="utf-8",
     )
-    real_raw, outbound, names = working_set_index._walk_page_entries(vault)
+    real_raw, outbound, names, project_members = working_set_index._walk_page_entries(vault)
     r0, r1 = real_raw
     # A copy of r0 whose id collides with r1's -- the forced duplicate.
     r0_dup = dict(r0)
@@ -213,10 +213,14 @@ def test_collect_caps_to_distinct_anchor_ids_not_list_positions(
     r2["title"] = "R Two"
 
     monkeypatch.setattr(
-        working_set_index, "_walk_page_entries", lambda vault_root: ([r0_dup, r1, r2], outbound, names)
+        working_set_index,
+        "_walk_page_entries",
+        lambda vault_root: ([r0_dup, r1, r2], outbound, names, project_members),
     )
     monkeypatch.setattr(working_set_index, "_collection_candidates", lambda vault_root: ([], []))
-    monkeypatch.setattr(working_set_index, "_project_candidates", lambda vault_root: [])
+    monkeypatch.setattr(
+        working_set_index, "_project_candidates", lambda vault_root, member_paths: ([], {})
+    )
     monkeypatch.setattr(working_set_index, "MAX_ANCHORS", 2)
 
     index = working_set_index.WorkingSetIndex(vault)
@@ -358,6 +362,200 @@ A spare runner for the sled.
     unchanged = index.generation()
     index.update()
     assert index.generation() == unchanged
+
+
+# --------------------------------------------------------------------------- #
+# Project anchors carry their member pages as links (`close-memory-loop`)
+# --------------------------------------------------------------------------- #
+
+
+def _seed_project_membership(vault: Path) -> None:
+    """A project key with one declared member page. Deliberately its OWN key
+    ("harbor-survey"), distinct from `_seed_structure`'s "northern-corridor"
+    (which names no page): that fixture's project shares its title with a
+    HUB ("Northern corridor"), and mixing the two here would make a test
+    unable to tell which anchor kind actually supplied a result.
+    """
+    _write(
+        vault / "Knowledge Base" / "_Schema" / "project-keys.yaml",
+        """projects:
+  harbor-survey:
+    folder: Harbor Survey
+    category: logistics
+""",
+    )
+    _write(
+        vault
+        / "Knowledge Base"
+        / "Notes"
+        / "Research"
+        / "Harbor Survey"
+        / "public-depth-notice.md",
+        """---
+type: research-note
+project: harbor-survey
+status: active
+updated: 2026-09-10
+---
+
+# Public depth notice
+
+## Constraints
+
+Draft may not exceed 4 metres at low tide.
+""",
+    )
+
+
+def test_a_resolved_project_anchor_carries_its_member_pages_as_links(
+    tmp_path: Path,
+) -> None:
+    """`close-memory-loop` root cause 1: a project anchor built with no path
+    and no links carries no material for any lane to read. At index time
+    (never on the request path) the anchor's own member pages -- their own
+    declared `project:`/`projects:` frontmatter, read the same way
+    `find_corpus.passes_filters` already reads it for search filtering --
+    become its `links`, so `AnchorFacts.neighbourhood` is non-empty and
+    `_units_lane`'s `allowed_parent_paths` has something to read.
+    """
+    vault = tmp_path / "vault"
+    _seed_project_membership(vault)
+
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild()
+
+    project = _by_title(index.anchors(), "Harbor Survey")
+    assert project.kind == "project"
+    member_path = "Knowledge Base/Notes/Research/Harbor Survey/public-depth-notice.md"
+    assert member_path in project.neighbourhood
+
+
+def test_a_raw_material_page_declaring_project_scope_is_not_a_member(
+    tmp_path: Path,
+) -> None:
+    """`Sources/`/`Evidence/` are immutable raw material, excluded from the
+    anchor set for the same reason (see `_page_anchor_kind`): admitting them
+    as project material would let evidence ABOUT a project name itself as
+    the project's own current material."""
+    vault = tmp_path / "vault"
+    _seed_project_membership(vault)
+    _write(
+        vault / "Knowledge Base" / "Sources" / "harbor-survey-clipping.md",
+        """---
+type: source
+project: harbor-survey
+status: active
+updated: 2026-09-11
+---
+
+# Harbor survey clipping
+
+## Summary
+
+A captured article, not the project's own material.
+""",
+    )
+
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild()
+
+    project = _by_title(index.anchors(), "Harbor Survey")
+    # A positive assertion alongside the negative one: the exclusion must be
+    # deliberate (raw material specifically), not incidental to a neighbourhood
+    # that happens to be empty altogether.
+    assert (
+        "Knowledge Base/Notes/Research/Harbor Survey/public-depth-notice.md"
+        in project.neighbourhood
+    )
+    assert "Knowledge Base/Sources/harbor-survey-clipping.md" not in project.neighbourhood
+
+
+def test_project_membership_is_capped_and_keeps_the_most_recently_updated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The member set is bounded by a named constant, most recently updated
+    first, with a deterministic (path-ascending) tie-break."""
+    vault = tmp_path / "vault"
+    _write(
+        vault / "Knowledge Base" / "_Schema" / "project-keys.yaml",
+        """projects:
+  harbor-survey:
+    folder: Harbor Survey
+    category: logistics
+""",
+    )
+    monkeypatch.setattr(working_set_index, "PROJECT_ANCHOR_MEMBER_CAP", 2)
+    for number, updated in ((0, "2026-09-01"), (1, "2026-09-05"), (2, "2026-09-03")):
+        _write(
+            vault
+            / "Knowledge Base"
+            / "Notes"
+            / "Research"
+            / "Harbor Survey"
+            / f"reading-{number}.md",
+            f"""---
+type: research-note
+project: harbor-survey
+status: active
+updated: {updated}
+---
+
+# Reading {number}
+
+## Constraints
+
+Body.
+""",
+        )
+
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild()
+
+    project = _by_title(index.anchors(), "Harbor Survey")
+    assert project.neighbourhood == {
+        "Knowledge Base/Notes/Research/Harbor Survey/reading-1.md",
+        "Knowledge Base/Notes/Research/Harbor Survey/reading-2.md",
+    }
+
+
+def test_membership_change_republishes_the_project_anchor(tmp_path: Path) -> None:
+    """The KEPT member set (post-cap) is part of what identifies this
+    generation of the anchor: adding a member page must move the generation
+    on an incremental `update()`, exactly as any other anchor's own change
+    already does.
+    """
+    vault = tmp_path / "vault"
+    _seed_project_membership(vault)
+
+    index = working_set_index.WorkingSetIndex(vault)
+    report = index.rebuild()
+    after_build = report["generation"]
+
+    _write(
+        vault / "Knowledge Base" / "Notes" / "Research" / "Harbor Survey" / "second-reading.md",
+        """---
+type: research-note
+project: harbor-survey
+status: active
+updated: 2026-09-12
+---
+
+# Second reading
+
+## Constraints
+
+Draft may not exceed 3 metres at neap tide.
+""",
+    )
+    report = index.update()
+
+    assert report.get("unchanged") is not True
+    assert report["generation"] > after_build
+    project = _by_title(index.anchors(), "Harbor Survey")
+    assert (
+        "Knowledge Base/Notes/Research/Harbor Survey/second-reading.md"
+        in project.neighbourhood
+    )
 
 
 def test_schema_mismatch_wipes_and_rebuilds(seeded: Path) -> None:
