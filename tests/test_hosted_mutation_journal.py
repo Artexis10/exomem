@@ -749,3 +749,99 @@ def test_public_selector_ignores_large_unrelated_retained_history(tmp_path: Path
     )
     assert evidence is not None
     assert evidence.publication.event_id == "publication-1"
+
+
+def _prepared_for(store: IdempotencyStore, key: str, digest: str, **overrides):
+    """One authenticated preparation bound to this store's live attempt."""
+
+    attempt = store._attempts[key]
+    descriptor = _descriptor()
+    descriptor["scoped_idempotency_digest"] = _sha(key.encode())
+    descriptor["attempt_id"] = attempt.attempt_id
+    descriptor["commit_token"] = attempt.commit_token
+    descriptor["command_digest"] = digest
+    descriptor.update(overrides)
+    return hosted_mutation_journal.prepare_canonical_mutation_recovery(
+        descriptor=descriptor,
+        prepared_results={"child-0": {"path": "Notes/0.md"}},
+        attempt_secret=attempt.commit_secret,
+    )
+
+
+def test_a_second_preparation_for_one_attempt_is_refused_as_stale(tmp_path: Path) -> None:
+    """The prepared payload is frozen once, and a later one is not an update.
+
+    Re-preparing the same attempt with different content means the two
+    processes disagree about what the mutation is. Overwriting would let the
+    second definition recover effects the first one published, so the store
+    keeps the payload it already bound and refuses. Re-persisting the byte
+    identical payload stays a no-op, because a retried preparation on the
+    happy path must not be an error.
+    """
+
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite")
+    store._claim_or_inspect("key-1", "2" * 64, None)
+    first = _prepared_for(store, "key-1", "2" * 64)
+    store.persist_prepared_recovery("key-1", "2" * 64, first)
+
+    # Idempotent for the identical payload.
+    store.persist_prepared_recovery("key-1", "2" * 64, first)
+    assert store.load_prepared_recovery("key-1", "2" * 64) == first
+
+    stale = _prepared_for(store, "key-1", "2" * 64, selector_digest="9" * 64)
+    assert stale != first
+    with pytest.raises(Exception, match="prepared mutation payload"):
+        store.persist_prepared_recovery("key-1", "2" * 64, stale)
+
+    # The refusal changed nothing: the first definition is still the binding one.
+    assert store.load_prepared_recovery("key-1", "2" * 64) == first
+
+
+def test_preparation_without_a_claimed_attempt_has_no_evidence_to_bind(
+    tmp_path: Path,
+) -> None:
+    """A payload that no live attempt vouches for cannot be persisted.
+
+    This is the missing-evidence case: without the attempt there is no commit
+    secret to authenticate the preparation against, so accepting it would
+    store an unauthenticated recovery plan that a later process would trust.
+    """
+
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite")
+    store._claim_or_inspect("key-1", "2" * 64, None)
+    recovery = _prepared_for(store, "key-1", "2" * 64)
+
+    # A different key was never claimed, so it has no attempt.
+    with pytest.raises(Exception, match="prepared mutation attempt"):
+        store.persist_prepared_recovery("key-2", "2" * 64, recovery)
+
+    assert store.load_prepared_recovery("key-2", "2" * 64) is None
+
+
+def test_a_crash_before_the_first_canonical_effect_leaves_preparation_unfinished(
+    tmp_path: Path,
+) -> None:
+    """Preparation is not a success, and a reopened store must not read it as one.
+
+    The precommit cut: the payload is durable and no canonical effect has
+    happened. A fresh process has to find an attempt still executing with no
+    terminal, so the mutation can be carried forward or abandoned -- never
+    replayed as a completed one.
+    """
+
+    path = tmp_path / "state" / "idempotency.sqlite"
+    store = IdempotencyStore(path)
+    store._claim_or_inspect("key-1", "2" * 64, None)
+    recovery = _prepared_for(store, "key-1", "2" * 64)
+    store.persist_prepared_recovery("key-1", "2" * 64, recovery)
+
+    # Reopen: a new process sees only what reached the disk.
+    reopened = IdempotencyStore(path)
+    assert reopened.load_prepared_recovery("key-1", "2" * 64) == recovery
+    assert reopened.completed_terminal("key-1", "2" * 64) is None
+    with sqlite3.connect(path) as connection:
+        state, result = connection.execute(
+            "SELECT state, result FROM mutations WHERE key='key-1'"
+        ).fetchone()
+    assert state == "executing"
+    assert result is None
