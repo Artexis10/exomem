@@ -956,13 +956,13 @@ def test_a_failed_discovery_does_not_erase_another_update_s_pending_set(
             raise structured_collections.CollectionError("BOOM", "discovery failed")
         return real_discover(root, **kwargs)
 
-    def pausing(vault_root: Path):
+    def pausing(vault_root: Path, member_paths):
         if threading.current_thread().name == "succeeding-update":
             # Hold this update AFTER its discovery and before its publish, so
             # the other update's failure lands squarely in between.
             discovery_held.set()
             failed_update_ran.wait(timeout=30)
-        return real_projects(vault_root)
+        return real_projects(vault_root, member_paths)
 
     monkeypatch.setattr(structured_collections, "discover_collections", branching)
     monkeypatch.setattr(working_set_index, "_project_candidates", pausing)

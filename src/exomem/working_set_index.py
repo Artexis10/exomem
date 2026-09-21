@@ -661,9 +661,14 @@ def _source_signature(path: Path) -> str:
 
 def _walk_page_entries(
     vault_root: Path,
-) -> tuple[list[dict[str, Any]], dict[str, tuple[str, ...]], dict[str, list[str]]]:
+) -> tuple[
+    list[dict[str, Any]],
+    dict[str, tuple[str, ...]],
+    dict[str, list[str]],
+    dict[str, list[tuple[str, str]]],
+]:
     """Walk the knowledge base once: raw anchor-page entries, wikilink edges,
-    and a name map.
+    a name map, and each project key's member pages.
 
     The name map is one name to MANY paths: `normalize()` folds case and Unicode
     form, so distinct pages can share a spelling, and collapsing them would hide
@@ -676,12 +681,26 @@ def _walk_page_entries(
     and neither can be decided from the page walk alone. `WorkingSetIndex.
     _collect` gathers every kind, applies the cap, and only then calls
     `_finalize_anchor_aliases` over everything that made the cut.
+
+    Project membership (`close-memory-loop` root cause 1: a project anchor
+    built with no path and no links carries no material) is read from EVERY
+    walked page, not only the ones that become anchors — a project's current
+    material is overwhelmingly research notes, patterns, insights and
+    failures, none of which are anchors on their own account. Read with
+    `find_corpus.all_projects`, the SAME predicate `find_corpus.passes_filters`
+    already uses to scope a project's own pages elsewhere: `page.scope` was
+    considered and rejected (see `_project_candidates`'s docstring) because it
+    is type-gated and does not answer "which project" for every page kind.
+    Raw material (`Sources/`, `Evidence/`) is excluded for the same reason it
+    is excluded from being an anchor at all: it is evidence ABOUT a project,
+    never the project's own current material.
     """
     from . import recall_policy
 
     raw: list[dict[str, Any]] = []
     outbound: dict[str, tuple[str, ...]] = {}
     names: dict[str, list[str]] = {}
+    project_members: dict[str, list[tuple[str, str]]] = {}
     kb = kb_dirname()
     for path in _walk_kb(vault_root):
         rel = path.relative_to(vault_root).as_posix()
@@ -722,6 +741,10 @@ def _walk_page_entries(
         )
         if links:
             outbound[rel] = links
+        head = rel.removeprefix(f"{kb}/").split("/", 1)[0]
+        if head not in _RAW_MATERIAL_FOLDERS:
+            for project_key in find_corpus.all_projects(frontmatter):
+                project_members.setdefault(project_key, []).append((rel, page.updated))
         kind = _page_anchor_kind(rel, frontmatter, kb=kb)
         if kind is None or path.name.casefold() in _NAVIGATION_BASENAMES:
             continue
@@ -745,7 +768,7 @@ def _walk_page_entries(
                 "source_signature": _source_signature(path),
             }
         )
-    return raw, outbound, names
+    return raw, outbound, names, project_members
 
 
 def _title_alias_term_owners(
@@ -1003,23 +1026,92 @@ def _planning_candidates(vault_root: Path, manifest: Any, rel: str) -> list[_Can
     return out
 
 
-def _project_candidates(vault_root: Path) -> list[_Candidate]:
+#: Bounds a project anchor's own member-page neighbourhood — the number of
+#: paths recorded as the project's `links`. Deliberately its OWN constant,
+#: distinct from `MAX_LINKS_PER_ANCHOR` (the generic wikilink-edge cap): a
+#: project's neighbourhood is a curated "what's current in this project" set
+#: the units lane reads material from, not an incidental link count, and the
+#: two are tuned on different accounts.
+PROJECT_ANCHOR_MEMBER_CAP = 24
+
+
+def _member_recency_key(updated: str) -> tuple[int, object]:
+    """Sort key: a real moment orders by `temporal.sort_key`; absent/unparsable
+    sorts last. The leading `0`/`1` keeps the two shapes from ever being
+    compared against each other — Python only inspects a tuple's later
+    positions once the earlier ones tie, and two members with no date at all
+    tie here at `(0, None)` and fall through to the caller's own tie-break.
+    """
+    from . import temporal
+
+    moment = temporal.parse(updated) if updated else None
+    if moment is None:
+        return (0, None)
+    return (1, temporal.sort_key(moment))
+
+
+def _bounded_project_members(members: Sequence[tuple[str, str]]) -> tuple[str, ...]:
+    """The capped, deterministic member-path list for one project anchor.
+
+    Most recently updated first, capped at `PROJECT_ANCHOR_MEMBER_CAP`. Two
+    stable sorts — path ascending, then recency descending — because Python's
+    `sort` is stable: the second sort keeps the first sort's order wherever
+    its own key does not decide, which is exactly the deterministic
+    tie-break a same-recency (or entirely undated) member set needs.
+    """
+    ordered = sorted(dict(members).items())
+    ordered.sort(key=lambda item: _member_recency_key(item[1]), reverse=True)
+    return tuple(path for path, _updated in ordered[:PROJECT_ANCHOR_MEMBER_CAP])
+
+
+def _project_candidates(
+    vault_root: Path, member_paths: Mapping[str, Sequence[tuple[str, str]]]
+) -> tuple[list[_Candidate], dict[str, list[tuple[str, str, str]]]]:
+    """Project-key anchors, and their member pages as the anchor's own links.
+
+    `member_paths` is `project key -> (rel_path, updated)` pairs, gathered by
+    `_walk_page_entries` from the single walk it already does — never a
+    second enumeration. A project anchor has no page of its own (`path` stays
+    `""`), so before this its `AnchorFacts.neighbourhood` was empty by
+    construction: `close-memory-loop`'s design.md already named this
+    "pathless project identities" that "still compete" for resolution and
+    then carry no material (root cause 1). The bounded, most-recently-updated
+    member subset becomes the anchor's `links`, which is exactly what
+    `working_set._neighbourhood_paths` and `_units_lane` already read for
+    every other anchor kind — no new lane, no new disclosure path: a member
+    page still reaches a packet only through the units lane's existing
+    catalogue read and the unconditional egress guard.
+
+    Membership is read from `find_corpus.all_projects` (frontmatter `project`/
+    `projects`), the SAME predicate `find_corpus.passes_filters` already
+    scopes a project's pages with elsewhere. `page.scope` was the first
+    candidate and was rejected: it is a per-PAGE-TYPE projection for the
+    public search result shape, and for `entity`, `production-log`,
+    `experiment` and `source` pages it returns the entity type/medium/domain/
+    source type and never falls through to the page's own `project`/
+    `projects` field at all — so it is not what ties an entity, a production
+    log, an experiment or a source page to a project key, only what a search
+    result shows as that page's "scope" column.
+    """
     from . import project_keys
 
     try:
         registry = project_keys.load_project_registry(Path(vault_root))
     except Exception:  # noqa: BLE001 - a missing registry costs project anchors only
         log.debug("activation index: project registry unavailable", exc_info=True)
-        return []
+        return [], {}
     out: list[_Candidate] = []
+    edges: dict[str, list[tuple[str, str, str]]] = {}
     for key in registry.keys:
         folder = registry.folder_for(key) or key
         category = registry.category_for(key)
+        anchor_id = f"project:{key}"
+        members = _bounded_project_members(member_paths.get(key, ()))
         out.append(
             _Candidate(
-                anchor_id=f"project:{key}",
+                anchor_id=anchor_id,
                 path="",
-                ref=f"project:{key}",
+                ref=anchor_id,
                 title=str(folder).strip(),
                 kind="project",
                 lifecycle="active",
@@ -1027,10 +1119,17 @@ def _project_candidates(vault_root: Path) -> list[_Candidate]:
                 aliases=(normalize(key),),
                 terms=terms_of(" ".join((str(folder), key, category))),
                 categories=(),
-                source_signature=f"{key}:{folder}:{category}",
+                # The KEPT member set (post-cap) is part of what identifies
+                # this generation of the anchor: it must change the source
+                # signature so `update()` republishes when it does, exactly
+                # as any other anchor's incremental update already reacts to
+                # its own source signature changing.
+                source_signature=f"{key}:{folder}:{category}:{','.join(members)}",
             )
         )
-    return out
+        if members:
+            edges[anchor_id] = [(path, "project_member", "outbound") for path in members]
+    return out, edges
 
 
 def _resolve_links(
@@ -1899,9 +1998,9 @@ class WorkingSetIndex:
         `rare_term` and the derived-name rarity gate measure against must
         cover exactly the anchors this index actually holds, of every kind.
         """
-        raw_pages, outbound, names = _walk_page_entries(self.vault_root)
+        raw_pages, outbound, names, project_members = _walk_page_entries(self.vault_root)
         records, plans = _collection_candidates(self.vault_root)
-        projects = _project_candidates(self.vault_root)
+        projects, project_edges = _project_candidates(self.vault_root, project_members)
 
         # Cap in the SAME order `anchors()` has always reported (pages first),
         # over anchor identities only — page entries are not `_Candidate`s yet.
@@ -1934,6 +2033,14 @@ class WorkingSetIndex:
             if candidate.path
         }
         edges = _resolve_links(outbound, names, anchor_paths)
+        # A project anchor's member links, merged the same way a page's own
+        # wikilink edges are: only for an anchor that survived the cap (the
+        # same guard `_resolve_links` gets for free from `anchor_paths`
+        # already being built from `kept_ids`).
+        for anchor_id, rows in project_edges.items():
+            if anchor_id not in kept_ids:
+                continue
+            edges.setdefault(anchor_id, []).extend(rows)
         candidates.sort(key=lambda candidate: candidate.anchor_id)
         term_counts = {term: len(ids) for term, ids in term_owners.items()}
         return candidates, edges, names, term_counts
