@@ -1394,6 +1394,109 @@ def test_r4_lexical_term_sets_are_folded_symmetrically() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Correction round 1, C1 (BLOCKER): a de-possessived form that itself folds
+# into a STOPWORD must never reach the single-token phrase set or the folded
+# lexical term sets. "it's"/"let's"/... are ordinary contractions of common
+# pronouns/verbs, never a turn naming an anchor literally called "It"/"Let".
+# --------------------------------------------------------------------------- #
+
+
+def test_c1_a_stopword_contraction_does_not_manufacture_exact_alias() -> None:
+    """Reviewer's named case: "it's" (4 chars, clears the length floor)
+    folds to "it" -- itself a stopword that would never appear in `phrases`
+    or a turn term on its own. It must not reach an anchor literally titled
+    "It" through the possessive fold.
+    """
+    row = _row("it.md", "It", kind="product")
+    analysis = resolve_module.analyze_turn("it's finally back online after the outage")
+    candidates = resolve_module.candidates_for(analysis, (row,))
+
+    assert candidates == ()
+
+
+def test_c1_lets_does_not_manufacture_exact_alias_against_an_anchor_named_let() -> None:
+    """"let's" (5 chars) folds to "let" -- not itself in STOPWORDS as a bare
+    word, but "let" IS one of the added function-word stopwords, so the same
+    route must be closed for it too."""
+    row = _row("let.md", "Let", kind="product")
+    analysis = resolve_module.analyze_turn("let's ship the release today")
+    candidates = resolve_module.candidates_for(analysis, (row,))
+
+    assert candidates == ()
+
+
+@pytest.mark.parametrize(
+    ("contraction", "title"),
+    [
+        ("that's", "That"),
+        ("who's", "Who"),
+        ("what's", "What"),
+        ("there's", "There"),
+    ],
+)
+def test_c1_common_stopword_contractions_do_not_manufacture_exact_alias(
+    contraction: str, title: str
+) -> None:
+    row = _row(f"{title.lower()}.md", title, kind="product")
+    analysis = resolve_module.analyze_turn(f"{contraction} not going to work today")
+    candidates = resolve_module.candidates_for(analysis, (row,))
+
+    assert candidates == ()
+
+
+def test_c1_the_legitimate_possessive_case_still_resolves() -> None:
+    """"dana's email" must still reach a plain "Dana" via `exact_alias` --
+    the fix drops only a fold that LANDS IN STOPWORDS, not possessive
+    folding in general (canonical R4 case, re-pinned here)."""
+    row = _row("dana.md", "Dana", kind="entity")
+    analysis = resolve_module.analyze_turn("draft dana's email")
+    candidates = resolve_module.candidates_for(analysis, (row,))
+    resolution = resolve_module.resolve(candidates)
+
+    assert len(candidates) == 1
+    assert "exact_alias" in candidates[0].evidence
+    assert resolution.anchors[0].status == "resolved"
+
+
+def test_c1_a_title_authored_with_a_possessive_still_matches_verbatim() -> None:
+    """A title itself authored with a possessive must still match a turn
+    spelling it out verbatim (canonical R4 case, re-pinned here)."""
+    row = _row("plan.md", "Dana's Plan", kind="hub")
+    analysis = resolve_module.analyze_turn("what about dana's plan")
+    candidates = resolve_module.candidates_for(analysis, (row,))
+
+    assert "exact_alias" in candidates[0].evidence
+    assert "dana's plan" in candidates[0].exact_alias_phrases
+
+
+def test_c1_fold_lexical_term_drops_a_stopword_landing_possessive_fold() -> None:
+    """The SAME helper folds BOTH sides of the lexical comparison
+    (`turn_terms_folded` and `row_terms_folded`/`name_terms_folded`), so
+    proving it here proves the anchor side cannot manufacture a stopword
+    name term in reverse either -- a title "It's Complicated" cannot gain
+    the name term "it", because `tokens_of("It's Complicated")` feeds "it's"
+    through this exact function on the anchor side too.
+    """
+    assert resolve_module._fold_lexical_term("it's") is None
+    assert resolve_module._fold_lexical_term("let's") is None
+    assert resolve_module._fold_lexical_term("dana's") == "dana"
+    # An ordinary plural fold is unaffected by the stopword guard.
+    assert resolve_module._fold_lexical_term("posts") == "post"
+
+
+# A true end-to-end anchor-side probe is not constructible: `turn_terms`
+# already excludes a LITERAL "it" (a stopword), and the turn-side fix above
+# drops any contraction that folds to one, so `turn_terms_folded` can never
+# contain "it" regardless of what the anchor side does -- `shared_name`'s
+# intersection would be identical whether or not `name_terms_folded` (a
+# title "It's Complicated") carries a phantom "it". `_fold_lexical_term`
+# is the ONE function both `turn_terms_folded` and `row_terms_folded`/
+# `name_terms_folded` call, so the direct test above is the correct and
+# only way to verify the anchor side is safe: proving the shared function
+# is safe proves both call sites are.
+
+
+# --------------------------------------------------------------------------- #
 # fix/activation-competing-senses, R5: named anchors order first. An anchor
 # holding a deciding-alone kind must survive MAX_ANCHORS truncation ahead of
 # weaker multi-kind candidates.

@@ -257,6 +257,49 @@ class Resolution:
 # --------------------------------------------------------------------------- #
 
 
+def _depossessive_token(token: str) -> str:
+    """One token's possessive-stripped spelling for PHRASE BUILDING (fix/
+    activation-competing-senses, correction round 1, C1) -- verbatim when
+    `fold_possessive` would land on a STOPWORD, the fold otherwise.
+
+    A contraction of a common pronoun or auxiliary verb ("it's", "let's",
+    "that's", "who's"...) folds to a bare function word that would never be
+    a turn term or a phrase on its own, and must not become one just
+    because it arrived via an apostrophe: "it's finally back online" is not
+    a turn naming a product literally called "It". Used for the N-GRAM
+    token sequence specifically, where a position must be filled by
+    SOMETHING (dropping the token outright would shift every phrase after
+    it) — the verbatim spelling is exactly what would have been there
+    without this fold in the first place, so substituting it is a true
+    no-op at that position, not a different kind of guess.
+    """
+    folded = fold_possessive(token)
+    return token if folded in STOPWORDS else folded
+
+
+def _fold_lexical_term(term: str) -> str | None:
+    """One term's fold for the LEXICAL COMPARISON (fix/activation-competing-
+    senses, correction round 1, C1) -- `fold_plural(fold_possessive(term))`,
+    or `None` when the possessive fold alone already lands on a STOPWORD.
+
+    Unlike `_depossessive_token`, a term set has no positions to preserve, so
+    a term whose fold is unsound is simply DROPPED rather than kept verbatim
+    -- the verbatim spelling ("it's") would never match anything anyway, so
+    dropping it costs nothing.
+
+    Used identically on BOTH sides of the lexical comparison in
+    `candidates_for` (the turn's own terms AND the anchor's `row.terms`/
+    title+alias terms): the same function on both call sites is what makes
+    the anchor side symmetric with the turn side by construction — a title
+    "It's Complicated" cannot manufacture the name term "it" any more than a
+    turn saying "it's" can, because both route through this one function.
+    """
+    folded = fold_possessive(term)
+    if folded in STOPWORDS:
+        return None
+    return fold_plural(folded)
+
+
 def analyze_turn(turn: str) -> TurnAnalysis:
     """Normalise a raw turn once: NFKC + casefold, tokens, n-grams, cues."""
     # Calls the shared `normalize()` rather than restating its formula: a
@@ -276,7 +319,7 @@ def analyze_turn(turn: str) -> TurnAnalysis:
     # Fleet" through the phrase "gamma fleet" it would never form verbatim,
     # while "Dana's Plan", authored with a possessive, must still match a
     # turn spelling it out the same way (the verbatim pass, unchanged).
-    folded_tokens = tuple(fold_possessive(token) for token in tokens)
+    folded_tokens = tuple(_depossessive_token(token) for token in tokens)
     ngrams: list[str] = []
     seen: set[str] = set()
     for token_sequence in (tokens, folded_tokens):
@@ -324,20 +367,32 @@ def candidates_for(
     # R4 (fix/activation-competing-senses): possessive fold, applied on the
     # TURN side of the lexical comparison -- "gamma's" must contribute the
     # term "gamma" the same way a plural turn token already folds to its
-    # singular. `fold_possessive` before `fold_plural`: strip the
-    # grammatical possessive marker first, then normalise number.
-    turn_terms_folded = frozenset(fold_plural(fold_possessive(term)) for term in turn_terms)
+    # singular. `_fold_lexical_term` (C1, correction round 1) is
+    # `fold_plural(fold_possessive(term))` with one guard: a term whose
+    # possessive fold alone lands on a STOPWORD ("it's" -> "it") is dropped
+    # rather than folded, so an ordinary contraction of a common pronoun or
+    # auxiliary verb can never manufacture a turn term that was never typed.
+    turn_terms_folded = frozenset(
+        folded for term in turn_terms if (folded := _fold_lexical_term(term)) is not None
+    )
     # A single turn TOKEN is a phrase too (`phrases` also feeds unigram
     # `exact_alias` matches), so its de-possessived spelling joins the
     # phrase set alongside the verbatim one -- "dana's" must reach a plain
     # single-word `exact_alias` on "Dana" exactly as "dana" already would.
     # `analysis.ngrams` already carries the de-possessived MULTI-token
     # phrases (`analyze_turn`); this adds the one-token case `analyze_turn`
-    # never builds n-grams for.
+    # never builds n-grams for. Same C1 guard: a fold that lands on a
+    # STOPWORD is dropped, never added as a phrase (the verbatim spelling is
+    # already covered by `frozenset(analysis.tokens)` above, so nothing is
+    # lost by not also adding its unsound fold).
     phrases = (
         frozenset(analysis.ngrams)
         | frozenset(analysis.tokens)
-        | frozenset(fold_possessive(token) for token in analysis.tokens)
+        | frozenset(
+            folded
+            for token in analysis.tokens
+            if (folded := fold_possessive(token)) not in STOPWORDS
+        )
     )
     cue_categories = analysis.cue_categories
     claims_winner = _claims_winner(analysis, routing_targets)
@@ -371,13 +426,16 @@ def candidates_for(
 
     # Position of every non-stopword turn token, by its FOLDED form — used
     # only by the consumption check below, the SAME comparison key
-    # `only_shared_name_term` already uses (fold_possessive then fold_plural,
-    # matching `turn_terms_folded`'s own construction above).
+    # `only_shared_name_term` already uses (`_fold_lexical_term`, matching
+    # `turn_terms_folded`'s own construction above).
     term_positions: dict[str, list[int]] = {}
     for index, token in enumerate(analysis.tokens):
         if token in _STOPWORDS:
             continue
-        term_positions.setdefault(fold_plural(fold_possessive(token)), []).append(index)
+        folded_term = _fold_lexical_term(token)
+        if folded_term is None:
+            continue
+        term_positions.setdefault(folded_term, []).append(index)
 
     # Pass 2 of 2: the ordinary per-row evidence assembly, reusing pass 1's
     # own matched phrases rather than recomputing them.
@@ -420,11 +478,18 @@ def candidates_for(
         # R4 (fix/activation-competing-senses): the SAME possessive fold on
         # the ANCHOR side too, for symmetry with the turn side above -- a
         # title authored "Dana's Plan" shares the name term "dana" with a
-        # turn saying plain "dana", not just the other way around.
-        row_terms_folded = frozenset(fold_plural(fold_possessive(term)) for term in row.terms)
+        # turn saying plain "dana", not just the other way around. C1
+        # (correction round 1): the SAME `_fold_lexical_term` the turn side
+        # uses, so a title "It's Complicated" cannot manufacture the name
+        # term "it" any more than a turn saying "it's" can -- one function,
+        # both call sites, symmetric by construction.
+        row_terms_folded = frozenset(
+            folded for term in row.terms if (folded := _fold_lexical_term(term)) is not None
+        )
         name_terms_folded = frozenset(
-            fold_plural(fold_possessive(term))
+            folded
             for term in tokens_of(" ".join((row.title, *row.aliases)))
+            if (folded := _fold_lexical_term(term)) is not None
         )
         shared_broad = turn_terms_folded & row_terms_folded
         shared_name = turn_terms_folded & name_terms_folded

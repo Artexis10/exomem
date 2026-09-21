@@ -81,7 +81,21 @@ log = logging.getLogger(__name__)
 #: at all, "i'd" and "i’d" tokenised as different words, "well-known" and
 #: "well‑known" did too) and must rebuild rather than answer from those
 #: stale rows.
-SCHEMA_VERSION = 7
+#: v8 (fix/activation-competing-senses, correction round 1) adds words to
+#: `STOPWORDS`: "let" (C1) and the closed-class function words C3 adds
+#: (before/after/into/etc. — see that commit for the full list).
+#: `derived_short_name`'s stopwords-only rejection reads `STOPWORDS`
+#: directly and runs at index-build time (`_finalize_anchor_aliases`), so a
+#: v7 sidecar's derived short names were computed against the SMALLER word
+#: list and would otherwise survive unrebuilt: a title whose leading name is
+#: now entirely closed-class words (implausible for "let" alone, more
+#: plausible once C3's larger list lands) would keep a derived alias a fresh
+#: build would refuse to derive. `term_anchor_counts` is unaffected —
+#: `_title_alias_term_owners` never filters by `STOPWORDS` — but the bump
+#: covers both commits in this round since C3 needs one for the SAME table
+#: and a schema version is an all-or-nothing per-round bump, not a per-word
+#: one.
+SCHEMA_VERSION = 8
 SIDECAR_NAME = ".working-set.sqlite"
 DISABLE_ENV = "EXOMEM_DISABLE_WORKING_SET"
 _TRUE = frozenset({"1", "true", "yes", "on"})
@@ -456,6 +470,13 @@ STOPWORDS: frozenset[str] = frozenset(
         "left", "like", "make", "many", "more", "most", "need", "now", "one", "only",
         "other", "over", "should", "some", "such", "than", "too", "use", "very",
         "want", "way", "well", "about",
+        # Correction round 1, C1: "let" (a hortative auxiliary in its own
+        # right, "let's" == "let us") is the one word the possessive-fold
+        # BLOCKER's own required red test ("let's ship" must not reach an
+        # anchor titled "Let") needs added here -- `fold_possessive("let's")`
+        # folds to "let", and the C1 fix only drops a fold that LANDS IN
+        # STOPWORDS, so the word itself has to be one.
+        "let",
     }
 )
 
