@@ -20,6 +20,7 @@ from conftest import _drain_background_threads
         "exomem-working-set-warm",
         "exomem-identity-catalogue-warm",
         "exomem-lexical-repair",
+        "exomem-refs-rebuild",
     ],
 )
 def test_the_drain_waits_for_a_vault_walking_background_thread(name: str) -> None:

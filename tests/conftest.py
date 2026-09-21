@@ -809,7 +809,9 @@ _GRAPH_REBUILD_THREAD_NAME = "exomem-graph-rebuild"
 #: Every background owner that walks a whole vault and ends on its own. A
 #: managed activation starts the working-set index build and the
 #: private-identity inventory build the same way a write starts a graph rebuild:
-#: as a daemon thread that outlives the request, and so the test. Long-lived
+#: as a daemon thread that outlives the request, and so the test; a managed
+#: recall that declines on a cold reference sidecar starts its rebuild the same
+#: way. Long-lived
 #: service threads (lease renewal, metrics, mode watch) are deliberately absent;
 #: they never finish, and waiting for one would hang every teardown.
 _VAULT_WALKING_THREAD_NAMES = frozenset(
@@ -818,6 +820,7 @@ _VAULT_WALKING_THREAD_NAMES = frozenset(
         "exomem-working-set-warm",
         "exomem-identity-catalogue-warm",
         "exomem-lexical-repair",
+        "exomem-refs-rebuild",
     }
 )
 #: A rebuild over most test vaults is milliseconds, and one that cannot finish
