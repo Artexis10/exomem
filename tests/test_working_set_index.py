@@ -884,6 +884,40 @@ def test_a_scheduled_build_records_the_stamp_so_the_next_request_stops_asking(
     assert scheduled == []
 
 
+def test_a_cold_scheduled_build_records_the_stamp_too(
+    seeded: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cold-start build is the same gate: it records the key it ran for.
+
+    Otherwise the first request after a managed cold start finds a fresh
+    catalogue with no key, reads it as stale, and pays for a second whole-vault
+    walk that finds nothing to do.
+    """
+    from exomem import readiness, working_set_runtime
+
+    working_set_runtime.reset_caches_for_tests()
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    assert not working_set_index.WorkingSetIndex(seeded).anchors()
+
+    state, _index, _stale = working_set_runtime.ensure_index(seeded, freshness_stamp="cold-key")
+    assert state == working_set_runtime.WARMING
+    _join_scheduled_builds()
+    assert working_set_index.WorkingSetIndex(seeded).freshness_stamp() == "cold-key"
+
+    real_schedule = working_set_runtime._schedule_build
+    scheduled: list[Path] = []
+
+    def recording(root: Path, **kwargs: object) -> None:
+        scheduled.append(root)
+        real_schedule(root, **kwargs)
+
+    monkeypatch.setattr(working_set_runtime, "_schedule_build", recording)
+    state, _index, stale = working_set_runtime.ensure_index(seeded, freshness_stamp="cold-key")
+
+    assert (state, stale) == (working_set_runtime.READY, False)
+    assert scheduled == []
+
+
 # --------------------------------------------------------------------------- #
 # Review round: hub scope and single-flight cold build
 # --------------------------------------------------------------------------- #
