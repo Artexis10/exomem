@@ -981,3 +981,154 @@ def test_a_failed_discovery_does_not_erase_another_update_s_pending_set(
         "update's failure cleared the set it was holding"
     )
     assert [manifest.path for manifest in published]
+
+
+# --------------------------------------------------------------------------- #
+# The registry is keyed on the sidecar, not on a number
+# --------------------------------------------------------------------------- #
+
+
+def _rebuilt(vault: Path, times: int) -> working_set_index.WorkingSetIndex:
+    """An index whose generation counter has been pushed past 1."""
+    index = working_set_index.WorkingSetIndex(vault)
+    for _ in range(times):
+        index.rebuild()
+    return index
+
+
+def test_a_recreated_sidecar_is_served_rather_than_stranded(vault: Path) -> None:
+    """A restarted generation counter must not strand every request.
+
+    Deleting the sidecar restarts the counter at 1 while the registry still
+    holds the dead sidecar's higher numbers. Keyed on the number alone, the
+    rebuild's publish was evicted on arrival and every request after it missed
+    AND declined to store — the sweep back on the request thread, for good,
+    which is the whole defect this work removes. Keyed on the sidecar's own
+    identity, the new sidecar's entries simply replace the dead one's.
+    """
+    _seed_without_collection(vault)
+    _write_collection(vault)
+    working_set_index.reset_collection_manifests_for_tests()
+
+    index = _rebuilt(vault, 3)
+    dead_token = index.token()
+    assert dead_token[1] >= 2, dead_token
+    assert (
+        working_set_index.published_collection_manifests(
+            vault, dead_token[1], token=dead_token
+        )
+        is not None
+    )
+
+    index.reset()
+    index.rebuild()
+    live_token = index.token()
+
+    assert live_token[2] != dead_token[2], "the sidecar was not actually recreated"
+    assert (
+        working_set_index.published_collection_manifests(
+            vault, live_token[1], token=live_token
+        )
+        is not None
+    ), "the recreated sidecar's own rebuild was evicted by the dead one's numbers"
+    assert (
+        working_set_index.published_collection_manifests(
+            vault, dead_token[1], token=dead_token
+        )
+        is None
+    ), "the dead sidecar's manifests are still being served"
+
+
+def test_a_dead_sidecar_s_manifests_are_never_served_to_a_live_one(
+    vault: Path,
+) -> None:
+    """Same path, different sidecar: the entries do not carry over.
+
+    A vault deleted and recreated at the same path — or any sidecar rebuilt
+    from scratch — gets a new identity, and manifests discovered for the old
+    one describe a tree that no longer exists. They are not evidence about
+    this vault and are not served as if they were.
+    """
+    _seed_without_collection(vault)
+    _write_collection(vault)
+    manifests = structured_collections.discover_collections(vault)
+    working_set_index.reset_collection_manifests_for_tests()
+
+    old_token = (1, 4, 111_111)
+    new_token = (1, 4, 222_222)
+    working_set_index.publish_collection_manifests(
+        vault, old_token[1], manifests, token=old_token
+    )
+
+    assert (
+        working_set_index.published_collection_manifests(
+            vault, new_token[1], token=new_token
+        )
+        is None
+    )
+
+
+def test_a_reader_holding_a_dead_token_stores_nothing_and_evicts_nothing(
+    vault: Path,
+) -> None:
+    """A request whose token died under it serves itself and leaves the
+    registry alone — it cannot prove its own answer is the current one."""
+    _seed_without_collection(vault)
+    _write_collection(vault)
+    manifests = structured_collections.discover_collections(vault)
+    working_set_index.reset_collection_manifests_for_tests()
+
+    live_token = (1, 7, 333_333)
+    dead_token = (1, 7, 444_444)
+    working_set_index.publish_collection_manifests(
+        vault, live_token[1], manifests, token=live_token
+    )
+
+    served = working_set_index.collection_manifests(vault, dead_token[1], token=dead_token)
+
+    assert [m.path for m in served] == [m.path for m in manifests]
+    assert (
+        working_set_index.published_collection_manifests(
+            vault, dead_token[1], token=dead_token
+        )
+        is None
+    ), "the dead-token reader stored its answer"
+    assert (
+        working_set_index.published_collection_manifests(
+            vault, live_token[1], token=live_token
+        )
+        is not None
+    ), "the dead-token reader evicted the live sidecar's entry"
+
+
+def test_generation_rules_still_hold_within_one_sidecar(vault: Path) -> None:
+    """Inside one sidecar identity, the generation rules are unchanged: the
+    highest generations are kept and a below-highest miss stores nothing."""
+    _seed_without_collection(vault)
+    _write_collection(vault)
+    manifests = structured_collections.discover_collections(vault)
+    working_set_index.reset_collection_manifests_for_tests()
+    token = (1, 0, 555_555)
+
+    for generation in (5, 6, 4, 3):
+        working_set_index.publish_collection_manifests(
+            vault, generation, manifests, token=(token[0], generation, token[2])
+        )
+
+    kept = [
+        generation
+        for generation in range(1, 8)
+        if working_set_index.published_collection_manifests(
+            vault, generation, token=(token[0], generation, token[2])
+        )
+        is not None
+    ]
+    assert kept == [5, 6], kept
+
+    working_set_index.collection_manifests(vault, 4, token=(token[0], 4, token[2]))
+    assert (
+        working_set_index.published_collection_manifests(
+            vault, 4, token=(token[0], 4, token[2])
+        )
+        is None
+    )
