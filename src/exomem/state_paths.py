@@ -69,7 +69,12 @@ _SLUG_MAX = 24
 # call, so a state root that has become a descendant of the vault is refused
 # the moment it is asked about. What the memo holds is the composed answer to
 # "where does this vault's state live", which is re-derived for the next
-# request and re-validated by every caller that acts on it.
+# request. `ensure_vault_state_dir`, the caller that creates and hardens the
+# directory, re-validates live before it acts. The other consumers of the
+# composed answer do not: inside a scope they inherit the one validation made
+# when the memo was filled, where before each of them validated for itself.
+# Validating on every composition would roughly double a warm request's
+# filesystem calls, which is the cost this scope exists to remove.
 #
 # Outside a scope there is no memo and nothing is remembered, so every caller
 # that has not opted in behaves byte-identically to before.
