@@ -817,6 +817,7 @@ _VAULT_WALKING_THREAD_NAMES = frozenset(
         _GRAPH_REBUILD_THREAD_NAME,
         "exomem-working-set-warm",
         "exomem-identity-catalogue-warm",
+        "exomem-lexical-repair",
     }
 )
 #: A rebuild over most test vaults is milliseconds, and one that cannot finish

@@ -15,7 +15,12 @@ from conftest import _drain_background_threads
 
 @pytest.mark.parametrize(
     "name",
-    ["exomem-graph-rebuild", "exomem-working-set-warm", "exomem-identity-catalogue-warm"],
+    [
+        "exomem-graph-rebuild",
+        "exomem-working-set-warm",
+        "exomem-identity-catalogue-warm",
+        "exomem-lexical-repair",
+    ],
 )
 def test_the_drain_waits_for_a_vault_walking_background_thread(name: str) -> None:
     release = threading.Event()

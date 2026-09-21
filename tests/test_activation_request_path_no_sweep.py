@@ -463,7 +463,10 @@ def test_warm_activation_request_resolves_the_state_location_once(
     real_key = state_paths.vault_state_key
 
     def counting_key(vault_root: Path) -> str:
-        key_calls.append(str(vault_root))
+        # Own vault only: the patch is process-wide, and a background thread an
+        # earlier test left running resolves ITS vault through this same hook.
+        if str(vault_root) == str(vault):
+            key_calls.append(str(vault_root))
         return real_key(vault_root)
 
     monkeypatch.setattr(state_paths, "vault_state_key", counting_key)
@@ -504,7 +507,10 @@ def test_resolution_scope_holds_no_cache_outside_itself(
     real_key = state_paths.vault_state_key
 
     def counting_key(root: Path) -> str:
-        calls.append(str(root))
+        # Own vault only: the patch is process-wide, and a background thread an
+        # earlier test left running resolves ITS vault through this same hook.
+        if str(root) == str(vault_root):
+            calls.append(str(root))
         return real_key(root)
 
     monkeypatch.setattr(state_paths, "vault_state_key", counting_key)
@@ -539,7 +545,10 @@ def test_resolution_scope_does_not_leak_into_another_thread(
     real_key = state_paths.vault_state_key
 
     def counting_key(root: Path) -> str:
-        calls.append(str(root))
+        # Own vault only: the patch is process-wide, and a background thread an
+        # earlier test left running resolves ITS vault through this same hook.
+        if str(root) == str(vault_root):
+            calls.append(str(root))
         return real_key(root)
 
     monkeypatch.setattr(state_paths, "vault_state_key", counting_key)
@@ -577,7 +586,10 @@ def test_nested_resolution_scopes_share_one_memo(
     real_key = state_paths.vault_state_key
 
     def counting_key(root: Path) -> str:
-        calls.append(str(root))
+        # Own vault only: the patch is process-wide, and a background thread an
+        # earlier test left running resolves ITS vault through this same hook.
+        if str(root) == str(vault_root):
+            calls.append(str(root))
         return real_key(root)
 
     monkeypatch.setattr(state_paths, "vault_state_key", counting_key)
