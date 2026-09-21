@@ -1493,7 +1493,8 @@ def _prepare_end_to_end_vault(vault: Path) -> None:
 
 def _reset_governance_state(vault: Path) -> None:
     from exomem import working_set_runtime
-    from exomem.governance import membership, policy as policy_module
+    from exomem.governance import membership
+    from exomem.governance import policy as policy_module
 
     policy_module._CACHE.clear()
     membership.clear_memo()
@@ -1567,8 +1568,11 @@ def test_a_policy_scoped_to_one_page_withholds_only_that_page_end_to_end(
     served_paths = {a["path"] for a in governed["anchors"]}
     assert served_paths == {"Knowledge Base/Products/Tow Cable.md"}
     assert "Knowledge Base/Products/Cargo Sled.md" not in str(governed)
-    unit_paths = {u["provenance"]["path"] for u in governed["units"]}
-    assert unit_paths == {"Knowledge Base/Products/Tow Cable.md"}
+    # `provenance.path` is legitimately empty on the current-state unit (its
+    # only anchor is `provenance.anchor`), so anchor is the field that always
+    # names the real page.
+    unit_anchors = {u["provenance"]["anchor"] for u in governed["units"]}
+    assert unit_anchors == {"Knowledge Base/Products/Tow Cable.md"}
 
 
 def _unit_with_ref(ref: str) -> dict:
@@ -1633,7 +1637,7 @@ def test_working_set_paths_stays_undecidable_for_an_unresolvable_reference(
             context_refs.vault_ref("../../etc/passwd.md") + fragment
         ),
         "absolute_drive_letter_path": (
-            context_refs.vault_ref("C:/Windows/System32/config/SAM.md") + fragment
+            context_refs.vault_ref("C:/example/local/config.md") + fragment
         ),
         "unknown_exomem_authority": f"{context_refs.SCHEME}://config/Foo.md{fragment}",
         "empty_path": context_refs.vault_ref("") + fragment,
