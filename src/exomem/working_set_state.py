@@ -122,6 +122,13 @@ def _governing_manifest(vault_root: Path, routed: Any) -> Any | None:
     Fails closed for its own collection only: a manifest that has vanished, no
     longer parses, or no longer declares the Records profile yields no
     current-state entry for that collection, and the packet still serves.
+
+    There are deliberately TWO guards for this and neither may be removed on
+    the strength of the other: `record_governance.query_collection` also
+    re-resolves the collection from its path before querying it. This one
+    exists so the freshness is a property of the caller that needs it rather
+    than a coincidence of what its callee happens to do today, and so a profile
+    change is refused before the query rather than inside it.
     """
     rel = str(getattr(routed, "path", "") or "")
     if not rel:

@@ -1088,10 +1088,28 @@ MANIFEST_REGISTRY_VAULTS = 8
 
 _MANIFEST_REGISTRY_LOCK = threading.Lock()
 #: vault identity -> index generation -> that generation's manifests.
+#:
+#: Keyed on the generation alone, where `_ROW_CACHE` keys on the whole
+#: `(epoch, generation, instance)` token. The accepted hole: a vault deleted and
+#: recreated at the same path, by another process, which then advances the NEW
+#: sidecar to a generation this process happens to hold, would be served the old
+#: vault's manifests as routing evidence. Every generation this process writes
+#: republishes, so the hole needs a writer that is not this process, and a
+#: process still serving a vault that was deleted under it has larger problems
+#: than this cache. Closing it means threading the token through the two
+#: request-path readers and adding a sidecar read to each -- worth doing if the
+#: hosted runtime ever recreates vaults in place.
 _MANIFEST_REGISTRY: OrderedDict[str, OrderedDict[int, tuple[Any, ...]]] = OrderedDict()
 #: vault identity -> what the last discovery in this process saw, before the
 #: write that will give it a generation. Written only by the index update (see
 #: `_collection_candidates`), promoted by `_write` once the generation is known.
+#:
+#: Two overlapping updates of one vault share this slot, and the later
+#: discovery wins for both. That can publish a set that is FRESHER than its
+#: generation claims, never staler: a sweep that started later cannot have seen
+#: an older vault. Fresher is safe for routing evidence (it is evidence, and
+#: more of it is not a disclosure) and irrelevant to governed reads, which
+#: re-read their manifest regardless.
 _PENDING_MANIFESTS: OrderedDict[str, tuple[Any, ...]] = OrderedDict()
 
 
