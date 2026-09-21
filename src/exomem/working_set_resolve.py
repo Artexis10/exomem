@@ -318,7 +318,7 @@ def candidates_for(
         # the turn shares words with this anchor — was counted twice and
         # `_status_for` resolved the pair. `lexical_overlap` needs at least
         # `min_terms` shared words over the BROAD vocabulary (title, aliases,
-        # sections, tags) AND at least one of them among the anchor's OWN
+        # sections, tags) AND genuine NAME CONTACT among the anchor's OWN
         # AUTHORED title/alias terms — a tag or section word may COMPLETE an
         # overlap, never CONSTITUTE one alone, or two anchors sharing nothing
         # but a tag and a section heading (e.g. two `hub`-tagged pages each
@@ -326,19 +326,36 @@ def candidates_for(
         # authored. `rare_term` is granted only when `lexical_overlap` was
         # NOT: it is the single-authored-rare-word case, a genuinely weaker,
         # different fact, never a second vote for the same one.
+        #
+        # Name contact (`close-memory-loop`, root cause 2) is two or more
+        # shared AUTHORED name terms, or exactly one that is independently
+        # rare (the same `term_anchor_counts` yardstick `rare_term` measures
+        # against): a single COMMON word shared with a long title — "project"
+        # against "Northern Corridor Winter Freight Logistics Project" — is
+        # not a turn naming that anchor, and let an unnamed hub sharing one
+        # ordinary word plus broad section vocabulary take over a packet.
+        # `term_anchor_counts` absent means the one shared term cannot be
+        # shown rare, so it earns nothing — never a fabricated rarity.
         row_terms_folded = frozenset(fold_plural(term) for term in row.terms)
         name_terms_folded = frozenset(
             fold_plural(term) for term in tokens_of(" ".join((row.title, *row.aliases)))
         )
         shared_broad = turn_terms_folded & row_terms_folded
         shared_name = turn_terms_folded & name_terms_folded
-        if len(shared_broad) >= min_terms and shared_name:
+        single_shared_name_term_is_rare = False
+        if len(shared_name) == 1:
+            (only_shared_name_term,) = shared_name
+            single_name_term_count = term_counts.get(only_shared_name_term)
+            single_shared_name_term_is_rare = (
+                single_name_term_count is not None
+                and single_name_term_count <= RARE_TERM_MAX_ANCHORS
+            )
+        if len(shared_broad) >= min_terms and (
+            len(shared_name) >= 2 or single_shared_name_term_is_rare
+        ):
             evidence.add("lexical_overlap")
-        elif len(shared_name) == 1:
-            (term,) = shared_name
-            count = term_counts.get(term)
-            if count is not None and count <= RARE_TERM_MAX_ANCHORS:
-                evidence.add("rare_term")
+        elif single_shared_name_term_is_rare:
+            evidence.add("rare_term")
         if bands.get(row.anchor_id):
             evidence.add("vector_band")
         if claims_winner is not None and claims_winner == row.path:
