@@ -319,21 +319,19 @@ def test_r3_a_named_project_carries_the_packet_past_two_weak_unrelated_entities(
     withheld the named project's own material; after R3 the two weak
     entities are demoted to `partial` and the turn resolves on the project.
 
-    The units LANE itself needs the maintained semantic-recall catalog,
-    which a raw `tmp_path` vault (no `vault`/`activation_vault` fixture) is
-    never warm for -- the same reason `test_a_partial_anchor_besides_a_
-    resolved_one_contributes_nothing_to_units` above only ever proves
-    non-leakage over `packet["units"]`, vacuously true when it is empty,
-    rather than proving it non-empty. That catalog-warming behaviour is
-    unrelated to R3 (it is a units-LANE readiness concern, not an anchor-
-    resolution one), so this test follows the same established precedent:
-    it proves the RESOLUTION verdict R3 changes (resolved, not ambiguous,
-    the weak pair demoted) and non-leakage, not that the lane itself is
-    warm here.
+    Correction round 1, C2: the units LANE needs the maintained semantic-
+    recall catalog, which a bare `tmp_path` vault is not warm for by
+    default -- but `tests/test_activate_context_request_path.py`'s own
+    `activation_vault` fixture already shows the fix, one extra call,
+    `lexstore.ensure_fresh(vault)`, before `WorkingSetIndex(vault).rebuild()`.
+    With it, the resolved project's own member page ("Alpha notes") serves
+    a real unit, which this test now asserts directly (by provenance path),
+    alongside the existing non-leakage assertions for the two demoted weak
+    entities.
     """
     from test_working_set_index import _write
 
-    from exomem import working_set, working_set_index
+    from exomem import lexstore, working_set, working_set_index, working_set_runtime
 
     vault = tmp_path / "vault"
     _write(
@@ -362,6 +360,8 @@ def test_r3_a_named_project_carries_the_packet_past_two_weak_unrelated_entities(
         "# South Gate\n\n## Summary\n\nRuns a review gate for yet another unrelated team.\n",
     )
 
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
     index = working_set_index.WorkingSetIndex(vault)
     index.rebuild()
     packet = working_set.compile_packet(
@@ -380,6 +380,10 @@ def test_r3_a_named_project_carries_the_packet_past_two_weak_unrelated_entities(
     assert north is None or north["status"] == "partial", north
     assert south is None or south["status"] == "partial", south
     assert packet["ambiguity"] == []
+    alpha_notes_path = "Knowledge Base/Notes/Engineering/alpha-notes.md"
+    assert any(
+        unit.get("provenance", {}).get("path") == alpha_notes_path for unit in packet["units"]
+    ), packet["units"]
     # The two weak, demoted entities supply no material of their own.
     assert all(unit.get("provenance", {}).get("path") != north_gate for unit in packet["units"])
     assert all(unit.get("provenance", {}).get("path") != south_gate for unit in packet["units"])
