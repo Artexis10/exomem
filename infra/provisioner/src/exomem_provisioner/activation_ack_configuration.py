@@ -263,12 +263,6 @@ def validate_activation_ack_server_certificate(
         raise ValueError("activation acknowledgement server certificate has expired")
     if expires - starts > MAX_ACTIVATION_ACK_CERTIFICATE_LIFETIME:
         raise ValueError("activation acknowledgement server certificate lifetime is unbounded")
-    remaining = expires - now
-    if remaining < minimum_remaining:
-        raise ValueError(
-            "activation acknowledgement server certificate is inside its rotation window"
-        )
-
     verifier = (
         PolicyBuilder()
         .store(Store(authorities))
@@ -276,15 +270,30 @@ def validate_activation_ack_server_certificate(
         .build_server_verifier(x509.DNSName(expected))
     )
     try:
-        verifier.verify(leaf, [])
+        chain = verifier.verify(leaf, [])
     except VerificationError as error:
         raise ValueError(
             "activation acknowledgement server certificate does not chain to the pinned trust"
         ) from error
 
+    # The rotation window is measured against the whole chain, not the leaf.
+    # A leaf outlives its issuer the moment someone mints a 90-day certificate
+    # from a CA with 30 days left: every check here passes, the startup log
+    # says "verified", and on the day the anchor expires path validation starts
+    # rejecting that leaf on every capable cell at once. `verify` hands back
+    # the chain it actually built, so this is the anchor that signed *this*
+    # leaf rather than the earliest one in the bundle.
+    authority_expires = min(certificate.not_valid_after_utc for certificate in chain)
+    remaining = min(expires, authority_expires) - now
+    if remaining < minimum_remaining:
+        raise ValueError(
+            "activation acknowledgement server certificate is inside its rotation window"
+        )
+
     return {
         "dns_name": expected,
         "not_valid_after": expires.isoformat(),
+        "authority_not_valid_after": authority_expires.isoformat(),
         "remaining_seconds": int(remaining.total_seconds()),
         "serial_number": format(leaf.serial_number, "x"),
     }

@@ -59,12 +59,13 @@ def _material(
     lifetime_days: int = 90,
     dns_name: str | None = None,
     authority_common_name: str = "Exomem activation acknowledgement CA",
+    authority_lifetime_days: int = 3650,
 ) -> tuple[ActivationAcknowledgementBinding, str, Path]:
     """Mint a CA and a leaf, and return the lock binding, bundle and cert path."""
 
     issuer = _issuer()
     authority_key, authority = issuer.build_authority(
-        now=issued_at, lifetime_days=3650, common_name=authority_common_name
+        now=issued_at, lifetime_days=authority_lifetime_days, common_name=authority_common_name
     )
     _, leaf = issuer.build_listener_certificate(
         authority_key=authority_key,
@@ -321,3 +322,72 @@ async def test_a_kubernetes_secret_projection_layout_refuses_and_a_subpath_mount
         now=now,
     )
     assert report["dns_name"] == activation_ack_server_dns_name(NAMESPACE)
+
+
+async def test_a_leaf_that_outlives_its_authority_reports_the_authority_clock(
+    tmp_path: Path,
+) -> None:
+    """A 90-day leaf from a CA with 30 days left is not a 90-day certificate.
+
+    Every check passes on the leaf alone: issuance sees 90 days against its
+    14-day floor, and startup would log `verified state=89d-remaining`. Then
+    the anchor expires and path validation rejects that leaf on every capable
+    cell at once, with nothing having ever mentioned the CA's clock.
+    `--authority-lifetime-days` is operator-supplied with no floor, so this is
+    an ordinary mistake rather than a decade-out curiosity.
+
+    The remaining window is therefore measured against the chain `verify`
+    actually built, and the report carries the authority's own expiry so the
+    startup log can name it.
+    """
+
+    now = dt.datetime.now(dt.UTC).replace(microsecond=0)
+    binding, trust_pem, certificate_path = _material(
+        tmp_path, issued_at=now, lifetime_days=90, authority_lifetime_days=30
+    )
+
+    report = await preflight_activation_ack_listener(
+        binding=binding,
+        certificate_path=str(certificate_path),
+        read_trust_bundle=_reader(trust_pem),
+        now=now,
+    )
+
+    # 30 days, the authority's -- not 90, the leaf's.
+    assert report["remaining_seconds"] == 30 * 24 * 3_600
+    assert report["not_valid_after"] != report["authority_not_valid_after"]
+
+
+async def test_an_expiring_authority_raises_the_rotation_warning_a_healthy_leaf_would_not(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The behavioural half: the anchor's clock is what the operator is told.
+
+    Startup deliberately does not refuse a certificate inside its rotation
+    window -- that would cause the outage now to prevent one later. It warns.
+    Before the chain was consulted this cell warned about nothing: the leaf has
+    61 days left. The CA has 1, and the handshake fails tomorrow.
+    """
+
+    now = dt.datetime.now(dt.UTC).replace(microsecond=0)
+    binding, trust_pem, certificate_path = _material(
+        tmp_path, issued_at=now, lifetime_days=90, authority_lifetime_days=30
+    )
+    later = now + dt.timedelta(days=29)
+
+    with caplog.at_level(logging.WARNING, logger="exomem_provisioner.activation_ack_startup"):
+        report = await preflight_activation_ack_listener(
+            binding=binding,
+            certificate_path=str(certificate_path),
+            read_trust_bundle=_reader(trust_pem),
+            now=later,
+            minimum_remaining=dt.timedelta(days=14),
+        )
+
+    assert report["remaining_seconds"] == 24 * 3_600
+    due = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "activation-ack-certificate-rotation-due"
+    ]
+    assert [record.state for record in due] == ["1d-remaining"]
