@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.90.1](https://github.com/Artexis10/exomem/compare/v0.90.0...v0.90.1) (2026-09-21)
+
+
+### Bug Fixes
+
+* **hosted:** refuse unwritable activation custody and prepare recovery contracts ([#1331](https://github.com/Artexis10/exomem/issues/1331)) ([4d54c52](https://github.com/Artexis10/exomem/commit/4d54c524fa243b69407298eedd24bede44ff2ff1))
+* **managed:** await a stopped worker's replacement under the cold-start budget ([#1335](https://github.com/Artexis10/exomem/issues/1335)) ([a4469ff](https://github.com/Artexis10/exomem/commit/a4469ff7c66192c06b8907c9a4bf82198ef4254a))
+
+
+### Performance
+
+* **activation:** take the filesystem off the activation request path ([#1336](https://github.com/Artexis10/exomem/issues/1336)) ([e998d67](https://github.com/Artexis10/exomem/commit/e998d6753320555df20ad1b31ca9d72e7e94005e))
+
 ## [0.90.0](https://github.com/Artexis10/exomem/compare/v0.89.0...v0.90.0) (2026-09-20)
 
 
