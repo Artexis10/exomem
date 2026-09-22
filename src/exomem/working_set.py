@@ -985,7 +985,7 @@ def _carried_packet(
     generation: dict[str, Any],
     index_token: tuple[int, int, int],
     freshness_snapshot: Any,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     """One packet compiled from a single dominant page, marked as carried.
 
     The page is reported as ONE anchor entry of kind `page` at status
@@ -1000,6 +1000,15 @@ def _carried_packet(
     page's own title and supersession, so the anchor entry says what the
     page says about itself, and falls back to the path when the lane found
     nothing to read.
+
+    `None` when the lanes read nothing off the page. A page can dominate
+    recall and still have nothing a unit role selects — its units carry
+    other categories, or it has none — and serving that as a packet with
+    `abstained: false` and an empty `units` block states that the turn
+    resolved and the vault had nothing, which is a different and false
+    claim. The caller abstains `unresolved` instead, which is what the turn
+    did before the carry existed and what the hook can still render a menu
+    for.
 
     The carried page is the packet's ONLY anchor, and that is load-bearing
     rather than incidental. An `unresolved` abstention lists the turn's
@@ -1051,6 +1060,8 @@ def _carried_packet(
         freshness_snapshot=freshness_snapshot,
         neighbourhood=frozenset({path}),
     )
+    if not items:
+        return None
     for item in items:
         if item.path == path:
             carried = replace(
@@ -1180,7 +1191,12 @@ def compile_packet(
             lexical_seconds=lexical_seconds,
         )
         if carried is not None:
-            return _carried_packet(
+            # `None` back means the lanes read nothing off that page, so it
+            # falls through to the ordinary `unresolved` abstention below —
+            # with the resolution's OWN anchors, the partial candidates the
+            # hook renders as a menu, because this turn ended up exactly
+            # where it would have without the carry.
+            packet = _carried_packet(
                 root,
                 page=carried,
                 analysis=analysis,
@@ -1192,6 +1208,8 @@ def compile_packet(
                 index_token=index_token,
                 freshness_snapshot=freshness_snapshot,
             )
+            if packet is not None:
+                return packet
 
     if resolution.status != "resolved":
         return abstained_packet(

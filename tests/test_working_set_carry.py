@@ -659,3 +659,27 @@ def test_the_carry_runs_when_the_first_pass_was_cheap(
         request_budget.reset_current(token)
 
     assert carried is not None and carried[0] == CARRY_PAGE
+
+
+def test_a_carried_page_with_no_readable_units_abstains(
+    carry_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page can dominate recall and still have nothing the lanes can read:
+    its units carry categories no unit role selects, or it has no units at all.
+
+    Serving that as `abstained: false` with an empty `units` block states
+    that the turn resolved and the vault had nothing, which is a different
+    and false claim — and the hook renders neither material nor the menu an
+    `unresolved` abstention would have shown, so the client sees a blank.
+    """
+    monkeypatch.setattr(
+        working_set, "run_lanes", lambda *args, **kwargs: ((), ({"role": "x", "reason": "no_material"},))
+    )
+
+    packet = working_set.compile_packet(carry_vault, turn=CARRY_TURN, max_chars=4000)
+
+    assert packet["abstained"] is True
+    assert packet["abstention"] == {"reason": "unresolved"}
+    assert packet["units"] == []
+    assert packet["anchors"] == []
+    assert "carried_by" not in packet["generation"]
