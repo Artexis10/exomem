@@ -289,7 +289,11 @@ side. **C3**: `STOPWORDS` was missing almost every preposition and
 subordinating conjunction, so a turn sharing only one such function word
 with an anchor's title (e.g. "... before the trip" against a plan titled
 "Before Launch Review") still earned `rare_term`; the missing closed-class
-English function words were added.
+English function words were added. **A minimum term length**: `rare_term` is
+never earned on a shared name term shorter than three characters, because
+rarity among anchor names cannot tell a genuinely short name ("hob", "van")
+from an everyday two-letter word a title happens to contain — "so should I
+go with the Siemens?" reached a page titled "... Go ..." on that one word.
 
 The final guard unwraps a packet reference to its vault path before deciding
 it, rather than deciding the reference text itself. A unit's own `ref` is the

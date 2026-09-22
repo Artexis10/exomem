@@ -431,6 +431,38 @@ def test_a_common_shared_term_is_neither_rare_term_nor_lexical_overlap() -> None
     assert candidates == ()
 
 
+def test_a_two_letter_shared_term_never_earns_rare_term() -> None:
+    """D4: a term shorter than three characters is never a lead.
+
+    "so should i go with the first option" is ordinary English, not a
+    reference to a page whose title happens to contain the word "Go" — but
+    "go" is no stopword, it names few anchors in a small catalogue, and it
+    was therefore a perfectly rare single shared name term. Length is the
+    only thing that separates that accident from a real short name, so a
+    two-character term earns no contact kind at all and the anchor is not a
+    candidate.
+    """
+    row = _term_row("release-go-checklist.md", "Release Go Checklist", terms=("release", "go"))
+    analysis = resolve_module.analyze_turn("so should i go with the first option")
+    candidates = resolve_module.candidates_for(
+        analysis, (row,), term_anchor_counts={"go": 1}
+    )
+
+    assert candidates == ()
+
+
+def test_a_three_letter_shared_term_still_earns_rare_term() -> None:
+    """The floor is exactly three characters: a genuinely short NAME still leads."""
+    row = _term_row("hob-service-log.md", "Hob Service Log", terms=("hob", "service"))
+    analysis = resolve_module.analyze_turn("is the hob booked in yet")
+    candidates = resolve_module.candidates_for(
+        analysis, (row,), term_anchor_counts={"hob": 1}
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].evidence == frozenset({"rare_term"})
+
+
 # --------------------------------------------------------------------------- #
 # Correction round 1 (`close-memory-loop`): rarity among ANCHOR NAMES is not
 # rarity of the WORD. A single shared name term never earns `lexical_overlap`,

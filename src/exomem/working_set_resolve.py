@@ -48,6 +48,16 @@ EVIDENCE_KINDS: tuple[str, ...] = (
 #: `_finalize_anchor_aliases`'s derived-short-name rarity gate needs it too,
 #: and that module has no dependency on this one.
 
+#: The shortest term that may be a LEAD to an anchor. Rarity among anchor
+#: NAMES cannot tell a genuinely short name from an everyday two-letter word
+#: that happens to appear in a title: "go" is no stopword, it names few
+#: anchors in any small catalogue, and "so should I go with the Siemens?"
+#: therefore reached a page titled "... Go ..." on one accidental word.
+#: Length is the discriminator a counting table has no way to supply. Three
+#: is the floor because real short names start there ("hob", "van", "PR");
+#: below it a shared term is coincidence, not reference.
+RARE_TERM_MIN_CHARS = 3
+
 #: `usage_prior` is a tie-break only. It never contributes to the two-kinds
 #: rule, because "you looked at this a lot" is not evidence that this turn is
 #: about it — that is how a rich-get-richer prior turns into a wrong anchor.
@@ -498,7 +508,11 @@ def candidates_for(
         elif len(shared_name) == 1:
             (only_shared_name_term,) = shared_name
             count = term_counts.get(only_shared_name_term)
-            if count is not None and count <= RARE_TERM_MAX_ANCHORS:
+            if (
+                len(only_shared_name_term) >= RARE_TERM_MIN_CHARS
+                and count is not None
+                and count <= RARE_TERM_MAX_ANCHORS
+            ):
                 # R2: a turn term all of whose occurrences lie inside the
                 # token span of a DIFFERENT anchor's own spelled-out
                 # multi-token name is consumed and cannot be the single
