@@ -3055,17 +3055,44 @@ CARRY_RUNNER_UP = "Knowledge Base/Notes/Insights/quillon-handover-brief.md"
 
 
 def _seed_carry_corpus(vault: Path) -> None:
-    """A dominant research note under a governable folder, and a genuine
-    runner-up elsewhere that the turn also reaches — so "never the
-    runner-up" has something to be true about."""
-    from test_working_set_carry import _seed_carry_pages, _write
+    """A dominant research note under a governable folder, a genuine runner-up
+    elsewhere that the turn also reaches — so "never the runner-up" has
+    something to be true about — and the ordinary notes any real vault has.
 
-    _seed_carry_pages(vault)
+    Seeds its own pages rather than reusing the carry suite's fixture: that
+    one also carries raw-material twins of the research note, and a fourth
+    page repeating the words the turn names them by would put those words
+    past the rarity cap and leave the turn with nothing distinctive to
+    reach either page on. Raw material has its own coverage there.
+    """
+    from test_working_set_carry import _ORDINARY_PROSE, _write
+    from test_working_set_index import _seed_planning, _seed_structure
+
+    _seed_structure(vault)
+    _seed_planning(vault)
+    kb = vault / "Knowledge Base"
+    _write(
+        kb / "Notes" / "Research" / "quillon-vantry-window.md",
+        """---
+type: research-note
+status: active
+updated: 2026-09-10
+---
+
+# Quillon vantry window
+
+## Summary
+
+- [decision] The quillon vantry window was widened to nine minutes after the
+  narrow window starved the vantry queue twice in one week. ^q-decision
+- [constraint] The quillon vantry window never exceeds twelve minutes. ^q-limit
+""",
+    )
     filler = " ".join(
         f"unrelated paragraph {n} about cadence ledgers and depot rotas." for n in range(60)
     )
     _write(
-        vault / "Knowledge Base" / "Notes" / "Insights" / "quillon-handover-brief.md",
+        kb / "Notes" / "Insights" / "quillon-handover-brief.md",
         f"""---
 type: insight
 status: active
@@ -3084,6 +3111,13 @@ updated: 2026-09-08
 {filler}
 """,
     )
+    for index in range(10):
+        _write(
+            kb / "Notes" / "Journal" / f"ordinary-note-{index:05d}.md",
+            "---\ntype: note\nstatus: active\nupdated: 2026-08-01\n---\n\n"
+            f"# Ordinary note {index:05d}\n\n## Summary\n\n"
+            f"- [note] {_ORDINARY_PROSE} ^o-{index}\n",
+        )
 
 
 def test_a_withheld_dominant_page_abstains_rather_than_carrying_the_runner_up(
