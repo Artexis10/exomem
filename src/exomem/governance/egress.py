@@ -2617,6 +2617,18 @@ def guard_working_set(
     ]
     _note_removal("anchors", len(original_anchors), len(guarded["anchors"]))
 
+    original_recent = [
+        item for item in guarded.get("recent_context") or () if isinstance(item, Mapping)
+    ]
+    guarded["recent_context"] = [
+        entry
+        for entry in (
+            _guarded_recent(item, frozen, invalid_refs) for item in original_recent
+        )
+        if entry is not None
+    ]
+    _note_removal("recent_context", len(original_recent), len(guarded["recent_context"]))
+
     original_units = [
         item for item in guarded.get("units") or () if isinstance(item, Mapping)
     ]
@@ -2668,10 +2680,20 @@ def guard_working_set(
             guarded[section] = []
         # `missing` is deliberately NOT cleared: its markers are the only thing
         # left saying the packet is empty because the guard emptied it, rather
-        # than because the compiler found nothing.
+        # than because the compiler found nothing. `recent_context` is not
+        # cleared either: it hangs from no anchor — it is what the vault has
+        # been working on, decided on its own paths above — and it is precisely
+        # what a turn with no anchors left still has to say.
         budget = guarded.get("budget")
         if isinstance(budget, Mapping):
-            guarded["budget"] = {**dict(budget), "used_chars": 0}
+            guarded["budget"] = {
+                **dict(budget),
+                "used_chars": sum(
+                    len(str(entry.get("title") or "")) + len(str(entry.get("statement") or ""))
+                    for entry in guarded.get("recent_context") or ()
+                    if isinstance(entry, Mapping)
+                ),
+            }
     return guarded
 
 
@@ -3083,7 +3105,15 @@ def _working_set_paths(
             for item in value:
                 _collect(item, ref_strict=ref_strict)
 
-    for section in ("anchors", "units", "pointers", "current_state", "ambiguity", "missing"):
+    for section in (
+        "recent_context",
+        "anchors",
+        "units",
+        "pointers",
+        "current_state",
+        "ambiguity",
+        "missing",
+    ):
         for item in packet.get(section) or ():
             if isinstance(item, Mapping):
                 _collect(item, ref_strict=not _item_has_own_page_field(item))
@@ -3288,6 +3318,48 @@ def _guarded_anchor(
         if isinstance(stripped, Mapping):
             out.update(stripped)
     return out
+
+
+def _guarded_recent(
+    entry: Mapping[str, Any],
+    withheld: frozenset[str],
+    invalid_refs: frozenset[str] = frozenset(),
+) -> dict[str, Any] | None:
+    """One `recent_context` entry, decided exactly like a unit.
+
+    The block leads the packet and is served on turns that resolved nothing, so
+    it is the one place where "what has this vault been working on" could
+    become an existence oracle for a page the audience may not have. It gets
+    the same three checks a unit gets, for the same reasons:
+
+    * its typed page fields (`path`, and `ref` when it stands in for one) must
+      not name a withheld page, and must not be an un-unwrappable candidate
+      (which never joins `withheld` and so is matched by exact text);
+    * its authored prose (`title`, `statement`, `why`) must not name one
+      either — an entry reading "status: superseded by [[…]]" names the page as
+      plainly as a path field would, and a statement cannot be edited
+      surgically without the server authoring a claim;
+    * and the item invariant (b): at least one TYPED page reference it carries
+      was decided and ADMITTED. A compiled entry always has a real `path`
+      (`working_set._recent_context`), so `path` is the typed field and `ref`
+      is merely tolerated beside it.
+    """
+    path = str(entry.get("path") or "")
+    ref = str(entry.get("ref") or "")
+    if path in invalid_refs or ref in invalid_refs:
+        return None
+    if _names_withheld(path, withheld) or _names_withheld(ref, withheld, reference_field=True):
+        return None
+    if any(
+        _names_withheld(entry.get(field), withheld, reference_field=True)
+        for field in _WORKING_SET_PROSE_FIELDS
+    ):
+        return None
+    if _value_names_an_invalid_reference(entry, invalid_refs):
+        return None
+    if not _is_admitted_typed_reference(path or ref, invalid_refs):
+        return None
+    return dict(entry)
 
 
 def _guarded_unit(

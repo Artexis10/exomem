@@ -3044,3 +3044,98 @@ def test_a_units_wikilink_in_any_prose_field_not_just_text_withholds_it(vault: P
 
     assert guarded is not None
     assert guarded["units"] == [], "LEAK: a withheld wikilink in a unit's `title` field survived"
+
+
+# --------------------------------------------------------------------------- #
+# Recent context — the always-on working-continuity block
+# --------------------------------------------------------------------------- #
+
+
+def _recent_entry(path: str, *, title: str, statement: str | None = None) -> dict:
+    entry: dict = {
+        "ref": path,
+        "path": path,
+        "title": title,
+        "kind": "page",
+        "why": "edited",
+        "as_of": "2026-09-20",
+    }
+    if statement is not None:
+        entry["statement"] = statement
+    return entry
+
+
+def _recent_packet(entries: list[dict]) -> dict:
+    packet = _packet()
+    packet["recent_context"] = entries
+    return packet
+
+
+def test_a_withheld_recent_page_leaves_the_block_and_the_others_serve(vault: Path) -> None:
+    """The block is the first thing a fresh session reads, so it is also the
+    first place a withheld page would surface as an existence oracle."""
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    packet = _recent_packet(
+        [
+            _recent_entry(RESTRICTED_PATH, title="Hidden recent page"),
+            _recent_entry(OPEN_PATH, title="Open recent page"),
+        ]
+    )
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _release())
+
+    assert guarded is not None
+    assert [entry["path"] for entry in guarded["recent_context"]] == [OPEN_PATH]
+    assert RESTRICTED_PATH not in str(guarded)
+    assert {"role": "recent_context", "reason": "withheld"} in guarded["missing"]
+
+
+def test_a_recent_statement_naming_a_withheld_page_drops_its_entry(vault: Path) -> None:
+    packet = _recent_packet(
+        [
+            _recent_entry(
+                OPEN_PATH,
+                title="Open recent page",
+                statement="status: superseded by [[kill-switch-for-risky-releases]]",
+            )
+        ]
+    )
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _release())
+
+    assert guarded is not None
+    assert guarded["recent_context"] == []
+
+
+def test_an_unresolvable_recent_path_is_withheld_without_a_filesystem_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    write_scope(vault)
+    write_rule(vault, ceiling=0, audience="external")
+    packet = _recent_packet([_recent_entry("../../etc/passwd.md", title="Escape")])
+    packet["anchors"] = []
+    packet["units"] = []
+    packet["pointers"] = []
+    packet["current_state"] = []
+    packet["ambiguity"] = []
+
+    decided_paths: list[str] = []
+    real_decide_path = egress._decide_path
+
+    def _recording_decide_path(vault_root, rel_path, **kwargs):
+        decided_paths.append(rel_path)
+        return real_decide_path(vault_root, rel_path, **kwargs)
+
+    monkeypatch.setattr(egress, "_decide_path", _recording_decide_path)
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _empty_release())
+
+    assert guarded is not None
+    assert guarded["recent_context"] == []
+    assert decided_paths == []
