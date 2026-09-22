@@ -5978,12 +5978,15 @@ def op_activate_context(
             deterministic, not a wildcard. Never affects ranking, and never
             enters the packet cache key.
         continuity: The opaque `continuity` token a previous packet of this
-            conversation returned. It only strengthens anchors this turn already
-            reaches on its own evidence: it never reaches one by itself, never
-            turns an `unresolved` turn into a resolved one, and is ignored and
-            reported as `generation.continuity = "stale"` when it was minted
-            against another vault's index or another role registry. Drop it on a
-            new session or after a compaction.
+            conversation returned. On a turn that names nothing ("continue",
+            "where were we") its anchors are the first thing the turn is taken
+            to refer to, and may resolve on that alone. On any other turn it
+            only strengthens anchors the turn already reaches on its own
+            evidence: it never reaches one by itself there, and never turns an
+            `unresolved` turn into a resolved one. It is ignored and reported as
+            `generation.continuity = "stale"` when it was minted against another
+            vault's index or another role registry. Drop it on a new session or
+            after a compaction.
         anchor: One canonical ref from a previous `ambiguity` block, naming the
             sense you mean. That anchor is then treated as resolved on your
             choice alone, its role lanes run and the competing senses are

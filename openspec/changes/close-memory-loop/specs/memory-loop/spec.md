@@ -388,9 +388,10 @@ anchor at all, activation MAY instead CARRY a packet from a single compiled
 knowledge-base page, and this SHALL be the only case in which retrieval alone
 produces served material.
 
-The carry SHALL run only when anchor resolution returned no resolved anchor and
-the request named no explicit anchor choice; an ambiguous turn and a turn that
-resolved any anchor SHALL be untouched. A hit SHALL be a candidate only where at least two
+The carry SHALL run only when anchor resolution returned no resolved anchor, or
+only anchors the recency prior alone resolved for a referential turn, and the
+request named no explicit anchor choice; an ambiguous turn and a turn that
+resolved any anchor on its own evidence SHALL be untouched. A hit SHALL be a candidate only where at least two
 of the turn's stems that it matches are DISTINCTIVE in the indexed corpus,
 measured as a document frequency at or below `max(3, ceil(0.5% of the indexed
 pages in scope))` over the same catalogue the ranking uses. A hit SHALL additionally satisfy a proximity
@@ -519,10 +520,14 @@ The hot profile SHALL be a bounded, deterministic projection over the anchor row
 the request already holds — a previous packet's continuity references, the
 freshness registry's own last-edit times, and the maintained usage activation
 snapshot — ranked in a single declared order, ties broken by a stable identity.
-It SHALL NOT enumerate directories, read pages or raise any declared request-path
-ceiling. A retired anchor SHALL NOT be in it. Recency evidence SHALL be earned by
-the anchors at the TOP of that ranking only, and the number of anchors that may
-tie at the top SHALL be bounded.
+A previous packet's continuity references SHALL rank first and SHALL form one
+tier taken whole: that packet already resolved them together. The profile SHALL
+be computed only for a referential turn. It SHALL NOT enumerate directories or
+raise any declared request-path ceiling, and SHALL read no page except, from the
+request's own page cache, the bounded few at its top, to exclude one that another
+page supersedes. A retired anchor SHALL NOT be in it. Recency evidence SHALL be
+earned by the anchors at the TOP of that ranking only, and the number of anchors
+that may tie at the top SHALL be bounded.
 
 Recency SHALL resolve an anchor only where the turn is referential AND no
 candidate anywhere in the same resolution carries a worded contact kind. Where
@@ -531,6 +536,13 @@ nothing. Where two or more anchors tie at the top of the profile and would each
 resolve, the turn SHALL report them as ambiguity for the agent to choose between
 and SHALL NOT select one by recency. Where the profile is empty the turn SHALL
 abstain exactly as before, still carrying its recent-context block.
+
+A referent the prior alone supplied SHALL yield to the turn's own words. Where
+every anchor a turn resolved stands on recency alone and the turn nonetheless
+names a compiled page that is not an anchor, the retrieval carry SHALL decide
+the packet as it would for a turn that resolved nothing: one named page is
+carried, and two or more abstain `unresolved` listing them. The prior supplies
+the referent of a turn that names nothing, never of one that names a page.
 
 #### Scenario: A referential turn resolves to the hottest recent anchor
 
@@ -555,6 +567,21 @@ abstain exactly as before, still carrying its recent-context block.
 - **THEN** the named anchor resolves and carries the packet
 - **AND** the hot anchor neither resolves nor completes any other candidate's
   evidence, on this or on any turn that is not referential
+
+#### Scenario: A short turn naming a compiled page is served that page, not the hottest anchor
+
+- **WHEN** a referential turn names no anchor but names one compiled page by its
+  own distinctive words, and another anchor is hottest in the profile
+- **THEN** the named page is carried and the hot anchor is not served
+- **AND** where the turn names two such pages it abstains `unresolved` listing
+  them, rather than falling back to the hot anchor
+
+#### Scenario: A previous packet's answer is resumed whole
+
+- **WHEN** a referential turn that names nothing passes the continuity token of a
+  packet that resolved two anchors together
+- **THEN** both anchors resolve on recency and continuity, whichever was edited
+  last
 
 ### Requirement: Interactive activation does bounded work under a deadline on every door
 

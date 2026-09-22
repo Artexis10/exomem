@@ -61,8 +61,9 @@ for the same turn scored 13.16 at one corpus size and 6.81 at another, and a two
 stub sharing three ordinary words with a long turn outscored the page the turn was
 actually about. Rarity is corpus-relative, so it does not drift as the vault grows; that page's units are served under one anchor entry of
 kind `page` at status `retrieval_carried`, marked `generation.carried_by = "retrieval"`,
-and no continuity token is minted from it. It never runs when any anchor resolved, when the
-turn is ambiguous, or when the agent named a sense; a near tie takes the abstention the
+and no continuity token is minted from it. It never runs when any anchor resolved on the
+turn's own evidence, when the turn is ambiguous, or when the agent named a sense; a
+referent the recency prior alone supplied yields to it (close-memory-loop design §8); a near tie takes the abstention the
 turn already had. The rejected alternative stands as written — a score is still no way to
 RESOLVE an anchor, and this is not one: it decides whether a turn that resolved nothing is
 served a named page's own material or nothing at all, which is a choice between serving and
