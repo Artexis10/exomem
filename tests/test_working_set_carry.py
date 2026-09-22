@@ -1040,7 +1040,7 @@ def test_an_exhausted_budget_carries_nothing(carry_vault: Path) -> None:
     budget = request_budget.RequestBudget(seconds=0.0)
     token = request_budget.set_current(budget)
     try:
-        assert working_set._carry_by_retrieval(carry_vault, turn=CARRY_TURN) is None
+        assert working_set._carry_by_retrieval(carry_vault, turn=CARRY_TURN) == ()
     finally:
         request_budget.reset_current(token)
 
@@ -1090,7 +1090,7 @@ def test_the_carry_refuses_a_stage_the_door_budget_cannot_finish(
     finally:
         request_budget.reset_current(token)
 
-    assert carried is None
+    assert carried == ()
     assert "working_set.carry" in budget.as_response_block()["skipped"]
 
 
@@ -1109,7 +1109,7 @@ def test_the_carry_runs_when_the_first_pass_was_cheap(
     finally:
         request_budget.reset_current(token)
 
-    assert carried is not None and carried[0] == CARRY_PAGE
+    assert [path for path, _score in carried] == [CARRY_PAGE]
 
 
 def test_the_reserve_covers_the_dearest_carry_measured(
@@ -1137,7 +1137,7 @@ def test_the_reserve_covers_the_dearest_carry_measured(
     finally:
         request_budget.reset_current(token)
 
-    assert carried is None
+    assert carried == ()
     assert "working_set.carry" in budget.as_response_block()["skipped"]
 
 
@@ -1190,7 +1190,7 @@ def test_a_carried_page_that_is_an_anchor_row_reports_the_indexed_title(
     """
     hub = "Knowledge Base/Notes/Insights/northern-corridor-hub.md"
     monkeypatch.setattr(
-        working_set, "_carry_by_retrieval", lambda *args, **kwargs: (hub, 12.0)
+        working_set, "_carry_by_retrieval", lambda *args, **kwargs: ((hub, 12.0),)
     )
     monkeypatch.setattr(
         working_set, "run_lanes", lambda *args, **kwargs: ((_page_item(hub),), ())
@@ -1349,3 +1349,54 @@ def test_filtering_happens_after_a_wider_fetch(
     # pages, so nothing is carried.
     assert [path for path, _score in hits] == [GENUINE_PAGE, DOUBLE_STEM_PAGE], hits
     assert working_set.dominant_carry(hits) is None
+
+
+def test_a_turn_that_names_two_pages_lists_them_for_the_client(vault: Path) -> None:
+    """An abstention that says nothing leaves the client with an empty
+    packet and no way to know that a question would help.
+
+    The turn named two pages; neither is carried, because choosing is the
+    guess the compiler exists not to make. But the client can choose, and
+    the only thing it needs is their names.
+    """
+    _seed_named_pages_corpus(vault)
+
+    turn = (
+        "I am trying to remember whether the kelvane throughput ceiling change "
+        "and the murran dispatch lane split were decided in the same month"
+    )
+    packet = working_set.compile_packet(vault, turn=turn, max_chars=4000)
+
+    assert packet["abstained"] is True
+    assert packet["abstention"] == {"reason": "unresolved"}
+    assert packet["units"] == []
+    listed = packet["anchors"]
+    assert {item["path"] for item in listed} == {
+        "Knowledge Base/Notes/Research/kelvane-throughput.md",
+        "Knowledge Base/Notes/Research/murran-dispatch.md",
+    }, listed
+    assert {item["status"] for item in listed} == {"retrieval_named"}
+    assert {item["kind"] for item in listed} == {"page"}
+    assert all(item["evidence"] == ["retrieval"] for item in listed)
+    # Not `ambiguity`, which means two anchors RESOLVED.
+    assert packet["ambiguity"] == []
+    # And the titles are the pages' own, not their filenames.
+    assert "Kelvane throughput" in {item["title"] for item in listed}
+
+
+def test_the_hook_renders_the_named_pages_as_its_menu(vault: Path) -> None:
+    """The client-facing half: the shipped hook injects the list."""
+    from exomem._hooks import exomem_retrieve_nudge as nudge
+
+    _seed_named_pages_corpus(vault)
+    turn = (
+        "I am trying to remember whether the kelvane throughput ceiling change "
+        "and the murran dispatch lane split were decided in the same month"
+    )
+    packet = working_set.compile_packet(vault, turn=turn, max_chars=4000)
+
+    block = nudge._format_working_set_block(packet, nudge._WORKING_SET_MAX_CHARS)
+
+    assert "kelvane-throughput.md" in block, block
+    assert "murran-dispatch.md" in block, block
+    assert nudge._block_keeps_the_reminder(packet) is True

@@ -3190,3 +3190,80 @@ def test_a_carried_page_the_audience_may_see_is_served(vault: Path) -> None:
     assert [item["path"] for item in packet["anchors"]] == [CARRY_DOMINANT]
     assert packet["anchors"][0]["status"] == "retrieval_carried"
     assert packet["units"], packet
+
+
+def test_a_withheld_named_page_is_removed_from_the_list(vault: Path) -> None:
+    """The pages listed for a turn that named several cross the guard like
+    any anchor: one the audience may not see is removed, and the rest stay.
+
+    Listing a page is telling the caller it exists and what it is called,
+    which is exactly what a release ceiling is for.
+    """
+    from test_working_set_carry import _write, seed_ordinary_notes
+    from test_working_set_index import _seed_planning, _seed_structure
+
+    from exomem import commands, lexstore, working_set
+
+    _seed_structure(vault)
+    _seed_planning(vault)
+    kb = vault / "Knowledge Base"
+    _write(
+        kb / "Notes" / "Patterns" / "girvan-slot-pattern.md",
+        """---
+type: pattern
+status: active
+updated: 2026-09-12
+---
+
+# Girvan slot pattern
+
+## Summary
+
+- [decision] The girvan slot window is nine minutes. ^g-1
+""",
+    )
+    _write(
+        kb / "Notes" / "Research" / "girvan-slot-research.md",
+        """---
+type: research-note
+status: active
+updated: 2026-09-11
+---
+
+# Girvan slot research
+
+## Summary
+
+- [finding] The girvan slot window was measured over four weeks. ^g-2
+""",
+    )
+    seed_ordinary_notes(vault)
+    lexstore.ensure_fresh(vault)
+    _indexed(vault)
+
+    turn = "what did we decide about the girvan slot window"
+    named = working_set._carry_by_retrieval(vault, turn=turn)
+    assert len(named) == 2, named
+
+    # Ungoverned: both listed.
+    open_packet = commands.op_activate_context(vault, turn=turn)
+    assert open_packet["abstained"] is True
+    assert {item["path"] for item in open_packet["anchors"]} == {
+        "Knowledge Base/Notes/Patterns/girvan-slot-pattern.md",
+        "Knowledge Base/Notes/Research/girvan-slot-research.md",
+    }
+
+    # One withheld: only the other is listed, and the withheld one is named
+    # nowhere in what is served.
+    write_scope(vault, paths="Notes/Patterns/**", name="Patterns")
+    write_rule(vault, ceiling=0)
+
+    with request_scope(_external()):
+        guarded = commands.op_activate_context(vault, turn=turn)
+
+    assert guarded["abstained"] is True
+    assert guarded["abstention"] == {"reason": "unresolved"}
+    assert [item["path"] for item in guarded["anchors"]] == [
+        "Knowledge Base/Notes/Research/girvan-slot-research.md"
+    ], guarded["anchors"]
+    assert "girvan-slot-pattern" not in str(guarded)

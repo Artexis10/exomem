@@ -1076,6 +1076,16 @@ def _format_ambiguity_block(packet: dict, max_chars: int) -> str:
     return f"{block}\n{_WORKING_SET_AMBIGUITY_LINE}" if block else ""
 
 
+#: The status a page carries when the turn's own words NAMED it but another
+#: page was named too, so nothing was carried. Rendered in the same menu as
+#: a worded candidate, by its own branch rather than by adding `retrieval`
+#: to `_WORDED_CONTACT_KINDS`: the reason it belongs here is that the server
+#: already applied the naming test, not that retrieval is suddenly a worded
+#: kind, and widening that set would also admit every `partial` candidate a
+#: ranking engine happened to surface.
+_RETRIEVAL_NAMED_STATUS = "retrieval_named"
+
+
 def _worded_candidates(packet: dict) -> list[dict]:
     """The packet's candidates that the turn's own WORDS reached, in its order.
 
@@ -1084,16 +1094,23 @@ def _worded_candidates(packet: dict) -> list[dict]:
     "partial"` and an `evidence` list that survives the egress guard. The filter
     is on evidence alone, not on the status — the status is the resolver's
     business and a later resolver change must not silently empty this block.
+
+    One status is admitted directly: `retrieval_named`, a page the server
+    already decided the turn NAMED (a distinctive phrase, in a corpus large
+    enough to measure that) but did not carry because another page was
+    named too. Those are the candidates the client most needs to see, since
+    naming one of them is all it takes to get a packet.
     """
     out: list[dict] = []
     for anchor in packet.get("anchors") or ():
         if not isinstance(anchor, dict):
             continue
-        evidence = anchor.get("evidence")
-        if not isinstance(evidence, (list, tuple)):
-            continue
-        if not _WORDED_CONTACT_KINDS.intersection(str(kind) for kind in evidence):
-            continue
+        if str(anchor.get("status") or "") != _RETRIEVAL_NAMED_STATUS:
+            evidence = anchor.get("evidence")
+            if not isinstance(evidence, (list, tuple)):
+                continue
+            if not _WORDED_CONTACT_KINDS.intersection(str(kind) for kind in evidence):
+                continue
         out.append(anchor)
         if len(out) >= _MAX_UNRESOLVED_CANDIDATES:
             break

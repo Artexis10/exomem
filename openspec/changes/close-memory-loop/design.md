@@ -262,7 +262,18 @@ phrase rather than between two of them. One raw token may carry several
 stems ("girvan-slot", "o'brien"), and all of them sit at that token's
 position — a compound is a phrase said as tightly as a phrase can be. What survives the gate IS the set of pages the turn named,
 so the decision is a COUNT and not a comparison: exactly one named page is
-a packet, two or more abstain. A score gap between two named pages says
+a packet, two or more abstain. An abstention that said nothing left the
+client with an empty packet and no way to know a question would help, so
+the named pages are listed in `anchors[]` at a status of their own,
+`retrieval_named`, with `kind: "page"` and `retrieval` as their only
+evidence. That is neither `retrieval_carried`, which says a page carries
+the packet, nor `ambiguity`, which says two anchors RESOLVED and the agent
+must choose a sense: nothing resolved and nothing was carried, and these
+are simply the pages the turn's own words reached. They cross the egress
+guard as ordinary anchors, so one the audience may not see is removed from
+the list. The shipped hook renders them in the menu it already shows for an
+`unresolved` turn, by an explicit branch on that status rather than by
+treating `retrieval` as a worded evidence kind. A score gap between two named pages says
 nothing about which one was meant — measured, one turn naming two pages
 scored them 19.60 against 19.16, and another differing only in wording
 scored 31.07 against 17.40 — so serving the higher would be a guess

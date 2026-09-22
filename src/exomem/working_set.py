@@ -1044,9 +1044,13 @@ def _carry_by_retrieval(
     timings: Any = None,
     freshness_snapshot: Any = None,
     lexical_seconds: float = 0.0,
-) -> tuple[str, float] | None:
-    """One scored recall over the compiled knowledge base, then the naming
-    test. `None` means carry nothing — the turn abstains exactly as it did.
+) -> tuple[tuple[str, float], ...]:
+    """The pages this turn NAMED, scored, current, and not raw material.
+
+    Empty means the turn named nothing and abstains exactly as it did. One
+    is a packet. Two or more is a turn that named several things: the
+    caller abstains and lists them, so the client can ask for one by name
+    rather than being handed an empty packet.
 
     Cost falls only on turns that would otherwise have returned an empty
     packet, and it is still refused outright when the request budget has run
@@ -1066,7 +1070,7 @@ def _carry_by_retrieval(
     if budget_exhausted(
         "working_set.carry", reserve=RETRIEVAL_CARRY_BUDGET_MULTIPLE * max(0.0, lexical_seconds)
     ):
-        return None
+        return ()
     freshness = None
     recall_checkpoint = None
     if freshness_snapshot is not None:
@@ -1075,7 +1079,7 @@ def _carry_by_retrieval(
             recall_checkpoint = freshness_snapshot.recall_checkpoint("kb")
         except Exception:  # noqa: BLE001 - an unreadable snapshot carries nothing
             log.debug("activation carry freshness unavailable", exc_info=True)
-            return None
+            return ()
     with _span(timings, "working_set.carry"):
         from . import working_set_runtime
 
@@ -1086,8 +1090,62 @@ def _carry_by_retrieval(
             recall_checkpoint=recall_checkpoint,
         )
     if state != "available":
-        return None
-    return dominant_carry(hits)
+        return ()
+    return hits[: working_set_resolve.MAX_ANCHORS]
+
+
+def _page_title(vault_root: Path, rel_path: str) -> str:
+    """A page's own authored title, or `""`.
+
+    Reads `find_corpus.CACHE`, which the lifecycle check has already warmed
+    for exactly these paths, so this is a cache hit rather than a second
+    read. A page that is not an anchor has no title in the catalogue, and a
+    menu of filenames is a worse menu than a menu of titles.
+    """
+    text = str(rel_path or "")
+    if not text.endswith(".md"):
+        return ""
+    try:
+        from . import find_corpus
+
+        root = Path(vault_root)
+        page = find_corpus.CACHE.get(root / text, root)
+    except Exception:  # noqa: BLE001 - a title is a courtesy, never a promise
+        log.debug("activation named-page title read failed for %s", text, exc_info=True)
+        return ""
+    if page is None:
+        return ""
+    frontmatter = page.frontmatter if isinstance(page.frontmatter, Mapping) else {}
+    return str(frontmatter.get("title") or getattr(page, "title", "") or "").strip()
+
+
+def _named_anchors(
+    vault_root: Path,
+    named: Sequence[tuple[str, float]],
+    *,
+    index: working_set_index.WorkingSetIndex | None = None,
+) -> tuple[dict[str, Any], ...]:
+    """The pages a turn named, as anchor entries, for an abstention that has
+    nothing to carry.
+
+    Same shape a carried page gets — `kind: "page"`, `retrieval` and nothing
+    else as evidence — at `retrieval_named`, which says the turn's words
+    reached this page and no packet was built from it. Each one crosses the
+    egress guard as an ordinary anchor, so a page this audience may not see
+    is removed from the list like any other.
+    """
+    return tuple(
+        {
+            "ref": path,
+            "path": path,
+            "title": _page_title(vault_root, path) or _indexed_title(index, path) or path,
+            "kind": "page",
+            "lifecycle": "active",
+            "status": working_set_resolve.RETRIEVAL_NAMED_STATUS,
+            "evidence": ["retrieval"],
+        }
+        for path, _score in named
+    )
 
 
 def _indexed_title(index: working_set_index.WorkingSetIndex | None, path: str) -> str:
@@ -1363,13 +1421,27 @@ def compile_packet(
     # decision taken after resolution has already abstained — it adds no
     # evidence kind, changes no status rule, and can never resolve an anchor.
     if resolution.status == "unresolved" and not anchor:
-        carried = _carry_by_retrieval(
+        named = _carry_by_retrieval(
             root,
             turn=turn,
             timings=timings,
             freshness_snapshot=freshness_snapshot,
             lexical_seconds=lexical_seconds,
         )
+        carried = dominant_carry(named)
+        if carried is None and named:
+            # The turn named several pages. Nothing is carried, but an
+            # abstention that says nothing at all leaves the client with an
+            # empty packet and no way to know a question would help. The
+            # named pages are listed at `retrieval_named` so it can ask for
+            # one; the reason stays `unresolved`, because nothing resolved.
+            return abstained_packet(
+                reason=resolution.status,
+                max_chars=limit,
+                generation=generation,
+                anchors=_named_anchors(root, named, index=index),
+                ambiguity=resolution.ambiguity,
+            )
         if carried is not None:
             # `None` back means the lanes read nothing off that page, so it
             # falls through to the ordinary `unresolved` abstention below —

@@ -5944,6 +5944,12 @@ def op_activate_context(
     the packet carries no continuity token, and a turn with nothing distinctive
     in it abstains `unresolved` rather than guessing between pages.
 
+    When a turn names SEVERAL pages this way, nothing is carried and the packet
+    abstains `unresolved`, listing them under `anchors[]` at `status:
+    "retrieval_named"`. That is not `ambiguity`, which reports two anchors that
+    both resolved: nothing resolved here. Name one of those refs back in `anchor`,
+    or read it directly, to get its material.
+
     Use `ask_memory` instead when you already know what you are looking for; use
     this when you do not, and follow it with `read_memory` on whatever ref the
     packet points at.

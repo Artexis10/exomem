@@ -411,7 +411,10 @@ Superseded and archived pages SHALL NOT be candidates, and lifecycle SHALL be
 decided before candidates are counted. Candidates SHALL be excluded before they are counted, not after the ranked
 result is limited. A page SHALL be carried only when it is the ONLY surviving
 candidate; where two or more survive, the turn SHALL abstain `unresolved`,
-SHALL NOT select between them by ranking score. A candidate
+SHALL NOT select between them by ranking score, and SHALL report them under
+`anchors[]` at a distinct status meaning "named, not carried" — never the
+carried status and never as resolution ambiguity. Those entries SHALL cross
+the release plane as anchors do. A candidate
 the ranking scored at or below a declared sanity bound SHALL NOT be carried.
 
 A carried packet SHALL report that page as its one anchor entry, of kind `page`,
@@ -462,6 +465,8 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
 - **THEN** the packet abstains `unresolved` with no units, exactly as it did
   before the carry existed
 - **AND** the higher-scoring page is not served in preference to the other
+- **AND** both pages are listed as named-but-not-carried so the caller can ask
+  for one, with any the current audience may not see removed from that list
 
 #### Scenario: A superseded page does not block the page that replaced it
 

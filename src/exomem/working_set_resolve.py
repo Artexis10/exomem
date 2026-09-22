@@ -85,11 +85,21 @@ DECIDING_ALONE_KINDS: frozenset[str] = frozenset({"exact_alias", "agent_choice"}
 #: needing to know this feature exists.
 RETRIEVAL_CARRIED_STATUS = "retrieval_carried"
 
+#: The status of a page a turn NAMED but that carries nothing, because the
+#: turn named another one too. Deliberately not `retrieval_carried`, which
+#: says "this page carries the packet", and deliberately not reported as
+#: `ambiguous`, which says two anchors RESOLVED and the agent must choose
+#: between senses. This is neither: nothing resolved, nothing was carried,
+#: and here are the pages the turn's own words reached, so the client can
+#: ask for one by name instead of being handed an empty packet.
+RETRIEVAL_NAMED_STATUS = "retrieval_named"
+
 ANCHOR_STATUSES: tuple[str, ...] = (
     "resolved",
     "partial",
     "unresolved",
     RETRIEVAL_CARRIED_STATUS,
+    RETRIEVAL_NAMED_STATUS,
 )
 TURN_STATUSES: tuple[str, ...] = ("resolved", "ambiguous", "unresolved")
 
