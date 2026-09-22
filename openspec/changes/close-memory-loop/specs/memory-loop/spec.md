@@ -387,8 +387,9 @@ resolved any anchor SHALL be untouched. It SHALL run one scored query against th
 maintained full-page catalogue over the knowledge-base scope, without the anchor
 path restriction, requiring the same two distinct matched content stems, applying
 the same no-foreground-delta and no-corpus-scan rules, and reporting rather than
-repairing an incomplete catalogue. Pages under the vault's raw-material `Sources`
-tree SHALL NOT be candidates. The query SHALL run within the request deadline
+repairing an incomplete catalogue. Pages in the knowledge base's raw-material
+folders — captured sources and preserved evidence, the same folders the anchor
+catalogue already refuses to build an anchor from — SHALL NOT be candidates. The query SHALL run within the request deadline
 under its own timing span and SHALL be skipped when that deadline can no longer
 afford a stage.
 
@@ -421,12 +422,12 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
 - **THEN** the packet abstains `unresolved` with no units, exactly as it did
   before the carry existed
 
-#### Scenario: A named anchor and a raw source are both refused as carriers
+#### Scenario: A named anchor and raw material are both refused as carriers
 
 - **WHEN** a turn both names an anchor and matches a compiled page, or its
-  strongest match is a page under the raw-material `Sources` tree
+  strongest match is a page in a raw-material folder
 - **THEN** the named anchor's own packet is served and is not marked as carried,
-  and the raw source is never a candidate for carrying
+  and the raw-material page is never a candidate for carrying
 
 #### Scenario: A carried page the audience may not see abstains
 

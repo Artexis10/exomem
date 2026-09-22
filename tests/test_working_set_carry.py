@@ -8,7 +8,7 @@ nothing is named and recall has ONE clearly dominant compiled page, that
 page's units are served, marked as carried.
 
 Everything about it refuses rather than ranks. A near tie carries nothing, a
-`Sources/` page is not a candidate at all, an unproven catalogue carries
+raw-material page is not a candidate at all, an unproven catalogue carries
 nothing, an exhausted budget carries nothing, and a named anchor always wins
 — resolution that resolved anything never reaches the carry at all.
 """
@@ -37,8 +37,9 @@ CARRY_TURN = "what did we decide about the quillon batching window"
 TIE_TURN = "where did the tarn rollover cadence end up"
 #: The dominant page `CARRY_TURN` reaches.
 CARRY_PAGE = "Knowledge Base/Notes/Research/quillon-batching-window.md"
-#: A `Sources/` page that outranks it and must never be a candidate.
+#: Raw-material pages that outrank it and must never be candidates.
 CARRY_SOURCE = "Knowledge Base/Sources/quillon-batching-window-transcript.md"
+CARRY_EVIDENCE = "Knowledge Base/Evidence/quillon-batching-window-receipt.md"
 
 
 def _write(path: Path, text: str) -> None:
@@ -47,8 +48,8 @@ def _write(path: Path, text: str) -> None:
 
 
 def _seed_carry_pages(vault: Path) -> None:
-    """One dominant research note, a `Sources/` page that outranks it, and two
-    near-twins that must tie rather than carry. None of them is an anchor."""
+    """One dominant research note, two raw-material pages that outrank it, and
+    two near-twins that must tie rather than carry. None is an anchor."""
     kb = vault / "Knowledge Base"
     _write(
         kb / "Notes" / "Research" / "quillon-batching-window.md",
@@ -84,6 +85,20 @@ updated: 2026-09-09
 
 Raw transcript. Quillon batching window, quillon batching window, quillon
 batching decided, quillon window batching, batching window quillon batching.
+""",
+    )
+    _write(
+        kb / "Evidence" / "quillon-batching-window-receipt.md",
+        """---
+type: evidence
+status: active
+updated: 2026-09-09
+---
+
+# Quillon batching window receipt
+
+Preserved record. Quillon batching window, quillon batching window, quillon
+window decided, quillon batching window, batching quillon window batching.
 """,
     )
     _write(
@@ -165,6 +180,7 @@ def test_the_carried_page_is_not_in_the_anchor_catalogue(carry_vault: Path) -> N
 
     assert CARRY_PAGE not in paths
     assert CARRY_SOURCE not in paths
+    assert CARRY_EVIDENCE not in paths
 
 
 # --------------------------------------------------------------------------- #
@@ -180,8 +196,8 @@ def test_the_scale_the_carry_thresholds_were_derived_from(carry_vault: Path) -> 
     message. Measured on this vault:
 
     * a turn repeating one page's own distinctive words scores ~14.5, and the
-      only other page that matched at all was the `Sources/` transcript,
-      which is not a candidate — a carry;
+      only other pages that matched at all were raw material, which is
+      never a candidate — a carry;
     * a turn matching several pages on nothing but the generic words
       "decision" and "summary" scores ~5.6-5.7 across all of them — noise,
       refused by the floor;
@@ -251,11 +267,11 @@ def test_a_hit_clear_of_the_separation_band_is_dominant() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_a_hit_under_sources_is_never_a_candidate(carry_vault: Path) -> None:
+def test_raw_material_is_never_a_candidate(carry_vault: Path) -> None:
     """Raw material is what a conclusion was drawn FROM, never durable memory.
 
-    The transcript outranks the compiled note on this very turn, so this is
-    not a rule with nothing to bite on: excluding it is what leaves the
+    Both raw pages outrank the compiled note on this very turn, so this is
+    not a rule with nothing to bite on: excluding them is what leaves the
     compiled page alone at the top.
     """
     raw = lexstore.search_bm25_result(
@@ -267,18 +283,27 @@ def test_a_hit_under_sources_is_never_a_candidate(carry_vault: Path) -> None:
         min_matched_terms=working_set_runtime.RETRIEVAL_CARRY_MIN_TERMS,
     )
     ranked = [path for path, _score in raw.value or ()]
-    assert ranked[:1] == [CARRY_SOURCE], ranked
+    assert set(ranked[:2]) == {CARRY_SOURCE, CARRY_EVIDENCE}, ranked
 
     hits, state = working_set_runtime.carry_candidates(carry_vault, CARRY_TURN)
     assert state == "available"
     assert [path for path, _score in hits] == [CARRY_PAGE]
 
 
-def test_a_page_merely_named_sources_is_still_a_candidate() -> None:
-    """The exclusion is a directory, not a word in a filename."""
-    assert working_set_runtime._under_sources("Knowledge Base/Sources/a.md") is True
-    assert working_set_runtime._under_sources("Knowledge Base\\Sources\\a.md") is True
-    assert working_set_runtime._under_sources("Knowledge Base/Notes/Sources of error.md") is False
+def test_the_raw_material_rule_is_the_index_rule() -> None:
+    """One spelling of "raw material", shared with the module that already
+    refuses to make an anchor of anything inside those folders — a top-level
+    knowledge-base folder, not any segment called `Sources`."""
+    assert working_set_runtime.CARRY_EXCLUDED_FOLDERS == (
+        working_set_index._RAW_MATERIAL_FOLDERS
+    )
+    assert working_set_runtime._is_raw_material("Knowledge Base/Sources/a.md") is True
+    assert working_set_runtime._is_raw_material("Knowledge Base/Evidence/receipt.md") is True
+    assert working_set_runtime._is_raw_material("Knowledge Base\\Sources\\a.md") is True
+    assert (
+        working_set_runtime._is_raw_material("Knowledge Base/Notes/Sources of error.md") is False
+    )
+    assert working_set_runtime._is_raw_material("Knowledge Base/Notes/Sources/a.md") is False
 
 
 # --------------------------------------------------------------------------- #

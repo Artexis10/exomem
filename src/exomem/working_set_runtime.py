@@ -513,29 +513,39 @@ def lexical_evidence(
 
 #: How many scored hits the carry recall asks for. Small on purpose: the
 #: dominance test only ever reads the top two, and the rest exist so a run of
-#: `Sources/` pages at the head cannot hide every compiled page behind them.
+#: raw-material pages at the head cannot hide every compiled page behind them.
 RETRIEVAL_CARRY_LIMIT = 5
 #: The same corroboration floor `lexical_evidence` uses: two distinct content
 #: stems from the turn, counted before the ranked limit. One shared stem is a
 #: coincidence at corpus scale, and a carried packet is served on the strength
 #: of recall alone.
 RETRIEVAL_CARRY_MIN_TERMS = 2
-#: The vault directory holding raw captured material. A carried packet serves
-#: compiled conclusions; a source is what a conclusion was drawn FROM, and
-#: serving one as though it were durable memory is the disclosure the
-#: compile step exists to stand between.
-CARRY_EXCLUDED_DIRNAME = "Sources"
+#: Knowledge-base folders holding raw captured material rather than compiled
+#: conclusions. Read off `working_set_index` rather than restated here: that
+#: module already refuses to make an anchor of anything inside them, for the
+#: same reason this refuses to carry one, and two spellings of "raw material"
+#: would be one spelling too many.
+CARRY_EXCLUDED_FOLDERS: frozenset[str] = working_set_index._RAW_MATERIAL_FOLDERS
 
 
-def _under_sources(path: str) -> bool:
-    """Is `path` inside the vault's `Sources/` tree, at any depth?
+def _is_raw_material(path: str) -> bool:
+    """Is `path` a captured source or a preserved piece of evidence?
 
-    Compared segment-wise on both separators rather than by prefix, so a page
-    called `Sources of error.md` is not mistaken for one that lives under the
-    directory, and a Windows-authored row spelled with backslashes is still
-    recognised.
+    A carried packet serves compiled conclusions. A source is what a
+    conclusion was drawn FROM and evidence is what one is checked AGAINST;
+    serving either as though it were durable memory is exactly the step the
+    compile stage exists to stand between.
+
+    Matched the SAME way `working_set_index` matches it — the first segment
+    under the knowledge-base folder — so an ordinary note folder someone
+    happened to name `Sources` is not caught by it and the two modules cannot
+    disagree about what raw material is. Backslashes are folded first, so a
+    row written on Windows is recognised too.
     """
-    return CARRY_EXCLUDED_DIRNAME in str(path).replace("\\", "/").split("/")
+    from .kbdir import kb_prefix
+
+    inside = str(path).replace("\\", "/").removeprefix(kb_prefix())
+    return inside.split("/", 1)[0] in CARRY_EXCLUDED_FOLDERS
 
 
 def carry_candidates(
@@ -592,7 +602,7 @@ def carry_candidates(
             tuple(
                 (str(path), float(score))
                 for path, score in (result.value or ())
-                if not _under_sources(path)
+                if not _is_raw_material(path)
             ),
             "available",
         )

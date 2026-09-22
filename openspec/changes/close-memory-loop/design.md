@@ -217,7 +217,8 @@ restriction, and this amends decision 1 of `make-anchor-resolution-sound` with
 the only retrieval-alone case there is — one that sits outside the soundness rule
 rather than inside it, because it only ever reaches a turn that rule has already
 abstained on. When resolution reached NO anchor, a second scored recall runs over
-the compiled knowledge base with no anchor restriction and `Sources/` excluded,
+the compiled knowledge base with no anchor restriction and the knowledge
+base's raw-material folders (captured sources, preserved evidence) excluded,
 under its own `working_set.carry` timing span and the same request budget, and it
 is skipped outright when the lexical catalogue is anything but `available`. A
 single page that dominates it — clear of an absolute floor derived from the

@@ -38,7 +38,8 @@ retrieval alone still never resolves an ANCHOR, whatever it scores and however m
 retrieved kinds and qualifiers stack. The one retrieval-alone case sits outside this rule
 rather than inside it, and only reaches a turn this rule has already abstained on. When
 resolution reached no anchor at all, one scored recall runs over the compiled knowledge
-base (`Sources/` excluded — raw material is never served), and a single page that
+base (the raw-material folders excluded — a captured source or a preserved piece of
+evidence is never served as durable memory), and a single page that
 DOMINATES it — clear of an absolute floor and `RETRIEVAL_CARRY_SEPARATION` times clear of
 the runner-up — may CARRY a packet: that page's units are served under one anchor entry of
 kind `page` at status `retrieval_carried`, marked `generation.carried_by = "retrieval"`,
