@@ -95,6 +95,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -754,14 +755,44 @@ def _gather_hits_with_lane(prompt: str) -> tuple[list[dict], str]:
     return (hits if hits is not None else []), lane
 
 
-def _gather_packet_with_lane(prompt: str, continuity: str) -> tuple[dict | None, str]:
+def _gather_packet_with_lane(
+    prompt: str, continuity: str, attribution: dict | None = None
+) -> tuple[dict | None, str]:
     """Working-set mode's rungs on the same ladder, under the same budget."""
     return _gather_with_lane(
         lambda api_key, timeout: _fetch_packet_via_rest(
-            prompt, api_key, continuity, timeout
+            prompt, api_key, continuity, timeout, attribution
         ),
-        lambda timeout: _fetch_packet_via_cli(prompt, continuity, timeout),
+        lambda timeout: _fetch_packet_via_cli(prompt, continuity, timeout, attribution),
     )
+
+
+#: The label the server derives a session's episode key from, per hook client.
+_EPISODE_CLIENT_LABELS = {"claude": "claude-code", "codex": "codex"}
+_EPISODE_KEY_LABEL = "exomem-episode-key-v1"
+
+
+def episode_key(client: str, session_id: str) -> str:
+    """The session's episode key: a pure function of client and session id.
+
+    Mirror of `exomem.episode_capture.hook_key` and of the Stop hook's copy;
+    `tests/test_capture_nudge_episode.py` pins all three together.
+    """
+    material = f"{_EPISODE_KEY_LABEL}\0{client}\0{session_id}".encode("utf-8", "surrogatepass")
+    return "ep-" + hashlib.sha256(material).hexdigest()[:32]
+
+
+def attribution(session_id: str) -> dict:
+    """`{client, session}` for the activation log, or `{}` without a session.
+
+    Recorded host-locally by the server and never part of the packet: the
+    session travels as its episode key, the same one the Stop hook asks the
+    agent to record under, so one conversation is one key on both doors.
+    """
+    client = _EPISODE_CLIENT_LABELS.get(_hook_client(), _hook_client())
+    if not session_id:
+        return {"client": client}
+    return {"client": client, "session": episode_key(client, session_id)}
 
 
 # --- working-set mode: the compiler's packet, not a hit list ---------------------
@@ -784,70 +815,108 @@ def _fetch_packet_via_rest(
     api_key: str,
     continuity: str = "",
     timeout: float = REST_TIMEOUT_SECONDS,
+    attribution: dict | None = None,
 ) -> dict | None:
     """One POST to the local REST facade's `/api/activate_context`.
 
     The turn goes in verbatim: this is not a search query and rewriting it into
     one is exactly what the compiler exists to avoid. Returns the packet, or
     `None` on ANY failure — connection error, timeout, non-200, malformed JSON,
-    `success: false` — and never raises."""
+    `success: false` — and never raises.
+
+    `attribution` rides in the body for the server's activation log. A service
+    older than this hook refuses the unknown fields with a 400; the request is
+    then made once more without them, because a plugin can update before the
+    service it talks to and the packet must not degrade for that window.
+    """
     port = _rest_port()
     if port is None:
         return None
     body: dict = {"turn": prompt, "max_chars": _working_set_max_chars()}
     if continuity:
         body["continuity"] = continuity
-    req = urllib.request.Request(
-        f"http://{_rest_host()}:{port}/api/activate_context",
-        data=json.dumps(body).encode("utf-8"),
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            status = resp.getcode()
-            raw = resp.read()
-        if status != 200:
+    started = time.monotonic()
+    for extra in ((attribution or {}), {}) if attribution else ({},):
+        req = urllib.request.Request(
+            f"http://{_rest_host()}:{port}/api/activate_context",
+            data=json.dumps({**body, **extra}).encode("utf-8"),
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+        )
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 0:
             return None
-        payload = json.loads(raw.decode("utf-8"))
-    except Exception:  # noqa: BLE001 - hook must never break prompt submission
-        return None
-    return _parse_packet(payload)
+        try:
+            with urllib.request.urlopen(req, timeout=remaining) as resp:
+                status = resp.getcode()
+                raw = resp.read()
+            if status != 200:
+                return None
+            payload = json.loads(raw.decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            if extra and error.code == 400:
+                continue
+            return None
+        except Exception:  # noqa: BLE001 - hook must never break prompt submission
+            return None
+        return _parse_packet(payload)
+    return None
 
 
 def _fetch_packet_via_cli(
-    prompt: str, continuity: str = "", timeout: float = CLI_TIMEOUT_SECONDS
+    prompt: str,
+    continuity: str = "",
+    timeout: float = CLI_TIMEOUT_SECONDS,
+    attribution: dict | None = None,
 ) -> dict | None:
-    """The opt-in CLI rung, over the same leaf the REST route reaches."""
+    """The opt-in CLI rung, over the same leaf the REST route reaches.
+
+    Attribution goes as `--client`/`--session`; an older CLI that does not
+    know them exits non-zero, and the rung then runs once more without them.
+    """
     script = shutil.which("exomem") or shutil.which("kb")
     if not script:
         return None
-    argv = [script, "activate_context", "--max-chars", str(_working_set_max_chars())]
+    base = [script, "activate_context", "--max-chars", str(_working_set_max_chars())]
     if continuity:
-        argv += ["--continuity", continuity]
-    # `--` before the turn: the turn is a user's words and those words are argv.
-    # A prompt of `--purpose` otherwise exits the CLI with a usage error, the rung
-    # returns nothing, and the mode degrades to the plain reminder for exactly the
-    # prompts a user would least expect it to. Stub mode's rung is deliberately
-    # left as it is; its behaviour is out of this change's scope.
-    argv += ["--json", "--", prompt]
-    try:
-        proc = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=timeout,
-        )
-        if proc.returncode != 0:
+        base += ["--continuity", continuity]
+    started = time.monotonic()
+    extras = [[], []]
+    for name in ("client", "session"):
+        value = (attribution or {}).get(name)
+        if value:
+            extras[0] += [f"--{name}", str(value)]
+    for extra in extras if extras[0] else extras[1:]:
+        # `--` before the turn: the turn is a user's words and those words are
+        # argv. A prompt of `--purpose` otherwise exits the CLI with a usage
+        # error, the rung returns nothing, and the mode degrades to the plain
+        # reminder for exactly the prompts a user would least expect it to.
+        # Stub mode's rung is deliberately left as it is; its behaviour is out
+        # of this change's scope.
+        argv = [*base, *extra, "--json", "--", prompt]
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 0:
             return None
-        payload = json.loads(proc.stdout)
-    except Exception:  # noqa: BLE001 - hook must never break prompt submission
-        return None
-    return _parse_packet(payload)
+        try:
+            proc = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=remaining,
+            )
+            if proc.returncode != 0:
+                if extra:
+                    continue
+                return None
+            payload = json.loads(proc.stdout)
+        except Exception:  # noqa: BLE001 - hook must never break prompt submission
+            return None
+        return _parse_packet(payload)
+    return None
 
 
 def activation_token_path(home, client: str, session_id: str) -> Path:
@@ -1063,12 +1132,13 @@ def _recent_lines(packet: dict) -> list[str]:
     both, and never a sentence this hook wrote.
 
     Labelled `session` rather than `recent` for a `Sources/Sessions` capture
-    (`why == "captured"`, `working_set.RECENT_CONTEXT_REASONS`). That is raw
-    material, not a compiled page: `anchor` does not take it, and the header's
-    default follow-up would fail on it exactly as it would on a `Sources/` or
-    `Evidence/` ref. The label is the whole remedy — a captured line still
-    ends with its ref like any other, and the header already says which tool
-    a `session` line wants.
+    (`why == "captured"`) and for a conversation's recorded recap under
+    `Sources/Episodes` (`why == "episode"`, `working_set.RECENT_CONTEXT_REASONS`).
+    Both are raw material, not compiled pages: `anchor` does not take them, and
+    the header's default follow-up would fail on them exactly as it would on a
+    `Sources/` or `Evidence/` ref. The label is the whole remedy — such a line
+    still ends with its ref like any other, and the header already says which
+    tool a `session` line wants.
     """
     lines: list[str] = []
     for entry in packet.get("recent_context") or ():
@@ -1078,7 +1148,11 @@ def _recent_lines(packet: dict) -> list[str]:
         detail = str(entry.get("statement") or "").strip() or str(entry.get("why") or "").strip()
         label = f"{title} — {detail}" if title and detail else (title or detail)
         if label:
-            kind = "session" if str(entry.get("why") or "") == "captured" else "recent"
+            kind = (
+                "session"
+                if str(entry.get("why") or "") in {"captured", "episode"}
+                else "recent"
+            )
             lines.append(
                 _packet_line(kind, label, str(entry.get("ref") or entry.get("path") or ""))
             )
@@ -1480,7 +1554,7 @@ def main() -> int:
         # the reminder FOLLOWS, and `_block_keeps_the_reminder` is what knows.
         try:
             packet, lane = _gather_packet_with_lane(
-                prompt, _read_activation_token(session_id)
+                prompt, _read_activation_token(session_id), attribution(session_id)
             )
             packet = packet if isinstance(packet, dict) else {}
             hit_count = len(packet.get("anchors") or ())

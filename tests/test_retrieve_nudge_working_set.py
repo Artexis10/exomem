@@ -2049,3 +2049,59 @@ def test_the_referent_line_follows_what_actually_supplied_the_referent(
     block = hook._format_working_set_block(packet, 4000)
 
     assert ("- referent:" in block) is printed
+
+
+# --------------------------------------------------------------------------- #
+# Episode recaps: a raw-material line, so `read_memory` is the follow-up
+# --------------------------------------------------------------------------- #
+
+
+def test_an_episode_entry_renders_as_a_session_line_with_its_summary() -> None:
+    hook = _load_hook_module()
+    path = (
+        "Knowledge Base/Sources/Episodes/"
+        "2026-09-21-harbor-lamp-purchase-ep0123456789ab-20260921t101500000000-0a0b0c0d.md"
+    )
+    packet = {
+        "recent_context": [
+            {
+                "ref": path,
+                "path": path,
+                "title": "Harbor Lamp purchase",
+                "kind": "episode",
+                "why": "episode",
+                "as_of": "2026-09-21",
+                "statement": "summary: Chose the brass lamp.",
+                "episode": "ep-" + "0" * 31 + "1",
+            }
+        ],
+        "anchors": [],
+        "roles": [],
+        "units": [],
+        "pointers": [],
+        "current_state": [],
+        "ambiguity": [],
+        "missing": [],
+        "budget": {"limit_chars": 4000, "used_chars": 0},
+        "generation": {},
+        "abstained": True,
+        "abstention": {"reason": "unresolved"},
+    }
+
+    lines = hook._recent_lines(packet)
+
+    assert lines == [f"- session: Harbor Lamp purchase — summary: Chose the brass lamp. [{path}]"]
+    assert "read_memory" in hook._WORKING_SET_HEADER
+    assert "for a `session` line" in hook._WORKING_SET_HEADER
+
+
+def test_the_deployed_retrieve_hook_still_matches_the_packaged_one() -> None:
+    packaged = RETRIEVE_SCRIPT.read_bytes()
+    deployed = (
+        Path(__file__).resolve().parents[1]
+        / "plugins"
+        / "claude-code"
+        / "hooks"
+        / "exomem_retrieve_nudge.py"
+    ).read_bytes()
+    assert deployed == packaged
