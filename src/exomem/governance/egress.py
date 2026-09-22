@@ -2628,6 +2628,14 @@ def guard_working_set(
         if entry is not None
     ]
     _note_removal("recent_context", len(original_recent), len(guarded["recent_context"]))
+    # `used_chars` is the caller's account of what it was charged for, and the
+    # compiler budgeted these entries before this guard saw them. What was
+    # removed is subtracted — a subtraction, never a recount: every other
+    # block's characters are in that number too and are not this guard's to
+    # re-derive.
+    _charge_back_removed_recent(
+        guarded, original_recent, guarded["recent_context"]
+    )
 
     original_units = [
         item for item in guarded.get("units") or () if isinstance(item, Mapping)
@@ -2689,7 +2697,7 @@ def guard_working_set(
             guarded["budget"] = {
                 **dict(budget),
                 "used_chars": sum(
-                    len(str(entry.get("title") or "")) + len(str(entry.get("statement") or ""))
+                    _recent_entry_chars(entry)
                     for entry in guarded.get("recent_context") or ()
                     if isinstance(entry, Mapping)
                 ),
@@ -3318,6 +3326,32 @@ def _guarded_anchor(
         if isinstance(stripped, Mapping):
             out.update(stripped)
     return out
+
+
+def _recent_entry_chars(entry: Mapping[str, Any]) -> int:
+    """What one recent entry cost the packet's budget.
+
+    The same arithmetic `working_set._budgeted_recent` charged for it — title
+    plus statement — spelled once so the guard's refund cannot drift from the
+    compiler's charge.
+    """
+    return len(str(entry.get("title") or "")) + len(str(entry.get("statement") or ""))
+
+
+def _charge_back_removed_recent(
+    guarded: dict[str, Any],
+    before: Sequence[Mapping[str, Any]],
+    after: Sequence[Mapping[str, Any]],
+) -> None:
+    """Subtract the removed recent entries' characters from `used_chars`."""
+    removed = sum(map(_recent_entry_chars, before)) - sum(map(_recent_entry_chars, after))
+    if removed <= 0:
+        return
+    budget = guarded.get("budget")
+    if isinstance(budget, Mapping):
+        used = budget.get("used_chars")
+        if isinstance(used, int):
+            guarded["budget"] = {**dict(budget), "used_chars": max(0, used - removed)}
 
 
 def _guarded_recent(

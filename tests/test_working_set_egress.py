@@ -3139,3 +3139,45 @@ def test_an_unresolvable_recent_path_is_withheld_without_a_filesystem_call(
     assert guarded is not None
     assert guarded["recent_context"] == []
     assert decided_paths == []
+
+
+def test_used_chars_drops_with_the_entries_the_guard_removed(vault: Path) -> None:
+    """A budget line that still counts what was withheld is a false receipt.
+
+    `used_chars` is the caller's account of what it was charged for. The guard
+    removes entries AFTER the compiler budgeted them, so a packet that loses
+    half its block to a policy must not still report paying for it — the
+    caller's own ceiling arithmetic is built on this number.
+    """
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    hidden = _recent_entry(RESTRICTED_PATH, title="Hidden recent page", statement="state: hidden")
+    shown = _recent_entry(OPEN_PATH, title="Open recent page", statement="state: open")
+    packet = _recent_packet([hidden, shown])
+    packet["budget"] = {
+        "limit_chars": 4000,
+        "used_chars": sum(
+            len(entry["title"]) + len(entry["statement"]) for entry in (hidden, shown)
+        ),
+    }
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _release())
+
+    assert guarded is not None
+    assert [entry["path"] for entry in guarded["recent_context"]] == [OPEN_PATH]
+    assert guarded["budget"]["used_chars"] == len(shown["title"]) + len(shown["statement"])
+
+
+def test_used_chars_is_untouched_when_the_guard_removes_nothing(vault: Path) -> None:
+    """The adjustment is a subtraction for what was removed, never a recount:
+    every other block's characters are counted too and are not this guard's to
+    re-derive."""
+    packet = _recent_packet([_recent_entry(OPEN_PATH, title="Open", statement="state: open")])
+    packet["budget"] = {"limit_chars": 4000, "used_chars": 1234}
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _release())
+
+    assert guarded is not None
+    assert guarded["budget"]["used_chars"] == 1234
