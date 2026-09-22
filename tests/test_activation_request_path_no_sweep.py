@@ -1258,6 +1258,17 @@ def test_a_referential_turn_with_the_hot_profile_on_holds_the_same_ceilings(
     _seed_structure(vault)
     _seed_planning(vault)
     _write_collection(vault)
+    # The seeding above is one write burst, and a burst carries no edit
+    # signal (close-memory-loop D2, R-J), so without this the profile would
+    # be empty and the turn would abstain before the lanes this test measures.
+    # Every page is spread a second apart, oldest first, with the product
+    # page edited last on its own — before the warm-up, which reads them.
+    now = time.time()
+    pages = sorted((vault / "Knowledge Base").rglob("*.md"))
+    for index, page in enumerate(pages):
+        os.utime(page, (now - 10_000 - index * 2, now - 10_000 - index * 2))
+    sled = vault / "Knowledge Base" / "Products" / "Cargo Sled.md"
+    os.utime(sled, (now - 60, now - 60))
     _warm_activation(vault, warm_managed_cell)
     _drain_background_walks()
 
