@@ -500,6 +500,62 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
 - **THEN** the packet abstains `withheld` with no anchors and no units
 - **AND** the weaker candidate is not carried in its place
 
+### Requirement: A turn that names nothing MAY resolve to the hottest recent anchor
+
+A recency prior SHALL NOT resolve an anchor, except for a REFERENTIAL turn — one
+whose own words are the reference and name nothing. This is the only case in
+which a file modification time, a read count or a previous packet's own answer
+may establish task relevance, and it SHALL be bounded by every condition below.
+
+A turn SHALL be referential when it speaks one of the declared referential cues,
+or when it carries no more than a declared small number of content words after
+function words are removed. Recency evidence SHALL be a distinct evidence kind of
+its own class: it SHALL NOT be a worded contact kind, SHALL NOT be a retrieved
+contact kind, SHALL NOT count toward the two-kinds rule for any other kind, and
+SHALL NOT be a tie-break between candidates the turn named. It SHALL be reported
+in a resolved anchor's evidence so a reader can see why that anchor was served.
+
+The hot profile SHALL be a bounded, deterministic projection over the anchor rows
+the request already holds — a previous packet's continuity references, the
+freshness registry's own last-edit times, and the maintained usage activation
+snapshot — ranked in a single declared order, ties broken by a stable identity.
+It SHALL NOT enumerate directories, read pages or raise any declared request-path
+ceiling. A retired anchor SHALL NOT be in it. Recency evidence SHALL be earned by
+the anchors at the TOP of that ranking only, and the number of anchors that may
+tie at the top SHALL be bounded.
+
+Recency SHALL resolve an anchor only where the turn is referential AND no
+candidate anywhere in the same resolution carries a worded contact kind. Where
+any candidate does, the named anchor SHALL be served and recency SHALL decide
+nothing. Where two or more anchors tie at the top of the profile and would each
+resolve, the turn SHALL report them as ambiguity for the agent to choose between
+and SHALL NOT select one by recency. Where the profile is empty the turn SHALL
+abstain exactly as before, still carrying its recent-context block.
+
+#### Scenario: A referential turn resolves to the hottest recent anchor
+
+- **WHEN** a session sends a turn that names nothing, such as "continue" or
+  "where were we", and one anchor is hottest in the bounded recency profile
+- **THEN** that anchor resolves, its evidence names the recency prior, and its
+  role lanes serve its material like any other resolved anchor
+- **AND** the same turn against an empty profile still abstains and still
+  carries the recent-context block
+
+#### Scenario: A referential turn with two equally hot anchors is ambiguous, never guessed
+
+- **WHEN** two anchors of one kind tie at the top of the recency profile on a
+  referential turn and nothing structural relates them
+- **THEN** the turn reports both as ambiguity for the agent to choose between
+- **AND** the server does not pick the one it happened to rank first
+
+#### Scenario: A named anchor wins over recency
+
+- **WHEN** a turn both names an anchor by its own words and the vault holds a
+  hotter anchor the turn never mentioned
+- **THEN** the named anchor resolves and carries the packet
+- **AND** the hot anchor neither resolves nor completes any other candidate's
+  evidence, on this or on any turn that is not referential
+
 ### Requirement: Interactive activation does bounded work under a deadline on every door
 
 An activation request SHALL stop starting work once its request deadline can no
