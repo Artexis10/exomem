@@ -264,8 +264,14 @@ _REFERENTIAL_PROMPT_RE = re.compile(
 
 
 def _is_referential_prompt(prompt: str) -> bool:
-    """True for a turn that points at recent work without naming any of it."""
-    return bool(_REFERENTIAL_PROMPT_RE.match(re.sub(r"\s+", " ", prompt).strip()))
+    """True for a turn that points at recent work without naming any of it.
+
+    Typographic apostrophes are folded to the plain one first, as the
+    server's own normalisation does: "let’s continue" and "what’s next?" are
+    what a phone keyboard or a word processor types.
+    """
+    text = prompt.replace("\u2019", "'").replace("\u2018", "'")
+    return bool(_REFERENTIAL_PROMPT_RE.match(re.sub(r"\s+", " ", text).strip()))
 
 
 def _env_flag(name: str) -> bool:
@@ -1079,24 +1085,29 @@ def _recent_lines(packet: dict) -> list[str]:
     return lines
 
 
-#: The evidence kinds that mean the TURN reached an anchor: its own words, a
-#: ranking engine, or the agent's choice. Spelled here rather than imported,
-#: because this hook runs as a standalone script.
-_TURN_CONTACT_KINDS = frozenset(
-    {
-        "exact_alias",
-        "lexical_overlap",
-        "claims_match",
-        "rare_term",
-        "retrieval",
-        "vector_band",
-        "agent_choice",
-    }
-)
+#: The evidence kinds that mean the TURN'S OWN WORDS reached an anchor, and
+#: the ranking engine's. Spelled here rather than imported, because this hook
+#: runs as a standalone script.
+_WORDED_KINDS = frozenset({"exact_alias", "lexical_overlap", "claims_match", "rare_term"})
+_RETRIEVED_KINDS = frozenset({"retrieval", "vector_band"})
+
+
+def _recency_supplied(evidence: set[str]) -> bool:
+    """Did the recency prior supply this anchor, rather than the turn?
+
+    `recency` with no worded kind and no `agent_choice`. A recall hit beside
+    it changes nothing — recall alone never resolves an anchor, so the prior
+    is still what did — except together with `continuity`, which resolves on
+    the turn's recall and the token without the prior's help.
+    """
+    if "recency" not in evidence or evidence & _WORDED_KINDS or "agent_choice" in evidence:
+        return False
+    return not ("continuity" in evidence and evidence & _RETRIEVED_KINDS)
 
 
 def _recency_referent_lines(packet: dict) -> list[str]:
-    """One line when every resolved anchor stood on recency alone.
+    """One line when the recency prior supplied every resolved anchor
+    (`_recency_supplied`).
 
     Such a packet answers "continue" with what the vault was last working
     on, and the agent must be able to tell that from an answer the turn's own
@@ -1111,8 +1122,7 @@ def _recency_referent_lines(packet: dict) -> list[str]:
     if not resolved:
         return []
     for anchor in resolved:
-        evidence = {str(kind) for kind in anchor.get("evidence") or ()}
-        if "recency" not in evidence or evidence & _TURN_CONTACT_KINDS:
+        if not _recency_supplied({str(kind) for kind in anchor.get("evidence") or ()}):
             return []
     titles = "; ".join(
         str(anchor.get("title") or anchor.get("ref") or "").strip() for anchor in resolved

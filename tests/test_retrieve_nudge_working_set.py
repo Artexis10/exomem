@@ -2006,3 +2006,46 @@ def test_stub_mode_still_stamps_every_printed_reminder(
 
     assert context == hook.REMINDER
     assert stamp.exists()
+
+
+# --------------------------------------------------------------------------- #
+# R-N3 / R-N4
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "prompt", ["let’s continue", "what’s next?", "ok let‘s continue", "what’s next"]
+)
+def test_a_typographic_apostrophe_is_still_a_referential_prompt(prompt: str) -> None:
+    assert hook._is_referential_prompt(prompt)
+
+
+@pytest.mark.parametrize(
+    ("evidence", "printed"),
+    [
+        (["recency"], True),
+        (["recency", "retrieval"], True),
+        (["recency", "vector_band"], True),
+        (["continuity", "recency"], True),
+        (["category_match", "recency", "usage_prior"], True),
+        (["continuity", "recency", "retrieval"], False),
+        (["exact_alias", "recency"], False),
+        (["rare_term", "recency", "retrieval"], False),
+        (["agent_choice"], False),
+        (["continuity", "retrieval"], False),
+    ],
+)
+def test_the_referent_line_follows_what_actually_supplied_the_referent(
+    evidence: list[str], printed: bool
+) -> None:
+    """R-N4: recency with no worded kind and no agent choice is a referent
+    supplied by recent work, recall hits beside it included — "let's continue
+    the work, what's pending?" resolved on `[recency, retrieval]` and printed
+    nothing. The one exception is continuity together with a retrieved kind,
+    which resolves on the turn's recall and the token without the prior."""
+    packet = _packet()
+    packet["anchors"][0]["evidence"] = evidence
+
+    block = hook._format_working_set_block(packet, 4000)
+
+    assert ("- referent:" in block) is printed
