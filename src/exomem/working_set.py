@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -52,6 +52,31 @@ UNIT_LANE_LIMIT = 200
 GRAPH_MAX_NODES = 24
 GRAPH_MAX_EDGES = 40
 GRAPH_TRAVERSAL_PROFILE = "epistemic"
+
+#: How far ahead of the runner-up the top recall hit must be before a packet
+#: is carried on its strength alone (design D3). A near tie is not a weaker
+#: answer, it is NOISE: two pages within a factor of this of each other say
+#: the turn's words are spread across the corpus, and the honest reply to
+#: that is the abstention the turn already had. 1.5 is chosen as a
+#: separation a genuine single-topic match clears comfortably on the BM25
+#: scale while two pages sharing a vocabulary do not.
+RETRIEVAL_CARRY_SEPARATION = 1.5
+#: The absolute floor the top hit must clear, on the same `-bm25()` scale
+#: `lexstore` returns (larger is better; the sign is already flipped there).
+#: Separation alone is not enough: a corpus where nothing matches well can
+#: still produce a lone weak hit with NO second hit, and there is no
+#: runner-up to divide by, so the separation test would pass it through.
+#:
+#: Derived by measurement, pinned by
+#: `test_the_scale_the_carry_thresholds_were_derived_from`. On the test vault
+#: a turn repeating one page's own distinctive words scores ~14.5; a turn
+#: matching several pages on nothing but the generic words "decision" and
+#: "summary" scores ~5.6-5.7 across all of them. 8.0 sits inside that gap
+#: with room on both sides — comfortably above every noise score measured
+#: and comfortably below every genuine match. It is deliberately the coarser
+#: of the two gates: the separation test is what judges an ordinary near
+#: miss, and this one exists only to refuse the degenerate lone-weak hit.
+RETRIEVAL_CARRY_FLOOR = 8.0
 
 PACKET_BLOCKS = (
     "anchors",
@@ -348,17 +373,25 @@ def run_lanes(
     current_state: Sequence[Mapping[str, Any]] = (),
     timings: Any = None,
     freshness_snapshot: Any = None,
+    neighbourhood: frozenset[str] | None = None,
 ) -> tuple[tuple[LaneItem, ...], tuple[dict[str, Any], ...]]:
     """Run one bounded lane per selected role. Every lane soft-fails alone.
 
     `current_state` is resolved ONCE by the caller and handed in, because the
     Records lane and the packet's own `current_state[]` block are two views of
     the same reads and resolving them twice doubled the collection queries.
+
+    `neighbourhood` is normally derived from the anchors' own typed graph.
+    A retrieval-carried packet passes its own — the single page recall
+    dominated on, and nothing else — because a carried page is not an anchor:
+    it has no indexed neighbourhood to expand, and expanding it would spend
+    graph work to widen a claim that rests on one recall score.
     """
     root = Path(vault_root)
     items: list[LaneItem] = []
     missing: list[dict[str, Any]] = []
-    neighbourhood = _neighbourhood_paths(root, anchors)
+    if neighbourhood is None:
+        neighbourhood = _neighbourhood_paths(root, anchors)
     for role in roles:
         role_id = str(role.get("id"))
         definition = registry.roles.get(role_id)
@@ -779,6 +812,204 @@ def signature_evidence(index: working_set_index.WorkingSetIndex, turn: str):
         return {}, None, "unavailable"
 
 
+# --------------------------------------------------------------------------- #
+# Retrieval-carried packets (design D3)
+# --------------------------------------------------------------------------- #
+
+
+def dominant_carry(hits: Sequence[tuple[str, float]]) -> tuple[str, float] | None:
+    """The one clearly dominant hit among `hits`, or `None`.
+
+    Two gates, both refusing rather than ranking. The top hit must clear
+    `RETRIEVAL_CARRY_FLOOR` — otherwise a corpus where nothing matches well
+    would still hand back its least-bad page, and a lone weak hit with no
+    runner-up at all would be "dominant" by default. And it must stand
+    `RETRIEVAL_CARRY_SEPARATION` times clear of the next one — otherwise the
+    turn's words are spread over the corpus and choosing between two close
+    pages is exactly the guess the compiler exists not to make. A single hit
+    that clears the floor IS dominant: there is no second page to be confused
+    with.
+    """
+    if not hits:
+        return None
+    path, score = hits[0]
+    if score < RETRIEVAL_CARRY_FLOOR:
+        return None
+    if len(hits) > 1 and score < RETRIEVAL_CARRY_SEPARATION * hits[1][1]:
+        return None
+    return str(path), float(score)
+
+
+def _carry_by_retrieval(
+    vault_root: Path,
+    *,
+    turn: str,
+    timings: Any = None,
+    freshness_snapshot: Any = None,
+) -> tuple[str, float] | None:
+    """One scored recall over the compiled knowledge base, then the dominance
+    test. `None` means carry nothing — the turn abstains exactly as it did.
+
+    Cost falls only on turns that would otherwise have returned an empty
+    packet, and it is still refused outright when the request budget has run
+    out or the lexical catalogue is anything other than `available`: a
+    carried packet rests entirely on recall, so recall that cannot prove
+    itself current is no ground to serve one from.
+    """
+    if budget_exhausted("working_set.carry"):
+        return None
+    freshness = None
+    recall_checkpoint = None
+    if freshness_snapshot is not None:
+        try:
+            freshness = freshness_snapshot.for_scope("kb")
+            recall_checkpoint = freshness_snapshot.recall_checkpoint("kb")
+        except Exception:  # noqa: BLE001 - an unreadable snapshot carries nothing
+            log.debug("activation carry freshness unavailable", exc_info=True)
+            return None
+    with _span(timings, "working_set.carry"):
+        from . import working_set_runtime
+
+        hits, state = working_set_runtime.carry_candidates(
+            vault_root,
+            turn,
+            freshness=freshness,
+            recall_checkpoint=recall_checkpoint,
+        )
+    if state != "available":
+        return None
+    return dominant_carry(hits)
+
+
+def _carry_roles(
+    registry: context_roles.RoleRegistry, analysis: Any
+) -> tuple[dict[str, str], ...]:
+    """The lenses a carried page is read through.
+
+    A carried page is not an anchor and has no anchor KIND, so
+    `context_roles.select_roles`' anchor defaults have nothing to key on. The
+    LANE is the selector instead: every `units` role, because units are the
+    only thing a page by itself can answer with — a Records lane needs a
+    collection, a planning lane a plan, an entity lane a profile, and a
+    carried page is none of those. The turn's own cues order first so a turn
+    asking about constraints gets constraints ahead of preferences, and the
+    same `MAX_SELECTED_ROLES` ceiling an ordinary packet has applies here.
+    """
+    text = str(getattr(analysis, "text", "") or "")
+    cued: list[tuple[int, Any]] = []
+    for role in registry.roles.values():
+        if role.lane != "units":
+            continue
+        matched = bool(role.cues) and any(cue in text for cue in role.cues)
+        cued.append((0 if matched else 1, role))
+    cued.sort(key=lambda entry: (entry[0], entry[1].priority))
+    return tuple(
+        {
+            "id": role.id,
+            "source": "turn_cue" if rank == 0 else "retrieval_carried",
+            "lane": role.lane,
+        }
+        for rank, role in cued[: context_roles.MAX_SELECTED_ROLES]
+    )
+
+
+def _carried_packet(
+    vault_root: Path,
+    *,
+    page: tuple[str, float],
+    analysis: Any,
+    registry: context_roles.RoleRegistry,
+    limit: int,
+    purpose: str | None,
+    timings: Any,
+    generation: dict[str, Any],
+    index_token: tuple[int, int, int],
+    freshness_snapshot: Any,
+) -> dict[str, Any]:
+    """One packet compiled from a single dominant page, marked as carried.
+
+    The page is reported as ONE anchor entry of kind `page` at status
+    `retrieval_carried`, whose only evidence is `retrieval`. That spelling is
+    the whole honesty of the feature: a reader can tell at a glance that no
+    anchor was named and that recall alone put this material here, and
+    `mint_continuity` — which carries `resolved` anchors only — declines to
+    mint a token from it without needing to know the feature exists.
+
+    Title and lifecycle are taken from the units the lane actually read off
+    that page, never asserted: the unit rows already carry their parent
+    page's own title and supersession, so the anchor entry says what the
+    page says about itself, and falls back to the path when the lane found
+    nothing to read.
+    """
+    path, _score = page
+    roles = _carry_roles(registry, analysis)
+    carried = working_set_resolve.ResolvedAnchor(
+        anchor_id=path,
+        path=path,
+        ref=None,
+        title=path,
+        kind="page",
+        lifecycle="active",
+        status=working_set_resolve.RETRIEVAL_CARRIED_STATUS,
+        evidence=("retrieval",),
+        categories=(),
+        neighbourhood=frozenset({path}),
+    )
+
+    if budget_exhausted("working_set.current_state"):
+        raise BudgetExhausted("working_set.current_state")
+    with _span(timings, "working_set.current_state"):
+        # `page` is not a stateful kind, so this resolves to nothing today.
+        # Called anyway rather than skipped: the packet's `current_state[]`
+        # block is the one place a stateful carried page would have to
+        # appear, and a silent omission here would be the kind of gap that
+        # only shows up once `STATEFUL_KINDS` grows.
+        current_state = working_set_state.current_state_for(
+            vault_root,
+            anchors=(carried,),
+            purpose=purpose,
+            index_generation=index_token[1],
+            index_token=index_token,
+        )
+    items, missing = run_lanes(
+        vault_root,
+        anchors=(carried,),
+        roles=roles,
+        registry=registry,
+        current_state=current_state,
+        timings=timings,
+        freshness_snapshot=freshness_snapshot,
+        neighbourhood=frozenset({path}),
+    )
+    for item in items:
+        if item.path == path:
+            carried = replace(
+                carried, title=item.title or path, lifecycle=item.lifecycle or "active"
+            )
+            break
+
+    generation = {**generation, "carried_by": "retrieval"}
+    if budget_exhausted("working_set.budget"):
+        raise BudgetExhausted("working_set.budget")
+    with _span(timings, "working_set.budget"):
+        # `status` is `build_packet`'s own "did this turn produce material"
+        # flag — the one thing it decides `abstained` from — not
+        # `resolution.status`, which stayed `unresolved` and is why this
+        # packet exists at all. What the turn actually did is in the anchor's
+        # own `retrieval_carried` status and in `generation.carried_by`.
+        return build_packet(
+            items=items,
+            anchors=(carried.as_dict(),),
+            roles=roles,
+            current_state=current_state,
+            ambiguity=(),
+            missing=missing,
+            max_chars=limit,
+            generation=generation,
+            status="resolved",
+        )
+
+
 def compile_packet(
     vault_root: Path,
     *,
@@ -860,6 +1091,32 @@ def compile_packet(
             )
             candidates = working_set_resolve.apply_continuity(candidates, continuity_refs)
             resolution = working_set_resolve.resolve(candidates, turn_tokens=analysis.tokens)
+
+    # Design D3, and ONLY here: the turn reached no anchor at all. An
+    # `ambiguous` turn is untouched (it reached two, and picking between them
+    # is the agent's job), an `agent_choice` turn is untouched (a ref that
+    # named nothing must keep abstaining `unresolved`, which is what
+    # `op_activate_context` turns into its one refusal), and a turn that
+    # resolved anything never reaches this line. Carrying is a PACKET-level
+    # decision taken after resolution has already abstained — it adds no
+    # evidence kind, changes no status rule, and can never resolve an anchor.
+    if resolution.status == "unresolved" and not anchor:
+        carried = _carry_by_retrieval(
+            root, turn=turn, timings=timings, freshness_snapshot=freshness_snapshot
+        )
+        if carried is not None:
+            return _carried_packet(
+                root,
+                page=carried,
+                analysis=analysis,
+                registry=registry,
+                limit=limit,
+                purpose=purpose,
+                timings=timings,
+                generation=generation,
+                index_token=index_token,
+                freshness_snapshot=freshness_snapshot,
+            )
 
     if resolution.status != "resolved":
         return abstained_packet(

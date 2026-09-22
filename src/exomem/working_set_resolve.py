@@ -69,7 +69,21 @@ TIE_BREAK_KINDS: frozenset[str] = frozenset({"usage_prior"})
 #: already taken. Every other kind needs a second one.
 DECIDING_ALONE_KINDS: frozenset[str] = frozenset({"exact_alias", "agent_choice"})
 
-ANCHOR_STATUSES: tuple[str, ...] = ("resolved", "partial", "unresolved")
+#: The status of a page a packet was CARRIED on (design D3), never one this
+#: module produces. `resolve()` cannot return it and `_status_for` has no
+#: clause for it: retrieval alone still never resolves an anchor. It is the
+#: spelling a packet uses to say "no anchor was named; recall alone put this
+#: page here", and it is deliberately not `resolved`, so everything keyed on
+#: that word — `mint_continuity`'s ref list above all — declines it without
+#: needing to know this feature exists.
+RETRIEVAL_CARRIED_STATUS = "retrieval_carried"
+
+ANCHOR_STATUSES: tuple[str, ...] = (
+    "resolved",
+    "partial",
+    "unresolved",
+    RETRIEVAL_CARRIED_STATUS,
+)
 TURN_STATUSES: tuple[str, ...] = ("resolved", "ambiguous", "unresolved")
 
 MAX_CANDIDATES = 24

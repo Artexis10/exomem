@@ -511,6 +511,96 @@ def lexical_evidence(
         return [], "unavailable"
 
 
+#: How many scored hits the carry recall asks for. Small on purpose: the
+#: dominance test only ever reads the top two, and the rest exist so a run of
+#: `Sources/` pages at the head cannot hide every compiled page behind them.
+RETRIEVAL_CARRY_LIMIT = 5
+#: The same corroboration floor `lexical_evidence` uses: two distinct content
+#: stems from the turn, counted before the ranked limit. One shared stem is a
+#: coincidence at corpus scale, and a carried packet is served on the strength
+#: of recall alone.
+RETRIEVAL_CARRY_MIN_TERMS = 2
+#: The vault directory holding raw captured material. A carried packet serves
+#: compiled conclusions; a source is what a conclusion was drawn FROM, and
+#: serving one as though it were durable memory is the disclosure the
+#: compile step exists to stand between.
+CARRY_EXCLUDED_DIRNAME = "Sources"
+
+
+def _under_sources(path: str) -> bool:
+    """Is `path` inside the vault's `Sources/` tree, at any depth?
+
+    Compared segment-wise on both separators rather than by prefix, so a page
+    called `Sources of error.md` is not mistaken for one that lives under the
+    directory, and a Windows-authored row spelled with backslashes is still
+    recognised.
+    """
+    return CARRY_EXCLUDED_DIRNAME in str(path).replace("\\", "/").split("/")
+
+
+def carry_candidates(
+    vault_root: Path,
+    turn: str,
+    *,
+    limit: int = RETRIEVAL_CARRY_LIMIT,
+    freshness=None,
+    recall_checkpoint=None,
+) -> tuple[tuple[tuple[str, float], ...], str]:
+    """Scored recall over the WHOLE compiled knowledge base, for a turn that
+    resolved no anchor at all. Returns `(hits, readiness status)`.
+
+    Two deliberate differences from `lexical_evidence`, which is the same
+    sqlite query under different orders:
+
+    * **No `allowed_paths`.** Anchor-restricted recall is what makes a
+      decision living in an ordinary research note unreachable — it is not an
+      anchor, so it is not in the catalogue the query is confined to, so the
+      turn abstains however plainly its own words name the page.
+    * **The score is kept.** `lexical_evidence` discards it because evidence
+      there is categorical: a page was surfaced or it was not. Carrying is a
+      DOMINANCE judgement instead — "one page, far ahead of the next" — and
+      dominance cannot be read off a rank.
+
+    Everything else is the existing bounded contract: the maintained
+    catalogue only, no foreground delta (`allow_delta=False`), no corpus
+    walk, no directory enumeration, and an incomplete catalogue reported
+    rather than repaired. `Sources/` hits are dropped before the caller ever
+    sees them: raw material is not a candidate, so it neither gets served nor
+    takes part in the dominance comparison.
+    """
+    from . import lexstore
+
+    try:
+        content_turn = " ".join(
+            token
+            for token in working_set_index.tokens_of(working_set_index.normalize(turn))
+            if token not in working_set_index.STOPWORDS
+        )
+        result = lexstore.search_bm25_result(
+            vault_root,
+            content_turn,
+            limit,
+            scope="kb",
+            freshness=freshness,
+            allow_delta=False,
+            min_matched_terms=RETRIEVAL_CARRY_MIN_TERMS,
+            recall_checkpoint=recall_checkpoint,
+        )
+        if not result.readiness.complete:
+            return (), result.readiness.status
+        return (
+            tuple(
+                (str(path), float(score))
+                for path, score in (result.value or ())
+                if not _under_sources(path)
+            ),
+            "available",
+        )
+    except Exception:  # noqa: BLE001 - the carry is additive; it abstains, never raises
+        log.debug("activation carry recall unavailable", exc_info=True)
+        return (), "unavailable"
+
+
 def refresh_index(index: working_set_index.WorkingSetIndex, *, freshness_stamp: str = "") -> bool:
     """Bring a stale index up to the current vault state; False when it could not.
 
