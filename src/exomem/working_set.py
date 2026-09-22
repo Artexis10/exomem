@@ -972,6 +972,20 @@ def _carry_by_retrieval(
     return dominant_carry(hits)
 
 
+def _indexed_title(index: working_set_index.WorkingSetIndex | None, path: str) -> str:
+    """The authored title the anchor catalogue already holds for `path`, or
+    `""`. Reads rows the request has in hand; never a file, never a walk."""
+    if index is None or not path:
+        return ""
+    try:
+        for row in index.anchors():
+            if str(getattr(row, "path", "") or "") == path:
+                return str(getattr(row, "title", "") or "")
+    except Exception:  # noqa: BLE001 - a title is a courtesy, never a promise
+        log.debug("activation carry title lookup failed", exc_info=True)
+    return ""
+
+
 def _carry_roles(
     registry: context_roles.RoleRegistry, analysis: Any
 ) -> tuple[dict[str, str], ...]:
@@ -1016,6 +1030,7 @@ def _carried_packet(
     generation: dict[str, Any],
     index_token: tuple[int, int, int],
     freshness_snapshot: Any,
+    index: working_set_index.WorkingSetIndex | None = None,
 ) -> dict[str, Any] | None:
     """One packet compiled from a single dominant page, marked as carried.
 
@@ -1029,8 +1044,10 @@ def _carried_packet(
     Title and lifecycle are taken from the units the lane actually read off
     that page, never asserted: the unit rows already carry their parent
     page's own title and supersession, so the anchor entry says what the
-    page says about itself, and falls back to the path when the lane found
-    nothing to read.
+    page says about itself. A page that is ALSO an anchor row the turn
+    failed to resolve has its authored title in the index already, which is
+    the next place to look. The path is the last fallback, not the first
+    answer.
 
     `None` when the lanes read nothing off the page. A page can dominate
     recall and still have nothing a unit role selects — its units carry
@@ -1057,7 +1074,7 @@ def _carried_packet(
         anchor_id=path,
         path=path,
         ref=None,
-        title=path,
+        title=_indexed_title(index, path) or path,
         kind="page",
         lifecycle="active",
         status=working_set_resolve.RETRIEVAL_CARRIED_STATUS,
@@ -1095,8 +1112,13 @@ def _carried_packet(
         return None
     for item in items:
         if item.path == path:
+            # The lane's own reading first, the index's second, the path
+            # last: a lane that knew no title must not overwrite one the
+            # catalogue already holds.
             carried = replace(
-                carried, title=item.title or path, lifecycle=item.lifecycle or "active"
+                carried,
+                title=item.title or carried.title or path,
+                lifecycle=item.lifecycle or "active",
             )
             break
 
@@ -1238,6 +1260,7 @@ def compile_packet(
                 generation=generation,
                 index_token=index_token,
                 freshness_snapshot=freshness_snapshot,
+                index=index,
             )
             if packet is not None:
                 return packet

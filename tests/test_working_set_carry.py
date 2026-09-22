@@ -245,6 +245,22 @@ def budget_free():
         request_budget.reset_current(token)
 
 
+def _page_item(path: str) -> working_set.LaneItem:
+    """One lane item for `path` carrying NO title of its own, so the anchor
+    entry has to find one somewhere else."""
+    return working_set.LaneItem(
+        role="precedents",
+        level="unit",
+        ref=f"{path}#unit-x",
+        path=path,
+        title="",
+        text="A unit whose lane knew no page title.",
+        lifecycle="active",
+        updated="2026-09-01",
+        anchor=path,
+    )
+
+
 def _anchor_statuses(packet: dict) -> list[str]:
     return [str(item.get("status") or "") for item in packet.get("anchors") or ()]
 
@@ -698,3 +714,25 @@ def test_a_carried_page_serves_each_of_its_units_once(
     refs = [unit["ref"] for unit in packet["units"]]
     assert refs, packet
     assert len(refs) == len(set(refs)), refs
+
+
+def test_a_carried_page_that_is_an_anchor_row_reports_the_indexed_title(
+    carry_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page can dominate recall and also be an anchor the turn failed to
+    resolve. The index already holds its authored title, so the packet says
+    that rather than its filename — the path is the last fallback, not the
+    first answer.
+    """
+    hub = "Knowledge Base/Notes/Insights/northern-corridor-hub.md"
+    monkeypatch.setattr(
+        working_set, "_carry_by_retrieval", lambda *args, **kwargs: (hub, 12.0)
+    )
+    monkeypatch.setattr(
+        working_set, "run_lanes", lambda *args, **kwargs: ((_page_item(hub),), ())
+    )
+
+    packet = working_set.compile_packet(carry_vault, turn=CARRY_TURN, max_chars=4000)
+
+    assert packet["anchors"][0]["path"] == hub
+    assert packet["anchors"][0]["title"] == "Northern corridor"
