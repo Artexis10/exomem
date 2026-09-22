@@ -1071,3 +1071,65 @@ def test_an_unavailable_graph_alone_is_per_path_work_and_is_not_held(
     assert any(moment >= burst_started for moment in drained), (
         "per-path repair was held behind the whole-vault quiet window"
     )
+
+
+def test_debt_the_drain_raises_itself_does_not_start_a_quiet_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The quiet window waits out writes, not the drain's own bookkeeping.
+
+    Finding an unreadable graph, the drain queues a whole-vault marker, and the
+    enqueue signals the drain like any other debt. Treating that signal as a
+    write made an unreadable graph wait a full quiet window before its repair
+    even with no writer anywhere.
+    """
+    monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.0)
+    monkeypatch.setattr(graph_drain, "RETRY_SECONDS", 0.05)
+    monkeypatch.setattr(graph_drain, "WHOLE_VAULT_SETTLE_SECONDS", 3.0)
+    monkeypatch.setattr(epistemic_graph, "last_whole_vault_pass_seconds", lambda _root: None)
+    marker = threading.Event()
+    monkeypatch.setattr(graph_drain, "_pending", lambda _root: True)
+    monkeypatch.setattr(graph_drain, "_whole_vault_pending", lambda _root: marker.is_set())
+    attempts: list[float] = []
+
+    def work(_root: Path) -> int:
+        attempts.append(time.monotonic())
+        if not marker.is_set():
+            # The drain's own `_request_full_rebuild`: the marker enqueue
+            # signals debt from the drain thread.
+            marker.set()
+            graph_drain.note_graph_debt()
+            return 1
+        return 0
+
+    monkeypatch.setattr(graph_drain, "_work_once", work)
+
+    graph_drain.start(tmp_path)
+    assert _wait_for(lambda: len(attempts) >= 2, timeout=5.0)
+    assert attempts[1] - attempts[0] < 1.0, (
+        f"the drain waited {attempts[1] - attempts[0]:.2f}s behind a quiet window its "
+        "own marker enqueue started"
+    )
+
+
+def test_a_write_signal_still_starts_the_quiet_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exemption is the drain's own thread; every other signal is a write."""
+    monkeypatch.setattr(graph_drain, "_thread", None)
+    before = graph_drain._last_debt
+    graph_drain.note_graph_debt()
+    assert graph_drain._last_debt > before
+
+    marked = graph_drain._last_debt
+    seen: list[float] = []
+
+    def signal_from_the_drain() -> None:
+        graph_drain.note_graph_debt()
+        seen.append(graph_drain._last_debt)
+
+    drain_thread = threading.Thread(target=signal_from_the_drain)
+    monkeypatch.setattr(graph_drain, "_thread", drain_thread)
+    drain_thread.start()
+    drain_thread.join(timeout=5.0)
+    assert seen == [marked], "a signal from the drain's own thread moved the quiet window"

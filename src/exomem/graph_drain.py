@@ -97,9 +97,16 @@ _last_debt = 0.0
 
 
 def note_graph_debt() -> None:
-    """Wake the drain: this process just queued epistemic-graph repair."""
+    """Wake the drain: this process just queued epistemic-graph repair.
+
+    A signal from any other thread comes from a write and starts the quiet
+    window whole-vault repair waits for. One from the drain's own thread -- the
+    marker it raises for an unreadable graph -- only wakes the loop: nothing was
+    written, so there is nothing to wait out.
+    """
     global _last_debt
-    _last_debt = time.monotonic()
+    if threading.current_thread() is not _thread:
+        _last_debt = time.monotonic()
     _DEBT.set()
 
 
