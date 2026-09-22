@@ -7708,7 +7708,10 @@ def converge_full_graph_marker(vault_root: Path) -> GraphDispatchResult:
             operation="epistemic_graph_dispatch_full_marker",
             holder_kind="graph",
         ):
-            observed = deferred_index.graph_full_rebuild_pending(root)
+            # The marker and its raise count, so the clear below declines for
+            # any debt raised after this sample -- including a repeat at the
+            # same value, which a value compare-and-swap would erase.
+            observed = deferred_index.graph_full_rebuild_observation(root)
             if observed is None:
                 return GraphDispatchResult.not_required()
             state = graph_sync.classify_epoch(root)
@@ -7771,7 +7774,7 @@ def converge_full_graph_marker(vault_root: Path) -> GraphDispatchResult:
         if checkpoint is None:
             return GraphDispatchResult("failed", "graph_convergence_failed")
         return GraphDispatchResult("deferred", "graph_convergence_deferred", checkpoint)
-    deferred_index.clear_graph_full_rebuild(root, generation=observed)
+    deferred_index.retire_observed_graph_full_rebuild(root, observed)
     return GraphDispatchResult("completed", code, checkpoint)
 
 

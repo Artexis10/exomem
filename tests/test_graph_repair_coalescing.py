@@ -209,6 +209,39 @@ def test_a_repeated_mark_during_the_pass_survives_its_publication(
     )
 
 
+def test_the_dispatcher_keeps_a_same_value_repeat_raised_after_its_publication(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The full-marker dispatcher retires by raise count too, not by value.
+
+    Its own rebuild publishes and then a full-scope batch raises the marker
+    again at the same value. The publication's retirement correctly declines,
+    and the dispatcher's own clear must decline for the same reason: clearing
+    by value erased that batch's debt and left its change out of the graph
+    until an availability backstop noticed.
+    """
+    value = deferred_index.advance_graph_full_rebuild(vault, after_generation=_current_generation(vault))
+    repeated: list[tuple[int, int] | None] = []
+    real_retire = epistemic_graph._retire_covered_full_marker
+
+    def retire_after_a_repeat(root: Path, observed: Any) -> None:
+        if not repeated:
+            deferred_index.mark_graph_full_rebuild(vault, generation=value)
+            repeated.append(deferred_index.graph_full_rebuild_observation(vault))
+        real_retire(root, observed)
+
+    monkeypatch.setattr(epistemic_graph, "_retire_covered_full_marker", retire_after_a_repeat)
+
+    result = epistemic_graph.converge_full_graph_marker(vault)
+
+    assert result.outcome == "completed"
+    assert repeated and repeated[0] is not None and repeated[0][0] == value
+    assert deferred_index.graph_full_rebuild_observation(vault) == repeated[0], (
+        "the dispatcher erased whole-vault debt re-raised at the same value after its "
+        "publication"
+    )
+
+
 def test_marker_retirement_stays_outside_the_publication_hold(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
