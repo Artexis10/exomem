@@ -757,8 +757,14 @@ def serve(
     lexical_state: str = "not_requested",
     evidence_token: tuple[int, int, int] | None = None,
     freshness_snapshot: Any = None,
+    lexical_seconds: float = 0.0,
 ) -> dict[str, Any]:
-    """Compile (or reuse) one unguarded packet. Never raises: it abstains instead."""
+    """Compile (or reuse) one unguarded packet. Never raises: it abstains instead.
+
+    `lexical_seconds` is what this request's own lexical pass measured,
+    passed through to the carry so it can ask the budget for a reserve its
+    stage can actually be paid for out of.
+    """
     root = Path(vault_root)
     limit = working_set.clamp_budget(max_chars)
     registry = context_roles.load_roles(root)
@@ -857,6 +863,7 @@ def serve(
             freshness_snapshot=freshness_snapshot,
             continuity_refs=continuity_refs,
             anchor=anchor,
+            lexical_seconds=lexical_seconds,
         )
     except working_set.BudgetExhausted as exc:
         # A deliberate budget skip, not a bug: `log.info`, no traceback. The

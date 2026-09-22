@@ -611,3 +611,51 @@ def test_an_agent_choice_that_named_nothing_still_abstains_unresolved(
     assert packet["abstained"] is True
     assert packet["abstention"] == {"reason": "unresolved"}
     assert "carried_by" not in packet["generation"]
+
+
+def test_the_carry_refuses_a_stage_the_door_budget_cannot_finish(
+    carry_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The carry's query is the SAME shape as the first lexical pass, so on a
+    turn where that pass was expensive this one will be too.
+
+    The generic one-second stage reserve is enough to START it and nothing
+    interrupts a stage already running, so a request whose first pass took
+    three seconds used to begin a second three-second pass with three
+    seconds left, overshoot the six-second door budget, and come back
+    `unavailable` — which renders nothing and reads as a fault — where it
+    used to abstain `unresolved` at half the cost. The gate now asks for
+    room proportional to what the first pass actually took.
+    """
+    budget = request_budget.RequestBudget(seconds=6.0)
+    token = request_budget.set_current(budget)
+    try:
+        # Three seconds already spent, three left: enough for the generic
+        # reserve, nowhere near enough for another three-second query.
+        monkeypatch.setattr(budget, "deadline", budget.deadline - 3.0)
+        carried = working_set._carry_by_retrieval(
+            carry_vault, turn=CARRY_TURN, lexical_seconds=3.0
+        )
+    finally:
+        request_budget.reset_current(token)
+
+    assert carried is None
+    assert "working_set.carry" in budget.as_response_block()["skipped"]
+
+
+def test_the_carry_runs_when_the_first_pass_was_cheap(
+    carry_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The over-restriction half: a cheap first pass must not refuse the
+    carry just because some budget is bound."""
+    budget = request_budget.RequestBudget(seconds=6.0)
+    token = request_budget.set_current(budget)
+    try:
+        monkeypatch.setattr(budget, "deadline", budget.deadline - 3.0)
+        carried = working_set._carry_by_retrieval(
+            carry_vault, turn=CARRY_TURN, lexical_seconds=0.05
+        )
+    finally:
+        request_budget.reset_current(token)
+
+    assert carried is not None and carried[0] == CARRY_PAGE

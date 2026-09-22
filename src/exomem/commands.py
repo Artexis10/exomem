@@ -26,6 +26,7 @@ import logging
 import mimetypes
 import os
 import re
+import time
 import typing
 from collections.abc import Mapping
 from contextvars import ContextVar
@@ -6247,8 +6248,17 @@ def _op_activate_context_body(
     # small result limit; none belongs on this bounded request path. The release
     # object is still mandatory: the final guard independently decides every
     # packet reference under the current audience and purpose.
+    lexical_seconds = 0.0
     try:
         _policy, release_active = egress_module.gate_state(vault_root)
+        # Measured unconditionally, not read back off `timings`: the shipped
+        # hook calls this door WITHOUT `include_timings`, so there is no
+        # collector on the very path the carry's budget gate exists to
+        # protect. The carry runs the same query shape against the same
+        # catalogue, so what this pass cost is the best estimate of what the
+        # second one will, and the gate asks the budget for room in
+        # proportion to it.
+        lexical_started = time.monotonic()
         with find_types.timing_span(timings, "working_set.lexical"):
             if anchor:
                 hits, lexical_state = [], "agent_choice"
@@ -6265,6 +6275,7 @@ def _op_activate_context_body(
                     freshness=lexical_freshness,
                     recall_checkpoint=(snapshot.recall_checkpoint("kb") if snapshot else None),
                 )
+        lexical_seconds = max(0.0, time.monotonic() - lexical_started)
         if working_set_module.budget_exhausted("working_set.release"):
             return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
         with find_types.timing_span(timings, "working_set.release"):
@@ -6287,6 +6298,7 @@ def _op_activate_context_body(
         lexical_state=lexical_state,
         evidence_token=evidence_token,
         freshness_snapshot=snapshot,
+        lexical_seconds=lexical_seconds,
     )
     # An override that resolved nothing named no anchor of this index. Refused
     # here, before the guard, with the same words a withheld ref gets below —

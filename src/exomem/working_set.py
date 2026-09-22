@@ -77,6 +77,13 @@ RETRIEVAL_CARRY_SEPARATION = 1.5
 #: the one corpus, which is what the separation test does.
 RETRIEVAL_CARRY_MIN_SCORE = 0.0
 
+#: How much room the carry asks the request budget for, as a multiple of
+#: what the request's first lexical pass measured. The carry runs the same
+#: query shape against the same catalogue, so its cost tracks that one; the
+#: margin is for a second pass that happens to be a little dearer than the
+#: first (measured at 0.7-1.0x across corpus sizes).
+RETRIEVAL_CARRY_BUDGET_MULTIPLE = 1.2
+
 #: A stem is DISTINCTIVE when it occurs on no more than this share of the
 #: indexed pages. Corpus-relative on purpose: "rare" is a statement about
 #: the vault the turn is being answered from, and the same word is a name in
@@ -764,7 +771,7 @@ class BudgetExhausted(RuntimeError):
     """
 
 
-def budget_exhausted(stage: str) -> bool:
+def budget_exhausted(stage: str, *, reserve: float | None = None) -> bool:
     """True when the active request budget cannot afford to start `stage`.
 
     One helper shared by every stage boundary in the activation request path
@@ -782,6 +789,14 @@ def budget_exhausted(stage: str) -> bool:
     positive number of milliseconds": 1ms of remaining budget is enough to
     START a stage but never enough to finish one.
 
+    `reserve` overrides that flat second for a stage whose cost this request
+    has already MEASURED. Nothing interrupts a stage once it has started, so
+    a flat reserve is only honest for stages that cost about the same every
+    time; the carry's query is the same shape as the first lexical pass and
+    costs about as much, so on a request where that pass took three seconds
+    the flat second admits a second three-second stage and the door budget
+    is overshot. A measured reserve refuses it instead.
+
     Records the skip on the budget itself (`note_skipped`), so it is safe to
     call at every boundary without special-casing: `RequestBudget.note_skipped`
     dedupes by name, and every caller of this helper either returns or raises
@@ -790,7 +805,12 @@ def budget_exhausted(stage: str) -> bool:
     the only one ever recorded.
     """
     budget = request_budget.current()
-    if budget is None or budget.can_afford(request_budget.ACTIVATION_STAGE_RESERVE_SECONDS):
+    needed = (
+        request_budget.ACTIVATION_STAGE_RESERVE_SECONDS
+        if reserve is None
+        else max(request_budget.ACTIVATION_STAGE_RESERVE_SECONDS, float(reserve))
+    )
+    if budget is None or budget.can_afford(needed):
         return False
     budget.note_skipped(stage)
     return True
@@ -874,6 +894,7 @@ def _carry_by_retrieval(
     turn: str,
     timings: Any = None,
     freshness_snapshot: Any = None,
+    lexical_seconds: float = 0.0,
 ) -> tuple[str, float] | None:
     """One scored recall over the compiled knowledge base, then the dominance
     test. `None` means carry nothing — the turn abstains exactly as it did.
@@ -883,8 +904,19 @@ def _carry_by_retrieval(
     out or the lexical catalogue is anything other than `available`: a
     carried packet rests entirely on recall, so recall that cannot prove
     itself current is no ground to serve one from.
+
+    `lexical_seconds` is what the request's FIRST lexical pass actually
+    took. This query is the same shape against the same catalogue, so it
+    will cost about the same, and the budget is asked for
+    `RETRIEVAL_CARRY_BUDGET_MULTIPLE` times that rather than the flat stage
+    reserve — a reserve that cannot pay for the stage it admits is not a
+    reserve. Refusing here abstains `unresolved`, which is what the turn did
+    before the carry existed; letting it start and run out mid-flight
+    abstains `unavailable`, which renders nothing and reads as a fault.
     """
-    if budget_exhausted("working_set.carry"):
+    if budget_exhausted(
+        "working_set.carry", reserve=RETRIEVAL_CARRY_BUDGET_MULTIPLE * max(0.0, lexical_seconds)
+    ):
         return None
     freshness = None
     recall_checkpoint = None
@@ -1061,6 +1093,7 @@ def compile_packet(
     freshness_snapshot: Any = None,
     continuity_refs: frozenset[str] = frozenset(),
     anchor: str | None = None,
+    lexical_seconds: float = 0.0,
 ) -> dict[str, Any]:
     """Resolve, select, retrieve and budget — the whole compiler in one call.
 
@@ -1140,7 +1173,11 @@ def compile_packet(
     # evidence kind, changes no status rule, and can never resolve an anchor.
     if resolution.status == "unresolved" and not anchor:
         carried = _carry_by_retrieval(
-            root, turn=turn, timings=timings, freshness_snapshot=freshness_snapshot
+            root,
+            turn=turn,
+            timings=timings,
+            freshness_snapshot=freshness_snapshot,
+            lexical_seconds=lexical_seconds,
         )
         if carried is not None:
             return _carried_packet(
