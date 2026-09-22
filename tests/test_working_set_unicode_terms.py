@@ -432,3 +432,34 @@ def test_three_long_compound_words_are_still_a_name() -> None:
     assert len(name) == 54
     tokens = wsi.tokens_of(name)
     assert [len(token) for token in tokens] == [28, 15, 9]
+
+
+def test_a_two_character_cjk_name_still_earns_rare_term() -> None:
+    """The `rare_term` length floor counts CODE POINTS, and two of them is an
+    ordinary-length word in CJK — a city, a company, a person.
+
+    The floor exists to stop an everyday two-letter English word ("go",
+    "it") being read as a lead. That reasoning is about an alphabet where a
+    word is several letters long; applying the same count to a script where
+    it is not turns a real name into a non-name. It is applied only where it
+    means something: a term written entirely in ASCII letters.
+    """
+    rows = (_row("cjk.md", "東京 プロジェクト"),)
+    analysis = resolve_module.analyze_turn("東京 の状況")
+    candidates = resolve_module.candidates_for(
+        analysis, rows, term_anchor_counts={"東京": 1}
+    )
+
+    assert len(candidates) == 1, candidates
+    assert "rare_term" in candidates[0].evidence
+
+
+def test_a_two_letter_ascii_term_is_still_refused() -> None:
+    """The half the floor exists for, unchanged."""
+    rows = (_row("go.md", "Release Go Checklist"),)
+    analysis = resolve_module.analyze_turn("so should i go with the first option")
+    candidates = resolve_module.candidates_for(
+        analysis, rows, term_anchor_counts={"go": 1}
+    )
+
+    assert candidates == ()

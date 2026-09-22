@@ -339,7 +339,9 @@ never earned on a shared name term shorter than three characters, because
 rarity among anchor names cannot tell a genuinely short name ("hob", "van")
 from an everyday two-letter word a title happens to contain — an ordinary
 "so should I go with the cheaper one?" reached a page titled "... Go ..." on
-that one word.
+that one word. The floor is applied only to a term written entirely in
+ASCII letters, since two characters is an ordinary-length word in CJK and
+counting code points there would turn a real name into a non-name.
 
 The final guard unwraps a packet reference to its vault path before deciding
 it, rather than deciding the reference text itself. A unit's own `ref` is the

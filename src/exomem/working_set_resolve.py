@@ -56,6 +56,13 @@ EVIDENCE_KINDS: tuple[str, ...] = (
 #: Length is the discriminator a counting table has no way to supply. Three
 #: is the floor because real short names start there ("hob", "van", "PR");
 #: below it a shared term is coincidence, not reference.
+#:
+#: Applied only to a term written entirely in ASCII LETTERS. The reasoning
+#: above is about an alphabet where an ordinary word is several letters
+#: long; two characters is an ordinary word in CJK — a city, a company, a
+#: person — and counting code points there turns a real name into a
+#: non-name. A term that is not all-ASCII keeps whatever rarity its
+#: document count earns it.
 RARE_TERM_MIN_CHARS = 3
 
 #: `usage_prior` is a tie-break only. It never contributes to the two-kinds
@@ -301,6 +308,17 @@ def _depossessive_token(token: str) -> str:
     return token if folded in STOPWORDS else folded
 
 
+def _clears_rare_term_length(term: str) -> bool:
+    """Is `term` long enough to be a lead?
+
+    `RARE_TERM_MIN_CHARS` code points, for an all-ASCII-letter term only.
+    Any term carrying a character outside `a-z` is exempt: the floor's whole
+    argument is about English word lengths, and a script that writes a name
+    in two characters is not the case it was reasoned about.
+    """
+    return len(term) >= RARE_TERM_MIN_CHARS or not term.isascii() or not term.isalpha()
+
+
 def _fold_lexical_term(term: str) -> str | None:
     """One term's fold for the LEXICAL COMPARISON (fix/activation-competing-
     senses, correction round 1, C1) -- `fold_plural(fold_possessive(term))`,
@@ -523,7 +541,7 @@ def candidates_for(
             (only_shared_name_term,) = shared_name
             count = term_counts.get(only_shared_name_term)
             if (
-                len(only_shared_name_term) >= RARE_TERM_MIN_CHARS
+                _clears_rare_term_length(only_shared_name_term)
                 and count is not None
                 and count <= RARE_TERM_MAX_ANCHORS
             ):
