@@ -971,7 +971,19 @@ def test_prominence_off_stays_silent_in_working_set_mode(
     assert seen == [], "the transport must never run behind a closed gate"
 
 
-@pytest.mark.parametrize("prompt", ["merge it", "thanks", "ship it", "done yet"])
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "merge it",
+        "thanks",
+        "ship it",
+        "done yet",
+        # Above `min_chars`, so this one is the case that actually reaches
+        # `_is_obvious_control_prompt`: the four short ones return at the
+        # length gate and prove nothing about the control filter.
+        "cool did you merge it to main?",
+    ],
+)
 def test_a_short_control_prompt_stays_silent_in_working_set_mode(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -987,6 +999,9 @@ def test_a_short_control_prompt_stays_silent_in_working_set_mode(
     an instruction to act carries no such question and still costs nothing.
     """
     seen = _serve(monkeypatch, _packet())
+    assert not hook._is_referential_prompt(prompt), (
+        "a case this test silences must not be one the exemption claims"
+    )
 
     assert _run(monkeypatch, capsys, _event(prompt=prompt), tmp_path / "home") == ""
     assert seen == []
