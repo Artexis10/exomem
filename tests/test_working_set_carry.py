@@ -1265,8 +1265,31 @@ def test_a_hyphenated_name_pairs_on_both_of_its_stems() -> None:
     ) == (("brien", "o"),)
 
 
+def test_the_retired_vocabulary_is_the_trees_own() -> None:
+    """Retirement is not a word list this module gets to invent.
+
+    It did: `retired` and `deprecated` appear as a page status nowhere else
+    in the tree, while `dropped` — which `activation._INACTIVE_STATUSES`
+    has always carried — was missing, so a page the author dropped was
+    carried and its unit injected as current memory.
+
+    The set is now the tree's own inactive statuses minus the two that mean
+    pre-active rather than retired. Pinned as a relation so the two cannot
+    drift apart: a status added there arrives here without anyone noticing
+    it needed to.
+    """
+    from exomem import activation
+
+    assert working_set.RETIRED_PAGE_STATUSES == frozenset(
+        activation._INACTIVE_STATUSES
+    ) - {"draft", "planned"}
+    assert "dropped" in working_set.RETIRED_PAGE_STATUSES
+    assert working_set.RETIRED_PAGE_STATUSES == {"archived", "dropped", "superseded"}
+
+
 def test_a_draft_page_is_still_a_candidate(vault: Path) -> None:
-    """A draft is a page the author is still writing, not one they retired.
+    """A draft is a page the author is still writing, not one they retired,
+    and `planned` is the same shape: authored, not yet active, not retired.
 
     The spec retires superseded and archived pages; treating every non-active
     status as retired swept in `draft`, which is the status a page carries
@@ -1276,10 +1299,10 @@ def test_a_draft_page_is_still_a_candidate(vault: Path) -> None:
     kb = vault / "Knowledge Base" / "Notes" / "Cases"
     for name, status in (
         ("draft.md", "draft"),
+        ("planned.md", "planned"),
         ("archived.md", "archived"),
         ("superseded-status.md", "superseded"),
-        ("retired.md", "retired"),
-        ("deprecated.md", "deprecated"),
+        ("dropped.md", "dropped"),
         ("active.md", "active"),
         ("in-review.md", "in-review"),
     ):
@@ -1298,13 +1321,13 @@ def test_a_draft_page_is_still_a_candidate(vault: Path) -> None:
         return working_set._is_current_page(vault, f"Knowledge Base/Notes/Cases/{name}")
 
     assert current("draft.md") is True
+    assert current("planned.md") is True
     assert current("in-review.md") is True
     assert current("active.md") is True
     assert current("no-status.md") is True
     assert current("archived.md") is False
     assert current("superseded-status.md") is False
-    assert current("retired.md") is False
-    assert current("deprecated.md") is False
+    assert current("dropped.md") is False
 
 
 def test_filtering_happens_after_a_wider_fetch(
@@ -1345,6 +1368,10 @@ def test_filtering_happens_after_a_wider_fetch(
     assert state == "available"
     assert asked == [working_set.RETRIEVAL_CARRY_FETCH], asked
     assert working_set.RETRIEVAL_CARRY_FETCH > 5, "a wider fetch is the point"
+    # And the window is never narrower than the number of rows the rarity
+    # gate can admit, at any corpus size.
+    for pages in (100, 1000, 2000, 2001, 3000, 5000, 10000):
+        assert working_set.carry_fetch_size(pages) > working_set.rare_document_cap(pages)
     # Four raw-material rows excluded, two compiled pages left: two named
     # pages, so nothing is carried.
     assert [path for path, _score in hits] == [GENUINE_PAGE, DOUBLE_STEM_PAGE], hits
@@ -1406,3 +1433,114 @@ def test_the_hook_renders_the_named_pages_as_its_menu(vault: Path) -> None:
     closing = block.splitlines()[-1]
     assert "read_memory" in closing, closing
     assert "`anchor`" not in closing, closing
+
+
+def test_a_dropped_page_is_never_carried(vault: Path) -> None:
+    """The measured hole: `status: dropped` was carried and its unit served
+    as current memory, because `dropped` was missing from a hand-written
+    retirement vocabulary."""
+    _seed_named_pages_corpus(vault)
+    _write(
+        vault / "Knowledge Base" / "Notes" / "Research" / "girvan-slot-window.md",
+        """---
+type: research-note
+status: dropped
+updated: 2026-09-12
+---
+
+# Girvan slot window
+
+## Summary
+
+- [decision] The girvan slot window is nine minutes. ^g-now
+""",
+    )
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+
+    hits, state = working_set_runtime.carry_candidates(
+        vault, "what did we decide about the girvan slot window"
+    )
+
+    assert state == "available"
+    assert hits == (), hits
+
+
+def test_a_carried_draft_reports_itself_as_a_draft(vault: Path) -> None:
+    """A `draft` is a candidate, so a packet can be carried on one — and a
+    packet that called it `active` would be telling the reader something the
+    page does not say."""
+    _seed_named_pages_corpus(vault)
+    _write(
+        vault / "Knowledge Base" / "Notes" / "Research" / "girvan-slot-window.md",
+        """---
+type: research-note
+status: draft
+updated: 2026-09-12
+---
+
+# Girvan slot window
+
+## Summary
+
+- [decision] The girvan slot window is nine minutes. ^g-now
+""",
+    )
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+
+    packet = working_set.compile_packet(
+        vault, turn="what did we decide about the girvan slot window", max_chars=4000
+    )
+
+    assert packet["generation"]["carried_by"] == "retrieval"
+    assert packet["anchors"][0]["lifecycle"] == "draft", packet["anchors"]
+
+
+def test_the_fetch_window_outgrows_the_rarity_cap(
+    prose_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The window has to be wider than the gate, at every corpus size.
+
+    Up to `rare_document_cap(pages)` pages can share one distinctive phrase,
+    and that cap passes a fixed ten from 2,001 pages (11 at 2,200, 25 at
+    5,000, 50 at 10,000). Above that, retired pages sharing the phrase can
+    fill the ranked window on their own, the surviving count reads one, and
+    a turn that named a second page carries the first anyway — the exact
+    failure the count was introduced to prevent, reappearing through the
+    limit instead of through the score.
+    """
+    assert working_set.carry_fetch_size(100) == working_set.RETRIEVAL_CARRY_FETCH
+    assert working_set.carry_fetch_size(2200) == working_set.rare_document_cap(2200) + 1
+    assert working_set.carry_fetch_size(10000) == working_set.rare_document_cap(10000) + 1
+
+    # The shape that can actually consume the window: retired pages sharing
+    # the phrase, ranked above the two current ones.
+    asked: list[int] = []
+    real = lexstore.search_bm25_result
+    retired = [(f"Knowledge Base/Notes/Old/superseded-{i:02d}.md", 40.0 - i) for i in range(11)]
+
+    def ranked(vault_root, query, k, **kwargs):
+        asked.append(k)
+        real(vault_root, query, k, **kwargs)
+        return lexstore.CatalogQueryResult(
+            [*retired, (GENUINE_PAGE, 22.0), (DOUBLE_STEM_PAGE, 21.0)],
+            lexstore.CatalogReadiness("available", True, "sqlite"),
+        )
+
+    monkeypatch.setattr(lexstore, "search_bm25_result", ranked)
+    monkeypatch.setattr(
+        working_set,
+        "_is_current_page",
+        lambda _root, rel: "superseded-" not in rel,
+    )
+    monkeypatch.setattr(working_set, "rare_document_cap", lambda _pages: 11)
+
+    hits, state = working_set_runtime.carry_candidates(prose_vault, GENUINE_TURN)
+
+    assert state == "available"
+    assert asked == [12], asked
+    # Eleven retired rows excluded; the two current pages both counted, so
+    # the turn named two and carries neither.
+    assert [path for path, _score in hits] == [GENUINE_PAGE, DOUBLE_STEM_PAGE], hits
+    assert working_set.dominant_carry(hits) is None

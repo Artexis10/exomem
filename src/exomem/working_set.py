@@ -60,7 +60,9 @@ GRAPH_TRAVERSAL_PROFILE = "epistemic"
 #: whole decision rests on, decided by where the LIMIT happened to fall.
 #: Ten leaves room for a page's raw-material twins and its predecessor
 #: ahead of it; the packet's own material stays bounded by the unit lanes,
-#: which this does not touch.
+#: which this does not touch. It is a FLOOR rather than the whole answer —
+#: see `carry_fetch_size`, since how many rows the gate can admit grows
+#: with the corpus and the window has to stay ahead of it.
 RETRIEVAL_CARRY_FETCH = 10
 
 #: There is deliberately no separation constant. One existed — the top hit
@@ -954,13 +956,23 @@ def signature_evidence(index: working_set_index.WorkingSetIndex, turn: str):
 # --------------------------------------------------------------------------- #
 
 
-#: Statuses that RETIRE a page. Named rather than inferred from "anything
-#: but active": `draft` and `in-review` are statuses a page carries while it
-#: is being written, and a turn that names one wants it. Only a status that
-#: says the vault has stopped standing behind the page excludes it.
-RETIRED_PAGE_STATUSES: frozenset[str] = frozenset(
-    {"archived", "superseded", "retired", "deprecated"}
-)
+#: Statuses that RETIRE a page: the tree's OWN inactive vocabulary, less
+#: the two that mean pre-active rather than retired.
+#:
+#: Derived rather than written out, because a hand-written list was wrong in
+#: both directions — it invented `retired` and `deprecated`, which name no
+#: page status anywhere else here, and it missed `dropped`, so a page the
+#: author dropped was carried and its unit served as current memory.
+#: `draft` and `planned` are carved out deliberately: both mean authored and
+#: not yet active, which is a page a turn naming it wants, not one the vault
+#: has stopped standing behind.
+def _retired_page_statuses() -> frozenset[str]:
+    from . import activation
+
+    return frozenset(activation._INACTIVE_STATUSES) - {"draft", "planned"}
+
+
+RETIRED_PAGE_STATUSES: frozenset[str] = _retired_page_statuses()
 
 
 def _is_current_page(vault_root: Path, rel_path: str) -> bool:
@@ -968,7 +980,8 @@ def _is_current_page(vault_root: Path, rel_path: str) -> bool:
 
     A page the author retired — a `RETIRED_PAGE_STATUSES` status, or a
     `superseded_by` pointing at its replacement — is not a page to answer a
-    turn from, and the replacement is named by the SAME words: "the girvan
+    turn from. `draft` and `planned` are NOT retirement: both mean authored
+    and not yet active, and a turn that names such a page wants it, and the replacement is named by the SAME words: "the girvan
     slot window" names both the current note and the one it superseded.
     Counting them as two named pages would refuse every revised page in the
     vault, and serving the loser would hand back the stale figure, which is
@@ -1011,12 +1024,31 @@ def rare_document_cap(corpus_pages: int) -> int:
     return max(RETRIEVAL_CARRY_RARE_MIN_DOCS, -(-pages * 5 // 1000))
 
 
+def carry_fetch_size(corpus_pages: int) -> int:
+    """How many ranked rows to read before filtering, for a corpus of
+    `corpus_pages` pages.
+
+    Never fewer than `RETRIEVAL_CARRY_FETCH`, and always MORE than the
+    number of pages the rarity gate can admit. Up to `rare_document_cap`
+    pages may share one distinctive phrase, and that cap passes a fixed ten
+    from 2,001 pages — 11 at 2,200, 25 at 5,000, 50 at 10,000. Above that a
+    fixed window can be filled entirely by retired pages sharing the phrase,
+    leaving one current page inside it; the count then reads one and a turn
+    that named a second page carries the first anyway. That is the failure
+    the count exists to prevent, arriving through the limit instead of
+    through the score.
+
+    One more than the cap, so a window full of excluded rows still leaves
+    room for the row that proves there were two.
+    """
+    return max(RETRIEVAL_CARRY_FETCH, rare_document_cap(corpus_pages) + 1)
+
+
 def dominant_carry(hits: Sequence[tuple[str, float]]) -> tuple[str, float] | None:
     """The one page `hits` says the turn named, or `None`.
 
-    Every entry has already passed the naming gate — a distinctive phrase,
-    or three distinctive stems — and been filtered to pages that are current
-    and not raw material. So `hits` IS the set of pages this turn named, and
+    Every entry has already passed the naming gate — a distinctive phrase —
+    and been filtered to pages that are current and not raw material. So `hits` IS the set of pages this turn named, and
     the question here is only how many there are.
 
     Exactly one is a packet. Two or more is a turn that named two things,
@@ -1094,6 +1126,32 @@ def _carry_by_retrieval(
     return hits[: working_set_resolve.MAX_ANCHORS]
 
 
+def _page_lifecycle(vault_root: Path, rel_path: str) -> str:
+    """A page's own normalised status, or `"active"` when it declares none.
+
+    Reported rather than assumed. A carried or named page can legitimately
+    be a `draft` or `planned` — both are candidates, being authored and not
+    yet active — and a packet that called every one of them `active` would
+    be telling the reader something the page does not say. Reads the cache
+    the lifecycle check has already warmed for exactly these paths.
+    """
+    text = str(rel_path or "")
+    if not text.endswith(".md"):
+        return "active"
+    try:
+        from . import find_corpus
+
+        root = Path(vault_root)
+        page = find_corpus.CACHE.get(root / text, root)
+    except Exception:  # noqa: BLE001 - a lifecycle label is never worth a failure
+        log.debug("activation page lifecycle read failed for %s", text, exc_info=True)
+        return "active"
+    if page is None:
+        return "active"
+    frontmatter = page.frontmatter if isinstance(page.frontmatter, Mapping) else {}
+    return working_set_index.normalize(frontmatter.get("status") or "active") or "active"
+
+
 def _page_title(vault_root: Path, rel_path: str) -> str:
     """A page's own authored title, or `""`.
 
@@ -1140,7 +1198,7 @@ def _named_anchors(
             "path": path,
             "title": _page_title(vault_root, path) or _indexed_title(index, path) or path,
             "kind": "page",
-            "lifecycle": "active",
+            "lifecycle": _page_lifecycle(vault_root, path),
             "status": working_set_resolve.RETRIEVAL_NAMED_STATUS,
             "evidence": ["retrieval"],
         }
@@ -1261,7 +1319,7 @@ def _carried_packet(
         ref=None,
         title=_indexed_title(index, path) or path,
         kind="page",
-        lifecycle="active",
+        lifecycle=_page_lifecycle(vault_root, path),
         status=working_set_resolve.RETRIEVAL_CARRIED_STATUS,
         evidence=("retrieval",),
         categories=(),
@@ -1299,12 +1357,11 @@ def _carried_packet(
         if item.path == path:
             # The lane's own reading first, the index's second, the path
             # last: a lane that knew no title must not overwrite one the
-            # catalogue already holds.
-            carried = replace(
-                carried,
-                title=item.title or carried.title or path,
-                lifecycle=item.lifecycle or "active",
-            )
+            # catalogue already holds. The LIFECYCLE is not taken from the
+            # lane at all — a lane item's lifecycle describes the UNIT, and
+            # the page's own status is already on the anchor, so letting it
+            # through here would report a draft page as active.
+            carried = replace(carried, title=item.title or carried.title or path)
             break
 
     generation = {**generation, "carried_by": "retrieval"}

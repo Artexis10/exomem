@@ -407,8 +407,12 @@ catalogue already refuses to build an anchor from — SHALL NOT be candidates. T
 under its own timing span and SHALL be skipped when that deadline can no longer
 afford a stage.
 
-Superseded and archived pages SHALL NOT be candidates, and lifecycle SHALL be
-decided before candidates are counted. Candidates SHALL be excluded before they are counted, not after the ranked
+Retired pages SHALL NOT be candidates, and lifecycle SHALL be decided before
+candidates are counted. Retirement SHALL be the system's own inactive page
+vocabulary less the statuses meaning pre-active rather than retired, together
+with a declared supersession; a draft or planned page SHALL remain a
+candidate. The number of ranked rows read before filtering SHALL exceed the
+number of pages the rarity gate can admit at the current corpus size. Candidates SHALL be excluded before they are counted, not after the ranked
 result is limited. A page SHALL be carried only when it is the ONLY surviving
 candidate; where two or more survive, the turn SHALL abstain `unresolved`,
 SHALL NOT select between them by ranking score, and SHALL report them under

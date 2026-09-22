@@ -281,13 +281,21 @@ presented as a resolution, which is the failure this whole gate exists to
 close. The separation constant is therefore gone: it guarded a candidate
 list that contained unnamed neighbours, and that list no longer exists.
 
-Lifecycle is decided BEFORE the count. A superseded or archived page is
-never a candidate, because a note and the note that superseded it answer to
-the same phrase: counting both would refuse every revised page in the
-vault, and serving the loser would hand back the stale figure. The facts
-are the ones the unit lane already reads for supersession, taken from the
-request path's own cached single-page read for at most five rows — no
-walk. The absolute score floor this
+Lifecycle is decided BEFORE the count. A page the author retired is never
+a candidate, because a note and the note that superseded it answer to the
+same phrase: counting both would refuse every revised page in the vault,
+and serving the loser would hand back the stale figure. Retirement is the
+tree's own inactive vocabulary (`activation._INACTIVE_STATUSES`: archived,
+dropped, superseded) plus a `superseded_by` pointing at a replacement, less
+`draft` and `planned` — both of those mean authored and not yet active,
+which is a page a turn naming it wants rather than one the vault has
+stopped standing behind. Deriving the set rather than writing it out is
+deliberate: a hand-written list was wrong in both directions, inventing two
+statuses that name nothing in this tree and missing `dropped`, so a page
+the author had dropped was carried and its unit served as current memory.
+The facts are the ones the unit lane already reads for supersession, taken
+from the request path's own cached single-page read for the rows in hand —
+no walk. The absolute score floor this
 replaced is gone: `-bm25()` is not comparable between corpora, so the same
 page for the same turn measured 13.16 with no bulk, 6.81 with 200 pages
 added (refused by a floor fitted to the first number) and was outranked by an

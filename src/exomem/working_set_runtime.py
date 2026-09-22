@@ -512,9 +512,10 @@ def lexical_evidence(
         return [], "unavailable"
 
 
-#: How many scored hits the carry recall asks for: `working_set`'s own
-#: fetch size, since how many rows must be read before filtering is a
-#: property of the rule that filters them.
+#: The floor on how many scored hits the carry recall asks for. The real
+#: number is `working_set.carry_fetch_size(pages)`, which grows with the
+#: corpus so the window stays wider than the rarity gate can admit; this
+#: name is the default for a caller that has no page count in hand.
 RETRIEVAL_CARRY_LIMIT = working_set.RETRIEVAL_CARRY_FETCH
 #: Knowledge-base folders holding raw captured material rather than compiled
 #: conclusions. Read off `working_set_index` rather than restated here: that
@@ -678,7 +679,7 @@ def carry_candidates(
     vault_root: Path,
     turn: str,
     *,
-    limit: int = RETRIEVAL_CARRY_LIMIT,
+    limit: int | None = None,
     freshness=None,
     recall_checkpoint=None,
 ) -> tuple[tuple[tuple[str, float], ...], str]:
@@ -732,7 +733,7 @@ def carry_candidates(
         stems = content_stems(turn)
         if len(stems) < working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS:
             return (), "available"
-        rare, pages, state = rare_turn_terms(
+        rare, corpus_pages, state = rare_turn_terms(
             vault_root,
             stems,
             freshness=freshness,
@@ -740,7 +741,7 @@ def carry_candidates(
         )
         if state != "available":
             return (), state
-        if pages < working_set.RETRIEVAL_CARRY_MIN_PAGES:
+        if corpus_pages < working_set.RETRIEVAL_CARRY_MIN_PAGES:
             # Rarity needs a corpus. The page count came back with the
             # frequencies, so this costs nothing beyond the lookup already
             # made, and it refuses before the ranking query.
@@ -761,7 +762,10 @@ def carry_candidates(
             # The turn's WORDS, not its stems: this query stems what it is
             # given, and stemming a stem is not a no-op.
             content_words(turn),
-            limit,
+            # Wider than the rarity gate can admit, which grows with the
+            # corpus: a window a run of retired rows can fill is a window
+            # that decides "one named page or two" by where it ends.
+            working_set.carry_fetch_size(corpus_pages) if limit is None else limit,
             scope="kb",
             freshness=freshness,
             allow_delta=False,
