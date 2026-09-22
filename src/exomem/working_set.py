@@ -68,12 +68,32 @@ RECENT_CONTEXT_REASONS: tuple[str, ...] = ("edited", "activated", "captured", "p
 #: The profile is what a REFERENTIAL turn resolves against (design §8's
 #: amendment), and a turn that names nothing refers to one thing, so the
 #: normal size of this set is one: a tie needs equality on all three ranked
-#: components at once. The bound exists for the pathological vault where it
-#: is not — a cold registry with no reads and a dozen anchors all scoring
-#: nothing — so that such a turn reports a menu of five rather than the whole
-#: catalogue. It never selects among a wider tie on the merits, because
+#: components at once. That happens whenever the edit time cannot separate
+#: anchors — none has one, or all of them fell in one write burst (see
+#: `HOT_PROFILE_BURST_PAGES`) — and the reads that order what is left are
+#: equal too: a vault nobody has read yet, or one whose pages were all read
+#: together. The bound keeps such a turn to a menu of five rather than the
+#: whole catalogue. It never selects among a wider tie on the merits, because
 #: there are none to select on: `resolve()` hands the tie to the agent.
 HOT_PROFILE_K = 5
+
+#: A write burst: this many pages or more whose last edits fall within
+#: `HOT_PROFILE_BURST_NS` of one another. A burst is a batch — a maintenance
+#: pass, an import, a sync — not the user's work, and a batch rewrites pages
+#: nobody chose. Its edit times say only that the batch ran, so an anchor in
+#: one carries no edit signal in the hot profile and is ordered by its reads
+#: instead.
+#:
+#: Counted over every page the freshness registry holds, not over anchors
+#: alone: a real batch interleaves anchors with ordinary notes — a measured
+#: identifier backfill wrote thirty pages about a hundred milliseconds apart,
+#: and its last two anchors fell 300 ms apart with no third anchor near them,
+#: so an anchor-only count left the batch's final anchor as the referent.
+#: Navigation pages are left out of the count, because every ordinary write
+#: also rewrites the activity log and the index, and those must not turn the
+#: user's own single edit into a "burst".
+HOT_PROFILE_BURST_PAGES = 3
+HOT_PROFILE_BURST_NS = 1_000_000_000
 
 #: How many ranked rows the carry asks for before it filters. The ranking
 #: limit truncated BEFORE raw material and retired pages were dropped, so a
@@ -1826,7 +1846,9 @@ def hot_profile(
        rather than reporting them as competing senses — and ranking inside it
        by edit time would drop half of a two-anchor answer on the very turn
        that asked to go on with it.
-    2. the freshness registry's last-edit time for the page. An edit is work.
+    2. the freshness registry's last-edit time for the page. An edit is work
+       — unless it fell in a write burst (`HOT_PROFILE_BURST_PAGES`), which
+       is a batch nobody chose, so a burst anchor has no edit time here.
     3. the memoized ACT-R activation for the page. A read is weaker evidence
        of work than an edit, so it orders what the edits could not separate.
 
@@ -1863,7 +1885,7 @@ def hot_profile(
     from . import usage
 
     nothing = (0, 0, 0.0)
-    heat: dict[str, tuple[int, int, float]] = {}
+    eligible: list[Any] = []
     for row in rows:
         path = str(getattr(row, "path", "") or "")
         if not path:
@@ -1872,11 +1894,17 @@ def hot_profile(
             continue
         if not _recent_reason_for(path, collections=collections):
             continue
+        eligible.append(row)
+    burst = _burst_paths(times)
+    heat: dict[str, tuple[int, int, float]] = {}
+    for row in eligible:
+        path = str(row.path)
         if working_set_resolve.anchor_ref(row) in continuity_refs:
             key = (1, 0, 0.0)
         else:
             activation = activations.get(usage.canon(path), activations.get(path))
-            key = (0, int(times.get(path, 0)), float(activation or 0.0))
+            edited = 0 if path in burst else int(times.get(path, 0))
+            key = (0, edited, float(activation or 0.0))
         heat[path] = max(key, heat.get(path, nothing))
     top: tuple[int, int, float] | None = None
     hot: list[str] = []
@@ -1894,6 +1922,36 @@ def hot_profile(
         top = key
         hot.append(path)
     return frozenset(hot)
+
+
+def _burst_paths(edited: Mapping[str, int]) -> frozenset[str]:
+    """The pages whose last edit fell in a write burst: at least
+    `HOT_PROFILE_BURST_PAGES` of them within `HOT_PROFILE_BURST_NS`,
+    navigation pages not counted.
+
+    One pass over the registry's edit times, sorted, with a sliding window:
+    no read, no walk — the map is the one the request already copied. A page
+    with no recorded edit is never in a burst.
+    """
+    from . import find_corpus
+
+    times = sorted(
+        (int(mtime), path)
+        for path, mtime in edited.items()
+        if int(mtime) > 0
+        and path.rsplit("/", 1)[-1].casefold() not in find_corpus.NAVIGATION_BASENAMES
+    )
+    burst: set[str] = set()
+    start = 0
+    marked = -1
+    for end in range(len(times)):
+        while times[end][0] - times[start][0] > HOT_PROFILE_BURST_NS:
+            start += 1
+        if end - start + 1 >= HOT_PROFILE_BURST_PAGES:
+            for index in range(max(start, marked + 1), end + 1):
+                burst.add(times[index][1])
+            marked = end
+    return frozenset(burst)
 
 
 def _activation_snapshot() -> Mapping[str, float]:

@@ -536,7 +536,12 @@ the request already holds — a previous packet's continuity references, the
 freshness registry's own last-edit times, and the maintained usage activation
 snapshot — ranked in a single declared order, ties broken by a stable identity.
 A previous packet's continuity references SHALL rank first and SHALL form one
-tier taken whole: that packet already resolved them together. The profile SHALL
+tier taken whole: that packet already resolved them together. A last-edit time
+that fell in a write burst — a declared number of pages or more, navigation
+pages not counted, edited within a declared short interval of one another —
+SHALL carry no edit signal, because a batch rewrites pages nobody chose; such
+an anchor SHALL be ordered by its reads alone, and a vault written in one batch
+with no reads SHALL have an empty profile rather than a menu. The profile SHALL
 be computed only for a referential turn. It SHALL NOT enumerate directories or
 raise any declared request-path ceiling, and SHALL read no page except, from the
 request's own page cache, the bounded few at its top, to exclude one that another
@@ -599,6 +604,13 @@ from recent work and not from the turn's own words.
 - **AND** a turn that names a compiled page is decided by the retrieval carry,
   and abstains `unresolved` when the carry cannot run, never falling back to
   the hot anchor
+
+#### Scenario: A maintenance batch does not pick the referent
+
+- **WHEN** the user last edited one anchor and a maintenance pass then rewrote
+  many other pages, anchors among them, within a few seconds
+- **THEN** a referential turn resolves the user's own last edit, not the page
+  the batch happened to write last
 
 #### Scenario: A previous packet's answer is resumed whole
 

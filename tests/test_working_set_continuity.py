@@ -1226,3 +1226,114 @@ def test_a_referential_turn_keeps_its_referent_past_recall_partials(
     assert [item["ref"] for item in resolved] == ["Knowledge Base/Products/Cargo Sled.md"]
     assert "recency" in resolved[0]["evidence"]
     assert packet["units"]
+
+
+# R-J: a write burst is a batch, not the user's work.
+
+
+def test_a_maintenance_batch_does_not_pick_the_referent(activation_vault: Path) -> None:
+    """The reviewer's p4: the user last edited Cargo Sled; a maintenance pass
+    then rewrote thirty pages. "continue" used to resolve whichever of those
+    the batch wrote last."""
+    import os
+    import time
+
+    from exomem import file_watcher, lexstore
+
+    sled = activation_vault / "Knowledge Base" / "Products" / "Cargo Sled.md"
+    # The user's own last edit, which also gave the page its identifier — so
+    # the batch below has no reason to rewrite it.
+    sled.write_text(
+        sled.read_text(encoding="utf-8").replace(
+            "---\n", "---\nexomem_id: 0b7c9e2a-4f1d-4c3a-9e8b-5a6d7c8e9f01\n", 1
+        ),
+        encoding="utf-8",
+    )
+    working_set_index.WorkingSetIndex(activation_vault).rebuild()
+    now = time.time()
+    for index, page in enumerate(sorted((activation_vault / "Knowledge Base").rglob("*.md"))):
+        os.utime(page, (now - 10_000 - index, now - 10_000 - index))
+    os.utime(sled, (now - 5, now - 5))
+    file_watcher.FileWatcher(activation_vault)._reconcile_once(seed=True)
+    lexstore.ensure_fresh(activation_vault)
+    runtime_module.reset_caches_for_tests()
+    before = commands.op_activate_context(activation_vault, turn="continue")
+    assert [
+        item["path"] for item in before["anchors"] if item["status"] == "resolved"
+    ] == ["Knowledge Base/Products/Cargo Sled.md"]
+
+    commands.op_maintain_memory(activation_vault, mode="backfill-ids", dry_run=False)
+    assert sled.stat().st_mtime < now - 1, "the batch must leave the user's page alone"
+    anchors = {row.path for row in working_set_index.WorkingSetIndex(activation_vault).anchors()}
+    rewritten = [
+        str(page.relative_to(activation_vault))
+        for page in (activation_vault / "Knowledge Base").rglob("*.md")
+        if page.stat().st_mtime > now - 1
+    ]
+    assert len(set(rewritten) & anchors) >= 3, "the batch must rewrite anchors, or this proves nothing"
+    file_watcher.FileWatcher(activation_vault)._reconcile_once(seed=True)
+    lexstore.ensure_fresh(activation_vault)
+    runtime_module.reset_caches_for_tests()
+
+    packet = commands.op_activate_context(activation_vault, turn="continue")
+
+    resolved = [item["path"] for item in packet["anchors"] if item["status"] == "resolved"]
+    assert resolved == ["Knowledge Base/Products/Cargo Sled.md"], packet["anchors"]
+
+
+def _one_batch(vault: Path, *, count: int) -> list[Path]:
+    """The whole vault written in one batch, `count` new person pages with it."""
+    import os
+    import time
+
+    from exomem import file_watcher
+
+    people = vault / "Knowledge Base" / "Entities" / "People"
+    pages = []
+    for index in range(count):
+        page = people / f"Batch Person {index:02d}.md"
+        page.write_text(
+            f"---\ntype: entity\nentity_type: person\nstatus: active\n---\n\n"
+            f"# Batch Person {index:02d}\n\n## Summary\n\nImported in bulk.\n",
+            encoding="utf-8",
+        )
+        pages.append(page)
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    stamp = time.time_ns()
+    for page in (vault / "Knowledge Base").rglob("*.md"):
+        os.utime(page, ns=(stamp, stamp))
+    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+    runtime_module.reset_caches_for_tests()
+    return pages
+
+
+def test_a_vault_written_in_one_batch_is_never_a_menu_of_its_pages(
+    activation_vault: Path,
+) -> None:
+    """The reviewer's p14: synthetic people written in one kernel tick tied on
+    every component and "continue" was answered with a five-way menu of
+    them. A batch carries no edit signal, so with no reads either the profile
+    falls through to nothing and the turn abstains."""
+    _one_batch(activation_vault, count=8)
+    rows = working_set_resolve_rows(activation_vault)
+
+    assert working_set.hot_profile(activation_vault, rows=rows) == frozenset()
+    packet = commands.op_activate_context(activation_vault, turn="continue")
+
+    assert packet["abstention"] == {"reason": "unresolved"}, packet["anchors"]
+    assert packet["ambiguity"] == []
+
+
+def test_a_batch_falls_through_to_what_was_read(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pages = _one_batch(activation_vault, count=8)
+    read = str(pages[3].relative_to(activation_vault))
+    monkeypatch.setattr(working_set, "_activation_snapshot", lambda: {read: 2.5})
+    rows = working_set_resolve_rows(activation_vault)
+
+    assert working_set.hot_profile(activation_vault, rows=rows) == frozenset({read})
+
+
+def working_set_resolve_rows(vault: Path):
+    return resolve_module.facts_from_rows(working_set_index.WorkingSetIndex(vault).anchors())
