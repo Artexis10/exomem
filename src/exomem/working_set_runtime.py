@@ -41,6 +41,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -231,12 +232,20 @@ def encode_continuity(
     generation: int,
     refs: Iterable[str],
     roles: Iterable[str],
+    minted_ns: int | None = None,
 ) -> str:
     """Base64 of the compact JSON payload. No secret, and no signature.
 
     There is nothing to sign: every field is re-checked against the serving
     state, and a forged token can at most name refs the current turn already
-    reached by a contact kind.
+    reached by a contact kind — or, on a turn that only points back, refs the
+    vault still holds as anchors, which is what the turn asked for.
+
+    `minted_ns` is when the packet was served, wall clock. It is what lets a
+    later referential turn tell a token that is still the latest thing that
+    happened from one the user has since moved on from (`working_set.
+    hot_profile`). Omitted, the token reads as it did before the field
+    existed, and its refs lead the profile unconditionally.
     """
     payload = {
         "v": CONTINUITY_VERSION,
@@ -252,6 +261,8 @@ def encode_continuity(
         # deliberately kept, not dead weight to be tidied away.
         "roles": [str(role) for role in roles if str(role)],
     }
+    if minted_ns is not None:
+        payload["minted_ns"] = int(minted_ns)
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
     # `surrogatepass`, symmetrically with `decode_continuity`. A vault path reaches
     # Python through filesystem decoding, so a filename with invalid UTF-8 arrives
@@ -310,13 +321,30 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
         generation = int(payload.get("generation") or 0)
     except (TypeError, ValueError, ArithmeticError):
         return None
+    # Optional, and never a reason to refuse: a token minted before the field
+    # existed has none, and a malformed one is read as absent, which is the
+    # older token's behaviour rather than a stale token's.
+    minted = payload.get("minted_ns")
+    minted_ns = minted if isinstance(minted, int) and not isinstance(minted, bool) and minted > 0 else None
     return {
         "identity": identity,
         "roles_hash": roles_hash,
         "generation": generation,
         "refs": [ref for ref in refs if isinstance(ref, str) and ref],
         "roles": [role for role in roles if isinstance(role, str) and role],
+        "minted_ns": minted_ns,
     }
+
+
+def continuity_minted_ns(token: str | None) -> int | None:
+    """When the packet behind `token` was served, or `None` when the token
+    does not say (minted before the field existed) or cannot be read. Never
+    raises: the argument is a caller's string."""
+    try:
+        payload = decode_continuity(token)
+    except Exception:  # noqa: BLE001 - a caller's string must not fail the request
+        return None
+    return payload.get("minted_ns") if payload else None
 
 
 def read_continuity(
@@ -393,6 +421,7 @@ def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
             generation=int(generation.get("index_generation") or 0),
             refs=refs,
             roles=[role for role in roles if role],
+            minted_ns=time.time_ns(),
         )
     except Exception:  # noqa: BLE001 - a token is an optimisation, never a promise
         log.debug("continuity token could not be minted; serving without", exc_info=True)
@@ -996,6 +1025,7 @@ def serve(
             freshness_key=_key_text(freshness_key),
             freshness_snapshot=freshness_snapshot,
             continuity_refs=continuity_refs,
+            continuity_minted_ns=continuity_minted_ns(continuity) if continuity_refs else None,
             anchor=anchor,
             lexical_seconds=lexical_seconds,
         )

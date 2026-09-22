@@ -1337,3 +1337,106 @@ def test_a_batch_falls_through_to_what_was_read(
 
 def working_set_resolve_rows(vault: Path):
     return resolve_module.facts_from_rows(working_set_index.WorkingSetIndex(vault).anchors())
+
+
+# R-M: the continuity tier leads only while it is the latest thing that happened.
+
+
+def test_a_token_says_when_it_was_minted(activation_vault: Path) -> None:
+    import time
+
+    before = time.time_ns()
+    served = commands.op_activate_context(activation_vault, turn=TURN)
+    after = time.time_ns()
+
+    minted = runtime_module.continuity_minted_ns(served["continuity"])
+
+    assert minted is not None and before <= minted <= after
+    assert runtime_module.decode_continuity(served["continuity"])["minted_ns"] == minted
+
+
+def test_a_token_minted_before_the_field_existed_still_reads() -> None:
+    token = _token()
+
+    assert runtime_module.decode_continuity(token)["minted_ns"] is None
+    assert runtime_module.continuity_minted_ns(token) is None
+    assert runtime_module.continuity_minted_ns("!!! not a token !!!") is None
+
+
+def _heat_after(vault: Path, *, minted_offset_s: float | None) -> frozenset[str]:
+    """Marit carried by a token; Cargo Sled edited once, alone, at `now`; the
+    token minted `minted_offset_s` seconds relative to that edit."""
+    import os
+    import time
+
+    rows = working_set_resolve_rows(vault)
+    now = time.time()
+    for index, page in enumerate(sorted((vault / "Knowledge Base").rglob("*.md"))):
+        os.utime(page, (now - 10_000 - index, now - 10_000 - index))
+    os.utime(vault / "Knowledge Base" / "Products" / "Cargo Sled.md", (now, now))
+    from exomem import file_watcher
+
+    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+    marit = next(row for row in rows if row.path.endswith("Marit Solheim.md"))
+    minted = None if minted_offset_s is None else int((now + minted_offset_s) * 1e9)
+    return working_set.hot_profile(
+        vault,
+        rows=rows,
+        continuity_refs=frozenset({resolve_module.anchor_ref(marit)}),
+        continuity_minted_ns=minted,
+    )
+
+
+def test_an_edit_after_the_token_unseats_the_continuity_tier(activation_vault: Path) -> None:
+    """The user moved on after that packet: its refs no longer lead."""
+    assert _heat_after(activation_vault, minted_offset_s=-60) == frozenset(
+        {"Knowledge Base/Products/Cargo Sled.md"}
+    )
+
+
+def test_an_edit_before_the_token_leaves_the_continuity_tier_leading(
+    activation_vault: Path,
+) -> None:
+    assert _heat_after(activation_vault, minted_offset_s=60) == frozenset(
+        {"Knowledge Base/Entities/People/Marit Solheim.md"}
+    )
+
+
+def test_a_token_that_does_not_say_when_it_was_minted_leads(activation_vault: Path) -> None:
+    assert _heat_after(activation_vault, minted_offset_s=None) == frozenset(
+        {"Knowledge Base/Entities/People/Marit Solheim.md"}
+    )
+
+
+def test_continue_after_moving_on_follows_the_new_work_not_the_old_token(
+    activation_vault: Path,
+) -> None:
+    """The reviewer's sticky-token question, through the door: the hook keeps
+    the last token for the session, so "continue" after the user went and
+    edited something else must follow the edit."""
+    import os
+    import time
+
+    from exomem import file_watcher, lexstore
+
+    now = time.time()
+    for index, page in enumerate(sorted((activation_vault / "Knowledge Base").rglob("*.md"))):
+        os.utime(page, (now - 10_000 - index, now - 10_000 - index))
+    file_watcher.FileWatcher(activation_vault)._reconcile_once(seed=True)
+    lexstore.ensure_fresh(activation_vault)
+    runtime_module.reset_caches_for_tests()
+    served = commands.op_activate_context(activation_vault, turn=TURN)
+    assert "Knowledge Base/Systems/Depot Ledger.md" not in _resolved_refs(served)
+    later = time.time() + 5
+    ledger = activation_vault / "Knowledge Base" / "Systems" / "Depot Ledger.md"
+    os.utime(ledger, (later, later))
+    file_watcher.FileWatcher(activation_vault)._reconcile_once(seed=True)
+    lexstore.ensure_fresh(activation_vault)
+    runtime_module.reset_caches_for_tests()
+
+    packet = commands.op_activate_context(
+        activation_vault, turn="continue", continuity=served["continuity"]
+    )
+
+    resolved = [item["path"] for item in packet["anchors"] if item["status"] == "resolved"]
+    assert resolved == ["Knowledge Base/Systems/Depot Ledger.md"], packet["anchors"]

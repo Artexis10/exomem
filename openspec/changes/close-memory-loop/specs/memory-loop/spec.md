@@ -536,7 +536,9 @@ the request already holds — a previous packet's continuity references, the
 freshness registry's own last-edit times, and the maintained usage activation
 snapshot — ranked in a single declared order, ties broken by a stable identity.
 A previous packet's continuity references SHALL rank first and SHALL form one
-tier taken whole: that packet already resolved them together. A last-edit time
+tier taken whole: that packet already resolved them together — but only while
+no anchor outside them has a last edit, not in a write burst, later than the
+time that packet was served. A last-edit time
 that fell in a write burst — a declared number of pages or more, navigation
 pages not counted, edited within a declared short interval of one another —
 SHALL carry no edit signal, because a batch rewrites pages nobody chose; such

@@ -5,7 +5,8 @@
 served after the egress guard, encoding the refs of the anchors that packet RESOLVED
 (never the refs of anchors it only listed as `partial`), the selected roles,
 the activation index identity (the sidecar's own identity token, which differs per
-vault and per rebuilt sidecar), the role-registry hash and the index generation, and
+vault and per rebuilt sidecar), the role-registry hash, the index generation and the
+time the packet was served, and
 SHALL accept it back as an optional `continuity` argument. A token SHALL never encode
 a ref the guard removed. A valid token SHALL contribute the `continuity` evidence
 kind, a qualifier, to the anchors it names that still exist in the current index;
@@ -19,7 +20,12 @@ anchor again, even by recall alone, is continuing a subject rather than discover
 one. The token's anchors SHALL also be the first tier of the recency hot profile
 (memory-loop: "A turn that names nothing MAY resolve to the hottest recent anchor"), so
 on a REFERENTIAL turn that names nothing they MAY supply the referent and resolve on
-`recency`; on any other turn the token SHALL only qualify anchors the turn reached. A
+`recency`; on any other turn the token SHALL only qualify anchors the turn reached.
+That tier SHALL lead only while it is the latest thing that happened: once an anchor
+outside the token's refs has a last edit, not in a write burst, later than the time the
+token was served, the token's anchors SHALL be ranked like any other anchor. A token
+that does not say when it was served, or says it unreadably, SHALL lead as before and
+SHALL NOT be reported `stale` for that reason. A
 token whose index identity
 or registry hash does not match the serving state, or that cannot be decoded, SHALL be
 ignored and reported as `generation.continuity = "stale"`; a token minted under an
@@ -52,6 +58,11 @@ packet. The server SHALL keep no per-conversation state.
 - **THEN** that anchor resolves with evidence `[continuity, recency]` and its role
   lanes serve its material, and the same turn without a token and with no recent
   edit or read still abstains `unresolved`
+
+#### Scenario: A referential turn follows work done after the token
+- **WHEN** a referential turn passes the token of an earlier packet, and since that
+  packet was served the user edited a different anchor on its own
+- **THEN** that edited anchor is the referent, not the token's anchors
 
 #### Scenario: A token from another index is ignored
 - **WHEN** a token was minted by a different vault's index, or under a different

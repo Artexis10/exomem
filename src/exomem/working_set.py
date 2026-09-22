@@ -1507,6 +1507,7 @@ def compile_packet(
     freshness_key: str = "",
     freshness_snapshot: Any = None,
     continuity_refs: frozenset[str] = frozenset(),
+    continuity_minted_ns: int | None = None,
     anchor: str | None = None,
     lexical_seconds: float = 0.0,
 ) -> dict[str, Any]:
@@ -1583,7 +1584,11 @@ def compile_packet(
                 # as it did before the prior could supply a referent.
                 hot_paths=(
                     hot_profile(
-                        root, rows=rows, continuity_refs=continuity_refs, mtimes=mtimes
+                        root,
+                        rows=rows,
+                        continuity_refs=continuity_refs,
+                        continuity_minted_ns=continuity_minted_ns,
+                        mtimes=mtimes,
                     )
                     if analysis.referential
                     else frozenset()
@@ -1828,6 +1833,7 @@ def hot_profile(
     *,
     rows: Sequence[Any],
     continuity_refs: frozenset[str] = frozenset(),
+    continuity_minted_ns: int | None = None,
     mtimes: Mapping[str, int] | None = None,
     limit: int = HOT_PROFILE_K,
 ) -> frozenset[str]:
@@ -1845,7 +1851,11 @@ def hot_profile(
        decided those anchors belong together — it resolved them side by side
        rather than reporting them as competing senses — and ranking inside it
        by edit time would drop half of a two-anchor answer on the very turn
-       that asked to go on with it.
+       that asked to go on with it. It leads only while it is still the
+       latest thing that happened: once an anchor outside it has an edit,
+       not in a burst, later than `continuity_minted_ns`, the user has moved
+       on since that packet, and its refs are ranked like any other anchor.
+       A token that does not say when it was minted leads, as it always did.
     2. the freshness registry's last-edit time for the page. An edit is work
        — unless it fell in a write burst (`HOT_PROFILE_BURST_PAGES`), which
        is a batch nobody chose, so a burst anchor has no edit time here.
@@ -1896,10 +1906,16 @@ def hot_profile(
             continue
         eligible.append(row)
     burst = _burst_paths(times)
+    leads = continuity_minted_ns is None or not any(
+        working_set_resolve.anchor_ref(row) not in continuity_refs
+        and str(row.path) not in burst
+        and int(times.get(str(row.path), 0)) > continuity_minted_ns
+        for row in eligible
+    )
     heat: dict[str, tuple[int, int, float]] = {}
     for row in eligible:
         path = str(row.path)
-        if working_set_resolve.anchor_ref(row) in continuity_refs:
+        if leads and working_set_resolve.anchor_ref(row) in continuity_refs:
             key = (1, 0, 0.0)
         else:
             activation = activations.get(usage.canon(path), activations.get(path))
