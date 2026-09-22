@@ -913,6 +913,43 @@ def clear_publication_refusal(vault_root: Path) -> None:
         _PUBLICATION_REFUSALS.pop(_publication_memo_key(vault_root), None)
 
 
+def _observe_full_marker(vault_root: Path) -> tuple[int, int] | None:
+    """The whole-vault debt standing before a rebuild attempt samples its epoch."""
+    try:
+        return deferred_index.graph_full_rebuild_observation(vault_root)
+    except Exception:  # noqa: BLE001 - an unread marker is simply not retired
+        return None
+
+
+def _retire_covered_full_marker(vault_root: Path, observed: tuple[int, int] | None) -> None:
+    """Retire the whole-vault debt a just-published rebuild provably paid.
+
+    Called after the publication hold and the owner claim are released. The
+    published ticket proved that no canonical batch committed and the recall
+    projection did not move between the attempt's epoch sample and the
+    replacement, and `observed` was read before that sample, so the new sidecar
+    covers every change that debt stood for. Without this, a coordinator or
+    recovery publication left the marker standing and the drain paid for the
+    same rebuild a second time. Debt raised at any point after the observation
+    -- during the pass or after the publication -- moves the marker's raise
+    count, so the retirement declines and that debt survives. Never raises: a
+    retained marker costs one redundant rebuild, never lost debt.
+    """
+    if observed is not None:
+        try:
+            retired = deferred_index.retire_observed_graph_full_rebuild(vault_root, observed)
+        except Exception:  # noqa: BLE001 - the marker stays, so the debt stays
+            log.warning(
+                "graph publication could not retire its covered full marker", exc_info=True
+            )
+        else:
+            if retired:
+                log.info(
+                    "graph rebuild publication retired the full marker it covers marker=%s",
+                    observed[0],
+                )
+
+
 #: Every reason `recover_suspended_graph` can decline, as a stable token.
 RECOVERY_DECLINE_EXTERNAL_PENDING = "external_change_pending"
 RECOVERY_DECLINE_GRAPH_DISABLED = "graph_disabled"
@@ -2644,8 +2681,13 @@ class EpistemicGraphIndex:
         _reap_preserved_temporaries(
             live, self.vault_root, state_root=self._mutation_coordinator.state_root
         )
+        published: dict[str, int] | None = None
+        paid_marker: tuple[int, int] | None = None
         while attempts < REBUILD_PUBLICATION_ATTEMPTS:
             attempts += 1
+            # Read before this attempt samples its epoch: whole-vault debt that
+            # already exists now is paid by the publication this attempt makes.
+            covered_marker = _observe_full_marker(self.vault_root)
             prepared_recall = freshness.prepare_recall_publication(self.vault_root, "vault")
             if prepared_recall is None:
                 self._reconcile_recall_publication()
@@ -2817,7 +2859,12 @@ class EpistemicGraphIndex:
                             attempts,
                             required.generation if required is not None else None,
                         )
-                        return report
+                        # Leave the hold and the owner claim before paying the
+                        # debt: the hold stays bounded to its ticket checks and
+                        # the replacement.
+                        published = report
+                        paid_marker = covered_marker
+                        break
                     finally:
                         _release_publication_hold(publication_hold)
             finally:
@@ -2848,6 +2895,9 @@ class EpistemicGraphIndex:
                 _reap_preserved_temporaries(
                     live, self.vault_root, state_root=self._mutation_coordinator.state_root
                 )
+        if published is not None:
+            _retire_covered_full_marker(self.vault_root, paid_marker)
+            return published
         if epoch_error is not None:
             raise epoch_error
         # Exhausting the publication attempts for any reason other than a proven

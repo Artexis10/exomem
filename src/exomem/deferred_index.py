@@ -23,6 +23,10 @@ _SEMANTIC_UPSERTS_GENERATION_KEY = "semantic_upserts_generation"
 _GRAPH_UPSERTS_GENERATION_KEY = "graph_upserts_generation"
 _GRAPH_FULL_REBUILD_KEY = "graph_full_rebuild_generation"
 _GRAPH_FULL_REBUILD_SEQUENCE_KEY = "graph_full_rebuild_sequence"
+#: Counts every raise of whole-vault debt, including a repeat that leaves the
+#: marker's value unchanged, so a retirement can tell "no new debt" from "new
+#: debt at the same value".
+_GRAPH_FULL_REBUILD_MARKS_KEY = "graph_full_rebuild_marks"
 _PENDING_VISIBILITY_GENERATION_KEY = "pending_visibility_generation:v1"
 
 #: The queues this store carries, and the tables behind them.  The graph queue
@@ -1053,6 +1057,7 @@ def mark_graph_full_rebuild(vault_root: Path, *, generation: int) -> None:
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (_GRAPH_FULL_REBUILD_SEQUENCE_KEY, str(max(sequence, recorded))),
             )
+            _count_graph_full_rebuild_mark_locked(conn)
         except Exception:
             conn.rollback()
             raise
@@ -1096,6 +1101,7 @@ def advance_graph_full_rebuild(vault_root: Path, *, after_generation: int = 0) -
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (_GRAPH_FULL_REBUILD_SEQUENCE_KEY, str(generation)),
             )
+            _count_graph_full_rebuild_mark_locked(conn)
         except Exception:
             conn.rollback()
             raise
@@ -1104,6 +1110,100 @@ def advance_graph_full_rebuild(vault_root: Path, *, after_generation: int = 0) -
         conn.close()
     _note_graph_debt()
     return generation
+
+
+def _count_graph_full_rebuild_mark_locked(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "INSERT INTO maintenance_state(key, value) VALUES (?, '1') "
+        "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1",
+        (_GRAPH_FULL_REBUILD_MARKS_KEY,),
+    )
+
+
+def graph_full_rebuild_observation(vault_root: Path) -> tuple[int, int] | None:
+    """The standing marker and its raise count, read together, or None.
+
+    What a whole-vault pass records before it samples its epoch, so that its
+    publication can retire exactly the debt that existed then and nothing
+    raised after -- see `retire_observed_graph_full_rebuild`.
+    """
+    if not store_path(vault_root).exists():
+        return None
+    try:
+        conn = _connect_readonly(vault_root)
+        try:
+            rows = dict(
+                conn.execute(
+                    "SELECT key, value FROM maintenance_state WHERE key IN (?, ?)",
+                    (_GRAPH_FULL_REBUILD_KEY, _GRAPH_FULL_REBUILD_MARKS_KEY),
+                ).fetchall()
+            )
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return None
+    if _GRAPH_FULL_REBUILD_KEY not in rows:
+        return None
+    try:
+        return int(rows[_GRAPH_FULL_REBUILD_KEY]), int(rows.get(_GRAPH_FULL_REBUILD_MARKS_KEY, 0))
+    except (TypeError, ValueError):
+        return None
+
+
+def retire_observed_graph_full_rebuild(
+    vault_root: Path, observation: tuple[int, int]
+) -> bool:
+    """Retire the marker only if no debt was raised since `observation`.
+
+    Stricter than `clear_graph_full_rebuild`'s value compare-and-swap: a repeat
+    raise keeps the marker's value but moves its raise count, so debt a batch
+    raised while a pass ran survives even when it did not change the value.
+    That is what lets a publication retire its debt after leaving the canonical
+    boundary rather than under it.
+    """
+    if not store_path(vault_root).exists():
+        return False
+    marker, marks = observation
+    conn = _connect(vault_root, create=True)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = dict(
+                conn.execute(
+                    "SELECT key, value FROM maintenance_state WHERE key IN (?, ?, ?)",
+                    (
+                        _GRAPH_FULL_REBUILD_KEY,
+                        _GRAPH_FULL_REBUILD_SEQUENCE_KEY,
+                        _GRAPH_FULL_REBUILD_MARKS_KEY,
+                    ),
+                ).fetchall()
+            )
+            if (
+                _GRAPH_FULL_REBUILD_KEY not in rows
+                or int(rows[_GRAPH_FULL_REBUILD_KEY]) != marker
+                or int(rows.get(_GRAPH_FULL_REBUILD_MARKS_KEY, 0)) != marks
+            ):
+                conn.commit()
+                return False
+            sequence = int(rows.get(_GRAPH_FULL_REBUILD_SEQUENCE_KEY, 0))
+            # The same persistence `clear_graph_full_rebuild` makes: later debt
+            # must advance past the generation retired here.
+            conn.execute(
+                "INSERT INTO maintenance_state(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_GRAPH_FULL_REBUILD_SEQUENCE_KEY, str(max(sequence, marker))),
+            )
+            changed = conn.execute(
+                "DELETE FROM maintenance_state WHERE key = ?",
+                (_GRAPH_FULL_REBUILD_KEY,),
+            ).rowcount
+        except Exception:
+            conn.rollback()
+            raise
+        conn.commit()
+        return bool(changed)
+    finally:
+        conn.close()
 
 
 def graph_full_rebuild_pending(vault_root: Path) -> int | None:
