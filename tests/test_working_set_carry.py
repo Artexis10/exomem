@@ -1400,3 +1400,9 @@ def test_the_hook_renders_the_named_pages_as_its_menu(vault: Path) -> None:
     assert "kelvane-throughput.md" in block, block
     assert "murran-dispatch.md" in block, block
     assert nudge._block_keeps_the_reminder(packet) is True
+    # And the remedy it offers is the one that works on a page that is not
+    # an anchor of this index: `anchor=` raises INVALID_ANCHOR for these
+    # refs, `read_memory` returns the page.
+    closing = block.splitlines()[-1]
+    assert "read_memory" in closing, closing
+    assert "`anchor`" not in closing, closing

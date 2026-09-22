@@ -147,6 +147,17 @@ _WORKING_SET_UNRESOLVED_LINE = (
     "None of these resolved on the turn's words alone. "
     + _WORKING_SET_ANCHOR_INSTRUCTION
 )
+#: The same menu for pages the turn NAMED, which need a different remedy.
+#: `anchor=` selects a sense of an AMBIGUOUS turn from the activation
+#: index's own anchors, and a named page is not one of those: measured,
+#: `activate_context(anchor="<that page>")` raises INVALID_ANCHOR, while
+#: `read_memory` on the identical ref returns the page. An instruction that
+#: does not work is worse than none — the agent spends a call, gets an
+#: error, and has no way to tell that the other remedy would have worked.
+_WORKING_SET_NAMED_LINE = (
+    "The turn named more than one page, so none was carried. "
+    "Read the one you mean with `read_memory`."
+)
 # Evidence kinds meaning the TURN'S OWN WORDS reached the anchor, as against
 # recall having surfaced it. This is the whole filter on an `unresolved` block: a
 # turn about a Planning item or a Records collection routinely ends `unresolved`
@@ -1123,18 +1134,36 @@ def _format_unresolved_block(packet: dict, max_chars: int) -> str:
     A candidate reached ONLY by retrieval is not rendered. Recall surfaced it, the
     turn did not name it, and a menu of pages the user never mentioned is exactly
     the hit list this compiler exists to replace.
+
+    The closing line depends on what is being listed, because the two cases
+    need different remedies. A `partial` candidate IS an anchor of the
+    activation index, so `anchor=` selects it. A `retrieval_named` page is
+    not, and asking for it that way fails; `read_memory` on the same ref is
+    what works. A packet carries one kind or the other, never both: the
+    named list is built by the carry's own abstention, which reports the
+    pages it named and nothing else.
     """
+    candidates = _worded_candidates(packet)
     lines = [
         _packet_line(
             str(anchor.get("kind") or "anchor"),
             str(anchor.get("title") or anchor.get("ref") or ""),
             str(anchor.get("ref") or ""),
         )
-        for anchor in _worded_candidates(packet)
+        for anchor in candidates
     ]
-    reserve = len(_WORKING_SET_UNRESOLVED_LINE) + 1
+    closing = (
+        _WORKING_SET_NAMED_LINE
+        if candidates
+        and all(
+            str(anchor.get("status") or "") == _RETRIEVAL_NAMED_STATUS
+            for anchor in candidates
+        )
+        else _WORKING_SET_UNRESOLVED_LINE
+    )
+    reserve = len(closing) + 1
     block = _bounded_block(lines, max_chars - reserve)
-    return f"{block}\n{_WORKING_SET_UNRESOLVED_LINE}" if block else ""
+    return f"{block}\n{closing}" if block else ""
 
 
 def _abstention_reason(packet: dict) -> str:

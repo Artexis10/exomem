@@ -5947,8 +5947,9 @@ def op_activate_context(
     When a turn names SEVERAL pages this way, nothing is carried and the packet
     abstains `unresolved`, listing them under `anchors[]` at `status:
     "retrieval_named"`. That is not `ambiguity`, which reports two anchors that
-    both resolved: nothing resolved here. Name one of those refs back in `anchor`,
-    or read it directly, to get its material.
+    both resolved: nothing resolved here, and those pages are not anchors of this
+    index, so `anchor` does not take them. Read the one you mean with
+    `read_memory`, passing the ref exactly as listed.
 
     Use `ask_memory` instead when you already know what you are looking for; use
     this when you do not, and follow it with `read_memory` on whatever ref the
