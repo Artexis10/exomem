@@ -38,7 +38,7 @@ def _record(
     vault: Path,
     source_schema: schema_module.SourceSchema,
     *,
-    slug: str = "harbor-lamp-purchase-epa1a1a1a1a1a1-20260518t091233-dddddddd",
+    slug: str = "harbor-lamp-purchase-epa1a1a1a1a1a1-20260518t091233000000-dddddddd",
     supersede: tuple[str, ...] = (),
     **fields: object,
 ) -> add_module.AddResult:
@@ -68,7 +68,7 @@ def test_the_episode_kind_routes_to_its_own_sources_folder(
 
     assert result.path == (
         "Knowledge Base/Sources/Episodes/2026-05-18-"
-        "harbor-lamp-purchase-epa1a1a1a1a1a1-20260518t091233-dddddddd.md"
+        "harbor-lamp-purchase-epa1a1a1a1a1a1-20260518t091233000000-dddddddd.md"
     )
     assert st.core_taxonomy().resolve_kind("episode").path_label == "Episodes"
 
@@ -193,7 +193,7 @@ def test_a_new_revision_marks_the_previous_one_superseded_in_the_same_batch(
     second = _record(
         vault,
         source_schema,
-        slug="harbor-lamp-purchase-epa1a1a1a1a1a1-20260518t101233-eeeeeeee",
+        slug="harbor-lamp-purchase-epa1a1a1a1a1a1-20260518t101233000000-eeeeeeee",
         supersede=(first.path,),
         episode_digest="e" * 64,
     )

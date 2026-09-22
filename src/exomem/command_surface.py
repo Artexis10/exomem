@@ -218,6 +218,7 @@ GUARDED_WRITE_FIELDS: dict[str, tuple[str, ...]] = {
     "manage_memory_file": ("content",),
     "record_memory": ("manifest_text", "body"),
     "plan_memory": ("manifest_text", "body"),
+    "episode_memory": ("subject", "summary"),
 }
 
 

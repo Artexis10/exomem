@@ -65,11 +65,11 @@ def test_the_digest_and_slug_are_deterministic() -> None:
     assert first.slug == second.slug
     assert first.slug == (
         f"harbor-lamp-purchase-ep{hashlib.sha256(KEY.encode()).hexdigest()[:12]}"
-        f"-20260518t091233-{first.digest[:8]}"
+        f"-20260518t091233000000-{first.digest[:8]}"
     )
     assert capture.filename_parts(f"2026-05-18-{first.slug}.md") == (
         hashlib.sha256(KEY.encode()).hexdigest()[:12],
-        "20260518t091233",
+        "20260518t091233000000",
         first.digest[:8],
     )
 

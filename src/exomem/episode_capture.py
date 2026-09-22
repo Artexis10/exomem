@@ -56,9 +56,12 @@ _REFUSED_FORMAT_CHARS = frozenset(
 )
 
 #: `<subject>-ep<group>-<order>-<digest>[-n].md`: the episode key's group, the
-#: UTC recording time (lexicographically ordered), and the recap digest.
+#: UTC recording time to the microsecond (lexicographically ordered), and the
+#: recap digest. The order token is what picks an episode's newest revision
+#: without a read: retiring an older revision rewrites its frontmatter, so
+#: modification time cannot.
 FILENAME_RE = re.compile(
-    r"-ep(?P<group>[0-9a-f]{12})-(?P<order>\d{8}t\d{6})-(?P<digest>[0-9a-f]{8})(?:-\d+)?\.md$"
+    r"-ep(?P<group>[0-9a-f]{12})-(?P<order>\d{8}t\d{12})-(?P<digest>[0-9a-f]{8})(?:-\d+)?\.md$"
 )
 
 _SECTIONS: tuple[tuple[str, str], ...] = (
@@ -236,7 +239,7 @@ def prepare(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
-    order = when.astimezone(dt.UTC).strftime("%Y%m%dt%H%M%S")
+    order = when.astimezone(dt.UTC).strftime("%Y%m%dt%H%M%S%f")
     subject_slug = slugify_title(title, max_length=_SUBJECT_SLUG_CHARS)
     if subject_slug == "untitled" and "untitled" not in title.casefold():
         subject_slug = _FALLBACK_SLUG

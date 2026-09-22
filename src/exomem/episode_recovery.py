@@ -316,6 +316,30 @@ class EpisodeInputOwner:
                 raise _error("EPISODE_NOT_FOUND", "episode is unavailable") from error
             raise
 
+    def input_history(self, key: str) -> dict[str, Any]:
+        """Each input revision's recorded recovery class, and the latest input ref.
+
+        Keyed by the episode key rather than its identity, for a caller that
+        holds only the key. The recovery class is what the bind recorded, not
+        a current release decision; `recover_input` makes that one.
+        """
+        store = self._store()
+        try:
+            current = store.read(model.episode_id(key))
+        except curation.CurationError as error:
+            if error.code == "CURATION_RUN_NOT_FOUND":
+                raise _error("EPISODE_NOT_FOUND", "episode is unavailable") from error
+            raise
+        revisions = current["state"]["input_revisions"]
+        return {
+            "episode_id": current["state"]["episode_id"],
+            "revisions": [
+                {"revision": item["revision"], "recovery": item["recovery"]}
+                for item in revisions
+            ],
+            "latest_reference": revisions[-1]["evidence"].get("reference"),
+        }
+
     def recover_input(
         self, episode_id: str, *, input_revision: int | None = None
     ) -> dict[str, Any]:

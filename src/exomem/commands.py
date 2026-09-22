@@ -67,6 +67,7 @@ from . import edit_operations as edit_operations_module
 from . import entity_candidates as entity_candidates_module
 from . import entity_types as entity_types_module
 from . import envelope as envelope_module
+from . import episode_memory as episode_memory_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
 from . import find as find_module
@@ -7103,6 +7104,81 @@ def op_capture_source(
     return out
 
 
+def op_episode_memory(
+    vault_root: Path,
+    source_schema: object,
+    action: Literal["record", "inspect"],
+    episode: str | None = None,
+    subject: str | None = None,
+    summary: str | None = None,
+    worked_on: list[str] | None = None,
+    decided: list[str] | None = None,
+    open: list[str] | None = None,  # noqa: A002 - the recap's own field name
+    said: list[str] | None = None,
+    about: list[str] | None = None,
+    client: str | None = None,
+) -> dict:
+    """Record what a conversation worked on, decided and left open, for the next session on any client.
+
+    Call `record` once when a conversation reaches a decision or a stopping
+    point, and skip it when nothing durable happened. You write the recap:
+    short one-line items, never a transcript. It is kept as a bounded Source
+    under `Sources/Episodes/`, and the newest recap of each conversation leads
+    the `recent_context` block `activate_context` serves on every client.
+    Recording again under the same `episode` with changed content adds a
+    revision and retires the previous one; an identical retry writes nothing.
+
+    Args:
+        action: `record` writes a recap revision; `inspect` reads this
+            episode's revision history back.
+        episode: The `ep-` key a previous record returned, or the one a hook
+            named. Omit it on a conversation's first record and reuse the
+            returned key for the rest of that conversation. Required for
+            `inspect`.
+        subject: What the conversation was about, one line, at most 120
+            characters.
+        summary: One line on where it stands, at most 180 characters.
+        worked_on: Up to 5 one-line items, 200 characters each.
+        decided: Up to 5 one-line items, 200 characters each.
+        open: Up to 5 one-line items left open, 200 characters each. At least
+            one of `worked_on`, `decided` or `open` is required.
+        said: Up to 3 verbatim user statements worth keeping, 300 characters
+            each.
+        about: Up to 3 `exomem://` refs of pages the conversation concerned.
+            Refs you cannot see are dropped and counted in `about_skipped`.
+        client: Optional lowercase client label, e.g. `claude-code` or
+            `chatgpt`.
+
+    Returns: record -> {episode, revision, source: {ref, path, title},
+        idempotent, recovery, ledger, about_skipped}; inspect -> {episode,
+        revisions: [{revision, recovery}], latest_source_ref,
+        coverage_current}. Newlines, credential-shaped text and anything over
+        a cap are refused with nothing written.
+    """
+    if action == "inspect":
+        if any(
+            value is not None
+            for value in (subject, summary, worked_on, decided, open, said, about, client)
+        ):
+            raise ValueError("EPISODE_INVALID: inspect takes only an episode key")
+        return episode_memory_module.inspect(vault_root, episode=episode)
+    if action != "record":
+        raise ValueError("EPISODE_INVALID: action must be record or inspect")
+    return episode_memory_module.record(
+        vault_root,
+        source_schema,
+        episode=episode,
+        subject=subject,
+        summary=summary,
+        worked_on=worked_on,
+        decided=decided,
+        open=open,
+        said=said,
+        about=about,
+        client=client,
+    )
+
+
 def op_compile_source(
     vault_root: Path,
     sources: list[str],
@@ -11083,6 +11159,7 @@ _PRODUCT_METADATA: dict[str, dict] = {
         "first_run_safe": False,
     },
     "activate_context": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
+    "episode_memory": {"surface": "primary", "actions": ("save",), "first_run_safe": False},
 }
 _MCRC = frozenset({"mcp", "rest", "cli"})
 _RC = frozenset({"rest", "cli"})
@@ -11133,6 +11210,7 @@ _SPEC: tuple[tuple, ...] = (
     ("plan_memory", plan_memory_module.plan_memory, 1, True, False, None, _MCRC),
     ("get_video_frames", op_get_video_frames, 2, False, False, None, _M),
     ("activate_context", op_activate_context, 1, False, False, "turn", _MCRC),
+    ("episode_memory", op_episode_memory, 1, True, True, None, _MCRC),
 )
 
 
@@ -11303,6 +11381,17 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("add", "propose_compilation"),
+        {"surface": "primary", "actions": ("save",), "first_run_safe": False},
+    ),
+    (
+        "episode_memory",
+        op_episode_memory,
+        1,
+        True,
+        True,
+        None,
+        _MCRC,
+        ("episode_memory",),
         {"surface": "primary", "actions": ("save",), "first_run_safe": False},
     ),
     (
@@ -11728,6 +11817,20 @@ HOSTED_SURFACE_EXCLUSIONS = MappingProxyType(
                 lifted_when=(
                     "a new hosted profile admits the context compiler and carries its "
                     "own command-surface digest and candidate definition"
+                ),
+            ),
+            HostedSurfaceExclusion(
+                command="episode_memory",
+                reason=(
+                    "The hosted profiles pin their ordered command membership, and v5 "
+                    "retains v4's. Publishing this tool on hosted would move both "
+                    "profiles' command_surface_sha256 under an unchanged profile ID. Its "
+                    "reader, activate_context, is itself excluded from hosted, so a "
+                    "hosted recap would be written where no hosted client reads it back."
+                ),
+                lifted_when=(
+                    "a new hosted profile admits the context compiler together with "
+                    "episode recording and carries its own command-surface digest"
                 ),
             ),
             HostedSurfaceExclusion(
