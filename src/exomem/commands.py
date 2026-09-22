@@ -5891,12 +5891,15 @@ def _with_due_state(
 ACTIVATE_RETRIEVAL_LIMIT = 8
 
 
-#: The one refusal an unknown `anchor` ref and a withheld one share. Two
-#: distinguishable answers would turn the argument into an existence oracle: a
-#: caller could learn that a page exists precisely by being told it may not see
-#: it. Neither form names the ref back.
+#: The one refusal an unknown `anchor` ref, a withheld one, raw material, a
+#: navigation page, and a retired page all share. Distinguishable answers
+#: would turn the argument into an existence oracle: a caller could learn
+#: that a page exists, or which rule kept it out, precisely by being told it
+#: may not see it. Neither form names the ref back, and none says WHICH of
+#: those it was.
 ACTIVATE_ANCHOR_REFUSAL = (
-    "INVALID_ANCHOR: anchor must name an available anchor of this activation index"
+    "INVALID_ANCHOR: anchor must name an available anchor of this activation "
+    "index or a visible compiled page"
 )
 
 
@@ -5954,14 +5957,17 @@ def op_activate_context(
     "retrieval_carried"`, and `generation.carried_by` is `"retrieval"`. Read that
     as "nothing was named; recall alone put this here" — no anchor was resolved,
     the packet carries no continuity token, and a turn with nothing distinctive
-    in it abstains `unresolved` rather than guessing between pages.
+    in it abstains `unresolved` rather than guessing between pages. Naming that
+    SAME page yourself with `anchor` instead resolves it outright, at `status:
+    "resolved"` and `generation.carried_by: "agent_choice"` — your choice, not
+    recall's guess.
 
     When a turn names SEVERAL pages this way, nothing is carried and the packet
     abstains `unresolved`, listing them under `anchors[]` at `status:
     "retrieval_named"`. That is not `ambiguity`, which reports two anchors that
-    both resolved: nothing resolved here, and those pages are not anchors of this
-    index, so `anchor` does not take them. Read the one you mean with
-    `read_memory`, passing the ref exactly as listed.
+    both resolved: nothing resolved here. Call again with `anchor` set to the
+    ref you mean — an ordinary compiled page takes it exactly as a page reached
+    by `retrieval_carried` above does — and that page's own units are served.
 
     Use `ask_memory` instead when you already know what you are looking for; use
     this when you do not, and follow it with `read_memory` on whatever ref the
@@ -5987,11 +5993,15 @@ def op_activate_context(
             `generation.continuity = "stale"` when it was minted against another
             vault's index or another role registry. Drop it on a new session or
             after a compaction.
-        anchor: One canonical ref from a previous `ambiguity` block, naming the
-            sense you mean. That anchor is then treated as resolved on your
-            choice alone, its role lanes run and the competing senses are
-            omitted. A ref that is not an anchor of this index, or one this
-            audience may not see, is refused identically and no packet is built.
+        anchor: One ref the agent is naming on its own authority: the sense
+            meant from a previous `ambiguity` block, or any ordinary compiled
+            page a packet already listed (`recent_context`, `retrieval_named`,
+            or an `unresolved` turn's candidates) — not raw `Sources`/`Evidence`
+            material, which stays a `read_memory` target. That anchor or page
+            is then treated as resolved on your choice alone, its roles run,
+            and any competing senses are omitted. A ref that names nothing
+            eligible this way, or one this audience may not see, is refused
+            identically and no packet is built.
         include_timings: Include per-stage timings for diagnostics.
 
     Returns: {recent_context, anchors, roles, units, pointers, current_state,

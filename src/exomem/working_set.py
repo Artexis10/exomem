@@ -1111,6 +1111,34 @@ def _is_current_page(vault_root: Path, rel_path: str) -> bool:
     return status not in RETIRED_PAGE_STATUSES
 
 
+def _eligible_agent_page(vault_root: Path, ref: str) -> str | None:
+    """The vault-relative page `ref` names, if `anchor` may carry a packet from
+    it, else `None`.
+
+    An anchor override tries the activation index's own rows first
+    (`override_candidates`); this is the fallback for a ref that named no row
+    there. It reuses the retrieval carry's OWN eligibility test rather than a
+    second opinion about what a servable page is — the same three refusals a
+    turn that merely NAMED a page already gets: not raw material
+    (`working_set_runtime._is_raw_material`, `Sources/`/`Evidence/`), not
+    navigation (`working_set_runtime._is_navigation_page`,
+    `find_corpus.NAVIGATION_BASENAMES`), and current — existing, Markdown,
+    not retired (`_is_current_page`, above).
+    """
+    path = str(ref or "").strip()
+    if not path:
+        return None
+    from . import working_set_runtime
+
+    if working_set_runtime._is_raw_material(path):
+        return None
+    if working_set_runtime._is_navigation_page(path):
+        return None
+    if not _is_current_page(vault_root, path):
+        return None
+    return path
+
+
 def rare_document_cap(corpus_pages: int) -> int:
     """The document frequency at or below which a stem counts as DISTINCTIVE
     in a corpus of `corpus_pages` indexed pages.
@@ -1375,15 +1403,29 @@ def _carried_packet(
     freshness_snapshot: Any,
     index: working_set_index.WorkingSetIndex | None = None,
     recent_context: Sequence[Mapping[str, Any]] = (),
+    status: str = working_set_resolve.RETRIEVAL_CARRIED_STATUS,
+    evidence: tuple[str, ...] = ("retrieval",),
+    carried_by: str = "retrieval",
 ) -> dict[str, Any] | None:
     """One packet compiled from a single dominant page, marked as carried.
 
-    The page is reported as ONE anchor entry of kind `page` at status
-    `retrieval_carried`, whose only evidence is `retrieval`. That spelling is
-    the whole honesty of the feature: a reader can tell at a glance that no
-    anchor was named and that recall alone put this material here, and
-    `mint_continuity` — which carries `resolved` anchors only — declines to
-    mint a token from it without needing to know the feature exists.
+    `status`/`evidence`/`carried_by` default to the retrieval carry's own
+    spelling (design D3): the page is reported as ONE anchor entry of kind
+    `page` at status `retrieval_carried`, whose only evidence is `retrieval`.
+    That spelling is the whole honesty of the feature: a reader can tell at a
+    glance that no anchor was named and that recall alone put this material
+    here, and `mint_continuity` — which carries `resolved` anchors only —
+    declines to mint a token from it without needing to know the feature
+    exists.
+
+    An agent-picked page (`anchor` naming an ordinary compiled page that is
+    not an index anchor) reuses this SAME builder and the same units lane,
+    at `status="resolved"`, `evidence=("agent_choice",)`, `carried_by=
+    "agent_choice"` instead — the identical soundness-rule outcome an anchor
+    override already gets when the ref DOES match an index row
+    (`DECIDING_ALONE_KINDS`). Nothing downstream (`mint_continuity`, the
+    egress guard, the hook) has to learn a second meaning of "the agent chose
+    this": it is the same meaning, reached on a page instead of an anchor.
 
     Title and lifecycle are taken from the units the lane actually read off
     that page, never asserted: the unit rows already carry their parent
@@ -1428,8 +1470,8 @@ def _carried_packet(
         title=_indexed_title(index, path) or path,
         kind="page",
         lifecycle=_page_lifecycle(vault_root, path),
-        status=working_set_resolve.RETRIEVAL_CARRIED_STATUS,
-        evidence=("retrieval",),
+        status=status,
+        evidence=evidence,
         categories=(),
         neighbourhood=frozenset({path}),
     )
@@ -1472,15 +1514,17 @@ def _carried_packet(
             carried = replace(carried, title=item.title or carried.title or path)
             break
 
-    generation = {**generation, "carried_by": "retrieval"}
+    generation = {**generation, "carried_by": carried_by}
     if budget_exhausted("working_set.budget"):
         raise BudgetExhausted("working_set.budget")
     with _span(timings, "working_set.budget"):
-        # `status` is `build_packet`'s own "did this turn produce material"
-        # flag — the one thing it decides `abstained` from — not
-        # `resolution.status`, which stayed `unresolved` and is why this
-        # packet exists at all. What the turn actually did is in the anchor's
-        # own `retrieval_carried` status and in `generation.carried_by`.
+        # The literal `"resolved"` below is `build_packet`'s own "did this
+        # turn produce material" flag — the one thing it decides `abstained`
+        # from. It is NOT this function's `status` parameter: `resolution`
+        # (the caller's) stayed `unresolved` in both carry cases, which is
+        # why this packet exists at all. What the turn actually did is in
+        # the anchor's own `status` (`retrieval_carried`, or `resolved` for
+        # an agent-picked page) and in `generation.carried_by`.
         return build_packet(
             items=items,
             anchors=(carried.as_dict(),),
@@ -1682,6 +1726,44 @@ def compile_packet(
             )
             if packet is not None:
                 return packet
+
+    # The agent-pick fallback: `anchor` named no row in the activation index
+    # (`override_candidates` above found nothing, so `resolution.status`
+    # stayed `unresolved` — the only other value an override branch can
+    # reach), but the ref may still name an ordinary compiled page this
+    # audience can see. Reuses `_carried_packet` unchanged, at the
+    # soundness rule's OWN "agent decides alone" outcome
+    # (`working_set_resolve.DECIDING_ALONE_KINDS`) rather than the carry's
+    # `retrieval_carried` one: the agent named this page, recall did not
+    # merely surface it.
+    if anchor and resolution.status == "unresolved":
+        agent_page = _eligible_agent_page(root, anchor)
+        if agent_page is not None:
+            packet = _carried_packet(
+                root,
+                page=(agent_page, 0.0),
+                analysis=analysis,
+                registry=registry,
+                limit=limit,
+                purpose=purpose,
+                timings=timings,
+                generation=generation,
+                index_token=index_token,
+                freshness_snapshot=freshness_snapshot,
+                index=index,
+                recent_context=recent,
+                status="resolved",
+                evidence=("agent_choice",),
+                carried_by="agent_choice",
+            )
+            if packet is not None:
+                return packet
+            # `None` back means the lanes read nothing off that page (it
+            # exists and is eligible, but carries no unit a role selects).
+            # Falls through to the ordinary `unresolved` abstention below,
+            # which `op_activate_context` turns into the one refusal an
+            # unknown ref and a withheld one share — the same outcome a
+            # retrieval carry that read nothing off its page reaches.
 
     if resolution.status != "resolved":
         return abstained_packet(
