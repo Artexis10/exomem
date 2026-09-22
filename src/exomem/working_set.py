@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -1138,7 +1138,11 @@ def _recent_context(
         if path and path not in by_path:
             by_path[path] = row
     mtimes = _recent_mtimes(root)
-    collections = _recent_collection_dirs(mtimes)
+    # From the index's rows AS WELL AS the freshness map. Without a watcher the
+    # map is empty, but the other two sources still run off the rows — so
+    # deriving the collection directories from the map alone left the exclusion
+    # inert on exactly the cold path where those sources are all there is.
+    collections = _recent_collection_dirs((*by_path, *mtimes))
     offered: dict[str, str] = {}
     for rel in sorted(mtimes, key=lambda item: (-mtimes[item], item)):
         if len(offered) >= limit:
@@ -1239,15 +1243,17 @@ def _recent_mtimes(vault_root: Path) -> dict[str, int]:
     return out
 
 
-def _recent_collection_dirs(mtimes: Mapping[str, int]) -> frozenset[str]:
+def _recent_collection_dirs(paths: Iterable[str]) -> frozenset[str]:
     """Every directory that holds a `_collection.md`, from the paths in hand.
 
-    Derived from the freshness map rather than by asking the filesystem
-    whether a sibling manifest exists: the map already names every page in the
-    knowledge base, so this is dict work on the request path.
+    Derived from the paths this request already holds — the freshness map and
+    the index's anchor rows — rather than by asking the filesystem whether a
+    sibling manifest exists: between them they name every page the block can
+    offer, so this is string work on the request path. Both sources matter:
+    without a watcher the map is empty and the rows are all there is.
     """
     marker = "/_collection.md"
-    return frozenset(rel[: -len(marker)] for rel in mtimes if rel.endswith(marker))
+    return frozenset(rel[: -len(marker)] for rel in paths if rel.endswith(marker))
 
 
 def _recent_reason_for(rel: str, *, collections: frozenset[str] = frozenset()) -> str:

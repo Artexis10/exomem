@@ -1248,3 +1248,39 @@ def test_the_reserved_slot_still_holds_when_the_block_is_full(
     assert len(entries) == working_set.RECENT_CONTEXT_MAX_ENTRIES
     assert whys.count("planning") == 1
     assert whys[-1] == "planning", "the plan keeps its place in recency order"
+
+
+def test_collection_storage_stays_out_on_the_cold_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exclusion must not depend on the freshness registry being live.
+
+    Without a watcher `live_entries` answers None, so the mtimes are empty —
+    but `_recently_activated` and `_recent_planning` still run off the index's
+    own rows, and deriving the collection directories from the mtimes alone
+    left them offering exactly the raw item pages the exclusion exists to keep
+    out.
+    """
+    from exomem import usage
+
+    manifest = "Knowledge Base/Records/Depot Stock/_collection.md"
+    item = "Knowledge Base/Records/Depot Stock/Items/2026-09-05.md"
+    rows = [
+        SimpleNamespace(
+            path=manifest, ref=None, title="Depot stock", kind="collection", lifecycle="active"
+        ),
+        SimpleNamespace(
+            path=item, ref=None, title="2026-09-05", kind="page", lifecycle="active"
+        ),
+    ]
+    monkeypatch.setattr(working_set, "_recent_mtimes", lambda _root: {})
+    monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
+    monkeypatch.setattr(
+        usage, "activation_map", lambda *a, **k: {usage.canon(item): 5.0, usage.canon(manifest): 4.0}
+    )
+
+    entries = working_set._recent_context(Path("/nonexistent"), rows=rows)
+    paths = [entry["path"] for entry in entries]
+
+    assert item not in paths, paths
+    assert manifest in paths, "the manifest itself is still working context"
