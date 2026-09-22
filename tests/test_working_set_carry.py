@@ -533,10 +533,16 @@ def test_the_same_two_words_as_a_phrase_are_a_name(vault: Path) -> None:
     ], hits
 
 
-def test_three_distinctive_words_anywhere_in_a_turn_are_a_name(vault: Path) -> None:
-    """Three of one page's distinctive words is naming it wherever they sit:
-    a turn that happens on three of them by accident is not a turn anyone
-    writes."""
+def test_three_distinctive_words_scattered_are_not_a_name(vault: Path) -> None:
+    """The flat three-anywhere path admitted a page the turn never named.
+
+    Measured: a long travel sentence mentioning three place names about
+    forty tokens apart carried a freight rota that happens to list all
+    three, at 26.19 and alone. Three scattered names are three things the
+    speaker mentioned; a page that lists many places will contain any three
+    of them. There is one admission path now — a phrase — and a third rare
+    stem may raise the score but never admits.
+    """
     _seed_proximity_corpus(vault)
 
     turn = (
@@ -549,16 +555,12 @@ def test_three_distinctive_words_anywhere_in_a_turn_are_a_name(vault: Path) -> N
     )
     page_words = {"lisbon", "ledger", "harbour"}
     assert page_words <= set(rare), rare
-    # None of the page's three sits within a window of another, so nothing
-    # but the three-anywhere clause can admit it.
     assert working_set_runtime.adjacent_rare_pairs(turn, sorted(page_words)) == (), turn
 
     hits, state = working_set_runtime.carry_candidates(vault, turn)
 
     assert state == "available"
-    assert [path for path, _score in hits] == [
-        "Knowledge Base/Notes/Research/harbour-ledger.md"
-    ], hits
+    assert hits == (), hits
 
 
 def test_the_proximity_window_is_measured_on_the_turns_own_tokens() -> None:
@@ -1224,3 +1226,126 @@ def test_the_carried_title_lookup_reads_the_rows_once(
     assert working_set._indexed_title(index, "Knowledge Base/Notes/nope.md") == ""
     assert working_set._indexed_title(index, "") == ""
     assert len(reads) <= 2, reads
+
+
+def test_a_sentence_boundary_ends_the_window() -> None:
+    """Two distinctive words on either side of a full stop are two
+    sentences, not a phrase — however few tokens separate them.
+
+    Measured: "I am flying out to lisbon next week. The harbour was shut
+    last time" paired `lisbon` with `harbour` across the stop and carried a
+    harbour ledger at 18.78. A comma is not a boundary: "the girvan, slot
+    question" is still one phrase interrupted by punctuation.
+    """
+    across = working_set_runtime.adjacent_rare_pairs(
+        "I am flying out to lisbon next week. The harbour was shut last time",
+        ("lisbon", "harbour"),
+    )
+    assert across == (), across
+
+    for breaker in (".", "!", "?", ";", "\n"):
+        assert working_set_runtime.adjacent_rare_pairs(
+            f"the lisbon run{breaker} the harbour run", ("lisbon", "harbour")
+        ) == (), breaker
+
+    assert working_set_runtime.adjacent_rare_pairs(
+        "the girvan, slot question", ("girvan", "slot")
+    ) == (("girvan", "slot"),)
+
+
+def test_a_hyphenated_name_pairs_on_both_of_its_stems() -> None:
+    """One raw token can carry two stems. "girvan-slot" is the phrase said
+    as tightly as a phrase can be said, and reading only the first stem
+    lost the second entirely."""
+    assert working_set_runtime.adjacent_rare_pairs(
+        "what did we decide about the girvan-slot window", ("girvan", "slot")
+    ) == (("girvan", "slot"),)
+    assert working_set_runtime.adjacent_rare_pairs(
+        "what did o'brien's team decide", ("o", "brien")
+    ) == (("brien", "o"),)
+
+
+def test_a_draft_page_is_still_a_candidate(vault: Path) -> None:
+    """A draft is a page the author is still writing, not one they retired.
+
+    The spec retires superseded and archived pages; treating every non-active
+    status as retired swept in `draft`, which is the status a page carries
+    while it is being written — exactly the page a turn naming it wants.
+    """
+    _seed_named_pages_corpus(vault)
+    kb = vault / "Knowledge Base" / "Notes" / "Cases"
+    for name, status in (
+        ("draft.md", "draft"),
+        ("archived.md", "archived"),
+        ("superseded-status.md", "superseded"),
+        ("retired.md", "retired"),
+        ("deprecated.md", "deprecated"),
+        ("active.md", "active"),
+        ("in-review.md", "in-review"),
+    ):
+        _write(
+            kb / name,
+            f"---\ntype: note\nstatus: {status}\nupdated: 2026-09-01\n---\n\n"
+            f"# {name}\n\n## Summary\n\n- [note] A page. ^x-1\n",
+        )
+    _write(
+        kb / "no-status.md",
+        "---\ntype: note\nupdated: 2026-09-01\n---\n\n# No status\n\n"
+        "## Summary\n\n- [note] A page. ^x-2\n",
+    )
+
+    def current(name: str) -> bool:
+        return working_set._is_current_page(vault, f"Knowledge Base/Notes/Cases/{name}")
+
+    assert current("draft.md") is True
+    assert current("in-review.md") is True
+    assert current("active.md") is True
+    assert current("no-status.md") is True
+    assert current("archived.md") is False
+    assert current("superseded-status.md") is False
+    assert current("retired.md") is False
+    assert current("deprecated.md") is False
+
+
+def test_filtering_happens_after_a_wider_fetch(
+    prose_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """"Exactly one named page" must mean one in the corpus, not one among
+    whatever survived the ranking limit.
+
+    The limit cut the rows BEFORE raw material and retired pages were
+    excluded, so a run of sources at the head could hide a second compiled
+    page and turn "two named pages, abstain" into "one named page, carry" —
+    the count the whole decision rests on, settled by where the limit
+    happened to fall. The rows are stubbed so the ORDER of the cut and the
+    filter is what is under test, not a corpus arranged to produce it.
+    """
+    asked: list[int] = []
+    real = lexstore.search_bm25_result
+
+    def ranked(vault_root, query, k, **kwargs):
+        asked.append(k)
+        real(vault_root, query, k, **kwargs)
+        return lexstore.CatalogQueryResult(
+            [
+                ("Knowledge Base/Sources/one.md", 40.0),
+                ("Knowledge Base/Sources/two.md", 39.0),
+                ("Knowledge Base/Evidence/three.md", 38.0),
+                ("Knowledge Base/Sources/four.md", 37.0),
+                (GENUINE_PAGE, 22.0),
+                (DOUBLE_STEM_PAGE, 21.0),
+            ],
+            lexstore.CatalogReadiness("available", True, "sqlite"),
+        )
+
+    monkeypatch.setattr(lexstore, "search_bm25_result", ranked)
+
+    hits, state = working_set_runtime.carry_candidates(prose_vault, GENUINE_TURN)
+
+    assert state == "available"
+    assert asked == [working_set.RETRIEVAL_CARRY_FETCH], asked
+    assert working_set.RETRIEVAL_CARRY_FETCH > 5, "a wider fetch is the point"
+    # Four raw-material rows excluded, two compiled pages left: two named
+    # pages, so nothing is carried.
+    assert [path for path, _score in hits] == [GENUINE_PAGE, DOUBLE_STEM_PAGE], hits
+    assert working_set.dominant_carry(hits) is None

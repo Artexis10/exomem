@@ -53,6 +53,16 @@ GRAPH_MAX_NODES = 24
 GRAPH_MAX_EDGES = 40
 GRAPH_TRAVERSAL_PROFILE = "epistemic"
 
+#: How many ranked rows the carry asks for before it filters. The ranking
+#: limit truncated BEFORE raw material and retired pages were dropped, so a
+#: run of sources at the head could hide a second compiled page and turn
+#: "two named pages, abstain" into "one named page, carry" — the count the
+#: whole decision rests on, decided by where the LIMIT happened to fall.
+#: Ten leaves room for a page's raw-material twins and its predecessor
+#: ahead of it; the packet's own material stays bounded by the unit lanes,
+#: which this does not touch.
+RETRIEVAL_CARRY_FETCH = 10
+
 #: There is deliberately no separation constant. One existed — the top hit
 #: had to stand 1.5x clear of the runner-up — from when the candidate list
 #: was everything recall returned and the gap was the only thing telling a
@@ -133,11 +143,15 @@ RETRIEVAL_CARRY_MIN_RARE_TERMS = 2
 #: is a phrase — "kelvane throughput ceiling", "quillon vantry window" —
 #: with room for the article or preposition a phrase carries.
 RETRIEVAL_CARRY_RARE_WINDOW = 4
-#: How many distinctive stems, sitting anywhere in the turn, name a page
-#: without a phrase. Three of ONE page's distinctive words is naming it
-#: wherever they sit: a turn that lands on three of them by accident is not
-#: a turn anyone writes.
-RETRIEVAL_CARRY_RARE_TERMS_ANYWHERE = 3
+#: There is deliberately no "N distinctive stems anywhere" path. One
+#: existed — three of a page's distinctive words, wherever they sat, named
+#: it — on the reasoning that a turn does not land on three by accident.
+#: Measured, it does: a long travel sentence mentioning three place names
+#: about forty tokens apart carried a freight rota that lists all three, at
+#: 26.19 and alone. A page that enumerates many things contains any few of
+#: them, and scattering is exactly what tells a list from a name. One
+#: admission path, a phrase; a third rare stem may raise the score but
+#: never admits.
 #: The smallest corpus the rarity gate may be believed on. Below it the
 #: carry does not run and the turn abstains as it did before.
 #:
@@ -940,10 +954,19 @@ def signature_evidence(index: working_set_index.WorkingSetIndex, turn: str):
 # --------------------------------------------------------------------------- #
 
 
+#: Statuses that RETIRE a page. Named rather than inferred from "anything
+#: but active": `draft` and `in-review` are statuses a page carries while it
+#: is being written, and a turn that names one wants it. Only a status that
+#: says the vault has stopped standing behind the page excludes it.
+RETIRED_PAGE_STATUSES: frozenset[str] = frozenset(
+    {"archived", "superseded", "retired", "deprecated"}
+)
+
+
 def _is_current_page(vault_root: Path, rel_path: str) -> bool:
     """Is `rel_path` a page the vault still stands behind?
 
-    A page the author retired — `status` anything but active, or a
+    A page the author retired — a `RETIRED_PAGE_STATUSES` status, or a
     `superseded_by` pointing at its replacement — is not a page to answer a
     turn from, and the replacement is named by the SAME words: "the girvan
     slot window" names both the current note and the one it superseded.
@@ -973,7 +996,7 @@ def _is_current_page(vault_root: Path, rel_path: str) -> bool:
         return False
     frontmatter = page.frontmatter if isinstance(page.frontmatter, Mapping) else {}
     status = working_set_index.normalize(frontmatter.get("status") or "active")
-    return status == "active"
+    return status not in RETIRED_PAGE_STATUSES
 
 
 def rare_document_cap(corpus_pages: int) -> int:
@@ -1022,7 +1045,7 @@ def _carry_by_retrieval(
     freshness_snapshot: Any = None,
     lexical_seconds: float = 0.0,
 ) -> tuple[str, float] | None:
-    """One scored recall over the compiled knowledge base, then the dominance
+    """One scored recall over the compiled knowledge base, then the naming
     test. `None` means carry nothing — the turn abstains exactly as it did.
 
     Cost falls only on turns that would otherwise have returned an empty

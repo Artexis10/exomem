@@ -386,11 +386,13 @@ the request named no explicit anchor choice; an ambiguous turn and a turn that
 resolved any anchor SHALL be untouched. A hit SHALL be a candidate only where at least two
 of the turn's stems that it matches are DISTINCTIVE in the indexed corpus,
 measured as a document frequency at or below `max(3, ceil(0.5% of the indexed
-pages in scope))` over the same catalogue the ranking uses. A hit SHALL additionally satisfy one of
-two proximity conditions: two of its matched distinctive stems occur within a
-declared token window of each other in the turn, or a declared larger number
-of them occur anywhere in it. Distance SHALL be measured over the turn's own
-tokens, function words included. A turn carrying fewer than two distinctive
+pages in scope))` over the same catalogue the ranking uses. A hit SHALL additionally satisfy a proximity
+condition: two of its matched distinctive stems occur within a declared token
+window of each other, within one sentence of the turn. Distance SHALL be
+measured over the turn's own tokens, function words included; sentence-ending
+punctuation and line breaks SHALL end a window and a comma SHALL NOT. A
+number of distinctive stems occurring anywhere in the turn SHALL NOT by
+itself admit a page. A turn carrying fewer than two distinctive
 stems SHALL carry nothing and SHALL NOT run the ranking query. Where the indexed corpus holds fewer than a declared minimum
 number of pages, the carry SHALL NOT run at all: rarity is only as sharp as
 the corpus it is measured against, and below that size there is no corpus to
@@ -406,9 +408,10 @@ under its own timing span and SHALL be skipped when that deadline can no longer
 afford a stage.
 
 Superseded and archived pages SHALL NOT be candidates, and lifecycle SHALL be
-decided before candidates are counted. A page SHALL be carried only when it is
-the ONLY surviving candidate; where two or more survive, the turn SHALL abstain
-`unresolved` and SHALL NOT select between them by ranking score. A candidate
+decided before candidates are counted. Candidates SHALL be excluded before they are counted, not after the ranked
+result is limited. A page SHALL be carried only when it is the ONLY surviving
+candidate; where two or more survive, the turn SHALL abstain `unresolved`,
+SHALL NOT select between them by ranking score. A candidate
 the ranking scored at or below a declared sanity bound SHALL NOT be carried.
 
 A carried packet SHALL report that page as its one anchor entry, of kind `page`,

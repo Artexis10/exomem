@@ -5796,24 +5796,26 @@ class LexicalStore:
             # unchanged either way: a caller narrowing this list is saying
             # which stems are worth counting, never which pages may rank.
             counted = tokens if corroboration_tokens is None else corroboration_tokens
-            count_sql = (
-                "(SELECT COUNT(*) FROM json_each(?) AS term "
-                "WHERE instr(' ' || fts.stemmed || ' ', ' ' || term.value || ' ') > 0) >= ?"
-            )
+            clauses: list[str] = []
+            if min_matched_terms > 1:
+                clauses.append(
+                    "(SELECT COUNT(*) FROM json_each(?) AS term "
+                    "WHERE instr(' ' || fts.stemmed || ' ', ' ' || term.value || ' ') > 0) >= ?"
+                )
+                params.extend((json.dumps(sorted(set(counted))), min_matched_terms))
             if groups:
-                # ... OR every term of some group is present. `NOT EXISTS a
-                # term of this group that is missing` is the all-of test.
-                group_sql = (
+                # Every term of some group is present. "NOT EXISTS a term of
+                # this group that is missing" is the all-of test.
+                clauses.append(
                     "EXISTS (SELECT 1 FROM json_each(?) AS grp WHERE NOT EXISTS ("
                     "SELECT 1 FROM json_each(grp.value) AS gt WHERE "
                     "instr(' ' || fts.stemmed || ' ', ' ' || gt.value || ' ') = 0))"
                 )
-                allowed_clause += f" AND ({count_sql} OR {group_sql})"
-                params.extend((json.dumps(sorted(set(counted))), min_matched_terms))
                 params.append(json.dumps([sorted(set(group)) for group in groups]))
-            else:
-                allowed_clause += f" AND {count_sql}"
-                params.extend((json.dumps(sorted(set(counted))), min_matched_terms))
+            # Either alone, or both as alternatives: a caller that supplies
+            # only groups gets the all-of test and no flat count, which is
+            # how "this page qualifies on a phrase or not at all" is said.
+            allowed_clause += " AND (" + " OR ".join(clauses) + ")"
         params.append(k)
         rows = conn.execute(
             "SELECT p.path, -bm25(fts) AS score "

@@ -5941,8 +5941,8 @@ def op_activate_context(
     its single `anchors[]` entry has `kind: "page"` and `status:
     "retrieval_carried"`, and `generation.carried_by` is `"retrieval"`. Read that
     as "nothing was named; recall alone put this here" — no anchor was resolved,
-    the packet carries no continuity token, and a near-tie or a turn with nothing
-    distinctive in it abstains `unresolved` rather than guessing between pages.
+    the packet carries no continuity token, and a turn with nothing distinctive
+    in it abstains `unresolved` rather than guessing between pages.
 
     Use `ask_memory` instead when you already know what you are looking for; use
     this when you do not, and follow it with `read_memory` on whatever ref the

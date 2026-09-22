@@ -38,6 +38,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 from collections import OrderedDict
@@ -511,10 +512,10 @@ def lexical_evidence(
         return [], "unavailable"
 
 
-#: How many scored hits the carry recall asks for. Small on purpose: the
-#: dominance test only ever reads the top two, and the rest exist so a run of
-#: raw-material pages at the head cannot hide every compiled page behind them.
-RETRIEVAL_CARRY_LIMIT = 5
+#: How many scored hits the carry recall asks for: `working_set`'s own
+#: fetch size, since how many rows must be read before filtering is a
+#: property of the rule that filters them.
+RETRIEVAL_CARRY_LIMIT = working_set.RETRIEVAL_CARRY_FETCH
 #: Knowledge-base folders holding raw captured material rather than compiled
 #: conclusions. Read off `working_set_index` rather than restated here: that
 #: module already refuses to make an anchor of anything inside them, for the
@@ -575,6 +576,12 @@ def content_stems(turn: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(bm25_module.tokenize(content_words(turn))))
 
 
+#: What ends a proximity window. Sentence-ending punctuation and a line
+#: break; a comma deliberately does not, being punctuation inside a phrase
+#: rather than between two of them.
+_SENTENCE_BREAK = re.compile(r"[.!?;\n\r]+")
+
+
 def adjacent_rare_pairs(
     turn: str,
     rare_terms: Sequence[str],
@@ -588,8 +595,22 @@ def adjacent_rare_pairs(
     — because that is the distance a reader sees: "the lisbon harbour
     window" is a phrase and "flying to lisbon ... around the harbour" is
     not, and dropping the function words in between would make them look
-    alike. Each pair is returned once, sorted, so the caller's query sees a
-    stable set.
+    alike.
+
+    A SENTENCE BOUNDARY ends the window however few tokens straddle it.
+    "I am flying out to lisbon next week. The harbour was shut" puts the
+    two words three tokens apart and they are still two sentences about two
+    things; measured, that pairing carried a harbour ledger at 18.78. A
+    comma is not a boundary — "the girvan, slot question" is one phrase
+    with punctuation in it. The window measures token distance within a
+    sentence; it does not measure intent, and nothing here reads meaning.
+
+    One raw token may carry several stems ("girvan-slot", "o'brien"), and
+    all of them are placed at that token's position: a compound is the
+    phrase said as tightly as a phrase can be said.
+
+    Each pair is returned once, sorted, so the caller's query sees a stable
+    set.
     """
     from . import bm25 as bm25_module
 
@@ -597,21 +618,25 @@ def adjacent_rare_pairs(
     wanted = {str(term) for term in rare_terms}
     if len(wanted) < 2:
         return ()
-    placed: list[tuple[int, str]] = []
-    for index, token in enumerate(
-        working_set_index.tokens_of(working_set_index.normalize(turn))
-    ):
-        stemmed = bm25_module.tokenize(token)
-        if stemmed and stemmed[0] in wanted:
-            placed.append((index, stemmed[0]))
     pairs: set[tuple[str, str]] = set()
-    for position, (left_at, left) in enumerate(placed):
-        for right_at, right in placed[position + 1 :]:
-            if right_at - left_at > span:
-                break
-            if left != right:
-                first, second = sorted((left, right))
-                pairs.add((first, second))
+    # Split the RAW text: `normalize` folds case and width but keeps the
+    # punctuation, and splitting per sentence is what keeps a window from
+    # reaching across one.
+    for sentence in _SENTENCE_BREAK.split(str(turn)):
+        placed: list[tuple[int, str]] = []
+        for index, token in enumerate(
+            working_set_index.tokens_of(working_set_index.normalize(sentence))
+        ):
+            for stem in bm25_module.tokenize(token):
+                if stem in wanted:
+                    placed.append((index, stem))
+        for position, (left_at, left) in enumerate(placed):
+            for right_at, right in placed[position + 1 :]:
+                if right_at - left_at > span:
+                    break
+                if left != right:
+                    first, second = sorted((left, right))
+                    pairs.add((first, second))
     return tuple(sorted(pairs))
 
 
@@ -675,11 +700,9 @@ def carry_candidates(
       memory. Narrowing to the stems that are rare in THIS corpus is most
       of the answer, but not all of it — two genuinely distinctive words
       nine tokens apart are still two things a speaker mentioned, not a
-      name. A page qualifies on a PHRASE (both stems of some pair the turn
-      said within `RETRIEVAL_CARRY_RARE_WINDOW` tokens) or on
-      `RETRIEVAL_CARRY_RARE_TERMS_ANYWHERE` distinctive stems sitting
-      anywhere. The ranking still sees the whole turn; only the gate
-      narrows.
+      name. A page qualifies on a PHRASE and on nothing else: both stems
+      of some pair the turn said within `RETRIEVAL_CARRY_RARE_WINDOW`
+      tokens. The ranking still sees the whole turn; only the gate narrows.
     * **The score is kept.** `lexical_evidence` discards it because evidence
       there is categorical. Carrying needs to compare two survivors, which a
       rank cannot express.
@@ -726,11 +749,12 @@ def carry_candidates(
             return (), "available"
         # Rarity says a word is name-shaped; proximity says the turn used it
         # to NAME something. Two distinctive words said together are a
-        # phrase; nine tokens apart in an ordinary sentence they are two
-        # things the speaker mentioned. Three of one page's distinctive
-        # words need no phrase — a turn does not land on three by accident.
+        # phrase; the same two nine tokens apart are two things the speaker
+        # mentioned. No phrase, no candidate — a page that enumerates many
+        # things contains any few of them, so scattering is what tells a
+        # list from a name.
         pairs = adjacent_rare_pairs(turn, rare)
-        if not pairs and len(rare) < working_set.RETRIEVAL_CARRY_RARE_TERMS_ANYWHERE:
+        if not pairs:
             return (), "available"
         result = lexstore.search_bm25_result(
             vault_root,
@@ -741,7 +765,6 @@ def carry_candidates(
             scope="kb",
             freshness=freshness,
             allow_delta=False,
-            min_matched_terms=working_set.RETRIEVAL_CARRY_RARE_TERMS_ANYWHERE,
             corroboration_tokens=list(rare),
             corroboration_groups=[list(pair) for pair in pairs],
             recall_checkpoint=recall_checkpoint,

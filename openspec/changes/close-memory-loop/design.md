@@ -234,18 +234,33 @@ two distinctive stems cannot carry anything, so the ranking query is not run
 at all.
 
 Rarity says a word is name-shaped; it cannot say the turn used it to NAME
-this page. A page therefore qualifies on a PHRASE — two of its distinctive
-stems sitting within `RETRIEVAL_CARRY_RARE_WINDOW` (4) tokens of each other
-in the turn, counted over the raw tokens so "the lisbon harbour window" is a
-phrase and "flying to lisbon ... around the harbour" is not — or on
-`RETRIEVAL_CARRY_RARE_TERMS_ANYWHERE` (3) distinctive stems sitting anywhere,
-since a turn does not land on three of one page's distinctive words by
-accident. Measured on a 235-page corpus whose prose uses every everyday word
-of the turn: "I am flying to lisbon next week and wanted to walk around the
-harbour if there is time" shares `lisbon` and `harbour` with a page about a
-harbour ledger and a lisbon freight window, both genuinely distinctive, and
-carried it at 18.51; nine tokens apart in an ordinary sentence they are two
-things the speaker mentioned. What survives the gate IS the set of pages the turn named,
+this page. A page qualifies on a PHRASE and on nothing else: two of its
+distinctive stems sitting within `RETRIEVAL_CARRY_RARE_WINDOW` (4) tokens of
+each other in the turn. Measured on a 235-page corpus whose prose uses every
+everyday word of the turn: "I am flying to lisbon next week and wanted to
+walk around the harbour if there is time" shares `lisbon` and `harbour` with
+a page about a harbour ledger and a lisbon freight window, both genuinely
+distinctive, and carried it at 18.51; nine tokens apart in an ordinary
+sentence they are two things the speaker mentioned.
+
+A second path was tried and removed: three distinctive stems sitting
+anywhere, on the reasoning that a turn does not land on three of one page's
+words by accident. Measured, it does — a long travel sentence naming three
+places about forty tokens apart carried a freight rota that lists all three,
+at 26.19 and alone. A page that enumerates many things contains any few of
+them, and scattering is exactly what tells a list from a name. A third rare
+stem may raise the score; it never admits.
+
+The window measures token distance WITHIN A SENTENCE, not intent. Distance
+is counted over the raw tokens, function words included, so "the lisbon
+harbour window" is a phrase and "flying to lisbon ... around the harbour" is
+not; and a full stop, exclamation mark, question mark, semicolon or line
+break ends the window however few tokens straddle it, since "flying out to
+lisbon next week. The harbour was shut" is two sentences about two things
+and measured 18.78 as a pair. A comma does not: it is punctuation inside a
+phrase rather than between two of them. One raw token may carry several
+stems ("girvan-slot", "o'brien"), and all of them sit at that token's
+position — a compound is a phrase said as tightly as a phrase can be. What survives the gate IS the set of pages the turn named,
 so the decision is a COUNT and not a comparison: exactly one named page is
 a packet, two or more abstain. A score gap between two named pages says
 nothing about which one was meant — measured, one turn naming two pages
@@ -292,7 +307,16 @@ and a near tie is noise, so the turn abstains exactly as it did. The carried pag
 crosses `guard_working_set` like any other reference; it is the packet's only
 anchor, so an audience that may not see it gets the abstention the existing
 every-anchor-withheld rule already produces, never the runner-up. Cost falls only
-on turns that would have returned an empty packet. The rarity pass and the
+on turns that would have returned an empty packet.
+
+One limit is worth stating because it is invisible from the rule: a turn
+whose content words fall outside the lexical catalogue's `[a-z0-9]`
+tokeniser — a turn written in CJK, say — yields no stems at all, so it has
+no distinctive pair and never carries. That is a property of the catalogue
+this work did not change, and it is a different thing from the `rare_term`
+length floor, which DOES cover a CJK name: that floor governs anchor
+resolution over the activation index's own terms, where such a name is
+present and reachable. The rarity pass and the
 ranking pass are two catalogue round trips, measured against the request's
 first lexical pass at zero, two hundred and two thousand added pages: 0.9x,
 1.1x and 1.9x on a quiet machine, and 2.0x, 2.3x and 1.5x for the same tip
