@@ -384,13 +384,31 @@ def test_a_carried_packet_mints_no_continuity_token(carry_vault: Path, budget_fr
     assert working_set_runtime.mint_continuity(packet, identity="vault-identity") == ""
 
 
-def test_the_carry_reports_its_own_timing_span(carry_vault: Path, budget_free) -> None:
-    timings = find_types.FindTimings()
-    working_set.compile_packet(
-        carry_vault, turn=CARRY_TURN, max_chars=4000, timings=timings
-    )
+def test_the_carry_costs_only_the_turns_that_would_have_abstained(
+    carry_vault: Path, budget_free
+) -> None:
+    """Its own span, and that span exists only where the turn had nothing.
 
-    assert "working_set.carry" in timings.as_dict()["stages"]
+    The whole cost argument for the carry is that it runs after resolution
+    has already given up, so a turn that resolves an anchor pays for none of
+    it. A span that showed up on a resolved turn would mean the recall was
+    running for every request.
+    """
+    carried_timings = find_types.FindTimings()
+    working_set.compile_packet(
+        carry_vault, turn=CARRY_TURN, max_chars=4000, timings=carried_timings
+    )
+    assert "working_set.carry" in carried_timings.as_dict()["stages"]
+
+    resolved_timings = find_types.FindTimings()
+    packet = working_set.compile_packet(
+        carry_vault,
+        turn="I'm planning to tow the Cargo Sled north — what are its constraints?",
+        max_chars=4000,
+        timings=resolved_timings,
+    )
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert "working_set.carry" not in resolved_timings.as_dict()["stages"]
 
 
 # --------------------------------------------------------------------------- #
