@@ -3050,7 +3050,7 @@ def test_a_units_wikilink_in_any_prose_field_not_just_text_withholds_it(vault: P
 # Retrieval-carried packets (design D3) cross the same guard
 # --------------------------------------------------------------------------- #
 
-CARRY_DOMINANT = "Knowledge Base/Notes/Research/quillon-batching-window.md"
+CARRY_DOMINANT = "Knowledge Base/Notes/Research/quillon-vantry-window.md"
 CARRY_RUNNER_UP = "Knowledge Base/Notes/Insights/quillon-handover-brief.md"
 
 
@@ -3078,7 +3078,7 @@ updated: 2026-09-08
 
 {filler}
 
-- [finding] The handover brief mentions the quillon batching window once.
+- [finding] The handover brief mentions the quillon vantry window once.
   ^h-once
 
 {filler}

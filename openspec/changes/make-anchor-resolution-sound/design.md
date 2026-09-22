@@ -39,9 +39,16 @@ retrieved kinds and qualifiers stack. The one retrieval-alone case sits outside 
 rather than inside it, and only reaches a turn this rule has already abstained on. When
 resolution reached no anchor at all, one scored recall runs over the compiled knowledge
 base (the raw-material folders excluded — a captured source or a preserved piece of
-evidence is never served as durable memory), and a single page that
-DOMINATES it — clear of an absolute floor and `RETRIEVAL_CARRY_SEPARATION` times clear of
-the runner-up — may CARRY a packet: that page's units are served under one anchor entry of
+evidence is never served as durable memory), and a single page that DOMINATES it may
+CARRY a packet. Dominance is a NAMED-CONTACT test, not a score threshold: a hit is a
+candidate only when at least two of the turn's stems that it matches are DISTINCTIVE in
+this corpus (document frequency at or below `max(3, ceil(0.5% of indexed pages))`,
+measured against the same catalogue the ranking uses), and the survivor must then stand
+`RETRIEVAL_CARRY_SEPARATION` times clear of the runner-up. An absolute score floor was
+tried first and removed: `-bm25()` is not comparable between corpora, so the same page
+for the same turn scored 13.16 at one corpus size and 6.81 at another, and a two-line
+stub sharing three ordinary words with a long turn outscored the page the turn was
+actually about. Rarity is corpus-relative, so it does not drift as the vault grows; that page's units are served under one anchor entry of
 kind `page` at status `retrieval_carried`, marked `generation.carried_by = "retrieval"`,
 and no continuity token is minted from it. It never runs when any anchor resolved, when the
 turn is ambiguous, or when the agent named a sense; a near tie takes the abstention the

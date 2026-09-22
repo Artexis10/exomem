@@ -41,7 +41,7 @@ import os
 import sqlite3
 import threading
 from collections import OrderedDict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -515,11 +515,6 @@ def lexical_evidence(
 #: dominance test only ever reads the top two, and the rest exist so a run of
 #: raw-material pages at the head cannot hide every compiled page behind them.
 RETRIEVAL_CARRY_LIMIT = 5
-#: The same corroboration floor `lexical_evidence` uses: two distinct content
-#: stems from the turn, counted before the ranked limit. One shared stem is a
-#: coincidence at corpus scale, and a carried packet is served on the strength
-#: of recall alone.
-RETRIEVAL_CARRY_MIN_TERMS = 2
 #: Knowledge-base folders holding raw captured material rather than compiled
 #: conclusions. Read off `working_set_index` rather than restated here: that
 #: module already refuses to make an anchor of anything inside them, for the
@@ -548,6 +543,57 @@ def _is_raw_material(path: str) -> bool:
     return inside.split("/", 1)[0] in CARRY_EXCLUDED_FOLDERS
 
 
+def content_stems(turn: str) -> tuple[str, ...]:
+    """The turn's own content stems, in order, deduplicated.
+
+    The SAME normalisation, stopword filter and stemmer the catalogue
+    indexed its pages with, so a frequency measured here and a page ranked
+    there are talking about the same word.
+    """
+    from . import bm25 as bm25_module
+
+    content_turn = " ".join(
+        token
+        for token in working_set_index.tokens_of(working_set_index.normalize(turn))
+        if token not in working_set_index.STOPWORDS
+    )
+    return tuple(dict.fromkeys(bm25_module.tokenize(content_turn)))
+
+
+def rare_turn_terms(
+    vault_root: Path,
+    stems: Sequence[str],
+    *,
+    freshness=None,
+    recall_checkpoint=None,
+) -> tuple[tuple[str, ...], int, str]:
+    """`(distinctive stems, indexed pages, readiness status)` for `stems`.
+
+    One document-frequency lookup per stem over the maintained catalogue,
+    bounded by the turn's own content words and measured on the same
+    `fts`/`pages` join the ranking uses. Measured at 34.8 ms for a four-stem
+    turn and 41.6 ms for a twenty-seven-stem turn against a 1,539-page
+    knowledge base, with the request's own recall checkpoint supplied — the
+    per-term cost is small and nearly all of it is the one readiness proof.
+    """
+    from . import lexstore
+
+    result = lexstore.term_document_frequencies(
+        vault_root,
+        stems,
+        scope="kb",
+        freshness=freshness,
+        allow_delta=False,
+        recall_checkpoint=recall_checkpoint,
+    )
+    if not result.readiness.complete:
+        return (), 0, result.readiness.status
+    frequencies, corpus_pages = result.value or ({}, 0)
+    cap = working_set.rare_document_cap(corpus_pages)
+    rare = tuple(stem for stem in stems if int(frequencies.get(stem, 0)) <= cap)
+    return rare, int(corpus_pages), "available"
+
+
 def carry_candidates(
     vault_root: Path,
     turn: str,
@@ -556,45 +602,65 @@ def carry_candidates(
     freshness=None,
     recall_checkpoint=None,
 ) -> tuple[tuple[tuple[str, float], ...], str]:
-    """Scored recall over the WHOLE compiled knowledge base, for a turn that
-    resolved no anchor at all. Returns `(hits, readiness status)`.
+    """Pages this turn NAMED, for a turn that resolved no anchor at all.
+    Returns `(hits, readiness status)`.
 
-    Two deliberate differences from `lexical_evidence`, which is the same
-    sqlite query under different orders:
+    Three deliberate differences from `lexical_evidence`, which is otherwise
+    the same sqlite query:
 
     * **No `allowed_paths`.** Anchor-restricted recall is what makes a
       decision living in an ordinary research note unreachable — it is not an
       anchor, so it is not in the catalogue the query is confined to, so the
       turn abstains however plainly its own words name the page.
+    * **Corroboration is counted over DISTINCTIVE stems only.** Counting it
+      over all of them asks "did several of the turn's words occur here",
+      which is co-occurrence: a two-line stub titled "Meeting notes" sharing
+      "meeting", "pending" and "decision" with an ordinary turn passed that
+      test and was served as durable memory. Counting only the stems that
+      are rare in THIS corpus asks "did the turn name this page", which is
+      the question the packet's honesty rests on. The ranking still sees the
+      whole turn; only the gate narrows.
     * **The score is kept.** `lexical_evidence` discards it because evidence
-      there is categorical: a page was surfaced or it was not. Carrying is a
-      DOMINANCE judgement instead — "one page, far ahead of the next" — and
-      dominance cannot be read off a rank.
+      there is categorical. Carrying needs to compare two survivors, which a
+      rank cannot express.
+
+    Fewer than `RETRIEVAL_CARRY_MIN_RARE_TERMS` distinctive stems means no
+    hit could qualify, so the ranking query is not made at all — the cheapest
+    refusal is the one that never asks.
 
     Everything else is the existing bounded contract: the maintained
     catalogue only, no foreground delta (`allow_delta=False`), no corpus
     walk, no directory enumeration, and an incomplete catalogue reported
-    rather than repaired. Raw-material hits are dropped before the caller ever
-    sees them: a captured source or a preserved piece of evidence is not a
-    candidate, so it neither gets served nor takes part in the dominance
+    rather than repaired. Raw-material hits are dropped before the caller
+    ever sees them: a captured source or a preserved piece of evidence is not
+    a candidate, so it neither gets served nor takes part in the dominance
     comparison.
     """
     from . import lexstore
 
     try:
-        content_turn = " ".join(
-            token
-            for token in working_set_index.tokens_of(working_set_index.normalize(turn))
-            if token not in working_set_index.STOPWORDS
+        stems = content_stems(turn)
+        if len(stems) < working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS:
+            return (), "available"
+        rare, _pages, state = rare_turn_terms(
+            vault_root,
+            stems,
+            freshness=freshness,
+            recall_checkpoint=recall_checkpoint,
         )
+        if state != "available":
+            return (), state
+        if len(rare) < working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS:
+            return (), "available"
         result = lexstore.search_bm25_result(
             vault_root,
-            content_turn,
+            " ".join(stems),
             limit,
             scope="kb",
             freshness=freshness,
             allow_delta=False,
-            min_matched_terms=RETRIEVAL_CARRY_MIN_TERMS,
+            min_matched_terms=working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS,
+            corroboration_tokens=list(rare),
             recall_checkpoint=recall_checkpoint,
         )
         if not result.readiness.complete:

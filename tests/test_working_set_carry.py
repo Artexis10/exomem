@@ -31,15 +31,45 @@ from exomem import (
 
 #: A turn that names no anchor of the fixture catalogue and repeats one
 #: research note's own words. Invented, generic vocabulary throughout.
-CARRY_TURN = "what did we decide about the quillon batching window"
+CARRY_TURN = "what did we decide about the quillon vantry window"
 #: A turn that lands equally on two near-twin notes. Two hits inside the
 #: separation band are noise, never a guess.
 TIE_TURN = "where did the tarn rollover cadence end up"
 #: The dominant page `CARRY_TURN` reaches.
-CARRY_PAGE = "Knowledge Base/Notes/Research/quillon-batching-window.md"
+CARRY_PAGE = "Knowledge Base/Notes/Research/quillon-vantry-window.md"
 #: Raw-material pages that outrank it and must never be candidates.
-CARRY_SOURCE = "Knowledge Base/Sources/quillon-batching-window-transcript.md"
-CARRY_EVIDENCE = "Knowledge Base/Evidence/quillon-batching-window-receipt.md"
+CARRY_SOURCE = "Knowledge Base/Sources/quillon-vantry-window-transcript.md"
+CARRY_EVIDENCE = "Knowledge Base/Evidence/quillon-vantry-window-receipt.md"
+
+#: The reviewer's stub case. Ordinary English throughout; the only page it
+#: touches is a two-line note titled "Meeting notes".
+STUB_TURN = (
+    "I have been going back and forth about this all week and I still do not "
+    "know what the right call is, so before the meeting tomorrow I would like "
+    "to settle the pending decision one way or the other"
+)
+#: The reviewer's genuine case: a turn naming a page by its own distinctive
+#: words, which a vault of any size leaves distinctive.
+GENUINE_TURN = (
+    "can you remind me what the review concluded about the kelvane "
+    "throughput ceiling and whether we ever raised it"
+)
+GENUINE_PAGE = "Knowledge Base/Notes/Research/kelvane-throughput-review.md"
+STUB_PAGE = "Knowledge Base/Notes/Inbox/meeting-notes.md"
+#: One ordinary note's worth of prose. Every word the stub turn shares with
+#: `STUB_PAGE` appears here, which is the point: in a vault that contains
+#: ordinary notes, "meeting", "pending" and "decision" are ordinary words.
+#: A corpus with no ordinary prose in it has no ordinary words to measure
+#: against, and rarity measured there says only that the corpus is small.
+_ORDINARY_PROSE = (
+    "This note records an ordinary week of work. The meeting on Tuesday was "
+    "short and the pending decision was carried over again; the call is still "
+    "open and the team will settle it before the review. Nothing here changes "
+    "the ceiling or the cycle, and the summary is unchanged from last week."
+)
+#: Ordinary notes seeded at every corpus size, `bulk` on top of them. Ten is
+#: enough to put the everyday words past the rare cap on a small vault.
+_ORDINARY_NOTES = 10
 
 
 def _write(path: Path, text: str) -> None:
@@ -52,53 +82,53 @@ def _seed_carry_pages(vault: Path) -> None:
     two near-twins that must tie rather than carry. None is an anchor."""
     kb = vault / "Knowledge Base"
     _write(
-        kb / "Notes" / "Research" / "quillon-batching-window.md",
+        kb / "Notes" / "Research" / "quillon-vantry-window.md",
         """---
 type: research-note
 status: active
 updated: 2026-09-10
 ---
 
-# Quillon batching window
+# Quillon vantry window
 
 ## Summary
 
-Why the quillon batching window was widened, and what the decision rests on.
+Why the quillon vantry window was widened, and what the decision rests on.
 
-- [decision] The quillon batching window was widened to nine minutes after
-  the narrow window starved the batching queue twice in one week. ^q-decision
-- [finding] A quillon batch that misses its window is retried whole, so a
+- [decision] The quillon vantry window was widened to nine minutes after
+  the narrow window starved the vantry queue twice in one week. ^q-decision
+- [finding] A quillon parcel that misses its window is retried whole, so a
   narrow window costs more work than it saves. ^q-finding
-- [constraint] The quillon batching window never exceeds twelve minutes: past
-  that the queue's own retention drops batches on the floor. ^q-constraint
+- [constraint] The quillon vantry window never exceeds twelve minutes: past
+  that the queue's own retention drops parcels on the floor. ^q-constraint
 """,
     )
     _write(
-        kb / "Sources" / "quillon-batching-window-transcript.md",
+        kb / "Sources" / "quillon-vantry-window-transcript.md",
         """---
 type: source
 status: active
 updated: 2026-09-09
 ---
 
-# Quillon batching window transcript
+# Quillon vantry window transcript
 
-Raw transcript. Quillon batching window, quillon batching window, quillon
-batching decided, quillon window batching, batching window quillon batching.
+Raw transcript. Quillon vantry window, quillon vantry window, quillon
+vantry decided, quillon window vantry, vantry window quillon vantry.
 """,
     )
     _write(
-        kb / "Evidence" / "quillon-batching-window-receipt.md",
+        kb / "Evidence" / "quillon-vantry-window-receipt.md",
         """---
 type: evidence
 status: active
 updated: 2026-09-09
 ---
 
-# Quillon batching window receipt
+# Quillon vantry window receipt
 
-Preserved record. Quillon batching window, quillon batching window, quillon
-window decided, quillon batching window, batching quillon window batching.
+Preserved record. Quillon vantry window, quillon vantry window, quillon
+window decided, quillon vantry window, vantry quillon window vantry.
 """,
     )
     _write(
@@ -133,6 +163,64 @@ updated: 2026-09-11
   ^t-south
 """,
     )
+
+
+def _seed_prose_corpus(vault: Path, *, bulk: int = 0) -> None:
+    """A vault that reads like a vault: ordinary notes, one page the turn can
+    name, and one stub that shares only ordinary words with it."""
+    _seed_structure(vault)
+    _seed_planning(vault)
+    kb = vault / "Knowledge Base"
+    _write(
+        kb / "Notes" / "Research" / "kelvane-throughput-review.md",
+        """---
+type: research-note
+status: active
+updated: 2026-09-10
+---
+
+# Kelvane throughput review
+
+## Summary
+
+- [decision] The kelvane throughput ceiling was raised to eleven units after
+  the review found the old ceiling idle for most of the cycle. ^k-decision
+- [finding] Raising the kelvane ceiling costs nothing while the cycle is
+  idle. ^k-finding
+""",
+    )
+    _write(
+        kb / "Notes" / "Inbox" / "meeting-notes.md",
+        """---
+type: note
+status: active
+updated: 2026-08-01
+---
+
+# Meeting notes
+
+## Summary
+
+- [note] Decision pending. ^m-1
+""",
+    )
+    for index in range(_ORDINARY_NOTES + max(0, bulk)):
+        _write(
+            kb / "Notes" / "Journal" / f"ordinary-note-{index:05d}.md",
+            "---\ntype: note\nstatus: active\nupdated: 2026-08-01\n---\n\n"
+            f"# Ordinary note {index:05d}\n\n## Summary\n\n"
+            f"- [note] {_ORDINARY_PROSE} ^o-{index}\n",
+        )
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+
+
+@pytest.fixture
+def prose_vault(vault: Path) -> Path:
+    """`_seed_prose_corpus` at its smallest representative size."""
+    _seed_prose_corpus(vault)
+    return vault
 
 
 @pytest.fixture
@@ -184,46 +272,101 @@ def test_the_carried_page_is_not_in_the_anchor_catalogue(carry_vault: Path) -> N
 
 
 # --------------------------------------------------------------------------- #
-# The scale the two thresholds were derived from
+# Named contact: the rarity gate the dominance test rests on
 # --------------------------------------------------------------------------- #
 
 
-def test_the_scale_the_carry_thresholds_were_derived_from(carry_vault: Path) -> None:
-    """The measurement `RETRIEVAL_CARRY_FLOOR` was derived from, pinned.
+def test_the_rare_document_cap_is_corpus_relative() -> None:
+    """A fixed cap is the same mistake a fixed score floor was.
 
-    A threshold read off a measurement is only as good as the measurement
-    staying true, so the measurement lives here rather than in a commit
-    message. Measured on this vault:
-
-    * a turn repeating one page's own distinctive words scores ~14.5, and the
-      only other pages that matched at all were raw material, which is
-      never a candidate — a carry;
-    * a turn matching several pages on nothing but the generic words
-      "decision" and "summary" scores ~5.6-5.7 across all of them — noise,
-      refused by the floor;
-    * a turn genuinely torn between two pages scores ~13.7 against ~10.2 —
-      over the floor, under the separation, refused as the near miss it is.
-
-    The floor therefore sits inside the gap between the noise ceiling and the
-    real-match floor, with room on both sides, and the separation test is
-    what handles everything above it.
+    "Distinctive" is a statement about THIS corpus. Half a percent of the
+    indexed pages is the share; the floor of three keeps the cap usable on a
+    vault too small for a share to mean anything.
     """
-    dominant, state = working_set_runtime.carry_candidates(carry_vault, CARRY_TURN)
+    assert working_set.rare_document_cap(0) == 3
+    assert working_set.rare_document_cap(38) == 3
+    assert working_set.rare_document_cap(600) == 3
+    assert working_set.rare_document_cap(1539) == 8
+    assert working_set.rare_document_cap(20000) == 100
+
+
+def test_a_stub_sharing_only_ordinary_words_is_never_carried(prose_vault: Path) -> None:
+    """The finding this gate exists for.
+
+    A two-line stub titled "Meeting notes" whose one unit reads "Decision
+    pending." used to be carried for an ordinary turn about a meeting and a
+    pending decision, and the hook injected "Decision pending." as durable
+    memory. It shares "meeting", "pending" and "decision" with the turn —
+    three stems, and under `min_matched_terms` over ALL stems that was
+    contact. None of them is distinctive in a corpus that contains ordinary
+    prose, so none of them counts now, and the turn abstains as it should.
+    """
+    hits, state = working_set_runtime.carry_candidates(prose_vault, STUB_TURN)
+
     assert state == "available"
-    assert dominant[0][1] > working_set.RETRIEVAL_CARRY_FLOOR * 1.5, dominant
+    assert hits == (), hits
+    assert working_set.dominant_carry(hits) is None
 
-    noise, _state = working_set_runtime.carry_candidates(carry_vault, "decision summary")
-    assert len(noise) >= 2, noise
-    assert max(score for _path, score in noise) < working_set.RETRIEVAL_CARRY_FLOOR, noise
-    assert working_set.dominant_carry(noise) is None
 
-    near, _state = working_set_runtime.carry_candidates(
-        carry_vault, "summary of the northern slot decision"
-    )
-    assert len(near) >= 2, near
-    assert near[0][1] > working_set.RETRIEVAL_CARRY_FLOOR, near
-    assert near[0][1] < working_set.RETRIEVAL_CARRY_SEPARATION * near[1][1], near
-    assert working_set.dominant_carry(near) is None
+def test_the_page_a_turn_names_is_carried_at_every_corpus_size(prose_vault: Path) -> None:
+    """The other half: the gate must not refuse the page the turn DID name.
+
+    "kelvane" and "throughput" occur on one page however large the corpus
+    grows, which is exactly what makes them a name rather than a word.
+    """
+    hits, state = working_set_runtime.carry_candidates(prose_vault, GENUINE_TURN)
+
+    assert state == "available"
+    assert [path for path, _score in hits] == [GENUINE_PAGE], hits
+    dominant = working_set.dominant_carry(hits)
+    assert dominant is not None and dominant[0] == GENUINE_PAGE
+
+
+@pytest.mark.timeout(900)
+@pytest.mark.parametrize("bulk", [200, 2000])
+def test_the_gate_holds_as_the_corpus_grows(vault: Path, bulk: int) -> None:
+    """Both halves again at 200 and 2000 added pages.
+
+    The absolute score floor this replaced failed exactly here: `-bm25()` is
+    not corpus-invariant, so the page the turn named scored 13.16 at bulk 0,
+    6.81 at bulk 200 (refused) and was outranked by a filler note at bulk
+    2000. Rarity is measured against the corpus, so it does not drift with
+    it, and a filler note shares no distinctive word with anything.
+    """
+    _seed_prose_corpus(vault, bulk=bulk)
+
+    stub, state = working_set_runtime.carry_candidates(vault, STUB_TURN)
+    assert state == "available"
+    assert stub == (), stub
+
+    genuine, state = working_set_runtime.carry_candidates(vault, GENUINE_TURN)
+    assert state == "available"
+    assert [path for path, _score in genuine] == [GENUINE_PAGE], genuine
+    assert not any("bulk" in path for path, _score in genuine), genuine
+    dominant = working_set.dominant_carry(genuine)
+    assert dominant is not None and dominant[0] == GENUINE_PAGE
+
+
+def test_a_turn_with_nothing_distinctive_runs_no_second_query(
+    prose_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fewer than two distinctive stems cannot produce a carry, so the
+    ranking query is never made: the cheapest refusal is the one that never
+    asks."""
+    calls: list[str] = []
+    real = lexstore.search_bm25_result
+
+    def counting(*args, **kwargs):
+        calls.append("bm25")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(lexstore, "search_bm25_result", counting)
+
+    hits, state = working_set_runtime.carry_candidates(prose_vault, "the meeting decision")
+
+    assert hits == ()
+    assert state == "available"
+    assert calls == [], "the ranking query ran for a turn that could not carry"
 
 
 # --------------------------------------------------------------------------- #
@@ -235,29 +378,31 @@ def test_nothing_is_dominant_among_no_hits() -> None:
     assert working_set.dominant_carry(()) is None
 
 
-def test_a_lone_hit_over_the_floor_is_dominant() -> None:
-    """There is no second page for it to be confused with."""
-    floor = working_set.RETRIEVAL_CARRY_FLOOR
-    assert working_set.dominant_carry((("a.md", floor + 1.0),)) == ("a.md", floor + 1.0)
+def test_a_lone_surviving_hit_is_dominant() -> None:
+    """Every survivor already carries two distinctive stems, and there is no
+    second page for this one to be confused with. No absolute score is
+    consulted: `-bm25()` is not comparable between two corpora, which is what
+    made the floor this replaced meaningless."""
+    assert working_set.dominant_carry((("a.md", 3.0),)) == ("a.md", 3.0)
+    assert working_set.dominant_carry((("a.md", 41.0),)) == ("a.md", 41.0)
 
 
-def test_a_lone_hit_under_the_floor_is_not_dominant() -> None:
-    """The degenerate case the floor exists for: nothing matched well, and
-    dividing by a runner-up that does not exist would carry the least bad
-    page in a corpus that had no answer."""
-    assert working_set.dominant_carry((("a.md", working_set.RETRIEVAL_CARRY_FLOOR - 0.1),)) is None
+def test_a_zero_scoring_hit_is_never_dominant() -> None:
+    """The one sanity bound left. The catalogue does return rows scoring 0.0
+    at corpus scale, and a row the ranking placed at nothing is not a page
+    the turn named."""
+    assert working_set.dominant_carry((("a.md", 0.0),)) is None
+    assert working_set.dominant_carry((("a.md", 0.0), ("b.md", 0.0))) is None
 
 
 def test_a_hit_inside_the_separation_band_is_not_dominant() -> None:
-    floor = working_set.RETRIEVAL_CARRY_FLOOR
-    second = floor + 10.0
+    second = 10.0
     top = second * working_set.RETRIEVAL_CARRY_SEPARATION - 0.1
     assert working_set.dominant_carry((("a.md", top), ("b.md", second))) is None
 
 
 def test_a_hit_clear_of_the_separation_band_is_dominant() -> None:
-    floor = working_set.RETRIEVAL_CARRY_FLOOR
-    second = floor + 1.0
+    second = 10.0
     top = second * working_set.RETRIEVAL_CARRY_SEPARATION + 0.1
     assert working_set.dominant_carry((("a.md", top), ("b.md", second))) == ("a.md", top)
 
@@ -276,11 +421,11 @@ def test_raw_material_is_never_a_candidate(carry_vault: Path) -> None:
     """
     raw = lexstore.search_bm25_result(
         carry_vault,
-        "quillon batching window decide",
+        "quillon vantry window decide",
         working_set_runtime.RETRIEVAL_CARRY_LIMIT,
         scope="kb",
         allow_delta=False,
-        min_matched_terms=working_set_runtime.RETRIEVAL_CARRY_MIN_TERMS,
+        min_matched_terms=working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS,
     )
     ranked = [path for path, _score in raw.value or ()]
     assert set(ranked[:2]) == {CARRY_SOURCE, CARRY_EVIDENCE}, ranked
@@ -324,7 +469,7 @@ def test_a_dominant_hit_carries_that_pages_units(carry_vault: Path, budget_free)
     assert anchor["path"] == CARRY_PAGE
     assert anchor["ref"] == CARRY_PAGE
     # The anchor says what the page says about itself, rather than asserting.
-    assert anchor["title"] == "Quillon batching window"
+    assert anchor["title"] == "Quillon vantry window"
     assert packet["units"], packet
     assert _unit_paths(packet) == {CARRY_PAGE}
 
@@ -363,7 +508,7 @@ def test_a_resolved_anchor_wins_over_a_dominant_hit(carry_vault: Path, budget_fr
         carry_vault,
         turn=(
             "I'm planning to tow the Cargo Sled north — what are its constraints, "
-            "and what did we decide about the quillon batching window?"
+            "and what did we decide about the quillon vantry window?"
         ),
         max_chars=4000,
     )

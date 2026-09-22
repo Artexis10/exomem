@@ -220,10 +220,28 @@ abstained on. When resolution reached NO anchor, a second scored recall runs ove
 the compiled knowledge base with no anchor restriction and the knowledge
 base's raw-material folders (captured sources, preserved evidence) excluded,
 under its own `working_set.carry` timing span and the same request budget, and it
-is skipped outright when the lexical catalogue is anything but `available`. A
-single page that dominates it — clear of an absolute floor derived from the
-measured BM25 scale, and `RETRIEVAL_CARRY_SEPARATION` (1.5) times clear of the
-runner-up — carries the packet: that page's units through the existing units
+is skipped outright when the lexical catalogue is anything but `available`. Dominance is a
+NAMED-CONTACT test. A hit is a candidate only when at least two of the turn's
+stems that it matches are DISTINCTIVE in this corpus — document frequency at
+or below `max(3, ceil(0.5% of the indexed knowledge-base pages))`, measured
+over the same catalogue join the ranking uses, so a frequency and a rank can
+never come from two different corpora. Counting corroboration over ALL the
+turn's stems asks whether several of its words occurred on a page, which is
+co-occurrence: a two-line stub titled "Meeting notes" whose one unit read
+"Decision pending" passed that test for an ordinary turn about a meeting and
+a pending decision, and was served as durable memory. A turn with fewer than
+two distinctive stems cannot carry anything, so the ranking query is not run
+at all. The surviving hit must then stand `RETRIEVAL_CARRY_SEPARATION` (1.5)
+times clear of the runner-up, and a lone survivor is dominant because it
+already carries the two distinctive stems. The absolute score floor this
+replaced is gone: `-bm25()` is not comparable between corpora, so the same
+page for the same turn measured 13.16 with no bulk, 6.81 with 200 pages
+added (refused by a floor fitted to the first number) and was outranked by an
+unrelated filler note at 2000. One sanity bound remains — a row the ranking
+placed at zero is not a page a turn named. Rarity is only as sharp as the
+corpus it is measured against: in a vault of a few dozen pages containing no
+ordinary prose, everyday words are rare by measurement, and the gate tightens
+monotonically as the vault fills. The dominant page then carries the packet: that page's units through the existing units
 lanes, one anchor entry of kind `page` at status `retrieval_carried` whose only
 evidence is `retrieval`, `generation.carried_by = "retrieval"`, and no continuity
 token, because a carried page is not a resolution to carry forward. Retrieval

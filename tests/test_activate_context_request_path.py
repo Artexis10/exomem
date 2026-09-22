@@ -928,7 +928,7 @@ def test_a_named_anchor_still_wins_through_the_whole_door(
 
     packet = commands.op_activate_context(
         carried_vault,
-        turn=f"{TURN} and what did we decide about the quillon batching window?",
+        turn=f"{TURN} and what did we decide about the quillon vantry window?",
     )
 
     assert packet["abstained"] is False, packet.get("abstention")

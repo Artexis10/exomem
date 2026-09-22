@@ -1783,9 +1783,20 @@ def search_bm25_result(
     allowed_paths: set[str] | None = None,
     allow_delta: bool = True,
     min_matched_terms: int = 1,
+    corroboration_tokens: list[str] | None = None,
     recall_checkpoint: Any | None = None,
 ) -> CatalogQueryResult[list[tuple[str, float]]]:
-    """Non-walking maintained-catalog BM25 query with explicit readiness."""
+    """Non-walking maintained-catalog BM25 query with explicit readiness.
+
+    `corroboration_tokens` separates WHAT MATCHES from WHAT COUNTS as
+    corroboration. `min_matched_terms` is normally counted over the query's
+    own stems, which answers "did several of the turn's words occur here".
+    A caller that already knows some of those stems are worthless — every
+    page in the corpus has them — can pass the subset worth counting, and
+    the predicate then answers the sharper question "did several of the
+    turn's DISTINCTIVE words occur here" while the ranking still sees the
+    whole query. `None` keeps the existing behaviour exactly.
+    """
     if not _usable():
         return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
     if not query.strip():
@@ -1803,6 +1814,45 @@ def search_bm25_result(
         allowed_paths,
         allow_delta=allow_delta,
         min_matched_terms=min_matched_terms,
+        corroboration_tokens=corroboration_tokens,
+        recall_checkpoint=recall_checkpoint,
+    )
+
+
+def term_document_frequencies(
+    vault_root: Path,
+    terms: Iterable[str],
+    *,
+    scope: str = "kb",
+    freshness: tuple | None = None,
+    allow_delta: bool = True,
+    recall_checkpoint: Any | None = None,
+) -> CatalogQueryResult[tuple[dict[str, int], int]]:
+    """How many indexed pages each stem occurs on, and how many there are.
+
+    Returns `({stem: document frequency}, pages in scope)` — the two numbers
+    a caller needs to decide whether a word is DISTINCTIVE in this corpus
+    rather than merely present in the query. Nothing here decides what
+    "rare" means: that is the caller's policy, and it differs between a
+    twelve-page vault and a twelve-thousand-page one.
+
+    Measured over the SAME `fts`/`pages` join and the same scope column the
+    BM25 query uses, so a term's frequency and its ranking cannot be taken
+    from two different corpora. One indexed FTS lookup per term, bounded by
+    the caller's own term list; no vocabulary table is materialised, because
+    `fts5vocab` counts documents vault-wide and would answer for a corpus
+    the query never searched.
+    """
+    if not _usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    wanted = [str(term) for term in terms if str(term).strip()]
+    if not wanted:
+        return CatalogQueryResult(({}, 0), CatalogReadiness("available", True, backend()))
+    return get_store(vault_root).term_document_frequencies(
+        wanted,
+        scope,
+        freshness,
+        allow_delta=allow_delta,
         recall_checkpoint=recall_checkpoint,
     )
 
@@ -5652,6 +5702,7 @@ class LexicalStore:
         *,
         allow_delta: bool = True,
         min_matched_terms: int = 1,
+        corroboration_tokens: list[str] | None = None,
         recall_checkpoint: Any | None = None,
     ) -> CatalogQueryResult[list[tuple[str, float]]]:
         return self._serve_from_ready_catalog_result(
@@ -5660,11 +5711,51 @@ class LexicalStore:
             lambda conn: self._bm25_query(
                 conn, stemmed_tokens, k, scope, allowed_paths,
                 min_matched_terms=min_matched_terms,
+                corroboration_tokens=corroboration_tokens,
             ),
             "lexical sidecar BM25 query failed (%s)",
             allow_delta=allow_delta,
             recall_checkpoint=recall_checkpoint,
         )
+
+    def term_document_frequencies(
+        self,
+        stemmed_tokens: list[str],
+        scope: str,
+        freshness: tuple | None,
+        *,
+        allow_delta: bool = True,
+        recall_checkpoint: Any | None = None,
+    ) -> CatalogQueryResult[tuple[dict[str, int], int]]:
+        return self._serve_from_ready_catalog_result(
+            scope,
+            freshness,
+            lambda conn: self._document_frequency_query(conn, stemmed_tokens, scope),
+            "lexical sidecar document-frequency query failed (%s)",
+            allow_delta=allow_delta,
+            recall_checkpoint=recall_checkpoint,
+        )
+
+    def _document_frequency_query(
+        self, conn: sqlite3.Connection, tokens: list[str], scope: str
+    ) -> tuple[dict[str, int], int]:
+        """`({stem: pages carrying it}, pages in scope)` — one indexed lookup
+        per DISTINCT stem, over the same join `_bm25_query` ranks with."""
+        col = "in_vault" if scope == "vault" else "in_kb"
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM pages WHERE {col} = 1"
+        ).fetchone()
+        frequencies: dict[str, int] = {}
+        for token in dict.fromkeys(tokens):
+            # Tokens are [a-z0-9]+ stems — no FTS5 syntax can hide in them,
+            # but quote anyway, exactly as `_bm25_query` does.
+            row = conn.execute(
+                "SELECT COUNT(*) FROM fts JOIN pages p ON p.rowid = fts.rowid "
+                f"WHERE fts MATCH ? AND p.{col} = 1",
+                (f'"{token}"',),
+            ).fetchone()
+            frequencies[token] = int(row[0]) if row else 0
+        return frequencies, int(total[0]) if total else 0
 
     def _bm25_query(
         self,
@@ -5675,6 +5766,7 @@ class LexicalStore:
         allowed_paths: set[str] | None = None,
         *,
         min_matched_terms: int = 1,
+        corroboration_tokens: list[str] | None = None,
     ) -> list[tuple[str, float]]:
         # Tokens are [a-z0-9]+ — no FTS5 syntax can hide in them, but quote
         # anyway; OR mirrors get_scores() membership (any-term match).
@@ -5688,11 +5780,17 @@ class LexicalStore:
         if min_matched_terms > 1:
             # Corroboration counts distinct stems, not repetitions of one word.
             # Filter before LIMIT so one-term hits cannot crowd out valid pages.
+            #
+            # Counted over `corroboration_tokens` when the caller supplied
+            # them, the query's own stems otherwise. The MATCH above is
+            # unchanged either way: a caller narrowing this list is saying
+            # which stems are worth counting, never which pages may rank.
+            counted = tokens if corroboration_tokens is None else corroboration_tokens
             allowed_clause += (
                 " AND (SELECT COUNT(*) FROM json_each(?) AS term "
                 "WHERE instr(' ' || fts.stemmed || ' ', ' ' || term.value || ' ') > 0) >= ?"
             )
-            params.extend((json.dumps(sorted(set(tokens))), min_matched_terms))
+            params.extend((json.dumps(sorted(set(counted))), min_matched_terms))
         params.append(k)
         rows = conn.execute(
             "SELECT p.path, -bm25(fts) AS score "

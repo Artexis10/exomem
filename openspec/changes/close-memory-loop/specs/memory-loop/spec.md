@@ -383,20 +383,27 @@ produces served material.
 
 The carry SHALL run only when anchor resolution returned no resolved anchor and
 the request named no explicit anchor choice; an ambiguous turn and a turn that
-resolved any anchor SHALL be untouched. It SHALL run one scored query against the
-maintained full-page catalogue over the knowledge-base scope, without the anchor
-path restriction, requiring the same two distinct matched content stems, applying
-the same no-foreground-delta and no-corpus-scan rules, and reporting rather than
+resolved any anchor SHALL be untouched. A hit SHALL be a candidate only where at least two
+of the turn's stems that it matches are DISTINCTIVE in the indexed corpus,
+measured as a document frequency at or below `max(3, ceil(0.5% of the indexed
+pages in scope))` over the same catalogue the ranking uses. A turn carrying
+fewer than two distinctive stems SHALL carry nothing and SHALL NOT run the
+ranking query. An absolute score threshold SHALL NOT be used to decide contact:
+the ranking score is comparable only between hits drawn from one corpus. The
+query SHALL run once against the maintained full-page catalogue over the
+knowledge-base scope, without the anchor path restriction, applying the same
+no-foreground-delta and no-corpus-scan rules, and reporting rather than
 repairing an incomplete catalogue. Pages in the knowledge base's raw-material
 folders — captured sources and preserved evidence, the same folders the anchor
 catalogue already refuses to build an anchor from — SHALL NOT be candidates. The query SHALL run within the request deadline
 under its own timing span and SHALL be skipped when that deadline can no longer
 afford a stage.
 
-A page SHALL be carried only when it clears a declared absolute score floor AND
-exceeds the next candidate by a declared separation factor; a single candidate
-clearing the floor SHALL count as dominant. Any other outcome SHALL abstain
-`unresolved` exactly as before.
+A page SHALL be carried only when it exceeds the next surviving candidate by a
+declared separation factor; a single surviving candidate SHALL count as
+dominant, because every survivor already carries two distinctive stems. A
+candidate the ranking scored at zero SHALL NOT be carried. Any other outcome
+SHALL abstain `unresolved` exactly as before.
 
 A carried packet SHALL report that page as its one anchor entry, of kind `page`,
 at status `retrieval_carried`, with `retrieval` as its only evidence, and SHALL
@@ -414,6 +421,14 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
 - **THEN** the packet serves that note's units under one anchor entry of kind
   `page` at status `retrieval_carried`, marked as carried by retrieval
 - **AND** no continuity token is minted from it, and no anchor is resolved
+
+#### Scenario: A stub sharing only ordinary words is not named
+
+- **WHEN** a turn that resolves no anchor shares two or more stems with a page,
+  and none of those stems is distinctive in the indexed corpus
+- **THEN** that page is not a candidate and the turn abstains `unresolved`
+- **AND** the same page IS a candidate for a turn that shares two distinctive
+  stems with it, at any corpus size
 
 #### Scenario: Two close candidates are noise, not a choice
 

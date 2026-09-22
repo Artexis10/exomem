@@ -61,22 +61,34 @@ GRAPH_TRAVERSAL_PROFILE = "epistemic"
 #: separation a genuine single-topic match clears comfortably on the BM25
 #: scale while two pages sharing a vocabulary do not.
 RETRIEVAL_CARRY_SEPARATION = 1.5
-#: The absolute floor the top hit must clear, on the same `-bm25()` scale
-#: `lexstore` returns (larger is better; the sign is already flipped there).
-#: Separation alone is not enough: a corpus where nothing matches well can
-#: still produce a lone weak hit with NO second hit, and there is no
-#: runner-up to divide by, so the separation test would pass it through.
+#: The only absolute score the carry consults, and it is a sanity bound
+#: rather than a threshold: the catalogue really does return rows scoring
+#: 0.0 at corpus scale, and a row the ranking placed at nothing is not a
+#: page a turn named.
 #:
-#: Derived by measurement, pinned by
-#: `test_the_scale_the_carry_thresholds_were_derived_from`. On the test vault
-#: a turn repeating one page's own distinctive words scores ~14.5; a turn
-#: matching several pages on nothing but the generic words "decision" and
-#: "summary" scores ~5.6-5.7 across all of them. 8.0 sits inside that gap
-#: with room on both sides — comfortably above every noise score measured
-#: and comfortably below every genuine match. It is deliberately the coarser
-#: of the two gates: the separation test is what judges an ordinary near
-#: miss, and this one exists only to refuse the degenerate lone-weak hit.
-RETRIEVAL_CARRY_FLOOR = 8.0
+#: An absolute FLOOR was tried and removed. `-bm25()` is not comparable
+#: between corpora, so any number that separated signal from noise on one
+#: vault was wrong on another: measured, the same page the same turn names
+#: scored 13.16 with no bulk, 6.81 with 200 pages added — below the floor
+#: that had been fitted to it, so the turn abstained — and was outranked by
+#: an unrelated filler note at 2000. What makes a hit contact is whether
+#: the turn used DISTINCTIVE words, which is what the rarity gate below
+#: measures; the score is then only good for comparing two hits taken from
+#: the one corpus, which is what the separation test does.
+RETRIEVAL_CARRY_MIN_SCORE = 0.0
+
+#: A stem is DISTINCTIVE when it occurs on no more than this share of the
+#: indexed pages. Corpus-relative on purpose: "rare" is a statement about
+#: the vault the turn is being answered from, and the same word is a name in
+#: one vault and an everyday word in another.
+RETRIEVAL_CARRY_RARE_FRACTION = 0.005
+#: The floor under that share. Half a percent of a forty-page vault rounds
+#: to nothing, and a cap of zero would make every word distinctive.
+RETRIEVAL_CARRY_RARE_MIN_DOCS = 3
+#: How many distinctive stems a hit must share with the turn before it is a
+#: candidate at all. One is a coincidence at corpus scale; the same two-fact
+#: standard the resolver's own `rare_term` clause applies to an anchor.
+RETRIEVAL_CARRY_MIN_RARE_TERMS = 2
 
 PACKET_BLOCKS = (
     "anchors",
@@ -817,23 +829,39 @@ def signature_evidence(index: working_set_index.WorkingSetIndex, turn: str):
 # --------------------------------------------------------------------------- #
 
 
+def rare_document_cap(corpus_pages: int) -> int:
+    """The document frequency at or below which a stem counts as DISTINCTIVE
+    in a corpus of `corpus_pages` indexed pages.
+
+    `max(RETRIEVAL_CARRY_RARE_MIN_DOCS, ceil(share * pages))`. Corpus-relative
+    because that is the only way the judgement survives a growing vault: a
+    fixed cap is the same mistake a fixed score floor was.
+    """
+    pages = max(0, int(corpus_pages))
+    return max(RETRIEVAL_CARRY_RARE_MIN_DOCS, -(-pages * 5 // 1000))
+
+
 def dominant_carry(hits: Sequence[tuple[str, float]]) -> tuple[str, float] | None:
     """The one clearly dominant hit among `hits`, or `None`.
 
-    Two gates, both refusing rather than ranking. The top hit must clear
-    `RETRIEVAL_CARRY_FLOOR` — otherwise a corpus where nothing matches well
-    would still hand back its least-bad page, and a lone weak hit with no
-    runner-up at all would be "dominant" by default. And it must stand
-    `RETRIEVAL_CARRY_SEPARATION` times clear of the next one — otherwise the
-    turn's words are spread over the corpus and choosing between two close
-    pages is exactly the guess the compiler exists not to make. A single hit
-    that clears the floor IS dominant: there is no second page to be confused
-    with.
+    `hits` has already passed the rarity gate, so every entry shares at least
+    `RETRIEVAL_CARRY_MIN_RARE_TERMS` DISTINCTIVE stems with the turn — the
+    "did this turn name this page" question is answered before this function
+    is reached, and answering it is what makes a score usable at all.
+
+    What is left is a comparison between two hits drawn from the one corpus:
+    the top must stand `RETRIEVAL_CARRY_SEPARATION` times clear of the next,
+    or the turn's distinctive words are spread over the corpus and choosing
+    between two close pages is exactly the guess the compiler exists not to
+    make. A lone survivor IS dominant — it already carries the two
+    distinctive stems, and there is no second page to be confused with.
+    `RETRIEVAL_CARRY_MIN_SCORE` is the one absolute left, and it only
+    refuses a row the ranking placed at nothing.
     """
     if not hits:
         return None
     path, score = hits[0]
-    if score < RETRIEVAL_CARRY_FLOOR:
+    if score <= RETRIEVAL_CARRY_MIN_SCORE:
         return None
     if len(hits) > 1 and score < RETRIEVAL_CARRY_SEPARATION * hits[1][1]:
         return None
