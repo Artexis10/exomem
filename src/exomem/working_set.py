@@ -1169,7 +1169,13 @@ def _recent_context(
         ((path, why) for path, why in offered.items() if why != "planning"), key=_rank
     )
     if planning_offers:
-        ranked = sorted([*others[: max(0, limit - 1)], planning_offers[0]], key=_rank)
+        # Reserve the slot, then backfill from EVERYTHING left, the plans that
+        # did not get the slot included. Reserving without backfilling left the
+        # block short on the vault it exists for — two recent edits and five
+        # open plans filled three of eight slots, and four open commitments
+        # were never offered at all.
+        rest = sorted([*others, *planning_offers[1:]], key=_rank)
+        ranked = sorted([*rest[: limit - 1], planning_offers[0]], key=_rank)
     else:
         ranked = others[:limit]
 

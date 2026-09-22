@@ -1198,3 +1198,53 @@ def test_the_block_never_takes_more_than_half_the_packet() -> None:
     )
     assert recent_chars <= working_set.MIN_BUDGET_CHARS // 2
     assert packet["units"], "the rest of the packet must still be affordable"
+
+
+def test_the_reserved_planning_slot_never_shrinks_the_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reserving a slot must not throw away the offers that did not get it.
+
+    An untouched plan is absent from the freshness map — that is what makes it
+    untouched — so open plans reach the block only through `_recent_planning`.
+    Keeping one and discarding the rest, while also cutting the other sources
+    to `limit - 1`, left slots empty on exactly the vault this block exists
+    for: someone resuming after a break, whose open commitments outnumber
+    their recent edits.
+    """
+    others = {f"Knowledge Base/Notes/note-{index}.md": 9_000 - index for index in range(2)}
+    plans = tuple(f"Knowledge Base/Planning/Plan {index}/_collection.md" for index in range(5))
+    monkeypatch.setattr(working_set, "_recent_mtimes", lambda _root: dict(others))
+    monkeypatch.setattr(working_set, "_recently_activated", lambda *a, **k: ())
+    monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: plans)
+    monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
+    monkeypatch.setattr(working_set, "_recent_collection_dirs", lambda _mtimes: frozenset())
+
+    entries = working_set._recent_context(Path("/nonexistent"), rows=[])
+
+    assert len(entries) == 7, [entry["path"] for entry in entries]
+    assert [entry["why"] for entry in entries].count("planning") == len(plans)
+    assert [entry["why"] for entry in entries][:2] == ["edited", "edited"], (
+        "the reservation must not promote a plan above a fresher edit"
+    )
+
+
+def test_the_reserved_slot_still_holds_when_the_block_is_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The backfill must not undo the reservation: with more recent edits than
+    slots, the newest open plan still gets one."""
+    others = {f"Knowledge Base/Notes/note-{index}.md": 9_000 - index for index in range(20)}
+    plans = ("Knowledge Base/Planning/Plan 0/_collection.md",)
+    monkeypatch.setattr(working_set, "_recent_mtimes", lambda _root: dict(others))
+    monkeypatch.setattr(working_set, "_recently_activated", lambda *a, **k: ())
+    monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: plans)
+    monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
+    monkeypatch.setattr(working_set, "_recent_collection_dirs", lambda _mtimes: frozenset())
+
+    entries = working_set._recent_context(Path("/nonexistent"), rows=[])
+    whys = [entry["why"] for entry in entries]
+
+    assert len(entries) == working_set.RECENT_CONTEXT_MAX_ENTRIES
+    assert whys.count("planning") == 1
+    assert whys[-1] == "planning", "the plan keeps its place in recency order"
