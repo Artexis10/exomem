@@ -1245,3 +1245,37 @@ def test_a_collection_the_turn_never_named_stays_off_the_request_path(
     assert unasked == [], calls.report()
     assert calls.enumerations <= WARM_REQUEST_ENUMERATION_CEILING, calls.report()
     assert calls.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, calls.report()
+
+
+def test_a_referential_turn_with_the_hot_profile_on_holds_the_same_ceilings(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
+) -> None:
+    """"continue" is the one turn that computes the hot profile and runs the
+    lanes of an anchor it never named (close-memory-loop D2). It pays the same
+    ceilings as every other warm request: the profile reads the rows, the
+    registry and the activation snapshot already in hand, plus at most
+    `HOT_PROFILE_K` cached page reads, and enumerates nothing."""
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _write_collection(vault)
+    _warm_activation(vault, warm_managed_cell)
+    _drain_background_walks()
+
+    scheduled = _no_background_walks(monkeypatch)
+    calls = _FilesystemCalls(vault)
+    calls.install(monkeypatch)
+
+    packet = commands.op_activate_context(vault, turn="continue")
+
+    assert scheduled == [], scheduled
+    assert packet["abstained"] is False, (
+        "the hot profile must be ON and resolve, or this proves nothing",
+        packet.get("abstention"),
+    )
+    assert any("recency" in item["evidence"] for item in packet["anchors"]), packet["anchors"]
+    assert packet["units"] or packet["current_state"], "its lanes must actually run"
+    assert calls.enumerations <= WARM_REQUEST_ENUMERATION_CEILING, calls.report()
+    assert calls.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, calls.report()
+    assert calls.unattributable == 0, calls.report()
+    assert WARM_REQUEST_ENUMERATION_CEILING == 8
+    assert WARM_REQUEST_FILESYSTEM_CALL_CEILING == 1200
