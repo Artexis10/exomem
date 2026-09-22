@@ -1192,3 +1192,37 @@ def test_a_cue_word_in_its_ordinary_sense_is_not_answered_by_recency(
     assert all("recency" not in item["evidence"] for item in packet["anchors"])
     assert packet["units"] == []
     assert packet["recent_context"]
+
+
+def test_a_referential_turn_keeps_its_referent_past_recall_partials(
+    activation_vault: Path,
+) -> None:
+    """The reviewer's p2: "let's continue the work, what's pending?" reached
+    seven pages whose text says "pending work" by recall, each a partial that
+    sorted ahead of the hot anchor, and the referent was cut before
+    resolution. Bare "continue" resolved; this did not."""
+    from exomem import lexstore
+
+    for name in ("Anvil Crate", "Bolt Tray", "Brace Kit", "Buoy Rack", "Awl Case", "Axle Bin", "Bale Hook"):
+        (activation_vault / "Knowledge Base" / "Products" / f"{name}.md").write_text(
+            f"---\ntype: note\nstatus: active\n---\n\n# {name}\n\n## Summary\n\n"
+            "Pending work: the pending work on this item is still pending.\n",
+            encoding="utf-8",
+        )
+    working_set_index.WorkingSetIndex(activation_vault).rebuild()
+    _age_everything(
+        activation_vault,
+        newest=activation_vault / "Knowledge Base" / "Products" / "Cargo Sled.md",
+    )
+    lexstore.ensure_fresh(activation_vault)
+    runtime_module.reset_caches_for_tests()
+
+    packet = commands.op_activate_context(
+        activation_vault, turn="let's continue the work, what's pending?"
+    )
+
+    assert packet["abstained"] is False, (packet.get("abstention"), packet["anchors"])
+    resolved = [item for item in packet["anchors"] if item["status"] == "resolved"]
+    assert [item["ref"] for item in resolved] == ["Knowledge Base/Products/Cargo Sled.md"]
+    assert "recency" in resolved[0]["evidence"]
+    assert packet["units"]

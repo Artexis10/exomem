@@ -1941,3 +1941,82 @@ def test_a_capitalised_short_word_is_not_an_acronym() -> None:
 
     assert analysis.acronyms == frozenset()
     assert resolve_module.candidates_for(analysis, (row,), term_anchor_counts={"go": 1}) == ()
+
+
+# --------------------------------------------------------------------------- #
+# R-I / R-K: a recency referent survives the cuts, and heat never reorders
+# candidates the turn named.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "partial_evidence",
+    [("retrieval", "usage_prior"), ("retrieval", "category_match"), ("retrieval", "vector_band")],
+)
+def test_a_recency_referent_survives_the_anchor_cut(partial_evidence: tuple[str, ...]) -> None:
+    """The reviewer's probe p1: eight retrieval-only partials whose ids sort
+    ahead of the hot anchor used to fill `MAX_ANCHORS` and drop it."""
+    candidates = [_facts("z-hot.md", kind="hub", evidence=("recency",))] + [
+        _facts(f"a-partial-{index}.md", kind="note", evidence=partial_evidence)
+        for index in range(8)
+    ]
+
+    resolution = resolve_module.resolve(candidates, referential=True)
+
+    assert resolution.status == "resolved"
+    assert [anchor.anchor_id for anchor in resolution.resolved_anchors] == ["z-hot.md"]
+    assert resolution.anchors[0].anchor_id == "z-hot.md"
+    assert len(resolution.anchors) == resolve_module.MAX_ANCHORS
+
+
+def test_the_anchor_cut_is_unchanged_when_recency_cannot_resolve() -> None:
+    candidates = [_facts("z-hot.md", kind="hub", evidence=("recency",))] + [
+        _facts(f"a-partial-{index}.md", kind="note", evidence=("retrieval", "usage_prior"))
+        for index in range(8)
+    ]
+
+    resolution = resolve_module.resolve(candidates)
+
+    assert resolution.status == "unresolved"
+    assert [anchor.anchor_id for anchor in resolution.anchors] == [
+        f"a-partial-{index}.md" for index in range(resolve_module.MAX_ANCHORS)
+    ]
+
+
+def test_a_hot_candidate_survives_the_candidate_cut_on_a_referential_turn() -> None:
+    rows = [_row(f"Notes/a-hit-{index:02d}.md", f"Hit {index}") for index in range(30)]
+    rows.append(_row("Products/z-hot.md", "Hot Page", kind="resource"))
+    hits = frozenset(f"Notes/a-hit-{index:02d}.md" for index in range(30))
+    hot = frozenset({"Products/z-hot.md"})
+
+    referential = resolve_module.candidates_for(
+        resolve_module.analyze_turn("let's continue the work, what's pending?"),
+        rows,
+        retrieval_paths=hits,
+        hot_paths=hot,
+    )
+    ordinary = resolve_module.candidates_for(
+        resolve_module.analyze_turn("the depot corridor hits for the winter north"),
+        rows,
+        retrieval_paths=hits,
+        hot_paths=hot,
+    )
+
+    assert len(referential) == resolve_module.MAX_CANDIDATES
+    assert "Products/z-hot.md" in {item.anchor_id for item in referential}
+    # Any other turn is cut exactly as before: the prior admits nothing there,
+    # and the first MAX_CANDIDATES recall hits by the ordinary order remain.
+    assert [item.anchor_id for item in ordinary] == [
+        f"Notes/a-hit-{index:02d}.md" for index in range(resolve_module.MAX_CANDIDATES)
+    ]
+
+
+def test_heat_never_reorders_candidates_the_turn_named() -> None:
+    """R-K: `a` is hot and `b` is not; `b` holds more of the turn's own
+    evidence and so comes first, whatever the heat."""
+    hot = _facts("a.md", evidence=("lexical_overlap", "recency"))
+    colder = _facts("b.md", evidence=("lexical_overlap", "claims_match"))
+
+    ordered = sorted([hot, colder], key=resolve_module._candidate_order)
+
+    assert [item.anchor_id for item in ordered] == ["b.md", "a.md"]

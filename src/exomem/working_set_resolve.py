@@ -781,6 +781,17 @@ def candidates_for(
             )
         )
     out.sort(key=_candidate_order)
+    if analysis.referential:
+        # The hot candidates survive the cut on a referential turn. Only they
+        # can resolve it, and they carry no contact kind, so the ordinary
+        # order ranks them behind every recall hit the turn's filler words
+        # happened to reach — six of those were enough to drop the referent
+        # before `resolve()` ever saw it. Bounded by `hot_paths`, which the
+        # caller cuts at `working_set.HOT_PROFILE_K`; every other turn is cut
+        # exactly as before.
+        hot = [item for item in out if "recency" in item.evidence][:MAX_CANDIDATES]
+        rest = [item for item in out if "recency" not in item.evidence]
+        return tuple(sorted([*hot, *rest[: MAX_CANDIDATES - len(hot)]], key=_candidate_order))
     return tuple(out[:MAX_CANDIDATES])
 
 
@@ -974,7 +985,10 @@ def _candidate_order(candidate: CandidateFacts) -> tuple:
     """
     return (
         0 if candidate.deciding_kinds & DECIDING_ALONE_KINDS else 1,
-        -len(candidate.deciding_kinds),
+        # The prior is not counted: heat never reorders candidates the turn
+        # named. Where a recency referent must survive a cut, `resolve()` and
+        # `candidates_for` keep it explicitly instead.
+        -len(candidate.deciding_kinds - PRIOR_CONTACT_KINDS),
         0 if "exact_alias" in candidate.evidence else 1,
         0 if "usage_prior" in candidate.evidence else 1,
         candidate.anchor_id,
@@ -1216,6 +1230,13 @@ def resolve(
                 exact_alias_phrases=candidate.exact_alias_phrases,
             )
         )
+    if recency_resolves:
+        # A recency referent carries no contact kind, so the ordinary order
+        # puts it behind every partial the turn's filler words reached, and the
+        # cut below dropped it. Where the fifth clause is open, resolved
+        # anchors go first — stably, so each group keeps its order. Every
+        # other resolution is cut exactly as before.
+        anchors.sort(key=lambda item: 0 if item.status == "resolved" else 1)
     anchors = anchors[:MAX_ANCHORS]
     anchors = _demote_subsumed_same_kind_aliases(anchors, turn_tokens)
     resolved = [anchor for anchor in anchors if anchor.status == "resolved"]
