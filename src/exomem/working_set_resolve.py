@@ -40,6 +40,7 @@ EVIDENCE_KINDS: tuple[str, ...] = (
     "retrieval",
     "graph_corroboration",
     "usage_prior",
+    "recency",
     "continuity",
     "agent_choice",
 )
@@ -69,6 +70,23 @@ RARE_TERM_MIN_CHARS = 3
 #: rule, because "you looked at this a lot" is not evidence that this turn is
 #: about it — that is how a rich-get-richer prior turns into a wrong anchor.
 TIE_BREAK_KINDS: frozenset[str] = frozenset({"usage_prior"})
+
+#: The prior class, and its one member. `recency` says "this anchor is at the
+#: top of the hot profile" — the previous packet's own answer, the freshest
+#: edit, the most-read page — and design §8's narrow amendment lets exactly
+#: that fact supply the REFERENT of a turn that names nothing at all.
+#:
+#: Deliberately in none of the other classes. Not a tie-break, because it is
+#: not ordering anything: on a referential turn it is the whole reason an
+#: anchor is a candidate. Not a worded or a retrieved contact kind, because
+#: the turn's words never reached this anchor and no ranking engine put it
+#: there. Not in `CONTACT_KINDS`, which is what keeps `_status_for`'s four
+#: existing clauses exactly as they were: the third resolves `rare_term` plus
+#: any other CONTACT kind, and admitting a prior there would let one shared
+#: word plus a hot page resolve an anchor nobody named. It is stripped from
+#: the soundness rule's `deciding` set for the same reason, so it can never be
+#: the second kind that promotes somebody else.
+PRIOR_CONTACT_KINDS: frozenset[str] = frozenset({"recency"})
 
 #: Kinds that resolve an anchor by themselves. `exact_alias` because the turn
 #: spelled the anchor's own name; `agent_choice` because the agent IS the
@@ -449,6 +467,7 @@ def candidates_for(
     routing_targets: Sequence[Any] = (),
     retrieval_paths: frozenset[str] = frozenset(),
     used_paths: frozenset[str] = frozenset(),
+    hot_paths: frozenset[str] = frozenset(),
     term_anchor_counts: Mapping[str, int] | None = None,
     config: RankingConfig | None = None,
 ) -> tuple[CandidateFacts, ...]:
@@ -458,6 +477,15 @@ def candidates_for(
     (`WorkingSetIndex.term_anchor_counts()`), the structure `rare_term`'s
     rarity check is measured against. Absent (`None`) simply means no anchor
     can earn `rare_term` this call — never a fabricated rarity.
+
+    `hot_paths` is the top of the caller's recency profile
+    (`working_set.hot_profile`), passed in like `used_paths` because it is a
+    fact about the vault, not about the turn. It earns `recency`, and on a
+    REFERENTIAL turn only it also admits an anchor the turn's own words never
+    reached — the one widening design §8 allows, so that a turn whose whole
+    content is a reference has something to refer to. Whether such a
+    candidate then resolves is `resolve()`'s call, not this function's: the
+    condition is about the whole candidate set.
     """
     config = config or DEFAULT_RANKING
     term_counts = term_anchor_counts or {}
@@ -630,9 +658,15 @@ def candidates_for(
         if row.path and row.path in retrieval_paths:
             evidence.add("retrieval")
         # Qualifiers, applied only to an anchor the turn already reached. An
-        # anchor with no contact kind is not a candidate at all.
-        if not evidence & CONTACT_KINDS:
+        # anchor with no contact kind is not a candidate at all — unless the
+        # turn is referential and this anchor is at the top of the hot
+        # profile, which is the one case where the absence of worded contact
+        # is the point rather than a disqualification.
+        hot = bool(row.path) and row.path in hot_paths
+        if not evidence & CONTACT_KINDS and not (hot and analysis.referential):
             continue
+        if hot:
+            evidence.add("recency")
         if cue_categories and cue_categories & frozenset(row.categories):
             evidence.add("category_match")
         if row.path and row.path in used_paths:
@@ -853,7 +887,7 @@ def _candidate_order(candidate: CandidateFacts) -> tuple:
     )
 
 
-def _status_for_evidence(evidence: frozenset[str]) -> str:
+def _status_for_evidence(evidence: frozenset[str], *, recency_resolves: bool = False) -> str:
     """The three-clause soundness rule (design.md decision 1), plus continuity.
 
     `resolved` iff: `exact_alias` or `agent_choice` (either decides alone —
@@ -874,8 +908,20 @@ def _status_for_evidence(evidence: frozenset[str]) -> str:
     clause against a candidate's evidence with `exact_alias` removed, to ask
     "would this anchor still resolve on its OTHER evidence alone" — without
     building a throwaway `CandidateFacts` just to hold a modified set.
+
+    `recency_resolves` is the FIFTH clause (close-memory-loop D2), and it is
+    the caller's answer to a question about the WHOLE candidate set, not
+    about this evidence: is the turn referential, and did no candidate
+    anywhere carry worded contact? `resolve()` is where that is visible and
+    where it is computed; here it only opens the clause.
+
+    `PRIOR_CONTACT_KINDS` leaves `deciding` along with the tie-breaks, so a
+    prior can never be the second kind that promotes somebody else. That
+    subtraction cannot change any evidence set that was expressible before
+    `recency` existed, so the four clauses above are the four clauses that
+    were there.
     """
-    deciding = evidence - TIE_BREAK_KINDS
+    deciding = evidence - TIE_BREAK_KINDS - PRIOR_CONTACT_KINDS
     if deciding & DECIDING_ALONE_KINDS:
         return "resolved"
     if deciding & {"lexical_overlap", "claims_match"} and len(deciding) >= 2:
@@ -884,14 +930,20 @@ def _status_for_evidence(evidence: frozenset[str]) -> str:
         return "resolved"
     if "continuity" in deciding and deciding & CONTACT_KINDS:
         return "resolved"
+    if recency_resolves and "recency" in evidence:
+        return "resolved"
     if deciding:
         return "partial"
+    # Nothing but a prior: not a candidate this turn can be said to have
+    # reached at all. Reported as `unresolved` so `resolve()` drops it,
+    # rather than as `partial`, which would fill the agent's menu with pages
+    # whose only claim is that somebody edited them.
     return "unresolved"
 
 
-def _status_for(candidate: CandidateFacts) -> str:
+def _status_for(candidate: CandidateFacts, *, recency_resolves: bool = False) -> str:
     """`_status_for_evidence`, applied to one candidate's own evidence."""
-    return _status_for_evidence(candidate.evidence)
+    return _status_for_evidence(candidate.evidence, recency_resolves=recency_resolves)
 
 
 def _phrase_spans(tokens: Sequence[str], phrase_tokens: Sequence[str]) -> list[tuple[int, int]]:
@@ -1015,7 +1067,10 @@ def _demote_subsumed_same_kind_aliases(
 
 
 def resolve(
-    candidates: Sequence[CandidateFacts], *, turn_tokens: Sequence[str] = ()
+    candidates: Sequence[CandidateFacts],
+    *,
+    turn_tokens: Sequence[str] = (),
+    referential: bool = False,
 ) -> Resolution:
     """Derive anchor statuses and the turn's verdict from categorical evidence.
 
@@ -1023,15 +1078,27 @@ def resolve(
     only by R1's position-aware free-standing-mention exception; production
     callers pass `analysis.tokens`, and omitting it (as most direct unit-test
     callers do) simply leaves that exception unavailable.
+
+    `referential` is `TurnAnalysis.referential`: the turn pointed at recent
+    work instead of naming any. It is half of the fifth soundness clause; the
+    other half is decided here, because it is a fact about the whole set —
+    a prior may supply a referent only where NO candidate anywhere carries
+    worded contact. One candidate the turn actually named, of any strength,
+    and recency is back to reporting a fact about the vault and deciding
+    nothing. Omitting it (every direct unit-test caller that has no opinion)
+    leaves the clause shut.
     """
     for candidate in candidates:
         unknown = sorted(candidate.evidence - frozenset(EVIDENCE_KINDS))
         if unknown:
             raise ValueError(f"unknown activation evidence kind: {unknown[0]}")
+    recency_resolves = referential and not any(
+        candidate.evidence & WORDED_CONTACT_KINDS for candidate in candidates
+    )
     ordered = sorted(candidates, key=_candidate_order)
     anchors: list[ResolvedAnchor] = []
     for candidate in ordered:
-        status = _status_for(candidate)
+        status = _status_for(candidate, recency_resolves=recency_resolves)
         if status == "unresolved":
             continue
         anchors.append(

@@ -985,6 +985,10 @@ def test_evidence_vocabulary_is_closed() -> None:
         "retrieval",
         "graph_corroboration",
         "usage_prior",
+        # Added by `close-memory-loop` D2: the hot profile's own top, which
+        # may supply the referent of a turn that names nothing and decides
+        # nothing on any other turn.
+        "recency",
         # Added by `activate-context-on-host-turns`: a client-carried token
         # qualifies an anchor the turn already reached, and an agent's own choice
         # of sense resolves one outright.
@@ -1655,3 +1659,124 @@ def test_a_cue_inside_a_longer_sentence_still_reads_as_referential() -> None:
     )
 
     assert analysis.referential is True
+
+
+# --------------------------------------------------------------------------- #
+# `recency`, the prior that may supply a referent (close-memory-loop D2)
+# --------------------------------------------------------------------------- #
+
+
+def test_recency_is_its_own_class_and_no_other() -> None:
+    assert "recency" in resolve_module.EVIDENCE_KINDS
+    assert resolve_module.PRIOR_CONTACT_KINDS == frozenset({"recency"})
+    assert "recency" not in resolve_module.TIE_BREAK_KINDS
+    assert "recency" not in resolve_module.WORDED_CONTACT_KINDS
+    assert "recency" not in resolve_module.RETRIEVED_CONTACT_KINDS
+    # Deliberately NOT a contact kind: `_status_for`'s third clause resolves
+    # `rare_term` plus any other CONTACT kind, and admitting a prior there
+    # would let one shared word plus a hot page resolve an anchor.
+    assert "recency" not in resolve_module.CONTACT_KINDS
+
+
+def test_a_referential_turn_resolves_to_the_one_hot_anchor() -> None:
+    resolution = resolve_module.resolve(
+        (_facts("hot.md", evidence=("recency",)),), referential=True
+    )
+
+    assert resolution.status == "resolved"
+    assert resolution.anchors[0].status == "resolved"
+    assert resolution.anchors[0].evidence == ("recency",)
+
+
+def test_two_equally_hot_anchors_on_a_referential_turn_are_ambiguous() -> None:
+    """Never a guess: the profile put two anchors of one kind at the top and
+    nothing relates them, so the agent is handed both."""
+    resolution = resolve_module.resolve(
+        (
+            _facts("first.md", kind="hub", evidence=("recency",)),
+            _facts("second.md", kind="hub", evidence=("recency",)),
+        ),
+        referential=True,
+    )
+
+    assert resolution.status == "ambiguous"
+    assert {item["ref"] for item in resolution.ambiguity} == {"first.md", "second.md"}
+
+
+def test_a_worded_candidate_anywhere_stops_recency_resolving() -> None:
+    """The named anchor carries the packet and the hot one decides nothing,
+    even though the turn read as referential by cue."""
+    resolution = resolve_module.resolve(
+        (
+            _facts("hot.md", kind="hub", evidence=("recency",)),
+            _facts("named.md", kind="resource", evidence=("exact_alias",)),
+        ),
+        referential=True,
+    )
+
+    assert resolution.status == "resolved"
+    assert [anchor.anchor_id for anchor in resolution.resolved_anchors] == ["named.md"]
+    assert "hot.md" not in {anchor.anchor_id for anchor in resolution.anchors}
+
+
+def test_recency_never_resolves_on_a_turn_that_is_not_referential() -> None:
+    resolution = resolve_module.resolve((_facts("hot.md", evidence=("recency",)),))
+
+    assert resolution.status == "unresolved"
+    assert resolution.anchors == ()
+
+
+def test_recency_never_completes_the_two_kinds_rule() -> None:
+    """The whole of section 8 that survives: a prior cannot be the second
+    kind that promotes another candidate, referential turn or not."""
+    for referential in (False, True):
+        resolution = resolve_module.resolve(
+            (_facts("a.md", evidence=("lexical_overlap", "recency")),),
+            referential=referential,
+        )
+
+        assert resolution.anchors[0].status == "partial", referential
+        assert resolution.status == "unresolved", referential
+
+
+def test_recency_does_not_promote_a_rare_term_candidate() -> None:
+    resolution = resolve_module.resolve(
+        (_facts("a.md", evidence=("rare_term", "recency")),), referential=True
+    )
+
+    assert resolution.anchors[0].status == "partial"
+
+
+def test_a_hot_anchor_is_a_candidate_only_on_a_referential_turn() -> None:
+    row = _row("Products/Hot Page.md", "Hot Page", kind="resource")
+    hot = frozenset({"Products/Hot Page.md"})
+
+    referential = resolve_module.candidates_for(
+        resolve_module.analyze_turn("continue"), (row,), hot_paths=hot
+    )
+    ordinary = resolve_module.candidates_for(
+        resolve_module.analyze_turn(
+            "I am planning to tow the cargo sled north along the winter corridor "
+            "and need the depot stock figures"
+        ),
+        (row,),
+        hot_paths=hot,
+    )
+
+    assert [item.anchor_id for item in referential] == ["Products/Hot Page.md"]
+    assert referential[0].evidence == frozenset({"recency"})
+    assert ordinary == ()
+
+
+def test_a_hot_anchor_the_turn_also_named_keeps_its_own_evidence() -> None:
+    """`recency` joins the evidence of an anchor already in contact — it is
+    reported, so a reader sees the page was hot, and it still decides
+    nothing (the clause above)."""
+    row = _term_row("Products/Hot Page.md", "Hot Page", terms=("hot", "page"))
+    candidates = resolve_module.candidates_for(
+        resolve_module.analyze_turn("the hot page"),
+        (row,),
+        hot_paths=frozenset({"Products/Hot Page.md"}),
+    )
+
+    assert candidates[0].evidence >= frozenset({"exact_alias", "recency"})
