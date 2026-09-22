@@ -76,7 +76,7 @@ def test_the_episode_kind_routes_to_its_own_sources_folder(
 def test_the_episode_fields_render_in_the_source_frontmatter(
     vault: Path, source_schema: schema_module.SourceSchema
 ) -> None:
-    about = ["exomem://0123456789abcdef0123456789abcdef"]
+    about = ["exomem://memory/69b2b4d3-d4c3-4361-8714-91b8f1b1c0b1"]
     result = _record(vault, source_schema, client="claude-code", about=about)
 
     parsed = _frontmatter(vault / result.path)
@@ -139,7 +139,7 @@ def test_episode_fields_are_refused_on_any_other_kind(
         {"type": "note"},
         {"summary": "two\nlines"},
         {"episode": ["not", "a", "string"]},
-        {"about": "exomem://0123456789abcdef0123456789abcdef"},
+        {"about": "exomem://memory/69b2b4d3-d4c3-4361-8714-91b8f1b1c0b1"},
     ],
 )
 def test_the_episode_frontmatter_set_is_closed(
