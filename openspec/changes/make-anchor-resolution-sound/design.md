@@ -33,6 +33,22 @@ itself is one.
 threshold is a tuned float with no meaning across vaults, and the neighbourhood clause
 would still admit candidates the turn never named.
 
+*Amended by `close-memory-loop` D3, retrieval-carried packets.* Nothing above changes:
+retrieval alone still never resolves an ANCHOR, whatever it scores and however many
+retrieved kinds and qualifiers stack. The one retrieval-alone case sits outside this rule
+rather than inside it, and only reaches a turn this rule has already abstained on. When
+resolution reached no anchor at all, one scored recall runs over the compiled knowledge
+base (`Sources/` excluded — raw material is never served), and a single page that
+DOMINATES it — clear of an absolute floor and `RETRIEVAL_CARRY_SEPARATION` times clear of
+the runner-up — may CARRY a packet: that page's units are served under one anchor entry of
+kind `page` at status `retrieval_carried`, marked `generation.carried_by = "retrieval"`,
+and no continuity token is minted from it. It never runs when any anchor resolved, when the
+turn is ambiguous, or when the agent named a sense; a near tie takes the abstention the
+turn already had. The rejected alternative stands as written — a score is still no way to
+RESOLVE an anchor, and this is not one: it decides whether a turn that resolved nothing is
+served a named page's own material or nothing at all, which is a choice between serving and
+abstaining rather than between two senses.
+
 ### 2. `retrieval` is about the anchor's own page
 The neighbourhood clause is removed. It was written so that a hub whose members are
 recall hits would be reached; on a dense vault it reaches every hub for every turn. A hub

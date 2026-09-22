@@ -209,6 +209,32 @@ negatives, current policy on cached packets, model contention and forbidden
 full-corpus/CLIP acquisition. End-to-end timings include semantic evidence;
 compiler-only timing is insufficient acceptance.
 
+D3, retrieval-carried packets. Restricting lexical evidence to anchor paths is
+what makes a decision living in an ordinary research note unreachable: no note
+is an anchor, so it is not in the catalogue the query is confined to, and the
+turn abstains however plainly its own words name the page. Resolution keeps that
+restriction, and this amends decision 1 of `make-anchor-resolution-sound` with
+the only retrieval-alone case there is — one that sits outside the soundness rule
+rather than inside it, because it only ever reaches a turn that rule has already
+abstained on. When resolution reached NO anchor, a second scored recall runs over
+the compiled knowledge base with no anchor restriction and `Sources/` excluded,
+under its own `working_set.carry` timing span and the same request budget, and it
+is skipped outright when the lexical catalogue is anything but `available`. A
+single page that dominates it — clear of an absolute floor derived from the
+measured BM25 scale, and `RETRIEVAL_CARRY_SEPARATION` (1.5) times clear of the
+runner-up — carries the packet: that page's units through the existing units
+lanes, one anchor entry of kind `page` at status `retrieval_carried` whose only
+evidence is `retrieval`, `generation.carried_by = "retrieval"`, and no continuity
+token, because a carried page is not a resolution to carry forward. Retrieval
+still never resolves an anchor: no evidence kind is added and no status clause
+changes. A named anchor always wins — the carry never runs when resolution
+resolved anything, when the turn is ambiguous, or when the agent named a sense —
+and a near tie is noise, so the turn abstains exactly as it did. The carried page
+crosses `guard_working_set` like any other reference; it is the packet's only
+anchor, so an audience that may not see it gets the abstention the existing
+every-anchor-withheld rule already produces, never the runner-up. Cost falls only
+on turns that would have returned an empty packet.
+
 A resolved project anchor was previously pathless AND linkless: built with no
 page and no neighbours, so a project-naming turn resolved the anchor and
 served no material at all from any role lane. At index build/update time

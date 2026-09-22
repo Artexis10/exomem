@@ -257,10 +257,11 @@ all candidates, including competitors of an exact match. Vector evidence alone
 SHALL NOT resolve an anchor.
 
 Lean activation SHALL retain bounded own-page lexical retrieval evidence from
-the maintained full-page FTS catalogue restricted to anchor paths. The lexical
-query SHALL preserve governed overfetch and per-audience release before its
-paths become evidence, SHALL NOT rebuild or apply a foreground delta, and SHALL
-NOT fall back to an in-process corpus scan. Its readiness result SHALL be
+the maintained full-page FTS catalogue restricted to anchor paths. Anchor
+RESOLUTION SHALL see no lexical evidence from outside that restriction. The
+lexical query SHALL preserve governed overfetch and per-audience release before
+its paths become evidence, SHALL NOT rebuild or apply a foreground delta, and
+SHALL NOT fall back to an in-process corpus scan. Its readiness result SHALL be
 reported as `generation.lexical_evidence`; incomplete publication SHALL remain
 non-cacheable. Title/alias overlap alone SHALL NOT be relabelled as retrieval.
 Lexical corroboration SHALL match at least two distinct content stems from the
@@ -372,6 +373,67 @@ fast abstention or compiler-only timing.
 - **THEN** the release plane decides the real vault page that reference names, not the literal reference text
 - **AND** a policy scoped to an unrelated page leaves the unit served, and a policy scoped to only the unit's own page withholds that unit without withholding an unrelated one
 - **AND** a reference that does not unwrap to a path inside the vault stays undecidable and withheld exactly as before
+
+### Requirement: A turn that resolves no anchor MAY be carried by one dominant recall hit
+
+Retrieval evidence alone SHALL NOT resolve an anchor. Where a turn resolves no
+anchor at all, activation MAY instead CARRY a packet from a single compiled
+knowledge-base page, and this SHALL be the only case in which retrieval alone
+produces served material.
+
+The carry SHALL run only when anchor resolution returned no resolved anchor and
+the request named no explicit anchor choice; an ambiguous turn and a turn that
+resolved any anchor SHALL be untouched. It SHALL run one scored query against the
+maintained full-page catalogue over the knowledge-base scope, without the anchor
+path restriction, requiring the same two distinct matched content stems, applying
+the same no-foreground-delta and no-corpus-scan rules, and reporting rather than
+repairing an incomplete catalogue. Pages under the vault's raw-material `Sources`
+tree SHALL NOT be candidates. The query SHALL run within the request deadline
+under its own timing span and SHALL be skipped when that deadline can no longer
+afford a stage.
+
+A page SHALL be carried only when it clears a declared absolute score floor AND
+exceeds the next candidate by a declared separation factor; a single candidate
+clearing the floor SHALL count as dominant. Any other outcome SHALL abstain
+`unresolved` exactly as before.
+
+A carried packet SHALL report that page as its one anchor entry, of kind `page`,
+at status `retrieval_carried`, with `retrieval` as its only evidence, and SHALL
+mark itself `generation.carried_by = "retrieval"`. Its material SHALL come from
+that page through the existing bounded unit lanes. No continuity token SHALL be
+minted from a carried page. The carried page SHALL cross the same release plane
+guard as any other packet reference, and a carried page the current audience may
+not see SHALL abstain `withheld` rather than substitute another candidate.
+
+#### Scenario: A decision living in a research note is reachable
+
+- **WHEN** a turn names no anchor of the catalogue but repeats one compiled
+  research note's own words, and recall places that note clearly ahead of every
+  other candidate
+- **THEN** the packet serves that note's units under one anchor entry of kind
+  `page` at status `retrieval_carried`, marked as carried by retrieval
+- **AND** no continuity token is minted from it, and no anchor is resolved
+
+#### Scenario: Two close candidates are noise, not a choice
+
+- **WHEN** a turn that resolves no anchor reaches two compiled pages whose
+  scores lie inside the declared separation band
+- **THEN** the packet abstains `unresolved` with no units, exactly as it did
+  before the carry existed
+
+#### Scenario: A named anchor and a raw source are both refused as carriers
+
+- **WHEN** a turn both names an anchor and matches a compiled page, or its
+  strongest match is a page under the raw-material `Sources` tree
+- **THEN** the named anchor's own packet is served and is not marked as carried,
+  and the raw source is never a candidate for carrying
+
+#### Scenario: A carried page the audience may not see abstains
+
+- **WHEN** the release plane withholds the dominant page from the current
+  audience and the turn also reached a weaker candidate
+- **THEN** the packet abstains `withheld` with no anchors and no units
+- **AND** the weaker candidate is not carried in its place
 
 ### Requirement: Interactive activation does bounded work under a deadline on every door
 
