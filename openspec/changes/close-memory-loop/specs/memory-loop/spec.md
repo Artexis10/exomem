@@ -552,9 +552,15 @@ that may tie at the top SHALL be bounded.
 Recency SHALL resolve an anchor only where the turn is referential AND no
 candidate anywhere in the same resolution carries a worded contact kind. Where
 any candidate does, the named anchor SHALL be served and recency SHALL decide
-nothing. Where two or more anchors tie at the top of the profile and would each
-resolve, the turn SHALL report them as ambiguity for the agent to choose between
-and SHALL NOT select one by recency. Where the profile is empty the turn SHALL
+nothing. Where two or more anchors of one kind that nothing structural relates
+tie at the top of the profile, the turn SHALL report them as ambiguity for the
+agent to choose between and SHALL NOT select one by recency; tied anchors of
+different kinds, or of one kind that are structurally related, are
+complementary and SHALL resolve together, as any two such anchors do. A
+recency referent SHALL NOT be lost to a candidate or anchor bound: where recency
+may resolve, the hot candidates and the resolved anchors SHALL be kept ahead of
+partial candidates when those bounds are applied, and the prior SHALL NOT
+change the order of candidates the turn reached by its own words. Where the profile is empty the turn SHALL
 abstain exactly as before, still carrying its recent-context block.
 
 A referential turn names nothing, so the retrieval carry SHALL NOT run for it;

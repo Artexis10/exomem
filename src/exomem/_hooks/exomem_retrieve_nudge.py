@@ -246,13 +246,15 @@ _CONTROL_PROMPT_RE = re.compile(
 _REFERENTIAL_PROMPT_RE = re.compile(
     r"""
     ^\s*
-    (?:(?:so|and|ok(?:ay)?|right|alright|now)[\s,]+)?
+    (?:(?:so|and|ok(?:ay)?|right|alright|now|let'?s|please)[\s,]+)*
     (?:
         continue|carry\s+on|go\s+on|resume|
-        status|status\s+update|
+        status|status\s+update|status\s+report|
         where\s+(?:were|was)\s+we|what\s+were\s+we\s+doing|
-        what(?:'s|\s+is)\s+next|what\s+now|
-        pick\s+up\s+where\s+we\s+left\s+off|same\s+as\s+before
+        where\s+did\s+we\s+leave\s+off|
+        what(?:'s|s|\s+is)\s+next|what\s+now|
+        pick\s+up\s+where\s+(?:we|you)\s+left\s+off|
+        same\s+as\s+before|as\s+before
     )
     [\s\.,!?:;\-]*$
     """,
@@ -1488,12 +1490,14 @@ def main() -> int:
     # not also burn the session's cooldown and the client-wide one. The session
     # stamp moves after every fetch, printed or not, so an unreachable service
     # costs a session one transport timeout per cooldown and not one per
-    # prompt. The client-wide stamp moves only when it was not already running:
-    # it dates the last REMINDER on this client, which is all it now gates, and
-    # a packet injected while it runs must not push the next reminder later for
-    # a reason that has nothing to do with reminders.
+    # prompt. The client-wide stamp moves only when the REMINDER was actually
+    # printed: it dates the last reminder on this client, which is all it
+    # gates, so a packet injected without one — a resolved block, or any block
+    # while the cooldown runs — leaves it where it was. Stub and reminder-only
+    # modes always print the reminder, so for them this is the unconditional
+    # stamp it always was.
     _touch(stamp)
-    if global_cooldown > 0 and global_ok:
+    if global_cooldown > 0 and REMINDER in additional_context:
         _touch(global_stamp)
     if not additional_context:
         return 0

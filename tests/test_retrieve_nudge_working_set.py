@@ -1939,3 +1939,73 @@ def test_a_referent_the_turn_reached_is_not_labelled_recent_work(evidence: list[
     block = hook._format_working_set_block(packet, 4000)
 
     assert "- referent:" not in block
+
+
+# --------------------------------------------------------------------------- #
+# R-L: the hook's referential prompts align with the resolver's, and the
+# client-wide stamp dates only a printed reminder.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "let's continue",
+        "please continue",
+        "where did we leave off?",
+        "as before",
+        "whats next",
+        "status report?",
+        "pick up where you left off",
+        "ok let's continue",
+    ],
+)
+def test_the_hook_exempts_the_resolvers_referential_prompts(prompt: str) -> None:
+    from exomem import working_set_resolve
+
+    assert hook._is_referential_prompt(prompt)
+    assert working_set_resolve.analyze_turn(prompt).referential
+
+
+def test_a_resolved_block_without_the_reminder_leaves_the_client_wide_stamp(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+) -> None:
+    """The reviewer's p13: tab A's resolved block printed no reminder but
+    moved the stamp, so tab B's unresolved block then lost its reminder."""
+    home = tmp_path / "home"
+    stamp = home / ".cache" / "exomem-nudge" / "retrieve_global"
+    _serve(monkeypatch, _packet())
+
+    context_a = _context(_run(monkeypatch, capsys, _event(session_id="tab-a"), home))
+
+    assert context_a and hook.REMINDER not in context_a
+    assert not stamp.exists()
+
+    unresolved = _packet(abstained=True, reason="unresolved", units=[], pointers=[], current_state=[])
+    unresolved["anchors"] = []
+    unresolved["recent_context"] = [_recent()]
+    _serve(monkeypatch, unresolved)
+
+    context_b = _context(_run(monkeypatch, capsys, _event(session_id="tab-b"), home))
+
+    assert hook.REMINDER in context_b
+    assert stamp.exists(), "the printed reminder is what the stamp dates"
+
+
+def test_stub_mode_still_stamps_every_printed_reminder(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", "1")
+    monkeypatch.setattr(hook, "_gather_hits_with_lane", lambda prompt: ([], "none"))
+    home = tmp_path / "home"
+    stamp = home / ".cache" / "exomem-nudge" / "retrieve_global"
+
+    context = _context(_run(monkeypatch, capsys, _event(session_id="stub-tab"), home))
+
+    assert context == hook.REMINDER
+    assert stamp.exists()
