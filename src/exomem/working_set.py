@@ -945,25 +945,6 @@ def compile_packet(
     # below.
     with _span(timings, "working_set.recent"):
         recent: tuple[dict[str, Any], ...] = _recent_context(root, rows=rows)
-        # An abstaining turn never reaches the current-state stage, so the ONE
-        # current-state read this request is allowed happens here instead. A
-        # resolved turn's read is the stage's own, below, widened to cover
-        # these rows — never a second read.
-        if recent and resolution.status != "resolved":
-            stateful = _recent_stateful_rows(recent, rows)
-            if stateful:
-                try:
-                    state_for_recent = working_set_state.current_state_for(
-                        root,
-                        anchors=stateful,
-                        purpose=purpose,
-                        index_generation=index_token[1],
-                        index_token=index_token,
-                    )
-                except Exception:  # noqa: BLE001 - a statement never costs the packet
-                    log.debug("recent context: current state unavailable", exc_info=True)
-                    state_for_recent = ()
-                recent = _apply_recent_statements(recent, state_for_recent)
 
     if resolution.status != "resolved":
         return abstained_packet(
@@ -992,32 +973,13 @@ def compile_packet(
     # Resolved ONCE: the Records lane and the packet's `current_state[]` block are
     # two views of the same collection reads.
     with _span(timings, "working_set.current_state"):
-        # ONE read, widened rather than repeated: the resolved anchors plus any
-        # stateful page the recent block kept that is not already among them.
-        # `current_state[]` is then filtered back to the resolved anchors, so
-        # what that block means is unchanged — a recent page nobody asked about
-        # is not the current state of this turn's anchor.
-        resolved_refs = {
-            working_set_resolve.anchor_ref(anchor) for anchor in resolution.resolved_anchors
-        }
-        state_entries = working_set_state.current_state_for(
+        current_state = working_set_state.current_state_for(
             root,
-            anchors=(
-                *resolution.resolved_anchors,
-                *(
-                    row
-                    for row in _recent_stateful_rows(recent, rows)
-                    if working_set_resolve.anchor_ref(row) not in resolved_refs
-                ),
-            ),
+            anchors=resolution.resolved_anchors,
             purpose=purpose,
             index_generation=index_token[1],
             index_token=index_token,
         )
-        current_state = tuple(
-            entry for entry in state_entries if str(entry.get("anchor") or "") in resolved_refs
-        )
-        recent = _apply_recent_statements(recent, state_entries)
     items, missing = run_lanes(
         root,
         anchors=lane_anchors,
@@ -1141,8 +1103,18 @@ def _recent_context(
       pages this vault has actually been reading (`activated`);
     * the activation index's own planning rows, for open commitments the
       recent edits did not already surface (`planning`);
-    * and, for the CHOSEN entries only, the current-state resolver and the
-      page's own frontmatter, for the one-line statement.
+    * and, for the CHOSEN entries only, each page's own authored
+      `status`/`summary` frontmatter, for the one-line statement.
+
+    The statement is deliberately NOT the current-state resolver, though that
+    is where `current_state[]` gets its own. The block's pages are chosen by
+    recency, not by the turn, so routing them through a governed collection
+    query drags the storage of collections the turn never named onto the
+    request path — measured at 9 directory enumerations against a ceiling of
+    8, three of them inside an unasked collection
+    (`test_a_collection_the_turn_never_named_stays_off_the_request_path`).
+    Frontmatter is the same authored value that resolver's own second tier
+    reads, and it costs one cached page read.
 
     Ranked most recent first, deduped by path — a page that was both edited and
     read appears once, under the reason that offered it first — and capped at
@@ -1201,10 +1173,8 @@ def _recent_context(
     for entry in entries:
         # A captured session carries its title and date only. Its body is raw
         # material: summarising it here would be the server authoring a claim
-        # about a conversation nobody has compiled yet. A stateful entry's
-        # statement comes from the current-state resolver instead, which the
-        # caller runs ONCE per request (`_apply_recent_statements`).
-        if entry["why"] == "captured" or entry["kind"] in working_set_state.STATEFUL_KINDS:
+        # about a conversation nobody has compiled yet.
+        if entry["why"] == "captured":
             continue
         statement = _recent_frontmatter_statement(root, entry["path"])
         if statement:
@@ -1326,65 +1296,6 @@ def _recent_planning(
     ]
     plans.sort(key=lambda path: (-mtimes.get(path, 0), path))
     return tuple(plans[:limit])
-
-
-def _recent_stateful_rows(
-    entries: Sequence[Mapping[str, Any]], rows: Sequence[Any]
-) -> tuple[Any, ...]:
-    """The anchor rows whose recent entries still owe a current-state statement.
-
-    Stateful entries only, and at most one row per path. The rows are handed
-    BACK to the caller rather than resolved here because current state is
-    resolved exactly ONCE per request by contract (`run_lanes`' docstring, and
-    `test_current_state_is_resolved_once_per_compile` pins it): resolving it a
-    second time for this block would double the collection queries the request
-    path was deliberately relieved of.
-    """
-    wanted = {
-        str(entry.get("path") or "")
-        for entry in entries
-        if entry.get("why") != "captured"
-        and str(entry.get("kind") or "") in working_set_state.STATEFUL_KINDS
-    }
-    wanted.discard("")
-    if not wanted:
-        return ()
-    out: list[Any] = []
-    seen: set[str] = set()
-    for row in rows:
-        path = str(getattr(row, "path", "") or "")
-        if path in wanted and path not in seen:
-            seen.add(path)
-            out.append(row)
-    return tuple(out)
-
-
-def _apply_recent_statements(
-    entries: Sequence[Mapping[str, Any]], state_entries: Sequence[Mapping[str, Any]]
-) -> tuple[dict[str, Any], ...]:
-    """Fill each stateful recent entry's statement from one current-state read.
-
-    The same resolver the packet's `current_state[]` block uses — Records
-    first, then the page's own status field — so a recent entry never contradicts
-    the current state served beside it. An entry the read had nothing for keeps
-    no statement at all, rather than a stale one from somewhere else.
-    """
-    by_anchor = {
-        str(entry.get("anchor") or ""): str(entry.get("statement") or "")
-        for entry in state_entries
-        if entry.get("statement")
-    }
-    out: list[dict[str, Any]] = []
-    for entry in entries:
-        item = dict(entry)
-        if "statement" not in item:
-            statement = by_anchor.get(str(item.get("ref") or "")) or by_anchor.get(
-                str(item.get("path") or "")
-            )
-            if statement:
-                item["statement"] = statement
-        out.append(item)
-    return tuple(out)
 
 
 def _recent_frontmatter_statement(vault_root: Path, rel: str) -> str:

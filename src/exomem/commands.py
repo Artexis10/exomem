@@ -5929,7 +5929,11 @@ def op_activate_context(
     Every packet leads with `recent_context`: up to eight pages this vault has
     recently been worked on — edited, read, captured as a session, or left open
     in Planning — each with its title, why it is recent, the date of that
-    contact and, where one exists, a one-line statement of its current state.
+    contact and, where the page carries one, its own authored `status` or
+    `summary` line. That line is the page's, not a current-state reading: these
+    pages are chosen by recency rather than by the turn, so the block never
+    queries a Records collection the turn did not name. `current_state[]`
+    remains the carrier for the resolved anchors' governed state.
     It is served whether or not the turn resolved anything, so a fresh session
     opening on "continue" receives the thread it is picking up. `as_of` dates
     the CONTACT, not the event the page describes.
