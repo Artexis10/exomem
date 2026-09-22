@@ -1663,3 +1663,36 @@ def test_an_ordinary_control_prompt_is_still_filtered(
 
     assert seen == []
     assert output.strip() == ""
+
+
+@pytest.mark.parametrize("ceiling", [900, 700, 600, 520])
+def test_a_tight_ceiling_keeps_the_menu_and_cuts_recent_context_instead(
+    ceiling: int,
+) -> None:
+    """The menu is the only thing on the block the agent can ACT on.
+
+    Recent context leads, but laying it out first under one shared ceiling let
+    it eat the disambiguation menu whole — the agent was shown what the vault
+    had been working on and no way to resolve the turn. The menu's room is
+    reserved first; recent context spends what is left.
+    """
+    packet = _unresolved_packet(WORDED_AND_RETRIEVAL_ONLY)
+    packet["recent_context"] = [
+        _recent(
+            f"Knowledge Base/Notes/recent-{index}.md",
+            title=f"A recently edited page number {index}",
+            statement="status: still being worked on this week",
+        )
+        for index in range(8)
+    ]
+
+    block = hook._format_working_set_block(packet, ceiling)
+    lines = block.splitlines()
+
+    assert any(line.startswith("- plan: Winter schedule") for line in lines), block
+    assert lines[-1] == hook._WORKING_SET_UNRESOLVED_LINE
+    assert len(block) <= ceiling
+    # Recent context still leads whatever survived of it.
+    recent_lines = [index for index, line in enumerate(lines) if line.startswith("- recent:")]
+    menu_lines = [index for index, line in enumerate(lines) if line.startswith("- plan:")]
+    assert not recent_lines or max(recent_lines) < min(menu_lines)

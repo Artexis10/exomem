@@ -1125,19 +1125,26 @@ def _bounded_lines(lines: list[str], max_chars: int) -> list[str]:
 def _menu_block(packet: dict, menu: list[str], instruction: str, max_chars: int) -> str:
     """Recent context, then a menu the agent can act on, then its instruction.
 
-    The instruction's room is reserved before the lines are laid out: a menu
-    with no stated way to act on it is context the agent pays for and cannot
-    use. It is appended only when a MENU line actually survived the ceiling —
-    recent context leads, so a tight ceiling can spend itself before the menu,
-    and "two senses match" beside no senses is a false claim. What is left then
-    is the recent block alone, which needs no instruction and gets the room
-    back.
+    The MENU's room is reserved first, then the instruction's, and recent
+    context spends what is left. Order on the page is not priority under
+    pressure: the menu is the only thing here the agent can act on, and laying
+    recent context out first under one shared ceiling ate the menu whole at
+    every tight ceiling measured — the agent was shown what the vault had been
+    working on and no way to resolve the turn at all. Recent context still
+    leads whatever survives of it; it just cannot crowd the menu out.
+
+    When not even one menu line fits, there is no menu to instruct about, and
+    what is left is the recent block alone with the room the instruction no
+    longer needs.
     """
     reserve = len(instruction) + 1
-    kept = _bounded_lines([*_recent_lines(packet), *menu], max_chars - reserve)
-    if any(line in menu for line in kept):
-        return "\n".join([_WORKING_SET_HEADER, *kept]) + f"\n{instruction}"
-    return _bounded_block(_recent_lines(packet), max_chars)
+    room = max_chars - reserve
+    menu_kept = _bounded_lines(menu, room)
+    if not menu_kept:
+        return _bounded_block(_recent_lines(packet), max_chars)
+    menu_cost = sum(1 + len(line) for line in menu_kept)
+    recent_kept = _bounded_lines(_recent_lines(packet), room - menu_cost)
+    return "\n".join([_WORKING_SET_HEADER, *recent_kept, *menu_kept]) + f"\n{instruction}"
 
 
 def _format_ambiguity_block(packet: dict, max_chars: int) -> str:
