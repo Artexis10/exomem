@@ -16,6 +16,7 @@ import pytest
 from exomem import working_set, working_set_index, working_set_resolve
 
 PACKET_KEYS = {
+    "recent_context",
     "anchors",
     "roles",
     "units",
@@ -815,3 +816,139 @@ def test_an_exact_limit_read_does_not_claim_truncation(monkeypatch: pytest.Monke
     )
     assert result.truncated is False
     assert len(result.items) == working_set.UNIT_LANE_LIMIT
+
+
+# --------------------------------------------------------------------------- #
+# Recent context — the always-on working-continuity block
+# --------------------------------------------------------------------------- #
+
+
+def _recent(
+    name: str,
+    *,
+    why: str = "edited",
+    statement: str | None = None,
+    title: str | None = None,
+) -> dict:
+    entry: dict = {
+        "ref": f"Knowledge Base/Notes/{name}.md",
+        "path": f"Knowledge Base/Notes/{name}.md",
+        "title": title if title is not None else name.replace("-", " "),
+        "kind": "note",
+        "why": why,
+        "as_of": "2026-09-20",
+    }
+    if statement is not None:
+        entry["statement"] = statement
+    return entry
+
+
+def test_recent_context_is_the_first_declared_block() -> None:
+    """Working continuity is what a fresh session opens with, so it leads."""
+    assert working_set.PACKET_BLOCKS[0] == "recent_context"
+    assert working_set.PACKET_BLOCKS.index("recent_context") < working_set.PACKET_BLOCKS.index(
+        "current_state"
+    )
+
+
+def test_a_resolved_packet_carries_recent_context_before_current_state() -> None:
+    packet = working_set.build_packet(
+        items=(_item("resources"),),
+        anchors=(),
+        roles=(),
+        current_state=({"anchor": "a", "source": "records", "as_of": "", "statement": "s" * 20},),
+        recent_context=(_recent("harbour-refit"),),
+        ambiguity=(),
+        missing=(),
+        max_chars=4000,
+        generation=_generation(),
+        status="resolved",
+    )
+
+    keys = list(packet)
+    assert keys.index("recent_context") < keys.index("current_state")
+    assert [entry["path"] for entry in packet["recent_context"]] == [
+        "Knowledge Base/Notes/harbour-refit.md"
+    ]
+    assert set(packet["recent_context"][0]) == {
+        "ref",
+        "path",
+        "title",
+        "kind",
+        "why",
+        "as_of",
+    }
+
+
+def test_recent_context_is_budgeted_first_and_counted_in_used_chars() -> None:
+    """The block is budgeted before `current_state`, inside the same ceiling."""
+    entry = _recent("harbour-refit", statement="status: waiting on the yard")
+    cost = len(entry["title"]) + len(entry["statement"])
+    packet = working_set.build_packet(
+        items=(),
+        anchors=(),
+        roles=(),
+        current_state=(),
+        recent_context=(entry,),
+        ambiguity=(),
+        missing=(),
+        max_chars=working_set.MIN_BUDGET_CHARS,
+        generation=_generation(),
+        status="resolved",
+    )
+
+    assert packet["budget"]["used_chars"] == cost
+
+
+def test_a_recent_entry_that_does_not_fit_is_dropped_whole() -> None:
+    """Like `current_state`: a half-sentence about recent work is worse than none."""
+    small = _recent("harbour-refit", statement="status: waiting")
+    huge = _recent("long-note", statement="x" * (working_set.RECENT_CONTEXT_MAX_CHARS + 50))
+    packet = working_set.build_packet(
+        items=(),
+        anchors=(),
+        roles=(),
+        current_state=(),
+        recent_context=(small, huge),
+        ambiguity=(),
+        missing=(),
+        max_chars=4000,
+        generation=_generation(),
+        status="resolved",
+    )
+
+    assert [entry["path"] for entry in packet["recent_context"]] == [small["path"]]
+    assert packet["budget"]["used_chars"] == len(small["title"]) + len(small["statement"])
+
+
+def test_recent_context_is_capped_at_its_entry_ceiling() -> None:
+    packet = working_set.build_packet(
+        items=(),
+        anchors=(),
+        roles=(),
+        current_state=(),
+        recent_context=tuple(_recent(f"note-{index}") for index in range(12)),
+        ambiguity=(),
+        missing=(),
+        max_chars=8000,
+        generation=_generation(),
+        status="resolved",
+    )
+
+    assert len(packet["recent_context"]) == working_set.RECENT_CONTEXT_MAX_ENTRIES == 8
+
+
+def test_an_abstained_packet_still_carries_recent_context() -> None:
+    """Abstention injects no ANSWER; it still says what was recently worked on."""
+    entry = _recent("harbour-refit", statement="status: waiting on the yard")
+    packet = working_set.abstained_packet(
+        reason="unresolved",
+        max_chars=4000,
+        generation=_generation(),
+        recent_context=(entry,),
+    )
+
+    assert packet["abstained"] is True
+    assert [item["path"] for item in packet["recent_context"]] == [entry["path"]]
+    assert packet["units"] == []
+    assert packet["budget"]["used_chars"] == len(entry["title"]) + len(entry["statement"])

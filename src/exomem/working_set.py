@@ -53,7 +53,16 @@ GRAPH_MAX_NODES = 24
 GRAPH_MAX_EDGES = 40
 GRAPH_TRAVERSAL_PROFILE = "epistemic"
 
+#: Entries the working-continuity block may carry, and the characters they may
+#: spend. Both are hard: the block leads every packet, including an abstained
+#: one, so an unbounded one would be paid for by every turn.
+RECENT_CONTEXT_MAX_ENTRIES = 8
+RECENT_CONTEXT_MAX_CHARS = 900
+
 PACKET_BLOCKS = (
+    # First, and in resolved and abstained packets alike: a fresh session opens
+    # with what was recently worked on, before anything this turn resolved.
+    "recent_context",
     "anchors",
     "roles",
     "units",
@@ -165,6 +174,7 @@ def build_packet(
     max_chars: int,
     generation: Mapping[str, Any],
     status: str,
+    recent_context: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Order, cap and budget the lane output into the packet the caller sees."""
     limit = clamp_budget(max_chars)
@@ -185,12 +195,17 @@ def build_packet(
     deferred: list[tuple[LaneItem, str]] = []
     per_role: dict[str, int] = {}
 
-    # Current state is the highest-value prose in the packet — it is the answer
-    # to "what is true right now" — so it is budgeted FIRST and the rest of the
-    # packet spends what is left. An entry that cannot fit is dropped whole: a
-    # half-sentence about an observed status is worse than silence.
+    # Working continuity is budgeted before anything else: it is the block a
+    # fresh session opens with, and a turn that resolved a lot must not spend
+    # the whole ceiling before saying what was recently worked on.
+    recent_entries, used = _budgeted_recent(recent_context, limit)
+
+    # Current state is the highest-value prose about the RESOLVED anchors — it
+    # is the answer to "what is true right now" — so it is budgeted next and the
+    # rest of the packet spends what is left. An entry that cannot fit is
+    # dropped whole: a half-sentence about an observed status is worse than
+    # silence.
     state_entries: list[dict[str, Any]] = []
-    used = 0
     for entry in current_state:
         statement = str(entry.get("statement") or "")
         if used + len(statement) > limit:
@@ -244,6 +259,7 @@ def build_packet(
         used += cost
 
     packet: dict[str, Any] = {
+        "recent_context": recent_entries,
         "anchors": [dict(anchor) for anchor in anchors],
         "roles": [dict(role) for role in roles],
         "units": units,
@@ -271,9 +287,21 @@ def abstained_packet(
     anchors: Sequence[Mapping[str, Any]] = (),
     ambiguity: Sequence[Mapping[str, Any]] = (),
     missing: Sequence[Mapping[str, Any]] = (),
+    recent_context: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
-    """The empty packet. Abstention injects NOTHING — that is the whole point."""
+    """The packet with no ANSWER in it — but still with working continuity.
+
+    Abstention injects no units, no pointers and no current state: the turn
+    resolved nothing, and inventing material for it is exactly what the
+    compiler exists not to do. `recent_context` is not material about a
+    resolved anchor, though — it is what was recently worked on, which is true
+    of the session regardless of what this turn reached, and it is the one
+    thing a fresh session opening on "ok continue" has to be told.
+    """
+    limit = clamp_budget(max_chars)
+    recent_entries, used = _budgeted_recent(recent_context, limit)
     return {
+        "recent_context": recent_entries,
         "anchors": [dict(anchor) for anchor in anchors],
         "roles": [],
         "units": [],
@@ -281,11 +309,37 @@ def abstained_packet(
         "current_state": [],
         "missing": [dict(entry) for entry in missing],
         "ambiguity": [dict(entry) for entry in ambiguity],
-        "budget": {"limit_chars": clamp_budget(max_chars), "used_chars": 0},
+        "budget": {"limit_chars": limit, "used_chars": used},
         "generation": dict(generation),
         "abstained": True,
         "abstention": {"reason": reason},
     }
+
+
+def _budgeted_recent(
+    recent_context: Sequence[Mapping[str, Any]], limit: int
+) -> tuple[list[dict[str, Any]], int]:
+    """The working-continuity entries that fit, and what they cost.
+
+    Two ceilings, both hard: the block's own `RECENT_CONTEXT_MAX_CHARS` and the
+    packet's `max_chars`, which it is counted inside rather than added on top
+    of. An entry that does not fit is dropped WHOLE — a title cut mid-word, or
+    a status sentence with its verb missing, is a claim about recent work that
+    nobody can check — and dropping it does not stop a later, shorter entry
+    from fitting: unlike the rendered block, this is data with no order the
+    reader cuts from the end of, and the caller has already ranked it.
+    """
+    entries: list[dict[str, Any]] = []
+    used = 0
+    for entry in recent_context:
+        if len(entries) >= RECENT_CONTEXT_MAX_ENTRIES:
+            break
+        cost = len(str(entry.get("title") or "")) + len(str(entry.get("statement") or ""))
+        if used + cost > RECENT_CONTEXT_MAX_CHARS or used + cost > limit:
+            continue
+        entries.append(dict(entry))
+        used += cost
+    return entries, used
 
 
 def _pointer(item: LaneItem, reason: str) -> dict[str, Any]:
