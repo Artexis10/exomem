@@ -594,9 +594,11 @@ no anchor outside them has a last edit, not in a write burst, later than the
 time that packet was served. A last-edit time
 that fell in a write burst — a declared number of pages or more, navigation
 pages not counted, edited within a declared short interval of one another —
-SHALL carry no edit signal, because a batch rewrites pages nobody chose; such
-an anchor SHALL be ordered by its reads alone, and a vault written in one batch
-with no reads SHALL have an empty profile rather than a menu. The profile SHALL
+SHALL carry no edit signal, because a batch rewrites pages nobody chose, and
+neither SHALL a last-edit time older than the latest such burst, because the
+batch may have rewritten the page the user was working on; such an anchor
+SHALL be ordered by its reads alone, and with no reads either the profile
+SHALL be empty rather than a menu or the freshest survivor. The profile SHALL
 be computed only for a referential turn. It SHALL NOT enumerate directories or
 raise any declared request-path ceiling, and SHALL read no page except, from the
 request's own page cache, the bounded few at its top, to exclude one that another
@@ -669,9 +671,12 @@ from recent work and not from the turn's own words.
 #### Scenario: A maintenance batch does not pick the referent
 
 - **WHEN** the user last edited one anchor and a maintenance pass then rewrote
-  many other pages, anchors among them, within a few seconds
-- **THEN** a referential turn resolves the user's own last edit, not the page
-  the batch happened to write last
+  many pages, anchors among them and possibly the user's own page, within a
+  few seconds
+- **THEN** a referential turn resolves neither the page the batch wrote last
+  nor the freshest page the batch left alone, however old
+- **AND** it resolves the anchor the usage snapshot shows was read, or
+  abstains `unresolved` with its recent-context block when nothing was read
 
 #### Scenario: A previous packet's answer is resumed whole
 

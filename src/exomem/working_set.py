@@ -82,7 +82,12 @@ HOT_PROFILE_K = 5
 #: pass, an import, a sync — not the user's work, and a batch rewrites pages
 #: nobody chose. Its edit times say only that the batch ran, so an anchor in
 #: one carries no edit signal in the hot profile and is ordered by its reads
-#: instead.
+#: instead. And so does every edit OLDER than the latest burst: a batch may
+#: have rewritten the page the user was working on, taking its signal with
+#: it, and then the freshest page left outside the batch is only the
+#: freshest survivor — two days old, in the measured case — not the user's
+#: last work. Only an edit made after the latest batch still says what the
+#: user was doing.
 #:
 #: Counted over every page the freshness registry holds, not over anchors
 #: alone: a real batch interleaves anchors with ordinary notes — a measured
@@ -1940,7 +1945,8 @@ def hot_profile(
        A token that does not say when it was minted leads, as it always did.
     2. the freshness registry's last-edit time for the page. An edit is work
        — unless it fell in a write burst (`HOT_PROFILE_BURST_PAGES`), which
-       is a batch nobody chose, so a burst anchor has no edit time here.
+       is a batch nobody chose, or came before the latest one, which may have
+       taken the user's own page with it; either has no edit time here.
     3. the memoized ACT-R activation for the page. A read is weaker evidence
        of work than an edit, so it orders what the edits could not separate.
 
@@ -1988,6 +1994,7 @@ def hot_profile(
             continue
         eligible.append(row)
     burst = _burst_paths(times)
+    after_burst = max((int(times[path]) for path in burst), default=0)
     leads = continuity_minted_ns is None or not any(
         not working_set_resolve.names_row(continuity_refs, row)
         and str(row.path) not in burst
@@ -2001,7 +2008,8 @@ def hot_profile(
             key = (1, 0, 0.0)
         else:
             activation = activations.get(usage.canon(path), activations.get(path))
-            edited = 0 if path in burst else int(times.get(path, 0))
+            edited_ns = int(times.get(path, 0))
+            edited = edited_ns if path not in burst and edited_ns > after_burst else 0
             key = (0, edited, float(activation or 0.0))
         heat[path] = max(key, heat.get(path, nothing))
     top: tuple[int, int, float] | None = None

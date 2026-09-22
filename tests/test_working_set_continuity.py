@@ -1231,54 +1231,119 @@ def test_a_referential_turn_keeps_its_referent_past_recall_partials(
 # R-J: a write burst is a batch, not the user's work.
 
 
-def test_a_maintenance_batch_does_not_pick_the_referent(activation_vault: Path) -> None:
-    """The reviewer's p4: the user last edited Cargo Sled; a maintenance pass
-    then rewrote thirty pages. "continue" used to resolve whichever of those
-    the batch wrote last."""
+SLED = "Knowledge Base/Products/Cargo Sled.md"
+MARIT = "Knowledge Base/Entities/People/Marit Solheim.md"
+_SLED_ID = "0b7c9e2a-4f1d-4c3a-9e8b-5a6d7c8e9f01"
+_MARIT_ID = "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f"
+
+
+def _give_id(vault: Path, rel: str, exomem_id: str) -> None:
+    page = vault / rel
+    page.write_text(
+        page.read_text(encoding="utf-8").replace("---\n", f"---\nexomem_id: {exomem_id}\n", 1),
+        encoding="utf-8",
+    )
+
+
+def _batch_after(
+    vault: Path, *, edits: dict[str, float], monkeypatch: pytest.MonkeyPatch, read: str | None
+) -> tuple[dict, dict]:
+    """Every page old, `edits` = {page: seconds ago}, then `backfill-ids` runs.
+    Returns the "continue" packets before and after the batch; `read` is the
+    one page the usage snapshot says was read, if any."""
     import os
     import time
 
     from exomem import file_watcher, lexstore
 
-    sled = activation_vault / "Knowledge Base" / "Products" / "Cargo Sled.md"
-    # The user's own last edit, which also gave the page its identifier — so
-    # the batch below has no reason to rewrite it.
-    sled.write_text(
-        sled.read_text(encoding="utf-8").replace(
-            "---\n", "---\nexomem_id: 0b7c9e2a-4f1d-4c3a-9e8b-5a6d7c8e9f01\n", 1
-        ),
-        encoding="utf-8",
-    )
-    working_set_index.WorkingSetIndex(activation_vault).rebuild()
+    working_set_index.WorkingSetIndex(vault).rebuild()
     now = time.time()
-    for index, page in enumerate(sorted((activation_vault / "Knowledge Base").rglob("*.md"))):
-        os.utime(page, (now - 10_000 - index, now - 10_000 - index))
-    os.utime(sled, (now - 5, now - 5))
-    file_watcher.FileWatcher(activation_vault)._reconcile_once(seed=True)
-    lexstore.ensure_fresh(activation_vault)
-    runtime_module.reset_caches_for_tests()
-    before = commands.op_activate_context(activation_vault, turn="continue")
-    assert [
-        item["path"] for item in before["anchors"] if item["status"] == "resolved"
-    ] == ["Knowledge Base/Products/Cargo Sled.md"]
+    for index, page in enumerate(sorted((vault / "Knowledge Base").rglob("*.md"))):
+        os.utime(page, (now - 10 * 86400 - index, now - 10 * 86400 - index))
+    for rel, ago in edits.items():
+        os.utime(vault / rel, (now - ago, now - ago))
 
-    commands.op_maintain_memory(activation_vault, mode="backfill-ids", dry_run=False)
-    assert sled.stat().st_mtime < now - 1, "the batch must leave the user's page alone"
-    anchors = {row.path for row in working_set_index.WorkingSetIndex(activation_vault).anchors()}
-    rewritten = [
-        str(page.relative_to(activation_vault))
-        for page in (activation_vault / "Knowledge Base").rglob("*.md")
+    def settle() -> None:
+        file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+        lexstore.ensure_fresh(vault)
+        working_set_index.WorkingSetIndex(vault).rebuild()
+        runtime_module.reset_caches_for_tests()
+
+    snapshot = {read: 2.5} if read else {}
+    monkeypatch.setattr(working_set, "_activation_snapshot", lambda: snapshot)
+    settle()
+    before = commands.op_activate_context(vault, turn="continue")
+    commands.op_maintain_memory(vault, mode="backfill-ids", dry_run=False)
+    anchors = {row.path for row in working_set_index.WorkingSetIndex(vault).anchors()}
+    rewritten = {
+        str(page.relative_to(vault))
+        for page in (vault / "Knowledge Base").rglob("*.md")
         if page.stat().st_mtime > now - 1
-    ]
-    assert len(set(rewritten) & anchors) >= 3, "the batch must rewrite anchors, or this proves nothing"
-    file_watcher.FileWatcher(activation_vault)._reconcile_once(seed=True)
-    lexstore.ensure_fresh(activation_vault)
-    runtime_module.reset_caches_for_tests()
+    }
+    assert len(rewritten & anchors) >= 3, "the batch must rewrite anchors, or this proves nothing"
+    settle()
+    return before, commands.op_activate_context(vault, turn="continue")
 
-    packet = commands.op_activate_context(activation_vault, turn="continue")
 
-    resolved = [item["path"] for item in packet["anchors"] if item["status"] == "resolved"]
-    assert resolved == ["Knowledge Base/Products/Cargo Sled.md"], packet["anchors"]
+def _resolved_paths(packet: dict) -> list[str]:
+    return [item["path"] for item in packet["anchors"] if item["status"] == "resolved"]
+
+
+@pytest.mark.parametrize("read", [None, SLED], ids=["nothing-read", "sled-read"])
+def test_a_maintenance_batch_does_not_pick_the_referent(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch, read: str | None
+) -> None:
+    """The reviewer's p4: the user last edited Cargo Sled; a maintenance pass
+    then rewrote thirty pages. "continue" used to resolve whichever of those
+    the batch wrote last. After a batch, no edit that came before it carries
+    a signal: what was read decides, and with nothing read the turn
+    abstains rather than guess."""
+    _give_id(activation_vault, SLED, _SLED_ID)
+
+    before, after = _batch_after(
+        activation_vault, edits={SLED: 5}, monkeypatch=monkeypatch, read=read
+    )
+
+    assert _resolved_paths(before) == [SLED]
+    assert (activation_vault / SLED).stat().st_mtime < time_now() - 1, "the batch left it alone"
+    if read:
+        assert _resolved_paths(after) == [SLED], after["anchors"]
+    else:
+        assert after["abstention"] == {"reason": "unresolved"}, after["anchors"]
+        assert after["recent_context"]
+
+
+@pytest.mark.parametrize("read", [None, SLED], ids=["nothing-read", "sled-read"])
+def test_a_batch_that_rewrote_the_users_page_never_promotes_an_old_edit(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch, read: str | None
+) -> None:
+    """The reviewer's r2 shape [e]: the user's last work, Cargo Sled an hour
+    ago, had no identifier, so the batch rewrote it and its edit signal went
+    with the batch. Marit Solheim, edited once two days ago, then became the
+    referent because it was the freshest page outside the batch — however
+    old. Only an edit NEWER than the latest batch counts."""
+    _give_id(activation_vault, MARIT, _MARIT_ID)
+
+    before, after = _batch_after(
+        activation_vault,
+        edits={MARIT: 2 * 86400, SLED: 3600},
+        monkeypatch=monkeypatch,
+        read=read,
+    )
+
+    assert _resolved_paths(before) == [SLED]
+    assert (activation_vault / SLED).stat().st_mtime > time_now() - 60, "the batch rewrote it"
+    assert MARIT not in _resolved_paths(after), after["anchors"]
+    if read:
+        assert _resolved_paths(after) == [SLED], after["anchors"]
+    else:
+        assert after["abstention"] == {"reason": "unresolved"}, after["anchors"]
+
+
+def time_now() -> float:
+    import time
+
+    return time.time()
 
 
 def _one_batch(vault: Path, *, count: int) -> list[Path]:
