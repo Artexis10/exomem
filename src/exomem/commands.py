@@ -68,6 +68,7 @@ from . import entity_candidates as entity_candidates_module
 from . import entity_types as entity_types_module
 from . import envelope as envelope_module
 from . import episode_memory as episode_memory_module
+from . import episode_nudge as episode_nudge_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
 from . import find as find_module
@@ -5934,10 +5935,12 @@ def op_activate_context(
     current state of any resource whose collection records one.
 
     Every packet leads with `recent_context`: up to eight pages this vault has
-    recently been worked on — edited, read, captured as a session, or left open
-    in Planning — each with its title, why it is recent, the date of that
-    contact and, where the page carries one, its own authored `status` or
-    `summary` line. That line is the page's, not a current-state reading: these
+    recently been worked on — edited, read, captured as a session, recorded as a
+    conversation recap, or left open in Planning — each with its title, why it
+    is recent, the date of that contact and, where the page carries one, its own
+    authored `status` or `summary` line. A recap entry (`why: "episode"`) is the
+    newest revision of one conversation's `episode_memory` record and carries
+    that conversation's `episode` key; follow it with `read_memory`. That line is the page's, not a current-state reading: these
     pages are chosen by recency rather than by the turn, so the block never
     queries a Records collection the turn did not name. `current_state[]`
     remains the carrier for the resolved anchors' governed state.
@@ -5971,6 +5974,11 @@ def op_activate_context(
     both resolved: nothing resolved here. Call again with `anchor` set to the
     ref you mean — an ordinary compiled page takes it exactly as a page reached
     by `retrieval_carried` above does — and that page's own units are served.
+
+    On the MCP door a packet may also carry `episode_due`: after several
+    activations with no `episode_memory` record from this caller, it asks you to
+    record one at the conversation's next decision or stopping point. It is
+    advice, at most once per half hour, and absent when proactive capture is off.
 
     Use `ask_memory` instead when you already know what you are looking for; use
     this when you do not, and follow it with `read_memory` on whatever ref the
@@ -6016,7 +6024,7 @@ def op_activate_context(
 
     Returns: {recent_context, anchors, roles, units, pointers, current_state,
              missing, ambiguity, budget, generation, abstained, abstention?,
-             continuity?}. `recent_context` is first and is present on an
+             continuity?, episode_due?}. `recent_context` is first and is present on an
              abstained packet too; every other block is empty on one.
              `generation.continuity` reports whether a token you passed was
              `applied`, `stale` or `absent`.
@@ -6430,6 +6438,11 @@ def _op_activate_context_body(
     )
     if token:
         packet["continuity"] = token
+    # After the guard and never cached: advice to this caller about recording
+    # its conversation, not material about the vault, and it names no page.
+    episode_due = episode_nudge_module.on_activation(vault_root)
+    if episode_due is not None:
+        packet["episode_due"] = episode_due
     if timings is not None:
         packet["timings"] = timings.as_dict()
     # Deliberately NOT `_with_due_state`. That helper consults the emission

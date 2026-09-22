@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from . import add as add_module
-from . import episode_capture, memory_refs, query_log, source_taxonomy
+from . import episode_capture, episode_nudge, memory_refs, query_log, source_taxonomy
 from .episode_model import EpisodeError
 from .episode_recovery import EpisodeInputOwner
 from .governance import egress
@@ -187,6 +187,8 @@ def record(
         ledger, recovery, revision = "unbound", "unavailable", None
     else:
         ledger, recovery, revision = bound["ledger"], bound["recovery"], bound["input_revision"]
+    # A recorded episode is what the `episode_due` advisory asks for.
+    episode_nudge.note_record(vault_root)
     return {
         "operation": "episode_memory",
         "episode": recap.key,
