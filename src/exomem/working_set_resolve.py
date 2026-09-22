@@ -119,7 +119,36 @@ CUE_PATTERNS: Mapping[str, tuple[str, ...]] = {
     "question": ("?", "what about", "why does"),
     "recent_change": ("again", "still", "changed", "since"),
     "precedent": ("last time", "before", "previously"),
+    # A turn whose own words ARE the reference (close-memory-loop D2). Unlike
+    # every other cue this one is not a lens on WHAT to look for; it says the
+    # turn named nothing to look for at all, and it is the first half of the
+    # `referential` test below (the second half is the short-turn rule).
+    "referential": (
+        "continue",
+        "where were we",
+        "where did we leave",
+        "go on",
+        "carry on",
+        "status",
+        "what's next",
+        "whats next",
+        "what is next",
+        "same as before",
+        "as before",
+        "pick up",
+        "resume",
+    ),
 }
+
+#: The longest turn that can be referential WITHOUT speaking a declared cue,
+#: counted in content words (function words removed). The cue list catches the
+#: turns people phrase from a list; this catches the ones they do not —
+#: "status?", "and the northern depot?", "how much is left" — where the words
+#: present are not a name but a pointer at what the session was already doing.
+#: Six is deliberately short: at seven content words a turn is usually saying
+#: something of its own, and the rule below never fires while ANY candidate
+#: carries worded contact anyway.
+REFERENTIAL_MAX_CONTENT_TOKENS = 6
 
 #: Worded contact: the turn's OWN WORDS reached the anchor's own names, terms
 #: or claims. Two of these together (or one plus any other kind besides
@@ -174,6 +203,11 @@ class TurnAnalysis:
     tokens: tuple[str, ...]
     ngrams: tuple[str, ...]
     cues: tuple[str, ...]
+    #: Does this turn point at recent work instead of naming anything? A
+    #: property of the TURN alone — whether anything hot exists to point at,
+    #: and whether the turn's words reached an anchor after all, are facts
+    #: about the vault and the candidate set, decided in `resolve()`.
+    referential: bool = False
 
     @property
     def cue_categories(self) -> frozenset[str]:
@@ -386,7 +420,19 @@ def analyze_turn(turn: str) -> TurnAnalysis:
         for name, patterns in CUE_PATTERNS.items()
         if any(pattern in text for pattern in patterns)
     )
-    return TurnAnalysis(text=text, tokens=tokens, ngrams=tuple(ngrams), cues=cues)
+    # Two ways in, both about the turn's own words: it speaks a declared
+    # referential cue, or it is short enough that what it does say cannot be
+    # a name. Function words are removed for the count for the same reason
+    # the lexical band removes them — "the" is not something a turn names.
+    content_tokens = sum(1 for token in tokens if token not in _STOPWORDS)
+    referential = "referential" in cues or content_tokens <= REFERENTIAL_MAX_CONTENT_TOKENS
+    return TurnAnalysis(
+        text=text,
+        tokens=tokens,
+        ngrams=tuple(ngrams),
+        cues=cues,
+        referential=referential,
+    )
 
 
 # --------------------------------------------------------------------------- #

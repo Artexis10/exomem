@@ -1575,3 +1575,83 @@ def test_c3_a_function_word_alone_does_not_earn_rare_term() -> None:
     )
 
     assert candidates == ()
+
+
+# --------------------------------------------------------------------------- #
+# Referential turns (close-memory-loop D2): a turn whose own words ARE the
+# reference. The cue list is deterministic substrings like every other cue;
+# the short-turn rule is the generalisation, for the turns nobody phrases
+# from a list ("status?", "and the sled?").
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "continue",
+        "ok continue",
+        "carry on",
+        "go on",
+        "where were we",
+        "where did we leave off",
+        "what's next",
+        "same as before",
+        "as before",
+        "pick up where we left off",
+        "resume",
+        "status",
+    ],
+)
+def test_a_declared_referential_cue_makes_the_turn_referential(turn: str) -> None:
+    analysis = resolve_module.analyze_turn(turn)
+
+    assert "referential" in analysis.cues
+    assert analysis.referential is True
+
+
+def test_a_short_turn_naming_nothing_is_referential_without_a_cue() -> None:
+    """The generalisation: six content words or fewer, no cue phrase at all."""
+    analysis = resolve_module.analyze_turn("and the northern depot?")
+
+    assert "referential" not in analysis.cues
+    assert analysis.referential is True
+
+
+def test_a_long_turn_with_no_cue_is_not_referential() -> None:
+    analysis = resolve_module.analyze_turn(
+        "I'm planning to tow the cargo sled north along the winter corridor "
+        "and I need to know what the depot stock looks like"
+    )
+
+    assert analysis.referential is False
+
+
+def test_function_words_do_not_count_toward_the_short_turn_rule() -> None:
+    """Seven content words is not a referential turn, however many of the
+    turn's own words are `the` and `of`."""
+    short = resolve_module.analyze_turn(
+        "the sled the depot the corridor the winter the stock the north"
+    )
+    long = resolve_module.analyze_turn(
+        "sled depot corridor winter stock north harbour"
+    )
+
+    assert short.referential is True
+    assert long.referential is False
+    assert resolve_module.REFERENTIAL_MAX_CONTENT_TOKENS == 6
+
+
+def test_a_cue_inside_a_longer_sentence_still_reads_as_referential() -> None:
+    """Cues are substrings, here as everywhere else in `CUE_PATTERNS`, so a
+    long turn that happens to say "continue" is referential by cue.
+
+    Pinned rather than left undefined because it is the shape the rule has to
+    survive: such a turn usually names something too, and `resolve()`'s own
+    guard — no recency resolution while ANY candidate holds worded contact —
+    is what keeps the cue from mattering there. The cue alone decides nothing.
+    """
+    analysis = resolve_module.analyze_turn(
+        "should I continue with the cheaper cargo sled or wait for the dearer one"
+    )
+
+    assert analysis.referential is True
