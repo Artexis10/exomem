@@ -1989,7 +1989,7 @@ def hot_profile(
         eligible.append(row)
     burst = _burst_paths(times)
     leads = continuity_minted_ns is None or not any(
-        working_set_resolve.anchor_ref(row) not in continuity_refs
+        not working_set_resolve.names_row(continuity_refs, row)
         and str(row.path) not in burst
         and int(times.get(str(row.path), 0)) > continuity_minted_ns
         for row in eligible
@@ -1997,7 +1997,7 @@ def hot_profile(
     heat: dict[str, tuple[int, int, float]] = {}
     for row in eligible:
         path = str(row.path)
-        if leads and working_set_resolve.anchor_ref(row) in continuity_refs:
+        if leads and working_set_resolve.names_row(continuity_refs, row):
             key = (1, 0, 0.0)
         else:
             activation = activations.get(usage.canon(path), activations.get(path))

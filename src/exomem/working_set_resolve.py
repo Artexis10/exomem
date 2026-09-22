@@ -910,6 +910,21 @@ def anchor_ref(row: Any) -> str:
     )
 
 
+def names_row(refs: frozenset[str] | set[str], row: Any) -> bool:
+    """Does a continuity token's ref list name `row`?
+
+    By the ref the packet reported (`anchor_ref`) or by the row's path. A
+    token minted while a page had no identifier names it by path; once the
+    page gains one (`backfill-ids`), its reported ref changes and the path is
+    the only spelling the two still share. The path is the page, so matching
+    it names nothing the token did not.
+    """
+    if not refs:
+        return False
+    path = str(getattr(row, "path", "") or "")
+    return anchor_ref(row) in refs or (bool(path) and path in refs)
+
+
 def apply_continuity(
     candidates: Sequence[CandidateFacts],
     refs: frozenset[str] | set[str],
@@ -926,7 +941,7 @@ def apply_continuity(
     if not refs:
         return tuple(candidates)
     return tuple(
-        replace(item, evidence=item.evidence | {"continuity"}) if anchor_ref(item) in refs else item
+        replace(item, evidence=item.evidence | {"continuity"}) if names_row(refs, item) else item
         for item in candidates
     )
 

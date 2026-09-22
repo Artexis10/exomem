@@ -1479,3 +1479,63 @@ def test_capitals_in_ordinary_prose_never_serve_an_unrelated_anchor(
         packet["anchors"]
     )
     assert packet["units"] == []
+
+
+# R-N5: a token minted before an anchor gained its identifier still names it.
+
+
+def test_a_token_from_before_a_backfill_still_leads_by_path(activation_vault: Path) -> None:
+    """The reviewer's r2 refcheck: the packet was served while Cargo Sled
+    had no identifier, so its token names the page by path. `backfill-ids`
+    then gives the page an identifier, its ref changes, and the token's tier
+    matched nothing; "continue" resolved an old collection instead."""
+    import time
+
+    from exomem import file_watcher, lexstore
+
+    file_watcher.FileWatcher(activation_vault)._reconcile_once(seed=True)
+    lexstore.ensure_fresh(activation_vault)
+    runtime_module.reset_caches_for_tests()
+    served = commands.op_activate_context(activation_vault, turn=TURN)
+    sled = "Knowledge Base/Products/Cargo Sled.md"
+    assert sled in runtime_module.decode_continuity(served["continuity"])["refs"]
+    time.sleep(1.2)
+    commands.op_maintain_memory(activation_vault, mode="backfill-ids", dry_run=False)
+    file_watcher.FileWatcher(activation_vault)._reconcile_once(seed=True)
+    lexstore.ensure_fresh(activation_vault)
+    working_set_index.WorkingSetIndex(activation_vault).rebuild()
+    runtime_module.reset_caches_for_tests()
+    rows = working_set_resolve_rows(activation_vault)
+    assert [resolve_module.anchor_ref(row) for row in rows if row.path == sled] != [sled], (
+        "the backfill must have changed the page's ref, or this proves nothing"
+    )
+
+    packet = commands.op_activate_context(
+        activation_vault, turn="continue", continuity=served["continuity"]
+    )
+
+    resolved = {
+        item["path"]: item["evidence"] for item in packet["anchors"] if item["status"] == "resolved"
+    }
+    # The previous answer, whole — Cargo Sled included, now named by path.
+    served_paths = {item["path"] for item in served["anchors"] if item["status"] == "resolved"}
+    assert set(resolved) == served_paths, packet["anchors"]
+    assert {"continuity", "recency"} <= set(resolved[sled])
+
+
+def test_continuity_qualifies_an_anchor_named_by_its_path() -> None:
+    candidate = resolve_module.CandidateFacts(
+        anchor_id="a",
+        path="Products/Page.md",
+        ref="exomem://memory/0b7c9e2a-4f1d-4c3a-9e8b-5a6d7c8e9f01",
+        title="Page",
+        kind="resource",
+        lifecycle="active",
+        categories=(),
+        neighbourhood=frozenset(),
+        evidence=frozenset({"retrieval"}),
+    )
+
+    (qualified,) = resolve_module.apply_continuity((candidate,), frozenset({"Products/Page.md"}))
+
+    assert "continuity" in qualified.evidence
