@@ -460,6 +460,82 @@ def ensure_index(
     return READY, index, False
 
 
+#: Above this many distinct content stems, the corroboration count is bounded
+#: (see `_bounded_corroboration_terms`) instead of counting every stem the
+#: turn used. A turn at or under this size pays nothing extra for the bound:
+#: it is small enough that the corroboration filter's own cost was never the
+#: problem, so it is left exactly as it always ran.
+_LEXICAL_CORROBORATION_TRIGGER = 6
+#: How many stems a bounded corroboration count ever keeps. Every RARE stem
+#: (this vault's own rarity cap, the same one the carry lane measures rarity
+#: against) is kept regardless of this number — see `_bounded_corroboration_terms`.
+_LEXICAL_CORROBORATION_CAP = 10
+
+
+def _bounded_corroboration_terms(
+    vault_root: Path,
+    stems: Sequence[str],
+    *,
+    freshness=None,
+    recall_checkpoint=None,
+) -> tuple[str, ...] | None:
+    """The stems `lexical_evidence` asks its corroboration filter to count,
+    bounded so a long turn's per-candidate cost stops growing with every
+    extra word it happened to use.
+
+    The corroboration filter re-scans each candidate anchor's full stemmed
+    text once per counted stem, with no index behind that scan — cost is
+    `O(candidate anchors * counted stems)`, unbounded in the stem count. A
+    turn naming two products by their full names (a handful of RARE stems)
+    wrapped in ordinary sentence filler (a dozen ORDINARY ones) pays for
+    every one of those filler stems today, though the filler was never what
+    made a page a match: `min_matched_terms=2` exists to demand DISTINCTIVE
+    corroboration, and an ordinary word occurring on most of the catalogue is
+    not distinctive.
+
+    Returns `None` — count every stem, exactly as before this bound existed
+    — when the turn is at or under `_LEXICAL_CORROBORATION_TRIGGER` (nothing
+    to save) or when this vault's document frequency is unavailable (an
+    unbounded count is always CORRECT, only sometimes slow; a bound is never
+    guessed from a proof this call could not get).
+
+    Every stem THIS vault's catalogue counts as rare — `frequencies.get(stem,
+    0) <= working_set.rare_document_cap(corpus_pages)`, the identical
+    corpus-relative cutoff `rare_turn_terms` measures the carry lane's
+    rarity against — is kept, unconditionally and with no cap of its own: a
+    bound that dropped one could be dropping the only word left that reaches
+    a named anchor, and a turn can name as many distinct rare things as it
+    likes. Only stems ABOVE that cutoff are ever trimmed, least-frequent
+    first, down to `_LEXICAL_CORROBORATION_CAP` stems in total — narrowing
+    the filter toward its own already-stated purpose (distinctive words),
+    never past the rare stems it must never lose.
+    """
+    if len(stems) <= _LEXICAL_CORROBORATION_TRIGGER:
+        return None
+    from . import lexstore
+
+    result = lexstore.term_document_frequencies(
+        vault_root,
+        stems,
+        scope="kb",
+        freshness=freshness,
+        allow_delta=False,
+        recall_checkpoint=recall_checkpoint,
+    )
+    if not result.readiness.complete:
+        return None
+    frequencies, corpus_pages = result.value or ({}, 0)
+    cap = working_set.rare_document_cap(corpus_pages)
+    ranked = sorted(stems, key=lambda stem: (frequencies.get(stem, 0), stem))
+    rare = [stem for stem in ranked if frequencies.get(stem, 0) <= cap]
+    if len(rare) >= _LEXICAL_CORROBORATION_CAP:
+        return tuple(rare)
+    rare_set = set(rare)
+    filler = [stem for stem in ranked if stem not in rare_set]
+    bounded = rare + filler[: _LEXICAL_CORROBORATION_CAP - len(rare)]
+    return tuple(bounded)
+
+
 def lexical_evidence(
     vault_root: Path, turn: str, rows, *, limit: int, freshness=None, recall_checkpoint=None
 ):
@@ -476,9 +552,12 @@ def lexical_evidence(
     try:
         # A full-page match on the same single name word is not a second fact.
         # Retain two distinct content stems; exact aliases still resolve alone.
-        content_turn = " ".join(
-            token for token in working_set_index.tokens_of(working_set_index.normalize(turn))
-            if token not in working_set_index.STOPWORDS
+        content_turn = content_words(turn)
+        corroboration_tokens = _bounded_corroboration_terms(
+            vault_root,
+            content_stems(turn),
+            freshness=freshness,
+            recall_checkpoint=recall_checkpoint,
         )
         result = lexstore.search_bm25_result(
             vault_root,
@@ -489,6 +568,7 @@ def lexical_evidence(
             allowed_paths=set(by_path),
             allow_delta=False,
             min_matched_terms=2,
+            corroboration_tokens=corroboration_tokens,
             recall_checkpoint=recall_checkpoint,
         )
         if not result.readiness.complete:
