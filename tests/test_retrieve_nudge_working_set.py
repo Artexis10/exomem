@@ -971,15 +971,24 @@ def test_prominence_off_stays_silent_in_working_set_mode(
     assert seen == [], "the transport must never run behind a closed gate"
 
 
+@pytest.mark.parametrize("prompt", ["merge it", "thanks", "ship it", "done yet"])
 def test_a_short_control_prompt_stays_silent_in_working_set_mode(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     working_set_mode: None,
+    prompt: str,
 ) -> None:
+    """The control filter still holds in working-set mode.
+
+    The one exemption is a REFERENTIAL turn ("continue", "where were we"),
+    which names nothing and means the thread the session was on — see
+    `test_a_referential_turn_reaches_activate_context`. An acknowledgement or
+    an instruction to act carries no such question and still costs nothing.
+    """
     seen = _serve(monkeypatch, _packet())
 
-    assert _run(monkeypatch, capsys, _event(prompt="continue"), tmp_path / "home") == ""
+    assert _run(monkeypatch, capsys, _event(prompt=prompt), tmp_path / "home") == ""
     assert seen == []
 
 
@@ -1535,3 +1544,122 @@ def test_the_mode_is_documented_where_the_hook_is_installed() -> None:
 
     assert "working_set" in source
     assert "EXOMEM_RETRIEVE_INJECT_MAX_CHARS" in source
+
+
+# --------------------------------------------------------------------------- #
+# Recent context — the block a fresh session opens with
+# --------------------------------------------------------------------------- #
+
+
+def _recent(
+    path: str = "Knowledge Base/Products/Cargo Sled.md",
+    *,
+    title: str = "Cargo Sled",
+    why: str = "edited",
+    statement: str | None = None,
+) -> dict:
+    entry = {
+        "ref": path,
+        "path": path,
+        "title": title,
+        "kind": "resource",
+        "why": why,
+        "as_of": "2026-09-21",
+    }
+    if statement is not None:
+        entry["statement"] = statement
+    return entry
+
+
+def test_recent_context_is_rendered_before_everything_else() -> None:
+    packet = _packet()
+    packet["recent_context"] = [_recent(statement="state: in storage abroad")]
+
+    block = hook._format_working_set_block(packet, 4000)
+    body = block.splitlines()[1:]
+
+    assert [line.split(":", 1)[0] for line in body] == [
+        "- recent",
+        "- state",
+        "- unit",
+        "- pointer",
+    ]
+    assert body[0] == (
+        "- recent: Cargo Sled — state: in storage abroad "
+        "[Knowledge Base/Products/Cargo Sled.md]"
+    )
+
+
+def test_a_recent_entry_with_no_statement_says_why_it_is_recent() -> None:
+    packet = _packet(units=[], pointers=[], current_state=[])
+    packet["recent_context"] = [_recent(why="planning", statement=None)]
+
+    body = hook._format_working_set_block(packet, 4000).splitlines()[1:]
+
+    assert body == ["- recent: Cargo Sled — planning [Knowledge Base/Products/Cargo Sled.md]"]
+
+
+@pytest.mark.parametrize("reason", ["unresolved", "index_warming", "disabled"])
+def test_an_abstained_packet_still_renders_its_recent_context(reason: str) -> None:
+    """The whole point of the block: the turns that resolve nothing are exactly
+    the ones a fresh session opens with."""
+    packet = _packet(
+        abstained=True, reason=reason, units=[], pointers=[], current_state=[], continuity=None
+    )
+    packet["anchors"] = []
+    packet["recent_context"] = [_recent(statement="state: in storage abroad")]
+
+    block = hook._format_working_set_block(packet, 4000)
+
+    assert block.startswith(hook._WORKING_SET_HEADER)
+    assert "- recent: Cargo Sled — state: in storage abroad" in block
+
+
+def test_an_unresolved_menu_puts_recent_context_above_its_candidates() -> None:
+    packet = _unresolved_packet(WORDED_AND_RETRIEVAL_ONLY)
+    packet["recent_context"] = [_recent(statement="state: in storage abroad")]
+
+    lines = hook._format_working_set_block(packet, 4000).splitlines()
+
+    assert lines[1].startswith("- recent: Cargo Sled")
+    assert lines[2].startswith("- plan: Winter schedule")
+    assert lines[-1] == hook._WORKING_SET_UNRESOLVED_LINE
+
+
+@pytest.mark.parametrize(
+    "prompt", ["continue", "ok continue", "status", "where were we", "go on"]
+)
+def test_a_referential_turn_reaches_activate_context(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+    prompt: str,
+) -> None:
+    """These are the turns the block exists for, and the control-prompt filter
+    used to drop every one of them before the packet was ever fetched."""
+    packet = _packet(abstained=True, reason="unresolved", units=[], pointers=[], current_state=[])
+    packet["anchors"] = []
+    packet["recent_context"] = [_recent(statement="state: in storage abroad")]
+    seen = _serve(monkeypatch, packet)
+
+    output = _run(monkeypatch, capsys, _event(prompt=prompt), tmp_path / "home")
+
+    assert [request["prompt"] for request in seen] == [prompt]
+    assert "- recent: Cargo Sled" in _context(output)
+
+
+def test_an_ordinary_control_prompt_is_still_filtered(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+) -> None:
+    """Only the referential turns are exempt: an acknowledgement still costs
+    nothing."""
+    seen = _serve(monkeypatch, _packet())
+
+    output = _run(monkeypatch, capsys, _event(prompt="thanks, perfect"), tmp_path / "home")
+
+    assert seen == []
+    assert output.strip() == ""

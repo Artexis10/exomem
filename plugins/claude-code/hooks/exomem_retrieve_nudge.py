@@ -223,6 +223,37 @@ _CONTROL_PROMPT_RE = re.compile(
 )
 
 
+#: Referential turns: short prompts that name nothing and mean "the thing we
+#: were doing". They look exactly like control prompts — which is why the
+#: filter above drops them — but in working-set mode they are the turns the
+#: packet's `recent_context` block exists for, so they are exempted from BOTH
+#: prompt-shape gates (the length floor and the control filter) and fetched.
+#: The exemption is narrow on purpose: an acknowledgement ("thanks", "perfect")
+#: or an instruction to act ("merge it", "ship it") is still churn, and still
+#: skipped. It does not touch the cooldowns, which are rate limits rather than
+#: opinions about the prompt.
+_REFERENTIAL_PROMPT_RE = re.compile(
+    r"""
+    ^\s*
+    (?:(?:so|and|ok(?:ay)?|right|alright|now)[\s,]+)?
+    (?:
+        continue|carry\s+on|go\s+on|resume|
+        status|status\s+update|
+        where\s+(?:were|was)\s+we|what\s+were\s+we\s+doing|
+        what(?:'s|\s+is)\s+next|what\s+now|
+        pick\s+up\s+where\s+we\s+left\s+off|same\s+as\s+before
+    )
+    [\s\.,!?:;\-]*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _is_referential_prompt(prompt: str) -> bool:
+    """True for a turn that points at recent work without naming any of it."""
+    return bool(_REFERENTIAL_PROMPT_RE.match(re.sub(r"\s+", " ", prompt).strip()))
+
+
 def _env_flag(name: str) -> bool:
     """Truthy opt-in parse: unset, '', '0', 'false', 'no', 'off' (any case) → False.
 
@@ -999,12 +1030,39 @@ def _packet_line(kind: str, text: str, ref: str) -> str:
     return f"- {label}: {body} [{handle}]" if handle else f"- {label}: {body}"
 
 
+def _recent_lines(packet: dict) -> list[str]:
+    """What was recently worked on, one whole line each, in the packet's order.
+
+    Rendered FIRST and on every packet, including the ones that resolved
+    nothing: a fresh session's first need is the thread it is picking up, and
+    the turns that carry the least resolution ("continue", "status") are
+    exactly the ones that need it most.
+
+    A statement when the packet has one — the page's current state or its
+    authored status — and otherwise the bare reason the page is recent. Never
+    both, and never a sentence this hook wrote.
+    """
+    lines: list[str] = []
+    for entry in packet.get("recent_context") or ():
+        if not isinstance(entry, dict):
+            continue
+        title = str(entry.get("title") or "").strip()
+        detail = str(entry.get("statement") or "").strip() or str(entry.get("why") or "").strip()
+        label = f"{title} — {detail}" if title and detail else (title or detail)
+        if label:
+            lines.append(
+                _packet_line("recent", label, str(entry.get("ref") or entry.get("path") or ""))
+            )
+    return lines
+
+
 def _packet_lines(packet: dict) -> list[str]:
-    """Current state first, then units, then pointers — the packet's own order.
+    """Recent context first, then current state, units and pointers — the
+    packet's own order.
 
     That order is the packet's priority order, so it is also the order the
     ceiling cuts from the end of."""
-    lines: list[str] = []
+    lines: list[str] = _recent_lines(packet)
     for entry in packet.get("current_state") or ():
         if not isinstance(entry, dict):
             continue
@@ -1044,24 +1102,46 @@ def _bounded_block(lines: list[str], max_chars: int) -> str:
     it under budget pressure would hand the agent the least important material it
     happened to be able to afford. `""` when not even one line fits — a bare
     header is a claim that something was retrieved, with nothing behind it."""
-    if not lines:
-        return ""
-    kept = [_WORKING_SET_HEADER]
+    kept = _bounded_lines(lines, max_chars)
+    return "\n".join([_WORKING_SET_HEADER, *kept]) if kept else ""
+
+
+def _bounded_lines(lines: list[str], max_chars: int) -> list[str]:
+    """The whole lines that fit under the header, in order.
+
+    Split out from `_bounded_block` so a caller that reserves room for a
+    trailing instruction can see WHICH lines survived, and drop an instruction
+    about a menu the ceiling left empty."""
+    kept: list[str] = []
     used = len(_WORKING_SET_HEADER)
     for line in lines:
         if used + 1 + len(line) > max_chars:
             break
         kept.append(line)
         used += 1 + len(line)
-    return "\n".join(kept) if len(kept) > 1 else ""
+    return kept
+
+
+def _menu_block(packet: dict, menu: list[str], instruction: str, max_chars: int) -> str:
+    """Recent context, then a menu the agent can act on, then its instruction.
+
+    The instruction's room is reserved before the lines are laid out: a menu
+    with no stated way to act on it is context the agent pays for and cannot
+    use. It is appended only when a MENU line actually survived the ceiling —
+    recent context leads, so a tight ceiling can spend itself before the menu,
+    and "two senses match" beside no senses is a false claim. What is left then
+    is the recent block alone, which needs no instruction and gets the room
+    back.
+    """
+    reserve = len(instruction) + 1
+    kept = _bounded_lines([*_recent_lines(packet), *menu], max_chars - reserve)
+    if any(line in menu for line in kept):
+        return "\n".join([_WORKING_SET_HEADER, *kept]) + f"\n{instruction}"
+    return _bounded_block(_recent_lines(packet), max_chars)
 
 
 def _format_ambiguity_block(packet: dict, max_chars: int) -> str:
-    """The competing senses plus the one instruction that can resolve them.
-
-    The instruction's room is reserved before the senses are laid out: senses
-    with no stated way to resolve them are context the agent pays for and cannot
-    use, so a ceiling that cannot hold both injects nothing."""
+    """The competing senses plus the one instruction that can resolve them."""
     lines = [
         _packet_line(
             "ambiguous",
@@ -1071,9 +1151,7 @@ def _format_ambiguity_block(packet: dict, max_chars: int) -> str:
         for entry in packet.get("ambiguity") or ()
         if isinstance(entry, dict) and (entry.get("ref") or entry.get("title"))
     ]
-    reserve = len(_WORKING_SET_AMBIGUITY_LINE) + 1
-    block = _bounded_block(lines, max_chars - reserve)
-    return f"{block}\n{_WORKING_SET_AMBIGUITY_LINE}" if block else ""
+    return _menu_block(packet, lines, _WORKING_SET_AMBIGUITY_LINE, max_chars)
 
 
 def _worded_candidates(packet: dict) -> list[dict]:
@@ -1115,9 +1193,7 @@ def _format_unresolved_block(packet: dict, max_chars: int) -> str:
         )
         for anchor in _worded_candidates(packet)
     ]
-    reserve = len(_WORKING_SET_UNRESOLVED_LINE) + 1
-    block = _bounded_block(lines, max_chars - reserve)
-    return f"{block}\n{_WORKING_SET_UNRESOLVED_LINE}" if block else ""
+    return _menu_block(packet, lines, _WORKING_SET_UNRESOLVED_LINE, max_chars)
 
 
 def _abstention_reason(packet: dict) -> str:
@@ -1136,8 +1212,13 @@ def _format_working_set_block(packet: dict, max_chars: int) -> str:
     `ambiguous` lists senses that each resolved and compete. `unresolved` lists
     the candidates the turn's own words reached but that no rule could promote —
     which is the ordinary outcome for Planning items and Records collections, and
-    would otherwise be invisible. Every other abstention renders nothing, because
-    injecting nothing is precisely what those abstentions mean.
+    would otherwise be invisible.
+
+    Every abstention now renders its `recent_context` as well, and one that has
+    nothing else renders that alone. What those abstentions mean is that the
+    turn reached no ANSWER — not that the session has no thread. Rendering
+    nothing at all for "ok continue" is the failure this block exists to fix,
+    and an abstention with an empty block still injects nothing.
     """
     if not isinstance(packet, dict) or max_chars <= 0:
         return ""
@@ -1147,7 +1228,7 @@ def _format_working_set_block(packet: dict, max_chars: int) -> str:
             return _format_ambiguity_block(packet, max_chars)
         if reason == "unresolved":
             return _format_unresolved_block(packet, max_chars)
-        return ""
+        return _bounded_block(_recent_lines(packet), max_chars)
     return _bounded_block(_packet_lines(packet), max_chars)
 
 
@@ -1229,10 +1310,18 @@ def main() -> int:
     cooldown = _env_int("EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC", preset[2])
     global_cooldown = _env_int("EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC", preset[3])
 
-    if len(prompt.strip()) < min_chars:  # trivial prompt ("yes", "go", "thanks")
+    mode = _inject_mode()
+    # "continue" / "where were we" are short and name nothing, so both prompt
+    # gates below drop them — and they are precisely the turns a compiled
+    # packet's recent-context block answers. Exempt in working-set mode only:
+    # that is the mode that fetches a packet, and in the others letting them
+    # through would buy a bare retrieval reminder nobody asked for.
+    referential = mode == _WORKING_SET_MODE and _is_referential_prompt(prompt)
+
+    if not referential and len(prompt.strip()) < min_chars:  # ("yes", "go", "thanks")
         return 0
 
-    if _is_obvious_control_prompt(prompt, control_max_chars):
+    if not referential and _is_obvious_control_prompt(prompt, control_max_chars):
         return 0
 
     session_id = str(data.get("session_id") or data.get("sessionId") or "")
@@ -1246,7 +1335,6 @@ def main() -> int:
 
     additional_context = REMINDER
     lane, hit_count = "off", 0
-    mode = _inject_mode()
     if mode == _WORKING_SET_MODE:
         # Usually a payload REPLACEMENT rather than an upgrade: a packet that
         # resolved, or that hands over a choice between senses that each did,
