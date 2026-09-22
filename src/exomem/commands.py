@@ -11095,6 +11095,7 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
             "compile_source",
             "preserve_artifacts",
             "process_media",
+            "episode_memory",
         ],
     },
     "review": {

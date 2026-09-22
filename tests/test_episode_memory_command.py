@@ -432,3 +432,24 @@ def test_unknown_fields_and_leaves_are_refused_at_every_door(
             )
 
     assert _episodes(vault) == []
+
+
+# --------------------------------------------------------------------------- #
+# Guidance: an agent can find the tool and knows when to use it
+# --------------------------------------------------------------------------- #
+
+
+def test_the_action_catalog_reaches_the_tool_from_capture() -> None:
+    catalog = commands.simple_action_catalog()
+    assert "episode_memory" in catalog["capture"]["advanced"]
+
+
+def test_the_scaffold_skill_routes_conversation_recaps_to_the_tool() -> None:
+    scaffold = Path(commands.__file__).parent / "_scaffold" / "_Schema"
+    skill = (scaffold / "SKILL.md").read_text(encoding="utf-8")
+    routing = (scaffold / "references" / "operation-routing.md").read_text(encoding="utf-8")
+    engagement = (scaffold / "references" / "engagement.md").read_text(encoding="utf-8")
+
+    assert "`episode_memory`" in skill
+    assert "**episode_memory**" in routing
+    assert "episode_memory" in engagement and "episode_due" in engagement

@@ -57,6 +57,7 @@ bootstrap; do not improvise a mutation whose rules remain unavailable.
 | Capture/compile/edit a conclusion or entity, connect or supersede knowledge | `remember`, `observe_memory`, `edit_memory`, `replace_memory`, `capture_source`, `compile_source`, `connect_memory` | [writing](references/writing.md); [mutation results](references/mutation-results.md) before any mutation |
 | Preserve or retrieve original files, process media | `capture_source`, `preserve_evidence`, `preserve_artifacts`, `transfer_artifact`, `process_media`, `read_media` | [operation routing and transport](references/operation-routing.md); [mutation results](references/mutation-results.md) before any mutation |
 | Save intent or observed events; interpret an ambiguous action | `plan_memory`, `record_memory`, `browse_memory` | [Planning and Records](references/planning-records.md); [mutation results](references/mutation-results.md) before any mutation |
+| Record what a conversation worked on, decided and left open | `episode_memory` | [engagement](references/engagement.md); [mutation results](references/mutation-results.md) before any mutation |
 | Review, adopt, audit, restructure, or maintain a vault | `review_memory`, `triage_memory`, `adopt_vault`, `maintain_memory` | [vault care](references/vault-care.md); [operation details](references/operations.md) for the selected operation; [mutation results](references/mutation-results.md) before any mutation |
 | Infer/change vocabulary or schema | `schema_memory` | [operation details](references/operations.md), [writing](references/writing.md); [mutation results](references/mutation-results.md) before any mutation |
 | Configured governance policy or a reserved withhold notice | `govern_memory` | [governance](references/governance.md); [mutation results](references/mutation-results.md) before any mutation |
@@ -105,7 +106,9 @@ and diagnosed failure route respectively to a how-to note, experiment, and failu
 Mid-thought exploration, tentative events, and incidental names stay unwritten.
 Capture unambiguous landings under the current disposition and existing scope
 approval, then report the write; ask only for missing decisions or confirmation
-required by the envelope. Raw capture is not automatic compilation.
+required by the envelope. Raw capture is not automatic compilation. At a
+conversation's decision or stopping point, record one bounded recap with
+`episode_memory`; it is what the next session on any client sees first.
 
 ## Recall loop
 
