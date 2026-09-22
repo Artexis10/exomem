@@ -26,6 +26,7 @@ from exomem import (
     request_budget,
     working_set,
     working_set_index,
+    working_set_resolve,
     working_set_runtime,
 )
 
@@ -1646,3 +1647,81 @@ def test_a_carried_packet_pays_for_both_blocks_out_of_one_ceiling(
     assert packet["units"], "the carried page's material must still be affordable"
     assert _recent_cost(packet) <= limit // 2
     assert packet["budget"]["used_chars"] <= limit
+
+
+# --------------------------------------------------------------------------- #
+# A referent the prior alone supplied yields to a page the turn named
+# (close-memory-loop D2). Both carry turns are short enough to be referential,
+# so against a live freshness registry the hot profile would otherwise answer
+# them with whatever was edited last.
+# --------------------------------------------------------------------------- #
+
+
+def _make_cargo_sled_the_freshest_edit(vault: Path) -> None:
+    import os
+    import time
+
+    from exomem import file_watcher
+
+    now = time.time()
+    for index, page in enumerate(sorted((vault / "Knowledge Base").rglob("*.md"))):
+        os.utime(page, (now - 10_000 - index, now - 10_000 - index))
+    sled = vault / "Knowledge Base" / "Products" / "Cargo Sled.md"
+    os.utime(sled, (now, now))
+    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+    # The service keeps its catalogue current through edits; a catalogue left
+    # behind by them is one the carry rightly refuses to serve from.
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+
+
+def test_a_referential_turn_that_names_a_page_is_served_that_page(
+    carry_vault: Path, budget_free
+) -> None:
+    """"What did we decide about the <page>" names nothing the resolver can
+    reach, and is short enough to be referential. The prior may supply the
+    referent of a turn that names nothing — not of one that names a page."""
+    _make_cargo_sled_the_freshest_edit(carry_vault)
+    assert working_set_resolve.analyze_turn(CARRY_TURN).referential
+
+    packet = working_set.compile_packet(carry_vault, turn=CARRY_TURN, max_chars=4000)
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert packet["generation"]["carried_by"] == "retrieval"
+    assert [item["path"] for item in packet["anchors"]] == [CARRY_PAGE]
+    assert _unit_paths(packet) == {CARRY_PAGE}
+
+
+def test_a_referential_turn_that_names_two_pages_abstains_rather_than_guess(
+    carry_vault: Path, budget_free
+) -> None:
+    """The turn named something — two things — so the prior is disqualified,
+    and choosing between the two is still the agent's call."""
+    _make_cargo_sled_the_freshest_edit(carry_vault)
+    assert working_set_resolve.analyze_turn(TIE_TURN).referential
+
+    packet = working_set.compile_packet(carry_vault, turn=TIE_TURN, max_chars=4000)
+
+    assert packet["abstained"] is True
+    assert packet["abstention"] == {"reason": "unresolved"}
+    assert packet["units"] == []
+    assert {item["status"] for item in packet["anchors"]} == {"retrieval_named"}
+    assert "Knowledge Base/Products/Cargo Sled.md" not in {
+        item["path"] for item in packet["anchors"]
+    }
+
+
+def test_a_referential_turn_the_carry_declines_keeps_its_hot_referent(
+    carry_vault: Path, budget_free
+) -> None:
+    """Asking the carry costs a genuine "continue" nothing and changes
+    nothing: it names no page, so the prior's referent stands."""
+    _make_cargo_sled_the_freshest_edit(carry_vault)
+
+    packet = working_set.compile_packet(carry_vault, turn="continue", max_chars=4000)
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert "carried_by" not in packet["generation"]
+    assert [
+        item["path"] for item in packet["anchors"] if item["status"] == "resolved"
+    ] == ["Knowledge Base/Products/Cargo Sled.md"]

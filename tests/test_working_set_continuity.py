@@ -41,7 +41,16 @@ from exomem.governance import egress
 from exomem.governance.principal import request_scope
 
 TURN = "I'm planning to tow the Cargo Sled north — how much depot stock is left?"
-NONSENSE_TURN = "zqxwvu plonktastic frobnitz quibblewhomp"
+#: Long on purpose. Close-memory-loop D2 made a SHORT turn that names nothing
+#: (six content words or fewer) referential: with a token, the previous
+#: packet's anchors are its referent, and that is pinned below by
+#: `test_a_referential_turn_with_a_token_resolves_the_previous_anchor`. What
+#: this turn pins is the other half, which did not move: a turn that says
+#: something of its own and reaches nothing is not rescued by a token.
+NONSENSE_TURN = (
+    "zqxwvu plonktastic frobnitz quibblewhomp snorkelwhistle grumbleferry "
+    "blatherskite wibblestock"
+)
 
 IDENTITY = "0:12345"
 OTHER_IDENTITY = "0:99999"
@@ -1062,3 +1071,78 @@ def test_the_short_cli_alias_passes_both_arguments_through(
 
     assert "--continuity" in help_text
     assert "--anchor" in help_text
+
+
+# --------------------------------------------------------------------------- #
+# A referential turn through the door (close-memory-loop D2). The catalogue is
+# made fresh first, as the live service keeps it, so the lexical stage of the
+# request is the real one and not its degraded fallback.
+# --------------------------------------------------------------------------- #
+
+
+def _live_cell(vault: Path) -> None:
+    """Seed the freshness registry the way the running service does."""
+    from exomem import file_watcher
+
+    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+
+
+def _age_everything(vault: Path, *, newest: Path) -> None:
+    import os
+    import time
+
+    now = time.time()
+    for index, page in enumerate(sorted((vault / "Knowledge Base").rglob("*.md"))):
+        os.utime(page, (now - 10_000 - index, now - 10_000 - index))
+    os.utime(newest, (now, now))
+    _live_cell(vault)
+
+
+def test_a_referential_turn_with_a_token_resolves_the_previous_anchor(
+    activation_vault: Path,
+) -> None:
+    """"continue" names nothing; the token says what this conversation was
+    last answered with, and that is its referent — served through the lanes
+    like any resolved anchor, and saying why."""
+    from exomem import lexstore
+
+    lexstore.ensure_fresh(activation_vault)
+    served = commands.op_activate_context(activation_vault, turn=TURN)
+    previous = _resolved_refs(served)
+    assert "Knowledge Base/Products/Cargo Sled.md" in previous
+
+    packet = commands.op_activate_context(
+        activation_vault, turn="continue", continuity=served["continuity"]
+    )
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    resolved = [item for item in packet["anchors"] if item["status"] == "resolved"]
+    assert "Knowledge Base/Products/Cargo Sled.md" in {item["ref"] for item in resolved}
+    assert {item["ref"] for item in resolved} <= set(previous)
+    assert all({"recency", "continuity"} <= set(item["evidence"]) for item in resolved)
+    assert packet["units"], "a recency-resolved anchor runs its lanes like any other"
+    # And the answer carries forward: this packet mints its own token.
+    assert packet["continuity"]
+
+
+def test_a_referential_turn_without_a_token_resolves_the_freshest_edit(
+    activation_vault: Path,
+) -> None:
+    """A fresh session has no token. The freshest edit is then the account of
+    what was being worked on."""
+    from exomem import lexstore
+
+    _age_everything(
+        activation_vault,
+        newest=activation_vault / "Knowledge Base" / "Products" / "Cargo Sled.md",
+    )
+    lexstore.ensure_fresh(activation_vault)
+
+    packet = commands.op_activate_context(activation_vault, turn="continue")
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    resolved = [item for item in packet["anchors"] if item["status"] == "resolved"]
+    assert [item["ref"] for item in resolved] == ["Knowledge Base/Products/Cargo Sled.md"]
+    assert resolved[0]["evidence"] == ["recency"]
+    assert packet["units"]
+    assert packet["recent_context"][0]["path"] == "Knowledge Base/Products/Cargo Sled.md"

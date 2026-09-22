@@ -1780,3 +1780,32 @@ def test_a_hot_anchor_the_turn_also_named_keeps_its_own_evidence() -> None:
     )
 
     assert candidates[0].evidence >= frozenset({"exact_alias", "recency"})
+
+
+def test_a_candidate_only_the_prior_admitted_is_dropped_when_something_was_named() -> None:
+    """A hot page the turn never reached rides in on the prior alone. Once
+    the turn names something else the prior decides nothing, and a qualifier
+    it happens to carry (`continuity`, `category_match`) must not turn it into
+    a `partial` menu entry whose only claim is that somebody edited it."""
+    for qualifier in ("continuity", "category_match"):
+        resolution = resolve_module.resolve(
+            (
+                _facts("hot.md", kind="hub", evidence=("recency", qualifier)),
+                _facts("named.md", kind="resource", evidence=("exact_alias",)),
+            ),
+            referential=True,
+        )
+
+        assert resolution.status == "resolved", qualifier
+        assert [anchor.anchor_id for anchor in resolution.anchors] == ["named.md"], qualifier
+
+
+def test_a_hot_anchor_with_continuity_resolves_on_a_referential_turn_naming_nothing() -> None:
+    """The previous packet's anchor, hot, on "continue": the fifth clause
+    resolves it, and both kinds are reported so a reader can see why."""
+    resolution = resolve_module.resolve(
+        (_facts("carried.md", evidence=("recency", "continuity")),), referential=True
+    )
+
+    assert resolution.status == "resolved"
+    assert resolution.anchors[0].evidence == ("continuity", "recency")

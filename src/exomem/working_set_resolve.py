@@ -932,12 +932,17 @@ def _status_for_evidence(evidence: frozenset[str], *, recency_resolves: bool = F
         return "resolved"
     if recency_resolves and "recency" in evidence:
         return "resolved"
+    # A candidate the PRIOR admitted — hot, on a referential turn, with no
+    # contact of its own — whose clause stayed shut because something else
+    # was named. Its qualifiers (`continuity`, `category_match`) would make
+    # `deciding` non-empty and list it `partial`, a menu entry whose only
+    # claim is that somebody edited it. Before `recency` existed no such
+    # candidate could be built, so this reads only sets that contain it.
+    if evidence & PRIOR_CONTACT_KINDS and not evidence & CONTACT_KINDS:
+        return "unresolved"
     if deciding:
         return "partial"
-    # Nothing but a prior: not a candidate this turn can be said to have
-    # reached at all. Reported as `unresolved` so `resolve()` drops it,
-    # rather than as `partial`, which would fill the agent's menu with pages
-    # whose only claim is that somebody edited them.
+    # Nothing but tie-breaks: not a candidate this turn reached at all.
     return "unresolved"
 
 
@@ -1155,6 +1160,30 @@ def resolve(
     if resolved:
         return Resolution(status="resolved", anchors=tuple(anchors))
     return Resolution(status="unresolved", anchors=tuple(anchors))
+
+
+def resolved_by_recency_alone(resolution: Resolution) -> bool:
+    """Did every anchor this resolution promoted stand ONLY on the prior?
+
+    The compiler's question, not the resolver's: a turn that reached an
+    anchor on the strength of `recency` alone is a turn that named nothing,
+    and design D3's retrieval carry — the turn's own words reaching a
+    compiled page that is not an anchor — is the other thing such a turn
+    might have been doing. `True` here is the compiler's cue to ask the
+    carry before letting the prior stand, so "what did we decide about the
+    <page>" is served that page rather than whatever was edited last.
+
+    Each anchor is re-tested against the soundness rule with the fifth
+    clause shut, so an anchor that would have resolved anyway — on
+    continuity and a recall hit, say, and which merely happens to be hot as
+    well — reports `False` and keeps its packet.
+    """
+    anchors = resolution.resolved_anchors
+    return bool(anchors) and all(
+        "recency" in anchor.evidence
+        and _status_for_evidence(frozenset(anchor.evidence)) != "resolved"
+        for anchor in anchors
+    )
 
 
 def _competing_groups(

@@ -985,8 +985,20 @@ def _touch(path: Path, *, when: float) -> None:
 def test_an_unresolved_turn_still_carries_the_recently_edited_page_first(
     stateful_vault: Path,
 ) -> None:
-    """The whole point: "ok continue" resolves nothing and must still say
-    what was recently worked on."""
+    """The whole point: a turn that resolves nothing must still say what was
+    recently worked on.
+
+    The turn is long nonsense rather than the short nonsense it was written
+    with ("zzz qqq unrelated gibberish"). Close-memory-loop D2 deliberately
+    changed what a SHORT turn naming nothing means: six content words or
+    fewer with no candidate anywhere is now a referential turn, and against a
+    live freshness registry it resolves to the hottest anchor — which is this
+    fixture exactly, so the old turn would have been testing the new rule
+    instead of this one. That behaviour is pinned by
+    `test_a_referential_turn_resolves_to_the_hottest_anchor`; what stays here
+    is the block on a genuine abstention, which needs a turn long enough not
+    to be a reference.
+    """
     import time
 
     working_set_index.WorkingSetIndex(stateful_vault).rebuild()
@@ -998,7 +1010,9 @@ def test_an_unresolved_turn_still_carries_the_recently_edited_page_first(
     _live_cell(stateful_vault)
 
     packet = working_set.compile_packet(
-        stateful_vault, turn="zzz qqq unrelated gibberish", max_chars=4000
+        stateful_vault,
+        turn="zzz qqq unrelated gibberish wubble frazzle mimsy borogove xyzzy plugh",
+        max_chars=4000,
     )
 
     assert packet["abstained"] is True
@@ -1337,3 +1351,253 @@ def test_a_unit_two_roles_both_selected_is_served_once() -> None:
     # ref a second time under a different name.
     assert [pointer["ref"] for pointer in packet["pointers"]] == []
     assert packet["budget"]["used_chars"] == sum(len(unit["text"]) for unit in packet["units"])
+
+
+# --------------------------------------------------------------------------- #
+# The hot profile and referential turns (close-memory-loop D2). `_live_cell`
+# is what makes these real: the profile reads the freshness registry, so a
+# test that never seeds it has no hot profile at all — which is one of the
+# cases below.
+# --------------------------------------------------------------------------- #
+
+
+def _age_everything(vault: Path, *, newest: Path) -> None:
+    """One page freshly edited, every other page old, in the registry the
+    service maintains."""
+    import time
+
+    now = time.time()
+    for index, page in enumerate(sorted((vault / "Knowledge Base").rglob("*.md"))):
+        _touch(page, when=now - 10_000 - index)
+    _touch(newest, when=now)
+    _live_cell(vault)
+
+
+def test_a_referential_turn_resolves_to_the_hottest_anchor(stateful_vault: Path) -> None:
+    """The unit's whole point: "continue" names nothing, and is served the
+    thing this vault was last working on, through the ordinary lanes."""
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _age_everything(
+        stateful_vault, newest=stateful_vault / "Knowledge Base" / "Products" / "Cargo Sled.md"
+    )
+
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    resolved = [item for item in packet["anchors"] if item["status"] == "resolved"]
+    assert [item["path"] for item in resolved] == [
+        "Knowledge Base/Products/Cargo Sled.md"
+    ]
+    assert "recency" in resolved[0]["evidence"]
+    assert packet["units"], "a recency-resolved anchor runs its lanes like any other"
+    assert packet["recent_context"]
+
+
+def test_a_referential_turn_with_no_hot_profile_still_abstains(
+    stateful_vault: Path,
+) -> None:
+    """No freshness registry, no reads, no token: nothing is hot, so nothing
+    is referred to. The turn abstains exactly as it did before this rule."""
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+
+    assert packet["abstained"] is True
+    assert packet["abstention"] == {"reason": "unresolved"}
+    assert not [item for item in packet["anchors"] if item["status"] == "resolved"]
+
+
+def test_a_named_anchor_beats_the_hottest_page(stateful_vault: Path) -> None:
+    """The half of design section 8 that did not move."""
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _age_everything(
+        stateful_vault,
+        newest=stateful_vault / "Knowledge Base" / "Entities" / "People" / "Marit Solheim.md",
+    )
+
+    packet = working_set.compile_packet(
+        stateful_vault,
+        turn="I'm planning to tow the Cargo Sled north — what are its constraints?",
+        max_chars=4000,
+    )
+
+    resolved = {item["path"] for item in packet["anchors"] if item["status"] == "resolved"}
+    assert "Knowledge Base/Products/Cargo Sled.md" in resolved
+    assert "Knowledge Base/Entities/People/Marit Solheim.md" not in resolved
+
+
+def test_a_retired_page_is_never_the_hottest_anchor(stateful_vault: Path) -> None:
+    """A prior may not resurrect superseded state (design section 8). The
+    freshest page in the vault is archived, so the profile skips it."""
+    retired = stateful_vault / "Knowledge Base" / "Products" / "Retired Sled.md"
+    retired.write_text(
+        "---\ntype: resource\nstatus: archived\n---\n\nThe old sled, withdrawn.\n",
+        encoding="utf-8",
+    )
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _age_everything(stateful_vault, newest=retired)
+    rows = working_set_resolve.facts_from_rows(
+        working_set_index.WorkingSetIndex(stateful_vault).anchors()
+    )
+    # Not vacuous: the retired page IS an anchor, and IS the freshest edit.
+    assert "Knowledge Base/Products/Retired Sled.md" in {row.path for row in rows}
+
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+
+    offered = {item["path"] for item in packet["anchors"]}
+    assert "Knowledge Base/Products/Retired Sled.md" not in offered
+    assert "Knowledge Base/Products/Retired Sled.md" not in working_set.hot_profile(
+        stateful_vault, rows=rows
+    )
+    # The profile falls through to the next-freshest current page rather
+    # than going empty because the freshest one was retired.
+    assert packet["abstained"] is False, packet.get("abstention")
+
+
+def test_the_hot_profile_is_bounded_and_ranked_deterministically(
+    stateful_vault: Path,
+) -> None:
+    """One function, one order, and a bound on how wide a tie may be."""
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _age_everything(
+        stateful_vault, newest=stateful_vault / "Knowledge Base" / "Products" / "Cargo Sled.md"
+    )
+    index = working_set_index.WorkingSetIndex(stateful_vault)
+    rows = working_set_resolve.facts_from_rows(index.anchors())
+
+    first = working_set.hot_profile(stateful_vault, rows=rows)
+    second = working_set.hot_profile(stateful_vault, rows=rows)
+
+    assert first == second
+    assert first == frozenset({"Knowledge Base/Products/Cargo Sled.md"})
+    assert len(first) <= working_set.HOT_PROFILE_K == 5
+
+
+def test_the_previous_packets_own_anchor_outranks_a_fresher_edit(
+    stateful_vault: Path,
+) -> None:
+    """A continuity reference is the strongest statement of what this
+    conversation was about — stronger than whichever file was written last."""
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _age_everything(
+        stateful_vault, newest=stateful_vault / "Knowledge Base" / "Products" / "Cargo Sled.md"
+    )
+    index = working_set_index.WorkingSetIndex(stateful_vault)
+    rows = working_set_resolve.facts_from_rows(index.anchors())
+    carried = next(row for row in rows if row.path.endswith("Marit Solheim.md"))
+
+    hot = working_set.hot_profile(
+        stateful_vault,
+        rows=rows,
+        continuity_refs=frozenset({working_set_resolve.anchor_ref(carried)}),
+    )
+
+    assert hot == frozenset({carried.path})
+
+
+def test_a_page_superseded_by_another_is_never_hot(stateful_vault: Path) -> None:
+    """Supersession an index row cannot see: the page still says `active`
+    and only its `superseded_by` pointer retires it. The prior must not
+    resurrect it either (design section 8)."""
+    stale = stateful_vault / "Knowledge Base" / "Products" / "Old Sled.md"
+    stale.write_text(
+        "---\ntype: resource\nstatus: active\nsuperseded_by: \"[[Cargo Sled]]\"\n---\n\n"
+        "The previous sled plan.\n",
+        encoding="utf-8",
+    )
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _age_everything(stateful_vault, newest=stale)
+    rows = working_set_resolve.facts_from_rows(
+        working_set_index.WorkingSetIndex(stateful_vault).anchors()
+    )
+    stale_rows = [row for row in rows if row.path == "Knowledge Base/Products/Old Sled.md"]
+    assert stale_rows and stale_rows[0].lifecycle == "active", "the index cannot see it"
+
+    hot = working_set.hot_profile(stateful_vault, rows=rows)
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+
+    assert "Knowledge Base/Products/Old Sled.md" not in hot
+    assert hot, "the next-freshest current page takes its place"
+    assert "Knowledge Base/Products/Old Sled.md" not in {
+        item["path"] for item in packet["anchors"]
+    }
+
+
+def test_the_previous_packets_anchors_are_one_tier_taken_whole(
+    stateful_vault: Path,
+) -> None:
+    """The previous packet resolved two anchors side by side; "continue"
+    refers to that answer, not to whichever of its pages was edited last."""
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _age_everything(
+        stateful_vault, newest=stateful_vault / "Knowledge Base" / "Products" / "Cargo Sled.md"
+    )
+    rows = working_set_resolve.facts_from_rows(
+        working_set_index.WorkingSetIndex(stateful_vault).anchors()
+    )
+    by_path = {row.path: row for row in rows}
+    carried = (
+        by_path["Knowledge Base/Products/Cargo Sled.md"],
+        by_path["Knowledge Base/Entities/People/Marit Solheim.md"],
+    )
+
+    hot = working_set.hot_profile(
+        stateful_vault,
+        rows=rows,
+        continuity_refs=frozenset(working_set_resolve.anchor_ref(row) for row in carried),
+    )
+
+    assert hot == frozenset(row.path for row in carried)
+
+
+def test_a_turn_that_is_not_referential_never_computes_the_hot_profile(
+    stateful_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On any other turn the prior decides nothing, so it costs nothing: the
+    turn resolves exactly as it did before the prior could supply a referent."""
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _age_everything(
+        stateful_vault, newest=stateful_vault / "Knowledge Base" / "Products" / "Cargo Sled.md"
+    )
+
+    def _refuse(*_args, **_kwargs):
+        raise AssertionError("hot profile computed for a turn that is not referential")
+
+    monkeypatch.setattr(working_set, "hot_profile", _refuse)
+
+    packet = working_set.compile_packet(
+        stateful_vault,
+        turn=(
+            "I'm planning to tow the Cargo Sled north along the winter corridor "
+            "this week — what are its constraints and who coordinates freight?"
+        ),
+        max_chars=4000,
+    )
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert all("recency" not in item["evidence"] for item in packet["anchors"])
+
+
+def test_one_request_copies_the_freshness_registry_once(
+    stateful_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hot profile and the recent-context block read the same map; the
+    request copies it once and hands it to both."""
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _age_everything(
+        stateful_vault, newest=stateful_vault / "Knowledge Base" / "Products" / "Cargo Sled.md"
+    )
+    real = working_set._recent_mtimes
+    calls: list[Path] = []
+
+    def _counting(vault_root: Path) -> dict[str, int]:
+        calls.append(vault_root)
+        return real(vault_root)
+
+    monkeypatch.setattr(working_set, "_recent_mtimes", _counting)
+
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert packet["recent_context"]
+    assert len(calls) == 1

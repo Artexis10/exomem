@@ -64,6 +64,17 @@ RECENT_CONTEXT_MAX_CHARS = 900
 #: the page's subject happened recently — that is what its own content says.
 RECENT_CONTEXT_REASONS: tuple[str, ...] = ("edited", "activated", "captured", "planning")
 
+#: How many anchors may share the top of the hot profile before it is cut.
+#: The profile is what a REFERENTIAL turn resolves against (design §8's
+#: amendment), and a turn that names nothing refers to one thing, so the
+#: normal size of this set is one: a tie needs equality on all three ranked
+#: components at once. The bound exists for the pathological vault where it
+#: is not — a cold registry with no reads and a dozen anchors all scoring
+#: nothing — so that such a turn reports a menu of five rather than the whole
+#: catalogue. It never selects among a wider tie on the merits, because
+#: there are none to select on: `resolve()` hands the tie to the agent.
+HOT_PROFILE_K = 5
+
 #: How many ranked rows the carry asks for before it filters. The ranking
 #: limit truncated BEFORE raw material and retired pages were dropped, so a
 #: run of sources at the head could hide a second compiled page and turn
@@ -1484,7 +1495,9 @@ def compile_packet(
     `anchor` is the agent's own choice of sense: it replaces resolution outright
     rather than joining it, because the agent is the decider of an ambiguous turn
     and the competing senses are then not candidates at all. `continuity_refs`
-    only ever qualifies anchors this turn already reached.
+    qualifies anchors this turn already reached; on a referential turn that
+    names nothing it is also the first tier of the hot profile, and may supply
+    the referent that turn points at (design §8).
     """
     root = Path(vault_root)
     limit = clamp_budget(max_chars)
@@ -1521,6 +1534,9 @@ def compile_packet(
         # silently narrow an overridden packet to the anchor kind's default roles.
         analysis = working_set_resolve.analyze_turn(turn)
         rows = working_set_resolve.facts_from_rows(index.anchors())
+        # Copied once per request and handed to both readers, the hot profile
+        # below and the recent-context block after resolution.
+        mtimes = _recent_mtimes(root)
         if anchor:
             chosen = working_set_resolve.override_candidates(rows, anchor)
             # A ref that names no anchor is not a packet with nothing in it: the
@@ -1539,13 +1555,30 @@ def compile_packet(
                     root, index_token[1], index_token=index_token
                 ),
                 used_paths=_used_paths(root, rows),
+                # Computed once per request, like `used_paths`, and for the
+                # same reason: it is a fact about the vault that every row is
+                # measured against, not something the loop can derive. Only
+                # for a referential turn: on any other the prior decides
+                # nothing, so it is not computed and the turn resolves exactly
+                # as it did before the prior could supply a referent.
+                hot_paths=(
+                    hot_profile(
+                        root, rows=rows, continuity_refs=continuity_refs, mtimes=mtimes
+                    )
+                    if analysis.referential
+                    else frozenset()
+                ),
                 term_anchor_counts=index.term_anchor_counts(),
             )
             candidates = working_set_resolve.add_graph_corroboration(
                 candidates, retrieval_paths=retrieval_paths
             )
             candidates = working_set_resolve.apply_continuity(candidates, continuity_refs)
-            resolution = working_set_resolve.resolve(candidates, turn_tokens=analysis.tokens)
+            resolution = working_set_resolve.resolve(
+                candidates,
+                turn_tokens=analysis.tokens,
+                referential=analysis.referential,
+            )
 
     # BEFORE the resolution branch, and in its own span: working continuity is
     # not material about an anchor this turn reached, so an abstention carries
@@ -1571,7 +1604,7 @@ def compile_packet(
     # — and an exhausted budget raises at `working_set.roles` immediately
     # below.
     with _span(timings, "working_set.recent"):
-        recent: tuple[dict[str, Any], ...] = _recent_context(root, rows=rows)
+        recent: tuple[dict[str, Any], ...] = _recent_context(root, rows=rows, mtimes=mtimes)
 
     # Design D3, and ONLY here: the turn reached no anchor at all. An
     # `ambiguous` turn is untouched (it reached two, and picking between them
@@ -1581,7 +1614,17 @@ def compile_packet(
     # resolved anything never reaches this line. Carrying is a PACKET-level
     # decision taken after resolution has already abstained — it adds no
     # evidence kind, changes no status rule, and can never resolve an anchor.
-    if resolution.status == "unresolved" and not anchor:
+    # D2 joins that condition: a turn resolved ONLY by the recency prior is a
+    # turn that named no ANCHOR, and naming a compiled page that is not an
+    # anchor is exactly the other thing such a turn might have been doing.
+    # The prior may supply the referent of a turn that names nothing — not of
+    # a turn that names a research note. The carry refuses turns of fewer than
+    # two content stems before it asks the catalogue anything, so a genuine
+    # "continue" pays nothing for this order.
+    if not anchor and (
+        resolution.status == "unresolved"
+        or working_set_resolve.resolved_by_recency_alone(resolution)
+    ):
         named = _carry_by_retrieval(
             root,
             turn=turn,
@@ -1596,8 +1639,14 @@ def compile_packet(
             # empty packet and no way to know a question would help. The
             # named pages are listed at `retrieval_named` so it can ask for
             # one; the reason stays `unresolved`, because nothing resolved.
+            #
+            # `unresolved` literally, not `resolution.status`: this branch is
+            # also reached from a resolution the prior alone promoted, and a
+            # turn that named two pages has disqualified that prior — it
+            # named something. Nothing resolved on the turn's own words,
+            # which is what the word means.
             return abstained_packet(
-                reason=resolution.status,
+                reason="unresolved",
                 max_chars=limit,
                 generation=generation,
                 anchors=_named_anchors(root, named, index=index),
@@ -1767,11 +1816,120 @@ def _used_paths(vault_root: Path, rows: Sequence[Any]) -> frozenset[str]:
 # --------------------------------------------------------------------------- #
 
 
+def hot_profile(
+    vault_root: Path,
+    *,
+    rows: Sequence[Any],
+    continuity_refs: frozenset[str] = frozenset(),
+    mtimes: Mapping[str, int] | None = None,
+    limit: int = HOT_PROFILE_K,
+) -> frozenset[str]:
+    """The anchor paths at the TOP of this vault's recency ranking — what a
+    turn that names nothing is taken to be referring to (design §8).
+
+    One ranking, stated here and nowhere else, descending, over the three
+    sources `recent_context` already reads and nothing further:
+
+    1. the anchors the PREVIOUS packet resolved (`continuity_refs`), as ONE
+       tier taken whole. First because it is the only source about this
+       conversation rather than about the vault: what the server last
+       answered with is a better account of "what we were doing" than
+       whichever file was written last. Whole because that packet already
+       decided those anchors belong together — it resolved them side by side
+       rather than reporting them as competing senses — and ranking inside it
+       by edit time would drop half of a two-anchor answer on the very turn
+       that asked to go on with it.
+    2. the freshness registry's last-edit time for the page. An edit is work.
+    3. the memoized ACT-R activation for the page. A read is weaker evidence
+       of work than an edit, so it orders what the edits could not separate.
+
+    The profile is the LEADING TIER only — every anchor tied with the top on
+    all three — never the top `limit`. A turn that names nothing refers to
+    one thing, and the second-freshest edit is not a second referent; marking
+    it hot would either serve material the turn never pointed at or turn
+    every "continue" into a menu. Ties are sorted by path for determinism and
+    CUT at `limit`, a bound on how wide a menu may be, never a choice: two
+    equally hot anchors of one kind are handed to the agent by `resolve()`.
+    A top that scores nothing on every source is EMPTY, not an arbitrary
+    five: an untouched vault has nothing to refer to, and "continue" against
+    it abstains exactly as it did before this rule.
+
+    Bounded to the rows already in hand. No directory is enumerated, and the
+    two sources that are not the rows themselves (the freshness map and the
+    activation snapshot) are dict reads the request already makes; the caller
+    passes `mtimes` so the registry is copied once per request. Retired state
+    is never offered — a prior must not resurrect it. The row's own indexed
+    lifecycle excludes an archived or superseded status for free, and a
+    `superseded_by` pointer, which an index row does not carry, is checked by
+    `_is_current_page` for the leading tier only: at most `limit` cached
+    single-page reads, of pages the lanes read next anyway. A collection's
+    stored item is excluded by the same rule that keeps one out of the
+    recent-context block, because the two must not disagree about what counts
+    as work.
+    """
+    root = Path(vault_root)
+    times = _recent_mtimes(root) if mtimes is None else mtimes
+    activations = _activation_snapshot()
+    collections = _recent_collection_dirs(
+        (*(str(getattr(row, "path", "") or "") for row in rows), *times)
+    )
+    from . import usage
+
+    nothing = (0, 0, 0.0)
+    heat: dict[str, tuple[int, int, float]] = {}
+    for row in rows:
+        path = str(getattr(row, "path", "") or "")
+        if not path:
+            continue
+        if str(getattr(row, "lifecycle", "active") or "active") in RETIRED_PAGE_STATUSES:
+            continue
+        if not _recent_reason_for(path, collections=collections):
+            continue
+        if working_set_resolve.anchor_ref(row) in continuity_refs:
+            key = (1, 0, 0.0)
+        else:
+            activation = activations.get(usage.canon(path), activations.get(path))
+            key = (0, int(times.get(path, 0)), float(activation or 0.0))
+        heat[path] = max(key, heat.get(path, nothing))
+    top: tuple[int, int, float] | None = None
+    hot: list[str] = []
+    reads = 0
+    for path, key in sorted(
+        heat.items(), key=lambda item: (-item[1][0], -item[1][1], -item[1][2], item[0])
+    ):
+        if key == nothing or (top is not None and key != top) or len(hot) >= limit:
+            break
+        if reads >= limit:
+            break
+        reads += 1
+        if not _is_current_page(root, path):
+            continue
+        top = key
+        hot.append(path)
+    return frozenset(hot)
+
+
+def _activation_snapshot() -> Mapping[str, float]:
+    """The memoized ACT-R activation map, or an empty one.
+
+    Optional by construction, like every other source the working-continuity
+    block reads: a vault with no usage log is not a vault with no recent work.
+    """
+    try:
+        from . import ranking_config, usage
+
+        return usage.activation_map(ranking_config.DEFAULT_RANKING) or {}
+    except Exception:  # noqa: BLE001 - the usage snapshot is optional by construction
+        log.debug("recent context: usage activation unavailable", exc_info=True)
+        return {}
+
+
 def _recent_context(
     vault_root: Path,
     *,
     rows: Sequence[Any],
     limit: int = RECENT_CONTEXT_MAX_ENTRIES,
+    mtimes: Mapping[str, int] | None = None,
 ) -> tuple[dict[str, Any], ...]:
     """What was recently worked on — the block a turn that resolved nothing
     still carries.
@@ -1812,7 +1970,7 @@ def _recent_context(
         path = str(getattr(row, "path", "") or "")
         if path and path not in by_path:
             by_path[path] = row
-    mtimes = _recent_mtimes(root)
+    mtimes = _recent_mtimes(root) if mtimes is None else mtimes
     # From the index's rows AS WELL AS the freshness map. Without a watcher the
     # map is empty, but the other two sources still run off the rows — so
     # deriving the collection directories from the map alone left the exclusion
@@ -2041,13 +2199,9 @@ def _recently_activated(
     been read a lot but is in neither is simply not offered, which is the
     bounded-work price of never walking.
     """
-    try:
-        from . import ranking_config, usage
+    from . import usage
 
-        activations = usage.activation_map(ranking_config.DEFAULT_RANKING)
-    except Exception:  # noqa: BLE001 - the usage snapshot is optional by construction
-        log.debug("recent context: usage activation unavailable", exc_info=True)
-        return ()
+    activations = _activation_snapshot()
     if not activations:
         return ()
     scored: list[tuple[float, str]] = []
