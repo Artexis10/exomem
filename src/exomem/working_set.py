@@ -1025,16 +1025,25 @@ def _carry_by_retrieval(
 
 def _indexed_title(index: working_set_index.WorkingSetIndex | None, path: str) -> str:
     """The authored title the anchor catalogue already holds for `path`, or
-    `""`. Reads rows the request has in hand; never a file, never a walk."""
+    `""`. Reads rows the request has in hand; never a file, never a walk.
+
+    A lookup by path rather than a scan compared against it: the rows are
+    read once into a mapping and asked once. The catalogue is bounded, so
+    the scan was never slow — it was a scan written where a lookup belongs,
+    and the shape is what makes it obvious that one carried page costs one
+    question.
+    """
     if index is None or not path:
         return ""
     try:
-        for row in index.anchors():
-            if str(getattr(row, "path", "") or "") == path:
-                return str(getattr(row, "title", "") or "")
+        titles = {
+            str(getattr(row, "path", "") or ""): str(getattr(row, "title", "") or "")
+            for row in index.anchors()
+        }
     except Exception:  # noqa: BLE001 - a title is a courtesy, never a promise
         log.debug("activation carry title lookup failed", exc_info=True)
-    return ""
+        return ""
+    return titles.get(path, "")
 
 
 def _carry_roles(

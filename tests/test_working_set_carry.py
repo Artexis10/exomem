@@ -1012,3 +1012,29 @@ def test_a_carried_page_that_is_an_anchor_row_reports_the_indexed_title(
 
     assert packet["anchors"][0]["path"] == hub
     assert packet["anchors"][0]["title"] == "Northern corridor"
+
+
+def test_the_carried_title_lookup_reads_the_rows_once(
+    carry_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One pass over the anchor rows, not one per row compared.
+
+    The catalogue holds up to `working_set_index.MAX_ANCHORS` rows, and the
+    lookup ran inside the request. A scan that happens to be short today is
+    still a scan.
+    """
+    index = working_set_index.WorkingSetIndex(carry_vault)
+    reads: list[str] = []
+    real = index.anchors
+
+    def counting():
+        reads.append("anchors")
+        return real()
+
+    monkeypatch.setattr(index, "anchors", counting)
+    hub = "Knowledge Base/Notes/Insights/northern-corridor-hub.md"
+
+    assert working_set._indexed_title(index, hub) == "Northern corridor"
+    assert working_set._indexed_title(index, "Knowledge Base/Notes/nope.md") == ""
+    assert working_set._indexed_title(index, "") == ""
+    assert len(reads) <= 2, reads
