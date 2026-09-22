@@ -1144,14 +1144,27 @@ def _recent_context(
     for rel in _recent_planning(by_path, mtimes, limit=limit):
         offered.setdefault(rel, "planning")
 
-    ranked = sorted(
-        offered.items(),
-        key=lambda item: (
-            -mtimes.get(item[0], 0),
-            RECENT_CONTEXT_REASONS.index(item[1]),
-            item[0],
-        ),
-    )[:limit]
+    def _rank(item: tuple[str, str]) -> tuple[int, int, str]:
+        return (-mtimes.get(item[0], 0), RECENT_CONTEXT_REASONS.index(item[1]), item[0])
+
+    # One slot is RESERVED for the newest open Planning item. Ranking the
+    # whole block by recency buried it every time: an open commitment nobody
+    # has touched is by definition older than the edits, so eight fresh pages
+    # cut it, `_recent_planning` could never put anything in the block, and
+    # the commitment a resumed session most needs reminding of was the one
+    # thing guaranteed missing. It is a reservation, not a takeover — the
+    # remaining slots stay recency-ranked, and the entry keeps its place in
+    # that order rather than being pinned to the front.
+    planning_offers = sorted(
+        ((path, why) for path, why in offered.items() if why == "planning"), key=_rank
+    )
+    others = sorted(
+        ((path, why) for path, why in offered.items() if why != "planning"), key=_rank
+    )
+    if planning_offers:
+        ranked = sorted([*others[: max(0, limit - 1)], planning_offers[0]], key=_rank)
+    else:
+        ranked = others[:limit]
 
     entries: list[dict[str, Any]] = []
     for path, why in ranked:

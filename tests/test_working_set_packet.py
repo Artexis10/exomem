@@ -1077,3 +1077,40 @@ def test_recent_context_gets_its_own_timing_span(stateful_vault: Path) -> None:
     )
 
     assert "working_set.recent" in timings.as_dict()["stages"]
+
+
+def test_an_open_planning_item_survives_a_flood_of_fresh_edits(
+    stateful_vault: Path,
+) -> None:
+    """The open commitment nobody has touched is the one a resumed session
+    forgets — and ranking purely by recency is exactly what buries it.
+
+    `_recent_planning` exists to carry it, but its offers competed with the
+    edits on mtime and lost every time there were eight fresher pages, so the
+    `planning` reason could never appear at all.
+    """
+    import time
+
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    now = time.time()
+    planning_pages = []
+    for page in sorted((stateful_vault / "Knowledge Base").rglob("*.md")):
+        rel = page.relative_to(stateful_vault).as_posix()
+        if "/Planning/" in rel:
+            planning_pages.append(page)
+            _touch(page, when=now - 90 * 86_400)
+        else:
+            _touch(page, when=now)
+    assert planning_pages, "the fixture must hold a Planning item to bury"
+    _live_cell(stateful_vault)
+
+    packet = working_set.compile_packet(
+        stateful_vault, turn="zzz qqq unrelated gibberish", max_chars=4000
+    )
+
+    block = packet["recent_context"]
+    assert len(block) == working_set.RECENT_CONTEXT_MAX_ENTRIES
+    planning = [entry for entry in block if entry["why"] == "planning"]
+    assert len(planning) == 1, [entry["why"] for entry in block]
+    # One slot, not a takeover: the fresh edits keep the rest of the block.
+    assert len([entry for entry in block if entry["why"] == "edited"]) == 7
