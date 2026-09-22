@@ -1428,12 +1428,12 @@ def test_the_hook_renders_the_named_pages_as_its_menu(vault: Path) -> None:
     assert "kelvane-throughput.md" in block, block
     assert "murran-dispatch.md" in block, block
     assert nudge._block_keeps_the_reminder(packet) is True
-    # And the remedy it offers is the one that works on a page that is not
-    # an anchor of this index: `anchor=` raises INVALID_ANCHOR for these
-    # refs, `read_memory` returns the page.
+    # And the remedy it offers is the one that now actually works: `anchor=`
+    # accepts an ordinary compiled page the packet listed, not only a row of
+    # the activation index (U7).
     closing = block.splitlines()[-1]
-    assert "read_memory" in closing, closing
-    assert "`anchor`" not in closing, closing
+    assert "`anchor`" in closing, closing
+    assert "activate_context" in closing, closing
 
 
 def test_a_dropped_page_is_never_carried(vault: Path) -> None:

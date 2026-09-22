@@ -1290,3 +1290,69 @@ def test_a_referential_turn_with_the_hot_profile_on_holds_the_same_ceilings(
     assert calls.unattributable == 0, calls.report()
     assert WARM_REQUEST_ENUMERATION_CEILING == 8
     assert WARM_REQUEST_FILESYSTEM_CALL_CEILING == 1200
+
+
+def _write_uncatalogued_page(vault: Path) -> Path:
+    """An ordinary compiled research note that is NOT an activation-index
+    row — the same shape U3's retrieval carry serves a packet from, and now
+    also what an agent-picked `anchor` falls back to when the ref names no
+    index row."""
+    page = (
+        vault / "Knowledge Base" / "Notes" / "Research" / "quillon-vantry-window.md"
+    )
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\n"
+        "type: research-note\n"
+        "status: active\n"
+        "updated: 2026-09-10\n"
+        "---\n"
+        "\n"
+        "# Quillon vantry window\n"
+        "\n"
+        "## Summary\n"
+        "\n"
+        "- [decision] The quillon vantry window was widened to nine minutes. "
+        "^q-decision\n",
+        encoding="utf-8",
+    )
+    return page
+
+
+def test_an_agent_picked_page_holds_the_same_ceilings(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
+) -> None:
+    """U7: `anchor` naming an ordinary compiled page, not an activation-index
+    row, falls back to `working_set._eligible_agent_page` and reuses
+    `_carried_packet` — the same bounded page-cache reads the retrieval carry
+    already pays for, never a directory sweep. It pays the same ceilings as
+    every other warm request."""
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _write_collection(vault)
+    page = _write_uncatalogued_page(vault)
+    _warm_activation(vault, warm_managed_cell)
+    _drain_background_walks()
+
+    scheduled = _no_background_walks(monkeypatch)
+    calls = _FilesystemCalls(vault)
+    calls.install(monkeypatch)
+
+    packet = commands.op_activate_context(
+        vault,
+        turn="zqxwvu plonktastic frobnitz quibblewhomp",
+        anchor="Knowledge Base/Notes/Research/quillon-vantry-window.md",
+    )
+
+    assert scheduled == [], scheduled
+    assert packet["abstained"] is False, packet.get("abstention")
+    (anchor,) = packet["anchors"]
+    assert anchor["ref"] == str(page.relative_to(vault))
+    assert anchor["kind"] == "page"
+    assert anchor["status"] == "resolved"
+    assert anchor["evidence"] == ["agent_choice"]
+    assert packet["generation"]["carried_by"] == "agent_choice"
+    assert packet["units"], "its lanes must actually run, or this proves nothing"
+    assert calls.enumerations <= WARM_REQUEST_ENUMERATION_CEILING, calls.report()
+    assert calls.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, calls.report()
+    assert calls.unattributable == 0, calls.report()

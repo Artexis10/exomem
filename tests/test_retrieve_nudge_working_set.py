@@ -1740,22 +1740,19 @@ NAMED_PAGES = [
 ]
 
 
-def test_a_named_page_menu_offers_read_memory_not_anchor() -> None:
-    """A named page is NOT an anchor of the activation index, so the closing
-    line the `unresolved` menu has always carried is a remedy that fails
-    here: `activate_context(anchor=<that page>)` raises INVALID_ANCHOR.
-    Measured, `read_memory` on the same ref returns the page (428 chars).
-
-    An instruction that does not work is worse than none: the agent spends
-    a call, gets an error, and has no way to tell that the OTHER remedy
-    would have worked.
+def test_a_named_page_menu_now_offers_the_anchor_remedy() -> None:
+    """A named page is NOT an anchor of the ACTIVATION INDEX, but `anchor`
+    now also accepts an ordinary compiled page the packet listed
+    (`working_set._eligible_agent_page`), and a `retrieval_named` page is
+    exactly that. `activate_context(anchor=<that page>)` now returns its
+    units instead of raising `INVALID_ANCHOR`, so the closing line offers
+    the remedy that works — the same one every other menu here gives.
     """
     block = hook._format_working_set_block(_unresolved_packet(NAMED_PAGES), 4000)
     closing = block.splitlines()[-1]
 
-    assert "read_memory" in closing, closing
-    assert "`anchor`" not in closing, closing
-    assert "activate_context" not in closing, closing
+    assert "activate_context" in closing, closing
+    assert "`anchor`" in closing, closing
     lines = block.splitlines()
     assert lines[1].startswith("- page: Girvan slot decision "), lines
     assert lines[2].startswith("- page: Girvan slot research "), lines
