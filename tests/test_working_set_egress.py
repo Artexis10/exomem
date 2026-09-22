@@ -3181,3 +3181,226 @@ def test_used_chars_is_untouched_when_the_guard_removes_nothing(vault: Path) -> 
 
     assert guarded is not None
     assert guarded["budget"]["used_chars"] == 1234
+
+
+# --------------------------------------------------------------------------- #
+# Retrieval-carried packets (design D3) cross the same guard
+# --------------------------------------------------------------------------- #
+
+CARRY_DOMINANT = "Knowledge Base/Notes/Research/quillon-vantry-window.md"
+CARRY_RUNNER_UP = "Knowledge Base/Notes/Insights/quillon-handover-brief.md"
+
+
+def _seed_carry_corpus(vault: Path) -> None:
+    """The page the turn names, a second page on the same topic that it does
+    NOT name, and the ordinary notes any real vault has.
+
+    The second page shares one distinctive word with the turn and no phrase,
+    so the naming gate never admits it — which is the point. Once a turn
+    that names two pages carries neither, "serve the runner-up instead" is
+    not a mistake the compiler can make by choosing wrongly; the only way it
+    could happen is by reaching for a page the turn never named, and this
+    corpus has exactly such a page sitting next to the withheld one.
+
+    Seeds its own pages rather than reusing the carry suite's fixture: that
+    one also carries raw-material twins of the research note, and a fourth
+    page repeating the words the turn names them by would put those words
+    past the rarity cap and leave the turn with nothing distinctive to
+    reach either page on. Raw material has its own coverage there.
+    """
+    from test_working_set_carry import _write, seed_ordinary_notes
+    from test_working_set_index import _seed_planning, _seed_structure
+
+    _seed_structure(vault)
+    _seed_planning(vault)
+    kb = vault / "Knowledge Base"
+    _write(
+        kb / "Notes" / "Research" / "quillon-vantry-window.md",
+        """---
+type: research-note
+status: active
+updated: 2026-09-10
+---
+
+# Quillon vantry window
+
+## Summary
+
+- [decision] The quillon vantry window was widened to nine minutes after the
+  narrow window starved the vantry queue twice in one week. ^q-decision
+- [constraint] The quillon vantry window never exceeds twelve minutes. ^q-limit
+""",
+    )
+    filler = " ".join(
+        f"unrelated paragraph {n} about cadence ledgers and depot rotas." for n in range(60)
+    )
+    _write(
+        kb / "Notes" / "Insights" / "quillon-handover-brief.md",
+        f"""---
+type: insight
+status: active
+updated: 2026-09-08
+---
+
+# Quillon handover brief
+
+## Summary
+
+{filler}
+
+- [finding] The handover brief mentions the quillon programme once, and
+  nothing else it says is distinctive. ^h-once
+
+{filler}
+""",
+    )
+    seed_ordinary_notes(vault)
+
+
+def test_a_withheld_dominant_page_abstains_rather_than_carrying_the_runner_up(
+    vault: Path,
+) -> None:
+    """The carried page passes the guard like any other, and a packet whose
+    only anchor the audience may not see is an abstention — not a second
+    attempt at a different page.
+
+    A carried packet has exactly one anchor by construction, so the guard
+    emptying it IS the answer. What this pins is that nothing anywhere
+    reaches for a different page once the named one is withheld: a second
+    page on the same topic sits in the corpus, it is named nowhere in what
+    is served, and the packet says `withheld` rather than quietly
+    substituting it.
+    """
+    from test_working_set_carry import CARRY_TURN
+
+    from exomem import commands, lexstore, working_set, working_set_runtime
+
+    _seed_carry_corpus(vault)
+    write_scope(vault, paths="Notes/Research/**", name="Research")
+    write_rule(vault, ceiling=0)
+    lexstore.ensure_fresh(vault)
+    _indexed(vault)
+
+    hits, state = working_set_runtime.carry_candidates(vault, CARRY_TURN)
+    assert state == "available"
+    # Exactly the page the turn named; the second page exists in the corpus
+    # but the naming gate never admits it.
+    assert [path for path, _score in hits] == [CARRY_DOMINANT], hits
+    assert (vault / CARRY_RUNNER_UP).exists()
+    dominant = working_set.dominant_carry(hits)
+    assert dominant is not None and dominant[0] == CARRY_DOMINANT, hits
+
+    with request_scope(_external()):
+        packet = commands.op_activate_context(vault, turn=CARRY_TURN)
+
+    assert packet["abstained"] is True
+    assert packet["abstention"] == {"reason": "withheld"}
+    assert packet["anchors"] == []
+    assert packet["units"] == []
+    assert packet["pointers"] == []
+    assert "quillon" not in str(packet).casefold(), "LEAK: the withheld carried page survived"
+    assert "handover" not in str(packet).casefold(), "the runner-up was carried instead"
+
+
+def test_a_carried_page_the_audience_may_see_is_served(vault: Path) -> None:
+    """The over-restriction half: the same corpus, the same turn, a policy
+    that does not reach the carried page — it is served, marked as carried.
+
+    Without this the test above passes just as well against a guard that
+    withheld every carried packet unconditionally.
+    """
+    from test_working_set_carry import CARRY_TURN
+
+    from exomem import commands, lexstore
+
+    _seed_carry_corpus(vault)
+    write_scope(vault, paths="Notes/Patterns/**", name="Patterns")
+    write_rule(vault, ceiling=0)
+    lexstore.ensure_fresh(vault)
+    _indexed(vault)
+
+    with request_scope(_external()):
+        packet = commands.op_activate_context(vault, turn=CARRY_TURN)
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert packet["generation"]["carried_by"] == "retrieval"
+    assert [item["path"] for item in packet["anchors"]] == [CARRY_DOMINANT]
+    assert packet["anchors"][0]["status"] == "retrieval_carried"
+    assert packet["units"], packet
+
+
+def test_a_withheld_named_page_is_removed_from_the_list(vault: Path) -> None:
+    """The pages listed for a turn that named several cross the guard like
+    any anchor: one the audience may not see is removed, and the rest stay.
+
+    Listing a page is telling the caller it exists and what it is called,
+    which is exactly what a release ceiling is for.
+    """
+    from test_working_set_carry import _write, seed_ordinary_notes
+    from test_working_set_index import _seed_planning, _seed_structure
+
+    from exomem import commands, lexstore, working_set
+
+    _seed_structure(vault)
+    _seed_planning(vault)
+    kb = vault / "Knowledge Base"
+    _write(
+        kb / "Notes" / "Patterns" / "girvan-slot-pattern.md",
+        """---
+type: pattern
+status: active
+updated: 2026-09-12
+---
+
+# Girvan slot pattern
+
+## Summary
+
+- [decision] The girvan slot window is nine minutes. ^g-1
+""",
+    )
+    _write(
+        kb / "Notes" / "Research" / "girvan-slot-research.md",
+        """---
+type: research-note
+status: active
+updated: 2026-09-11
+---
+
+# Girvan slot research
+
+## Summary
+
+- [finding] The girvan slot window was measured over four weeks. ^g-2
+""",
+    )
+    seed_ordinary_notes(vault)
+    lexstore.ensure_fresh(vault)
+    _indexed(vault)
+
+    turn = "what did we decide about the girvan slot window"
+    named = working_set._carry_by_retrieval(vault, turn=turn)
+    assert len(named) == 2, named
+
+    # Ungoverned: both listed.
+    open_packet = commands.op_activate_context(vault, turn=turn)
+    assert open_packet["abstained"] is True
+    assert {item["path"] for item in open_packet["anchors"]} == {
+        "Knowledge Base/Notes/Patterns/girvan-slot-pattern.md",
+        "Knowledge Base/Notes/Research/girvan-slot-research.md",
+    }
+
+    # One withheld: only the other is listed, and the withheld one is named
+    # nowhere in what is served.
+    write_scope(vault, paths="Notes/Patterns/**", name="Patterns")
+    write_rule(vault, ceiling=0)
+
+    with request_scope(_external()):
+        guarded = commands.op_activate_context(vault, turn=turn)
+
+    assert guarded["abstained"] is True
+    assert guarded["abstention"] == {"reason": "unresolved"}
+    assert [item["path"] for item in guarded["anchors"]] == [
+        "Knowledge Base/Notes/Research/girvan-slot-research.md"
+    ], guarded["anchors"]
+    assert "girvan-slot-pattern" not in str(guarded)

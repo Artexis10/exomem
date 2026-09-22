@@ -38,10 +38,11 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 from collections import OrderedDict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -511,6 +512,288 @@ def lexical_evidence(
         return [], "unavailable"
 
 
+#: The floor on how many scored hits the carry recall asks for. The real
+#: number is `working_set.carry_fetch_size(pages)`, which grows with the
+#: corpus so the window stays wider than the rarity gate can admit; this
+#: name is the default for a caller that has no page count in hand.
+RETRIEVAL_CARRY_LIMIT = working_set.RETRIEVAL_CARRY_FETCH
+#: Knowledge-base folders holding raw captured material rather than compiled
+#: conclusions. Read off `working_set_index` rather than restated here: that
+#: module already refuses to make an anchor of anything inside them, for the
+#: same reason this refuses to carry one, and two spellings of "raw material"
+#: would be one spelling too many.
+CARRY_EXCLUDED_FOLDERS: frozenset[str] = working_set_index._RAW_MATERIAL_FOLDERS
+
+
+def _is_raw_material(path: str) -> bool:
+    """Is `path` a captured source or a preserved piece of evidence?
+
+    A carried packet serves compiled conclusions. A source is what a
+    conclusion was drawn FROM and evidence is what one is checked AGAINST;
+    serving either as though it were durable memory is exactly the step the
+    compile stage exists to stand between.
+
+    Matched the SAME way `working_set_index` matches it — the first segment
+    under the knowledge-base folder — so an ordinary note folder someone
+    happened to name `Sources` is not caught by it and the two modules cannot
+    disagree about what raw material is. Backslashes are folded first, so a
+    row written on Windows is recognised too.
+    """
+    from .kbdir import kb_prefix
+
+    inside = str(path).replace("\\", "/").removeprefix(kb_prefix())
+    return inside.split("/", 1)[0] in CARRY_EXCLUDED_FOLDERS
+
+
+def content_words(turn: str) -> str:
+    """The turn's own content WORDS, unstemmed, stopwords dropped.
+
+    What the ranking query is given. `search_bm25_result` tokenises and
+    stems whatever it receives, so it must receive words: handing it stems
+    stems them a SECOND time, and Snowball does not settle in one pass —
+    237 of 6,225 words in this repository change again ("collapse" ->
+    "collaps" -> "collap"), and the MATCH is then issued for terms no page
+    contains.
+    """
+    return " ".join(
+        token
+        for token in working_set_index.tokens_of(working_set_index.normalize(turn))
+        if token not in working_set_index.STOPWORDS
+    )
+
+
+def content_stems(turn: str) -> tuple[str, ...]:
+    """The turn's own content stems, in order, deduplicated.
+
+    The SAME normalisation, stopword filter and stemmer the catalogue
+    indexed its pages with, so a frequency measured here and a page ranked
+    there are talking about the same word. Used for the rarity lookup and
+    the corroboration list, which compare against the catalogue's STORED
+    stems directly; never for the ranking query, which stems what it is
+    given (see `content_words`).
+    """
+    from . import bm25 as bm25_module
+
+    return tuple(dict.fromkeys(bm25_module.tokenize(content_words(turn))))
+
+
+#: What ends a proximity window. Sentence-ending punctuation and a line
+#: break; a comma deliberately does not, being punctuation inside a phrase
+#: rather than between two of them.
+_SENTENCE_BREAK = re.compile(r"[.!?;\n\r]+")
+
+
+def adjacent_rare_pairs(
+    turn: str,
+    rare_terms: Sequence[str],
+    *,
+    window: int | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """Pairs of distinctive stems the turn said close enough together to be
+    reading as one name, measured on the turn's OWN token positions.
+
+    Distance is counted over the raw normalised tokens — stopwords included
+    — because that is the distance a reader sees: "the lisbon harbour
+    window" is a phrase and "flying to lisbon ... around the harbour" is
+    not, and dropping the function words in between would make them look
+    alike.
+
+    A SENTENCE BOUNDARY ends the window however few tokens straddle it.
+    "I am flying out to lisbon next week. The harbour was shut" puts the
+    two words three tokens apart and they are still two sentences about two
+    things; measured, that pairing carried a harbour ledger at 18.78. A
+    comma is not a boundary — "the girvan, slot question" is one phrase
+    with punctuation in it. The window measures token distance within a
+    sentence; it does not measure intent, and nothing here reads meaning.
+
+    One raw token may carry several stems ("girvan-slot", "o'brien"), and
+    all of them are placed at that token's position: a compound is the
+    phrase said as tightly as a phrase can be said.
+
+    Each pair is returned once, sorted, so the caller's query sees a stable
+    set.
+    """
+    from . import bm25 as bm25_module
+
+    span = working_set.RETRIEVAL_CARRY_RARE_WINDOW if window is None else int(window)
+    wanted = {str(term) for term in rare_terms}
+    if len(wanted) < 2:
+        return ()
+    pairs: set[tuple[str, str]] = set()
+    # Split the RAW text: `normalize` folds case and width but keeps the
+    # punctuation, and splitting per sentence is what keeps a window from
+    # reaching across one.
+    for sentence in _SENTENCE_BREAK.split(str(turn)):
+        placed: list[tuple[int, str]] = []
+        for index, token in enumerate(
+            working_set_index.tokens_of(working_set_index.normalize(sentence))
+        ):
+            for stem in bm25_module.tokenize(token):
+                if stem in wanted:
+                    placed.append((index, stem))
+        for position, (left_at, left) in enumerate(placed):
+            for right_at, right in placed[position + 1 :]:
+                if right_at - left_at > span:
+                    break
+                if left != right:
+                    first, second = sorted((left, right))
+                    pairs.add((first, second))
+    return tuple(sorted(pairs))
+
+
+def rare_turn_terms(
+    vault_root: Path,
+    stems: Sequence[str],
+    *,
+    freshness=None,
+    recall_checkpoint=None,
+) -> tuple[tuple[str, ...], int, str]:
+    """`(distinctive stems, indexed pages, readiness status)` for `stems`.
+
+    One document-frequency lookup per stem over the maintained catalogue,
+    bounded by the turn's own content words and measured on the same
+    `fts`/`pages` join the ranking uses. Measured at 34.8 ms for a four-stem
+    turn and 41.6 ms for a twenty-seven-stem turn against a 1,539-page
+    knowledge base, with the request's own recall checkpoint supplied — the
+    per-term cost is small and nearly all of it is the one readiness proof.
+    """
+    from . import lexstore
+
+    result = lexstore.term_document_frequencies(
+        vault_root,
+        stems,
+        scope="kb",
+        freshness=freshness,
+        allow_delta=False,
+        recall_checkpoint=recall_checkpoint,
+    )
+    if not result.readiness.complete:
+        return (), 0, result.readiness.status
+    frequencies, corpus_pages = result.value or ({}, 0)
+    cap = working_set.rare_document_cap(corpus_pages)
+    rare = tuple(stem for stem in stems if int(frequencies.get(stem, 0)) <= cap)
+    return rare, int(corpus_pages), "available"
+
+
+def carry_candidates(
+    vault_root: Path,
+    turn: str,
+    *,
+    limit: int | None = None,
+    freshness=None,
+    recall_checkpoint=None,
+) -> tuple[tuple[tuple[str, float], ...], str]:
+    """Pages this turn NAMED, for a turn that resolved no anchor at all.
+    Returns `(hits, readiness status)`.
+
+    Three deliberate differences from `lexical_evidence`, which is otherwise
+    the same sqlite query:
+
+    * **No `allowed_paths`.** Anchor-restricted recall is what makes a
+      decision living in an ordinary research note unreachable — it is not an
+      anchor, so it is not in the catalogue the query is confined to, so the
+      turn abstains however plainly its own words name the page.
+    * **Corroboration is counted over DISTINCTIVE stems only, and where
+      they sit matters.** Counting it over all of them asks "did several of
+      the turn's words occur here", which is co-occurrence: a two-line stub
+      titled "Meeting notes" sharing "meeting", "pending" and "decision"
+      with an ordinary turn passed that test and was served as durable
+      memory. Narrowing to the stems that are rare in THIS corpus is most
+      of the answer, but not all of it — two genuinely distinctive words
+      nine tokens apart are still two things a speaker mentioned, not a
+      name. A page qualifies on a PHRASE and on nothing else: both stems
+      of some pair the turn said within `RETRIEVAL_CARRY_RARE_WINDOW`
+      tokens. The ranking still sees the whole turn; only the gate narrows.
+    * **The score is kept.** `lexical_evidence` discards it because evidence
+      there is categorical. Carrying needs to compare two survivors, which a
+      rank cannot express.
+
+    Fewer than `RETRIEVAL_CARRY_MIN_RARE_TERMS` distinctive stems means no
+    hit could qualify, so the ranking query is not made at all — the
+    cheapest refusal is the one that never asks. A corpus smaller than
+    `RETRIEVAL_CARRY_MIN_PAGES` refuses for the same reason one step back:
+    rarity measured against a vault that holds no ordinary prose says only
+    that the vault is small.
+
+    What comes back IS the set of pages this turn named, which is why the
+    caller can decide on the COUNT rather than on a score. Raw-material
+    hits and retired pages are dropped before the caller ever sees them: a
+    captured source or a preserved piece of evidence is not a candidate,
+    and a superseded note answers to the same phrase as the note that
+    superseded it, so leaving it in would read as two named pages.
+
+    Everything else is the existing bounded contract: the maintained
+    catalogue only, no foreground delta (`allow_delta=False`), no corpus
+    walk, no directory enumeration, and an incomplete catalogue reported
+    rather than repaired.
+    """
+    from . import lexstore
+
+    try:
+        stems = content_stems(turn)
+        if len(stems) < working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS:
+            return (), "available"
+        rare, corpus_pages, state = rare_turn_terms(
+            vault_root,
+            stems,
+            freshness=freshness,
+            recall_checkpoint=recall_checkpoint,
+        )
+        if state != "available":
+            return (), state
+        if corpus_pages < working_set.RETRIEVAL_CARRY_MIN_PAGES:
+            # Rarity needs a corpus. The page count came back with the
+            # frequencies, so this costs nothing beyond the lookup already
+            # made, and it refuses before the ranking query.
+            return (), "available"
+        if len(rare) < working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS:
+            return (), "available"
+        # Rarity says a word is name-shaped; proximity says the turn used it
+        # to NAME something. Two distinctive words said together are a
+        # phrase; the same two nine tokens apart are two things the speaker
+        # mentioned. No phrase, no candidate — a page that enumerates many
+        # things contains any few of them, so scattering is what tells a
+        # list from a name.
+        pairs = adjacent_rare_pairs(turn, rare)
+        if not pairs:
+            return (), "available"
+        result = lexstore.search_bm25_result(
+            vault_root,
+            # The turn's WORDS, not its stems: this query stems what it is
+            # given, and stemming a stem is not a no-op.
+            content_words(turn),
+            # Wider than the rarity gate can admit, which grows with the
+            # corpus: a window a run of retired rows can fill is a window
+            # that decides "one named page or two" by where it ends.
+            working_set.carry_fetch_size(corpus_pages) if limit is None else limit,
+            scope="kb",
+            freshness=freshness,
+            allow_delta=False,
+            corroboration_tokens=list(rare),
+            corroboration_groups=[list(pair) for pair in pairs],
+            recall_checkpoint=recall_checkpoint,
+        )
+        if not result.readiness.complete:
+            return (), result.readiness.status
+        # Raw material and retired pages are dropped BEFORE the caller
+        # counts what the turn named. A superseded note and the note that
+        # superseded it answer to the same phrase, so leaving it in would
+        # read as two named pages and refuse every revised page in the
+        # vault.
+        return (
+            tuple(
+                (str(path), float(score))
+                for path, score in (result.value or ())
+                if not _is_raw_material(path)
+                and working_set._is_current_page(vault_root, str(path))
+            ),
+            "available",
+        )
+    except Exception:  # noqa: BLE001 - the carry is additive; it abstains, never raises
+        log.debug("activation carry recall unavailable", exc_info=True)
+        return (), "unavailable"
+
+
 def refresh_index(index: working_set_index.WorkingSetIndex, *, freshness_stamp: str = "") -> bool:
     """Bring a stale index up to the current vault state; False when it could not.
 
@@ -590,8 +873,14 @@ def serve(
     lexical_state: str = "not_requested",
     evidence_token: tuple[int, int, int] | None = None,
     freshness_snapshot: Any = None,
+    lexical_seconds: float = 0.0,
 ) -> dict[str, Any]:
-    """Compile (or reuse) one unguarded packet. Never raises: it abstains instead."""
+    """Compile (or reuse) one unguarded packet. Never raises: it abstains instead.
+
+    `lexical_seconds` is what this request's own lexical pass measured,
+    passed through to the carry so it can ask the budget for a reserve its
+    stage can actually be paid for out of.
+    """
     root = Path(vault_root)
     limit = working_set.clamp_budget(max_chars)
     registry = context_roles.load_roles(root)
@@ -690,6 +979,7 @@ def serve(
             freshness_snapshot=freshness_snapshot,
             continuity_refs=continuity_refs,
             anchor=anchor,
+            lexical_seconds=lexical_seconds,
         )
     except working_set.BudgetExhausted as exc:
         # A deliberate budget skip, not a bug: `log.info`, no traceback. The

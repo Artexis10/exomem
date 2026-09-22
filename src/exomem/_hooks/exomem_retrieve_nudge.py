@@ -147,6 +147,17 @@ _WORKING_SET_UNRESOLVED_LINE = (
     "None of these resolved on the turn's words alone. "
     + _WORKING_SET_ANCHOR_INSTRUCTION
 )
+#: The same menu for pages the turn NAMED, which need a different remedy.
+#: `anchor=` selects a sense of an AMBIGUOUS turn from the activation
+#: index's own anchors, and a named page is not one of those: measured,
+#: `activate_context(anchor="<that page>")` raises INVALID_ANCHOR, while
+#: `read_memory` on the identical ref returns the page. An instruction that
+#: does not work is worse than none — the agent spends a call, gets an
+#: error, and has no way to tell that the other remedy would have worked.
+_WORKING_SET_NAMED_LINE = (
+    "The turn named more than one page, so none was carried. "
+    "Read the one you mean with `read_memory`."
+)
 # Evidence kinds meaning the TURN'S OWN WORDS reached the anchor, as against
 # recall having surfaced it. This is the whole filter on an `unresolved` block: a
 # turn about a Planning item or a Records collection routinely ends `unresolved`
@@ -1161,6 +1172,16 @@ def _format_ambiguity_block(packet: dict, max_chars: int) -> str:
     return _menu_block(packet, lines, _WORKING_SET_AMBIGUITY_LINE, max_chars)
 
 
+#: The status a page carries when the turn's own words NAMED it but another
+#: page was named too, so nothing was carried. Rendered in the same menu as
+#: a worded candidate, by its own branch rather than by adding `retrieval`
+#: to `_WORDED_CONTACT_KINDS`: the reason it belongs here is that the server
+#: already applied the naming test, not that retrieval is suddenly a worded
+#: kind, and widening that set would also admit every `partial` candidate a
+#: ranking engine happened to surface.
+_RETRIEVAL_NAMED_STATUS = "retrieval_named"
+
+
 def _worded_candidates(packet: dict) -> list[dict]:
     """The packet's candidates that the turn's own WORDS reached, in its order.
 
@@ -1169,16 +1190,23 @@ def _worded_candidates(packet: dict) -> list[dict]:
     "partial"` and an `evidence` list that survives the egress guard. The filter
     is on evidence alone, not on the status — the status is the resolver's
     business and a later resolver change must not silently empty this block.
+
+    One status is admitted directly: `retrieval_named`, a page the server
+    already decided the turn NAMED (a distinctive phrase, in a corpus large
+    enough to measure that) but did not carry because another page was
+    named too. Those are the candidates the client most needs to see, since
+    naming one of them is all it takes to get a packet.
     """
     out: list[dict] = []
     for anchor in packet.get("anchors") or ():
         if not isinstance(anchor, dict):
             continue
-        evidence = anchor.get("evidence")
-        if not isinstance(evidence, (list, tuple)):
-            continue
-        if not _WORDED_CONTACT_KINDS.intersection(str(kind) for kind in evidence):
-            continue
+        if str(anchor.get("status") or "") != _RETRIEVAL_NAMED_STATUS:
+            evidence = anchor.get("evidence")
+            if not isinstance(evidence, (list, tuple)):
+                continue
+            if not _WORDED_CONTACT_KINDS.intersection(str(kind) for kind in evidence):
+                continue
         out.append(anchor)
         if len(out) >= _MAX_UNRESOLVED_CANDIDATES:
             break
@@ -1191,16 +1219,34 @@ def _format_unresolved_block(packet: dict, max_chars: int) -> str:
     A candidate reached ONLY by retrieval is not rendered. Recall surfaced it, the
     turn did not name it, and a menu of pages the user never mentioned is exactly
     the hit list this compiler exists to replace.
+
+    The closing line depends on what is being listed, because the two cases
+    need different remedies. A `partial` candidate IS an anchor of the
+    activation index, so `anchor=` selects it. A `retrieval_named` page is
+    not, and asking for it that way fails; `read_memory` on the same ref is
+    what works. A packet carries one kind or the other, never both: the
+    named list is built by the carry's own abstention, which reports the
+    pages it named and nothing else.
     """
+    candidates = _worded_candidates(packet)
     lines = [
         _packet_line(
             str(anchor.get("kind") or "anchor"),
             str(anchor.get("title") or anchor.get("ref") or ""),
             str(anchor.get("ref") or ""),
         )
-        for anchor in _worded_candidates(packet)
+        for anchor in candidates
     ]
-    return _menu_block(packet, lines, _WORKING_SET_UNRESOLVED_LINE, max_chars)
+    closing = (
+        _WORKING_SET_NAMED_LINE
+        if candidates
+        and all(
+            str(anchor.get("status") or "") == _RETRIEVAL_NAMED_STATUS
+            for anchor in candidates
+        )
+        else _WORKING_SET_UNRESOLVED_LINE
+    )
+    return _menu_block(packet, lines, closing, max_chars)
 
 
 def _abstention_reason(packet: dict) -> str:

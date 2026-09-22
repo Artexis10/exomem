@@ -1711,3 +1711,61 @@ def test_a_tight_ceiling_keeps_the_menu_and_cuts_recent_context_instead(
     recent_lines = [index for index, line in enumerate(lines) if line.startswith("- recent:")]
     menu_lines = [index for index, line in enumerate(lines) if line.startswith("- plan:")]
     assert not recent_lines or max(recent_lines) < min(menu_lines)
+
+
+# --------------------------------------------------------------------------- #
+# `retrieval_named`: the remedy offered must be the one that works
+# --------------------------------------------------------------------------- #
+
+NAMED_PAGES = [
+    {
+        "ref": "Knowledge Base/Notes/Decisions/girvan-slot-decision.md",
+        "path": "Knowledge Base/Notes/Decisions/girvan-slot-decision.md",
+        "title": "Girvan slot decision",
+        "kind": "page",
+        "lifecycle": "active",
+        "status": "retrieval_named",
+        "evidence": ["retrieval"],
+    },
+    {
+        "ref": "Knowledge Base/Notes/Research/girvan-slot-research.md",
+        "path": "Knowledge Base/Notes/Research/girvan-slot-research.md",
+        "title": "Girvan slot research",
+        "kind": "page",
+        "lifecycle": "active",
+        "status": "retrieval_named",
+        "evidence": ["retrieval"],
+    },
+]
+
+
+def test_a_named_page_menu_offers_read_memory_not_anchor() -> None:
+    """A named page is NOT an anchor of the activation index, so the closing
+    line the `unresolved` menu has always carried is a remedy that fails
+    here: `activate_context(anchor=<that page>)` raises INVALID_ANCHOR.
+    Measured, `read_memory` on the same ref returns the page (428 chars).
+
+    An instruction that does not work is worse than none: the agent spends
+    a call, gets an error, and has no way to tell that the OTHER remedy
+    would have worked.
+    """
+    block = hook._format_working_set_block(_unresolved_packet(NAMED_PAGES), 4000)
+    closing = block.splitlines()[-1]
+
+    assert "read_memory" in closing, closing
+    assert "`anchor`" not in closing, closing
+    assert "activate_context" not in closing, closing
+    lines = block.splitlines()
+    assert lines[1].startswith("- page: Girvan slot decision "), lines
+    assert lines[2].startswith("- page: Girvan slot research "), lines
+
+
+def test_an_ordinary_unresolved_menu_still_offers_anchor() -> None:
+    """The half that must not change: a `partial` candidate IS an anchor of
+    the index, and `anchor=` is exactly the remedy for it."""
+    block = hook._format_working_set_block(
+        _unresolved_packet(WORDED_AND_RETRIEVAL_ONLY), 4000
+    )
+
+    assert "`anchor`" in block, block
+    assert "read_memory" not in block.splitlines()[-1], block

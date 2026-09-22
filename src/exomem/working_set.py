@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -63,6 +63,126 @@ RECENT_CONTEXT_MAX_CHARS = 900
 #: `activated` is a read, `planning` is an open commitment. None of them claims
 #: the page's subject happened recently — that is what its own content says.
 RECENT_CONTEXT_REASONS: tuple[str, ...] = ("edited", "activated", "captured", "planning")
+
+#: How many ranked rows the carry asks for before it filters. The ranking
+#: limit truncated BEFORE raw material and retired pages were dropped, so a
+#: run of sources at the head could hide a second compiled page and turn
+#: "two named pages, abstain" into "one named page, carry" — the count the
+#: whole decision rests on, decided by where the LIMIT happened to fall.
+#: Ten leaves room for a page's raw-material twins and its predecessor
+#: ahead of it; the packet's own material stays bounded by the unit lanes,
+#: which this does not touch. It is a FLOOR rather than the whole answer —
+#: see `carry_fetch_size`, since how many rows the gate can admit grows
+#: with the corpus and the window has to stay ahead of it.
+RETRIEVAL_CARRY_FETCH = 10
+
+#: There is deliberately no separation constant. One existed — the top hit
+#: had to stand 1.5x clear of the runner-up — from when the candidate list
+#: was everything recall returned and the gap was the only thing telling a
+#: match from its neighbours. The naming gate now decides membership, so
+#: every row that survives it is a page the turn NAMED, and a gap between
+#: two named pages says nothing about which one was meant: measured, one
+#: turn naming two pages scored them 19.60 against 19.16, and another
+#: differing only in wording scored 31.07 against 17.40. A packet is
+#: carried when exactly one page is named; two named pages abstain, and the
+#: client can ask which.
+#:
+#: The only absolute score the carry consults, and it is a sanity bound
+#: rather than a threshold: the catalogue really does return rows scoring
+#: 0.0 at corpus scale, and a row the ranking placed at nothing is not a
+#: page a turn named.
+#:
+#: One, not zero. "Greater than zero" waved through 3e-06 — what a
+#: double-stemmed query scored for a page that scores 25.2 when asked
+#: properly — and every comparison downstream then treated that as a real
+#: number. A genuine match scores several units even on the thinnest
+#: contact this gate admits: 6.36 for a turn that reached its page on two
+#: stable terms out of four, 12 to 25 for an ordinary named page, 18.5 for
+#: the coincidence the proximity window now refuses. Nothing measured
+#: anywhere in this work lands between 0 and 1, which is what keeps this a
+#: sanity bound rather than the corpus-dependent floor it replaced.
+#:
+#: An absolute FLOOR was tried and removed. `-bm25()` is not comparable
+#: between corpora, so any number that separated signal from noise on one
+#: vault was wrong on another: measured, the same page the same turn names
+#: scored 13.16 with no bulk, 6.81 with 200 pages added — below the floor
+#: that had been fitted to it, so the turn abstained — and was outranked by
+#: an unrelated filler note at 2000. What makes a hit contact is whether
+#: the turn used DISTINCTIVE words, which is what the rarity gate below
+#: measures; the score is then only good for comparing two hits taken from
+#: the one corpus, which is what the separation test does.
+RETRIEVAL_CARRY_MIN_SCORE = 1.0
+
+#: How much room the carry asks the request budget for, as a multiple of
+#: what the request's first lexical pass measured. The carry's own cost
+#: tracks that pass — same catalogue, same query shape — but it is TWO
+#: round trips rather than one, because a rare-term pass runs before the
+#: ranking pass.
+#:
+#: Measured against that first pass at zero, two hundred and two thousand
+#: added pages: 0.9x, 1.1x and 1.9x on a quiet machine, and 2.0x, 2.3x and
+#: 1.5x for the same tip under load. The reserve covers the dearest of
+#: those rather than the typical one, because the two outcomes are not
+#: symmetric: a carry that runs past its reserve overshoots the door budget
+#: and returns `unavailable`, which renders nothing and reads to the client
+#: as a fault, where refusing returns the same empty packet honestly and
+#: sooner. What it costs when it fires wrongly is no carry while the first
+#: pass sits between about 1.7 and 2.0 seconds — a band U4's lexical-stage
+#: work is about to shrink from the other side.
+RETRIEVAL_CARRY_BUDGET_MULTIPLE = 2.5
+
+#: A stem is DISTINCTIVE when it occurs on no more than this share of the
+#: indexed pages. Corpus-relative on purpose: "rare" is a statement about
+#: the vault the turn is being answered from, and the same word is a name in
+#: one vault and an everyday word in another.
+RETRIEVAL_CARRY_RARE_FRACTION = 0.005
+#: The floor under that share. Half a percent of a forty-page vault rounds
+#: to nothing, and a cap of zero would make every word distinctive.
+RETRIEVAL_CARRY_RARE_MIN_DOCS = 3
+#: How many distinctive stems a hit must share with the turn before it is a
+#: candidate at all. One is a coincidence at corpus scale; the same two-fact
+#: standard the resolver's own `rare_term` clause applies to an anchor.
+RETRIEVAL_CARRY_MIN_RARE_TERMS = 2
+#: How close two of a page's distinctive words must sit in the turn before
+#: they read as a NAME rather than as two things the speaker mentioned.
+#:
+#: Rarity alone says a word is name-shaped; it cannot say the turn used it
+#: to name this page. Measured on a 235-page corpus whose prose uses every
+#: everyday word of the turn: "I am flying to lisbon next week and wanted to
+#: walk around the harbour if there is time" shares `lisbon` and `harbour`
+#: with a page about a harbour ledger and a lisbon freight window, both
+#: genuinely distinctive, and carried it at 18.51. Nine tokens apart in an
+#: ordinary sentence they are two things the speaker mentioned. Four tokens
+#: is a phrase — "kelvane throughput ceiling", "quillon vantry window" —
+#: with room for the article or preposition a phrase carries.
+RETRIEVAL_CARRY_RARE_WINDOW = 4
+#: There is deliberately no "N distinctive stems anywhere" path. One
+#: existed — three of a page's distinctive words, wherever they sat, named
+#: it — on the reasoning that a turn does not land on three by accident.
+#: Measured, it does: a long travel sentence mentioning three place names
+#: about forty tokens apart carried a freight rota that lists all three, at
+#: 26.19 and alone. A page that enumerates many things contains any few of
+#: them, and scattering is exactly what tells a list from a name. One
+#: admission path, a phrase; a third rare stem may raise the score but
+#: never admits.
+#: The smallest corpus the rarity gate may be believed on. Below it the
+#: carry does not run and the turn abstains as it did before.
+#:
+#: Rarity is only as sharp as the corpus it is measured against, and below
+#: this size there is no corpus to measure against. On a thirty-page vault
+#: where the word "meeting" appears on exactly one page, "meeting" IS rare
+#: by measurement — and so is every other ordinary English word, because
+#: the vault holds no ordinary prose for them to be ordinary in. Measured:
+#: a two-line note titled "Meeting notes" whose one unit read "Decision
+#: pending" was carried at 12.02 for an ordinary turn about a meeting and a
+#: pending decision, and the same stub is refused the moment the corpus
+#: contains ordinary notes.
+#:
+#: A floor on the CORPUS rather than on the turn, deliberately. "A turn all
+#: of whose words are rare tells you nothing" would have closed the same
+#: case and would also reject a short turn made entirely of real names,
+#: which is the turn this feature exists to serve.
+RETRIEVAL_CARRY_MIN_PAGES = 100
 
 PACKET_BLOCKS = (
     # First, and in resolved and abstained packets alike: a fresh session opens
@@ -168,6 +288,24 @@ def _role_order(roles: Sequence[Mapping[str, Any]]) -> dict[str, int]:
     return {str(role.get("id")): index for index, role in enumerate(roles)}
 
 
+def _deduplicated(ordered: Sequence[LaneItem]) -> tuple[LaneItem, ...]:
+    """One item per `ref`, keeping the first in the order given.
+
+    An empty ref is not an identity, so those are all kept: two lanes with
+    nothing to name themselves by are not evidently the same material.
+    """
+    seen: set[str] = set()
+    out: list[LaneItem] = []
+    for item in ordered:
+        ref = str(item.ref or "")
+        if ref:
+            if ref in seen:
+                continue
+            seen.add(ref)
+        out.append(item)
+    return tuple(out)
+
+
 def build_packet(
     *,
     items: Sequence[LaneItem],
@@ -195,7 +333,20 @@ def build_packet(
             item.ref,
         )
 
-    ordered = sorted(items, key=_sort_key)
+    # One unit, once. Role categories overlap by design — `recent_change`
+    # and `precedents` both select `decision`, `resources` and `baseline`
+    # both select `fact` — so two selected roles routinely read the SAME
+    # unit off the same page, and a retrieval-carried packet, which selects
+    # every units role, reads a page's units several times over. Served
+    # twice it is one sentence printed twice in the agent's context and
+    # charged twice against the character budget.
+    #
+    # Deduped HERE rather than in either lane, so every packet benefits and
+    # no future lane has to remember. After `_sort_key`, so the winner is
+    # the first role in registry priority order that reached it — the most
+    # specific lens that asked. A `level`-less or ref-less item is left
+    # alone: its identity is not its ref.
+    ordered = _deduplicated(sorted(items, key=_sort_key))
     units: list[dict[str, Any]] = []
     deferred: list[tuple[LaneItem, str]] = []
     per_role: dict[str, int] = {}
@@ -413,17 +564,25 @@ def run_lanes(
     current_state: Sequence[Mapping[str, Any]] = (),
     timings: Any = None,
     freshness_snapshot: Any = None,
+    neighbourhood: frozenset[str] | None = None,
 ) -> tuple[tuple[LaneItem, ...], tuple[dict[str, Any], ...]]:
     """Run one bounded lane per selected role. Every lane soft-fails alone.
 
     `current_state` is resolved ONCE by the caller and handed in, because the
     Records lane and the packet's own `current_state[]` block are two views of
     the same reads and resolving them twice doubled the collection queries.
+
+    `neighbourhood` is normally derived from the anchors' own typed graph.
+    A retrieval-carried packet passes its own — the single page recall
+    dominated on, and nothing else — because a carried page is not an anchor:
+    it has no indexed neighbourhood to expand, and expanding it would spend
+    graph work to widen a claim that rests on one recall score.
     """
     root = Path(vault_root)
     items: list[LaneItem] = []
     missing: list[dict[str, Any]] = []
-    neighbourhood = _neighbourhood_paths(root, anchors)
+    if neighbourhood is None:
+        neighbourhood = _neighbourhood_paths(root, anchors)
     for role in roles:
         role_id = str(role.get("id"))
         definition = registry.roles.get(role_id)
@@ -784,7 +943,7 @@ class BudgetExhausted(RuntimeError):
     """
 
 
-def budget_exhausted(stage: str) -> bool:
+def budget_exhausted(stage: str, *, reserve: float | None = None) -> bool:
     """True when the active request budget cannot afford to start `stage`.
 
     One helper shared by every stage boundary in the activation request path
@@ -802,6 +961,14 @@ def budget_exhausted(stage: str) -> bool:
     positive number of milliseconds": 1ms of remaining budget is enough to
     START a stage but never enough to finish one.
 
+    `reserve` overrides that flat second for a stage whose cost this request
+    has already MEASURED. Nothing interrupts a stage once it has started, so
+    a flat reserve is only honest for stages that cost about the same every
+    time; the carry's query is the same shape as the first lexical pass and
+    costs about as much, so on a request where that pass took three seconds
+    the flat second admits a second three-second stage and the door budget
+    is overshot. A measured reserve refuses it instead.
+
     Records the skip on the budget itself (`note_skipped`), so it is safe to
     call at every boundary without special-casing: `RequestBudget.note_skipped`
     dedupes by name, and every caller of this helper either returns or raises
@@ -810,7 +977,12 @@ def budget_exhausted(stage: str) -> bool:
     the only one ever recorded.
     """
     budget = request_budget.current()
-    if budget is None or budget.can_afford(request_budget.ACTIVATION_STAGE_RESERVE_SECONDS):
+    needed = (
+        request_budget.ACTIVATION_STAGE_RESERVE_SECONDS
+        if reserve is None
+        else max(request_budget.ACTIVATION_STAGE_RESERVE_SECONDS, float(reserve))
+    )
+    if budget is None or budget.can_afford(needed):
         return False
     budget.note_skipped(stage)
     return True
@@ -844,6 +1016,450 @@ def signature_evidence(index: working_set_index.WorkingSetIndex, turn: str):
         return {}, None, "unavailable"
 
 
+# --------------------------------------------------------------------------- #
+# Retrieval-carried packets (design D3)
+# --------------------------------------------------------------------------- #
+
+
+#: Statuses that RETIRE a page: the tree's OWN inactive vocabulary, less
+#: the two that mean pre-active rather than retired.
+#:
+#: Derived rather than written out, because a hand-written list was wrong in
+#: both directions — it invented `retired` and `deprecated`, which name no
+#: page status anywhere else here, and it missed `dropped`, so a page the
+#: author dropped was carried and its unit served as current memory.
+#: `draft` and `planned` are carved out deliberately: both mean authored and
+#: not yet active, which is a page a turn naming it wants, not one the vault
+#: has stopped standing behind.
+def _retired_page_statuses() -> frozenset[str]:
+    from . import activation
+
+    return frozenset(activation._INACTIVE_STATUSES) - {"draft", "planned"}
+
+
+RETIRED_PAGE_STATUSES: frozenset[str] = _retired_page_statuses()
+
+
+def _is_current_page(vault_root: Path, rel_path: str) -> bool:
+    """Is `rel_path` a page the vault still stands behind?
+
+    A page the author retired — a `RETIRED_PAGE_STATUSES` status, or a
+    `superseded_by` pointing at its replacement — is not a page to answer a
+    turn from. `draft` and `planned` are NOT retirement: both mean authored
+    and not yet active, and a turn that names such a page wants it, and the replacement is named by the SAME words: "the girvan
+    slot window" names both the current note and the one it superseded.
+    Counting them as two named pages would refuse every revised page in the
+    vault, and serving the loser would hand back the stale figure, which is
+    the worse of the two.
+
+    Reads the same facts the unit lane already reads for supersession, from
+    `find_corpus.CACHE` — the request path's own cached single-page read, no
+    walk, and at most `RETRIEVAL_CARRY_LIMIT` of them. A page that cannot be
+    read is not proven current, so it is not a candidate.
+    """
+    text = str(rel_path or "")
+    if not text.endswith(".md"):
+        return False
+    try:
+        from . import find_corpus
+
+        root = Path(vault_root)
+        page = find_corpus.CACHE.get(root / text, root)
+    except Exception:  # noqa: BLE001 - an unreadable page is simply not a candidate
+        log.debug("activation carry lifecycle read failed for %s", text, exc_info=True)
+        return False
+    if page is None:
+        return False
+    if getattr(page, "superseded_by", None):
+        return False
+    frontmatter = page.frontmatter if isinstance(page.frontmatter, Mapping) else {}
+    status = working_set_index.normalize(frontmatter.get("status") or "active")
+    return status not in RETIRED_PAGE_STATUSES
+
+
+def rare_document_cap(corpus_pages: int) -> int:
+    """The document frequency at or below which a stem counts as DISTINCTIVE
+    in a corpus of `corpus_pages` indexed pages.
+
+    `max(RETRIEVAL_CARRY_RARE_MIN_DOCS, ceil(share * pages))`. Corpus-relative
+    because that is the only way the judgement survives a growing vault: a
+    fixed cap is the same mistake a fixed score floor was.
+    """
+    pages = max(0, int(corpus_pages))
+    return max(RETRIEVAL_CARRY_RARE_MIN_DOCS, -(-pages * 5 // 1000))
+
+
+def carry_fetch_size(corpus_pages: int) -> int:
+    """How many ranked rows to read before filtering, for a corpus of
+    `corpus_pages` pages.
+
+    Never fewer than `RETRIEVAL_CARRY_FETCH`, and always MORE than the
+    number of pages the rarity gate can admit. Up to `rare_document_cap`
+    pages may share one distinctive phrase, and that cap passes a fixed ten
+    from 2,001 pages — 11 at 2,200, 25 at 5,000, 50 at 10,000. Above that a
+    fixed window can be filled entirely by retired pages sharing the phrase,
+    leaving one current page inside it; the count then reads one and a turn
+    that named a second page carries the first anyway. That is the failure
+    the count exists to prevent, arriving through the limit instead of
+    through the score.
+
+    One more than the cap, so a window full of excluded rows still leaves
+    room for the row that proves there were two.
+    """
+    return max(RETRIEVAL_CARRY_FETCH, rare_document_cap(corpus_pages) + 1)
+
+
+def dominant_carry(hits: Sequence[tuple[str, float]]) -> tuple[str, float] | None:
+    """The one page `hits` says the turn named, or `None`.
+
+    Every entry has already passed the naming gate — a distinctive phrase —
+    and been filtered to pages that are current and not raw material. So `hits` IS the set of pages this turn named, and
+    the question here is only how many there are.
+
+    Exactly one is a packet. Two or more is a turn that named two things,
+    and choosing between them is the guess the compiler exists not to make:
+    the score gap carries no information about which was meant, since two
+    equally-named pages measured 19.60 against 19.16 on one turn and 31.07
+    against 17.40 on another differing only in wording. The turn abstains
+    and the client, which can see it abstained, is free to ask.
+
+    `RETRIEVAL_CARRY_MIN_SCORE` is the one absolute left, and it only
+    refuses a row the ranking placed at nothing.
+    """
+    if len(hits) != 1:
+        return None
+    path, score = hits[0]
+    if score <= RETRIEVAL_CARRY_MIN_SCORE:
+        return None
+    return str(path), float(score)
+
+
+def _carry_by_retrieval(
+    vault_root: Path,
+    *,
+    turn: str,
+    timings: Any = None,
+    freshness_snapshot: Any = None,
+    lexical_seconds: float = 0.0,
+) -> tuple[tuple[str, float], ...]:
+    """The pages this turn NAMED, scored, current, and not raw material.
+
+    Empty means the turn named nothing and abstains exactly as it did. One
+    is a packet. Two or more is a turn that named several things: the
+    caller abstains and lists them, so the client can ask for one by name
+    rather than being handed an empty packet.
+
+    Cost falls only on turns that would otherwise have returned an empty
+    packet, and it is still refused outright when the request budget has run
+    out or the lexical catalogue is anything other than `available`: a
+    carried packet rests entirely on recall, so recall that cannot prove
+    itself current is no ground to serve one from.
+
+    `lexical_seconds` is what the request's FIRST lexical pass actually
+    took. This query is the same shape against the same catalogue, so it
+    will cost about the same, and the budget is asked for
+    `RETRIEVAL_CARRY_BUDGET_MULTIPLE` times that rather than the flat stage
+    reserve — a reserve that cannot pay for the stage it admits is not a
+    reserve. Refusing here abstains `unresolved`, which is what the turn did
+    before the carry existed; letting it start and run out mid-flight
+    abstains `unavailable`, which renders nothing and reads as a fault.
+    """
+    if budget_exhausted(
+        "working_set.carry", reserve=RETRIEVAL_CARRY_BUDGET_MULTIPLE * max(0.0, lexical_seconds)
+    ):
+        return ()
+    freshness = None
+    recall_checkpoint = None
+    if freshness_snapshot is not None:
+        try:
+            freshness = freshness_snapshot.for_scope("kb")
+            recall_checkpoint = freshness_snapshot.recall_checkpoint("kb")
+        except Exception:  # noqa: BLE001 - an unreadable snapshot carries nothing
+            log.debug("activation carry freshness unavailable", exc_info=True)
+            return ()
+    with _span(timings, "working_set.carry"):
+        from . import working_set_runtime
+
+        hits, state = working_set_runtime.carry_candidates(
+            vault_root,
+            turn,
+            freshness=freshness,
+            recall_checkpoint=recall_checkpoint,
+        )
+    if state != "available":
+        return ()
+    return hits[: working_set_resolve.MAX_ANCHORS]
+
+
+def _page_lifecycle(vault_root: Path, rel_path: str) -> str:
+    """A page's own normalised status, or `"active"` when it declares none.
+
+    Reported rather than assumed. A carried or named page can legitimately
+    be a `draft` or `planned` — both are candidates, being authored and not
+    yet active — and a packet that called every one of them `active` would
+    be telling the reader something the page does not say. Reads the cache
+    the lifecycle check has already warmed for exactly these paths.
+    """
+    text = str(rel_path or "")
+    if not text.endswith(".md"):
+        return "active"
+    try:
+        from . import find_corpus
+
+        root = Path(vault_root)
+        page = find_corpus.CACHE.get(root / text, root)
+    except Exception:  # noqa: BLE001 - a lifecycle label is never worth a failure
+        log.debug("activation page lifecycle read failed for %s", text, exc_info=True)
+        return "active"
+    if page is None:
+        return "active"
+    frontmatter = page.frontmatter if isinstance(page.frontmatter, Mapping) else {}
+    return working_set_index.normalize(frontmatter.get("status") or "active") or "active"
+
+
+def _page_title(vault_root: Path, rel_path: str) -> str:
+    """A page's own authored title, or `""`.
+
+    Reads `find_corpus.CACHE`, which the lifecycle check has already warmed
+    for exactly these paths, so this is a cache hit rather than a second
+    read. A page that is not an anchor has no title in the catalogue, and a
+    menu of filenames is a worse menu than a menu of titles.
+    """
+    text = str(rel_path or "")
+    if not text.endswith(".md"):
+        return ""
+    try:
+        from . import find_corpus
+
+        root = Path(vault_root)
+        page = find_corpus.CACHE.get(root / text, root)
+    except Exception:  # noqa: BLE001 - a title is a courtesy, never a promise
+        log.debug("activation named-page title read failed for %s", text, exc_info=True)
+        return ""
+    if page is None:
+        return ""
+    frontmatter = page.frontmatter if isinstance(page.frontmatter, Mapping) else {}
+    return str(frontmatter.get("title") or getattr(page, "title", "") or "").strip()
+
+
+def _named_anchors(
+    vault_root: Path,
+    named: Sequence[tuple[str, float]],
+    *,
+    index: working_set_index.WorkingSetIndex | None = None,
+) -> tuple[dict[str, Any], ...]:
+    """The pages a turn named, as anchor entries, for an abstention that has
+    nothing to carry.
+
+    Same shape a carried page gets — `kind: "page"`, `retrieval` and nothing
+    else as evidence — at `retrieval_named`, which says the turn's words
+    reached this page and no packet was built from it. Each one crosses the
+    egress guard as an ordinary anchor, so a page this audience may not see
+    is removed from the list like any other.
+    """
+    return tuple(
+        {
+            "ref": path,
+            "path": path,
+            "title": _page_title(vault_root, path) or _indexed_title(index, path) or path,
+            "kind": "page",
+            "lifecycle": _page_lifecycle(vault_root, path),
+            "status": working_set_resolve.RETRIEVAL_NAMED_STATUS,
+            "evidence": ["retrieval"],
+        }
+        for path, _score in named
+    )
+
+
+def _indexed_title(index: working_set_index.WorkingSetIndex | None, path: str) -> str:
+    """The authored title the anchor catalogue already holds for `path`, or
+    `""`. Reads rows the request has in hand; never a file, never a walk.
+
+    A lookup by path rather than a scan compared against it: the rows are
+    read once into a mapping and asked once. The catalogue is bounded, so
+    the scan was never slow — it was a scan written where a lookup belongs,
+    and the shape is what makes it obvious that one carried page costs one
+    question.
+    """
+    if index is None or not path:
+        return ""
+    try:
+        titles = {
+            str(getattr(row, "path", "") or ""): str(getattr(row, "title", "") or "")
+            for row in index.anchors()
+        }
+    except Exception:  # noqa: BLE001 - a title is a courtesy, never a promise
+        log.debug("activation carry title lookup failed", exc_info=True)
+        return ""
+    return titles.get(path, "")
+
+
+def _carry_roles(
+    registry: context_roles.RoleRegistry, analysis: Any
+) -> tuple[dict[str, str], ...]:
+    """The lenses a carried page is read through.
+
+    A carried page is not an anchor and has no anchor KIND, so
+    `context_roles.select_roles`' anchor defaults have nothing to key on. The
+    LANE is the selector instead: every `units` role, because units are the
+    only thing a page by itself can answer with — a Records lane needs a
+    collection, a planning lane a plan, an entity lane a profile, and a
+    carried page is none of those. The turn's own cues order first so a turn
+    asking about constraints gets constraints ahead of preferences, and the
+    same `MAX_SELECTED_ROLES` ceiling an ordinary packet has applies here.
+    """
+    text = str(getattr(analysis, "text", "") or "")
+    cued: list[tuple[int, Any]] = []
+    for role in registry.roles.values():
+        if role.lane != "units":
+            continue
+        matched = bool(role.cues) and any(cue in text for cue in role.cues)
+        cued.append((0 if matched else 1, role))
+    cued.sort(key=lambda entry: (entry[0], entry[1].priority))
+    return tuple(
+        {
+            "id": role.id,
+            "source": "turn_cue" if rank == 0 else "retrieval_carried",
+            "lane": role.lane,
+        }
+        for rank, role in cued[: context_roles.MAX_SELECTED_ROLES]
+    )
+
+
+def _carried_packet(
+    vault_root: Path,
+    *,
+    page: tuple[str, float],
+    analysis: Any,
+    registry: context_roles.RoleRegistry,
+    limit: int,
+    purpose: str | None,
+    timings: Any,
+    generation: dict[str, Any],
+    index_token: tuple[int, int, int],
+    freshness_snapshot: Any,
+    index: working_set_index.WorkingSetIndex | None = None,
+    recent_context: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any] | None:
+    """One packet compiled from a single dominant page, marked as carried.
+
+    The page is reported as ONE anchor entry of kind `page` at status
+    `retrieval_carried`, whose only evidence is `retrieval`. That spelling is
+    the whole honesty of the feature: a reader can tell at a glance that no
+    anchor was named and that recall alone put this material here, and
+    `mint_continuity` — which carries `resolved` anchors only — declines to
+    mint a token from it without needing to know the feature exists.
+
+    Title and lifecycle are taken from the units the lane actually read off
+    that page, never asserted: the unit rows already carry their parent
+    page's own title and supersession, so the anchor entry says what the
+    page says about itself. A page that is ALSO an anchor row the turn
+    failed to resolve has its authored title in the index already, which is
+    the next place to look. The path is the last fallback, not the first
+    answer.
+
+    `None` when the lanes read nothing off the page. A page can dominate
+    recall and still have nothing a unit role selects — its units carry
+    other categories, or it has none — and serving that as a packet with
+    `abstained: false` and an empty `units` block states that the turn
+    resolved and the vault had nothing, which is a different and false
+    claim. The caller abstains `unresolved` instead, which is what the turn
+    did before the carry existed and what the hook can still render a menu
+    for.
+
+    The carried page is the packet's ONLY anchor, and that is load-bearing
+    rather than incidental. An `unresolved` abstention lists the turn's
+    `partial` candidates in `anchors[]` so the agent can choose one; carrying
+    them here as well would break the egress rule that makes a withheld
+    carried page safe — `guard_working_set` turns a packet into a `withheld`
+    abstention only when EVERY anchor was withheld, so surviving partials
+    would leave the packet claiming it resolved something after the one page
+    it was built from was removed. The cost is that a carried turn no longer
+    shows that menu; the material it shows instead is the trade.
+
+    `recent_context` is passed straight through to `build_packet`, so a
+    carried packet leads with working continuity exactly as a resolved or an
+    abstained one does. It is not material about the carried page and the
+    carry does not decide it: the caller assembled it before resolution was
+    even branched on, and every exit from `compile_packet` carries the same
+    block.
+    """
+    path, _score = page
+    roles = _carry_roles(registry, analysis)
+    carried = working_set_resolve.ResolvedAnchor(
+        anchor_id=path,
+        path=path,
+        ref=None,
+        title=_indexed_title(index, path) or path,
+        kind="page",
+        lifecycle=_page_lifecycle(vault_root, path),
+        status=working_set_resolve.RETRIEVAL_CARRIED_STATUS,
+        evidence=("retrieval",),
+        categories=(),
+        neighbourhood=frozenset({path}),
+    )
+
+    if budget_exhausted("working_set.current_state"):
+        raise BudgetExhausted("working_set.current_state")
+    with _span(timings, "working_set.current_state"):
+        # `page` is not a stateful kind, so this resolves to nothing today.
+        # Called anyway rather than skipped: the packet's `current_state[]`
+        # block is the one place a stateful carried page would have to
+        # appear, and a silent omission here would be the kind of gap that
+        # only shows up once `STATEFUL_KINDS` grows.
+        current_state = working_set_state.current_state_for(
+            vault_root,
+            anchors=(carried,),
+            purpose=purpose,
+            index_generation=index_token[1],
+            index_token=index_token,
+        )
+    items, missing = run_lanes(
+        vault_root,
+        anchors=(carried,),
+        roles=roles,
+        registry=registry,
+        current_state=current_state,
+        timings=timings,
+        freshness_snapshot=freshness_snapshot,
+        neighbourhood=frozenset({path}),
+    )
+    if not items:
+        return None
+    for item in items:
+        if item.path == path:
+            # The lane's own reading first, the index's second, the path
+            # last: a lane that knew no title must not overwrite one the
+            # catalogue already holds. The LIFECYCLE is not taken from the
+            # lane at all — a lane item's lifecycle describes the UNIT, and
+            # the page's own status is already on the anchor, so letting it
+            # through here would report a draft page as active.
+            carried = replace(carried, title=item.title or carried.title or path)
+            break
+
+    generation = {**generation, "carried_by": "retrieval"}
+    if budget_exhausted("working_set.budget"):
+        raise BudgetExhausted("working_set.budget")
+    with _span(timings, "working_set.budget"):
+        # `status` is `build_packet`'s own "did this turn produce material"
+        # flag — the one thing it decides `abstained` from — not
+        # `resolution.status`, which stayed `unresolved` and is why this
+        # packet exists at all. What the turn actually did is in the anchor's
+        # own `retrieval_carried` status and in `generation.carried_by`.
+        return build_packet(
+            items=items,
+            anchors=(carried.as_dict(),),
+            roles=roles,
+            current_state=current_state,
+            ambiguity=(),
+            missing=missing,
+            max_chars=limit,
+            generation=generation,
+            status="resolved",
+            recent_context=recent_context,
+        )
+
+
 def compile_packet(
     vault_root: Path,
     *,
@@ -857,6 +1473,7 @@ def compile_packet(
     freshness_snapshot: Any = None,
     continuity_refs: frozenset[str] = frozenset(),
     anchor: str | None = None,
+    lexical_seconds: float = 0.0,
 ) -> dict[str, Any]:
     """Resolve, select, retrieve and budget — the whole compiler in one call.
 
@@ -951,6 +1568,60 @@ def compile_packet(
     # below.
     with _span(timings, "working_set.recent"):
         recent: tuple[dict[str, Any], ...] = _recent_context(root, rows=rows)
+
+    # Design D3, and ONLY here: the turn reached no anchor at all. An
+    # `ambiguous` turn is untouched (it reached two, and picking between them
+    # is the agent's job), an `agent_choice` turn is untouched (a ref that
+    # named nothing must keep abstaining `unresolved`, which is what
+    # `op_activate_context` turns into its one refusal), and a turn that
+    # resolved anything never reaches this line. Carrying is a PACKET-level
+    # decision taken after resolution has already abstained — it adds no
+    # evidence kind, changes no status rule, and can never resolve an anchor.
+    if resolution.status == "unresolved" and not anchor:
+        named = _carry_by_retrieval(
+            root,
+            turn=turn,
+            timings=timings,
+            freshness_snapshot=freshness_snapshot,
+            lexical_seconds=lexical_seconds,
+        )
+        carried = dominant_carry(named)
+        if carried is None and named:
+            # The turn named several pages. Nothing is carried, but an
+            # abstention that says nothing at all leaves the client with an
+            # empty packet and no way to know a question would help. The
+            # named pages are listed at `retrieval_named` so it can ask for
+            # one; the reason stays `unresolved`, because nothing resolved.
+            return abstained_packet(
+                reason=resolution.status,
+                max_chars=limit,
+                generation=generation,
+                anchors=_named_anchors(root, named, index=index),
+                ambiguity=resolution.ambiguity,
+                recent_context=recent,
+            )
+        if carried is not None:
+            # `None` back means the lanes read nothing off that page, so it
+            # falls through to the ordinary `unresolved` abstention below —
+            # with the resolution's OWN anchors, the partial candidates the
+            # hook renders as a menu, because this turn ended up exactly
+            # where it would have without the carry.
+            packet = _carried_packet(
+                root,
+                page=carried,
+                analysis=analysis,
+                registry=registry,
+                limit=limit,
+                purpose=purpose,
+                timings=timings,
+                generation=generation,
+                index_token=index_token,
+                freshness_snapshot=freshness_snapshot,
+                index=index,
+                recent_context=recent,
+            )
+            if packet is not None:
+                return packet
 
     if resolution.status != "resolved":
         return abstained_packet(

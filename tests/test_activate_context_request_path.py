@@ -865,3 +865,74 @@ def test_the_door_bound_budget_is_restored_after_an_exception(
         )
 
     assert request_budget.current() is None
+
+
+# --------------------------------------------------------------------------- #
+# D3 — a turn that names no anchor is carried by one dominant recall hit
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def carried_vault(activation_vault: Path) -> Path:
+    """The activation vault plus a research note that is NOT an anchor.
+
+    Same pattern as `activation_vault` itself — `lexstore.ensure_fresh`
+    before the index rebuild — because a carried packet is served entirely
+    off the maintained lexical catalogue, and an unproven one carries
+    nothing.
+    """
+    from test_working_set_carry import _seed_carry_pages
+
+    _seed_carry_pages(activation_vault)
+    lexstore.ensure_fresh(activation_vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(activation_vault).reset()
+    working_set_index.WorkingSetIndex(activation_vault).rebuild()
+    return activation_vault
+
+
+def test_a_turn_naming_no_anchor_is_served_that_notes_units(
+    carried_vault: Path, budget_free
+) -> None:
+    """The whole door, not just the compiler: freshness, readiness, the
+    lexical lane, the release plane and the guard all run, and the turn that
+    used to come back empty comes back with the research note's own units.
+    """
+    from test_working_set_carry import CARRY_PAGE, CARRY_TURN
+
+    packet = commands.op_activate_context(
+        carried_vault, turn=CARRY_TURN, include_timings=True
+    )
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert packet["generation"]["carried_by"] == "retrieval"
+    assert len(packet["anchors"]) == 1
+    assert packet["anchors"][0]["status"] == "retrieval_carried"
+    assert packet["anchors"][0]["kind"] == "page"
+    assert packet["anchors"][0]["path"] == CARRY_PAGE
+    assert packet["units"], packet
+    assert {
+        str((unit.get("provenance") or {}).get("path") or "") for unit in packet["units"]
+    } == {CARRY_PAGE}
+    assert "working_set.carry" in packet["timings"]["stages"]
+    # Lane U2 owns referents: a carried page is not a resolution to carry on.
+    assert "continuity" not in packet
+
+
+def test_a_named_anchor_still_wins_through_the_whole_door(
+    carried_vault: Path, budget_free
+) -> None:
+    """The carried page's own words are in this turn too, and are ignored:
+    resolution reached an anchor, so the carry never runs."""
+    from test_working_set_carry import CARRY_PAGE
+
+    packet = commands.op_activate_context(
+        carried_vault,
+        turn=f"{TURN} and what did we decide about the quillon vantry window?",
+    )
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert "carried_by" not in packet["generation"]
+    assert CARRY_PAGE not in {
+        str(item.get("path") or "") for item in packet["anchors"]
+    }

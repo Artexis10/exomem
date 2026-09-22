@@ -48,6 +48,23 @@ EVIDENCE_KINDS: tuple[str, ...] = (
 #: `_finalize_anchor_aliases`'s derived-short-name rarity gate needs it too,
 #: and that module has no dependency on this one.
 
+#: The shortest term that may be a LEAD to an anchor. Rarity among anchor
+#: NAMES cannot tell a genuinely short name from an everyday two-letter word
+#: that happens to appear in a title: "go" is no stopword, it names few
+#: anchors in any small catalogue, and an ordinary "so should I go with the
+#: cheaper one?" therefore reached a page titled "... Go ..." on that one word.
+#: Length is the discriminator a counting table has no way to supply. Three
+#: is the floor because real short names start there ("hob", "van", "PR");
+#: below it a shared term is coincidence, not reference.
+#:
+#: Applied only to a term written entirely in ASCII LETTERS. The reasoning
+#: above is about an alphabet where an ordinary word is several letters
+#: long; two characters is an ordinary word in CJK — a city, a company, a
+#: person — and counting code points there turns a real name into a
+#: non-name. A term that is not all-ASCII keeps whatever rarity its
+#: document count earns it.
+RARE_TERM_MIN_CHARS = 3
+
 #: `usage_prior` is a tie-break only. It never contributes to the two-kinds
 #: rule, because "you looked at this a lot" is not evidence that this turn is
 #: about it — that is how a rich-get-richer prior turns into a wrong anchor.
@@ -59,7 +76,31 @@ TIE_BREAK_KINDS: frozenset[str] = frozenset({"usage_prior"})
 #: already taken. Every other kind needs a second one.
 DECIDING_ALONE_KINDS: frozenset[str] = frozenset({"exact_alias", "agent_choice"})
 
-ANCHOR_STATUSES: tuple[str, ...] = ("resolved", "partial", "unresolved")
+#: The status of a page a packet was CARRIED on (design D3), never one this
+#: module produces. `resolve()` cannot return it and `_status_for` has no
+#: clause for it: retrieval alone still never resolves an anchor. It is the
+#: spelling a packet uses to say "no anchor was named; recall alone put this
+#: page here", and it is deliberately not `resolved`, so everything keyed on
+#: that word — `mint_continuity`'s ref list above all — declines it without
+#: needing to know this feature exists.
+RETRIEVAL_CARRIED_STATUS = "retrieval_carried"
+
+#: The status of a page a turn NAMED but that carries nothing, because the
+#: turn named another one too. Deliberately not `retrieval_carried`, which
+#: says "this page carries the packet", and deliberately not reported as
+#: `ambiguous`, which says two anchors RESOLVED and the agent must choose
+#: between senses. This is neither: nothing resolved, nothing was carried,
+#: and here are the pages the turn's own words reached, so the client can
+#: ask for one by name instead of being handed an empty packet.
+RETRIEVAL_NAMED_STATUS = "retrieval_named"
+
+ANCHOR_STATUSES: tuple[str, ...] = (
+    "resolved",
+    "partial",
+    "unresolved",
+    RETRIEVAL_CARRIED_STATUS,
+    RETRIEVAL_NAMED_STATUS,
+)
 TURN_STATUSES: tuple[str, ...] = ("resolved", "ambiguous", "unresolved")
 
 MAX_CANDIDATES = 24
@@ -275,6 +316,17 @@ def _depossessive_token(token: str) -> str:
     """
     folded = fold_possessive(token)
     return token if folded in STOPWORDS else folded
+
+
+def _clears_rare_term_length(term: str) -> bool:
+    """Is `term` long enough to be a lead?
+
+    `RARE_TERM_MIN_CHARS` code points, for an all-ASCII-letter term only.
+    Any term carrying a character outside `a-z` is exempt: the floor's whole
+    argument is about English word lengths, and a script that writes a name
+    in two characters is not the case it was reasoned about.
+    """
+    return len(term) >= RARE_TERM_MIN_CHARS or not term.isascii() or not term.isalpha()
 
 
 def _fold_lexical_term(term: str) -> str | None:
@@ -498,7 +550,11 @@ def candidates_for(
         elif len(shared_name) == 1:
             (only_shared_name_term,) = shared_name
             count = term_counts.get(only_shared_name_term)
-            if count is not None and count <= RARE_TERM_MAX_ANCHORS:
+            if (
+                _clears_rare_term_length(only_shared_name_term)
+                and count is not None
+                and count <= RARE_TERM_MAX_ANCHORS
+            ):
                 # R2: a turn term all of whose occurrences lie inside the
                 # token span of a DIFFERENT anchor's own spelled-out
                 # multi-token name is consumed and cannot be the single

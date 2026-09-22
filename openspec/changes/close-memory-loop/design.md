@@ -209,6 +209,155 @@ negatives, current policy on cached packets, model contention and forbidden
 full-corpus/CLIP acquisition. End-to-end timings include semantic evidence;
 compiler-only timing is insufficient acceptance.
 
+D3, retrieval-carried packets. Restricting lexical evidence to anchor paths is
+what makes a decision living in an ordinary research note unreachable: no note
+is an anchor, so it is not in the catalogue the query is confined to, and the
+turn abstains however plainly its own words name the page. Resolution keeps that
+restriction, and this amends decision 1 of `make-anchor-resolution-sound` with
+the only retrieval-alone case there is — one that sits outside the soundness rule
+rather than inside it, because it only ever reaches a turn that rule has already
+abstained on. When resolution reached NO anchor, a second scored recall runs over
+the compiled knowledge base with no anchor restriction and the knowledge
+base's raw-material folders (captured sources, preserved evidence) excluded,
+under its own `working_set.carry` timing span and the same request budget, and it
+is skipped outright when the lexical catalogue is anything but `available`. Dominance is a
+NAMED-CONTACT test. A hit is a candidate only when at least two of the turn's
+stems that it matches are DISTINCTIVE in this corpus — document frequency at
+or below `max(3, ceil(0.5% of the indexed knowledge-base pages))`, measured
+over the same catalogue join the ranking uses, so a frequency and a rank can
+never come from two different corpora. Counting corroboration over ALL the
+turn's stems asks whether several of its words occurred on a page, which is
+co-occurrence: a two-line stub titled "Meeting notes" whose one unit read
+"Decision pending" passed that test for an ordinary turn about a meeting and
+a pending decision, and was served as durable memory. A turn with fewer than
+two distinctive stems cannot carry anything, so the ranking query is not run
+at all.
+
+Rarity says a word is name-shaped; it cannot say the turn used it to NAME
+this page. A page qualifies on a PHRASE and on nothing else: two of its
+distinctive stems sitting within `RETRIEVAL_CARRY_RARE_WINDOW` (4) tokens of
+each other in the turn. Measured on a 235-page corpus whose prose uses every
+everyday word of the turn: "I am flying to lisbon next week and wanted to
+walk around the harbour if there is time" shares `lisbon` and `harbour` with
+a page about a harbour ledger and a lisbon freight window, both genuinely
+distinctive, and carried it at 18.51; nine tokens apart in an ordinary
+sentence they are two things the speaker mentioned.
+
+A second path was tried and removed: three distinctive stems sitting
+anywhere, on the reasoning that a turn does not land on three of one page's
+words by accident. Measured, it does — a long travel sentence naming three
+places about forty tokens apart carried a freight rota that lists all three,
+at 26.19 and alone. A page that enumerates many things contains any few of
+them, and scattering is exactly what tells a list from a name. A third rare
+stem may raise the score; it never admits.
+
+The window measures token distance WITHIN A SENTENCE, not intent. Distance
+is counted over the raw tokens, function words included, so "the lisbon
+harbour window" is a phrase and "flying to lisbon ... around the harbour" is
+not; and a full stop, exclamation mark, question mark, semicolon or line
+break ends the window however few tokens straddle it, since "flying out to
+lisbon next week. The harbour was shut" is two sentences about two things
+and measured 18.78 as a pair. A comma does not: it is punctuation inside a
+phrase rather than between two of them. One raw token may carry several
+stems ("girvan-slot", "o'brien"), and all of them sit at that token's
+position — a compound is a phrase said as tightly as a phrase can be. What survives the gate IS the set of pages the turn named,
+so the decision is a COUNT and not a comparison: exactly one named page is
+a packet, two or more abstain. An abstention that said nothing left the
+client with an empty packet and no way to know a question would help, so
+the named pages are listed in `anchors[]` at a status of their own,
+`retrieval_named`, with `kind: "page"` and `retrieval` as their only
+evidence. That is neither `retrieval_carried`, which says a page carries
+the packet, nor `ambiguity`, which says two anchors RESOLVED and the agent
+must choose a sense: nothing resolved and nothing was carried, and these
+are simply the pages the turn's own words reached. They cross the egress
+guard as ordinary anchors, so one the audience may not see is removed from
+the list. The shipped hook renders them in the menu it already shows for an
+`unresolved` turn, by an explicit branch on that status rather than by
+treating `retrieval` as a worded evidence kind. A score gap between two named pages says
+nothing about which one was meant — measured, one turn naming two pages
+scored them 19.60 against 19.16, and another differing only in wording
+scored 31.07 against 17.40 — so serving the higher would be a guess
+presented as a resolution, which is the failure this whole gate exists to
+close. The separation constant is therefore gone: it guarded a candidate
+list that contained unnamed neighbours, and that list no longer exists.
+
+Lifecycle is decided BEFORE the count. A page the author retired is never
+a candidate, because a note and the note that superseded it answer to the
+same phrase: counting both would refuse every revised page in the vault,
+and serving the loser would hand back the stale figure. Retirement is the
+tree's own inactive vocabulary (`activation._INACTIVE_STATUSES`: archived,
+dropped, superseded) plus a `superseded_by` pointing at a replacement, less
+`draft` and `planned` — both of those mean authored and not yet active,
+which is a page a turn naming it wants rather than one the vault has
+stopped standing behind. Deriving the set rather than writing it out is
+deliberate: a hand-written list was wrong in both directions, inventing two
+statuses that name nothing in this tree and missing `dropped`, so a page
+the author had dropped was carried and its unit served as current memory.
+The facts are the ones the unit lane already reads for supersession, taken
+from the request path's own cached single-page read for the rows in hand —
+no walk. The absolute score floor this
+replaced is gone: `-bm25()` is not comparable between corpora, so the same
+page for the same turn measured 13.16 with no bulk, 6.81 with 200 pages
+added (refused by a floor fitted to the first number) and was outranked by an
+unrelated filler note at 2000. One sanity bound remains — a row the ranking
+placed at zero is not a page a turn named.
+
+Rarity is only as sharp as the corpus it is measured against, and below
+`RETRIEVAL_CARRY_MIN_PAGES` (100) there is no corpus to measure against, so
+the carry does not run at all and the turn abstains exactly as it did
+before. On a thirty-page vault where "meeting" appears on one page,
+"meeting" IS rare by measurement — and so is every other ordinary English
+word, because the vault holds no ordinary prose for them to be ordinary in:
+measured, a two-line note titled "Meeting notes" whose one unit read
+"Decision pending" was carried at 12.02 for an ordinary turn about a meeting
+and a pending decision, and the same stub is refused the moment the corpus
+contains ordinary notes. The floor is on the CORPUS rather than on the turn
+deliberately: "a turn all of whose words are rare tells you nothing" would
+close the same case and would also reject a short turn made entirely of real
+names, which is the turn this feature exists to serve. Above the line the
+dominant page carries the packet: that page's units through the existing units
+lanes, one anchor entry of kind `page` at status `retrieval_carried` whose only
+evidence is `retrieval`, `generation.carried_by = "retrieval"`, and no continuity
+token, because a carried page is not a resolution to carry forward. Retrieval
+still never resolves an anchor: no evidence kind is added and no status clause
+changes. A named anchor always wins — the carry never runs when resolution
+resolved anything, when the turn is ambiguous, or when the agent named a sense —
+and a near tie is noise, so the turn abstains exactly as it did. The carried page
+crosses `guard_working_set` like any other reference; it is the packet's only
+anchor, so an audience that may not see it gets the abstention the existing
+every-anchor-withheld rule already produces, never the runner-up. Cost falls only
+on turns that would have returned an empty packet.
+
+One limit is worth stating because it is invisible from the rule: a turn
+whose content words fall outside the lexical catalogue's `[a-z0-9]`
+tokeniser — a turn written in CJK, say — yields no stems at all, so it has
+no distinctive pair and never carries. That is a property of the catalogue
+this work did not change, and it is a different thing from the `rare_term`
+length floor, which DOES cover a CJK name: that floor governs anchor
+resolution over the activation index's own terms, where such a name is
+present and reachable. The rarity pass and the
+ranking pass are two catalogue round trips, measured against the request's
+first lexical pass at zero, two hundred and two thousand added pages: 0.9x,
+1.1x and 1.9x on a quiet machine, and 2.0x, 2.3x and 1.5x for the same tip
+under load. The budget reserve is sized to the dearest of those rather than
+the typical one, because the outcomes are not symmetric — a carry that runs
+past its reserve returns `unavailable`, which renders nothing, where
+refusing returns the same empty packet honestly and sooner. Merging the two
+passes into one readiness proof and one transaction is the next lever if
+that proves dear.
+
+The reserve has an accepted consequence worth stating plainly. It asks for
+`max(1.0, 2.5 x L)` seconds where `L` is what the first lexical pass took,
+against roughly `6.0 - L` remaining of the door budget, so the carry stops
+running once `L` passes about 1.7 seconds — and the long, token-rich turns
+measured live take three to four seconds in that stage. On exactly those
+turns the carry will not run, and the turn abstains as it did before. That
+is the right trade while the stage costs what it costs: a turn that
+overshoots the door budget comes back `unavailable`, which renders nothing
+and reads as a fault, where abstaining returns the same empty packet
+honestly and half a second sooner. What lifts it is U4, the lexical-stage
+cost work; nothing in the carry can.
+
 A resolved project anchor was previously pathless AND linkless: built with no
 page and no neighbours, so a project-naming turn resolved the anchor and
 served no material at all from any role lane. At index build/update time
@@ -289,7 +438,16 @@ side. **C3**: `STOPWORDS` was missing almost every preposition and
 subordinating conjunction, so a turn sharing only one such function word
 with an anchor's title (e.g. "... before the trip" against a plan titled
 "Before Launch Review") still earned `rare_term`; the missing closed-class
-English function words were added.
+English function words were added. **A minimum term length**: `rare_term` is
+never earned on a shared name term shorter than three characters, because
+rarity among anchor names cannot tell a genuinely short name ("hob", "van")
+from an everyday two-letter word a title happens to contain — an ordinary
+"so should I go with the cheaper one?" reached a page titled "... Go ..." on
+that one word. The floor is applied only to a term written entirely in
+ASCII letters, since two characters is an ordinary-length word in CJK and
+counting code points there would turn a real name into a non-name; a short
+ASCII term carrying a digit ("v2", "b2") is exempt for the same reason, no
+ordinary English word containing one.
 
 The final guard unwraps a packet reference to its vault path before deciding
 it, rather than deciding the reference text itself. A unit's own `ref` is the

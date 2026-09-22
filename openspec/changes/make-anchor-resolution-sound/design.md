@@ -33,6 +33,41 @@ itself is one.
 threshold is a tuned float with no meaning across vaults, and the neighbourhood clause
 would still admit candidates the turn never named.
 
+*Amended by `close-memory-loop` D3, retrieval-carried packets.* Nothing above changes:
+retrieval alone still never resolves an ANCHOR, whatever it scores and however many
+retrieved kinds and qualifiers stack. The one retrieval-alone case sits outside this rule
+rather than inside it, and only reaches a turn this rule has already abstained on. When
+resolution reached no anchor at all, one scored recall runs over the compiled knowledge
+base (the raw-material folders excluded — a captured source or a preserved piece of
+evidence is never served as durable memory), and a single page that DOMINATES it may
+CARRY a packet. Dominance is a NAMED-CONTACT test, not a score threshold: a hit is a
+candidate only when at least two of the turn's stems that it matches are DISTINCTIVE in
+this corpus (document frequency at or below `max(3, ceil(0.5% of indexed pages))`,
+measured against the same catalogue the ranking uses), and two of those stems must sit
+together — within `RETRIEVAL_CARRY_RARE_WINDOW` tokens of each other and
+inside one sentence — because two distinctive words nine tokens apart, or
+either side of a full stop, are two things a speaker mentioned rather than a
+name. There is no "N stems anywhere" path: a page that enumerates many
+things contains any few of them. What survives is the set of pages the
+turn named, and a packet is carried only when there is exactly one of them:
+two named pages abstain, since the gap between their scores says nothing
+about which was meant. Superseded and archived pages are excluded before
+that count, because a page and the page it superseded answer to one phrase. Rarity needs a
+corpus: below `RETRIEVAL_CARRY_MIN_PAGES` the carry does not run at all,
+because in a vault holding no ordinary prose every ordinary word is rare by
+measurement. An absolute score floor was
+tried first and removed: `-bm25()` is not comparable between corpora, so the same page
+for the same turn scored 13.16 at one corpus size and 6.81 at another, and a two-line
+stub sharing three ordinary words with a long turn outscored the page the turn was
+actually about. Rarity is corpus-relative, so it does not drift as the vault grows; that page's units are served under one anchor entry of
+kind `page` at status `retrieval_carried`, marked `generation.carried_by = "retrieval"`,
+and no continuity token is minted from it. It never runs when any anchor resolved, when the
+turn is ambiguous, or when the agent named a sense; a near tie takes the abstention the
+turn already had. The rejected alternative stands as written — a score is still no way to
+RESOLVE an anchor, and this is not one: it decides whether a turn that resolved nothing is
+served a named page's own material or nothing at all, which is a choice between serving and
+abstaining rather than between two senses.
+
 ### 2. `retrieval` is about the anchor's own page
 The neighbourhood clause is removed. It was written so that a hub whose members are
 recall hits would be reached; on a dense vault it reaches every hub for every turn. A hub
