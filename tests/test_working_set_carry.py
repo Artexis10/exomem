@@ -1885,3 +1885,187 @@ def test_the_fetch_window_covers_the_navigation_filter(
     assert removed == window - 2
     assert sum(1 for i in range(window - 2) if _is_navigation(removed_rows[i % 6])) >= 4
     assert working_set.dominant_carry(hits) is None
+
+
+# --------------------------------------------------------------------------- #
+# U4 — bounding `lexical_evidence`'s corroboration term count on a long turn
+# --------------------------------------------------------------------------- #
+#
+# `lexical_evidence`'s corroboration filter (`min_matched_terms=2`) re-scans
+# each CANDIDATE anchor's full stemmed text once per counted stem, with no
+# index behind that scan (`instr()` over raw text) — cost is
+# `O(candidate anchors * counted stems)`, unbounded in how many content words
+# the turn used. A turn wrapping two distinctive product names in a dozen
+# words of ordinary sentence filler paid for every one of those filler words
+# too, though they were never what made a page match.
+
+#: Prose long enough, and repeated across enough anchor pages, that its own
+#: words are genuinely COMMON in this fixture's corpus — the shape that lets
+#: an ordinary-language turn's OR match reach nearly the whole anchor
+#: catalogue, and that makes an uncapped per-candidate corroboration scan
+#: grow with every one of those ordinary words.
+_LEXICAL_COMMON_PROSE = (
+    "This entity's record is reviewed on a regular cadence. The team tracks "
+    "its status, discusses open questions in the weekly meeting, and follows "
+    "up on any pending decision before the next planning call. Nothing about "
+    "the process, the schedule or the owner has changed since the last "
+    "summary, and the timeline remains on track for this project."
+)
+
+#: A turn shaped like the live regression this bound closes: ordinary
+#: sentence filler — words `_LEXICAL_COMMON_PROSE` puts on nearly every
+#: anchor page — wrapped around two distinctive, rare product-style names
+#: being compared. Invented, generic vocabulary throughout.
+_LEXICAL_LONG_TURN = (
+    "Should I still go with the quenlow vantix for this project, given the "
+    "schedule, the owner, the timeline and the pending decision, or "
+    "reconsider the harrow delkin instead"
+)
+#: The turn's own two rare, distinctive product names — the only route to
+#: their pages, and the words a bound must never drop.
+_LEXICAL_RARE_STEMS = frozenset({"quenlow", "vantix", "harrow", "delkin"})
+
+
+def _seed_lexical_cost_vault(vault: Path, *, anchors: int = 60) -> None:
+    """Many anchor ENTITY pages sharing one ordinary paragraph, plus two
+    entities each carrying one genuinely rare, distinctive name."""
+    kb = vault / "Knowledge Base" / "Entities"
+    for index in range(anchors):
+        _write(
+            kb / f"generic-entity-{index:04d}.md",
+            "---\ntype: entity\nstatus: active\nupdated: 2026-09-01\n---\n\n"
+            f"# Generic entity {index:04d}\n\n## Summary\n\n"
+            f"- [note] {_LEXICAL_COMMON_PROSE} ^e-{index}\n",
+        )
+    _write(
+        kb / "quenlow-vantix.md",
+        "---\ntype: entity\nstatus: active\nupdated: 2026-09-01\n---\n\n"
+        "# Quenlow Vantix\n\n## Summary\n\n"
+        f"- [note] {_LEXICAL_COMMON_PROSE} ^r-1\n",
+    )
+    _write(
+        kb / "harrow-delkin.md",
+        "---\ntype: entity\nstatus: active\nupdated: 2026-09-01\n---\n\n"
+        "# Harrow Delkin\n\n## Summary\n\n"
+        f"- [note] {_LEXICAL_COMMON_PROSE} ^r-2\n",
+    )
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+
+
+@pytest.fixture
+def lexical_cost_vault(vault: Path) -> Path:
+    _seed_lexical_cost_vault(vault)
+    return vault
+
+
+def _capture_corroboration_tokens(monkeypatch: pytest.MonkeyPatch) -> list:
+    """Records the `corroboration_tokens` each `search_bm25_result` call
+    receives, while still running the real query underneath it."""
+    captured: list = []
+    real = lexstore.search_bm25_result
+
+    def capturing(*args, **kwargs):
+        captured.append(kwargs.get("corroboration_tokens"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(lexstore, "search_bm25_result", capturing)
+    return captured
+
+
+def test_a_long_turn_bounds_its_corroboration_term_count(
+    lexical_cost_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn with a dozen-plus content words must not make the corroboration
+    filter count every one of them: its cost is per candidate anchor times
+    counted terms, and the candidate set here is the whole catalogue."""
+    captured = _capture_corroboration_tokens(monkeypatch)
+    rows = working_set_index.WorkingSetIndex(lexical_cost_vault).anchors()
+
+    working_set_runtime.lexical_evidence(
+        lexical_cost_vault, _LEXICAL_LONG_TURN, rows, limit=8,
+    )
+
+    assert captured, "the ranking query never ran"
+    tokens = captured[0]
+    assert tokens is not None, "the corroboration count was never bounded"
+    assert len(tokens) < len(working_set_runtime.content_stems(_LEXICAL_LONG_TURN))
+    assert len(tokens) <= working_set_runtime._LEXICAL_CORROBORATION_CAP
+
+
+def test_the_bound_never_drops_a_rare_stem(
+    lexical_cost_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The turn's two product names are the only route to their pages; a
+    bound that dropped either would break exactly what corroboration exists
+    to protect — recall soundness over raw cost."""
+    captured = _capture_corroboration_tokens(monkeypatch)
+    rows = working_set_index.WorkingSetIndex(lexical_cost_vault).anchors()
+
+    working_set_runtime.lexical_evidence(
+        lexical_cost_vault, _LEXICAL_LONG_TURN, rows, limit=8,
+    )
+
+    tokens = set(captured[0] or ())
+    assert _LEXICAL_RARE_STEMS <= tokens, (_LEXICAL_RARE_STEMS, tokens)
+
+
+def test_a_turn_naming_only_a_rare_product_is_still_ranked_first(
+    lexical_cost_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Functional check, not just structural: the bound must not change what
+    a turn naming a product together with several of the ordinary words
+    every anchor shares actually resolves to.
+
+    The turn names TWO products in the same way, so which of the two ranks
+    first is a tie the bound has no business deciding. What the bound must
+    preserve is the ranking itself: both named pages above every generic
+    one, in exactly the order the unbounded query gives."""
+    rows = working_set_index.WorkingSetIndex(lexical_cost_vault).anchors()
+
+    hits, status = working_set_runtime.lexical_evidence(
+        lexical_cost_vault, _LEXICAL_LONG_TURN, rows, limit=8,
+    )
+
+    assert status == "available"
+    assert hits, "the turn's own two named products were never ranked"
+    assert {hit.path for hit in hits[:2]} == {
+        "Knowledge Base/Entities/quenlow-vantix.md",
+        "Knowledge Base/Entities/harrow-delkin.md",
+    }
+
+    monkeypatch.setattr(
+        working_set_runtime, "_bounded_corroboration_terms", lambda *a, **k: None
+    )
+    unbounded, unbounded_status = working_set_runtime.lexical_evidence(
+        lexical_cost_vault, _LEXICAL_LONG_TURN, rows, limit=8,
+    )
+    assert unbounded_status == "available"
+    assert [hit.path for hit in hits] == [hit.path for hit in unbounded]
+
+
+def test_a_short_turn_pays_for_no_rarity_lookup(
+    lexical_cost_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn small enough that the corroboration filter's own cost was
+    never the problem pays nothing extra for the bound: no document-
+    frequency round trip, and the filter still counts every one of its
+    (few) stems, exactly as it always has."""
+    calls: list[str] = []
+    real = lexstore.term_document_frequencies
+
+    def counting(*args, **kwargs):
+        calls.append("df")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(lexstore, "term_document_frequencies", counting)
+    captured = _capture_corroboration_tokens(monkeypatch)
+    rows = working_set_index.WorkingSetIndex(lexical_cost_vault).anchors()
+
+    working_set_runtime.lexical_evidence(
+        lexical_cost_vault, "what about the quenlow vantix", rows, limit=8,
+    )
+
+    assert calls == [], "a short turn paid for a rarity lookup it never needed"
+    assert captured == [None], captured
