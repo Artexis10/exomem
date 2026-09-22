@@ -405,11 +405,11 @@ catalogue already refuses to build an anchor from — SHALL NOT be candidates. T
 under its own timing span and SHALL be skipped when that deadline can no longer
 afford a stage.
 
-A page SHALL be carried only when it exceeds the next surviving candidate by a
-declared separation factor; a single surviving candidate SHALL count as
-dominant, because every survivor already carries two distinctive stems. A
-candidate the ranking scored at zero SHALL NOT be carried. Any other outcome
-SHALL abstain `unresolved` exactly as before.
+Superseded and archived pages SHALL NOT be candidates, and lifecycle SHALL be
+decided before candidates are counted. A page SHALL be carried only when it is
+the ONLY surviving candidate; where two or more survive, the turn SHALL abstain
+`unresolved` and SHALL NOT select between them by ranking score. A candidate
+the ranking scored at or below a declared sanity bound SHALL NOT be carried.
 
 A carried packet SHALL report that page as its one anchor entry, of kind `page`,
 at status `retrieval_carried`, with `retrieval` as its only evidence, and SHALL
@@ -452,12 +452,20 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
 - **AND** the same page IS a candidate for a turn that shares two distinctive
   stems with it, at any corpus size
 
-#### Scenario: Two close candidates are noise, not a choice
+#### Scenario: A turn that names two pages carries neither
 
-- **WHEN** a turn that resolves no anchor reaches two compiled pages whose
-  scores lie inside the declared separation band
+- **WHEN** a turn that resolves no anchor names two compiled pages, at any
+  ranking scores whatever
 - **THEN** the packet abstains `unresolved` with no units, exactly as it did
   before the carry existed
+- **AND** the higher-scoring page is not served in preference to the other
+
+#### Scenario: A superseded page does not block the page that replaced it
+
+- **WHEN** a turn names a page whose predecessor it superseded, and both
+  answer to the same distinctive words
+- **THEN** only the current page is a candidate and it is carried
+- **AND** an archived page is likewise never carried
 
 #### Scenario: A named anchor and raw material are both refused as carriers
 

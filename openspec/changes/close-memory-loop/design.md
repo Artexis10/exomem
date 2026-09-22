@@ -245,9 +245,23 @@ of the turn: "I am flying to lisbon next week and wanted to walk around the
 harbour if there is time" shares `lisbon` and `harbour` with a page about a
 harbour ledger and a lisbon freight window, both genuinely distinctive, and
 carried it at 18.51; nine tokens apart in an ordinary sentence they are two
-things the speaker mentioned. The surviving hit must then stand `RETRIEVAL_CARRY_SEPARATION` (1.5)
-times clear of the runner-up, and a lone survivor is dominant because it
-already carries the two distinctive stems. The absolute score floor this
+things the speaker mentioned. What survives the gate IS the set of pages the turn named,
+so the decision is a COUNT and not a comparison: exactly one named page is
+a packet, two or more abstain. A score gap between two named pages says
+nothing about which one was meant — measured, one turn naming two pages
+scored them 19.60 against 19.16, and another differing only in wording
+scored 31.07 against 17.40 — so serving the higher would be a guess
+presented as a resolution, which is the failure this whole gate exists to
+close. The separation constant is therefore gone: it guarded a candidate
+list that contained unnamed neighbours, and that list no longer exists.
+
+Lifecycle is decided BEFORE the count. A superseded or archived page is
+never a candidate, because a note and the note that superseded it answer to
+the same phrase: counting both would refuse every revised page in the
+vault, and serving the loser would hand back the stale figure. The facts
+are the ones the unit lane already reads for supersession, taken from the
+request path's own cached single-page read for at most five rows — no
+walk. The absolute score floor this
 replaced is gone: `-bm25()` is not comparable between corpora, so the same
 page for the same turn measured 13.16 with no bulk, 6.81 with 200 pages
 added (refused by a floor fitted to the first number) and was outranked by an

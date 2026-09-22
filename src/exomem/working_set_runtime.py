@@ -691,13 +691,17 @@ def carry_candidates(
     rarity measured against a vault that holds no ordinary prose says only
     that the vault is small.
 
+    What comes back IS the set of pages this turn named, which is why the
+    caller can decide on the COUNT rather than on a score. Raw-material
+    hits and retired pages are dropped before the caller ever sees them: a
+    captured source or a preserved piece of evidence is not a candidate,
+    and a superseded note answers to the same phrase as the note that
+    superseded it, so leaving it in would read as two named pages.
+
     Everything else is the existing bounded contract: the maintained
     catalogue only, no foreground delta (`allow_delta=False`), no corpus
     walk, no directory enumeration, and an incomplete catalogue reported
-    rather than repaired. Raw-material hits are dropped before the caller
-    ever sees them: a captured source or a preserved piece of evidence is not
-    a candidate, so it neither gets served nor takes part in the dominance
-    comparison.
+    rather than repaired.
     """
     from . import lexstore
 
@@ -744,11 +748,17 @@ def carry_candidates(
         )
         if not result.readiness.complete:
             return (), result.readiness.status
+        # Raw material and retired pages are dropped BEFORE the caller
+        # counts what the turn named. A superseded note and the note that
+        # superseded it answer to the same phrase, so leaving it in would
+        # read as two named pages and refuse every revised page in the
+        # vault.
         return (
             tuple(
                 (str(path), float(score))
                 for path, score in (result.value or ())
                 if not _is_raw_material(path)
+                and working_set._is_current_page(vault_root, str(path))
             ),
             "available",
         )

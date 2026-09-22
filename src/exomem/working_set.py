@@ -53,14 +53,17 @@ GRAPH_MAX_NODES = 24
 GRAPH_MAX_EDGES = 40
 GRAPH_TRAVERSAL_PROFILE = "epistemic"
 
-#: How far ahead of the runner-up the top recall hit must be before a packet
-#: is carried on its strength alone (design D3). A near tie is not a weaker
-#: answer, it is NOISE: two pages within a factor of this of each other say
-#: the turn's words are spread across the corpus, and the honest reply to
-#: that is the abstention the turn already had. 1.5 is chosen as a
-#: separation a genuine single-topic match clears comfortably on the BM25
-#: scale while two pages sharing a vocabulary do not.
-RETRIEVAL_CARRY_SEPARATION = 1.5
+#: There is deliberately no separation constant. One existed — the top hit
+#: had to stand 1.5x clear of the runner-up — from when the candidate list
+#: was everything recall returned and the gap was the only thing telling a
+#: match from its neighbours. The naming gate now decides membership, so
+#: every row that survives it is a page the turn NAMED, and a gap between
+#: two named pages says nothing about which one was meant: measured, one
+#: turn naming two pages scored them 19.60 against 19.16, and another
+#: differing only in wording scored 31.07 against 17.40. A packet is
+#: carried when exactly one page is named; two named pages abstain, and the
+#: client can ask which.
+#:
 #: The only absolute score the carry consults, and it is a sanity bound
 #: rather than a threshold: the catalogue really does return rows scoring
 #: 0.0 at corpus scale, and a row the ranking placed at nothing is not a
@@ -931,6 +934,42 @@ def signature_evidence(index: working_set_index.WorkingSetIndex, turn: str):
 # --------------------------------------------------------------------------- #
 
 
+def _is_current_page(vault_root: Path, rel_path: str) -> bool:
+    """Is `rel_path` a page the vault still stands behind?
+
+    A page the author retired — `status` anything but active, or a
+    `superseded_by` pointing at its replacement — is not a page to answer a
+    turn from, and the replacement is named by the SAME words: "the girvan
+    slot window" names both the current note and the one it superseded.
+    Counting them as two named pages would refuse every revised page in the
+    vault, and serving the loser would hand back the stale figure, which is
+    the worse of the two.
+
+    Reads the same facts the unit lane already reads for supersession, from
+    `find_corpus.CACHE` — the request path's own cached single-page read, no
+    walk, and at most `RETRIEVAL_CARRY_LIMIT` of them. A page that cannot be
+    read is not proven current, so it is not a candidate.
+    """
+    text = str(rel_path or "")
+    if not text.endswith(".md"):
+        return False
+    try:
+        from . import find_corpus
+
+        root = Path(vault_root)
+        page = find_corpus.CACHE.get(root / text, root)
+    except Exception:  # noqa: BLE001 - an unreadable page is simply not a candidate
+        log.debug("activation carry lifecycle read failed for %s", text, exc_info=True)
+        return False
+    if page is None:
+        return False
+    if getattr(page, "superseded_by", None):
+        return False
+    frontmatter = page.frontmatter if isinstance(page.frontmatter, Mapping) else {}
+    status = working_set_index.normalize(frontmatter.get("status") or "active")
+    return status == "active"
+
+
 def rare_document_cap(corpus_pages: int) -> int:
     """The document frequency at or below which a stem counts as DISTINCTIVE
     in a corpus of `corpus_pages` indexed pages.
@@ -944,28 +983,27 @@ def rare_document_cap(corpus_pages: int) -> int:
 
 
 def dominant_carry(hits: Sequence[tuple[str, float]]) -> tuple[str, float] | None:
-    """The one clearly dominant hit among `hits`, or `None`.
+    """The one page `hits` says the turn named, or `None`.
 
-    `hits` has already passed the rarity gate, so every entry shares at least
-    `RETRIEVAL_CARRY_MIN_RARE_TERMS` DISTINCTIVE stems with the turn — the
-    "did this turn name this page" question is answered before this function
-    is reached, and answering it is what makes a score usable at all.
+    Every entry has already passed the naming gate — a distinctive phrase,
+    or three distinctive stems — and been filtered to pages that are current
+    and not raw material. So `hits` IS the set of pages this turn named, and
+    the question here is only how many there are.
 
-    What is left is a comparison between two hits drawn from the one corpus:
-    the top must stand `RETRIEVAL_CARRY_SEPARATION` times clear of the next,
-    or the turn's distinctive words are spread over the corpus and choosing
-    between two close pages is exactly the guess the compiler exists not to
-    make. A lone survivor IS dominant — it already carries the two
-    distinctive stems, and there is no second page to be confused with.
+    Exactly one is a packet. Two or more is a turn that named two things,
+    and choosing between them is the guess the compiler exists not to make:
+    the score gap carries no information about which was meant, since two
+    equally-named pages measured 19.60 against 19.16 on one turn and 31.07
+    against 17.40 on another differing only in wording. The turn abstains
+    and the client, which can see it abstained, is free to ask.
+
     `RETRIEVAL_CARRY_MIN_SCORE` is the one absolute left, and it only
     refuses a row the ranking placed at nothing.
     """
-    if not hits:
+    if len(hits) != 1:
         return None
     path, score = hits[0]
     if score <= RETRIEVAL_CARRY_MIN_SCORE:
-        return None
-    if len(hits) > 1 and score < RETRIEVAL_CARRY_SEPARATION * hits[1][1]:
         return None
     return str(path), float(score)
 

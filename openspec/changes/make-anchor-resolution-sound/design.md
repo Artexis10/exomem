@@ -46,8 +46,11 @@ this corpus (document frequency at or below `max(3, ceil(0.5% of indexed pages))
 measured against the same catalogue the ranking uses), and those stems must sit
 together — two within `RETRIEVAL_CARRY_RARE_WINDOW` tokens of each other, or
 three anywhere in the turn — because two distinctive words nine tokens apart
-are two things a speaker mentioned rather than a name. The survivor must then
-stand `RETRIEVAL_CARRY_SEPARATION` times clear of the runner-up. Rarity needs a
+are two things a speaker mentioned rather than a name. What survives is the set of pages the
+turn named, and a packet is carried only when there is exactly one of them:
+two named pages abstain, since the gap between their scores says nothing
+about which was meant. Superseded and archived pages are excluded before
+that count, because a page and the page it superseded answer to one phrase. Rarity needs a
 corpus: below `RETRIEVAL_CARRY_MIN_PAGES` the carry does not run at all,
 because in a vault holding no ordinary prose every ordinary word is rare by
 measurement. An absolute score floor was

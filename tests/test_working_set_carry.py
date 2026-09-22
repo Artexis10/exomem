@@ -654,6 +654,160 @@ def test_a_turn_with_nothing_distinctive_runs_no_second_query(
     assert calls == [], "the ranking query ran for a turn that could not carry"
 
 
+def _seed_named_pages_corpus(vault: Path) -> None:
+    """Ordinary prose, two separately-named pages, and a page whose
+    predecessor it superseded."""
+    _seed_structure(vault)
+    _seed_planning(vault)
+    kb = vault / "Knowledge Base"
+    _write(
+        kb / "Notes" / "Research" / "kelvane-throughput.md",
+        """---
+type: research-note
+status: active
+updated: 2026-09-10
+---
+
+# Kelvane throughput
+
+## Summary
+
+- [decision] The kelvane throughput ceiling was raised to eleven units after
+  the review found the old ceiling idle. ^k-1
+""",
+    )
+    _write(
+        kb / "Notes" / "Research" / "murran-dispatch.md",
+        """---
+type: research-note
+status: active
+updated: 2026-09-11
+---
+
+# Murran dispatch
+
+## Summary
+
+- [decision] The murran dispatch lane was split in two so the second lane
+  could drain independently. ^m-1
+""",
+    )
+    _write(
+        kb / "Notes" / "Research" / "girvan-slot-window.md",
+        """---
+type: research-note
+status: active
+updated: 2026-09-12
+supersedes: [Knowledge Base/Notes/Research/girvan-slot-window-2025.md]
+---
+
+# Girvan slot window
+
+## Summary
+
+- [decision] The girvan slot window is nine minutes, revised from the earlier
+  figure after the queue starved twice. ^g-now
+""",
+    )
+    _write(
+        kb / "Notes" / "Research" / "girvan-slot-window-2025.md",
+        """---
+type: research-note
+status: superseded
+updated: 2025-11-02
+superseded_by: [Knowledge Base/Notes/Research/girvan-slot-window.md]
+---
+
+# Girvan slot window (2025)
+
+## Summary
+
+- [decision] The girvan slot window is four minutes. ^g-old
+""",
+    )
+    seed_ordinary_notes(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+
+
+def test_a_turn_naming_two_separate_pages_carries_neither(vault: Path) -> None:
+    """The reviewer's B2. Both pages are named — each by its own distinctive
+    phrase — and the ranking happened to spread them 31.07 against 17.40.
+
+    A score gap between two NAMED pages says nothing about which one the
+    turn meant; the same shape measured 19.60 against 19.16 on a turn
+    differing only in wording. Serving the higher one is the round-1 failure
+    in a new coat: a guess presented as a resolution.
+    """
+    _seed_named_pages_corpus(vault)
+
+    turn = (
+        "I am trying to remember whether the kelvane throughput ceiling change "
+        "and the murran dispatch lane split were decided in the same month"
+    )
+    hits, state = working_set_runtime.carry_candidates(vault, turn)
+
+    assert state == "available"
+    assert len(hits) == 2, hits
+    assert working_set.dominant_carry(hits) is None
+
+    packet = working_set.compile_packet(vault, turn=turn, max_chars=4000)
+    assert packet["abstained"] is True
+    assert packet["abstention"] == {"reason": "unresolved"}
+
+
+def test_a_superseded_predecessor_does_not_block_its_successor(vault: Path) -> None:
+    """The prerequisite. A note and the note that superseded it are named by
+    the SAME phrase, so counting named pages would refuse every revised page
+    in the vault — and the one thing the client must not be handed is the
+    stale figure. Lifecycle is decided before the count.
+    """
+    _seed_named_pages_corpus(vault)
+
+    current = "Knowledge Base/Notes/Research/girvan-slot-window.md"
+    superseded = "Knowledge Base/Notes/Research/girvan-slot-window-2025.md"
+    assert working_set._is_current_page(vault, current) is True
+    assert working_set._is_current_page(vault, superseded) is False
+
+    turn = "what did we decide about the girvan slot window"
+    hits, state = working_set_runtime.carry_candidates(vault, turn)
+
+    assert state == "available"
+    assert [path for path, _score in hits] == [current], hits
+    dominant = working_set.dominant_carry(hits)
+    assert dominant is not None and dominant[0] == current
+
+
+def test_an_archived_page_is_never_carried(vault: Path) -> None:
+    """Same rule, the other lifecycle that retires a page."""
+    _seed_named_pages_corpus(vault)
+    _write(
+        vault / "Knowledge Base" / "Notes" / "Research" / "girvan-slot-window.md",
+        """---
+type: research-note
+status: archived
+updated: 2026-09-12
+---
+
+# Girvan slot window
+
+## Summary
+
+- [decision] The girvan slot window is nine minutes. ^g-now
+""",
+    )
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+
+    hits, state = working_set_runtime.carry_candidates(
+        vault, "what did we decide about the girvan slot window"
+    )
+
+    assert state == "available"
+    assert hits == (), hits
+
+
 # --------------------------------------------------------------------------- #
 # The dominance rule, as pure logic
 # --------------------------------------------------------------------------- #
@@ -687,16 +841,18 @@ def test_a_hit_scoring_essentially_nothing_is_never_dominant() -> None:
     assert working_set.dominant_carry((("a.md", 6.3),)) == ("a.md", 6.3)
 
 
-def test_a_hit_inside_the_separation_band_is_not_dominant() -> None:
-    second = 10.0
-    top = second * working_set.RETRIEVAL_CARRY_SEPARATION - 0.1
-    assert working_set.dominant_carry((("a.md", top), ("b.md", second))) is None
+def test_two_named_rows_carry_nothing_however_far_apart_they_score() -> None:
+    """Every row that reaches this function passed the naming test, so two
+    rows means the turn named two pages — and choosing between them on a
+    score is the guess the compiler exists not to make, whatever the gap.
 
-
-def test_a_hit_clear_of_the_separation_band_is_dominant() -> None:
-    second = 10.0
-    top = second * working_set.RETRIEVAL_CARRY_SEPARATION + 0.1
-    assert working_set.dominant_carry((("a.md", top), ("b.md", second))) == ("a.md", top)
+    The score gap is not evidence about which page the turn meant: measured,
+    one turn naming two pages equally scored them 19.60 against 19.16, and
+    another, differing only in wording, scored 31.07 against 17.40.
+    """
+    assert working_set.dominant_carry((("a.md", 11.0), ("b.md", 10.0))) is None
+    assert working_set.dominant_carry((("a.md", 31.07), ("b.md", 17.40))) is None
+    assert working_set.dominant_carry((("a.md", 99.0), ("b.md", 2.0))) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -779,10 +935,11 @@ def test_an_ordinary_packet_is_not_marked_as_carried(carry_vault: Path, budget_f
     assert "retrieval_carried" not in _anchor_statuses(packet)
 
 
-def test_two_hits_inside_the_separation_band_carry_nothing(
+def test_a_turn_that_names_two_pages_carries_neither(
     carry_vault: Path, budget_free
 ) -> None:
-    """A near tie is noise. The turn abstains exactly as it did before."""
+    """Two near-twin notes, both named by the same turn. The turn abstains
+    and the client can ask which one it meant."""
     hits, _state = working_set_runtime.carry_candidates(carry_vault, TIE_TURN)
     assert len(hits) >= 2, hits
 
