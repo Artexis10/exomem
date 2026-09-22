@@ -683,3 +683,18 @@ def test_a_carried_page_with_no_readable_units_abstains(
     assert packet["units"] == []
     assert packet["anchors"] == []
     assert "carried_by" not in packet["generation"]
+
+
+def test_a_carried_page_serves_each_of_its_units_once(
+    carry_vault: Path, budget_free
+) -> None:
+    """The carry selects every `units` role, so overlapping categories read
+    one page's units several times over. Measured before the fix: five units
+    served, three distinct refs, and the hook printed the same sentence
+    twice."""
+    packet = working_set.compile_packet(carry_vault, turn=CARRY_TURN, max_chars=4000)
+
+    assert packet["generation"]["carried_by"] == "retrieval"
+    refs = [unit["ref"] for unit in packet["units"]]
+    assert refs, packet
+    assert len(refs) == len(set(refs)), refs

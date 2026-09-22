@@ -815,3 +815,56 @@ def test_an_exact_limit_read_does_not_claim_truncation(monkeypatch: pytest.Monke
     )
     assert result.truncated is False
     assert len(result.items) == working_set.UNIT_LANE_LIMIT
+
+
+# --------------------------------------------------------------------------- #
+# One unit, once (correction round 1, C4)
+# --------------------------------------------------------------------------- #
+
+
+def test_a_unit_two_roles_both_selected_is_served_once() -> None:
+    """Role categories overlap by design — `recent_change` and `precedents`
+    both select `decision`, `resources` and `baseline` both select `fact` —
+    so two selected roles routinely read the SAME unit off the same page.
+
+    Served twice it is the same sentence printed twice in the agent's
+    context and charged twice against the character budget, which is the one
+    thing the packet promises not to do. The first role to reach it keeps
+    it: roles are in registry priority order, so that is the most specific
+    lens that asked for it.
+    """
+    shared = "exomem://vault/Knowledge%20Base/Notes/p.md#unit-shared"
+    packet = working_set.build_packet(
+        items=(
+            _item("recent_change", ref=shared, text="One decision, read twice."),
+            _item("precedents", ref=shared, text="One decision, read twice."),
+            _item("precedents", ref="other", text="A different unit entirely."),
+        ),
+        anchors=(
+            {
+                "ref": "a",
+                "title": "A",
+                "kind": "hub",
+                "status": "resolved",
+                "evidence": ["exact_alias"],
+            },
+        ),
+        roles=(
+            {"id": "recent_change", "source": "anchor_default", "lane": "units"},
+            {"id": "precedents", "source": "anchor_default", "lane": "units"},
+        ),
+        current_state=(),
+        ambiguity=(),
+        missing=(),
+        max_chars=4000,
+        generation=_generation(),
+        status="resolved",
+    )
+
+    refs = [unit["ref"] for unit in packet["units"]]
+    assert refs == [shared, "other"], refs
+    assert [unit["role"] for unit in packet["units"]] == ["recent_change", "precedents"]
+    # The duplicate is gone, not deferred: a pointer to it would be the same
+    # ref a second time under a different name.
+    assert [pointer["ref"] for pointer in packet["pointers"]] == []
+    assert packet["budget"]["used_chars"] == sum(len(unit["text"]) for unit in packet["units"])

@@ -198,6 +198,24 @@ def _role_order(roles: Sequence[Mapping[str, Any]]) -> dict[str, int]:
     return {str(role.get("id")): index for index, role in enumerate(roles)}
 
 
+def _deduplicated(ordered: Sequence[LaneItem]) -> tuple[LaneItem, ...]:
+    """One item per `ref`, keeping the first in the order given.
+
+    An empty ref is not an identity, so those are all kept: two lanes with
+    nothing to name themselves by are not evidently the same material.
+    """
+    seen: set[str] = set()
+    out: list[LaneItem] = []
+    for item in ordered:
+        ref = str(item.ref or "")
+        if ref:
+            if ref in seen:
+                continue
+            seen.add(ref)
+        out.append(item)
+    return tuple(out)
+
+
 def build_packet(
     *,
     items: Sequence[LaneItem],
@@ -224,7 +242,20 @@ def build_packet(
             item.ref,
         )
 
-    ordered = sorted(items, key=_sort_key)
+    # One unit, once. Role categories overlap by design — `recent_change`
+    # and `precedents` both select `decision`, `resources` and `baseline`
+    # both select `fact` — so two selected roles routinely read the SAME
+    # unit off the same page, and a retrieval-carried packet, which selects
+    # every units role, reads a page's units several times over. Served
+    # twice it is one sentence printed twice in the agent's context and
+    # charged twice against the character budget.
+    #
+    # Deduped HERE rather than in either lane, so every packet benefits and
+    # no future lane has to remember. After `_sort_key`, so the winner is
+    # the first role in registry priority order that reached it — the most
+    # specific lens that asked. A `level`-less or ref-less item is left
+    # alone: its identity is not its ref.
+    ordered = _deduplicated(sorted(items, key=_sort_key))
     units: list[dict[str, Any]] = []
     deferred: list[tuple[LaneItem, str]] = []
     per_role: dict[str, int] = {}
