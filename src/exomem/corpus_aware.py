@@ -782,10 +782,10 @@ def _best_cosine_per_file(
                 if rel is not None
             }
             best_per_file: dict[str, float] = {}
-            for v in vecs:
-                for fp, _cidx, _ctext, score in idx.search(
-                    v, k=k, allowed_paths=allowed_paths
-                ):
+            # Every chunk in one pass over the matrix: a `search` per chunk
+            # re-read the whole matrix and hydrated chunk text this discards.
+            for hits in idx.search_many(vecs, k, allowed_paths=allowed_paths):
+                for fp, _cidx, score in hits:
                     if fp not in best_per_file or score > best_per_file[fp]:
                         best_per_file[fp] = score
             return best_per_file
@@ -913,10 +913,10 @@ def best_cosine_per_file_for_vectors(
             }
             self_canon = _canon(self_path) if self_path else None
             best_per_file: dict[str, float] = {}
-            for v in rows:
-                for fp, _cidx, _ctext, score in idx.search(
-                    v, k=k, allowed_paths=allowed_paths
-                ):
+            # The same one-pass scoring as the inline sweep, so a deferred
+            # advisory ranks exactly what the synchronous one would have.
+            for hits in idx.search_many(rows, k, allowed_paths=allowed_paths):
+                for fp, _cidx, score in hits:
                     if self_canon and _canon(fp) == self_canon:
                         continue
                     if fp not in best_per_file or score > best_per_file[fp]:

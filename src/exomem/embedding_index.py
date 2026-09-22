@@ -222,6 +222,35 @@ class SemanticUnitVectorRow(NamedTuple):
 SEMANTIC_UNIT_READ_BATCH = 2_000
 
 
+def _top_rows(
+    scores: np.ndarray, mask: np.ndarray | None, k_eff: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """The top `k_eff` eligible rows of one query's `scores`, best first.
+
+    Returns `(row_indices, masked_scores)`. `k_eff` must already be clamped to
+    the eligible row count (see `search`), so `argpartition` cannot reach a
+    masked row through `-inf` padding.
+    """
+    if mask is not None:
+        scores = np.where(mask, scores, -np.inf)
+    # argpartition is O(N), then sort the top-k slice.
+    top_idx = np.argpartition(-scores, k_eff - 1)[:k_eff]
+    if mask is not None and not bool(mask[top_idx].all()):
+        # An ineligible row won a slot, which masking alone cannot prevent:
+        # `-(-inf)` is `+inf`, and numpy orders NaN ABOVE `+inf`, so when the
+        # query embeds to NaN (a zero-norm or broken vector) every eligible
+        # score is NaN and the masked rows partition first. Reachable only
+        # with non-finite scores, but eligibility is a governance boundary
+        # rather than a ranking preference, so it must not depend on
+        # arithmetic holding. Fall back to selecting among the eligible rows
+        # only — the pre-#951 computation exactly, on the rows it would have
+        # had — which restores both the row and its true score.
+        eligible_idx = np.flatnonzero(mask)
+        sub = scores[eligible_idx]
+        top_idx = eligible_idx[np.argpartition(-sub, k_eff - 1)[:k_eff]]
+    return top_idx[np.argsort(-scores[top_idx])], scores
+
+
 class EmbeddingIndex:
     """Per-vault sqlite sidecar holding chunk-level vectors.
 
@@ -939,24 +968,7 @@ class EmbeddingIndex:
             return []
         # query_vec is (768,) normalized; matrix is (N, 768) normalized.
         scores = matrix @ query_vec.astype(np.float32, copy=False)
-        if mask is not None:
-            scores = np.where(mask, scores, -np.inf)
-        # argpartition is O(N), then sort the top-k slice.
-        top_idx = np.argpartition(-scores, k_eff - 1)[:k_eff]
-        if mask is not None and not bool(mask[top_idx].all()):
-            # An ineligible row won a slot, which masking alone cannot prevent:
-            # `-(-inf)` is `+inf`, and numpy orders NaN ABOVE `+inf`, so when the
-            # query embeds to NaN (a zero-norm or broken vector) every eligible
-            # score is NaN and the masked rows partition first. Reachable only
-            # with non-finite scores, but eligibility is a governance boundary
-            # rather than a ranking preference, so it must not depend on
-            # arithmetic holding. Fall back to selecting among the eligible rows
-            # only — the pre-#951 computation exactly, on the rows it would have
-            # had — which restores both the row and its true score.
-            eligible_idx = np.flatnonzero(mask)
-            sub = scores[eligible_idx]
-            top_idx = eligible_idx[np.argpartition(-sub, k_eff - 1)[:k_eff]]
-        top_idx = top_idx[np.argsort(-scores[top_idx])]
+        top_idx, scores = _top_rows(scores, mask, k_eff)
         top = [(metadata[i][0], metadata[i][1], float(scores[i])) for i in top_idx]
         # numpy-lite: hydrate only the winners' texts (PK point-lookups).
         try:
@@ -965,6 +977,43 @@ class EmbeddingIndex:
             log.warning("chunk-text fetch failed (%s); returning hits without text", e)
             texts = {}
         return [(fp, ci, texts.get((fp, ci), ""), score) for fp, ci, score in top]
+
+    def search_many(
+        self,
+        query_vecs: np.ndarray,
+        k: int,
+        *,
+        allowed_paths: AbstractSet[str],
+    ) -> list[list[tuple[str, int, float]]]:
+        """`search`'s filtered numpy rung for many queries: one list of
+        `(file_path, chunk_idx, score)` per query row, in query order.
+
+        Each list is the answer `search(query, k, allowed_paths=...)` gives for
+        that row -- the same eligibility mask, `k` clamp and non-finite guard --
+        but the matrix is read once and scored in one product for every query,
+        and no chunk text is hydrated. The write advisory scores every chunk of
+        a draft and uses only the file and the score; issuing one `search` per
+        chunk read the ~200 MB matrix, and paid two sidecar round trips, per
+        chunk. Scores match `search` to the BLAS kernel wobble the #951 note
+        measured (a product over many queries picks sgemm over sgemv).
+        """
+        queries = np.asarray(query_vecs, dtype=np.float32).reshape(-1, VECTOR_DIM)
+        if not len(queries):
+            return []
+        metadata, matrix = self.all_vectors()
+        if not metadata:
+            return [[] for _ in range(len(queries))]
+        mask, k_ceiling = self._eligibility_mask(metadata, allowed_paths)
+        k_eff = min(k, k_ceiling)
+        if k_eff <= 0:
+            return [[] for _ in range(len(queries))]
+        answers: list[list[tuple[str, int, float]]] = []
+        for scores in queries @ matrix.T:
+            top_idx, scores = _top_rows(scores, mask, k_eff)
+            answers.append(
+                [(metadata[i][0], metadata[i][1], float(scores[i])) for i in top_idx]
+            )
+        return answers
 
     def _eligibility_mask(
         self, metadata: list[tuple[str, int]], allowed_paths: AbstractSet[str]

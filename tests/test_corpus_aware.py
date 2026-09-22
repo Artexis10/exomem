@@ -553,3 +553,31 @@ def test_sweep_encodes_when_the_commit_published_nothing(
     draft_chunks = embeddings.chunk_text("Reuse probe", body)
     assert Counter(counting_encoder) == Counter(draft_chunks)
     assert any(twin.removesuffix(".md") in w for w in result["warnings"]), result["warnings"]
+
+
+def test_sweep_scores_every_draft_chunk_in_one_pass_over_the_matrix(
+    vault: Path, counting_encoder: list[str], monkeypatch
+) -> None:
+    """One matrix read per sweep, not one per chunk, and no chunk text it never uses."""
+    embeddings.get_embedding_index(vault).rebuild_all()
+    calls = {"all_vectors": 0, "texts": 0}
+    real_all_vectors = embeddings.EmbeddingIndex.all_vectors
+    real_texts_for = embeddings.EmbeddingIndex._texts_for
+
+    def counted_all_vectors(self):
+        calls["all_vectors"] += 1
+        return real_all_vectors(self)
+
+    def counted_texts_for(self, pairs):
+        calls["texts"] += 1
+        return real_texts_for(self, pairs)
+
+    monkeypatch.setattr(embeddings.EmbeddingIndex, "all_vectors", counted_all_vectors)
+    monkeypatch.setattr(embeddings.EmbeddingIndex, "_texts_for", counted_texts_for)
+
+    scores = corpus_aware._best_cosine_per_file(
+        vault, title="One pass probe", body="\n\n".join(_REUSE_PARAGRAPHS)
+    )
+
+    assert scores, "the sweep found nothing, so the pass count proves nothing"
+    assert calls == {"all_vectors": 1, "texts": 0}

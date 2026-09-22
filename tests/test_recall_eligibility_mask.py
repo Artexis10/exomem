@@ -666,3 +666,114 @@ def test_exact_ties_may_pick_a_different_equally_scoring_row(tmp_path):
     assert len(hits) == 1
     assert hits[0][0] in allowed
     assert hits[0][3] == pytest.approx(1.0, abs=SCORE_TOLERANCE)
+
+
+# --------------------------------------------------------------------------- #
+# `search_many`: the write advisory's many draft chunks, scored in one pass.
+# --------------------------------------------------------------------------- #
+#
+# The post-commit advisory ran one `search` per draft chunk: one full read of
+# the matrix, one eligibility lookup and one chunk-text hydration per chunk, of
+# which it used only the file path and the score. On a CPU-capped cell that was
+# ~90 ms per chunk. `search_many` must answer each query exactly as `search`
+# does (same rows, same order, scores within the sgemv/sgemm kernel wobble
+# measured above), without the text it never needed.
+
+
+def _batch(rng: np.random.Generator, count: int) -> np.ndarray:
+    return np.stack([_unit_query(rng) for _ in range(count)])
+
+
+@pytest.mark.parametrize(
+    "scope,k",
+    [
+        ("empty", 10),
+        ("every_row", 10),
+        ("one_row", 10),
+        ("fewer_than_k", 50),
+        ("half", 10),
+        ("exactly_k", 12),
+    ],
+)
+def test_search_many_answers_each_query_as_search_does(tmp_path, scope, k):
+    rng = np.random.default_rng(1920)
+    vault = _fresh_vault(tmp_path)
+    index, paths = _populated(vault, rng, files=40, per_file=3)
+    allowed = {
+        "empty": set(),
+        "every_row": set(paths),
+        "one_row": {paths[7]},
+        "fewer_than_k": set(paths[:4]),
+        "exactly_k": set(paths[:4]),
+        "half": set(paths[::2]),
+    }[scope]
+    queries = _batch(rng, 25)
+
+    batched = index.search_many(queries, k, allowed_paths=allowed)
+
+    assert len(batched) == len(queries)
+    for query, hits in zip(queries, batched, strict=True):
+        single = index.search(query, k, allowed_paths=allowed)
+        assert [(fp, ci) for fp, ci, _score in hits] == [
+            (fp, ci) for fp, ci, _text, _score in single
+        ]
+        assert np.allclose(
+            [score for *_rest, score in hits],
+            [score for *_rest, score in single],
+            rtol=0.0,
+            atol=SCORE_TOLERANCE,
+        )
+
+
+def test_search_many_never_returns_an_ineligible_row_under_pathological_queries(tmp_path):
+    rng = np.random.default_rng(1921)
+    vault = _fresh_vault(tmp_path)
+    index, paths = _populated(vault, rng, files=10, per_file=2)
+    allowed = set(paths[:3])
+    queries = np.stack(
+        [
+            np.full(768, np.nan, dtype=np.float32),
+            np.zeros(768, dtype=np.float32),
+            np.full(768, np.inf, dtype=np.float32),
+            _unit_query(rng),
+        ]
+    )
+
+    for k in (1, 3, 6, 20):
+        for hits in index.search_many(queries, k, allowed_paths=allowed):
+            assert all(fp in allowed for fp, _ci, _score in hits)
+            assert len(hits) <= 6
+            assert not any(np.isinf(score) for *_rest, score in hits)
+
+
+def test_search_many_with_no_queries_or_no_rows_answers_empty(tmp_path):
+    rng = np.random.default_rng(1922)
+    vault = _fresh_vault(tmp_path)
+    empty = embeddings.EmbeddingIndex(vault)
+    assert empty.search_many(_batch(rng, 2), 5, allowed_paths={"a.md"}) == [[], []]
+    index, paths = _populated(vault, rng, files=3, per_file=1)
+    no_queries = np.zeros((0, embeddings.VECTOR_DIM), dtype=np.float32)
+    assert index.search_many(no_queries, 5, allowed_paths=set(paths)) == []
+
+
+def test_search_many_reads_the_matrix_once_and_hydrates_no_text(tmp_path, monkeypatch):
+    rng = np.random.default_rng(1923)
+    vault = _fresh_vault(tmp_path)
+    index, paths = _populated(vault, rng, files=12, per_file=2)
+    calls = {"all_vectors": 0, "texts": 0}
+    real_all_vectors = index.all_vectors
+
+    def counted_all_vectors():
+        calls["all_vectors"] += 1
+        return real_all_vectors()
+
+    def no_text(_pairs):
+        calls["texts"] += 1
+        return {}
+
+    monkeypatch.setattr(index, "all_vectors", counted_all_vectors)
+    monkeypatch.setattr(index, "_texts_for", no_text)
+
+    index.search_many(_batch(rng, 8), 5, allowed_paths=set(paths))
+
+    assert calls == {"all_vectors": 1, "texts": 0}
