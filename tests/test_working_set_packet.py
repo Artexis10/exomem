@@ -1595,3 +1595,252 @@ def test_one_request_copies_the_freshness_registry_once(
     assert packet["abstained"] is False, packet.get("abstention")
     assert packet["recent_context"]
     assert len(calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Episodes: the recap of a conversation leads "continue" on every client
+# --------------------------------------------------------------------------- #
+
+EPISODE_FOLDER = "Knowledge Base/Sources/Episodes"
+
+
+def _episode_key(index: int) -> str:
+    return "ep-" + f"{index:032x}"
+
+
+def _write_episode(
+    vault: Path,
+    *,
+    key: str,
+    subject: str = "Harbor Lamp purchase",
+    summary: str = "Chose the brass lamp; delivery date still open.",
+    order: str = "20260921t101500000000",
+    digest8: str = "0a0b0c0d",
+    status: str | None = None,
+) -> Path:
+    from exomem import episode_capture
+
+    folder = vault / EPISODE_FOLDER
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / (
+        f"2026-09-21-harbor-lamp-purchase-ep{episode_capture.key_group(key)}-{order}-{digest8}.md"
+    )
+    lines = [
+        "---",
+        "type: source",
+        "exomem_id: 12345678-1234-4234-8234-1234567890ab",
+        f"title: {subject}",
+        "source_type: episode",
+        "captured: 2026-09-21T10:15:00Z",
+        f"summary: {summary}",
+        f"episode: {key}",
+        f"episode_digest: {digest8 * 8}",
+    ]
+    if status:
+        lines.append(f"status: {status}")
+    lines += ["tags: []", "ingested_into: []", "---", "", f"# {subject}", "", "## Capture", ""]
+    lines += ["### Worked on", "", "- Compared two lamps for Project Alpha", ""]
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def _episode_entries(packet: dict) -> list[dict]:
+    return [entry for entry in packet["recent_context"] if entry["why"] == "episode"]
+
+
+def test_an_unresolved_continue_leads_with_the_newest_episode_and_its_summary(
+    stateful_vault: Path,
+) -> None:
+    import time
+
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    recap = _write_episode(stateful_vault, key=_episode_key(1))
+    now = time.time()
+    for index, page in enumerate(sorted((stateful_vault / "Knowledge Base").rglob("*.md"))):
+        _touch(page, when=now - 10_000 - index)
+    _touch(recap, when=now)
+    _live_cell(stateful_vault)
+
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+
+    first = packet["recent_context"][0]
+    assert first["path"] == recap.relative_to(stateful_vault).as_posix()
+    assert first["why"] == "episode"
+    assert first["kind"] == "episode"
+    assert first["title"] == "Harbor Lamp purchase"
+    assert first["statement"] == "summary: Chose the brass lamp; delivery date still open."
+    assert first["episode"] == _episode_key(1)
+    assert first["as_of"]
+
+
+def test_two_revisions_of_one_episode_appear_once(stateful_vault: Path) -> None:
+    """The filename's order token picks the newest revision, not the mtime:
+    retiring the old revision rewrote its frontmatter, so it is often the
+    fresher file."""
+    import time
+
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    old = _write_episode(
+        stateful_vault,
+        key=_episode_key(2),
+        summary="An earlier account.",
+        order="20260921t090000000000",
+        digest8="11111111",
+        status="superseded",
+    )
+    new = _write_episode(
+        stateful_vault,
+        key=_episode_key(2),
+        summary="The current account.",
+        order="20260921t100000000000",
+        digest8="22222222",
+    )
+    now = time.time()
+    for index, page in enumerate(sorted((stateful_vault / "Knowledge Base").rglob("*.md"))):
+        _touch(page, when=now - 10_000 - index)
+    _touch(new, when=now - 5)
+    _touch(old, when=now)
+    _live_cell(stateful_vault)
+
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+
+    episodes = _episode_entries(packet)
+    assert [entry["path"] for entry in episodes] == [new.relative_to(stateful_vault).as_posix()]
+    assert episodes[0]["statement"] == "summary: The current account."
+
+
+def test_eight_fresh_edits_do_not_bury_the_newest_episode(stateful_vault: Path) -> None:
+    import time
+
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    recap = _write_episode(stateful_vault, key=_episode_key(3))
+    now = time.time()
+    for page in sorted((stateful_vault / "Knowledge Base").rglob("*.md")):
+        _touch(page, when=now)
+    _touch(recap, when=now - 90 * 86_400)
+    _live_cell(stateful_vault)
+
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+
+    block = packet["recent_context"]
+    assert len(block) == working_set.RECENT_CONTEXT_MAX_ENTRIES
+    assert [entry["path"] for entry in _episode_entries(packet)] == [
+        recap.relative_to(stateful_vault).as_posix()
+    ]
+
+
+def _episode_path(index: int) -> str:
+    from exomem import episode_capture
+
+    group = episode_capture.key_group(_episode_key(index))
+    return f"{EPISODE_FOLDER}/2026-09-21-topic-{index}-ep{group}-20260921t100000000000-0a0b0c0d.md"
+
+
+def test_the_planning_and_episode_reservations_coexist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    others = {f"Knowledge Base/Notes/note-{index}.md": 9_000 - index for index in range(20)}
+    episode = {_episode_path(1): 100}
+    plans = ("Knowledge Base/Planning/Plan 0/_collection.md",)
+    monkeypatch.setattr(working_set, "_recent_mtimes", lambda _root: {**others, **episode})
+    monkeypatch.setattr(working_set, "_recently_activated", lambda *a, **k: ())
+    monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: plans)
+    monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
+    monkeypatch.setattr(working_set, "_recent_collection_dirs", lambda _mtimes: frozenset())
+
+    entries = working_set._recent_context(Path("/nonexistent"), rows=[])
+    whys = [entry["why"] for entry in entries]
+
+    assert len(entries) == working_set.RECENT_CONTEXT_MAX_ENTRIES
+    assert whys.count("planning") == 1
+    assert whys.count("episode") == 1
+    assert whys.count("edited") == working_set.RECENT_CONTEXT_MAX_ENTRIES - 2
+
+
+def test_episodes_take_at_most_four_slots(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A burst of conversations must not crowd out the edits."""
+    episodes = {_episode_path(index): 9_000 - index for index in range(6)}
+    others = {f"Knowledge Base/Notes/note-{index}.md": 100 - index for index in range(6)}
+    monkeypatch.setattr(working_set, "_recent_mtimes", lambda _root: {**episodes, **others})
+    monkeypatch.setattr(working_set, "_recently_activated", lambda *a, **k: ())
+    monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: ())
+    monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
+    monkeypatch.setattr(working_set, "_recent_collection_dirs", lambda _mtimes: frozenset())
+
+    entries = working_set._recent_context(Path("/nonexistent"), rows=[])
+    whys = [entry["why"] for entry in entries]
+
+    assert whys.count("episode") == working_set.RECENT_EPISODES_MAX == 4
+    assert whys.count("edited") == working_set.RECENT_CONTEXT_MAX_ENTRIES - 4
+    assert [entry["path"] for entry in entries if entry["why"] == "episode"] == [
+        _episode_path(index) for index in range(4)
+    ]
+
+
+def test_an_activated_older_revision_never_enters_beside_the_newest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The read-activation source must not bring a retired revision back."""
+    from exomem import episode_capture
+
+    group = episode_capture.key_group(_episode_key(1))
+    older = f"{EPISODE_FOLDER}/2026-09-21-topic-ep{group}-20260921t090000000000-11111111.md"
+    newer = f"{EPISODE_FOLDER}/2026-09-21-topic-ep{group}-20260921t100000000000-22222222.md"
+    monkeypatch.setattr(working_set, "_recent_mtimes", lambda _root: {older: 200, newer: 100})
+    monkeypatch.setattr(working_set, "_activation_snapshot", lambda: {older: 9.0})
+    monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: ())
+    monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
+    monkeypatch.setattr(working_set, "_recent_collection_dirs", lambda _mtimes: frozenset())
+
+    entries = working_set._recent_context(Path("/nonexistent"), rows=[])
+
+    assert [entry["path"] for entry in entries] == [newer]
+
+
+def test_an_episode_entry_is_budgeted_whole_and_its_key_costs_nothing() -> None:
+    entry = {
+        "ref": _episode_path(1),
+        "path": _episode_path(1),
+        "title": "Harbor Lamp purchase",
+        "kind": "episode",
+        "why": "episode",
+        "as_of": "2026-09-21",
+        "statement": "summary: " + "x" * 180,
+        "episode": _episode_key(1),
+    }
+    fits, used = working_set._budgeted_recent([entry], 4000)
+    assert fits == [entry]
+    assert used == len(entry["title"]) + len(entry["statement"])
+
+    squeezed, spent = working_set._budgeted_recent([entry], 300)
+    assert squeezed == [] and spent == 0
+
+
+def test_a_captured_session_still_carries_no_statement_beside_an_episode(
+    stateful_vault: Path,
+) -> None:
+    import time
+
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    sessions = stateful_vault / "Knowledge Base" / "Sources" / "Sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    captured = sessions / "2026-09-21-corridor-call.md"
+    captured.write_text(
+        "---\ntype: source\nsummary: a summary nobody asked for\n---\n\nRaw notes.\n",
+        encoding="utf-8",
+    )
+    recap = _write_episode(stateful_vault, key=_episode_key(4))
+    now = time.time()
+    for index, page in enumerate(sorted((stateful_vault / "Knowledge Base").rglob("*.md"))):
+        _touch(page, when=now - 10_000 - index)
+    _touch(captured, when=now)
+    _touch(recap, when=now - 1)
+    _live_cell(stateful_vault)
+
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+
+    by_path = {entry["path"]: entry for entry in packet["recent_context"]}
+    session = by_path[captured.relative_to(stateful_vault).as_posix()]
+    assert session["why"] == "captured"
+    assert "statement" not in session
+    assert by_path[recap.relative_to(stateful_vault).as_posix()]["statement"].startswith("summary:")

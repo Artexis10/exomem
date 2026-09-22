@@ -33,6 +33,7 @@ from typing import Any, NamedTuple
 from . import (
     context_roles,
     request_budget,
+    source_taxonomy,
     working_set_index,
     working_set_resolve,
     working_set_state,
@@ -60,9 +61,24 @@ RECENT_CONTEXT_MAX_ENTRIES = 8
 RECENT_CONTEXT_MAX_CHARS = 900
 #: How a page came to be recent. A closed vocabulary, and deliberately about
 #: CONTACT rather than meaning: `edited` and `captured` are file changes,
-#: `activated` is a read, `planning` is an open commitment. None of them claims
-#: the page's subject happened recently — that is what its own content says.
-RECENT_CONTEXT_REASONS: tuple[str, ...] = ("edited", "activated", "captured", "planning")
+#: `episode` is a conversation's recorded recap, `activated` is a read,
+#: `planning` is an open commitment. None of them claims the page's subject
+#: happened recently — that is what its own content says. The order is only the
+#: equal-mtime tie-break.
+RECENT_CONTEXT_REASONS: tuple[str, ...] = (
+    "edited",
+    "episode",
+    "activated",
+    "captured",
+    "planning",
+)
+#: Episodes the block may carry, whatever else is recent. One slot is reserved
+#: for the newest (a conversation that saved nothing else must still reach the
+#: next session), and a burst of conversations takes at most this many, so at
+#: least three slots stay for edits and reads and one for an open commitment.
+RECENT_EPISODES_MAX = 4
+#: Reasons that each hold one slot for their newest offer.
+_RESERVED_RECENT_REASONS: tuple[str, ...] = ("planning", "episode")
 
 #: How many anchors may share the top of the hot profile before it is cut.
 #: The profile is what a REFERENTIAL turn resolves against (design §8's
@@ -2132,45 +2148,56 @@ def _recent_context(
         if len(offered) >= limit:
             break
         why = _recent_reason_for(rel, collections=collections)
-        if why and rel not in offered:
+        # An episode is offered once per conversation, below, never per file.
+        if why and why != "episode" and rel not in offered:
             offered[rel] = why
     for rel in _recently_activated(by_path, mtimes, limit=limit, collections=collections):
         offered.setdefault(rel, "activated")
     for rel in _recent_planning(by_path, mtimes, limit=limit, collections=collections):
         offered.setdefault(rel, "planning")
+    for rel in _recent_episodes(mtimes, limit=RECENT_EPISODES_MAX):
+        offered[rel] = "episode"
 
     def _rank(item: tuple[str, str]) -> tuple[int, int, str]:
         return (-mtimes.get(item[0], 0), RECENT_CONTEXT_REASONS.index(item[1]), item[0])
 
-    # One slot is RESERVED for the newest open Planning item. Ranking the
-    # whole block by recency buried it every time: an open commitment nobody
-    # has touched is by definition older than the edits, so eight fresh pages
-    # cut it, `_recent_planning` could never put anything in the block, and
-    # the commitment a resumed session most needs reminding of was the one
-    # thing guaranteed missing. It is a reservation, not a takeover — the
-    # remaining slots stay recency-ranked, and the entry keeps its place in
-    # that order rather than being pinned to the front.
-    planning_offers = sorted(
-        ((path, why) for path, why in offered.items() if why == "planning"), key=_rank
-    )
-    others = sorted(
-        ((path, why) for path, why in offered.items() if why != "planning"), key=_rank
-    )
-    if planning_offers:
-        # Reserve the slot, then backfill from EVERYTHING left, the plans that
-        # did not get the slot included. Reserving without backfilling left the
-        # block short on the vault it exists for — two recent edits and five
-        # open plans filled three of eight slots, and four open commitments
-        # were never offered at all.
-        rest = sorted([*others, *planning_offers[1:]], key=_rank)
-        ranked = sorted([*rest[: limit - 1], planning_offers[0]], key=_rank)
-    else:
-        ranked = others[:limit]
+    # One slot is RESERVED for the newest offer of each reserved reason: the
+    # newest open Planning item and the newest episode. Ranking the whole
+    # block by recency buried both every time — an open commitment nobody has
+    # touched is by definition older than the edits, and so is the last
+    # conversation once work has resumed — so eight fresh pages cut exactly
+    # what a resumed session most needs reminding of. It is a reservation, not
+    # a takeover: the remaining slots stay recency-ranked, and a reserved
+    # entry keeps its place in that order rather than being pinned to the
+    # front.
+    ordered = sorted(offered.items(), key=_rank)
+    reserved = [
+        first
+        for reason in _RESERVED_RECENT_REASONS
+        if (first := next((item for item in ordered if item[1] == reason), None)) is not None
+    ]
+    # Then backfill from EVERYTHING left, the plans and episodes that did not
+    # get a slot included. Reserving without backfilling left the block short
+    # on the vault it exists for — two recent edits and five open plans filled
+    # three of eight slots, and four open commitments were never offered.
+    episodes = sum(1 for _path, why in reserved if why == "episode")
+    backfill: list[tuple[str, str]] = []
+    for item in ordered:
+        if len(backfill) >= limit - len(reserved):
+            break
+        if item in reserved:
+            continue
+        if item[1] == "episode":
+            if episodes >= RECENT_EPISODES_MAX:
+                continue
+            episodes += 1
+        backfill.append(item)
+    ranked = sorted([*reserved, *backfill], key=_rank)
 
     entries: list[dict[str, Any]] = []
     for path, why in ranked:
         row = by_path.get(path)
-        kind = str(getattr(row, "kind", "") or "") or "page"
+        kind = "episode" if why == "episode" else str(getattr(row, "kind", "") or "") or "page"
         entries.append(
             {
                 "ref": str(getattr(row, "ref", None) or path),
@@ -2189,6 +2216,12 @@ def _recent_context(
         # material: summarising it here would be the server authoring a claim
         # about a conversation nobody has compiled yet.
         if entry["why"] == "captured":
+            continue
+        if entry["why"] == "episode":
+            # The recording agent's own subject and summary: authored, like
+            # any page's `summary`, never a sentence the server wrote. The
+            # same one cached read every other entry gets.
+            entry.update(_recent_episode_fields(root, entry["path"]))
             continue
         statement = _recent_frontmatter_statement(root, entry["path"])
         if statement:
@@ -2240,15 +2273,20 @@ def _recent_collection_dirs(paths: Iterable[str]) -> frozenset[str]:
     return frozenset(rel[: -len(marker)] for rel in paths if rel.endswith(marker))
 
 
+_EPISODE_PREFIX = f"Sources/{source_taxonomy.EPISODE_PATH_LABEL}/"
+
+
 def _recent_reason_for(rel: str, *, collections: frozenset[str] = frozenset()) -> str:
-    """`edited`, `captured`, or `""` for a page that is not working context.
+    """`edited`, `captured`, `episode`, or `""` for a page that is not working context.
 
     Raw material and operational state are excluded by the SAME path rules the
     content corpus already uses (`find_corpus.EXCLUDED_DIR_NAMES`,
     `NAVIGATION_BASENAMES`), so nothing here is a second, drifting opinion
     about what counts as a page. Two exclusions carry their own weight:
     `Sources/` is evidence ABOUT work rather than the work, except
-    `Sources/Sessions/`, which IS the record of a conversation; and the KB's
+    `Sources/Sessions/`, which IS the record of a conversation, and
+    `Sources/Episodes/`, which is a conversation's recorded recap (a reserved
+    folder, so this stays a string test); and the KB's
     activity log is rewritten by every confirmed write, so without excluding it
     it would be the most recently edited page on every turn and this block
     would say nothing else.
@@ -2266,6 +2304,8 @@ def _recent_reason_for(rel: str, *, collections: frozenset[str] = frozenset()) -
         return ""
     if inner.startswith("Evidence/"):
         return ""
+    if inner.startswith(_EPISODE_PREFIX):
+        return "episode"
     if inner.startswith("Sources/"):
         return "captured" if inner.startswith("Sources/Sessions/") else ""
     if _inside_collection_storage(rel, collections):
@@ -2357,7 +2397,9 @@ def _recently_activated(
         return ()
     scored: list[tuple[float, str]] = []
     for rel in dict.fromkeys((*by_path, *mtimes)):
-        if not _recent_reason_for(rel, collections=collections):
+        # An episode is offered by `_recent_episodes`, newest revision only; a
+        # read of a retired revision must not bring it back beside the newest.
+        if _recent_reason_for(rel, collections=collections) in ("", "episode"):
             continue
         activation = activations.get(usage.canon(rel), activations.get(rel))
         if activation is None:
@@ -2391,6 +2433,61 @@ def _recent_planning(
     ]
     plans.sort(key=lambda path: (-mtimes.get(path, 0), path))
     return tuple(plans[:limit])
+
+
+def _recent_episodes(mtimes: Mapping[str, int], *, limit: int) -> tuple[str, ...]:
+    """The newest revision of each of the most recent episodes, newest first.
+
+    String work over the freshness map the block already copied: no read, no
+    walk. Revisions of one episode share the filename's group token and are
+    ordered by its recording-time token, never by mtime — retiring an older
+    revision rewrites its frontmatter, so the retired file is often the
+    fresher one. Grouping happens BEFORE egress, so a withheld newest revision
+    makes its episode vanish rather than fall back to an older one. A file in
+    the folder without the token is its own episode.
+    """
+    from . import episode_capture
+
+    newest: dict[str, tuple[str, str]] = {}
+    for rel in mtimes:
+        if _recent_reason_for(rel) != "episode":
+            continue
+        parts = episode_capture.filename_parts(rel.rsplit("/", 1)[-1])
+        group, order = (parts[0], parts[1]) if parts is not None else (rel, "")
+        if group not in newest or (order, rel) > newest[group]:
+            newest[group] = (order, rel)
+    chosen = sorted((rel for _order, rel in newest.values()), key=lambda rel: (-mtimes[rel], rel))
+    return tuple(chosen[:limit])
+
+
+def _recent_episode_fields(vault_root: Path, rel: str) -> dict[str, str]:
+    """An episode entry's authored `title`, `summary` statement and `episode` key.
+
+    One cached page read, the one every other chosen entry gets for its
+    statement. Anything absent or malformed is simply left out: the entry
+    keeps its filename title and carries no statement.
+    """
+    from . import episode_capture, find_corpus
+
+    try:
+        page = find_corpus.CACHE.get(Path(vault_root) / rel, Path(vault_root))
+    except Exception:  # noqa: BLE001 - an unreadable page costs its fields only
+        log.debug("recent context: episode unreadable for %s", rel, exc_info=True)
+        return {}
+    frontmatter = getattr(page, "frontmatter", None)
+    if not isinstance(frontmatter, dict):
+        return {}
+    fields: dict[str, str] = {}
+    title = frontmatter.get("title")
+    if isinstance(title, str) and title.strip():
+        fields["title"] = " ".join(title.split())
+    summary = frontmatter.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        fields["statement"] = f"summary: {summary.strip()}"[: working_set_state.STATEMENT_MAX_CHARS]
+    key = frontmatter.get("episode")
+    if isinstance(key, str) and episode_capture.EPISODE_KEY_RE.fullmatch(key):
+        fields["episode"] = key
+    return fields
 
 
 def _recent_frontmatter_statement(vault_root: Path, rel: str) -> str:

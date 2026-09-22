@@ -3404,3 +3404,80 @@ updated: 2026-09-11
         "Knowledge Base/Notes/Research/girvan-slot-research.md"
     ], guarded["anchors"]
     assert "girvan-slot-pattern" not in str(guarded)
+
+
+# --------------------------------------------------------------------------- #
+# Episode recaps cross the same guard as every other recent entry
+# --------------------------------------------------------------------------- #
+
+EPISODE_PATH = (
+    "Knowledge Base/Sources/Episodes/"
+    "2026-09-21-harbor-lamp-purchase-ep0123456789ab-20260921t101500000000-0a0b0c0d.md"
+)
+EPISODE_KEY = "ep-" + "0" * 31 + "1"
+
+
+def _episode_entry(*, statement: str = "summary: Chose the brass lamp.") -> dict:
+    return {
+        "ref": EPISODE_PATH,
+        "path": EPISODE_PATH,
+        "title": "Harbor Lamp purchase",
+        "kind": "episode",
+        "why": "episode",
+        "as_of": "2026-09-21",
+        "statement": statement,
+        "episode": EPISODE_KEY,
+    }
+
+
+def _write_episode_page(vault: Path) -> None:
+    page = vault / EPISODE_PATH
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\ntype: source\ntitle: Harbor Lamp purchase\nsource_type: episode\n"
+        f"summary: Chose the brass lamp.\nepisode: {EPISODE_KEY}\n---\n\n# Harbor Lamp purchase\n",
+        encoding="utf-8",
+    )
+
+
+def test_a_withheld_recap_leaves_the_block(vault: Path) -> None:
+    _write_episode_page(vault)
+    write_scope(vault, paths="Sources/Episodes/**", name="Episodes")
+    write_rule(vault, ceiling=0)
+    packet = _recent_packet([_episode_entry(), _recent_entry(OPEN_PATH, title="Open recent page")])
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _release(withheld=()))
+
+    assert guarded is not None
+    assert [entry["path"] for entry in guarded["recent_context"]] == [OPEN_PATH]
+    assert EPISODE_PATH not in str(guarded)
+    assert EPISODE_KEY not in str(guarded)
+
+
+def test_a_recap_summary_naming_a_withheld_page_removes_its_entry(vault: Path) -> None:
+    _write_episode_page(vault)
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    packet = _recent_packet(
+        [_episode_entry(statement="summary: settled by [[kill-switch-for-risky-releases]]")]
+    )
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _release())
+
+    assert guarded is not None
+    assert guarded["recent_context"] == []
+
+
+def test_the_episode_key_never_causes_a_spurious_withhold(vault: Path) -> None:
+    _write_episode_page(vault)
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    packet = _recent_packet([_episode_entry()])
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _release())
+
+    assert guarded is not None
+    assert guarded["recent_context"] == [_episode_entry()]
