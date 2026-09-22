@@ -241,8 +241,8 @@ _CONTROL_PROMPT_RE = re.compile(
 #: prompt-shape gates (the length floor and the control filter) and fetched.
 #: The exemption is narrow on purpose: an acknowledgement ("thanks", "perfect")
 #: or an instruction to act ("merge it", "ship it") is still churn, and still
-#: skipped. It does not touch the cooldowns, which are rate limits rather than
-#: opinions about the prompt.
+#: skipped. They also bypass both cooldowns (`main`): "continue" typed right
+#: after a nudged turn is the turn most in need of its packet.
 _REFERENTIAL_PROMPT_RE = re.compile(
     r"""
     ^\s*
@@ -1379,11 +1379,21 @@ def main() -> int:
 
     session_id = str(data.get("session_id") or data.get("sessionId") or "")
     ok, stamp = _cooldown_ok(session_id, cooldown)
-    if not ok:  # already nudged recently this session — keep it quiet
+    # Already nudged recently this session — keep it quiet. Except a
+    # referential prompt (working-set mode only, see above): its packet is the
+    # session's thread, and later substantive turns are covered by the agent's
+    # own `activate_context` call, which the server's instructions require.
+    if not ok and not referential:
         return 0
 
+    # Another tab/session already got the REMINDER recently. In working-set
+    # mode that is all it gates: a fresh session's first packet is not the
+    # reminder another tab saw, and suppressing it is a new session receiving
+    # nothing without being asked. So working-set mode fetches regardless and
+    # withholds only the bare reminder below. Every other mode fetches no
+    # packet, and stays silent here exactly as before.
     global_ok, global_stamp = _global_cooldown_ok(global_cooldown)
-    if not global_ok:  # another tab/session already got the reminder recently
+    if not global_ok and mode != _WORKING_SET_MODE:
         return 0
 
     additional_context = REMINDER
@@ -1409,8 +1419,10 @@ def main() -> int:
             lane, hit_count, block, keep_reminder = "none", 0, "", False
         if block:
             additional_context = (
-                block + "\n\n" + REMINDER if keep_reminder else block
+                block + "\n\n" + REMINDER if keep_reminder and global_ok else block
             )
+        elif not global_ok:
+            additional_context = ""
     elif mode == _STUB_MODE:
         # Inject mode is a payload upgrade on this same gate, not a second
         # trigger — REST/CLI are only ever attempted past this point. Any
@@ -1425,10 +1437,18 @@ def main() -> int:
         if block:
             additional_context = REMINDER + "\n\n" + block
     # Stamped after the transport ran: a hook the client kills mid-ladder must
-    # not also burn the session's cooldown and the client-wide one.
+    # not also burn the session's cooldown and the client-wide one. The session
+    # stamp moves after every fetch, printed or not, so an unreachable service
+    # costs a session one transport timeout per cooldown and not one per
+    # prompt. The client-wide stamp moves only when it was not already running:
+    # it dates the last REMINDER on this client, which is all it now gates, and
+    # a packet injected while it runs must not push the next reminder later for
+    # a reason that has nothing to do with reminders.
     _touch(stamp)
-    if global_cooldown > 0:
+    if global_cooldown > 0 and global_ok:
         _touch(global_stamp)
+    if not additional_context:
+        return 0
     _log(prompt, lane, hit_count)
 
     print(json.dumps({"hookSpecificOutput": {

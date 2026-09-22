@@ -24,6 +24,7 @@ import io
 import json
 import os
 import stat
+import time
 from pathlib import Path
 
 import pytest
@@ -1769,3 +1770,141 @@ def test_an_ordinary_unresolved_menu_still_offers_anchor() -> None:
 
     assert "`anchor`" in block, block
     assert "read_memory" not in block.splitlines()[-1], block
+
+
+# --------------------------------------------------------------------------- #
+# Cooldowns in working-set mode (close-memory-loop D2, orchestrator ruling):
+# the client-wide cooldown gates the bare reminder only, never a packet fetch;
+# the session cooldown stays for ordinary prompts; a referential prompt
+# bypasses both. Stub and reminder-only modes are unchanged.
+# --------------------------------------------------------------------------- #
+
+
+def _fresh_client_wide_stamp(home: Path) -> Path:
+    """Another tab was nudged a moment ago."""
+    stamp = home / ".cache" / "exomem-nudge" / "retrieve_global"
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.write_text("0", encoding="utf-8")
+    old = time.time() - 30
+    os.utime(stamp, (old, old))
+    return stamp
+
+
+def test_a_fresh_sessions_first_prompt_gets_its_packet_under_the_client_wide_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+) -> None:
+    """The acceptance bar: a new session receives context without asking,
+    even when another tab fetched a packet in the last fifteen minutes. And
+    the reminder that cooldown exists for stays suppressed: the stamp it
+    reads is not moved by a packet."""
+    home = tmp_path / "home"
+    stamp = _fresh_client_wide_stamp(home)
+    before = stamp.stat().st_mtime
+    seen = _serve(monkeypatch, _packet())
+
+    context = _context(_run(monkeypatch, capsys, _event(session_id="fresh-tab"), home))
+
+    assert [request["prompt"] for request in seen] == [PROMPT]
+    assert context
+    assert hook.REMINDER not in context
+    assert stamp.stat().st_mtime == before
+
+
+def test_an_empty_packet_under_the_client_wide_cooldown_prints_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+) -> None:
+    """Fetched, found nothing to say, and says nothing: the bare reminder is
+    the one thing the client-wide cooldown still suppresses."""
+    home = tmp_path / "home"
+    _fresh_client_wide_stamp(home)
+    seen = _serve(monkeypatch, None)
+
+    output = _run(monkeypatch, capsys, _event(session_id="fresh-tab"), home)
+
+    assert len(seen) == 1
+    assert output.strip() == ""
+
+
+def test_an_unresolved_block_under_the_client_wide_cooldown_drops_the_reminder(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+) -> None:
+    home = tmp_path / "home"
+    _fresh_client_wide_stamp(home)
+    packet = _packet(abstained=True, reason="unresolved", units=[], pointers=[], current_state=[])
+    packet["anchors"] = []
+    packet["recent_context"] = [_recent(statement="state: in storage abroad")]
+    _serve(monkeypatch, packet)
+
+    context = _context(_run(monkeypatch, capsys, _event(session_id="fresh-tab"), home))
+
+    assert "- recent: Cargo Sled" in context
+    assert hook.REMINDER not in context
+
+
+def test_an_ordinary_second_prompt_inside_the_session_cooldown_is_not_fetched(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+) -> None:
+    """Later substantive turns are the agent's own `activate_context` calls."""
+    home = tmp_path / "home"
+    seen = _serve(monkeypatch, _packet())
+
+    assert _run(monkeypatch, capsys, _event(), home) != ""
+    assert _run(monkeypatch, capsys, _event(), home) == ""
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize("prompt", ["continue", "where were we", "status?"])
+def test_a_referential_prompt_bypasses_both_cooldowns(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+    prompt: str,
+) -> None:
+    """"continue" typed right after a nudged turn still fetches."""
+    home = tmp_path / "home"
+    seen = _serve(monkeypatch, _packet())
+    assert _run(monkeypatch, capsys, _event(), home) != ""
+    _fresh_client_wide_stamp(home)
+
+    context = _context(_run(monkeypatch, capsys, _event(prompt=prompt), home))
+
+    assert [request["prompt"] for request in seen] == [PROMPT, prompt]
+    assert context
+
+
+@pytest.mark.parametrize("mode", ["1", "off"])
+def test_stub_and_reminder_modes_keep_the_client_wide_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    """Unchanged byte for byte: those modes fetch no packet, so a fresh
+    client-wide stamp silences them exactly as before."""
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", mode)
+    home = tmp_path / "home"
+    _fresh_client_wide_stamp(home)
+    fetched: list[str] = []
+
+    def _gather(prompt: str):
+        fetched.append(prompt)
+        return [], "none"
+
+    monkeypatch.setattr(hook, "_gather_hits_with_lane", _gather)
+
+    assert _run(monkeypatch, capsys, _event(session_id="fresh-tab"), home) == ""
+    assert _run(monkeypatch, capsys, _event(prompt="continue", session_id="other"), home) == ""
+    assert fetched == []
