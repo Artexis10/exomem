@@ -5920,6 +5920,8 @@ def op_activate_context(
     continuity: str | None = None,
     anchor: str | None = None,
     include_timings: bool = False,
+    client: str | None = None,
+    session: str | None = None,
 ) -> dict:
     """Compile durable context for a raw conversational turn, without a query.
 
@@ -6004,6 +6006,13 @@ def op_activate_context(
             eligible this way, or one this audience may not see, is refused
             identically and no packet is built.
         include_timings: Include per-stage timings for diagnostics.
+        client: Optional lowercase label for the calling client, e.g.
+            `claude-code`, `codex` or `chatgpt`. Recorded in a host-local
+            activation log only; an invalid label is ignored, never refused.
+        session: Optional opaque conversation identifier, at most 256
+            characters, such as the `episode` key an `episode_memory` record
+            returned. Only a vault-keyed hash of it is recorded. Neither
+            argument ever changes the packet.
 
     Returns: {recent_context, anchors, roles, units, pointers, current_state,
              missing, ambiguity, budget, generation, abstained, abstention?,
@@ -6043,6 +6052,11 @@ def op_activate_context(
     # remembered at all. It has to cover the abstention paths too: a request
     # that abstains still resolved placement several times on its way there,
     # and the abstention paths are the ones a struggling server takes most.
+    #
+    # `client` and `session` stop HERE: they are recorded by the activation
+    # log after the packet exists and never reach resolution, the packet, its
+    # cache key or the continuity token.
+    started = time.perf_counter()
     with state_paths_module.resolution_scope():
         bound_token = None
         if readiness_module.runtime_managed() and request_budget_module.current() is None:
@@ -6052,7 +6066,7 @@ def op_activate_context(
                 )
             )
         try:
-            return _op_activate_context_body(
+            packet = _op_activate_context_body(
                 vault_root,
                 turn,
                 max_chars,
@@ -6061,9 +6075,28 @@ def op_activate_context(
                 anchor=anchor,
                 include_timings=include_timings,
             )
+        except Exception as error:
+            query_log.log_activation_call(
+                vault_root,
+                packet=None,
+                client=client,
+                session=session,
+                outcome="refused" if isinstance(error, ValueError) else "error",
+                error_code=type(error).__name__,
+                duration_ms=round((time.perf_counter() - started) * 1000, 3),
+            )
+            raise
         finally:
             if bound_token is not None:
                 request_budget_module.reset_current(bound_token)
+    query_log.log_activation_call(
+        vault_root,
+        packet=packet,
+        client=client,
+        session=session,
+        duration_ms=round((time.perf_counter() - started) * 1000, 3),
+    )
+    return packet
 
 
 def _op_activate_context_body(
