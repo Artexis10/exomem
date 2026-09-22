@@ -1114,3 +1114,60 @@ def test_an_open_planning_item_survives_a_flood_of_fresh_edits(
     assert len(planning) == 1, [entry["why"] for entry in block]
     # One slot, not a takeover: the fresh edits keep the rest of the block.
     assert len([entry for entry in block if entry["why"] == "edited"]) == 7
+
+
+def test_a_collections_own_item_files_never_enter_the_block(
+    stateful_vault: Path,
+) -> None:
+    """A Records collection's items are its storage, not working context.
+
+    Writing one record touches a file per observation, so on any vault that
+    actually uses Records the raw item pages are always the most recently
+    edited thing there is — and they carry a date and a state field, not a
+    subject. Four of the eight slots went to one collection's storage.
+    """
+    import time
+
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    now = time.time()
+    for index, page in enumerate(sorted((stateful_vault / "Knowledge Base").rglob("*.md"))):
+        _touch(page, when=now - 10_000 - index)
+    items = sorted((stateful_vault / "Knowledge Base" / "Records").rglob("Items/*.md"))
+    assert items, "the fixture must hold collection item files"
+    for page in items:
+        _touch(page, when=now)
+    _live_cell(stateful_vault)
+
+    packet = working_set.compile_packet(
+        stateful_vault, turn="zzz qqq unrelated gibberish", max_chars=4000
+    )
+
+    paths = [entry["path"] for entry in packet["recent_context"]]
+    assert paths, "the block must still carry something"
+    assert not [path for path in paths if "/Items/" in path], paths
+
+
+def test_a_collection_manifest_never_appears_beside_its_own_item(
+    stateful_vault: Path,
+) -> None:
+    """Both carry the same authored title, so serving both spends two of eight
+    slots saying one thing."""
+    import time
+
+    planning = stateful_vault / "Knowledge Base" / "Planning" / "Corridor"
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    now = time.time()
+    for index, page in enumerate(sorted((stateful_vault / "Knowledge Base").rglob("*.md"))):
+        _touch(page, when=now - 10_000 - index)
+    for index, page in enumerate(sorted(planning.rglob("*.md"))):
+        _touch(page, when=now - index)
+    _live_cell(stateful_vault)
+
+    packet = working_set.compile_packet(
+        stateful_vault, turn="zzz qqq unrelated gibberish", max_chars=4000
+    )
+
+    titles = [entry["title"].casefold() for entry in packet["recent_context"]]
+    assert len(titles) == len(set(titles)), [
+        (entry["title"], entry["path"]) for entry in packet["recent_context"]
+    ]

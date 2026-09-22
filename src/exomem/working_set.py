@@ -1132,16 +1132,17 @@ def _recent_context(
         if path and path not in by_path:
             by_path[path] = row
     mtimes = _recent_mtimes(root)
+    collections = _recent_collection_dirs(mtimes)
     offered: dict[str, str] = {}
     for rel in sorted(mtimes, key=lambda item: (-mtimes[item], item)):
         if len(offered) >= limit:
             break
-        why = _recent_reason_for(rel)
+        why = _recent_reason_for(rel, collections=collections)
         if why and rel not in offered:
             offered[rel] = why
-    for rel in _recently_activated(by_path, mtimes, limit=limit):
+    for rel in _recently_activated(by_path, mtimes, limit=limit, collections=collections):
         offered.setdefault(rel, "activated")
-    for rel in _recent_planning(by_path, mtimes, limit=limit):
+    for rel in _recent_planning(by_path, mtimes, limit=limit, collections=collections):
         offered.setdefault(rel, "planning")
 
     def _rank(item: tuple[str, str]) -> tuple[int, int, str]:
@@ -1192,7 +1193,7 @@ def _recent_context(
         statement = _recent_frontmatter_statement(root, entry["path"])
         if statement:
             entry["statement"] = statement
-    return tuple(entries)
+    return _without_collection_echoes(entries, collections)
 
 
 def _recent_mtimes(vault_root: Path) -> dict[str, int]:
@@ -1226,7 +1227,18 @@ def _recent_mtimes(vault_root: Path) -> dict[str, int]:
     return out
 
 
-def _recent_reason_for(rel: str) -> str:
+def _recent_collection_dirs(mtimes: Mapping[str, int]) -> frozenset[str]:
+    """Every directory that holds a `_collection.md`, from the paths in hand.
+
+    Derived from the freshness map rather than by asking the filesystem
+    whether a sibling manifest exists: the map already names every page in the
+    knowledge base, so this is dict work on the request path.
+    """
+    marker = "/_collection.md"
+    return frozenset(rel[: -len(marker)] for rel in mtimes if rel.endswith(marker))
+
+
+def _recent_reason_for(rel: str, *, collections: frozenset[str] = frozenset()) -> str:
     """`edited`, `captured`, or `""` for a page that is not working context.
 
     Raw material and operational state are excluded by the SAME path rules the
@@ -1254,11 +1266,79 @@ def _recent_reason_for(rel: str) -> str:
         return ""
     if inner.startswith("Sources/"):
         return "captured" if inner.startswith("Sources/Sessions/") else ""
+    if _inside_collection_storage(rel, collections):
+        return ""
     return "edited"
 
 
+def _inside_collection_storage(rel: str, collections: frozenset[str]) -> bool:
+    """True for a collection's own stored items — its `Items/`, or a page
+    sitting directly beside its manifest.
+
+    A collection's items are its STORAGE, not working context. Writing one
+    record touches a file per observation, so on any vault that actually uses
+    Records they are permanently the most recently edited pages there are:
+    four of eight slots went to one collection's item files, each offering a
+    date and a state field in place of a subject. The manifest itself stays —
+    it is the thing with a title and a claim — and this never looks at the
+    filesystem, only at which directories the freshness map says hold a
+    manifest.
+    """
+    if not collections or rel.endswith("/_collection.md"):
+        return False
+    parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
+    if parent in collections:
+        return True
+    grandparent = parent.rsplit("/", 1)[0] if "/" in parent else ""
+    return bool(grandparent) and grandparent in collections
+
+
+def _without_collection_echoes(
+    entries: Sequence[Mapping[str, Any]], collections: frozenset[str]
+) -> tuple[dict[str, Any], ...]:
+    """Drop an entry that only repeats its own collection manifest's title.
+
+    A Planning item and the manifest it lives under are one anchor spelled two
+    ways — the index gives them the same authored title — so serving both
+    spends two of eight slots saying one thing. The manifest is kept, being
+    the entry an agent can act on; the echo goes.
+    """
+    manifests = {
+        str(entry.get("path") or "").rsplit("/", 1)[0]: str(entry.get("title") or "").casefold()
+        for entry in entries
+        if str(entry.get("path") or "").endswith("/_collection.md")
+    }
+    if not manifests:
+        return tuple(dict(entry) for entry in entries)
+    out: list[dict[str, Any]] = []
+    for entry in entries:
+        path = str(entry.get("path") or "")
+        title = str(entry.get("title") or "").casefold()
+        if path.endswith("/_collection.md"):
+            # A manifest is never an echo — least of all of itself, which it
+            # matches by construction (same directory, same title).
+            out.append(dict(entry))
+            continue
+        owner = next(
+            (
+                directory
+                for directory in manifests
+                if directory in collections and path.startswith(f"{directory}/")
+            ),
+            None,
+        )
+        if owner is not None and manifests[owner] == title:
+            continue
+        out.append(dict(entry))
+    return tuple(out)
+
+
 def _recently_activated(
-    by_path: Mapping[str, Any], mtimes: Mapping[str, int], *, limit: int
+    by_path: Mapping[str, Any],
+    mtimes: Mapping[str, int],
+    *,
+    limit: int,
+    collections: frozenset[str] = frozenset(),
 ) -> tuple[str, ...]:
     """The most-activated known pages, from the memoized usage snapshot.
 
@@ -1279,7 +1359,7 @@ def _recently_activated(
         return ()
     scored: list[tuple[float, str]] = []
     for rel in dict.fromkeys((*by_path, *mtimes)):
-        if not _recent_reason_for(rel):
+        if not _recent_reason_for(rel, collections=collections):
             continue
         activation = activations.get(usage.canon(rel), activations.get(rel))
         if activation is None:
@@ -1290,7 +1370,11 @@ def _recently_activated(
 
 
 def _recent_planning(
-    by_path: Mapping[str, Any], mtimes: Mapping[str, int], *, limit: int
+    by_path: Mapping[str, Any],
+    mtimes: Mapping[str, int],
+    *,
+    limit: int,
+    collections: frozenset[str] = frozenset(),
 ) -> tuple[str, ...]:
     """Open Planning items, newest first — the same rows `_planning_lane` reads.
 
@@ -1305,7 +1389,7 @@ def _recent_planning(
         for path, row in by_path.items()
         if str(getattr(row, "kind", "")) == "plan"
         and str(getattr(row, "lifecycle", "active") or "active") == "active"
-        and _recent_reason_for(path)
+        and _recent_reason_for(path, collections=collections)
     ]
     plans.sort(key=lambda path: (-mtimes.get(path, 0), path))
     return tuple(plans[:limit])
