@@ -15,6 +15,8 @@ exercised by the unit tests and by the live operation.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
@@ -64,7 +66,19 @@ EVIDENCE_KINDS: tuple[str, ...] = (
 #: person — and counting code points there turns a real name into a
 #: non-name. A term that is not all-ASCII keeps whatever rarity its
 #: document count earns it.
+#:
+#: And not to a term the turn spelled as an ACRONYM ("AI", "UI", "EU"): an
+#: all-capitals word in a turn of ordinary case is written that way because
+#: it is a name, while the everyday word the floor exists for is written
+#: "go" or "Go". A turn with no lower-case letter at all carries no such
+#: signal and is read as lower case (`TurnAnalysis.acronyms`).
 RARE_TERM_MIN_CHARS = 3
+
+#: A word the turn spelled in capitals, found on the RAW turn because
+#: `normalize()` casefolds. ASCII letters only, the one alphabet the length
+#: floor applies to; bounded on both sides by anything that is not a letter
+#: or digit, so "AI's" and "AI-driven" still show "AI".
+_ACRONYM_RE = re.compile(r"(?<![A-Za-z0-9])[A-Z]+(?![A-Za-z0-9])")
 
 #: `usage_prior` is a tie-break only. It never contributes to the two-kinds
 #: rule, because "you looked at this a lot" is not evidence that this turn is
@@ -230,6 +244,11 @@ class TurnAnalysis:
     #: and whether the turn's words reached an anchor after all, are facts
     #: about the vault and the candidate set, decided in `resolve()`.
     referential: bool = False
+    #: The words the turn spelled as acronyms, casefolded like `tokens`: the
+    #: casing the analysis otherwise discards, kept only because the
+    #: rare-term length floor needs it (`RARE_TERM_MIN_CHARS`). Empty for a
+    #: turn with no lower-case letter, where capitals carry no signal.
+    acronyms: frozenset[str] = frozenset()
 
     @property
     def cue_categories(self) -> frozenset[str]:
@@ -374,15 +393,40 @@ def _depossessive_token(token: str) -> str:
     return token if folded in STOPWORDS else folded
 
 
-def _clears_rare_term_length(term: str) -> bool:
+def _clears_rare_term_length(term: str, *, acronyms: frozenset[str] = frozenset()) -> bool:
     """Is `term` long enough to be a lead?
 
     `RARE_TERM_MIN_CHARS` code points, for an all-ASCII-letter term only.
     Any term carrying a character outside `a-z` is exempt: the floor's whole
     argument is about English word lengths, and a script that writes a name
-    in two characters is not the case it was reasoned about.
+    in two characters is not the case it was reasoned about. So is a term
+    the turn spelled as an acronym (`acronyms`): the floor is about everyday
+    words, and "AI" in a sentence of ordinary case is not one.
     """
-    return len(term) >= RARE_TERM_MIN_CHARS or not term.isascii() or not term.isalpha()
+    return (
+        len(term) >= RARE_TERM_MIN_CHARS
+        or not term.isascii()
+        or not term.isalpha()
+        or term in acronyms
+    )
+
+
+def _acronyms_of(turn: str) -> frozenset[str]:
+    """The casefolded words `turn` spelled in capitals, or nothing when the
+    whole turn is in capitals (caps lock says nothing about any one word).
+
+    Function words are left out: "I" and a sentence-initial "A" are written
+    in capitals by rule, not because they name anything, and neither can be
+    a turn term anyway.
+    """
+    raw = unicodedata.normalize("NFKC", str(turn or ""))
+    if not any(character.islower() for character in raw):
+        return frozenset()
+    return frozenset(
+        folded
+        for word in _ACRONYM_RE.findall(raw)
+        if (folded := word.casefold()) not in _STOPWORDS
+    )
 
 
 def _fold_lexical_term(term: str) -> str | None:
@@ -456,6 +500,7 @@ def analyze_turn(turn: str) -> TurnAnalysis:
         ngrams=tuple(ngrams),
         cues=cues,
         referential=referential,
+        acronyms=_acronyms_of(turn),
     )
 
 
@@ -631,7 +676,7 @@ def candidates_for(
             (only_shared_name_term,) = shared_name
             count = term_counts.get(only_shared_name_term)
             if (
-                _clears_rare_term_length(only_shared_name_term)
+                _clears_rare_term_length(only_shared_name_term, acronyms=analysis.acronyms)
                 and count is not None
                 and count <= RARE_TERM_MAX_ANCHORS
             ):

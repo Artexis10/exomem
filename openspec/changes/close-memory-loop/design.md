@@ -455,7 +455,13 @@ that one word. The floor is applied only to a term written entirely in
 ASCII letters, since two characters is an ordinary-length word in CJK and
 counting code points there would turn a real name into a non-name; a short
 ASCII term carrying a digit ("v2", "b2") is exempt for the same reason, no
-ordinary English word containing one.
+ordinary English word containing one. So is a short term the turn spelled as
+an ACRONYM, in capitals inside a turn of ordinary case ("my AI usage
+limits"): the floor is about everyday words, which are written "go" or "Go",
+and without the exception a benchmark case whose only shared name word was
+"AI" stopped resolving its gold collection. A turn with no lower-case letter
+at all carries no casing signal and is read as lower case, so caps lock does
+not turn "GO" into a name.
 
 The final guard unwraps a packet reference to its vault path before deciding
 it, rather than deciding the reference text itself. A unit's own `ref` is the

@@ -1829,3 +1829,62 @@ def test_a_hot_anchor_with_continuity_resolves_on_a_referential_turn_naming_noth
 
     assert resolution.status == "resolved"
     assert resolution.anchors[0].evidence == ("continuity", "recency")
+
+
+# --------------------------------------------------------------------------- #
+# R-E (amends D4): a one- or two-letter ASCII term clears the rare-term floor
+# only when the turn spells it as an acronym, in upper case.
+# --------------------------------------------------------------------------- #
+
+
+def test_an_upper_case_two_letter_acronym_earns_rare_term() -> None:
+    """"AI" in "my AI usage limits" is a name the turn spelled as one — the
+    D4 floor exists for everyday words, and nobody writes "go" as "GO" in a
+    sentence of ordinary case."""
+    row = _term_row(
+        "Records/AI Subscriptions/_collection.md", "AI Subscriptions", terms=("ai", "subscriptions")
+    )
+    analysis = resolve_module.analyze_turn("I keep hitting my AI usage limits again this week.")
+
+    assert analysis.acronyms == frozenset({"ai"})
+    candidates = resolve_module.candidates_for(analysis, (row,), term_anchor_counts={"ai": 1})
+
+    assert len(candidates) == 1
+    assert "rare_term" in candidates[0].evidence
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "I keep hitting my ai usage limits again this week.",
+        "I keep hitting my Ai usage limits again this week.",
+    ],
+)
+def test_a_short_term_not_spelled_as_an_acronym_stays_refused(turn: str) -> None:
+    """Lower or mixed case is how an everyday word is written, so D4 holds."""
+    row = _term_row(
+        "Records/AI Subscriptions/_collection.md", "AI Subscriptions", terms=("ai", "subscriptions")
+    )
+    analysis = resolve_module.analyze_turn(turn)
+
+    assert analysis.acronyms == frozenset()
+    assert resolve_module.candidates_for(analysis, (row,), term_anchor_counts={"ai": 1}) == ()
+
+
+def test_an_all_capitals_turn_carries_no_casing_signal() -> None:
+    """A turn typed with caps lock on spells every word in upper case, so
+    upper case says nothing there: "GO" in it is still the verb."""
+    row = _term_row("release-go-checklist.md", "Release Go Checklist", terms=("release", "go"))
+    analysis = resolve_module.analyze_turn("SO SHOULD I GO WITH THE FIRST OPTION")
+
+    assert analysis.acronyms == frozenset()
+    assert resolve_module.candidates_for(analysis, (row,), term_anchor_counts={"go": 1}) == ()
+
+
+def test_a_capitalised_short_word_is_not_an_acronym() -> None:
+    """"Go" at the start of a sentence is the verb with a capital, not a name."""
+    row = _term_row("release-go-checklist.md", "Release Go Checklist", terms=("release", "go"))
+    analysis = resolve_module.analyze_turn("Go with the first option, I think")
+
+    assert analysis.acronyms == frozenset()
+    assert resolve_module.candidates_for(analysis, (row,), term_anchor_counts={"go": 1}) == ()
