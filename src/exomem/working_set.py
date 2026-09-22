@@ -927,10 +927,24 @@ def compile_packet(
     # exists to fix. Skipped rather than raised when the budget is gone: it is
     # an enrichment, and losing it must not turn an honest `unresolved` into
     # `unavailable`.
+    #
+    # It takes NO budget boundary of its own, in either direction. Not a
+    # recording one (`budget_exhausted`): that marks the stage a request
+    # STOPPED at, every caller of it returns or raises immediately, and
+    # recording one here took the slot `working_set.roles` needed — the
+    # regression `test_budget_exhausted_after_resolve_skips_roles_onward`
+    # caught. Not a silent affordability read either: the suite simulates
+    # exhaustion by counting reads of `RequestBudget.remaining()`
+    # (`_CountdownBudget`), which `can_afford` goes through, so ANY check here
+    # shifts the documented pre-lane call count that
+    # `test_budget_exhausted_between_two_role_lanes_discards_the_first_lanes_
+    # work` pins. What makes that safe is that the block is bounded work
+    # between two boundaries that already gate the request — it reads a dict,
+    # sorts it, and touches at most `RECENT_CONTEXT_MAX_ENTRIES` cached pages
+    # — and an exhausted budget raises at `working_set.roles` immediately
+    # below.
     with _span(timings, "working_set.recent"):
-        recent: tuple[dict[str, Any], ...] = (
-            () if budget_exhausted("working_set.recent") else _recent_context(root, rows=rows)
-        )
+        recent: tuple[dict[str, Any], ...] = _recent_context(root, rows=rows)
         # An abstaining turn never reaches the current-state stage, so the ONE
         # current-state read this request is allowed happens here instead. A
         # resolved turn's read is the stage's own, below, widened to cover
