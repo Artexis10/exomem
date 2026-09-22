@@ -3055,11 +3055,15 @@ CARRY_RUNNER_UP = "Knowledge Base/Notes/Insights/quillon-handover-brief.md"
 
 
 def _seed_carry_corpus(vault: Path) -> None:
-    """A dominant research note under a governable folder, a genuine runner-up
-    elsewhere that the turn also reaches — so "never the runner-up" has
-    something to be true about — and the ordinary notes any real vault has,
-    which are what make everyday words everyday and carry the corpus past
-    `RETRIEVAL_CARRY_MIN_PAGES`.
+    """The page the turn names, a second page on the same topic that it does
+    NOT name, and the ordinary notes any real vault has.
+
+    The second page shares one distinctive word with the turn and no phrase,
+    so the naming gate never admits it — which is the point. Once a turn
+    that names two pages carries neither, "serve the runner-up instead" is
+    not a mistake the compiler can make by choosing wrongly; the only way it
+    could happen is by reaching for a page the turn never named, and this
+    corpus has exactly such a page sitting next to the withheld one.
 
     Seeds its own pages rather than reusing the carry suite's fixture: that
     one also carries raw-material twins of the research note, and a fourth
@@ -3107,8 +3111,8 @@ updated: 2026-09-08
 
 {filler}
 
-- [finding] The handover brief mentions the quillon vantry window once.
-  ^h-once
+- [finding] The handover brief mentions the quillon programme once, and
+  nothing else it says is distinctive. ^h-once
 
 {filler}
 """,
@@ -3125,9 +3129,10 @@ def test_a_withheld_dominant_page_abstains_rather_than_carrying_the_runner_up(
 
     A carried packet has exactly one anchor by construction, so the guard
     emptying it IS the answer. What this pins is that nothing anywhere
-    re-runs the choice without the withheld page: the turn reaches a real
-    runner-up, that runner-up is named nowhere in what is served, and the
-    packet says `withheld` rather than quietly serving the second best.
+    reaches for a different page once the named one is withheld: a second
+    page on the same topic sits in the corpus, it is named nowhere in what
+    is served, and the packet says `withheld` rather than quietly
+    substituting it.
     """
     from test_working_set_carry import CARRY_TURN
 
@@ -3141,8 +3146,10 @@ def test_a_withheld_dominant_page_abstains_rather_than_carrying_the_runner_up(
 
     hits, state = working_set_runtime.carry_candidates(vault, CARRY_TURN)
     assert state == "available"
-    assert len(hits) >= 2, f"the turn must reach a runner-up for this to prove anything: {hits}"
-    assert [path for path, _score in hits][:2] == [CARRY_DOMINANT, CARRY_RUNNER_UP], hits
+    # Exactly the page the turn named; the second page exists in the corpus
+    # but the naming gate never admits it.
+    assert [path for path, _score in hits] == [CARRY_DOMINANT], hits
+    assert (vault / CARRY_RUNNER_UP).exists()
     dominant = working_set.dominant_carry(hits)
     assert dominant is not None and dominant[0] == CARRY_DOMINANT, hits
 
