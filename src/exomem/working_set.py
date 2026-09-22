@@ -78,11 +78,16 @@ RETRIEVAL_CARRY_SEPARATION = 1.5
 RETRIEVAL_CARRY_MIN_SCORE = 0.0
 
 #: How much room the carry asks the request budget for, as a multiple of
-#: what the request's first lexical pass measured. The carry runs the same
-#: query shape against the same catalogue, so its cost tracks that one; the
-#: margin is for a second pass that happens to be a little dearer than the
-#: first (measured at 0.7-1.0x across corpus sizes).
-RETRIEVAL_CARRY_BUDGET_MULTIPLE = 1.2
+#: what the request's first lexical pass measured. The carry's own cost
+#: tracks that pass — same catalogue, same query shape — but it is now TWO
+#: round trips rather than one, because a rare-term pass runs before the
+#: ranking pass. Measured against the first lexical pass at 1.3x with no
+#: bulk, 1.4x at 200 added pages and 1.9x at 2000, so the reserve is 2.0: a
+#: reserve that cannot pay for the stage it admits is not a reserve, and
+#: the failure it exists to prevent — overshooting the door budget and
+#: returning `unavailable` where the turn would have said `unresolved` — is
+#: worse than the occasional refusal of a carry that would have fitted.
+RETRIEVAL_CARRY_BUDGET_MULTIPLE = 2.0
 
 #: A stem is DISTINCTIVE when it occurs on no more than this share of the
 #: indexed pages. Corpus-relative on purpose: "rare" is a statement about
