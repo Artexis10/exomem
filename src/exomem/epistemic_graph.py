@@ -913,6 +913,24 @@ def clear_publication_refusal(vault_root: Path) -> None:
         _PUBLICATION_REFUSALS.pop(_publication_memo_key(vault_root), None)
 
 
+_WHOLE_VAULT_PASS_SECONDS: dict[str, float] = {}
+
+
+def _note_whole_vault_pass(vault_root: Path, seconds: float) -> None:
+    with _PUBLICATION_MEMO_LOCK:
+        _WHOLE_VAULT_PASS_SECONDS[_publication_memo_key(vault_root)] = seconds
+
+
+def last_whole_vault_pass_seconds(vault_root: Path) -> float | None:
+    """Wall time of the latest whole-vault pass over this vault in this process.
+
+    One pass is the unit a concurrent write invalidates: the drain waits for a
+    quiet window at least this long before it starts another one.
+    """
+    with _PUBLICATION_MEMO_LOCK:
+        return _WHOLE_VAULT_PASS_SECONDS.get(_publication_memo_key(vault_root))
+
+
 def _observe_full_marker(vault_root: Path) -> tuple[int, int] | None:
     """The whole-vault debt standing before a rebuild attempt samples its epoch."""
     try:
@@ -934,6 +952,10 @@ def _retire_covered_full_marker(vault_root: Path, observed: tuple[int, int] | No
     -- during the pass or after the publication -- moves the marker's raise
     count, so the retirement declines and that debt survives. Never raises: a
     retained marker costs one redundant rebuild, never lost debt.
+
+    The drain is told either way: whatever backoff it is serving described the
+    graph this publication just replaced, and the per-path work queued behind
+    the marker can drain now.
     """
     if observed is not None:
         try:
@@ -948,6 +970,12 @@ def _retire_covered_full_marker(vault_root: Path, observed: tuple[int, int] | No
                     "graph rebuild publication retired the full marker it covers marker=%s",
                     observed[0],
                 )
+    try:
+        from . import graph_drain
+
+        graph_drain.note_graph_progress()
+    except Exception:  # noqa: BLE001 - a missed wake costs one poll, never the repair
+        pass
 
 
 #: Every reason `recover_suspended_graph` can decline, as a stable token.
@@ -3456,6 +3484,7 @@ class EpistemicGraphIndex:
             while _may_restabilize(attempts, retarget=retarget, started=started):
                 attempts += 1
                 retarget = False
+                attempt_started = time.monotonic()
                 before_disk = _disk_vault_freshness(self.vault_root)
                 before = _recall_projection_identity(self.vault_root, disk_freshness=before_disk)
                 resolver = find_module.recall_resolver_snapshot(
@@ -3490,6 +3519,7 @@ class EpistemicGraphIndex:
                 pass_started = True
                 report = self._rebuild_all_pass(resolver)
                 after_disk = _disk_vault_freshness(self.vault_root)
+                _note_whole_vault_pass(self.vault_root, time.monotonic() - attempt_started)
                 # Bound to names so the `else` below can say *which* of the three
                 # conditions moved without re-running either O(vault) proof.  The
                 # walrus keeps the short-circuit exactly as it was: membership is

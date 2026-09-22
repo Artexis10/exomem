@@ -773,3 +773,218 @@ def test_unloading_resolver_caches_revokes_an_inflight_recall_build(
 
     assert not thread.is_alive()
     assert Path(vault) not in find_module._RECALL_RESOLVER_CACHE
+
+
+# --- Whole-vault repair waits out a write burst instead of spinning into it ---
+
+
+def _signal_debt_for(seconds: float, every: float = 0.02) -> None:
+    """Stand in for a burst of writes: each one enqueues graph debt."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        graph_drain.note_graph_debt()
+        time.sleep(every)
+
+
+def test_write_signals_do_not_restart_whole_vault_repair_mid_burst(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A burst of writes must not buy one whole-vault attempt per write.
+
+    Every write enqueues graph debt and signals the drain. With a whole-vault
+    marker standing, each of those passes either loses the canonical boundary
+    to the next write (`graph_boundary_busy`) or starts a rebuild the next write
+    invalidates, so answering every signal is the spin the live service showed:
+    a convergence attempt every few seconds for as long as writes kept landing.
+    The no-progress backoff has to hold against the signal, not only against
+    the idle poll.
+    """
+    monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.0)
+    monkeypatch.setattr(graph_drain, "RETRY_SECONDS", 0.2)
+    monkeypatch.setattr(graph_drain, "MAX_RETRY_SECONDS", 0.4)
+    monkeypatch.setattr(graph_drain, "WHOLE_VAULT_SETTLE_SECONDS", 0.3, raising=False)
+    monkeypatch.setattr(graph_drain, "_pending", lambda _root: True)
+    monkeypatch.setattr(graph_drain, "_whole_vault_pending", lambda _root: True, raising=False)
+    attempts: list[float] = []
+
+    def no_progress(_root: Path) -> int:
+        attempts.append(time.monotonic())
+        return 0
+
+    monkeypatch.setattr(graph_drain, "_work_once", no_progress)
+
+    graph_drain.start(tmp_path)
+    burst_started = time.monotonic()
+    _signal_debt_for(1.5)
+    during_burst = [moment for moment in attempts if moment >= burst_started]
+
+    # The ceiling is the backoff's own cadence, not one per write: ~75 signals
+    # land in the burst, and at most one attempt per ceiling interval may start.
+    assert len(during_burst) <= 5, (
+        f"{len(during_burst)} whole-vault attempts during a 1.5 s write burst; "
+        "debt signals are bypassing the no-progress backoff"
+    )
+
+
+def test_whole_vault_repair_runs_once_the_burst_settles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Waiting out a burst is deferral, never abandonment."""
+    monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.0)
+    monkeypatch.setattr(graph_drain, "RETRY_SECONDS", 0.2)
+    monkeypatch.setattr(graph_drain, "MAX_RETRY_SECONDS", 0.4)
+    monkeypatch.setattr(graph_drain, "WHOLE_VAULT_SETTLE_SECONDS", 0.3, raising=False)
+    settled = threading.Event()
+    monkeypatch.setattr(graph_drain, "_pending", lambda _root: not settled.is_set())
+    monkeypatch.setattr(graph_drain, "_whole_vault_pending", lambda _root: True, raising=False)
+
+    def converge(_root: Path) -> int:
+        settled.set()
+        return 1
+
+    monkeypatch.setattr(graph_drain, "_work_once", converge)
+
+    graph_drain.start(tmp_path)
+    _signal_debt_for(0.5)
+    assert _wait_for(settled.is_set, timeout=5.0), "whole-vault repair never ran after the burst"
+
+
+def test_a_publication_elsewhere_ends_the_drains_backoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once another owner publishes, the drain's backoff describes nothing.
+
+    The coordinator's rebuild, not the drain, is usually what lands the graph
+    after a burst. What is left then is ordinary per-path work, and a drain
+    still asleep on a two-minute whole-vault backoff would leave it queued.
+    """
+    monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.0)
+    monkeypatch.setattr(graph_drain, "RETRY_SECONDS", 30.0)
+    monkeypatch.setattr(graph_drain, "MAX_RETRY_SECONDS", 60.0)
+    monkeypatch.setattr(graph_drain, "WHOLE_VAULT_SETTLE_SECONDS", 0.0, raising=False)
+    monkeypatch.setattr(graph_drain, "_pending", lambda _root: True)
+    monkeypatch.setattr(graph_drain, "_whole_vault_pending", lambda _root: True, raising=False)
+    attempts: list[float] = []
+
+    def no_progress(_root: Path) -> int:
+        attempts.append(time.monotonic())
+        return 0
+
+    monkeypatch.setattr(graph_drain, "_work_once", no_progress)
+
+    graph_drain.start(tmp_path)
+    assert _wait_for(lambda: len(attempts) >= 1, timeout=5.0)
+    graph_drain.note_graph_debt()
+    time.sleep(0.3)
+    assert len(attempts) == 1, "a write signal cut a 30 s whole-vault backoff short"
+
+    graph_drain.note_graph_progress()
+
+    assert _wait_for(lambda: len(attempts) >= 2, timeout=5.0), (
+        "a publication by another owner did not wake the backed-off drain"
+    )
+
+
+def test_a_standing_marker_is_the_passs_only_whole_vault_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One pass, one whole-vault attempt.
+
+    With a whole-vault marker standing, the drain converges it first. When
+    that attempt makes no progress, barrier recovery is another whole-vault
+    rebuild of the same graph: the live service logged the pair on nearly
+    every pass, a `graph_boundary_busy` convergence and then a recovery that
+    failed on the same busy boundary. The marker's convergence covers the
+    barrier too, so recovery waits for the next pass.
+    """
+    deferred_index.mark_graph_full_rebuild(tmp_path, generation=1)
+    monkeypatch.setattr(graph_drain, "_drain_once", lambda _root: 0)
+    monkeypatch.setattr(graph_drain, "_barrier_pending", lambda _root: True)
+    recoveries: list[Path] = []
+
+    def recover(root: Path) -> bool:
+        recoveries.append(root)
+        return False
+
+    monkeypatch.setattr(graph_drain, "_recover_once", recover)
+
+    assert graph_drain._work_once(tmp_path) == 0
+    assert recoveries == [], "a pass paid for barrier recovery on top of the marker's attempt"
+    assert deferred_index.graph_full_rebuild_pending(tmp_path) == 1
+
+
+def test_the_quiet_window_is_one_whole_vault_pass_long(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A gap shorter than one pass cannot publish one, so it must not start one.
+
+    The live vault's whole-vault pass took ~45 s idle and minutes under load,
+    while agents wrote every 10-60 s. A fixed few-second debounce starts a pass
+    in nearly every gap, and the next write throws it away. The window the drain
+    waits for is the duration of the last whole-vault pass it has seen.
+    """
+    monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.0)
+    monkeypatch.setattr(graph_drain, "RETRY_SECONDS", 0.05)
+    monkeypatch.setattr(graph_drain, "MAX_RETRY_SECONDS", 5.0)
+    monkeypatch.setattr(graph_drain, "WHOLE_VAULT_SETTLE_SECONDS", 0.1, raising=False)
+    monkeypatch.setattr(
+        epistemic_graph, "last_whole_vault_pass_seconds", lambda _root: 0.6, raising=False
+    )
+    monkeypatch.setattr(graph_drain, "_pending", lambda _root: True)
+    monkeypatch.setattr(graph_drain, "_whole_vault_pending", lambda _root: True, raising=False)
+    attempts: list[float] = []
+
+    def no_progress(_root: Path) -> int:
+        attempts.append(time.monotonic())
+        return 0
+
+    monkeypatch.setattr(graph_drain, "_work_once", no_progress)
+
+    graph_drain.start(tmp_path)
+    # The startup pass runs at once (no burst yet) and makes no progress.
+    assert _wait_for(lambda: len(attempts) >= 1, timeout=5.0)
+    burst_started = time.monotonic()
+    # Writes 0.2 s apart: every gap is longer than the floor, none as long as a pass.
+    _signal_debt_for(1.5, every=0.2)
+    burst_ended = time.monotonic()
+    during_burst = [moment for moment in attempts if burst_started <= moment < burst_ended]
+    assert during_burst == [], (
+        f"{len(during_burst)} whole-vault attempt(s) started in gaps shorter than one pass"
+    )
+    assert _wait_for(lambda: any(moment >= burst_ended for moment in attempts), timeout=5.0), (
+        "the pass never ran once the writes stopped"
+    )
+
+
+def test_an_unavailable_graph_alone_is_per_path_work_and_is_not_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ordinary per-path fence must keep draining through a write burst.
+
+    A deferred write withdraws availability and queues its own paths; the drain
+    restores availability by repairing them. That is not a whole-vault pass, so
+    the quiet window does not apply to it: holding it would leave the graph
+    unreadable for the whole burst when proportional repair could have kept up.
+    """
+    monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.0)
+    monkeypatch.setattr(graph_drain, "WHOLE_VAULT_SETTLE_SECONDS", 60.0, raising=False)
+    monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root: True)
+    monkeypatch.setattr(graph_drain, "_availability_pending", lambda _root: True)
+    monkeypatch.setattr(deferred_index, "graph_full_rebuild_pending", lambda _root: None)
+    drained: list[float] = []
+
+    def drain(_root: Path, *, limit: int | None = None) -> int:
+        drained.append(time.monotonic())
+        return 1
+
+    monkeypatch.setattr(index_sync, "drain_graph_work", drain)
+    monkeypatch.setattr(graph_drain, "_republish_once", lambda _root: False)
+    monkeypatch.setattr(graph_drain, "_request_full_rebuild", lambda _root: False)
+
+    graph_drain.start(tmp_path)
+    burst_started = time.monotonic()
+    _signal_debt_for(0.5)
+
+    assert any(moment >= burst_started for moment in drained), (
+        "per-path repair was held behind the whole-vault quiet window"
+    )
