@@ -543,21 +543,36 @@ def _is_raw_material(path: str) -> bool:
     return inside.split("/", 1)[0] in CARRY_EXCLUDED_FOLDERS
 
 
+def content_words(turn: str) -> str:
+    """The turn's own content WORDS, unstemmed, stopwords dropped.
+
+    What the ranking query is given. `search_bm25_result` tokenises and
+    stems whatever it receives, so it must receive words: handing it stems
+    stems them a SECOND time, and Snowball does not settle in one pass —
+    237 of 6,225 words in this repository change again ("collapse" ->
+    "collaps" -> "collap"), and the MATCH is then issued for terms no page
+    contains.
+    """
+    return " ".join(
+        token
+        for token in working_set_index.tokens_of(working_set_index.normalize(turn))
+        if token not in working_set_index.STOPWORDS
+    )
+
+
 def content_stems(turn: str) -> tuple[str, ...]:
     """The turn's own content stems, in order, deduplicated.
 
     The SAME normalisation, stopword filter and stemmer the catalogue
     indexed its pages with, so a frequency measured here and a page ranked
-    there are talking about the same word.
+    there are talking about the same word. Used for the rarity lookup and
+    the corroboration list, which compare against the catalogue's STORED
+    stems directly; never for the ranking query, which stems what it is
+    given (see `content_words`).
     """
     from . import bm25 as bm25_module
 
-    content_turn = " ".join(
-        token
-        for token in working_set_index.tokens_of(working_set_index.normalize(turn))
-        if token not in working_set_index.STOPWORDS
-    )
-    return tuple(dict.fromkeys(bm25_module.tokenize(content_turn)))
+    return tuple(dict.fromkeys(bm25_module.tokenize(content_words(turn))))
 
 
 def rare_turn_terms(
@@ -662,7 +677,9 @@ def carry_candidates(
             return (), "available"
         result = lexstore.search_bm25_result(
             vault_root,
-            " ".join(stems),
+            # The turn's WORDS, not its stems: this query stems what it is
+            # given, and stemming a stem is not a no-op.
+            content_words(turn),
             limit,
             scope="kb",
             freshness=freshness,

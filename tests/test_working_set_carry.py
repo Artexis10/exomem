@@ -55,6 +55,11 @@ GENUINE_TURN = (
     "throughput ceiling and whether we ever raised it"
 )
 GENUINE_PAGE = "Knowledge Base/Notes/Research/kelvane-throughput-review.md"
+#: A page whose distinctive words are ORDINARY English that the stemmer does
+#: not settle on in one pass: "collapse" stems to "collaps", and stemming
+#: that again gives "collap", which no page in the catalogue contains.
+DOUBLE_STEM_TURN = "what did we decide about the collapse browse window"
+DOUBLE_STEM_PAGE = "Knowledge Base/Notes/Research/collapse-browse-window.md"
 STUB_PAGE = "Knowledge Base/Notes/Inbox/meeting-notes.md"
 #: One ordinary note's worth of prose. Every word the stub turn shares with
 #: `STUB_PAGE` appears here, which is the point: in a vault that contains
@@ -226,6 +231,22 @@ updated: 2026-08-01
 - [note] Decision pending. ^m-1
 """,
     )
+    _write(
+        kb / "Notes" / "Research" / "collapse-browse-window.md",
+        """---
+type: research-note
+status: active
+updated: 2026-09-12
+---
+
+# Collapse browse window
+
+## Summary
+
+- [decision] The collapse browse window was shortened after the collapse
+  browse pass was found to run twice per cycle. ^c-decision
+""",
+    )
     seed_ordinary_notes(vault, _ORDINARY_NOTES + max(0, bulk))
     lexstore.ensure_fresh(vault)
     working_set_runtime.reset_caches_for_tests()
@@ -382,6 +403,29 @@ def test_a_corpus_large_enough_to_measure_rarity_still_carries(prose_vault: Path
     hits, state = working_set_runtime.carry_candidates(prose_vault, GENUINE_TURN)
     assert state == "available"
     assert [path for path, _score in hits] == [GENUINE_PAGE], hits
+
+
+def test_a_word_the_stemmer_does_not_settle_on_still_ranks(prose_vault: Path) -> None:
+    """The ranking query takes the turn's WORDS; only the rarity gate takes
+    its stems.
+
+    Snowball is not idempotent — 237 of 6,225 words in this repository change
+    under a second pass, "collapse" to "collaps" to "collap" — so handing the
+    already-stemmed terms to a query that stems what it is given issues the
+    MATCH for terms no page contains. The page still surfaced, because one
+    term in the turn happened to be stable, and it scored 3e-06 where the
+    same page for the same turn scores in the tens. A score that small is
+    indistinguishable from noise, and everything downstream of it — the
+    separation test, the sanity bound — was comparing numbers that meant
+    nothing.
+    """
+    hits, state = working_set_runtime.carry_candidates(prose_vault, DOUBLE_STEM_TURN)
+
+    assert state == "available"
+    assert [path for path, _score in hits] == [DOUBLE_STEM_PAGE], hits
+    assert hits[0][1] > 10.0, hits
+    dominant = working_set.dominant_carry(hits)
+    assert dominant is not None and dominant[0] == DOUBLE_STEM_PAGE
 
 
 def test_a_stub_sharing_only_ordinary_words_is_never_carried(prose_vault: Path) -> None:
