@@ -1440,3 +1440,42 @@ def test_continue_after_moving_on_follows_the_new_work_not_the_old_token(
 
     resolved = [item["path"] for item in packet["anchors"] if item["status"] == "resolved"]
     assert resolved == ["Knowledge Base/Systems/Depot Ledger.md"], packet["anchors"]
+
+
+# R-N1 through the door: the reviewer's r2 acronym probe.
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "I got a C on my chemistry exam",
+        "I got a c on my chemistry exam",
+        "should I GO with the cheaper build machines?",
+        "should I go with the cheaper build machines?",
+    ],
+)
+def test_capitals_in_ordinary_prose_never_serve_an_unrelated_anchor(
+    activation_vault: Path, turn: str
+) -> None:
+    from exomem import file_watcher, lexstore
+
+    pages = {
+        "Building C": "The chemistry building, where every exam hall is.",
+        "Go Toolchain": "Notes on the cheaper build machines for the toolchain.",
+    }
+    for title, body in pages.items():
+        (activation_vault / "Knowledge Base" / "Products" / f"{title}.md").write_text(
+            f"---\ntype: note\nstatus: active\n---\n\n# {title}\n\n## Summary\n\n{body}\n",
+            encoding="utf-8",
+        )
+    working_set_index.WorkingSetIndex(activation_vault).rebuild()
+    file_watcher.FileWatcher(activation_vault)._reconcile_once(seed=True)
+    lexstore.ensure_fresh(activation_vault)
+    runtime_module.reset_caches_for_tests()
+
+    packet = commands.op_activate_context(activation_vault, turn=turn)
+
+    assert not [item for item in packet["anchors"] if item["status"] == "resolved"], (
+        packet["anchors"]
+    )
+    assert packet["units"] == []

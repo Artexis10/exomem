@@ -1885,8 +1885,9 @@ def test_a_hot_anchor_with_continuity_resolves_on_a_referential_turn_naming_noth
 
 
 # --------------------------------------------------------------------------- #
-# R-E (amends D4): a one- or two-letter ASCII term clears the rare-term floor
-# only when the turn spells it as an acronym, in upper case.
+# R-E (amends D4), narrowed by R-N1: a short ASCII term clears the rare-term
+# floor only when the turn spells it as exactly two capitals AND the anchor's
+# own title spells it in capitals too.
 # --------------------------------------------------------------------------- #
 
 
@@ -2020,3 +2021,61 @@ def test_heat_never_reorders_candidates_the_turn_named() -> None:
     ordered = sorted([hot, colder], key=resolve_module._candidate_order)
 
     assert [item.anchor_id for item in ordered] == ["b.md", "a.md"]
+
+
+@pytest.mark.parametrize(
+    ("turn", "title", "term"),
+    [
+        ("I got a C on my chemistry exam", "Building C", "c"),
+        ("should I GO with the cheaper build machines?", "Go Toolchain", "go"),
+        ("U.S. tax deadline?", "Model S Lease", "s"),
+        ("the S in HTTPS stands for secure", "Model S Lease", "s"),
+        ("I keep hitting my AI usage limits again this week.", "Ai Tools", "ai"),
+    ],
+)
+def test_capitals_alone_never_make_a_short_word_a_lead(turn: str, title: str, term: str) -> None:
+    """R-N1, the reviewer's r2 probes: a single capital, emphasis capitals on
+    an everyday word, a dotted abbreviation, or an acronym the anchor's own
+    title does not spell in capitals. Each used to earn `rare_term`, and with
+    an ordinary recall hit beside it, to resolve and serve the anchor."""
+    row = _term_row(f"{title}.md", title, terms=tuple(title.casefold().split()))
+
+    candidates = resolve_module.candidates_for(
+        resolve_module.analyze_turn(turn), (row,), term_anchor_counts={term: 1}
+    )
+
+    assert all("rare_term" not in item.evidence for item in candidates), candidates
+
+
+def test_a_two_capital_acronym_the_title_also_capitalises_is_a_lead() -> None:
+    """C1's shape, which must keep resolving."""
+    row = _term_row("PM Handbook.md", "PM Handbook", terms=("pm", "handbook"))
+
+    candidates = resolve_module.candidates_for(
+        resolve_module.analyze_turn("where is the PM checklist kept"),
+        (row,),
+        term_anchor_counts={"pm": 1},
+    )
+
+    assert [item.evidence for item in candidates] == [frozenset({"rare_term"})]
+
+
+def test_only_two_capital_words_are_acronyms() -> None:
+    analysis = resolve_module.analyze_turn("the S in HTTPS and the U.S. plan for AI")
+
+    assert analysis.acronyms == frozenset({"ai"})
+
+
+def test_a_one_letter_name_still_resolves_by_its_own_spelling() -> None:
+    """Single capitals never earn `rare_term`, but a page named exactly "R"
+    is still reached by the turn spelling its name."""
+    row = _term_row("R.md", "R", terms=("r",))
+
+    candidates = resolve_module.candidates_for(
+        resolve_module.analyze_turn("Is R worth learning for statistics?"),
+        (row,),
+        term_anchor_counts={"r": 1},
+    )
+
+    assert candidates and "exact_alias" in candidates[0].evidence
+    assert resolve_module.resolve(candidates).status == "resolved"

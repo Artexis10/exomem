@@ -67,18 +67,24 @@ EVIDENCE_KINDS: tuple[str, ...] = (
 #: non-name. A term that is not all-ASCII keeps whatever rarity its
 #: document count earns it.
 #:
-#: And not to a term the turn spelled as an ACRONYM ("AI", "UI", "EU"): an
-#: all-capitals word in a turn of ordinary case is written that way because
-#: it is a name, while the everyday word the floor exists for is written
-#: "go" or "Go". A turn with no lower-case letter at all carries no such
-#: signal and is read as lower case (`TurnAnalysis.acronyms`).
+#: And not to a two-letter ACRONYM both sides spell as one: the turn writes
+#: it as exactly two capitals ("AI", "UI", "EU") AND the anchor's own title
+#: writes it in capitals too ("AI Subscriptions"). Either half alone is not
+#: enough. Capitals in a turn are also emphasis ("should I GO with..."), a
+#: grade ("I got a C"), or a dotted abbreviation ("U.S."), and each of those
+#: reached an unrelated anchor and served it when the turn's casing sufficed;
+#: an anchor whose title writes the word "Go" is not named by an emphatic
+#: "GO". A single capital never qualifies — a one-letter name is reached by
+#: its own spelling (`exact_alias`), never as a lead — and a turn with no
+#: lower-case letter at all carries no casing signal and is read as lower
+#: case (`TurnAnalysis.acronyms`).
 RARE_TERM_MIN_CHARS = 3
 
-#: A word the turn spelled in capitals, found on the RAW turn because
-#: `normalize()` casefolds. ASCII letters only, the one alphabet the length
-#: floor applies to; bounded on both sides by anything that is not a letter
-#: or digit, so "AI's" and "AI-driven" still show "AI".
-_ACRONYM_RE = re.compile(r"(?<![A-Za-z0-9])[A-Z]+(?![A-Za-z0-9])")
+#: Exactly two ASCII capitals, found on the RAW text because `normalize()`
+#: casefolds. Bounded on both sides by anything that is not a letter, a digit
+#: or a dot, so "AI's" and "AI-driven" still show "AI" while "HTTPS" and a
+#: dotted "U.S." show nothing.
+_ACRONYM_RE = re.compile(r"(?<![A-Za-z0-9.])[A-Z]{2}(?![A-Za-z0-9]|\.[A-Za-z])")
 
 #: `usage_prior` is a tie-break only. It never contributes to the two-kinds
 #: rule, because "you looked at this a lot" is not evidence that this turn is
@@ -268,10 +274,10 @@ class TurnAnalysis:
     #: and whether the turn's words reached an anchor after all, are facts
     #: about the vault and the candidate set, decided in `resolve()`.
     referential: bool = False
-    #: The words the turn spelled as acronyms, casefolded like `tokens`: the
-    #: casing the analysis otherwise discards, kept only because the
-    #: rare-term length floor needs it (`RARE_TERM_MIN_CHARS`). Empty for a
-    #: turn with no lower-case letter, where capitals carry no signal.
+    #: The two-capital words the turn spelled as acronyms, casefolded like
+    #: `tokens`: the casing the analysis otherwise discards, kept only because
+    #: the rare-term length floor needs it (`RARE_TERM_MIN_CHARS`). Empty for
+    #: a turn with no lower-case letter, where capitals carry no signal.
     acronyms: frozenset[str] = frozenset()
 
     @property
@@ -423,9 +429,9 @@ def _clears_rare_term_length(term: str, *, acronyms: frozenset[str] = frozenset(
     `RARE_TERM_MIN_CHARS` code points, for an all-ASCII-letter term only.
     Any term carrying a character outside `a-z` is exempt: the floor's whole
     argument is about English word lengths, and a script that writes a name
-    in two characters is not the case it was reasoned about. So is a term
-    the turn spelled as an acronym (`acronyms`): the floor is about everyday
-    words, and "AI" in a sentence of ordinary case is not one.
+    in two characters is not the case it was reasoned about. So is a term in
+    `acronyms` — the caller's intersection of the turn's two-capital words
+    with the anchor title's (`RARE_TERM_MIN_CHARS`).
     """
     return (
         len(term) >= RARE_TERM_MIN_CHARS
@@ -435,15 +441,14 @@ def _clears_rare_term_length(term: str, *, acronyms: frozenset[str] = frozenset(
     )
 
 
-def _acronyms_of(turn: str) -> frozenset[str]:
-    """The casefolded words `turn` spelled in capitals, or nothing when the
-    whole turn is in capitals (caps lock says nothing about any one word).
+def _acronyms_of(text: str) -> frozenset[str]:
+    """The casefolded two-capital words `text` spells, or nothing when the
+    whole text is in capitals (caps lock says nothing about any one word).
 
-    Function words are left out: "I" and a sentence-initial "A" are written
-    in capitals by rule, not because they name anything, and neither can be
-    a turn term anyway.
+    Used on a turn and on an anchor's title alike. Function words are left
+    out: "OK" or "SO" written in capitals name nothing.
     """
-    raw = unicodedata.normalize("NFKC", str(turn or ""))
+    raw = unicodedata.normalize("NFKC", str(text or ""))
     if not any(character.islower() for character in raw):
         return frozenset()
     return frozenset(
@@ -719,7 +724,12 @@ def candidates_for(
             (only_shared_name_term,) = shared_name
             count = term_counts.get(only_shared_name_term)
             if (
-                _clears_rare_term_length(only_shared_name_term, acronyms=analysis.acronyms)
+                _clears_rare_term_length(
+                    only_shared_name_term,
+                    acronyms=analysis.acronyms & _acronyms_of(row.title)
+                    if analysis.acronyms
+                    else frozenset(),
+                )
                 and count is not None
                 and count <= RARE_TERM_MAX_ANCHORS
             ):
