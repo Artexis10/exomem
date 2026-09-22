@@ -1110,6 +1110,35 @@ def test_the_carry_runs_when_the_first_pass_was_cheap(
     assert carried is not None and carried[0] == CARRY_PAGE
 
 
+def test_the_reserve_covers_the_dearest_carry_measured(
+    carry_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A carry that runs past its reserve turns a timely `unresolved` into
+    `unavailable`, which renders nothing — so the reserve has to cover the
+    worst ratio observed, not the typical one.
+
+    Measured against the request's first lexical pass: 0.9x, 1.1x and 1.9x
+    on a quiet machine at zero, two hundred and two thousand added pages,
+    and 2.0x, 2.3x and 1.5x for the same tip under load.
+    """
+    assert working_set.RETRIEVAL_CARRY_BUDGET_MULTIPLE >= 2.3
+
+    budget = request_budget.RequestBudget(seconds=6.0)
+    token = request_budget.set_current(budget)
+    try:
+        # One second spent, five left; a first pass costing 2.2 s means the
+        # dearest observed carry needs 5.06 s, which does not fit.
+        monkeypatch.setattr(budget, "deadline", budget.deadline - 1.0)
+        carried = working_set._carry_by_retrieval(
+            carry_vault, turn=CARRY_TURN, lexical_seconds=2.2
+        )
+    finally:
+        request_budget.reset_current(token)
+
+    assert carried is None
+    assert "working_set.carry" in budget.as_response_block()["skipped"]
+
+
 def test_a_carried_page_with_no_readable_units_abstains(
     carry_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch
 ) -> None:

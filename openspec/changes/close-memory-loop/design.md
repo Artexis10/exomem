@@ -293,16 +293,20 @@ crosses `guard_working_set` like any other reference; it is the packet's only
 anchor, so an audience that may not see it gets the abstention the existing
 every-anchor-withheld rule already produces, never the runner-up. Cost falls only
 on turns that would have returned an empty packet. The rarity pass and the
-ranking pass are two catalogue round trips, measured at 1.3x, 1.4x and 1.9x
-the request's first lexical pass at zero, two hundred and two thousand added
-pages, which is what the carry's budget reserve is sized against; merging
-them into one readiness proof and one transaction is the next lever if that
-proves dear.
+ranking pass are two catalogue round trips, measured against the request's
+first lexical pass at zero, two hundred and two thousand added pages: 0.9x,
+1.1x and 1.9x on a quiet machine, and 2.0x, 2.3x and 1.5x for the same tip
+under load. The budget reserve is sized to the dearest of those rather than
+the typical one, because the outcomes are not symmetric — a carry that runs
+past its reserve returns `unavailable`, which renders nothing, where
+refusing returns the same empty packet honestly and sooner. Merging the two
+passes into one readiness proof and one transaction is the next lever if
+that proves dear.
 
 The reserve has an accepted consequence worth stating plainly. It asks for
-`max(1.0, 2.0 x L)` seconds where `L` is what the first lexical pass took,
+`max(1.0, 2.5 x L)` seconds where `L` is what the first lexical pass took,
 against roughly `6.0 - L` remaining of the door budget, so the carry stops
-running once `L` passes about two seconds — and the long, token-rich turns
+running once `L` passes about 1.7 seconds — and the long, token-rich turns
 measured live take three to four seconds in that stage. On exactly those
 turns the carry will not run, and the turn abstains as it did before. That
 is the right trade while the stage costs what it costs: a turn that
