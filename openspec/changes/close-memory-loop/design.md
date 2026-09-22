@@ -285,6 +285,18 @@ pages, which is what the carry's budget reserve is sized against; merging
 them into one readiness proof and one transaction is the next lever if that
 proves dear.
 
+The reserve has an accepted consequence worth stating plainly. It asks for
+`max(1.0, 2.0 x L)` seconds where `L` is what the first lexical pass took,
+against roughly `6.0 - L` remaining of the door budget, so the carry stops
+running once `L` passes about two seconds — and the long, token-rich turns
+measured live take three to four seconds in that stage. On exactly those
+turns the carry will not run, and the turn abstains as it did before. That
+is the right trade while the stage costs what it costs: a turn that
+overshoots the door budget comes back `unavailable`, which renders nothing
+and reads as a fault, where abstaining returns the same empty packet
+honestly and half a second sooner. What lifts it is U4, the lexical-stage
+cost work; nothing in the carry can.
+
 A resolved project anchor was previously pathless AND linkless: built with no
 page and no neighbours, so a project-naming turn resolved the anchor and
 served no material at all from any role lane. At index build/update time
