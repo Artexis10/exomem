@@ -41,16 +41,7 @@ from exomem.governance import egress
 from exomem.governance.principal import request_scope
 
 TURN = "I'm planning to tow the Cargo Sled north — how much depot stock is left?"
-#: Long on purpose. Close-memory-loop D2 made a SHORT turn that names nothing
-#: (six content words or fewer) referential: with a token, the previous
-#: packet's anchors are its referent, and that is pinned below by
-#: `test_a_referential_turn_with_a_token_resolves_the_previous_anchor`. What
-#: this turn pins is the other half, which did not move: a turn that says
-#: something of its own and reaches nothing is not rescued by a token.
-NONSENSE_TURN = (
-    "zqxwvu plonktastic frobnitz quibblewhomp snorkelwhistle grumbleferry "
-    "blatherskite wibblestock"
-)
+NONSENSE_TURN = "zqxwvu plonktastic frobnitz quibblewhomp"
 
 IDENTITY = "0:12345"
 OTHER_IDENTITY = "0:99999"

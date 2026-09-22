@@ -137,15 +137,19 @@ CUE_PATTERNS: Mapping[str, tuple[str, ...]] = {
     "question": ("?", "what about", "why does"),
     "recent_change": ("again", "still", "changed", "since"),
     "precedent": ("last time", "before", "previously"),
-    # A turn whose own words ARE the reference (close-memory-loop D2). Unlike
-    # every other cue this one is not a lens on WHAT to look for; it says the
-    # turn named nothing to look for at all, and it is the first half of the
-    # `referential` test below (the second half is the short-turn rule).
+    # A turn that says it points back at what the session was doing
+    # (close-memory-loop D2). Unlike every other cue this one is not a lens on
+    # WHAT to look for, and it is the WHOLE of the `referential` test: being
+    # short is not a signal, because a novel turn is short too and a prior
+    # must never answer one. Matched on whole tokens, not as a substring
+    # (`_REFERENTIAL_CUE_PHRASES`), so "discontinue" and "statuses" are not
+    # cues; bare "go on" and "pick up" are absent because their ordinary
+    # senses ("go online", "pick up the parcel") are far commoner than the
+    # referential one.
     "referential": (
         "continue",
         "where were we",
         "where did we leave",
-        "go on",
         "carry on",
         "status",
         "what's next",
@@ -153,20 +157,20 @@ CUE_PATTERNS: Mapping[str, tuple[str, ...]] = {
         "what is next",
         "same as before",
         "as before",
-        "pick up",
+        "pick up where",
         "resume",
     ),
 }
 
-#: The longest turn that can be referential WITHOUT speaking a declared cue,
-#: counted in content words (function words removed). The cue list catches the
-#: turns people phrase from a list; this catches the ones they do not —
-#: "status?", "and the northern depot?", "how much is left" — where the words
-#: present are not a name but a pointer at what the session was already doing.
-#: Six is deliberately short: at seven content words a turn is usually saying
-#: something of its own, and the rule below never fires while ANY candidate
-#: carries worded contact anyway.
-REFERENTIAL_MAX_CONTENT_TOKENS = 6
+#: The referential cues as token runs, spelled the way `tokens_of` spells a
+#: turn, so a cue matches only a contiguous run of whole turn tokens. The
+#: known residual: a cue word in its ordinary sense on a turn that names
+#: nothing ("update my resume") still reads as referential. `resolve()`'s
+#: guard — recency decides nothing while any candidate carries worded
+#: contact — is what bounds it; design section 8 records it.
+_REFERENTIAL_CUE_PHRASES: tuple[str, ...] = tuple(
+    " ".join(tokens_of(normalize(pattern))) for pattern in CUE_PATTERNS["referential"]
+)
 
 #: Worded contact: the turn's OWN WORDS reached the anchor's own names, terms
 #: or claims. Two of these together (or one plus any other kind besides
@@ -433,17 +437,19 @@ def analyze_turn(turn: str) -> TurnAnalysis:
                 if phrase not in seen:
                     seen.add(phrase)
                     ngrams.append(phrase)
+    token_text = f" {' '.join(tokens)} "
     cues = tuple(
         name
         for name, patterns in CUE_PATTERNS.items()
-        if any(pattern in text for pattern in patterns)
+        if (
+            any(f" {phrase} " in token_text for phrase in _REFERENTIAL_CUE_PHRASES)
+            if name == "referential"
+            else any(pattern in text for pattern in patterns)
+        )
     )
-    # Two ways in, both about the turn's own words: it speaks a declared
-    # referential cue, or it is short enough that what it does say cannot be
-    # a name. Function words are removed for the count for the same reason
-    # the lexical band removes them — "the" is not something a turn names.
-    content_tokens = sum(1 for token in tokens if token not in _STOPWORDS)
-    referential = "referential" in cues or content_tokens <= REFERENTIAL_MAX_CONTENT_TOKENS
+    # Only a declared cue makes a turn referential (close-memory-loop D2, as
+    # narrowed): the turn has to say it points back.
+    referential = "referential" in cues
     return TurnAnalysis(
         text=text,
         tokens=tokens,

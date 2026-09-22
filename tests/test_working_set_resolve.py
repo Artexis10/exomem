@@ -1582,10 +1582,9 @@ def test_c3_a_function_word_alone_does_not_earn_rare_term() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Referential turns (close-memory-loop D2): a turn whose own words ARE the
-# reference. The cue list is deterministic substrings like every other cue;
-# the short-turn rule is the generalisation, for the turns nobody phrases
-# from a list ("status?", "and the sled?").
+# Referential turns (close-memory-loop D2, as narrowed): a turn that SAYS it
+# points back at what the session was doing. A declared cue is the whole test,
+# matched on whole tokens; being short is not a signal.
 # --------------------------------------------------------------------------- #
 
 
@@ -1595,15 +1594,16 @@ def test_c3_a_function_word_alone_does_not_earn_rare_term() -> None:
         "continue",
         "ok continue",
         "carry on",
-        "go on",
         "where were we",
         "where did we leave off",
         "what's next",
+        "what\u2019s next?",
         "same as before",
         "as before",
         "pick up where we left off",
         "resume",
         "status",
+        "status?",
     ],
 )
 def test_a_declared_referential_cue_makes_the_turn_referential(turn: str) -> None:
@@ -1613,12 +1613,42 @@ def test_a_declared_referential_cue_makes_the_turn_referential(turn: str) -> Non
     assert analysis.referential is True
 
 
-def test_a_short_turn_naming_nothing_is_referential_without_a_cue() -> None:
-    """The generalisation: six content words or fewer, no cue phrase at all."""
-    analysis = resolve_module.analyze_turn("and the northern depot?")
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "and the northern depot?",
+        "zzz qqq unrelated gibberish",
+        "What's a good name for a new houseplant?",
+        "so should I go with the cheaper one?",
+    ],
+)
+def test_a_short_turn_without_a_cue_is_not_referential(turn: str) -> None:
+    """Being short is not a signal. A novel turn is short too, and a prior
+    must never answer one with whatever was edited last."""
+    analysis = resolve_module.analyze_turn(turn)
 
     assert "referential" not in analysis.cues
-    assert analysis.referential is True
+    assert analysis.referential is False
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "discontinue the winter schedule",
+        "list the statuses of every depot",
+        "go online and check the depot",
+        "go on the northern route",
+        "pick up the parcel at the depot",
+        "wherever we were going",
+    ],
+)
+def test_a_cue_is_matched_on_whole_tokens_only(turn: str) -> None:
+    """A cue inside a longer word, or a dropped cue's ordinary sense, is not
+    a turn pointing back."""
+    analysis = resolve_module.analyze_turn(turn)
+
+    assert "referential" not in analysis.cues
+    assert analysis.referential is False
 
 
 def test_a_long_turn_with_no_cue_is_not_referential() -> None:
@@ -1630,24 +1660,8 @@ def test_a_long_turn_with_no_cue_is_not_referential() -> None:
     assert analysis.referential is False
 
 
-def test_function_words_do_not_count_toward_the_short_turn_rule() -> None:
-    """Seven content words is not a referential turn, however many of the
-    turn's own words are `the` and `of`."""
-    short = resolve_module.analyze_turn(
-        "the sled the depot the corridor the winter the stock the north"
-    )
-    long = resolve_module.analyze_turn(
-        "sled depot corridor winter stock north harbour"
-    )
-
-    assert short.referential is True
-    assert long.referential is False
-    assert resolve_module.REFERENTIAL_MAX_CONTENT_TOKENS == 6
-
-
 def test_a_cue_inside_a_longer_sentence_still_reads_as_referential() -> None:
-    """Cues are substrings, here as everywhere else in `CUE_PATTERNS`, so a
-    long turn that happens to say "continue" is referential by cue.
+    """A long turn that says "continue" is referential by cue.
 
     Pinned rather than left undefined because it is the shape the rule has to
     survive: such a turn usually names something too, and `resolve()`'s own
@@ -1659,6 +1673,12 @@ def test_a_cue_inside_a_longer_sentence_still_reads_as_referential() -> None:
     )
 
     assert analysis.referential is True
+
+
+def test_a_cue_word_in_its_ordinary_sense_is_the_known_residual() -> None:
+    """Recorded in design section 8 as known, not fixed: whole-token matching
+    cannot tell "resume" the verb from "resume" the document."""
+    assert resolve_module.analyze_turn("update my resume").referential is True
 
 
 # --------------------------------------------------------------------------- #

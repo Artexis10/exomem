@@ -508,10 +508,11 @@ whose own words are the reference and name nothing. This is the only case in
 which a file modification time, a read count or a previous packet's own answer
 may establish task relevance, and it SHALL be bounded by every condition below.
 
-A turn SHALL be referential when it speaks one of the declared referential cues,
-or when it carries no more than a declared small number of content words after
-function words are removed. Recency evidence SHALL be a distinct evidence kind of
-its own class: it SHALL NOT be a worded contact kind, SHALL NOT be a retrieved
+A turn SHALL be referential only when it speaks one of the declared referential
+cues, matched on whole tokens rather than as a substring of a longer word. A
+turn SHALL NOT be referential merely because it is short. Recency evidence SHALL
+be a distinct evidence kind of its own class: it SHALL NOT be a worded contact
+kind, SHALL NOT be a retrieved
 contact kind, SHALL NOT count toward the two-kinds rule for any other kind, and
 SHALL NOT be a tie-break between candidates the turn named. It SHALL be reported
 in a resolved anchor's evidence so a reader can see why that anchor was served.
@@ -568,7 +569,15 @@ the referent of a turn that names nothing, never of one that names a page.
 - **AND** the hot anchor neither resolves nor completes any other candidate's
   evidence, on this or on any turn that is not referential
 
-#### Scenario: A short turn naming a compiled page is served that page, not the hottest anchor
+#### Scenario: A short turn with no referential cue is not answered by recency
+
+- **WHEN** a turn speaks no referential cue, however few words it has, names no
+  anchor, and one anchor is hottest in the recency profile
+- **THEN** that anchor does not resolve and its material is not served
+- **AND** the turn abstains `unresolved` still carrying its recent-context block,
+  unless it names a compiled page the retrieval carry serves
+
+#### Scenario: A referential turn naming a compiled page is served that page, not the hottest anchor
 
 - **WHEN** a referential turn names no anchor but names one compiled page by its
   own distinctive words, and another anchor is hottest in the profile

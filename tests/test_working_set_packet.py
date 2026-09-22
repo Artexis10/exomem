@@ -986,19 +986,7 @@ def test_an_unresolved_turn_still_carries_the_recently_edited_page_first(
     stateful_vault: Path,
 ) -> None:
     """The whole point: a turn that resolves nothing must still say what was
-    recently worked on.
-
-    The turn is long nonsense rather than the short nonsense it was written
-    with ("zzz qqq unrelated gibberish"). Close-memory-loop D2 deliberately
-    changed what a SHORT turn naming nothing means: six content words or
-    fewer with no candidate anywhere is now a referential turn, and against a
-    live freshness registry it resolves to the hottest anchor — which is this
-    fixture exactly, so the old turn would have been testing the new rule
-    instead of this one. That behaviour is pinned by
-    `test_a_referential_turn_resolves_to_the_hottest_anchor`; what stays here
-    is the block on a genuine abstention, which needs a turn long enough not
-    to be a reference.
-    """
+    recently worked on."""
     import time
 
     working_set_index.WorkingSetIndex(stateful_vault).rebuild()
@@ -1010,9 +998,7 @@ def test_an_unresolved_turn_still_carries_the_recently_edited_page_first(
     _live_cell(stateful_vault)
 
     packet = working_set.compile_packet(
-        stateful_vault,
-        turn="zzz qqq unrelated gibberish wubble frazzle mimsy borogove xyzzy plugh",
-        max_chars=4000,
+        stateful_vault, turn="zzz qqq unrelated gibberish", max_chars=4000
     )
 
     assert packet["abstained"] is True
@@ -1415,15 +1401,18 @@ def test_a_named_anchor_beats_the_hottest_page(stateful_vault: Path) -> None:
         newest=stateful_vault / "Knowledge Base" / "Entities" / "People" / "Marit Solheim.md",
     )
 
-    packet = working_set.compile_packet(
-        stateful_vault,
-        turn="I'm planning to tow the Cargo Sled north — what are its constraints?",
-        max_chars=4000,
-    )
+    turn = "continue: I'm planning to tow the Cargo Sled north — what are its constraints?"
+    assert working_set_resolve.analyze_turn(turn).referential, "the prior must be in play"
+
+    packet = working_set.compile_packet(stateful_vault, turn=turn, max_chars=4000)
 
     resolved = {item["path"] for item in packet["anchors"] if item["status"] == "resolved"}
     assert "Knowledge Base/Products/Cargo Sled.md" in resolved
-    assert "Knowledge Base/Entities/People/Marit Solheim.md" not in resolved
+    # Not resolved, and not listed either: the prior admitted it, and the
+    # prior decides nothing once the turn names something.
+    assert "Knowledge Base/Entities/People/Marit Solheim.md" not in {
+        item["path"] for item in packet["anchors"]
+    }
 
 
 def test_a_retired_page_is_never_the_hottest_anchor(stateful_vault: Path) -> None:

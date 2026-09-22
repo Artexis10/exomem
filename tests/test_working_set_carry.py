@@ -1651,10 +1651,16 @@ def test_a_carried_packet_pays_for_both_blocks_out_of_one_ceiling(
 
 # --------------------------------------------------------------------------- #
 # A referent the prior alone supplied yields to a page the turn named
-# (close-memory-loop D2). Both carry turns are short enough to be referential,
-# so against a live freshness registry the hot profile would otherwise answer
-# them with whatever was edited last.
+# (close-memory-loop D2). Each turn below speaks a referential cue AND names a
+# research note, so against a live freshness registry the hot profile would
+# otherwise answer it with whatever was edited last.
 # --------------------------------------------------------------------------- #
+
+
+#: `CARRY_TURN`'s page, named by a turn that also says it points back.
+REFERENTIAL_CARRY_TURN = "what's next for the quillon vantry window"
+#: `TIE_TURN`'s two near-twin notes, named by a turn that also points back.
+REFERENTIAL_TIE_TURN = "status of the tarn rollover cadence"
 
 
 def _make_cargo_sled_the_freshest_edit(vault: Path) -> None:
@@ -1678,13 +1684,15 @@ def _make_cargo_sled_the_freshest_edit(vault: Path) -> None:
 def test_a_referential_turn_that_names_a_page_is_served_that_page(
     carry_vault: Path, budget_free
 ) -> None:
-    """"What did we decide about the <page>" names nothing the resolver can
-    reach, and is short enough to be referential. The prior may supply the
-    referent of a turn that names nothing — not of one that names a page."""
+    """"What's next for the <page>" names no anchor the resolver can reach,
+    and speaks a referential cue. The prior may supply the referent of a turn
+    that names nothing — not of one that names a page."""
     _make_cargo_sled_the_freshest_edit(carry_vault)
-    assert working_set_resolve.analyze_turn(CARRY_TURN).referential
+    assert working_set_resolve.analyze_turn(REFERENTIAL_CARRY_TURN).referential
 
-    packet = working_set.compile_packet(carry_vault, turn=CARRY_TURN, max_chars=4000)
+    packet = working_set.compile_packet(
+        carry_vault, turn=REFERENTIAL_CARRY_TURN, max_chars=4000
+    )
 
     assert packet["abstained"] is False, packet.get("abstention")
     assert packet["generation"]["carried_by"] == "retrieval"
@@ -1698,9 +1706,13 @@ def test_a_referential_turn_that_names_two_pages_abstains_rather_than_guess(
     """The turn named something — two things — so the prior is disqualified,
     and choosing between the two is still the agent's call."""
     _make_cargo_sled_the_freshest_edit(carry_vault)
-    assert working_set_resolve.analyze_turn(TIE_TURN).referential
+    assert working_set_resolve.analyze_turn(REFERENTIAL_TIE_TURN).referential
+    hits, _state = working_set_runtime.carry_candidates(carry_vault, REFERENTIAL_TIE_TURN)
+    assert len(hits) >= 2, hits
 
-    packet = working_set.compile_packet(carry_vault, turn=TIE_TURN, max_chars=4000)
+    packet = working_set.compile_packet(
+        carry_vault, turn=REFERENTIAL_TIE_TURN, max_chars=4000
+    )
 
     assert packet["abstained"] is True
     assert packet["abstention"] == {"reason": "unresolved"}
