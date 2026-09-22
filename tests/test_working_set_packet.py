@@ -415,8 +415,18 @@ def test_compile_abstains_on_a_turn_that_reaches_nothing(stateful_vault: Path) -
 
     assert packet["abstained"] is True
     assert packet["abstention"]["reason"] == "unresolved"
+    # Abstention injects no ANSWER — no units, no pointers, no current state.
+    # Working continuity is the one exception and it is not an answer: it says
+    # what was recently worked on, which is true of the session whatever this
+    # turn reached. Its cost is pinned to the block's own arithmetic so the
+    # abstained packet cannot quietly start carrying anything else.
     assert packet["units"] == []
-    assert packet["budget"]["used_chars"] == 0
+    assert packet["pointers"] == []
+    assert packet["current_state"] == []
+    assert packet["budget"]["used_chars"] == sum(
+        len(str(entry.get("title") or "")) + len(str(entry.get("statement") or ""))
+        for entry in packet["recent_context"]
+    )
 
 
 def test_compile_returns_a_bounded_packet_for_a_resolved_turn(stateful_vault: Path) -> None:
@@ -952,3 +962,118 @@ def test_an_abstained_packet_still_carries_recent_context() -> None:
     assert [item["path"] for item in packet["recent_context"]] == [entry["path"]]
     assert packet["units"] == []
     assert packet["budget"]["used_chars"] == len(entry["title"]) + len(entry["statement"])
+
+
+def _live_cell(vault: Path) -> None:
+    """Seed the freshness registry the way the running service does.
+
+    `recent_context` reads per-path mtimes out of that registry rather than
+    walking the vault, so a test that never seeds it is testing the
+    not-live fallback, not the block.
+    """
+    from exomem import file_watcher
+
+    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+
+
+def _touch(path: Path, *, when: float) -> None:
+    import os
+
+    os.utime(path, (when, when))
+
+
+def test_an_unresolved_turn_still_carries_the_recently_edited_page_first(
+    stateful_vault: Path,
+) -> None:
+    """The whole point: "ok continue" resolves nothing and must still say
+    what was recently worked on."""
+    import time
+
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    newest = stateful_vault / "Knowledge Base" / "Products" / "Cargo Sled.md"
+    now = time.time()
+    for index, page in enumerate(sorted((stateful_vault / "Knowledge Base").rglob("*.md"))):
+        _touch(page, when=now - 10_000 - index)
+    _touch(newest, when=now)
+    _live_cell(stateful_vault)
+
+    packet = working_set.compile_packet(
+        stateful_vault, turn="zzz qqq unrelated gibberish", max_chars=4000
+    )
+
+    assert packet["abstained"] is True
+    assert packet["recent_context"], "an abstained packet still carries recent context"
+    first = packet["recent_context"][0]
+    assert first["path"] == "Knowledge Base/Products/Cargo Sled.md"
+    assert first["why"] == "edited"
+    assert first["title"] == "Cargo Sled"
+    assert first["as_of"]
+
+
+def test_a_resolved_turn_carries_recent_context_as_well(stateful_vault: Path) -> None:
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _live_cell(stateful_vault)
+
+    packet = working_set.compile_packet(
+        stateful_vault,
+        turn="I'm planning to tow the Cargo Sled north — how much depot stock is left?",
+        max_chars=4000,
+    )
+
+    assert packet["abstained"] is False
+    assert packet["recent_context"]
+    assert all(entry["path"] for entry in packet["recent_context"])
+    assert len(packet["recent_context"]) <= working_set.RECENT_CONTEXT_MAX_ENTRIES
+
+
+def test_a_captured_session_page_carries_its_title_and_date_only(
+    stateful_vault: Path,
+) -> None:
+    import time
+
+    sessions = stateful_vault / "Knowledge Base" / "Sources" / "Sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    captured = sessions / "2026-09-21-corridor-call.md"
+    captured.write_text(
+        "---\ntype: source\nstatus: active\nsummary: a summary nobody asked for\n---\n\nRaw notes.\n",
+        encoding="utf-8",
+    )
+    other = stateful_vault / "Knowledge Base" / "Sources" / "corridor-report.md"
+    other.write_text("---\ntype: source\n---\n\nAn ordinary source.\n", encoding="utf-8")
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    now = time.time()
+    for index, page in enumerate(sorted((stateful_vault / "Knowledge Base").rglob("*.md"))):
+        _touch(page, when=now - 10_000 - index)
+    _touch(captured, when=now)
+    _touch(other, when=now - 1)
+    _live_cell(stateful_vault)
+
+    packet = working_set.compile_packet(
+        stateful_vault, turn="zzz qqq unrelated gibberish", max_chars=4000
+    )
+
+    paths = [entry["path"] for entry in packet["recent_context"]]
+    assert "Knowledge Base/Sources/Sessions/2026-09-21-corridor-call.md" in paths
+    assert "Knowledge Base/Sources/corridor-report.md" not in paths, (
+        "a raw Source page is not working context — only a captured session is"
+    )
+    entry = packet["recent_context"][paths.index(
+        "Knowledge Base/Sources/Sessions/2026-09-21-corridor-call.md"
+    )]
+    assert entry["why"] == "captured"
+    assert entry["as_of"]
+    assert "statement" not in entry, "a captured session carries its title and date only"
+
+
+def test_recent_context_gets_its_own_timing_span(stateful_vault: Path) -> None:
+    from exomem import find_types
+
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _live_cell(stateful_vault)
+    timings = find_types.FindTimings()
+
+    working_set.compile_packet(
+        stateful_vault, turn="zzz qqq unrelated gibberish", max_chars=4000, timings=timings
+    )
+
+    assert "working_set.recent" in timings.as_dict()["stages"]

@@ -58,6 +58,11 @@ GRAPH_TRAVERSAL_PROFILE = "epistemic"
 #: one, so an unbounded one would be paid for by every turn.
 RECENT_CONTEXT_MAX_ENTRIES = 8
 RECENT_CONTEXT_MAX_CHARS = 900
+#: How a page came to be recent. A closed vocabulary, and deliberately about
+#: CONTACT rather than meaning: `edited` and `captured` are file changes,
+#: `activated` is a read, `planning` is an open commitment. None of them claims
+#: the page's subject happened recently — that is what its own content says.
+RECENT_CONTEXT_REASONS: tuple[str, ...] = ("edited", "activated", "captured", "planning")
 
 PACKET_BLOCKS = (
     # First, and in resolved and abstained packets alike: a fresh session opens
@@ -915,6 +920,37 @@ def compile_packet(
             candidates = working_set_resolve.apply_continuity(candidates, continuity_refs)
             resolution = working_set_resolve.resolve(candidates, turn_tokens=analysis.tokens)
 
+    # BEFORE the resolution branch, and in its own span: working continuity is
+    # not material about an anchor this turn reached, so an abstention carries
+    # it too. "ok continue" resolves nothing by construction, and a fresh
+    # session that receives nothing for it is the whole failure this block
+    # exists to fix. Skipped rather than raised when the budget is gone: it is
+    # an enrichment, and losing it must not turn an honest `unresolved` into
+    # `unavailable`.
+    with _span(timings, "working_set.recent"):
+        recent: tuple[dict[str, Any], ...] = (
+            () if budget_exhausted("working_set.recent") else _recent_context(root, rows=rows)
+        )
+        # An abstaining turn never reaches the current-state stage, so the ONE
+        # current-state read this request is allowed happens here instead. A
+        # resolved turn's read is the stage's own, below, widened to cover
+        # these rows — never a second read.
+        if recent and resolution.status != "resolved":
+            stateful = _recent_stateful_rows(recent, rows)
+            if stateful:
+                try:
+                    state_for_recent = working_set_state.current_state_for(
+                        root,
+                        anchors=stateful,
+                        purpose=purpose,
+                        index_generation=index_token[1],
+                        index_token=index_token,
+                    )
+                except Exception:  # noqa: BLE001 - a statement never costs the packet
+                    log.debug("recent context: current state unavailable", exc_info=True)
+                    state_for_recent = ()
+                recent = _apply_recent_statements(recent, state_for_recent)
+
     if resolution.status != "resolved":
         return abstained_packet(
             reason=resolution.status,
@@ -922,6 +958,7 @@ def compile_packet(
             generation=generation,
             anchors=tuple(anchor.as_dict() for anchor in resolution.anchors),
             ambiguity=resolution.ambiguity,
+            recent_context=recent,
         )
 
     if budget_exhausted("working_set.roles"):
@@ -941,13 +978,32 @@ def compile_packet(
     # Resolved ONCE: the Records lane and the packet's `current_state[]` block are
     # two views of the same collection reads.
     with _span(timings, "working_set.current_state"):
-        current_state = working_set_state.current_state_for(
+        # ONE read, widened rather than repeated: the resolved anchors plus any
+        # stateful page the recent block kept that is not already among them.
+        # `current_state[]` is then filtered back to the resolved anchors, so
+        # what that block means is unchanged — a recent page nobody asked about
+        # is not the current state of this turn's anchor.
+        resolved_refs = {
+            working_set_resolve.anchor_ref(anchor) for anchor in resolution.resolved_anchors
+        }
+        state_entries = working_set_state.current_state_for(
             root,
-            anchors=resolution.resolved_anchors,
+            anchors=(
+                *resolution.resolved_anchors,
+                *(
+                    row
+                    for row in _recent_stateful_rows(recent, rows)
+                    if working_set_resolve.anchor_ref(row) not in resolved_refs
+                ),
+            ),
             purpose=purpose,
             index_generation=index_token[1],
             index_token=index_token,
         )
+        current_state = tuple(
+            entry for entry in state_entries if str(entry.get("anchor") or "") in resolved_refs
+        )
+        recent = _apply_recent_statements(recent, state_entries)
     items, missing = run_lanes(
         root,
         anchors=lane_anchors,
@@ -971,6 +1027,7 @@ def compile_packet(
             max_chars=limit,
             generation=generation,
             status=resolution.status,
+            recent_context=recent,
         )
     return packet
 
@@ -1046,3 +1103,308 @@ def _used_paths(vault_root: Path, rows: Sequence[Any]) -> frozenset[str]:
         if usage.usage_multiplier(activation, config) > 1.0:
             out.add(path)
     return frozenset(out)
+
+
+# --------------------------------------------------------------------------- #
+# Working continuity
+# --------------------------------------------------------------------------- #
+
+
+def _recent_context(
+    vault_root: Path,
+    *,
+    rows: Sequence[Any],
+    limit: int = RECENT_CONTEXT_MAX_ENTRIES,
+) -> tuple[dict[str, Any], ...]:
+    """What was recently worked on — the block a turn that resolved nothing
+    still carries.
+
+    Four sources, none of which enumerates a directory or walks the vault:
+
+    * the freshness registry's per-path mtimes, which the watcher maintains and
+      this reads as a dict (`edited`, or `captured` for a captured session);
+    * the memoized ACT-R activation snapshot `_used_paths` already reuses, for
+      pages this vault has actually been reading (`activated`);
+    * the activation index's own planning rows, for open commitments the
+      recent edits did not already surface (`planning`);
+    * and, for the CHOSEN entries only, the current-state resolver and the
+      page's own frontmatter, for the one-line statement.
+
+    Ranked most recent first, deduped by path — a page that was both edited and
+    read appears once, under the reason that offered it first — and capped at
+    `limit`. `as_of` dates the CONTACT, never the event the page describes: a
+    note edited today about a decision taken in March is recent work on an old
+    decision, and `why` is what says which.
+
+    Best-effort by construction. Every source is optional and every failure
+    costs the block its entries, never the packet.
+    """
+    root = Path(vault_root)
+    by_path: dict[str, Any] = {}
+    for row in rows:
+        path = str(getattr(row, "path", "") or "")
+        if path and path not in by_path:
+            by_path[path] = row
+    mtimes = _recent_mtimes(root)
+    offered: dict[str, str] = {}
+    for rel in sorted(mtimes, key=lambda item: (-mtimes[item], item)):
+        if len(offered) >= limit:
+            break
+        why = _recent_reason_for(rel)
+        if why and rel not in offered:
+            offered[rel] = why
+    for rel in _recently_activated(by_path, mtimes, limit=limit):
+        offered.setdefault(rel, "activated")
+    for rel in _recent_planning(by_path, mtimes, limit=limit):
+        offered.setdefault(rel, "planning")
+
+    ranked = sorted(
+        offered.items(),
+        key=lambda item: (
+            -mtimes.get(item[0], 0),
+            RECENT_CONTEXT_REASONS.index(item[1]),
+            item[0],
+        ),
+    )[:limit]
+
+    entries: list[dict[str, Any]] = []
+    for path, why in ranked:
+        row = by_path.get(path)
+        kind = str(getattr(row, "kind", "") or "") or "page"
+        entries.append(
+            {
+                "ref": str(getattr(row, "ref", None) or path),
+                "path": path,
+                # The anchor's own title when the page is one; otherwise the
+                # readable filename, which costs no read. Never the page body.
+                "title": str(getattr(row, "title", "") or "") or Path(path).stem,
+                "kind": kind,
+                "why": why,
+                "as_of": _recent_as_of(mtimes.get(path)),
+            }
+        )
+
+    for entry in entries:
+        # A captured session carries its title and date only. Its body is raw
+        # material: summarising it here would be the server authoring a claim
+        # about a conversation nobody has compiled yet. A stateful entry's
+        # statement comes from the current-state resolver instead, which the
+        # caller runs ONCE per request (`_apply_recent_statements`).
+        if entry["why"] == "captured" or entry["kind"] in working_set_state.STATEFUL_KINDS:
+            continue
+        statement = _recent_frontmatter_statement(root, entry["path"])
+        if statement:
+            entry["statement"] = statement
+    return tuple(entries)
+
+
+def _recent_mtimes(vault_root: Path) -> dict[str, int]:
+    """`{vault-relative path: mtime_ns}` from the live freshness registry.
+
+    A dict copy, not a walk: the watcher (or the 300 s reconcile) already
+    maintains this map, which is precisely why the lexical heal reads it
+    instead of re-statting the corpus. A scope that is not live — no watcher,
+    or the kill switch — yields nothing, and the block falls back to the
+    sources that need no mtime rather than walking to fill it.
+    """
+    try:
+        from . import freshness
+
+        entries = freshness.live_entries(vault_root, "kb")
+    except Exception:  # noqa: BLE001 - the registry is optional by construction
+        log.debug("recent context: freshness registry unavailable", exc_info=True)
+        return {}
+    if not entries:
+        return {}
+    prefix = f"{vault_root}{os.sep}"
+    out: dict[str, int] = {}
+    for key, signature in entries.items():
+        if not key.startswith(prefix) or not key.lower().endswith(".md"):
+            continue
+        rel = key[len(prefix) :].replace(os.sep, "/")
+        try:
+            out[rel] = int(signature[0])
+        except (IndexError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _recent_reason_for(rel: str) -> str:
+    """`edited`, `captured`, or `""` for a page that is not working context.
+
+    Raw material and operational state are excluded by the SAME path rules the
+    content corpus already uses (`find_corpus.EXCLUDED_DIR_NAMES`,
+    `NAVIGATION_BASENAMES`), so nothing here is a second, drifting opinion
+    about what counts as a page. Two exclusions carry their own weight:
+    `Sources/` is evidence ABOUT work rather than the work, except
+    `Sources/Sessions/`, which IS the record of a conversation; and the KB's
+    activity log is rewritten by every confirmed write, so without excluding it
+    it would be the most recently edited page on every turn and this block
+    would say nothing else.
+    """
+    from . import find_corpus
+    from .kbdir import kb_prefix
+
+    if not rel.lower().endswith(".md"):
+        return ""
+    inner = rel[len(kb_prefix()) :] if rel.startswith(kb_prefix()) else rel
+    parts = inner.split("/")
+    if any(part.startswith(".") or part in find_corpus.EXCLUDED_DIR_NAMES for part in parts[:-1]):
+        return ""
+    if parts[-1].casefold() in find_corpus.NAVIGATION_BASENAMES:
+        return ""
+    if inner.startswith("Evidence/"):
+        return ""
+    if inner.startswith("Sources/"):
+        return "captured" if inner.startswith("Sources/Sessions/") else ""
+    return "edited"
+
+
+def _recently_activated(
+    by_path: Mapping[str, Any], mtimes: Mapping[str, int], *, limit: int
+) -> tuple[str, ...]:
+    """The most-activated known pages, from the memoized usage snapshot.
+
+    The candidate set is the paths this request ALREADY holds — the index's
+    anchor rows and the freshness map — so the activation map is read as a
+    lookup table and never as a list of paths to go and find. A page that has
+    been read a lot but is in neither is simply not offered, which is the
+    bounded-work price of never walking.
+    """
+    try:
+        from . import ranking_config, usage
+
+        activations = usage.activation_map(ranking_config.DEFAULT_RANKING)
+    except Exception:  # noqa: BLE001 - the usage snapshot is optional by construction
+        log.debug("recent context: usage activation unavailable", exc_info=True)
+        return ()
+    if not activations:
+        return ()
+    scored: list[tuple[float, str]] = []
+    for rel in dict.fromkeys((*by_path, *mtimes)):
+        if not _recent_reason_for(rel):
+            continue
+        activation = activations.get(usage.canon(rel), activations.get(rel))
+        if activation is None:
+            continue
+        scored.append((-float(activation), rel))
+    scored.sort()
+    return tuple(rel for _activation, rel in scored[:limit])
+
+
+def _recent_planning(
+    by_path: Mapping[str, Any], mtimes: Mapping[str, int], *, limit: int
+) -> tuple[str, ...]:
+    """Open Planning items, newest first — the same rows `_planning_lane` reads.
+
+    Read from the anchor rows this request already has, so an open commitment
+    is carried without a second query. An item recently edited is offered by
+    the edit source first and keeps that reason; what this adds is the open
+    item nobody has touched lately, which is exactly the one a resumed session
+    forgets.
+    """
+    plans = [
+        path
+        for path, row in by_path.items()
+        if str(getattr(row, "kind", "")) == "plan"
+        and str(getattr(row, "lifecycle", "active") or "active") == "active"
+        and _recent_reason_for(path)
+    ]
+    plans.sort(key=lambda path: (-mtimes.get(path, 0), path))
+    return tuple(plans[:limit])
+
+
+def _recent_stateful_rows(
+    entries: Sequence[Mapping[str, Any]], rows: Sequence[Any]
+) -> tuple[Any, ...]:
+    """The anchor rows whose recent entries still owe a current-state statement.
+
+    Stateful entries only, and at most one row per path. The rows are handed
+    BACK to the caller rather than resolved here because current state is
+    resolved exactly ONCE per request by contract (`run_lanes`' docstring, and
+    `test_current_state_is_resolved_once_per_compile` pins it): resolving it a
+    second time for this block would double the collection queries the request
+    path was deliberately relieved of.
+    """
+    wanted = {
+        str(entry.get("path") or "")
+        for entry in entries
+        if entry.get("why") != "captured"
+        and str(entry.get("kind") or "") in working_set_state.STATEFUL_KINDS
+    }
+    wanted.discard("")
+    if not wanted:
+        return ()
+    out: list[Any] = []
+    seen: set[str] = set()
+    for row in rows:
+        path = str(getattr(row, "path", "") or "")
+        if path in wanted and path not in seen:
+            seen.add(path)
+            out.append(row)
+    return tuple(out)
+
+
+def _apply_recent_statements(
+    entries: Sequence[Mapping[str, Any]], state_entries: Sequence[Mapping[str, Any]]
+) -> tuple[dict[str, Any], ...]:
+    """Fill each stateful recent entry's statement from one current-state read.
+
+    The same resolver the packet's `current_state[]` block uses — Records
+    first, then the page's own status field — so a recent entry never contradicts
+    the current state served beside it. An entry the read had nothing for keeps
+    no statement at all, rather than a stale one from somewhere else.
+    """
+    by_anchor = {
+        str(entry.get("anchor") or ""): str(entry.get("statement") or "")
+        for entry in state_entries
+        if entry.get("statement")
+    }
+    out: list[dict[str, Any]] = []
+    for entry in entries:
+        item = dict(entry)
+        if "statement" not in item:
+            statement = by_anchor.get(str(item.get("ref") or "")) or by_anchor.get(
+                str(item.get("path") or "")
+            )
+            if statement:
+                item["statement"] = statement
+        out.append(item)
+    return tuple(out)
+
+
+def _recent_frontmatter_statement(vault_root: Path, rel: str) -> str:
+    """The page's authored `status`/`summary`, or `""`.
+
+    Bounded to the entries the block already chose — at most
+    `RECENT_CONTEXT_MAX_ENTRIES` pages, through the shared page cache, never a
+    scan. Authored values only, rendered the way `working_set_state` renders
+    them, so nothing here is a sentence the server wrote.
+    """
+    from . import find_corpus
+
+    try:
+        page = find_corpus.CACHE.get(Path(vault_root) / rel, Path(vault_root))
+    except Exception:  # noqa: BLE001 - an unreadable page costs its statement only
+        log.debug("recent context: page unreadable for %s", rel, exc_info=True)
+        return ""
+    if page is None:
+        return ""
+    frontmatter = page.frontmatter if isinstance(page.frontmatter, dict) else {}
+    for name in ("status", "summary"):
+        value = frontmatter.get(name)
+        if isinstance(value, (str, int, float)) and str(value).strip():
+            return f"{name}: {str(value).strip()}"[: working_set_state.STATEMENT_MAX_CHARS]
+    return ""
+
+
+def _recent_as_of(mtime_ns: int | None) -> str:
+    """The ISO date of the contact, or `""` when this source carries no time."""
+    if not mtime_ns:
+        return ""
+    import datetime as dt
+
+    try:
+        return dt.date.fromtimestamp(mtime_ns / 1_000_000_000).isoformat()
+    except (OSError, OverflowError, ValueError):
+        return ""
