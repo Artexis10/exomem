@@ -1737,3 +1737,122 @@ def test_a_referential_turn_the_carry_declines_keeps_its_hot_referent(
     assert [
         item["path"] for item in packet["anchors"] if item["status"] == "resolved"
     ] == ["Knowledge Base/Products/Cargo Sled.md"]
+
+
+# --------------------------------------------------------------------------- #
+# R-F: navigation pages are never a named page. `index.md` and `log.md` repeat
+# every title in the vault, so a turn naming a page by its title always found
+# them as a second and third "named" page and never carried.
+# --------------------------------------------------------------------------- #
+
+
+def _seed_navigation_pages(vault: Path) -> None:
+    """The vault's own index and activity log, listing the research notes by
+    title, as the maintained navigation pages do."""
+    kb = vault / "Knowledge Base"
+    listing = (
+        "- [[Kelvane throughput]] — kelvane throughput ceiling review\n"
+        "- [[Murran dispatch]] — murran dispatch lane split\n"
+        "- [[Girvan slot window]] — girvan slot window revision\n"
+    )
+    _write(kb / "index.md", f"# Index\n\n{listing}")
+    _write(kb / "log.md", f"# Log\n\n## 2026-09-12\n\n{listing}")
+
+
+def _navigation_vault(vault: Path) -> Path:
+    _seed_named_pages_corpus(vault)
+    _seed_navigation_pages(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    return vault
+
+
+def _is_navigation(path: str) -> bool:
+    from exomem import find_corpus
+
+    return path.rsplit("/", 1)[-1].casefold() in find_corpus.NAVIGATION_BASENAMES
+
+
+NAVIGATION_TURN = "what did the review conclude about the kelvane throughput ceiling"
+
+
+def test_a_page_named_by_its_title_is_carried_past_the_navigation_pages(
+    vault: Path, budget_free
+) -> None:
+    vault = _navigation_vault(vault)
+    raw = lexstore.search_bm25_result(
+        vault, working_set_runtime.content_words(NAVIGATION_TURN), 20, scope="kb"
+    )
+    assert any(_is_navigation(str(path)) for path, _score in raw.value or ()), (
+        "the navigation pages must match the turn, or this proves nothing"
+    )
+
+    packet = working_set.compile_packet(vault, turn=NAVIGATION_TURN, max_chars=4000)
+
+    assert packet["abstained"] is False, (packet.get("abstention"), packet["anchors"])
+    assert packet["generation"]["carried_by"] == "retrieval"
+    assert [item["path"] for item in packet["anchors"]] == [
+        "Knowledge Base/Notes/Research/kelvane-throughput.md"
+    ]
+
+
+def test_navigation_pages_are_never_listed_as_named(vault: Path, budget_free) -> None:
+    vault = _navigation_vault(vault)
+    turn = (
+        "I am trying to remember whether the kelvane throughput ceiling change "
+        "and the murran dispatch lane split were decided in the same month"
+    )
+
+    packet = working_set.compile_packet(vault, turn=turn, max_chars=4000)
+
+    assert packet["abstained"] is True
+    listed = [item["path"] for item in packet["anchors"]]
+    assert sorted(listed) == [
+        "Knowledge Base/Notes/Research/kelvane-throughput.md",
+        "Knowledge Base/Notes/Research/murran-dispatch.md",
+    ], listed
+    assert not any(_is_navigation(path) for path in listed)
+
+
+def test_the_fetch_window_covers_the_navigation_filter(
+    prose_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Navigation rows are removed AFTER the full window is fetched, like raw
+    material, so a window whose head is all removed rows still holds the row
+    that proves the turn named two pages. The window is filled to its last
+    slot with removed rows, at every directory level, and the count of
+    removed rows is checked."""
+    asked: list[int] = []
+    real = lexstore.search_bm25_result
+    removed_rows = [
+        "Knowledge Base/index.md",
+        "Knowledge Base/log.md",
+        "Knowledge Base/Notes/Research/index.md",
+        "Knowledge Base/Notes/Research/LOG.md",
+        "Knowledge Base/Sources/one.md",
+        "Knowledge Base/Evidence/two.md",
+    ]
+
+    def ranked(vault_root, query, k, **kwargs):
+        asked.append(k)
+        real(vault_root, query, k, **kwargs)
+        head = [removed_rows[i % len(removed_rows)] for i in range(k - 2)]
+        rows = [(path, 40.0 - index) for index, path in enumerate(head)]
+        rows += [(GENUINE_PAGE, 22.0), (DOUBLE_STEM_PAGE, 21.0)]
+        return lexstore.CatalogQueryResult(
+            rows, lexstore.CatalogReadiness("available", True, "sqlite")
+        )
+
+    monkeypatch.setattr(lexstore, "search_bm25_result", ranked)
+
+    hits, state = working_set_runtime.carry_candidates(prose_vault, GENUINE_TURN)
+
+    assert state == "available"
+    (window,) = asked
+    assert window == working_set.carry_fetch_size(working_set.RETRIEVAL_CARRY_MIN_PAGES)
+    assert [path for path, _score in hits] == [GENUINE_PAGE, DOUBLE_STEM_PAGE], hits
+    removed = window - len(hits)
+    assert removed == window - 2
+    assert sum(1 for i in range(window - 2) if _is_navigation(removed_rows[i % 6])) >= 4
+    assert working_set.dominant_carry(hits) is None

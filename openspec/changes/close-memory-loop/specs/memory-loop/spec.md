@@ -411,7 +411,10 @@ knowledge-base scope, without the anchor path restriction, applying the same
 no-foreground-delta and no-corpus-scan rules, and reporting rather than
 repairing an incomplete catalogue. Pages in the knowledge base's raw-material
 folders — captured sources and preserved evidence, the same folders the anchor
-catalogue already refuses to build an anchor from — SHALL NOT be candidates. The query SHALL run within the request deadline
+catalogue already refuses to build an anchor from — SHALL NOT be candidates, and
+neither SHALL navigation pages, identified by the same navigation-page rule the
+recall corpus uses, since they repeat the titles of the pages they list. The
+query SHALL run within the request deadline
 under its own timing span and SHALL be skipped when that deadline can no longer
 afford a stage.
 
@@ -486,6 +489,13 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
   answer to the same distinctive words
 - **THEN** only the current page is a candidate and it is carried
 - **AND** an archived page is likewise never carried
+
+#### Scenario: A navigation page is never a named page
+
+- **WHEN** a turn names one compiled page by its title's distinctive words,
+  and the vault's index and log pages list that title among others
+- **THEN** the named page is carried, and no navigation page is counted as a
+  second named page or listed under `anchors[]`
 
 #### Scenario: A named anchor and raw material are both refused as carriers
 

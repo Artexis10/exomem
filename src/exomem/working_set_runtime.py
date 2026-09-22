@@ -545,6 +545,21 @@ def _is_raw_material(path: str) -> bool:
     return inside.split("/", 1)[0] in CARRY_EXCLUDED_FOLDERS
 
 
+def _is_navigation_page(path: str) -> bool:
+    """Is `path` an `index.md` or `log.md`, at any directory level?
+
+    The same predicate the recent-context block and the find corpus use
+    (`find_corpus.NAVIGATION_BASENAMES`), so the modules cannot disagree
+    about what navigation is. A navigation page lists the titles of the
+    pages it navigates to, so it matches any turn that names one of them by
+    its title — it is never itself the page a turn named.
+    """
+    from . import find_corpus
+
+    name = str(path).replace("\\", "/").rsplit("/", 1)[-1]
+    return name.casefold() in find_corpus.NAVIGATION_BASENAMES
+
+
 def content_words(turn: str) -> str:
     """The turn's own content WORDS, unstemmed, stopwords dropped.
 
@@ -775,16 +790,19 @@ def carry_candidates(
         )
         if not result.readiness.complete:
             return (), result.readiness.status
-        # Raw material and retired pages are dropped BEFORE the caller
-        # counts what the turn named. A superseded note and the note that
-        # superseded it answer to the same phrase, so leaving it in would
-        # read as two named pages and refuse every revised page in the
-        # vault.
+        # Raw material, navigation pages and retired pages are dropped
+        # BEFORE the caller counts what the turn named. A superseded note
+        # and the note that superseded it answer to the same phrase, so
+        # leaving it in would read as two named pages and refuse every
+        # revised page in the vault; an index or a log repeats every title
+        # in the vault, so leaving one in did exactly that to every turn that
+        # named a page by its title.
         return (
             tuple(
                 (str(path), float(score))
                 for path, score in (result.value or ())
                 if not _is_raw_material(path)
+                and not _is_navigation_page(path)
                 and working_set._is_current_page(vault_root, str(path))
             ),
             "available",

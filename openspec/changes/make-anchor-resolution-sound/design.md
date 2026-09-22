@@ -39,7 +39,9 @@ retrieved kinds and qualifiers stack. The one retrieval-alone case sits outside 
 rather than inside it, and only reaches a turn this rule has already abstained on. When
 resolution reached no anchor at all, one scored recall runs over the compiled knowledge
 base (the raw-material folders excluded — a captured source or a preserved piece of
-evidence is never served as durable memory), and a single page that DOMINATES it may
+evidence is never served as durable memory — and navigation pages too, since an
+`index.md` or `log.md` repeats every title and is never the page a turn named), and a
+single page that DOMINATES it may
 CARRY a packet. Dominance is a NAMED-CONTACT test, not a score threshold: a hit is a
 candidate only when at least two of the turn's stems that it matches are DISTINCTIVE in
 this corpus (document frequency at or below `max(3, ceil(0.5% of indexed pages))`,

@@ -219,6 +219,8 @@ rather than inside it, because it only ever reaches a turn that rule has already
 abstained on. When resolution reached NO anchor, a second scored recall runs over
 the compiled knowledge base with no anchor restriction and the knowledge
 base's raw-material folders (captured sources, preserved evidence) excluded,
+navigation pages (`index.md` and `log.md` at any level, which repeat every
+title and so matched every turn naming a page by its title) excluded too,
 under its own `working_set.carry` timing span and the same request budget, and it
 is skipped outright when the lexical catalogue is anything but `available`. Dominance is a
 NAMED-CONTACT test. A hit is a candidate only when at least two of the turn's
