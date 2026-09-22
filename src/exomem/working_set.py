@@ -940,6 +940,16 @@ def _carried_packet(
     page's own title and supersession, so the anchor entry says what the
     page says about itself, and falls back to the path when the lane found
     nothing to read.
+
+    The carried page is the packet's ONLY anchor, and that is load-bearing
+    rather than incidental. An `unresolved` abstention lists the turn's
+    `partial` candidates in `anchors[]` so the agent can choose one; carrying
+    them here as well would break the egress rule that makes a withheld
+    carried page safe — `guard_working_set` turns a packet into a `withheld`
+    abstention only when EVERY anchor was withheld, so surviving partials
+    would leave the packet claiming it resolved something after the one page
+    it was built from was removed. The cost is that a carried turn no longer
+    shows that menu; the material it shows instead is the trade.
     """
     path, _score = page
     roles = _carry_roles(registry, analysis)

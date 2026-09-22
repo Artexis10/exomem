@@ -574,9 +574,10 @@ def carry_candidates(
     Everything else is the existing bounded contract: the maintained
     catalogue only, no foreground delta (`allow_delta=False`), no corpus
     walk, no directory enumeration, and an incomplete catalogue reported
-    rather than repaired. `Sources/` hits are dropped before the caller ever
-    sees them: raw material is not a candidate, so it neither gets served nor
-    takes part in the dominance comparison.
+    rather than repaired. Raw-material hits are dropped before the caller ever
+    sees them: a captured source or a preserved piece of evidence is not a
+    candidate, so it neither gets served nor takes part in the dominance
+    comparison.
     """
     from . import lexstore
 
