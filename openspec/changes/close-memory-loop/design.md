@@ -295,7 +295,15 @@ statuses that name nothing in this tree and missing `dropped`, so a page
 the author had dropped was carried and its unit served as current memory.
 The facts are the ones the unit lane already reads for supersession, taken
 from the request path's own cached single-page read for the rows in hand —
-no walk. The absolute score floor this
+no walk. That read is per row, and the number of rows grows with the corpus:
+the fetch window is `rare_document_cap(pages) + 1`, which is 1001 rows at
+200,000 pages, and reads were measured 1:1 with rows. A warm request is
+bounded at 1200 filesystem calls and already spends about 644 of them, so a
+worst-case carried turn could approach that ceiling somewhere near 110,000
+pages. That is a known limit rather than a defect: no personal vault in this
+work comes near it, no fixture reaches it and nothing tests it, and the lever
+if one ever does is the same one named below — merging the rarity and ranking
+passes into one transaction. The absolute score floor this
 replaced is gone: `-bm25()` is not comparable between corpora, so the same
 page for the same turn measured 13.16 with no bulk, 6.81 with 200 pages
 added (refused by a floor fitted to the first number) and was outranked by an

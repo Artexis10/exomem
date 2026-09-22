@@ -1046,11 +1046,14 @@ def _is_current_page(vault_root: Path, rel_path: str) -> bool:
     A page the author retired — a `RETIRED_PAGE_STATUSES` status, or a
     `superseded_by` pointing at its replacement — is not a page to answer a
     turn from. `draft` and `planned` are NOT retirement: both mean authored
-    and not yet active, and a turn that names such a page wants it, and the replacement is named by the SAME words: "the girvan
-    slot window" names both the current note and the one it superseded.
-    Counting them as two named pages would refuse every revised page in the
-    vault, and serving the loser would hand back the stale figure, which is
-    the worse of the two.
+    and not yet active, and a turn that names such a page wants it.
+
+    Lifecycle is decided here rather than counted later because a retired
+    page and its replacement are named by the SAME words: "the girvan slot
+    window" names both the current note and the one it superseded. Counting
+    them as two named pages would refuse every revised page in the vault,
+    and serving the loser would hand back the stale figure, which is the
+    worse of the two.
 
     Reads the same facts the unit lane already reads for supersession, from
     `find_corpus.CACHE` — the request path's own cached single-page read, no
@@ -1113,8 +1116,9 @@ def dominant_carry(hits: Sequence[tuple[str, float]]) -> tuple[str, float] | Non
     """The one page `hits` says the turn named, or `None`.
 
     Every entry has already passed the naming gate — a distinctive phrase —
-    and been filtered to pages that are current and not raw material. So `hits` IS the set of pages this turn named, and
-    the question here is only how many there are.
+    and been filtered to pages that are current and not raw material. So
+    `hits` IS the set of pages this turn named, and the question here is
+    only how many there are.
 
     Exactly one is a packet. Two or more is a turn that named two things,
     and choosing between them is the guess the compiler exists not to make:
