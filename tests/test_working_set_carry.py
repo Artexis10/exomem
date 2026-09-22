@@ -672,12 +672,19 @@ def test_a_lone_surviving_hit_is_dominant() -> None:
     assert working_set.dominant_carry((("a.md", 41.0),)) == ("a.md", 41.0)
 
 
-def test_a_zero_scoring_hit_is_never_dominant() -> None:
-    """The one sanity bound left. The catalogue does return rows scoring 0.0
-    at corpus scale, and a row the ranking placed at nothing is not a page
-    the turn named."""
+def test_a_hit_scoring_essentially_nothing_is_never_dominant() -> None:
+    """The one sanity bound left, and it has to catch more than exact zero.
+
+    The catalogue returns rows scoring 0.0 at corpus scale, and a
+    double-stemmed query once produced 3e-06 for a page that scores 25.2
+    when asked properly — a number a bound of "greater than zero" waves
+    through and every comparison downstream then treats as a real score.
+    A genuine match on one distinctive term scores several units.
+    """
     assert working_set.dominant_carry((("a.md", 0.0),)) is None
-    assert working_set.dominant_carry((("a.md", 0.0), ("b.md", 0.0))) is None
+    assert working_set.dominant_carry((("a.md", 3e-06),)) is None
+    assert working_set.dominant_carry((("a.md", 0.9),)) is None
+    assert working_set.dominant_carry((("a.md", 6.3),)) == ("a.md", 6.3)
 
 
 def test_a_hit_inside_the_separation_band_is_not_dominant() -> None:

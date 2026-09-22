@@ -66,6 +66,16 @@ RETRIEVAL_CARRY_SEPARATION = 1.5
 #: 0.0 at corpus scale, and a row the ranking placed at nothing is not a
 #: page a turn named.
 #:
+#: One, not zero. "Greater than zero" waved through 3e-06 — what a
+#: double-stemmed query scored for a page that scores 25.2 when asked
+#: properly — and every comparison downstream then treated that as a real
+#: number. A genuine match scores several units even on the thinnest
+#: contact this gate admits: 6.36 for a turn that reached its page on two
+#: stable terms out of four, 12 to 25 for an ordinary named page, 18.5 for
+#: the coincidence the proximity window now refuses. Nothing measured
+#: anywhere in this work lands between 0 and 1, which is what keeps this a
+#: sanity bound rather than the corpus-dependent floor it replaced.
+#:
 #: An absolute FLOOR was tried and removed. `-bm25()` is not comparable
 #: between corpora, so any number that separated signal from noise on one
 #: vault was wrong on another: measured, the same page the same turn names
@@ -75,7 +85,7 @@ RETRIEVAL_CARRY_SEPARATION = 1.5
 #: the turn used DISTINCTIVE words, which is what the rarity gate below
 #: measures; the score is then only good for comparing two hits taken from
 #: the one corpus, which is what the separation test does.
-RETRIEVAL_CARRY_MIN_SCORE = 0.0
+RETRIEVAL_CARRY_MIN_SCORE = 1.0
 
 #: How much room the carry asks the request budget for, as a multiple of
 #: what the request's first lexical pass measured. The carry's own cost
