@@ -697,7 +697,12 @@ def suggest_related(
 
 
 def _best_cosine_per_file(
-    vault_root: Path, *, title: str, body: str, k: int = 15
+    vault_root: Path,
+    *,
+    title: str,
+    body: str,
+    k: int = 15,
+    published_path: str | None = None,
 ) -> dict[str, float]:
     """Embed a draft (title+body) as PASSAGES and return the max cosine per
     existing file over the sidecar: ``{file_path: best_score}``.
@@ -709,6 +714,15 @@ def _best_cosine_per_file(
     a query). Returns ``{}`` when embeddings are disabled, unimportable, or the
     sidecar is empty — the no-op contract both callers depend on, so the fast
     test suite and torch-less deploys are unaffected.
+
+    `published_path` names a page whose rows the sidecar may already hold for
+    these very chunk texts — a post-commit sweep passes the page its commit just
+    embedded. A chunk whose exact text has a stored vector takes that vector
+    instead of being encoded again: a vector is a function of its text, the
+    same economy the write's own embedding pass applies. On a CPU-only cell the
+    second encode of a just-written note was most of a 9-13 s sweep. Only the
+    texts the page's rows lack are encoded, so a missing or stale row costs
+    what it always did and never changes a score.
     """
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return {}
@@ -731,13 +745,34 @@ def _best_cosine_per_file(
         # `index.embeddings`, and this is the caller it belonged to.
         with call_spans.span("advisory.best_cosine", {}) as measured:
             chunks = embeddings.chunk_text(title, body)
-            if measured is not None:
-                measured["texts"] = len(chunks)
-                measured["chars"] = sum(len(chunk) for chunk in chunks)
             if not chunks:
+                if measured is not None:
+                    measured["texts"] = 0
+                    measured["chars"] = 0
                 return {}
-            vecs = embeddings.embed_texts(chunks, is_query=False)
             idx = embeddings.get_embedding_index(vault_root)
+            stored = (
+                embeddings._stored_text_vectors(idx, published_path)[0]
+                if published_path
+                else {}
+            )
+            encoded = [chunk for chunk in chunks if chunk not in stored]
+            if measured is not None:
+                # `texts`/`chars` count what was NOT served from stored rows,
+                # so on this surface they still say what the sweep encoded.
+                measured["texts"] = len(encoded)
+                measured["chars"] = sum(len(chunk) for chunk in encoded)
+                if published_path:
+                    measured["reused"] = len(chunks) - len(encoded)
+            if len(encoded) == len(chunks):
+                vecs = embeddings.embed_texts(chunks, is_query=False)
+            else:
+                lookup = {chunk: stored[chunk] for chunk in chunks if chunk in stored}
+                missing = list(dict.fromkeys(encoded))
+                if missing:
+                    fresh = embeddings.embed_texts(missing, is_query=False)
+                    lookup.update(zip(missing, fresh, strict=True))
+                vecs = [lookup[chunk] for chunk in chunks]
             allowed_paths = {
                 rel
                 for rel in (

@@ -8,8 +8,11 @@ torch and lift the suite-wide embeddings gate.
 
 from __future__ import annotations
 
+import hashlib
+from collections import Counter
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from exomem import add as add_module
@@ -435,3 +438,118 @@ def test_detect_contradictions_excludes_real_near_identical(
     assert not any("progressive-disclosure" in c.path for c in out), [
         c.as_dict() for c in out
     ]
+
+
+# ---------------- the post-commit sweep reuses the commit's own encode ----------------
+#
+# A note write encodes the page's chunks once when its commit publishes them to
+# the sidecar, then ran the near-dup/contradiction sweep, which encoded the very
+# same chunk texts again. On a CPU-only cell that second encode was most of the
+# sweep's 9-13 s. These run torch-free with a deterministic encoder, so they pin
+# the wiring and the exactness, not model numerics.
+
+
+@pytest.fixture
+def counting_encoder(monkeypatch):
+    """A deterministic, torch-free text encoder that records every text it encodes.
+
+    The vector is seeded from the text after its title line, so a draft that
+    repeats an existing page's paragraphs scores cosine 1.0 against that page,
+    which is what a real near-duplicate looks like to the sweep.
+    """
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
+    encoded: list[str] = []
+
+    def fake(texts, *, is_query=False):
+        encoded.extend(texts)
+        rows = []
+        for text in texts:
+            key = text.split("\n\n", 1)[-1]
+            seed = int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], "little")
+            vector = np.random.default_rng(seed).standard_normal(embeddings.VECTOR_DIM)
+            rows.append(vector / np.linalg.norm(vector))
+        return np.asarray(rows, dtype=np.float32).reshape(len(texts), embeddings.VECTOR_DIM)
+
+    monkeypatch.setattr(embeddings, "embed_texts", fake)
+    monkeypatch.setattr(embeddings, "get_model", lambda: object())
+    return encoded
+
+
+_REUSE_PARAGRAPHS = [
+    "Reuse probe paragraph one about bounded retry budgets.",
+    "Reuse probe paragraph two about idempotent handlers.",
+    "Reuse probe paragraph three about jittered backoff.",
+    "Reuse probe paragraph four about circuit breakers.",
+]
+
+
+def test_note_sweep_does_not_re_encode_what_its_commit_published(
+    vault: Path, counting_encoder: list[str]
+) -> None:
+    embeddings.get_embedding_index(vault).rebuild_all()
+    counting_encoder.clear()
+    body = "\n\n".join(_REUSE_PARAGRAPHS)
+
+    note_module.note(
+        vault, content=body, note_type="insight", title="Reuse probe", status="draft"
+    )
+
+    draft_chunks = embeddings.chunk_text("Reuse probe", body)
+    counts = Counter(counting_encoder)
+    assert [counts[chunk] for chunk in draft_chunks] == [1] * len(draft_chunks), (
+        "each draft chunk must be encoded once per write -- by the commit that "
+        "publishes it -- and the advisory sweep must reuse that vector"
+    )
+
+
+def test_reused_vectors_score_exactly_as_a_fresh_encode(
+    vault: Path, counting_encoder: list[str]
+) -> None:
+    body = "\n\n".join(_REUSE_PARAGRAPHS)
+    twin = _seed_md(vault, "Notes/Insights/reuse-twin.md", type_="insight", body=body)
+    embeddings.get_embedding_index(vault).rebuild_all()
+
+    result = note_module.note(
+        vault, content=body, note_type="insight", title="Reuse probe", status="draft"
+    ).as_dict()
+
+    # The warning the write returns is the one a fresh encode produces.
+    assert any(
+        w.startswith(f"possible near-duplicate of [[{twin.removesuffix('.md')}")
+        or w.startswith(f"possible near-duplicate of [[{twin}")
+        for w in result["warnings"]
+    ), result["warnings"]
+    fresh = corpus_aware._best_cosine_per_file(vault, title="Reuse probe", body=body)
+    counting_encoder.clear()
+    reused = corpus_aware._best_cosine_per_file(
+        vault, title="Reuse probe", body=body, published_path=result["path"]
+    )
+    assert counting_encoder == []
+    assert reused == fresh
+    assert reused[twin] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_sweep_encodes_when_the_commit_published_nothing(
+    vault: Path, counting_encoder: list[str], monkeypatch
+) -> None:
+    """Reuse is an economy, never a dependency: no stored rows, full encode, same warning."""
+    body = "\n\n".join(_REUSE_PARAGRAPHS)
+    twin = _seed_md(vault, "Notes/Insights/reuse-twin.md", type_="insight", body=body)
+    embeddings.get_embedding_index(vault).rebuild_all()
+    monkeypatch.setattr(
+        embeddings,
+        "upsert_after_write_status",
+        lambda _root, paths, **_k: embeddings.EmbeddingSyncStatus(
+            "disabled", "embeddings_disabled", len(paths)
+        ),
+    )
+    counting_encoder.clear()
+
+    result = note_module.note(
+        vault, content=body, note_type="insight", title="Reuse probe", status="draft"
+    ).as_dict()
+
+    draft_chunks = embeddings.chunk_text("Reuse probe", body)
+    assert Counter(counting_encoder) == Counter(draft_chunks)
+    assert any(twin.removesuffix(".md") in w for w in result["warnings"]), result["warnings"]
