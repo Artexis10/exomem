@@ -260,32 +260,6 @@ def _whole_vault_pending(vault_root: Path) -> bool:
     return _marker_pending(vault_root) or _barrier_pending(vault_root)
 
 
-def _recover_once(vault_root: Path) -> bool:
-    """Re-arm a rebuild that stopped. Never raises; True when it recovered.
-
-    Draining the queue is not the whole of convergence. When the incremental
-    path falls back, the whole-vault rebuild that replaces it is terminal if it
-    stops: `graph_sync` records the error, clears `_running` and returns. The
-    persisted barrier it leaves is the retry signal, and until now the only
-    thing that acted on it was the watcher's reconcile -- 300s, and skipped
-    entirely under `EXOMEM_DISABLE_FILE_WATCHER`.
-
-    A product E2E run showed the cost exactly: the queue settled four times in
-    seven seconds, the rebuild stopped at +7.3s, and the server then answered
-    readiness polls for the remaining 120s without ever attempting another one.
-    `recover_suspended_graph` declines by itself when the barrier is absent or
-    when a publication is already proven doomed for this checkpoint, so calling
-    it on a settled queue costs a few cheap checks in the ordinary case.
-    """
-    from . import epistemic_graph
-
-    try:
-        return bool(epistemic_graph.recover_suspended_graph(vault_root))
-    except Exception:  # noqa: BLE001 - the barrier stays, so the signal stays
-        log.warning("graph drain: barrier recovery failed; barrier remains", exc_info=True)
-        return False
-
-
 def _drain_once(vault_root: Path) -> int:
     """One bounded drain. Never raises; returns receipts cleared."""
     from . import deferred_index, epistemic_graph, index_sync
@@ -336,19 +310,40 @@ def _republish_once(vault_root: Path) -> bool:
         return False
 
 
+def _per_path_work_once(vault_root: Path) -> int:
+    """The per-path half of a pass, for while whole-vault work is held.
+
+    Per-path repair is never held: it is proportional, and a write landing
+    mid-drain only appends work. It runs only when no marker stands -- with one
+    standing, the queue's next step is the marker's whole-vault convergence.
+    Never raises.
+    """
+    if not _queue_pending(vault_root) or _marker_pending(vault_root):
+        return 0
+    return _drain_once(vault_root)
+
+
 def _work_once(vault_root: Path) -> int:
     """Drain what is queued, then repair a barrier if one is still standing.
 
     Both in one pass, in that order: draining is proportional and may itself
     clear the condition the rebuild would have been re-run for.
 
-    A whole-vault marker that is still standing after the drain means this pass
-    has already spent its whole-vault attempt on it, and that attempt's
-    publication would have cleared the barrier as well. Recovering the barrier
-    too would be a second rebuild of the same graph in the same pass.
+    When the marker's convergence ran a whole-vault pass in this pass, barrier
+    recovery waits for the next one: it would rebuild the same graph again, and
+    a publication would have cleared the barrier anyway. A convergence that ran
+    no pass -- a busy boundary, an unavailable epoch -- does not hold recovery
+    back.
     """
-    processed = _drain_once(vault_root) if _queue_pending(vault_root) else 0
-    if _marker_pending(vault_root):
+    from . import epistemic_graph
+
+    processed = 0
+    attempted = False
+    if _queue_pending(vault_root):
+        with epistemic_graph.observe_full_marker_dispatches() as dispatches:
+            processed = _drain_once(vault_root)
+        attempted = any(result.whole_vault_attempted for result in dispatches)
+    if attempted:
         return processed
     if _barrier_pending(vault_root):
         if _recover_once(vault_root):
@@ -449,10 +444,12 @@ def _run(vault_root: Path) -> None:
         if hold > 0.0:
             # A write signal during the hold only wakes this loop to re-read the
             # quiet window; it can never start the attempt early. Every write
-            # of a burst therefore shares the one attempt after it.
+            # of a burst therefore shares the one attempt after it. Per-path
+            # work behind a barrier is not held: it drains on every wake.
             if held_since is None:
                 held_since = _last_debt or time.monotonic()
-            interval = hold
+            drained = _per_path_work_once(vault_root)
+            interval = min(hold, RETRY_SECONDS) if drained else hold
             continue
         # This attempt is no longer held; the next one gets its own ceiling.
         held_since = None

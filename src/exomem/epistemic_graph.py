@@ -7690,9 +7690,53 @@ class GraphDispatchResult:
     def not_required(cls) -> GraphDispatchResult:
         return cls("not_required", "no_graph_input")
 
+    @property
+    def whole_vault_attempted(self) -> bool:
+        """Whether this dispatch ran, or joined, a whole-vault rebuild pass."""
+        return self.code in _WHOLE_VAULT_ATTEMPT_CODES
+
+
+#: Dispatch codes that mean a whole-vault pass ran for the marker (published or
+#: lost) or another owner's pass is running. A busy boundary, an unavailable
+#: epoch and a registry rebind are not whole-vault passes.
+_WHOLE_VAULT_ATTEMPT_CODES = frozenset(
+    {
+        "graph_rebuild_completed",
+        "graph_convergence_deferred",
+        "graph_convergence_failed",
+        "graph_rebuild_in_progress",
+    }
+)
+
+_FULL_MARKER_DISPATCHES: ContextVar[list[GraphDispatchResult] | None] = ContextVar(
+    "exomem_graph_full_marker_dispatches", default=None
+)
+
+
+@contextmanager
+def observe_full_marker_dispatches() -> Iterator[list[GraphDispatchResult]]:
+    """Collect every full-marker dispatch outcome produced inside this block."""
+    seen: list[GraphDispatchResult] = []
+    token = _FULL_MARKER_DISPATCHES.set(seen)
+    try:
+        yield seen
+    finally:
+        _FULL_MARKER_DISPATCHES.reset(token)
+
+
+def _record_full_marker_dispatch(result: GraphDispatchResult) -> GraphDispatchResult:
+    seen = _FULL_MARKER_DISPATCHES.get()
+    if seen is not None:
+        seen.append(result)
+    return result
+
 
 def converge_full_graph_marker(vault_root: Path) -> GraphDispatchResult:
     """Converge one observed full marker through rebind or the full-rebuild fallback."""
+    return _record_full_marker_dispatch(_converge_full_graph_marker(vault_root))
+
+
+def _converge_full_graph_marker(vault_root: Path) -> GraphDispatchResult:
     root = Path(vault_root)
     checkpoint: graph_sync.GraphSyncCheckpoint | None = None
     try:

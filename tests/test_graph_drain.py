@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -885,20 +886,17 @@ def test_a_publication_elsewhere_ends_the_drains_backoff(
     )
 
 
-def test_a_standing_marker_is_the_passs_only_whole_vault_attempt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """One pass, one whole-vault attempt.
-
-    With a whole-vault marker standing, the drain converges it first. When
-    that attempt makes no progress, barrier recovery is another whole-vault
-    rebuild of the same graph: the live service logged the pair on nearly
-    every pass, a `graph_boundary_busy` convergence and then a recovery that
-    failed on the same busy boundary. The marker's convergence covers the
-    barrier too, so recovery waits for the next pass.
-    """
+def _standing_marker_and_barrier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dispatch: Any
+) -> list[Path]:
+    """A marker and a barrier both standing; the dispatcher reports `dispatch`."""
     deferred_index.mark_graph_full_rebuild(tmp_path, generation=1)
-    monkeypatch.setattr(graph_drain, "_drain_once", lambda _root: 0)
+
+    def drain(root: Path) -> int:
+        epistemic_graph._record_full_marker_dispatch(dispatch)
+        return 0
+
+    monkeypatch.setattr(graph_drain, "_drain_once", drain)
     monkeypatch.setattr(graph_drain, "_barrier_pending", lambda _root: True)
     recoveries: list[Path] = []
 
@@ -907,11 +905,89 @@ def test_a_standing_marker_is_the_passs_only_whole_vault_attempt(
         return False
 
     monkeypatch.setattr(graph_drain, "_recover_once", recover)
+    return recoveries
+
+
+def test_a_standing_marker_is_the_passs_only_whole_vault_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One pass, one whole-vault attempt.
+
+    With a whole-vault marker standing, the drain converges it first. When
+    that attempt runs a whole-vault pass and loses, barrier recovery would be
+    another whole-vault rebuild of the same graph in the same pass. The
+    marker's convergence covers the barrier too, so recovery waits for the
+    next pass.
+    """
+    recoveries = _standing_marker_and_barrier(
+        tmp_path,
+        monkeypatch,
+        epistemic_graph.GraphDispatchResult("failed", "graph_convergence_failed"),
+    )
 
     assert graph_drain._work_once(tmp_path) == 0
     assert recoveries == [], "a pass paid for barrier recovery on top of the marker's attempt"
     assert deferred_index.graph_full_rebuild_pending(tmp_path) == 1
 
+
+def test_a_dispatcher_that_attempted_nothing_does_not_starve_barrier_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Skipping recovery is earned by a whole-vault attempt, not by a marker.
+
+    A dispatcher that keeps losing the canonical boundary never runs a pass,
+    so a standing marker alone must not also keep the barrier from being
+    recovered.
+    """
+    recoveries = _standing_marker_and_barrier(
+        tmp_path,
+        monkeypatch,
+        epistemic_graph.GraphDispatchResult("failed", "graph_boundary_busy"),
+    )
+
+    graph_drain._work_once(tmp_path)
+
+    assert recoveries == [tmp_path], (
+        "a dispatcher that ran no whole-vault pass kept the barrier from being recovered"
+    )
+
+
+def test_a_barrier_holds_only_its_recovery_not_the_per_path_drain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """While a barrier waits for its quiet window, queued paths keep draining."""
+    monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.0)
+    monkeypatch.setattr(graph_drain, "WHOLE_VAULT_SETTLE_SECONDS", 60.0)
+    monkeypatch.setattr(epistemic_graph, "last_whole_vault_pass_seconds", lambda _root: None)
+    monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root: True)
+    monkeypatch.setattr(graph_drain, "_barrier_pending", lambda _root: True)
+    monkeypatch.setattr(deferred_index, "graph_full_rebuild_pending", lambda _root: None)
+    drained: list[float] = []
+    recovered: list[float] = []
+
+    def drain(_root: Path, *, limit: int | None = None) -> int:
+        drained.append(time.monotonic())
+        return 1
+
+    def recover(_root: Path) -> bool:
+        recovered.append(time.monotonic())
+        return False
+
+    monkeypatch.setattr(index_sync, "drain_graph_work", drain)
+    monkeypatch.setattr(graph_drain, "_recover_once", recover)
+
+    graph_drain.start(tmp_path)
+    # The startup pass is not held (no write yet) and recovers once.
+    assert _wait_for(lambda: len(recovered) >= 1, timeout=5.0)
+    burst_started = time.monotonic()
+    _signal_debt_for(0.5)
+
+    assert any(moment >= burst_started for moment in drained), (
+        "per-path repair was held behind the barrier's quiet window"
+    )
+    assert [moment for moment in recovered if moment >= burst_started] == [], (
+        "barrier recovery ran inside its quiet window"
+    )
 
 def test_the_quiet_window_is_one_whole_vault_pass_long(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
