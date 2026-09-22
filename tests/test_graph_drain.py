@@ -956,6 +956,89 @@ def test_the_quiet_window_is_one_whole_vault_pass_long(
     )
 
 
+def _held_whole_vault_attempts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    last_pass: float | None,
+    floor: float,
+    ceiling: float,
+    gap: float,
+    stream: float,
+) -> tuple[float, list[float]]:
+    """Run the real schedule against a stream of write signals; time each attempt.
+
+    Whole-vault work stands throughout and no attempt makes progress, so every
+    attempt the drain starts is visible and none ends the hold early. Returns the
+    stream's start and the start time of every attempt.
+    """
+    monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.0)
+    monkeypatch.setattr(graph_drain, "RETRY_SECONDS", 0.05)
+    monkeypatch.setattr(graph_drain, "MAX_RETRY_SECONDS", ceiling)
+    monkeypatch.setattr(graph_drain, "WHOLE_VAULT_SETTLE_SECONDS", floor)
+    monkeypatch.setattr(epistemic_graph, "last_whole_vault_pass_seconds", lambda _root: last_pass)
+    monkeypatch.setattr(graph_drain, "_pending", lambda _root: True)
+    monkeypatch.setattr(graph_drain, "_whole_vault_pending", lambda _root: True)
+    attempts: list[float] = []
+
+    def no_progress(_root: Path) -> int:
+        attempts.append(time.monotonic())
+        return 0
+
+    monkeypatch.setattr(graph_drain, "_work_once", no_progress)
+
+    graph_drain.start(tmp_path)
+    # The startup pass runs at once (no burst yet) and makes no progress.
+    assert _wait_for(lambda: len(attempts) >= 1, timeout=5.0)
+    started = time.monotonic()
+    _signal_debt_for(stream, every=gap)
+    return started, attempts
+
+
+def test_a_held_whole_vault_attempt_runs_within_the_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The quiet window is a preference, not a precondition.
+
+    A stream whose gaps never reach one pass would otherwise hold whole-vault
+    repair for as long as it lasts, and main, which starts a pass a debounce
+    after each write, sometimes publishes in such a stream. An attempt held for
+    a quiet window runs anyway once the first debt signal it was held for is
+    `MAX_RETRY_SECONDS` old, and later attempts are held no longer than that.
+    """
+    started, attempts = _held_whole_vault_attempts(
+        tmp_path, monkeypatch, last_pass=0.3, floor=0.1, ceiling=0.6, gap=0.1, stream=2.5
+    )
+    ended = time.monotonic()
+    during = [moment for moment in attempts if started <= moment < ended]
+
+    assert during, "a whole-vault attempt stayed held for the whole stream"
+    assert during[0] - started <= 0.6 + 0.35, (
+        f"the first held attempt ran {during[0] - started:.2f}s into the stream, "
+        "past its ceiling"
+    )
+    gaps = [later - earlier for earlier, later in zip(during, during[1:], strict=False)]
+    assert all(gap_ <= 0.6 + 0.35 for gap_ in gaps), f"an attempt outlived the ceiling: {gaps}"
+    assert len(during) <= 6, f"{len(during)} attempts in 2.5 s: the ceiling became a spin"
+
+
+def test_the_five_second_floor_applies_only_until_a_pass_is_timed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A timed pass shorter than the floor sets the window on its own.
+
+    Gaps longer than one measured pass can publish one, so a floor that is
+    longer than the pass must not turn them away.
+    """
+    started, attempts = _held_whole_vault_attempts(
+        tmp_path, monkeypatch, last_pass=0.2, floor=0.6, ceiling=30.0, gap=0.4, stream=2.0
+    )
+    ended = time.monotonic()
+    during = [moment for moment in attempts if started <= moment < ended]
+
+    assert during, "a floor longer than the measured pass held every gap in the stream"
+
+
 def test_an_unavailable_graph_alone_is_per_path_work_and_is_not_held(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

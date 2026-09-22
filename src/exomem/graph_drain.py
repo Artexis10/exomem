@@ -28,6 +28,7 @@ Three properties the timing has to have:
   concurrency check to whichever write lands next. Repair wants the quiet moment
   just after a burst, not the middle of one. For whole-vault work that moment is
   a quiet window as long as one whole-vault pass: a shorter gap cannot publish.
+  The window is bounded: no attempt waits for it longer than the retry ceiling.
 * **Bounded.** Debt that cannot be drained -- an unsettled epoch, a vault not yet
   ready -- must not spin. The retry interval backs off to a ceiling, so a queue
   that is stuck costs one attempt every couple of minutes rather than one per
@@ -67,11 +68,15 @@ MAX_RETRY_SECONDS = 120.0
 #: single call, matching the cap the periodic reconcile already applies.
 DRAIN_LIMIT = 64
 
-#: Quiet time, at least, a whole-vault repair waits for after the last graph
-#: debt signal. A whole-vault pass publishes only if no write lands while it
-#: runs, so starting one mid-burst buys a pass the next write throws away. Once
-#: a pass has been timed, the window is that long instead (up to the retry
-#: ceiling): a gap shorter than one pass cannot publish one.
+#: Quiet time a whole-vault repair waits for after the last graph debt signal,
+#: until this process has timed a whole-vault pass. A whole-vault pass publishes
+#: only if no write lands while it runs, so starting one mid-burst buys a pass
+#: the next write throws away. Once a pass has been timed, the window is that
+#: pass's duration instead (up to the retry ceiling), with no floor: a gap
+#: shorter than one pass cannot publish one, and a gap as long as one can.
+#: Either way an attempt is held at most `MAX_RETRY_SECONDS` past the first
+#: debt signal it was held for, because the window is a preference: a stream
+#: that never pauses for one pass must still get attempts.
 WHOLE_VAULT_SETTLE_SECONDS = 5.0
 
 _LOCK = threading.Lock()
@@ -374,34 +379,43 @@ def _work_once(vault_root: Path) -> int:
 
 
 def _whole_vault_settle(vault_root: Path) -> float:
-    """The quiet window a whole-vault pass needs: one pass, within bounds."""
+    """The quiet window a whole-vault pass needs: one timed pass, else the floor."""
     from . import epistemic_graph
 
     try:
-        last_pass = epistemic_graph.last_whole_vault_pass_seconds(vault_root) or 0.0
+        last_pass = epistemic_graph.last_whole_vault_pass_seconds(vault_root)
     except Exception:  # noqa: BLE001 - an unknown duration falls back to the floor
-        last_pass = 0.0
-    return min(MAX_RETRY_SECONDS, max(WHOLE_VAULT_SETTLE_SECONDS, last_pass))
+        last_pass = None
+    if last_pass is None:
+        return WHOLE_VAULT_SETTLE_SECONDS
+    return min(MAX_RETRY_SECONDS, max(0.0, last_pass))
 
 
-def _whole_vault_hold(vault_root: Path, not_before: float) -> float:
+def _whole_vault_hold(vault_root: Path, not_before: float, held_since: float | None) -> float:
     """Seconds a whole-vault pass must still wait, or 0.0 when it may run now.
 
     Two waits, whichever ends later: the backoff after an attempt that made no
-    progress, and a quiet window since the last debt signal. Per-path repair is
-    never held -- it is proportional, and a write landing mid-drain only
-    appends work rather than invalidating it.
+    progress, and a quiet window since the last debt signal. The quiet window
+    never extends past `MAX_RETRY_SECONDS` after `held_since`, the first debt
+    signal this attempt was held for. Per-path repair is never held -- it is
+    proportional, and a write landing mid-drain only appends work rather than
+    invalidating it.
     """
     now = time.monotonic()
-    return max(0.0, not_before - now, _last_debt + _whole_vault_settle(vault_root) - now)
+    quiet = _last_debt + _whole_vault_settle(vault_root) - now
+    if held_since is not None:
+        quiet = min(quiet, held_since + MAX_RETRY_SECONDS - now)
+    return max(0.0, not_before - now, quiet)
 
 
 def _run(vault_root: Path) -> None:
     interval = IDLE_POLL_SECONDS
-    # The no-progress backoff (0.0 after progress), and the earliest moment the
-    # next whole-vault attempt may start.
+    # The no-progress backoff (0.0 after progress), the earliest moment the next
+    # whole-vault attempt may start, and the first debt signal the next
+    # whole-vault attempt is being held for (None while nothing is held).
     backoff = 0.0
     not_before = 0.0
+    held_since: float | None = None
     while not _stop.is_set():
         signalled = _DEBT.wait(timeout=interval)
         if _stop.is_set():
@@ -413,22 +427,28 @@ def _run(vault_root: Path) -> None:
             _PROGRESS.clear()
             backoff = 0.0
             not_before = 0.0
+            held_since = None
         if signalled:
             # Settle. `wait` returning True here means a stop was requested.
             if _stop.wait(DEBOUNCE_SECONDS):
                 break
         if not _pending(vault_root):
             backoff = 0.0
+            held_since = None
             interval = IDLE_POLL_SECONDS
             continue
         whole_vault = _whole_vault_pending(vault_root)
-        hold = _whole_vault_hold(vault_root, not_before) if whole_vault else 0.0
+        hold = _whole_vault_hold(vault_root, not_before, held_since) if whole_vault else 0.0
         if hold > 0.0:
             # A write signal during the hold only wakes this loop to re-read the
             # quiet window; it can never start the attempt early. Every write
             # of a burst therefore shares the one attempt after it.
+            if held_since is None:
+                held_since = _last_debt or time.monotonic()
             interval = hold
             continue
+        # This attempt is no longer held; the next one gets its own ceiling.
+        held_since = None
         processed = _work_once(vault_root)
         if not _pending(vault_root):
             log.info("graph drain: graph settled (%d unit(s) of work cleared)", processed)
