@@ -393,7 +393,8 @@ the request named no explicit anchor choice; an ambiguous turn, a turn that
 resolved any anchor and a referential turn SHALL be untouched. A hit SHALL be a candidate only where at least two
 of the turn's stems that it matches are DISTINCTIVE in the indexed corpus,
 measured as a document frequency at or below `max(3, ceil(0.5% of the indexed
-pages in scope))` over the same catalogue the ranking uses. A hit SHALL additionally satisfy a proximity
+pages in scope))` over the same catalogue the ranking uses, navigation pages not
+counted toward a stem's frequency. A hit SHALL additionally satisfy a proximity
 condition: two of its matched distinctive stems occur within a declared token
 window of each other, within one sentence of the turn. Distance SHALL be
 measured over the turn's own tokens, function words included; sentence-ending

@@ -44,7 +44,7 @@ evidence is never served as durable memory — and navigation pages too, since a
 single page that DOMINATES it may
 CARRY a packet. Dominance is a NAMED-CONTACT test, not a score threshold: a hit is a
 candidate only when at least two of the turn's stems that it matches are DISTINCTIVE in
-this corpus (document frequency at or below `max(3, ceil(0.5% of indexed pages))`,
+this corpus (document frequency, navigation pages not counted, at or below `max(3, ceil(0.5% of indexed pages))`,
 measured against the same catalogue the ranking uses), and two of those stems must sit
 together — within `RETRIEVAL_CARRY_RARE_WINDOW` tokens of each other and
 inside one sentence — because two distinctive words nine tokens apart, or

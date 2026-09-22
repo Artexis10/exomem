@@ -783,6 +783,9 @@ def rare_turn_terms(
     """
     from . import lexstore
 
+    # Navigation pages are not counted: an index or a log repeats the titles
+    # it lists, so a folder-level one beside the vault's own pushed a title
+    # word past the cap and the page named by its title was never carried.
     result = lexstore.term_document_frequencies(
         vault_root,
         stems,
@@ -790,6 +793,7 @@ def rare_turn_terms(
         freshness=freshness,
         allow_delta=False,
         recall_checkpoint=recall_checkpoint,
+        exclude_navigation=True,
     )
     if not result.readiness.complete:
         return (), 0, result.readiness.status

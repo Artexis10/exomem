@@ -2069,3 +2069,45 @@ def test_a_short_turn_pays_for_no_rarity_lookup(
 
     assert calls == [], "a short turn paid for a rarity lookup it never needed"
     assert captured == [None], captured
+
+
+# --------------------------------------------------------------------------- #
+# R-N6: navigation pages do not count toward a stem's document frequency.
+# --------------------------------------------------------------------------- #
+
+
+def test_folder_navigation_pages_cannot_push_a_title_past_the_rarity_cap(
+    vault: Path, budget_free
+) -> None:
+    """Every index and log that lists a title adds one to its words' document
+    frequency. With a folder-level index and log beside the vault's own, the
+    title word "kelvane" sat on five pages against a cap of three, stopped
+    being distinctive, and the page named by its title was never carried."""
+    _seed_named_pages_corpus(vault)
+    _seed_navigation_pages(vault)
+    kb = vault / "Knowledge Base"
+    listing = "- [[Kelvane throughput]] — kelvane throughput ceiling review\n"
+    _write(kb / "Notes" / "Research" / "index.md", f"# Research\n\n{listing}")
+    _write(kb / "Notes" / "Research" / "log.md", f"# Research log\n\n{listing}")
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+
+    counted = lexstore.term_document_frequencies(vault, ["kelvan"], scope="kb").value
+    frequencies, pages = counted
+    cap = working_set.rare_document_cap(pages)
+    assert 100 <= pages <= 600 and cap == 3, (pages, cap)
+    assert frequencies["kelvan"] > cap, "the navigation pages must push it past, or this proves nothing"
+    without_navigation = lexstore.term_document_frequencies(
+        vault, ["kelvan"], scope="kb", exclude_navigation=True
+    ).value
+    assert without_navigation == ({"kelvan": 1}, pages)
+
+    hits, state = working_set_runtime.carry_candidates(vault, NAVIGATION_TURN)
+    packet = working_set.compile_packet(vault, turn=NAVIGATION_TURN, max_chars=4000)
+
+    assert state == "available"
+    assert [path for path, _score in hits] == [
+        "Knowledge Base/Notes/Research/kelvane-throughput.md"
+    ]
+    assert packet["generation"].get("carried_by") == "retrieval", packet.get("abstention")

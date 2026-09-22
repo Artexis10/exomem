@@ -1833,6 +1833,7 @@ def term_document_frequencies(
     freshness: tuple | None = None,
     allow_delta: bool = True,
     recall_checkpoint: Any | None = None,
+    exclude_navigation: bool = False,
 ) -> CatalogQueryResult[tuple[dict[str, int], int]]:
     """How many indexed pages each stem occurs on, and how many there are.
 
@@ -1848,6 +1849,12 @@ def term_document_frequencies(
     the caller's own term list; no vocabulary table is materialised, because
     `fts5vocab` counts documents vault-wide and would answer for a corpus
     the query never searched.
+
+    `exclude_navigation` leaves navigation pages (`index.md`, `log.md` at any
+    level, `find_corpus.NAVIGATION_BASENAMES`) out of each stem's count. They
+    repeat the titles of the pages they list, so every index or log that
+    lists a title adds one to its words' frequency without making them any
+    less distinctive. The page total is unchanged.
     """
     if not _usable():
         return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
@@ -1860,6 +1867,7 @@ def term_document_frequencies(
         freshness,
         allow_delta=allow_delta,
         recall_checkpoint=recall_checkpoint,
+        exclude_navigation=exclude_navigation,
     )
 
 
@@ -5734,18 +5742,26 @@ class LexicalStore:
         *,
         allow_delta: bool = True,
         recall_checkpoint: Any | None = None,
+        exclude_navigation: bool = False,
     ) -> CatalogQueryResult[tuple[dict[str, int], int]]:
         return self._serve_from_ready_catalog_result(
             scope,
             freshness,
-            lambda conn: self._document_frequency_query(conn, stemmed_tokens, scope),
+            lambda conn: self._document_frequency_query(
+                conn, stemmed_tokens, scope, exclude_navigation=exclude_navigation
+            ),
             "lexical sidecar document-frequency query failed (%s)",
             allow_delta=allow_delta,
             recall_checkpoint=recall_checkpoint,
         )
 
     def _document_frequency_query(
-        self, conn: sqlite3.Connection, tokens: list[str], scope: str
+        self,
+        conn: sqlite3.Connection,
+        tokens: list[str],
+        scope: str,
+        *,
+        exclude_navigation: bool = False,
     ) -> tuple[dict[str, int], int]:
         """`({stem: pages carrying it}, pages in scope)` — one indexed lookup
         per DISTINCT stem, over the same join `_bm25_query` ranks with."""
@@ -5753,14 +5769,27 @@ class LexicalStore:
         total = conn.execute(
             f"SELECT COUNT(*) FROM pages WHERE {col} = 1"
         ).fetchone()
+        navigation_clause = ""
+        navigation_params: list[str] = []
+        if exclude_navigation:
+            from . import find_corpus
+
+            # A basename at the root or after a separator; LIKE is
+            # case-insensitive for ASCII, matching the casefolded names.
+            names = sorted(find_corpus.NAVIGATION_BASENAMES)
+            navigation_clause = " AND NOT (" + " OR ".join(
+                "p.path LIKE ? OR p.path LIKE ?" for _name in names
+            ) + ")"
+            for name in names:
+                navigation_params.extend((name, f"%/{name}"))
         frequencies: dict[str, int] = {}
         for token in dict.fromkeys(tokens):
             # Tokens are [a-z0-9]+ stems — no FTS5 syntax can hide in them,
             # but quote anyway, exactly as `_bm25_query` does.
             row = conn.execute(
                 "SELECT COUNT(*) FROM fts JOIN pages p ON p.rowid = fts.rowid "
-                f"WHERE fts MATCH ? AND p.{col} = 1",
-                (f'"{token}"',),
+                f"WHERE fts MATCH ? AND p.{col} = 1" + navigation_clause,
+                (f'"{token}"', *navigation_params),
             ).fetchone()
             frequencies[token] = int(row[0]) if row else 0
         return frequencies, int(total[0]) if total else 0
