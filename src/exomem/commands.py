@@ -5926,6 +5926,14 @@ def op_activate_context(
     provenance-bearing units, pointers to what did not fit the budget, and the
     current state of any resource whose collection records one.
 
+    Every packet leads with `recent_context`: up to eight pages this vault has
+    recently been worked on — edited, read, captured as a session, or left open
+    in Planning — each with its title, why it is recent, the date of that
+    contact and, where one exists, a one-line statement of its current state.
+    It is served whether or not the turn resolved anything, so a fresh session
+    opening on "continue" receives the thread it is picking up. `as_of` dates
+    the CONTACT, not the event the page describes.
+
     Read-only and abstaining by construction. It writes nothing, changes no
     `ask_memory`/`find` result, runs no model beyond the retrieval scorers recall
     already runs, and returns `abstained: true` with a reason rather than guessing
@@ -5963,10 +5971,12 @@ def op_activate_context(
             audience may not see, is refused identically and no packet is built.
         include_timings: Include per-stage timings for diagnostics.
 
-    Returns: {anchors, roles, units, pointers, current_state, missing,
-             ambiguity, budget, generation, abstained, abstention?,
-             continuity?}. `generation.continuity` reports whether a token you
-             passed was `applied`, `stale` or `absent`.
+    Returns: {recent_context, anchors, roles, units, pointers, current_state,
+             missing, ambiguity, budget, generation, abstained, abstention?,
+             continuity?}. `recent_context` is first and is present on an
+             abstained packet too; every other block is empty on one.
+             `generation.continuity` reports whether a token you passed was
+             `applied`, `stale` or `absent`.
     """
     # `RequestBudget` is bound in exactly one place, the MCP dispatch
     # middleware: `request_budget.current()` is always None on the REST and

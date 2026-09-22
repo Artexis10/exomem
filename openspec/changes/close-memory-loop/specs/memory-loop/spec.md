@@ -27,6 +27,13 @@ Where evidence supplies them, event occurrence, knowledge acquisition and claim 
 - **AND** unrelated freshness cannot crowd out that context or manufacture a new user commitment
 - **AND** acceptance observes the later agent response using those connections, separately from scripted tool calls
 
+#### Scenario: A turn that resolves nothing still carries recent context
+
+- **WHEN** a supported session sends a turn that names no anchor and resolves none, such as "continue" or "where were we"
+- **THEN** activation still returns the bounded recent-context block, first in the packet, naming what was recently worked on with its provenance and the reason each item is recent
+- **AND** no other block claims an anchor was resolved, and every item in the block crosses the same release plane a served unit does
+- **AND** the block's contact times describe the edit, read or capture, not the events the pages record
+
 #### Scenario: Old information is saved again after a correction
 
 - **WHEN** an old event or superseded claim receives a recent capture or file edit without new event evidence
