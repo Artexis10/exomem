@@ -78,6 +78,20 @@ _ORDINARY_PROSE = (
 #: all — a vault too small to measure rarity against is not a vault the
 #: carry can read a name out of.
 _ORDINARY_NOTES = 100
+#: Prose for the proximity corpus: it deliberately uses every everyday word
+#: of the proximity turns except the two each finding turns on.
+_PROXIMITY_PROSE = (
+    "This note records an ordinary week. I am flying out next week and wanted "
+    "to walk around for a while if there is time; I keep trying to remember "
+    "whether the change to the lane split was decided in the same month or a "
+    "month apart, and whether the team was involved. We will decide about it "
+    "before the review. Nothing here changes the cycle or the ceiling, and the "
+    "summary is unchanged. The meeting was short, the pending decision carried "
+    "over, the call is open and the team will settle it. I also need to book a "
+    "venue at some point this month and reschedule the dentist, and to ask "
+    "whether the run was still reconciled on a Tuesday, since the end of it "
+    "was never written down and the freight side has changed twice."
+)
 
 
 def _write(path: Path, text: str) -> None:
@@ -426,6 +440,139 @@ def test_a_word_the_stemmer_does_not_settle_on_still_ranks(prose_vault: Path) ->
     assert hits[0][1] > 10.0, hits
     dominant = working_set.dominant_carry(hits)
     assert dominant is not None and dominant[0] == DOUBLE_STEM_PAGE
+
+
+# --------------------------------------------------------------------------- #
+# Proximity: two distinctive words far apart are a coincidence
+# --------------------------------------------------------------------------- #
+
+
+def _seed_proximity_corpus(vault: Path) -> None:
+    """A corpus whose ordinary prose uses every everyday word of the turns
+    below, so whatever is left rare is rare because the word is name-shaped
+    and not because the fixture is thin."""
+    _seed_structure(vault)
+    _seed_planning(vault)
+    kb = vault / "Knowledge Base"
+    _write(
+        kb / "Notes" / "Research" / "harbour-ledger.md",
+        """---
+type: research-note
+status: active
+updated: 2026-09-10
+---
+
+# Harbour ledger
+
+## Summary
+
+- [decision] The harbour ledger is reconciled each Tuesday before the lisbon
+  freight window opens. ^h-1
+- [finding] A harbour ledger left unreconciled past the lisbon window costs a
+  whole cycle. ^h-2
+""",
+    )
+    journal = kb / "Notes" / "Journal"
+    for index in range(200):
+        _write(
+            journal / f"proximity-note-{index:05d}.md",
+            "---\ntype: note\nstatus: active\nupdated: 2026-08-01\n---\n\n"
+            f"# Proximity note {index:05d}\n\n## Summary\n\n"
+            f"- [note] {_PROXIMITY_PROSE} ^p-{index}\n",
+        )
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+
+
+def test_two_distinctive_words_far_apart_are_a_coincidence(vault: Path) -> None:
+    """The finding: a turn about a trip that happens to use two of a page's
+    words.
+
+    "flying to lisbon ... walk around the harbour" shares `lisbon` and
+    `harbour` with a page about a harbour ledger and a lisbon freight
+    window. Both words are genuinely distinctive — the corpus is 235 pages
+    of prose using every other word of the turn — and the page was carried
+    at 18.51. Nine tokens apart in an ordinary sentence they are two things
+    the speaker mentioned, not a name.
+    """
+    _seed_proximity_corpus(vault)
+
+    turn = (
+        "I am flying to lisbon next week and wanted to walk around the harbour "
+        "if there is time"
+    )
+    rare, pages, _state = working_set_runtime.rare_turn_terms(
+        vault, working_set_runtime.content_stems(turn)
+    )
+    assert pages >= working_set.RETRIEVAL_CARRY_MIN_PAGES, pages
+    assert set(rare) == {"lisbon", "harbour"}, rare
+
+    hits, state = working_set_runtime.carry_candidates(vault, turn)
+    assert state == "available"
+    assert hits == (), hits
+
+
+def test_the_same_two_words_as_a_phrase_are_a_name(vault: Path) -> None:
+    """The over-restriction half, and the whole point of a window: the same
+    two words said together ARE how a page is named."""
+    _seed_proximity_corpus(vault)
+
+    turn = "what did we decide about the lisbon harbour"
+    rare, _pages, _state = working_set_runtime.rare_turn_terms(
+        vault, working_set_runtime.content_stems(turn)
+    )
+    # Exactly two, so nothing but the window can admit this page.
+    assert set(rare) == {"lisbon", "harbour"}, rare
+
+    hits, state = working_set_runtime.carry_candidates(vault, turn)
+
+    assert state == "available"
+    assert [path for path, _score in hits] == [
+        "Knowledge Base/Notes/Research/harbour-ledger.md"
+    ], hits
+
+
+def test_three_distinctive_words_anywhere_in_a_turn_are_a_name(vault: Path) -> None:
+    """Three of one page's distinctive words is naming it wherever they sit:
+    a turn that happens on three of them by accident is not a turn anyone
+    writes."""
+    _seed_proximity_corpus(vault)
+
+    turn = (
+        "I keep meaning to ask whether the lisbon run is still reconciled on a "
+        "Tuesday, because nobody has updated the ledger since then, and the "
+        "harbour end of it was never written down anywhere"
+    )
+    rare, _pages, _state = working_set_runtime.rare_turn_terms(
+        vault, working_set_runtime.content_stems(turn)
+    )
+    page_words = {"lisbon", "ledger", "harbour"}
+    assert page_words <= set(rare), rare
+    # None of the page's three sits within a window of another, so nothing
+    # but the three-anywhere clause can admit it.
+    assert working_set_runtime.adjacent_rare_pairs(turn, sorted(page_words)) == (), turn
+
+    hits, state = working_set_runtime.carry_candidates(vault, turn)
+
+    assert state == "available"
+    assert [path for path, _score in hits] == [
+        "Knowledge Base/Notes/Research/harbour-ledger.md"
+    ], hits
+
+
+def test_the_proximity_window_is_measured_on_the_turns_own_tokens() -> None:
+    """Pure logic: which rare stems the turn said close enough together."""
+    pairs = working_set_runtime.adjacent_rare_pairs(
+        "the lisbon harbour window", ("lisbon", "harbour")
+    )
+    assert pairs == (("harbour", "lisbon"),)
+
+    far = working_set_runtime.adjacent_rare_pairs(
+        "I am flying to lisbon next week and wanted to walk around the harbour",
+        ("lisbon", "harbour"),
+    )
+    assert far == ()
 
 
 def test_a_stub_sharing_only_ordinary_words_is_never_carried(prose_vault: Path) -> None:

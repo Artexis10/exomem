@@ -1784,6 +1784,7 @@ def search_bm25_result(
     allow_delta: bool = True,
     min_matched_terms: int = 1,
     corroboration_tokens: list[str] | None = None,
+    corroboration_groups: list[list[str]] | None = None,
     recall_checkpoint: Any | None = None,
 ) -> CatalogQueryResult[list[tuple[str, float]]]:
     """Non-walking maintained-catalog BM25 query with explicit readiness.
@@ -1806,6 +1807,10 @@ def search_bm25_result(
     tokens = bm25_module.tokenize(query)
     if not tokens:
         return CatalogQueryResult([], CatalogReadiness("available", True, backend()))
+    groups = [
+        sorted({str(term) for term in group if str(term).strip()})
+        for group in (corroboration_groups or [])
+    ]
     return get_store(vault_root).search_bm25_result(
         tokens,
         k,
@@ -1815,6 +1820,7 @@ def search_bm25_result(
         allow_delta=allow_delta,
         min_matched_terms=min_matched_terms,
         corroboration_tokens=corroboration_tokens,
+        corroboration_groups=[group for group in groups if group],
         recall_checkpoint=recall_checkpoint,
     )
 
@@ -5703,6 +5709,7 @@ class LexicalStore:
         allow_delta: bool = True,
         min_matched_terms: int = 1,
         corroboration_tokens: list[str] | None = None,
+        corroboration_groups: list[list[str]] | None = None,
         recall_checkpoint: Any | None = None,
     ) -> CatalogQueryResult[list[tuple[str, float]]]:
         return self._serve_from_ready_catalog_result(
@@ -5712,6 +5719,7 @@ class LexicalStore:
                 conn, stemmed_tokens, k, scope, allowed_paths,
                 min_matched_terms=min_matched_terms,
                 corroboration_tokens=corroboration_tokens,
+                corroboration_groups=corroboration_groups,
             ),
             "lexical sidecar BM25 query failed (%s)",
             allow_delta=allow_delta,
@@ -5767,6 +5775,7 @@ class LexicalStore:
         *,
         min_matched_terms: int = 1,
         corroboration_tokens: list[str] | None = None,
+        corroboration_groups: list[list[str]] | None = None,
     ) -> list[tuple[str, float]]:
         # Tokens are [a-z0-9]+ — no FTS5 syntax can hide in them, but quote
         # anyway; OR mirrors get_scores() membership (any-term match).
@@ -5777,7 +5786,8 @@ class LexicalStore:
         if allowed_paths is not None:
             allowed_clause = " AND p.path IN (SELECT value FROM json_each(?))"
             params.append(json.dumps(sorted(allowed_paths), ensure_ascii=False))
-        if min_matched_terms > 1:
+        groups = [group for group in (corroboration_groups or []) if group]
+        if min_matched_terms > 1 or groups:
             # Corroboration counts distinct stems, not repetitions of one word.
             # Filter before LIMIT so one-term hits cannot crowd out valid pages.
             #
@@ -5786,11 +5796,24 @@ class LexicalStore:
             # unchanged either way: a caller narrowing this list is saying
             # which stems are worth counting, never which pages may rank.
             counted = tokens if corroboration_tokens is None else corroboration_tokens
-            allowed_clause += (
-                " AND (SELECT COUNT(*) FROM json_each(?) AS term "
+            count_sql = (
+                "(SELECT COUNT(*) FROM json_each(?) AS term "
                 "WHERE instr(' ' || fts.stemmed || ' ', ' ' || term.value || ' ') > 0) >= ?"
             )
-            params.extend((json.dumps(sorted(set(counted))), min_matched_terms))
+            if groups:
+                # ... OR every term of some group is present. `NOT EXISTS a
+                # term of this group that is missing` is the all-of test.
+                group_sql = (
+                    "EXISTS (SELECT 1 FROM json_each(?) AS grp WHERE NOT EXISTS ("
+                    "SELECT 1 FROM json_each(grp.value) AS gt WHERE "
+                    "instr(' ' || fts.stemmed || ' ', ' ' || gt.value || ' ') = 0))"
+                )
+                allowed_clause += f" AND ({count_sql} OR {group_sql})"
+                params.extend((json.dumps(sorted(set(counted))), min_matched_terms))
+                params.append(json.dumps([sorted(set(group)) for group in groups]))
+            else:
+                allowed_clause += f" AND {count_sql}"
+                params.extend((json.dumps(sorted(set(counted))), min_matched_terms))
         params.append(k)
         rows = conn.execute(
             "SELECT p.path, -bm25(fts) AS score "

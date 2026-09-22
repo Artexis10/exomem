@@ -101,6 +101,24 @@ RETRIEVAL_CARRY_RARE_MIN_DOCS = 3
 #: candidate at all. One is a coincidence at corpus scale; the same two-fact
 #: standard the resolver's own `rare_term` clause applies to an anchor.
 RETRIEVAL_CARRY_MIN_RARE_TERMS = 2
+#: How close two of a page's distinctive words must sit in the turn before
+#: they read as a NAME rather than as two things the speaker mentioned.
+#:
+#: Rarity alone says a word is name-shaped; it cannot say the turn used it
+#: to name this page. Measured on a 235-page corpus whose prose uses every
+#: everyday word of the turn: "I am flying to lisbon next week and wanted to
+#: walk around the harbour if there is time" shares `lisbon` and `harbour`
+#: with a page about a harbour ledger and a lisbon freight window, both
+#: genuinely distinctive, and carried it at 18.51. Nine tokens apart in an
+#: ordinary sentence they are two things the speaker mentioned. Four tokens
+#: is a phrase — "kelvane throughput ceiling", "quillon vantry window" —
+#: with room for the article or preposition a phrase carries.
+RETRIEVAL_CARRY_RARE_WINDOW = 4
+#: How many distinctive stems, sitting anywhere in the turn, name a page
+#: without a phrase. Three of ONE page's distinctive words is naming it
+#: wherever they sit: a turn that lands on three of them by accident is not
+#: a turn anyone writes.
+RETRIEVAL_CARRY_RARE_TERMS_ANYWHERE = 3
 #: The smallest corpus the rarity gate may be believed on. Below it the
 #: carry does not run and the turn abstains as it did before.
 #:

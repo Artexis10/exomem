@@ -43,8 +43,11 @@ evidence is never served as durable memory), and a single page that DOMINATES it
 CARRY a packet. Dominance is a NAMED-CONTACT test, not a score threshold: a hit is a
 candidate only when at least two of the turn's stems that it matches are DISTINCTIVE in
 this corpus (document frequency at or below `max(3, ceil(0.5% of indexed pages))`,
-measured against the same catalogue the ranking uses), and the survivor must then stand
-`RETRIEVAL_CARRY_SEPARATION` times clear of the runner-up. Rarity needs a
+measured against the same catalogue the ranking uses), and those stems must sit
+together — two within `RETRIEVAL_CARRY_RARE_WINDOW` tokens of each other, or
+three anywhere in the turn — because two distinctive words nine tokens apart
+are two things a speaker mentioned rather than a name. The survivor must then
+stand `RETRIEVAL_CARRY_SEPARATION` times clear of the runner-up. Rarity needs a
 corpus: below `RETRIEVAL_CARRY_MIN_PAGES` the carry does not run at all,
 because in a vault holding no ordinary prose every ordinary word is rare by
 measurement. An absolute score floor was

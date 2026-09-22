@@ -386,9 +386,12 @@ the request named no explicit anchor choice; an ambiguous turn and a turn that
 resolved any anchor SHALL be untouched. A hit SHALL be a candidate only where at least two
 of the turn's stems that it matches are DISTINCTIVE in the indexed corpus,
 measured as a document frequency at or below `max(3, ceil(0.5% of the indexed
-pages in scope))` over the same catalogue the ranking uses. A turn carrying
-fewer than two distinctive stems SHALL carry nothing and SHALL NOT run the
-ranking query. Where the indexed corpus holds fewer than a declared minimum
+pages in scope))` over the same catalogue the ranking uses. A hit SHALL additionally satisfy one of
+two proximity conditions: two of its matched distinctive stems occur within a
+declared token window of each other in the turn, or a declared larger number
+of them occur anywhere in it. Distance SHALL be measured over the turn's own
+tokens, function words included. A turn carrying fewer than two distinctive
+stems SHALL carry nothing and SHALL NOT run the ranking query. Where the indexed corpus holds fewer than a declared minimum
 number of pages, the carry SHALL NOT run at all: rarity is only as sharp as
 the corpus it is measured against, and below that size there is no corpus to
 measure against. An absolute score threshold SHALL NOT be used to decide contact:
@@ -432,6 +435,14 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
 - **THEN** the carry does not run and the turn abstains `unresolved`
 - **AND** the same turn against the same page IS judged on rarity once the
   corpus is large enough to measure it
+
+#### Scenario: Two distinctive words far apart are a coincidence
+
+- **WHEN** a turn that resolves no anchor shares exactly two distinctive
+  stems with a page and says them further apart than the declared window
+- **THEN** that page is not a candidate and the turn abstains `unresolved`
+- **AND** the same two stems said as a phrase DO make it a candidate, as do
+  three of that page's distinctive stems sitting anywhere in the turn
 
 #### Scenario: A stub sharing only ordinary words is not named
 

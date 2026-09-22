@@ -231,7 +231,21 @@ co-occurrence: a two-line stub titled "Meeting notes" whose one unit read
 "Decision pending" passed that test for an ordinary turn about a meeting and
 a pending decision, and was served as durable memory. A turn with fewer than
 two distinctive stems cannot carry anything, so the ranking query is not run
-at all. The surviving hit must then stand `RETRIEVAL_CARRY_SEPARATION` (1.5)
+at all.
+
+Rarity says a word is name-shaped; it cannot say the turn used it to NAME
+this page. A page therefore qualifies on a PHRASE — two of its distinctive
+stems sitting within `RETRIEVAL_CARRY_RARE_WINDOW` (4) tokens of each other
+in the turn, counted over the raw tokens so "the lisbon harbour window" is a
+phrase and "flying to lisbon ... around the harbour" is not — or on
+`RETRIEVAL_CARRY_RARE_TERMS_ANYWHERE` (3) distinctive stems sitting anywhere,
+since a turn does not land on three of one page's distinctive words by
+accident. Measured on a 235-page corpus whose prose uses every everyday word
+of the turn: "I am flying to lisbon next week and wanted to walk around the
+harbour if there is time" shares `lisbon` and `harbour` with a page about a
+harbour ledger and a lisbon freight window, both genuinely distinctive, and
+carried it at 18.51; nine tokens apart in an ordinary sentence they are two
+things the speaker mentioned. The surviving hit must then stand `RETRIEVAL_CARRY_SEPARATION` (1.5)
 times clear of the runner-up, and a lone survivor is dominant because it
 already carries the two distinctive stems. The absolute score floor this
 replaced is gone: `-bm25()` is not comparable between corpora, so the same

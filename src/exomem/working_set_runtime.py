@@ -575,6 +575,46 @@ def content_stems(turn: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(bm25_module.tokenize(content_words(turn))))
 
 
+def adjacent_rare_pairs(
+    turn: str,
+    rare_terms: Sequence[str],
+    *,
+    window: int | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """Pairs of distinctive stems the turn said close enough together to be
+    reading as one name, measured on the turn's OWN token positions.
+
+    Distance is counted over the raw normalised tokens — stopwords included
+    — because that is the distance a reader sees: "the lisbon harbour
+    window" is a phrase and "flying to lisbon ... around the harbour" is
+    not, and dropping the function words in between would make them look
+    alike. Each pair is returned once, sorted, so the caller's query sees a
+    stable set.
+    """
+    from . import bm25 as bm25_module
+
+    span = working_set.RETRIEVAL_CARRY_RARE_WINDOW if window is None else int(window)
+    wanted = {str(term) for term in rare_terms}
+    if len(wanted) < 2:
+        return ()
+    placed: list[tuple[int, str]] = []
+    for index, token in enumerate(
+        working_set_index.tokens_of(working_set_index.normalize(turn))
+    ):
+        stemmed = bm25_module.tokenize(token)
+        if stemmed and stemmed[0] in wanted:
+            placed.append((index, stemmed[0]))
+    pairs: set[tuple[str, str]] = set()
+    for position, (left_at, left) in enumerate(placed):
+        for right_at, right in placed[position + 1 :]:
+            if right_at - left_at > span:
+                break
+            if left != right:
+                first, second = sorted((left, right))
+                pairs.add((first, second))
+    return tuple(sorted(pairs))
+
+
 def rare_turn_terms(
     vault_root: Path,
     stems: Sequence[str],
@@ -627,14 +667,19 @@ def carry_candidates(
       decision living in an ordinary research note unreachable — it is not an
       anchor, so it is not in the catalogue the query is confined to, so the
       turn abstains however plainly its own words name the page.
-    * **Corroboration is counted over DISTINCTIVE stems only.** Counting it
-      over all of them asks "did several of the turn's words occur here",
-      which is co-occurrence: a two-line stub titled "Meeting notes" sharing
-      "meeting", "pending" and "decision" with an ordinary turn passed that
-      test and was served as durable memory. Counting only the stems that
-      are rare in THIS corpus asks "did the turn name this page", which is
-      the question the packet's honesty rests on. The ranking still sees the
-      whole turn; only the gate narrows.
+    * **Corroboration is counted over DISTINCTIVE stems only, and where
+      they sit matters.** Counting it over all of them asks "did several of
+      the turn's words occur here", which is co-occurrence: a two-line stub
+      titled "Meeting notes" sharing "meeting", "pending" and "decision"
+      with an ordinary turn passed that test and was served as durable
+      memory. Narrowing to the stems that are rare in THIS corpus is most
+      of the answer, but not all of it — two genuinely distinctive words
+      nine tokens apart are still two things a speaker mentioned, not a
+      name. A page qualifies on a PHRASE (both stems of some pair the turn
+      said within `RETRIEVAL_CARRY_RARE_WINDOW` tokens) or on
+      `RETRIEVAL_CARRY_RARE_TERMS_ANYWHERE` distinctive stems sitting
+      anywhere. The ranking still sees the whole turn; only the gate
+      narrows.
     * **The score is kept.** `lexical_evidence` discards it because evidence
       there is categorical. Carrying needs to compare two survivors, which a
       rank cannot express.
@@ -675,6 +720,14 @@ def carry_candidates(
             return (), "available"
         if len(rare) < working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS:
             return (), "available"
+        # Rarity says a word is name-shaped; proximity says the turn used it
+        # to NAME something. Two distinctive words said together are a
+        # phrase; nine tokens apart in an ordinary sentence they are two
+        # things the speaker mentioned. Three of one page's distinctive
+        # words need no phrase — a turn does not land on three by accident.
+        pairs = adjacent_rare_pairs(turn, rare)
+        if not pairs and len(rare) < working_set.RETRIEVAL_CARRY_RARE_TERMS_ANYWHERE:
+            return (), "available"
         result = lexstore.search_bm25_result(
             vault_root,
             # The turn's WORDS, not its stems: this query stems what it is
@@ -684,8 +737,9 @@ def carry_candidates(
             scope="kb",
             freshness=freshness,
             allow_delta=False,
-            min_matched_terms=working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS,
+            min_matched_terms=working_set.RETRIEVAL_CARRY_RARE_TERMS_ANYWHERE,
             corroboration_tokens=list(rare),
+            corroboration_groups=[list(pair) for pair in pairs],
             recall_checkpoint=recall_checkpoint,
         )
         if not result.readiness.complete:
