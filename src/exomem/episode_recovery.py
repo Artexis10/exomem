@@ -195,6 +195,93 @@ class EpisodeInputOwner:
             current = store.create(key, self._evidence(reference=reference, input_digest=input_digest))
         return self._projection(current)
 
+    def _committed_evidence(self, canonical: str, path: str) -> dict[str, str]:
+        """Input evidence for the page the Source writer just committed at `path`.
+
+        The writer's receipt names the path, so the ref is checked AT that path
+        rather than resolved through `egress.resolve_visible_identifier`, which
+        walks the whole corpus by design. One page read, one release decision
+        on that page alone. A page the recorder may not read back binds by
+        digest only: the write already happened, and answering it with an
+        error would invite a retry that writes nothing new.
+        """
+        try:
+            page = get_page(self.vault_root, path=path)
+        except (GetError, OSError, ValueError) as error:
+            raise _error("EPISODE_INPUT_UNAVAILABLE", "input is unavailable") from error
+        if memory_refs.ref_from_markdown(page.content) != canonical:
+            raise _error("EPISODE_INPUT_INVALID", "the page at that path holds another ref")
+        digest = model._hash("exomem-episode-input-page-v1", canonical, page.content_hash)
+        if str(page.frontmatter.get("status") or "").casefold() == "superseded":
+            return {"digest": digest}
+        with egress.disclosure_boundary(self.vault_root, "episode-input-authorization"):
+            released = egress.annotate_page(
+                self.vault_root,
+                {
+                    "path": page.path,
+                    "frontmatter": page.frontmatter,
+                    "body": page.body,
+                    "content": page.content,
+                    "content_hash": page.content_hash,
+                    "mtime": page.mtime,
+                },
+                principal=effective_principal(),
+                snapshot_content=page.content,
+                stable_ref=canonical,
+            )
+        if (
+            released is None
+            or released.get("content_hash") != page.content_hash
+            or released.get("body") != page.body
+        ):
+            return {"digest": digest}
+        return {"reference": canonical, "digest": digest}
+
+    def bind_committed_input(self, key: str, *, path: str, reference: str) -> dict[str, Any]:
+        """Bind a just-committed page as the next input revision of episode `key`.
+
+        Creates the episode on first use and appends a revision after that. A
+        byte-equivalent input (`EPISODE_REVISION_UNCHANGED`) is success, so a
+        retried record binds once; a concurrent writer's revision
+        (`EPISODE_REVISION_CONFLICT`) is reloaded and retried once. The owner
+        is resolved before the page is read, and every audience keeps its own
+        history of a shared key.
+        """
+        store = self._store()
+        canonical, unit_ref = self._reference(reference)
+        if unit_ref is not None:
+            raise _error("EPISODE_INPUT_INVALID", "a committed input is a whole page")
+        evidence = self._committed_evidence(canonical, path)
+        identity = model.episode_id(key)
+        for attempt in range(2):
+            with store._guard():
+                try:
+                    current = store.read(identity)
+                except curation.CurationError as error:
+                    if error.code != "CURATION_RUN_NOT_FOUND":
+                        raise
+                    current = store.create(key, evidence)
+                    break
+                try:
+                    current = store.transition(
+                        identity,
+                        expected_revision=current["revision"],
+                        expected_digest=current["journal_digest"],
+                        action="append_input_revision",
+                        args={"input_evidence": evidence},
+                    )
+                except model.EpisodeError as error:
+                    if error.code == "EPISODE_REVISION_CONFLICT" and attempt == 0:
+                        continue
+                    if error.code != "EPISODE_REVISION_UNCHANGED":
+                        raise
+                break
+        return {
+            **self._projection(current),
+            "ledger": "bound" if "reference" in evidence else "digest_only",
+            "recovery": "available" if "reference" in evidence else "unavailable",
+        }
+
     def append_input(
         self,
         episode_id: str,
