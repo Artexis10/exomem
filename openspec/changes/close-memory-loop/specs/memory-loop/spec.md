@@ -510,6 +510,59 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
 - **THEN** the packet abstains `withheld` with no anchors and no units
 - **AND** the weaker candidate is not carried in its place
 
+### Requirement: An agent's own `anchor` choice MAY name an ordinary compiled page
+
+The `anchor` override SHALL NOT be limited to a row of the activation index. Where
+the chosen ref names no such row, activation SHALL instead test it against the
+SAME eligibility the retrieval carry already applies to a page it carries on
+recall alone: not a raw-material page, not a navigation page, and current —
+existing, Markdown, and not retired. An eligible page SHALL be served exactly
+as a retrieval-carried page is, through the existing bounded unit lanes, but
+marked as the AGENT's own choice rather than recall's: its one anchor entry
+SHALL be of kind `page`, at status `resolved`, with `agent_choice` as its only
+evidence, and the packet SHALL mark itself `generation.carried_by =
+"agent_choice"`. `anchor` naming a row of the activation index SHALL be
+unaffected by this fallback and SHALL continue to resolve exactly as before.
+
+A ref that names neither an activation-index row nor an eligible page, or one
+the current audience may not see, SHALL be refused with the SAME error an
+unknown or withheld anchor already shares; the refusal SHALL NOT distinguish
+between an unknown ref, a withheld one, raw material, a navigation page, and a
+retired page. `recent_context` SHALL remain the first block of a packet served
+this way, exactly as it is for any other packet.
+
+#### Scenario: An agent picks a page a packet already listed
+
+- **WHEN** the agent calls again with `anchor` set to the ref of an ordinary
+  compiled page a previous packet listed — under `recent_context`, as a
+  `retrieval_named` page, or as an unresolved turn's own candidate — and that
+  page is not a row of the activation index
+- **THEN** the packet serves that page's units under one anchor entry of kind
+  `page`, at status `resolved`, with `agent_choice` as its only evidence
+- **AND** the packet marks itself `generation.carried_by = "agent_choice"`
+- **AND** `recent_context` remains the packet's first block
+
+#### Scenario: An override naming an activation-index row is unaffected
+
+- **WHEN** `anchor` names a row of the activation index
+- **THEN** it resolves exactly as it did before this fallback existed, at
+  status `resolved` with `agent_choice` as its evidence, and the packet does
+  not mark itself as carried
+
+#### Scenario: A withheld page and an unknown ref refuse identically
+
+- **WHEN** `anchor` names an eligible page the current audience may not see,
+  or a ref this index does not recognize at all
+- **THEN** both are refused with the identical error, naming neither the ref
+  nor which rule excluded it
+
+#### Scenario: Raw material, a navigation page and a retired page are refused like an unknown ref
+
+- **WHEN** `anchor` names a page in a raw-material folder, a navigation page,
+  or a page the vault has retired
+- **THEN** each is refused with the identical error an unknown ref receives,
+  and no packet is built
+
 ### Requirement: A turn that names nothing MAY resolve to the hottest recent anchor
 
 A recency prior SHALL NOT resolve an anchor, except for a REFERENTIAL turn — one
