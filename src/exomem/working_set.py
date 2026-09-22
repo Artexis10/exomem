@@ -326,21 +326,27 @@ def _budgeted_recent(
 ) -> tuple[list[dict[str, Any]], int]:
     """The working-continuity entries that fit, and what they cost.
 
-    Two ceilings, both hard: the block's own `RECENT_CONTEXT_MAX_CHARS` and the
-    packet's `max_chars`, which it is counted inside rather than added on top
-    of. An entry that does not fit is dropped WHOLE — a title cut mid-word, or
-    a status sentence with its verb missing, is a claim about recent work that
+    Two ceilings, both hard: the block's own `RECENT_CONTEXT_MAX_CHARS` and
+    HALF the packet's `max_chars`, which it is counted inside rather than added
+    on top of. The half is what keeps it a block rather than the packet: at the
+    budget floor it was spending 500 characters of 500, so a caller who asked
+    for a small packet got working continuity and no answer at all. Leading the
+    packet is not the same as being it.
+
+    An entry that does not fit is dropped WHOLE — a title cut mid-word, or a
+    status sentence with its verb missing, is a claim about recent work that
     nobody can check — and dropping it does not stop a later, shorter entry
     from fitting: unlike the rendered block, this is data with no order the
     reader cuts from the end of, and the caller has already ranked it.
     """
+    ceiling = min(RECENT_CONTEXT_MAX_CHARS, limit // 2)
     entries: list[dict[str, Any]] = []
     used = 0
     for entry in recent_context:
         if len(entries) >= RECENT_CONTEXT_MAX_ENTRIES:
             break
         cost = len(str(entry.get("title") or "")) + len(str(entry.get("statement") or ""))
-        if used + cost > RECENT_CONTEXT_MAX_CHARS or used + cost > limit:
+        if used + cost > ceiling:
             continue
         entries.append(dict(entry))
         used += cost

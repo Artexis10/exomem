@@ -1171,3 +1171,30 @@ def test_a_collection_manifest_never_appears_beside_its_own_item(
     assert len(titles) == len(set(titles)), [
         (entry["title"], entry["path"]) for entry in packet["recent_context"]
     ]
+
+
+def test_the_block_never_takes_more_than_half_the_packet() -> None:
+    """At the budget floor the block was spending 500 of 500 characters, so a
+    caller who asked for a small packet got working continuity and no answer
+    at all. It leads the packet; it does not get to be the packet."""
+    packet = working_set.build_packet(
+        items=(_item("resources", text="u" * 100),),
+        anchors=(),
+        roles=({"id": "resources", "source": "anchor_default", "lane": "units"},),
+        current_state=(),
+        recent_context=tuple(
+            _recent(f"note-{index}", statement="s" * 80) for index in range(8)
+        ),
+        ambiguity=(),
+        missing=(),
+        max_chars=working_set.MIN_BUDGET_CHARS,
+        generation=_generation(),
+        status="resolved",
+    )
+
+    recent_chars = sum(
+        len(entry["title"]) + len(entry.get("statement") or "")
+        for entry in packet["recent_context"]
+    )
+    assert recent_chars <= working_set.MIN_BUDGET_CHARS // 2
+    assert packet["units"], "the rest of the packet must still be affordable"
