@@ -285,7 +285,16 @@ the same let an ordinary word that happens to name few anchors resolve an
 unnamed anchor. A single shared authored term MAY still grant the separate,
 weaker rare-term evidence when it is independently rare; an unavailable
 rarity table SHALL NOT be read as proof of rarity, and rare-term evidence
-alone or with only a qualifier SHALL NOT resolve an anchor.
+alone or with only a qualifier SHALL NOT resolve an anchor. A shared term
+written entirely in ASCII letters and shorter than three characters SHALL NOT
+grant rare-term evidence, because rarity among anchor names cannot tell a
+genuinely short name from an everyday two-letter word a title happens to
+contain; a term carrying any other character is exempt. The one exception SHALL
+be a two-letter acronym both sides spell as one: the turn writes it as exactly
+two capital letters and the anchor's own authored title writes it in capitals
+too. A single capital, a dotted abbreviation, capitals in a turn with no
+lower-case letter, and capitals the anchor's title does not share SHALL NOT
+qualify; a one-letter name SHALL remain reachable through its own spelling.
 Independently resolved items sharing a nonempty canonical page or collection
 SHALL be treated as complementary rather than competing senses. Empty paths
 SHALL NOT establish that relationship. Disconnected same-kind groups SHALL
@@ -367,6 +376,16 @@ fast abstention or compiler-only timing.
   stays partial
 - **AND** the same anchor with its own page in retrieval instead resolves,
   via rare-term evidence, never lexical-overlap
+
+#### Scenario: Capitals alone never make a short word a lead
+
+- **WHEN** a turn writes a one- or two-letter word in capitals — a grade ("I
+  got a C"), emphasis ("should I GO with the cheaper one?") or a dotted
+  abbreviation ("U.S.") — and an anchor's title shares that word without
+  writing it in the same capitals
+- **THEN** the anchor earns no rare-term evidence from it
+- **AND** a turn writing "AI" still earns rare-term evidence for an anchor
+  titled "AI Subscriptions"
 
 #### Scenario: A collection contains complementary Planning items
 

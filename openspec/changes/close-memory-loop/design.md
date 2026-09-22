@@ -457,13 +457,19 @@ that one word. The floor is applied only to a term written entirely in
 ASCII letters, since two characters is an ordinary-length word in CJK and
 counting code points there would turn a real name into a non-name; a short
 ASCII term carrying a digit ("v2", "b2") is exempt for the same reason, no
-ordinary English word containing one. So is a short term the turn spelled as
-an ACRONYM, in capitals inside a turn of ordinary case ("my AI usage
-limits"): the floor is about everyday words, which are written "go" or "Go",
-and without the exception a benchmark case whose only shared name word was
-"AI" stopped resolving its gold collection. A turn with no lower-case letter
-at all carries no casing signal and is read as lower case, so caps lock does
-not turn "GO" into a name.
+ordinary English word containing one. So is a two-letter ACRONYM both sides spell as
+one: the turn writes it as exactly two capitals inside a turn of ordinary
+case ("my AI usage limits") and the anchor's own title writes it in capitals
+too ("AI Subscriptions"). Without the exception a benchmark case whose only
+shared name word was "AI" stopped resolving its gold collection. The turn's
+casing alone is not enough, because capitals in prose are also a grade ("I got
+a C on my chemistry exam" reached "Building C"), emphasis ("should I GO with
+the cheaper build machines?" reached "Go Toolchain") or a dotted abbreviation
+("U.S."), and each served an unrelated anchor when it sufficed. A single
+capital never qualifies, a one-letter name is reached by its own spelling, and
+a turn with no lower-case letter at all carries no casing signal and is read as
+lower case. Aliases are stored casefolded, so the title is the one authored
+casing compared.
 
 The final guard unwraps a packet reference to its vault path before deciding
 it, rather than deciding the reference text itself. A unit's own `ref` is the
