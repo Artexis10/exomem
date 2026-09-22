@@ -67,14 +67,35 @@ _ORDINARY_PROSE = (
     "open and the team will settle it before the review. Nothing here changes "
     "the ceiling or the cycle, and the summary is unchanged from last week."
 )
-#: Ordinary notes seeded at every corpus size, `bulk` on top of them. Ten is
-#: enough to put the everyday words past the rare cap on a small vault.
-_ORDINARY_NOTES = 10
+#: Ordinary notes seeded at every corpus size, `bulk` on top of them. Enough
+#: to put the everyday words past the rare cap AND to carry the corpus past
+#: `RETRIEVAL_CARRY_MIN_PAGES`, since below that the carry does not run at
+#: all — a vault too small to measure rarity against is not a vault the
+#: carry can read a name out of.
+_ORDINARY_NOTES = 100
 
 
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def seed_ordinary_notes(vault: Path, count: int = _ORDINARY_NOTES) -> None:
+    """The notes any real vault is mostly made of.
+
+    They do two jobs at once, and both are the point rather than padding:
+    they make everyday words everyday, so rarity can tell a name from a
+    word, and they carry the corpus past `RETRIEVAL_CARRY_MIN_PAGES`, below
+    which there is nothing to measure rarity against.
+    """
+    journal = vault / "Knowledge Base" / "Notes" / "Journal"
+    for index in range(max(0, count)):
+        _write(
+            journal / f"ordinary-note-{index:05d}.md",
+            "---\ntype: note\nstatus: active\nupdated: 2026-08-01\n---\n\n"
+            f"# Ordinary note {index:05d}\n\n## Summary\n\n"
+            f"- [note] {_ORDINARY_PROSE} ^o-{index}\n",
+        )
 
 
 def _seed_carry_pages(vault: Path) -> None:
@@ -147,6 +168,7 @@ updated: 2026-09-11
   ^t-north
 """,
     )
+    seed_ordinary_notes(vault)
     _write(
         kb / "Notes" / "Research" / "tarn-rollover-cadence-south.md",
         """---
@@ -204,13 +226,7 @@ updated: 2026-08-01
 - [note] Decision pending. ^m-1
 """,
     )
-    for index in range(_ORDINARY_NOTES + max(0, bulk)):
-        _write(
-            kb / "Notes" / "Journal" / f"ordinary-note-{index:05d}.md",
-            "---\ntype: note\nstatus: active\nupdated: 2026-08-01\n---\n\n"
-            f"# Ordinary note {index:05d}\n\n## Summary\n\n"
-            f"- [note] {_ORDINARY_PROSE} ^o-{index}\n",
-        )
+    seed_ordinary_notes(vault, _ORDINARY_NOTES + max(0, bulk))
     lexstore.ensure_fresh(vault)
     working_set_runtime.reset_caches_for_tests()
     working_set_index.WorkingSetIndex(vault).rebuild()
@@ -304,6 +320,68 @@ def test_the_rare_document_cap_is_corpus_relative() -> None:
     assert working_set.rare_document_cap(600) == 3
     assert working_set.rare_document_cap(1539) == 8
     assert working_set.rare_document_cap(20000) == 100
+
+
+def test_a_corpus_too_small_to_measure_rarity_carries_nothing(vault: Path) -> None:
+    """Rarity needs a corpus.
+
+    The reviewer's stub case at fixture scale: thirty-odd pages, a two-line
+    note titled "Meeting notes" whose one unit reads "Decision pending", and
+    an ordinary turn about a meeting and a pending decision. On a vault that
+    small every one of those words IS rare by measurement — "meeting"
+    appears on exactly one page — so the rarity gate has nothing to judge
+    with and the stub was carried at 12.02. Below
+    `RETRIEVAL_CARRY_MIN_PAGES` the carry does not run at all.
+    """
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _write(
+        vault / "Knowledge Base" / "Notes" / "Inbox" / "meeting-notes.md",
+        """---
+type: note
+status: active
+updated: 2026-08-01
+---
+
+# Meeting notes
+
+## Summary
+
+- [note] Decision pending. ^m-1
+""",
+    )
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+
+    _rare, pages, state = working_set_runtime.rare_turn_terms(
+        vault, working_set_runtime.content_stems(STUB_TURN)
+    )
+    assert state == "available"
+    assert pages < working_set.RETRIEVAL_CARRY_MIN_PAGES, pages
+
+    hits, state = working_set_runtime.carry_candidates(vault, STUB_TURN)
+    assert state == "available"
+    assert hits == (), hits
+
+    packet = working_set.compile_packet(vault, turn=STUB_TURN, max_chars=4000)
+    assert packet["abstained"] is True
+    assert packet["abstention"] == {"reason": "unresolved"}
+    assert "carried_by" not in packet["generation"]
+
+
+def test_a_corpus_large_enough_to_measure_rarity_still_carries(prose_vault: Path) -> None:
+    """The over-restriction half: past the floor the gate does its own work
+    again, and the page the turn names is served."""
+    _rare, pages, state = working_set_runtime.rare_turn_terms(
+        prose_vault, working_set_runtime.content_stems(GENUINE_TURN)
+    )
+    assert state == "available"
+    assert pages >= working_set.RETRIEVAL_CARRY_MIN_PAGES, pages
+
+    hits, state = working_set_runtime.carry_candidates(prose_vault, GENUINE_TURN)
+    assert state == "available"
+    assert [path for path, _score in hits] == [GENUINE_PAGE], hits
 
 
 def test_a_stub_sharing_only_ordinary_words_is_never_carried(prose_vault: Path) -> None:

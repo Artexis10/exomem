@@ -101,6 +101,24 @@ RETRIEVAL_CARRY_RARE_MIN_DOCS = 3
 #: candidate at all. One is a coincidence at corpus scale; the same two-fact
 #: standard the resolver's own `rare_term` clause applies to an anchor.
 RETRIEVAL_CARRY_MIN_RARE_TERMS = 2
+#: The smallest corpus the rarity gate may be believed on. Below it the
+#: carry does not run and the turn abstains as it did before.
+#:
+#: Rarity is only as sharp as the corpus it is measured against, and below
+#: this size there is no corpus to measure against. On a thirty-page vault
+#: where the word "meeting" appears on exactly one page, "meeting" IS rare
+#: by measurement — and so is every other ordinary English word, because
+#: the vault holds no ordinary prose for them to be ordinary in. Measured:
+#: a two-line note titled "Meeting notes" whose one unit read "Decision
+#: pending" was carried at 12.02 for an ordinary turn about a meeting and a
+#: pending decision, and the same stub is refused the moment the corpus
+#: contains ordinary notes.
+#:
+#: A floor on the CORPUS rather than on the turn, deliberately. "A turn all
+#: of whose words are rare tells you nothing" would have closed the same
+#: case and would also reject a short turn made entirely of real names,
+#: which is the turn this feature exists to serve.
+RETRIEVAL_CARRY_MIN_PAGES = 100
 
 PACKET_BLOCKS = (
     "anchors",

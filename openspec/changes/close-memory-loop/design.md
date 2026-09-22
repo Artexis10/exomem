@@ -238,10 +238,22 @@ replaced is gone: `-bm25()` is not comparable between corpora, so the same
 page for the same turn measured 13.16 with no bulk, 6.81 with 200 pages
 added (refused by a floor fitted to the first number) and was outranked by an
 unrelated filler note at 2000. One sanity bound remains — a row the ranking
-placed at zero is not a page a turn named. Rarity is only as sharp as the
-corpus it is measured against: in a vault of a few dozen pages containing no
-ordinary prose, everyday words are rare by measurement, and the gate tightens
-monotonically as the vault fills. The dominant page then carries the packet: that page's units through the existing units
+placed at zero is not a page a turn named.
+
+Rarity is only as sharp as the corpus it is measured against, and below
+`RETRIEVAL_CARRY_MIN_PAGES` (100) there is no corpus to measure against, so
+the carry does not run at all and the turn abstains exactly as it did
+before. On a thirty-page vault where "meeting" appears on one page,
+"meeting" IS rare by measurement — and so is every other ordinary English
+word, because the vault holds no ordinary prose for them to be ordinary in:
+measured, a two-line note titled "Meeting notes" whose one unit read
+"Decision pending" was carried at 12.02 for an ordinary turn about a meeting
+and a pending decision, and the same stub is refused the moment the corpus
+contains ordinary notes. The floor is on the CORPUS rather than on the turn
+deliberately: "a turn all of whose words are rare tells you nothing" would
+close the same case and would also reject a short turn made entirely of real
+names, which is the turn this feature exists to serve. Above the line the
+dominant page carries the packet: that page's units through the existing units
 lanes, one anchor entry of kind `page` at status `retrieval_carried` whose only
 evidence is `retrieval`, `generation.carried_by = "retrieval"`, and no continuity
 token, because a carried page is not a resolution to carry forward. Retrieval
@@ -252,7 +264,12 @@ and a near tie is noise, so the turn abstains exactly as it did. The carried pag
 crosses `guard_working_set` like any other reference; it is the packet's only
 anchor, so an audience that may not see it gets the abstention the existing
 every-anchor-withheld rule already produces, never the runner-up. Cost falls only
-on turns that would have returned an empty packet.
+on turns that would have returned an empty packet. The rarity pass and the
+ranking pass are two catalogue round trips, measured at 1.3x, 1.4x and 1.9x
+the request's first lexical pass at zero, two hundred and two thousand added
+pages, which is what the carry's budget reserve is sized against; merging
+them into one readiness proof and one transaction is the next lever if that
+proves dear.
 
 A resolved project anchor was previously pathless AND linkless: built with no
 page and no neighbours, so a project-naming turn resolved the anchor and
@@ -341,7 +358,9 @@ from an everyday two-letter word a title happens to contain — an ordinary
 "so should I go with the cheaper one?" reached a page titled "... Go ..." on
 that one word. The floor is applied only to a term written entirely in
 ASCII letters, since two characters is an ordinary-length word in CJK and
-counting code points there would turn a real name into a non-name.
+counting code points there would turn a real name into a non-name; a short
+ASCII term carrying a digit ("v2", "b2") is exempt for the same reason, no
+ordinary English word containing one.
 
 The final guard unwraps a packet reference to its vault path before deciding
 it, rather than deciding the reference text itself. A unit's own `ref` is the

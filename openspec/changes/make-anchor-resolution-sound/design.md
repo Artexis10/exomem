@@ -44,7 +44,10 @@ CARRY a packet. Dominance is a NAMED-CONTACT test, not a score threshold: a hit 
 candidate only when at least two of the turn's stems that it matches are DISTINCTIVE in
 this corpus (document frequency at or below `max(3, ceil(0.5% of indexed pages))`,
 measured against the same catalogue the ranking uses), and the survivor must then stand
-`RETRIEVAL_CARRY_SEPARATION` times clear of the runner-up. An absolute score floor was
+`RETRIEVAL_CARRY_SEPARATION` times clear of the runner-up. Rarity needs a
+corpus: below `RETRIEVAL_CARRY_MIN_PAGES` the carry does not run at all,
+because in a vault holding no ordinary prose every ordinary word is rare by
+measurement. An absolute score floor was
 tried first and removed: `-bm25()` is not comparable between corpora, so the same page
 for the same turn scored 13.16 at one corpus size and 6.81 at another, and a two-line
 stub sharing three ordinary words with a long turn outscored the page the turn was

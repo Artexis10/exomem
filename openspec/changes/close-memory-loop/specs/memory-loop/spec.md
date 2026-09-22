@@ -388,7 +388,10 @@ of the turn's stems that it matches are DISTINCTIVE in the indexed corpus,
 measured as a document frequency at or below `max(3, ceil(0.5% of the indexed
 pages in scope))` over the same catalogue the ranking uses. A turn carrying
 fewer than two distinctive stems SHALL carry nothing and SHALL NOT run the
-ranking query. An absolute score threshold SHALL NOT be used to decide contact:
+ranking query. Where the indexed corpus holds fewer than a declared minimum
+number of pages, the carry SHALL NOT run at all: rarity is only as sharp as
+the corpus it is measured against, and below that size there is no corpus to
+measure against. An absolute score threshold SHALL NOT be used to decide contact:
 the ranking score is comparable only between hits drawn from one corpus. The
 query SHALL run once against the maintained full-page catalogue over the
 knowledge-base scope, without the anchor path restriction, applying the same
@@ -421,6 +424,14 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
 - **THEN** the packet serves that note's units under one anchor entry of kind
   `page` at status `retrieval_carried`, marked as carried by retrieval
 - **AND** no continuity token is minted from it, and no anchor is resolved
+
+#### Scenario: A corpus too small to measure rarity carries nothing
+
+- **WHEN** a turn that resolves no anchor reaches a page in a knowledge base
+  holding fewer than the declared minimum number of indexed pages
+- **THEN** the carry does not run and the turn abstains `unresolved`
+- **AND** the same turn against the same page IS judged on rarity once the
+  corpus is large enough to measure it
 
 #### Scenario: A stub sharing only ordinary words is not named
 

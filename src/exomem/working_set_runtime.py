@@ -625,8 +625,11 @@ def carry_candidates(
       rank cannot express.
 
     Fewer than `RETRIEVAL_CARRY_MIN_RARE_TERMS` distinctive stems means no
-    hit could qualify, so the ranking query is not made at all — the cheapest
-    refusal is the one that never asks.
+    hit could qualify, so the ranking query is not made at all — the
+    cheapest refusal is the one that never asks. A corpus smaller than
+    `RETRIEVAL_CARRY_MIN_PAGES` refuses for the same reason one step back:
+    rarity measured against a vault that holds no ordinary prose says only
+    that the vault is small.
 
     Everything else is the existing bounded contract: the maintained
     catalogue only, no foreground delta (`allow_delta=False`), no corpus
@@ -642,7 +645,7 @@ def carry_candidates(
         stems = content_stems(turn)
         if len(stems) < working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS:
             return (), "available"
-        rare, _pages, state = rare_turn_terms(
+        rare, pages, state = rare_turn_terms(
             vault_root,
             stems,
             freshness=freshness,
@@ -650,6 +653,11 @@ def carry_candidates(
         )
         if state != "available":
             return (), state
+        if pages < working_set.RETRIEVAL_CARRY_MIN_PAGES:
+            # Rarity needs a corpus. The page count came back with the
+            # frequencies, so this costs nothing beyond the lookup already
+            # made, and it refuses before the ranking query.
+            return (), "available"
         if len(rare) < working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS:
             return (), "available"
         result = lexstore.search_bm25_result(
