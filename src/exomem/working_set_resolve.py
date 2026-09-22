@@ -51,8 +51,8 @@ EVIDENCE_KINDS: tuple[str, ...] = (
 #: The shortest term that may be a LEAD to an anchor. Rarity among anchor
 #: NAMES cannot tell a genuinely short name from an everyday two-letter word
 #: that happens to appear in a title: "go" is no stopword, it names few
-#: anchors in any small catalogue, and "so should I go with the Siemens?"
-#: therefore reached a page titled "... Go ..." on one accidental word.
+#: anchors in any small catalogue, and an ordinary "so should I go with the
+#: cheaper one?" therefore reached a page titled "... Go ..." on that one word.
 #: Length is the discriminator a counting table has no way to supply. Three
 #: is the floor because real short names start there ("hob", "van", "PR");
 #: below it a shared term is coincidence, not reference.
