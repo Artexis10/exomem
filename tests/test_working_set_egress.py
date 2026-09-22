@@ -3044,3 +3044,112 @@ def test_a_units_wikilink_in_any_prose_field_not_just_text_withholds_it(vault: P
 
     assert guarded is not None
     assert guarded["units"] == [], "LEAK: a withheld wikilink in a unit's `title` field survived"
+
+
+# --------------------------------------------------------------------------- #
+# Retrieval-carried packets (design D3) cross the same guard
+# --------------------------------------------------------------------------- #
+
+CARRY_DOMINANT = "Knowledge Base/Notes/Research/quillon-batching-window.md"
+CARRY_RUNNER_UP = "Knowledge Base/Notes/Insights/quillon-handover-brief.md"
+
+
+def _seed_carry_corpus(vault: Path) -> None:
+    """A dominant research note under a governable folder, and a genuine
+    runner-up elsewhere that the turn also reaches — so "never the
+    runner-up" has something to be true about."""
+    from test_working_set_carry import _seed_carry_pages, _write
+
+    _seed_carry_pages(vault)
+    filler = " ".join(
+        f"unrelated paragraph {n} about cadence ledgers and depot rotas." for n in range(60)
+    )
+    _write(
+        vault / "Knowledge Base" / "Notes" / "Insights" / "quillon-handover-brief.md",
+        f"""---
+type: insight
+status: active
+updated: 2026-09-08
+---
+
+# Quillon handover brief
+
+## Summary
+
+{filler}
+
+- [finding] The handover brief mentions the quillon batching window once.
+  ^h-once
+
+{filler}
+""",
+    )
+
+
+def test_a_withheld_dominant_page_abstains_rather_than_carrying_the_runner_up(
+    vault: Path,
+) -> None:
+    """The carried page passes the guard like any other, and a packet whose
+    only anchor the audience may not see is an abstention — not a second
+    attempt at a different page.
+
+    A carried packet has exactly one anchor by construction, so the guard
+    emptying it IS the answer. What this pins is that nothing anywhere
+    re-runs the choice without the withheld page: the turn reaches a real
+    runner-up, that runner-up is named nowhere in what is served, and the
+    packet says `withheld` rather than quietly serving the second best.
+    """
+    from test_working_set_carry import CARRY_TURN
+
+    from exomem import commands, lexstore, working_set, working_set_runtime
+
+    _seed_carry_corpus(vault)
+    write_scope(vault, paths="Notes/Research/**", name="Research")
+    write_rule(vault, ceiling=0)
+    lexstore.ensure_fresh(vault)
+    _indexed(vault)
+
+    hits, state = working_set_runtime.carry_candidates(vault, CARRY_TURN)
+    assert state == "available"
+    assert len(hits) >= 2, f"the turn must reach a runner-up for this to prove anything: {hits}"
+    assert [path for path, _score in hits][:2] == [CARRY_DOMINANT, CARRY_RUNNER_UP], hits
+    dominant = working_set.dominant_carry(hits)
+    assert dominant is not None and dominant[0] == CARRY_DOMINANT, hits
+
+    with request_scope(_external()):
+        packet = commands.op_activate_context(vault, turn=CARRY_TURN)
+
+    assert packet["abstained"] is True
+    assert packet["abstention"] == {"reason": "withheld"}
+    assert packet["anchors"] == []
+    assert packet["units"] == []
+    assert packet["pointers"] == []
+    assert "quillon" not in str(packet).casefold(), "LEAK: the withheld carried page survived"
+    assert "handover" not in str(packet).casefold(), "the runner-up was carried instead"
+
+
+def test_a_carried_page_the_audience_may_see_is_served(vault: Path) -> None:
+    """The over-restriction half: the same corpus, the same turn, a policy
+    that does not reach the carried page — it is served, marked as carried.
+
+    Without this the test above passes just as well against a guard that
+    withheld every carried packet unconditionally.
+    """
+    from test_working_set_carry import CARRY_TURN
+
+    from exomem import commands, lexstore
+
+    _seed_carry_corpus(vault)
+    write_scope(vault, paths="Notes/Patterns/**", name="Patterns")
+    write_rule(vault, ceiling=0)
+    lexstore.ensure_fresh(vault)
+    _indexed(vault)
+
+    with request_scope(_external()):
+        packet = commands.op_activate_context(vault, turn=CARRY_TURN)
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert packet["generation"]["carried_by"] == "retrieval"
+    assert [item["path"] for item in packet["anchors"]] == [CARRY_DOMINANT]
+    assert packet["anchors"][0]["status"] == "retrieval_carried"
+    assert packet["units"], packet
