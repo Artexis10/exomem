@@ -5936,6 +5936,14 @@ def op_activate_context(
     both anchors under `ambiguity` and runs no role lane — you pick the sense and
     call again with `anchor` set to the ref you mean.
 
+    A turn that named no anchor but whose own distinctive words clearly reach one
+    compiled page is served from that page instead of abstaining, and says so:
+    its single `anchors[]` entry has `kind: "page"` and `status:
+    "retrieval_carried"`, and `generation.carried_by` is `"retrieval"`. Read that
+    as "nothing was named; recall alone put this here" — no anchor was resolved,
+    the packet carries no continuity token, and a near-tie or a turn with nothing
+    distinctive in it abstains `unresolved` rather than guessing between pages.
+
     Use `ask_memory` instead when you already know what you are looking for; use
     this when you do not, and follow it with `read_memory` on whatever ref the
     packet points at.
