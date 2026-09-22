@@ -1137,3 +1137,58 @@ def test_a_referential_turn_without_a_token_resolves_the_freshest_edit(
     assert resolved[0]["evidence"] == ["recency"]
     assert packet["units"]
     assert packet["recent_context"][0]["path"] == "Knowledge Base/Products/Cargo Sled.md"
+
+
+# R-G through the door: the reviewer's p3/p15 misfires and p11 keep-phrases.
+from test_working_set_resolve import (  # noqa: E402
+    CUE_WORD_BUT_NOT_POINTING_BACK_TURNS,
+    POINTING_BACK_TURNS,
+)
+
+
+@pytest.fixture
+def hot_sled_vault(activation_vault: Path) -> Path:
+    from exomem import lexstore
+
+    _age_everything(
+        activation_vault,
+        newest=activation_vault / "Knowledge Base" / "Products" / "Cargo Sled.md",
+    )
+    lexstore.ensure_fresh(activation_vault)
+    runtime_module.reset_caches_for_tests()
+    return activation_vault
+
+
+@pytest.mark.parametrize("turn", POINTING_BACK_TURNS)
+def test_a_turn_that_only_points_back_resolves_the_hottest_anchor(
+    hot_sled_vault: Path, turn: str
+) -> None:
+    packet = commands.op_activate_context(hot_sled_vault, turn=turn)
+
+    assert packet["abstained"] is False, (turn, packet.get("abstention"), packet["anchors"])
+    resolved = {
+        item["ref"]: item["evidence"] for item in packet["anchors"] if item["status"] == "resolved"
+    }
+    assert "recency" in resolved.get("Knowledge Base/Products/Cargo Sled.md", ()), resolved
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        *CUE_WORD_BUT_NOT_POINTING_BACK_TURNS[:9],
+        *CUE_WORD_BUT_NOT_POINTING_BACK_TURNS[11:20],
+    ],
+)
+def test_a_cue_word_in_its_ordinary_sense_is_not_answered_by_recency(
+    hot_sled_vault: Path, turn: str
+) -> None:
+    """The reviewer's misfires: each resolved the hottest anchor and served
+    its units. None names anything in this vault, so each abstains, still
+    carrying what was recently worked on."""
+    packet = commands.op_activate_context(hot_sled_vault, turn=turn)
+
+    assert packet["abstained"] is True, (turn, packet["anchors"])
+    assert packet["abstention"] == {"reason": "unresolved"}
+    assert all("recency" not in item["evidence"] for item in packet["anchors"])
+    assert packet["units"] == []
+    assert packet["recent_context"]

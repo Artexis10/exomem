@@ -388,10 +388,9 @@ anchor at all, activation MAY instead CARRY a packet from a single compiled
 knowledge-base page, and this SHALL be the only case in which retrieval alone
 produces served material.
 
-The carry SHALL run only when anchor resolution returned no resolved anchor, or
-only anchors the recency prior alone resolved for a referential turn, and the
-request named no explicit anchor choice; an ambiguous turn and a turn that
-resolved any anchor on its own evidence SHALL be untouched. A hit SHALL be a candidate only where at least two
+The carry SHALL run only when anchor resolution returned no resolved anchor and
+the request named no explicit anchor choice; an ambiguous turn, a turn that
+resolved any anchor and a referential turn SHALL be untouched. A hit SHALL be a candidate only where at least two
 of the turn's stems that it matches are DISTINCTIVE in the indexed corpus,
 measured as a document frequency at or below `max(3, ceil(0.5% of the indexed
 pages in scope))` over the same catalogue the ranking uses. A hit SHALL additionally satisfy a proximity
@@ -519,8 +518,13 @@ which a file modification time, a read count or a previous packet's own answer
 may establish task relevance, and it SHALL be bounded by every condition below.
 
 A turn SHALL be referential only when it speaks one of the declared referential
-cues, matched on whole tokens rather than as a substring of a longer word. A
-turn SHALL NOT be referential merely because it is short. Recency evidence SHALL
+cues, matched on whole tokens rather than as a substring of a longer word, AND
+says nothing else: once the matched cue words, function words and one closed,
+declared set of filler words that refer to the work without naming it are
+removed, no word SHALL remain. A turn that speaks a cue word in its ordinary
+sense or names anything besides it ("update my resume", "check the status of my
+flight", "what's next for <a page>") SHALL NOT be referential, and a turn SHALL
+NOT be referential merely because it is short. Recency evidence SHALL
 be a distinct evidence kind of its own class: it SHALL NOT be a worded contact
 kind, SHALL NOT be a retrieved
 contact kind, SHALL NOT count toward the two-kinds rule for any other kind, and
@@ -548,12 +552,11 @@ resolve, the turn SHALL report them as ambiguity for the agent to choose between
 and SHALL NOT select one by recency. Where the profile is empty the turn SHALL
 abstain exactly as before, still carrying its recent-context block.
 
-A referent the prior alone supplied SHALL yield to the turn's own words. Where
-every anchor a turn resolved stands on recency alone and the turn nonetheless
-names a compiled page that is not an anchor, the retrieval carry SHALL decide
-the packet as it would for a turn that resolved nothing: one named page is
-carried, and two or more abstain `unresolved` listing them. The prior supplies
-the referent of a turn that names nothing, never of one that names a page.
+A referential turn names nothing, so the retrieval carry SHALL NOT run for it;
+a turn that names a page is not referential and is decided by the carry
+exactly as a turn that resolved no anchor. Where every anchor a packet resolved
+stood on recency alone, the rendered block SHALL say that its referent came
+from recent work and not from the turn's own words.
 
 #### Scenario: A referential turn resolves to the hottest recent anchor
 
@@ -587,13 +590,15 @@ the referent of a turn that names nothing, never of one that names a page.
 - **AND** the turn abstains `unresolved` still carrying its recent-context block,
   unless it names a compiled page the retrieval carry serves
 
-#### Scenario: A referential turn naming a compiled page is served that page, not the hottest anchor
+#### Scenario: A cue word in its ordinary sense is not answered by recency
 
-- **WHEN** a referential turn names no anchor but names one compiled page by its
-  own distinctive words, and another anchor is hottest in the profile
-- **THEN** the named page is carried and the hot anchor is not served
-- **AND** where the turn names two such pages it abstains `unresolved` listing
-  them, rather than falling back to the hot anchor
+- **WHEN** a turn speaks a referential cue word but also says what it is about,
+  such as "update my resume" or "what's next for <a compiled page>", and one
+  anchor is hottest in the profile
+- **THEN** the turn is not referential and the hot anchor is not served
+- **AND** a turn that names a compiled page is decided by the retrieval carry,
+  and abstains `unresolved` when the carry cannot run, never falling back to
+  the hot anchor
 
 #### Scenario: A previous packet's answer is resumed whole
 

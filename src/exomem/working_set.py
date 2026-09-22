@@ -1614,17 +1614,10 @@ def compile_packet(
     # resolved anything never reaches this line. Carrying is a PACKET-level
     # decision taken after resolution has already abstained — it adds no
     # evidence kind, changes no status rule, and can never resolve an anchor.
-    # D2 joins that condition: a turn resolved ONLY by the recency prior is a
-    # turn that named no ANCHOR, and naming a compiled page that is not an
-    # anchor is exactly the other thing such a turn might have been doing.
-    # The prior may supply the referent of a turn that names nothing — not of
-    # a turn that names a research note. The carry refuses turns of fewer than
-    # two content stems before it asks the catalogue anything, so a genuine
-    # "continue" pays nothing for this order.
-    if not anchor and (
-        resolution.status == "unresolved"
-        or working_set_resolve.resolved_by_recency_alone(resolution)
-    ):
+    # A referential turn never reaches it either (close-memory-loop D2): it
+    # says nothing besides its cue and filler words, so it names no page for
+    # the carry to find, and the carry is not asked.
+    if not anchor and resolution.status == "unresolved" and not analysis.referential:
         named = _carry_by_retrieval(
             root,
             turn=turn,
@@ -1639,14 +1632,8 @@ def compile_packet(
             # empty packet and no way to know a question would help. The
             # named pages are listed at `retrieval_named` so it can ask for
             # one; the reason stays `unresolved`, because nothing resolved.
-            #
-            # `unresolved` literally, not `resolution.status`: this branch is
-            # also reached from a resolution the prior alone promoted, and a
-            # turn that named two pages has disqualified that prior — it
-            # named something. Nothing resolved on the turn's own words,
-            # which is what the word means.
             return abstained_packet(
-                reason="unresolved",
+                reason=resolution.status,
                 max_chars=limit,
                 generation=generation,
                 anchors=_named_anchors(root, named, index=index),

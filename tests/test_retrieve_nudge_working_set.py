@@ -1908,3 +1908,34 @@ def test_stub_and_reminder_modes_keep_the_client_wide_cooldown(
     assert _run(monkeypatch, capsys, _event(session_id="fresh-tab"), home) == ""
     assert _run(monkeypatch, capsys, _event(prompt="continue", session_id="other"), home) == ""
     assert fetched == []
+
+
+# --------------------------------------------------------------------------- #
+# R-G: a packet whose referent came from recency alone says so.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_recency_referent_is_rendered_as_such() -> None:
+    packet = _packet()
+    packet["anchors"][0]["evidence"] = ["continuity", "recency"]
+    packet["recent_context"] = [_recent()]
+
+    lines = hook._format_working_set_block(packet, 4000).splitlines()
+
+    assert lines[1].startswith("- recent: Cargo Sled")
+    assert lines[2] == (
+        "- referent: Cargo Sled — taken from recent work, not from the turn's own words "
+        "[Knowledge Base/Products/Cargo Sled.md]"
+    )
+
+
+@pytest.mark.parametrize(
+    "evidence", [["exact_alias"], ["exact_alias", "recency"], ["continuity", "retrieval"]]
+)
+def test_a_referent_the_turn_reached_is_not_labelled_recent_work(evidence: list[str]) -> None:
+    packet = _packet()
+    packet["anchors"][0]["evidence"] = evidence
+
+    block = hook._format_working_set_block(packet, 4000)
+
+    assert "- referent:" not in block

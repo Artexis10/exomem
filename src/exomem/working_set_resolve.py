@@ -153,19 +153,23 @@ CUE_PATTERNS: Mapping[str, tuple[str, ...]] = {
     "precedent": ("last time", "before", "previously"),
     # A turn that says it points back at what the session was doing
     # (close-memory-loop D2). Unlike every other cue this one is not a lens on
-    # WHAT to look for, and it is the WHOLE of the `referential` test: being
-    # short is not a signal, because a novel turn is short too and a prior
-    # must never answer one. Matched on whole tokens, not as a substring
-    # (`_REFERENTIAL_CUE_PHRASES`), so "discontinue" and "statuses" are not
-    # cues; bare "go on" and "pick up" are absent because their ordinary
-    # senses ("go online", "pick up the parcel") are far commoner than the
-    # referential one.
+    # WHAT to look for. It is NECESSARY for a turn to be referential but not
+    # sufficient: the turn must also say nothing else (`REFERENTIAL_FILLER`
+    # and `analyze_turn`), because every cue word has an ordinary sense —
+    # "update my resume", "check the status of my flight", "continue the
+    # story" — and a prior must never answer one of those. Matched on whole
+    # tokens, not as a substring (`_REFERENTIAL_CUE_PHRASES`), so
+    # "discontinue" and "statuses" are not cues; bare "go on" and "pick up"
+    # are absent because their ordinary senses are far commoner.
     "referential": (
         "continue",
         "where were we",
         "where did we leave",
+        "what were we doing",
         "carry on",
         "status",
+        "status update",
+        "status report",
         "what's next",
         "whats next",
         "what is next",
@@ -177,13 +181,33 @@ CUE_PATTERNS: Mapping[str, tuple[str, ...]] = {
 }
 
 #: The referential cues as token runs, spelled the way `tokens_of` spells a
-#: turn, so a cue matches only a contiguous run of whole turn tokens. The
-#: known residual: a cue word in its ordinary sense on a turn that names
-#: nothing ("update my resume") still reads as referential. `resolve()`'s
-#: guard — recency decides nothing while any candidate carries worded
-#: contact — is what bounds it; design section 8 records it.
+#: turn, longest first so an overlapping pair ("same as before", "as before")
+#: is removed as the longer one. A cue matches only a contiguous run of whole
+#: turn tokens.
 _REFERENTIAL_CUE_PHRASES: tuple[str, ...] = tuple(
-    " ".join(tokens_of(normalize(pattern))) for pattern in CUE_PATTERNS["referential"]
+    sorted(
+        {" ".join(tokens_of(normalize(pattern))) for pattern in CUE_PATTERNS["referential"]},
+        key=lambda phrase: (-len(phrase), phrase),
+    )
+)
+
+#: The closed set of words a referential turn may carry besides its cue and
+#: function words: fillers and words that refer to the work itself rather
+#: than name any of it ("let's continue the work, what's pending?", "continue
+#: from where we stopped yesterday"). A turn with ANY other word left over
+#: after the cue, the stopwords and these is saying something of its own —
+#: "status of my flight", "resume the download", "continue learning
+#: Spanish" — and is not referential, whatever cue it spoke. Closed and
+#: deliberately small: every word added here is a word a turn can say while
+#: still being answered by recency. "okay", "lets", "what's" and "whats" are
+#: the spellings of listed words that the tokeniser keeps distinct.
+REFERENTIAL_FILLER: frozenset[str] = frozenset(
+    {
+        "ok", "okay", "so", "now", "let's", "lets", "please",
+        "work", "task", "thing", "things", "stuff", "it", "this", "that",
+        "pending", "left", "off", "up", "from", "where", "what", "what's", "whats",
+        "here", "today", "yesterday", "last", "stopped", "doing", "on", "with", "again",
+    }
 )
 
 #: Worded contact: the turn's OWN WORDS reached the anchor's own names, terms
@@ -452,6 +476,24 @@ def _fold_lexical_term(term: str) -> str | None:
     return fold_plural(folded)
 
 
+def _referential_residue(token_text: str) -> tuple[str, ...]:
+    """The words a cue-speaking turn says besides its cues, function words and
+    `REFERENTIAL_FILLER` — empty for a turn that only points back.
+
+    `token_text` is the turn's tokens joined by single spaces and padded with
+    one on each side, the form `analyze_turn` matches cues against.
+    """
+    text = token_text
+    for phrase in _REFERENTIAL_CUE_PHRASES:
+        while f" {phrase} " in text:
+            text = text.replace(f" {phrase} ", " ")
+    return tuple(
+        token
+        for token in text.split()
+        if token not in _STOPWORDS and token not in REFERENTIAL_FILLER
+    )
+
+
 def analyze_turn(turn: str) -> TurnAnalysis:
     """Normalise a raw turn once: NFKC + casefold, tokens, n-grams, cues."""
     # Calls the shared `normalize()` rather than restating its formula: a
@@ -491,9 +533,10 @@ def analyze_turn(turn: str) -> TurnAnalysis:
             else any(pattern in text for pattern in patterns)
         )
     )
-    # Only a declared cue makes a turn referential (close-memory-loop D2, as
-    # narrowed): the turn has to say it points back.
-    referential = "referential" in cues
+    # A declared cue, and nothing else said (close-memory-loop D2, as
+    # narrowed twice): the turn has to say it points back, and must not also
+    # say what it is about.
+    referential = "referential" in cues and not _referential_residue(token_text)
     return TurnAnalysis(
         text=text,
         tokens=tokens,
@@ -1211,30 +1254,6 @@ def resolve(
     if resolved:
         return Resolution(status="resolved", anchors=tuple(anchors))
     return Resolution(status="unresolved", anchors=tuple(anchors))
-
-
-def resolved_by_recency_alone(resolution: Resolution) -> bool:
-    """Did every anchor this resolution promoted stand ONLY on the prior?
-
-    The compiler's question, not the resolver's: a turn that reached an
-    anchor on the strength of `recency` alone is a turn that named nothing,
-    and design D3's retrieval carry — the turn's own words reaching a
-    compiled page that is not an anchor — is the other thing such a turn
-    might have been doing. `True` here is the compiler's cue to ask the
-    carry before letting the prior stand, so "what did we decide about the
-    <page>" is served that page rather than whatever was edited last.
-
-    Each anchor is re-tested against the soundness rule with the fifth
-    clause shut, so an anchor that would have resolved anyway — on
-    continuity and a recall hit, say, and which merely happens to be hot as
-    well — reports `False` and keeps its packet.
-    """
-    anchors = resolution.resolved_anchors
-    return bool(anchors) and all(
-        "recency" in anchor.evidence
-        and _status_for_evidence(frozenset(anchor.evidence)) != "resolved"
-        for anchor in anchors
-    )
 
 
 def _competing_groups(

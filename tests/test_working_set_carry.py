@@ -1650,17 +1650,18 @@ def test_a_carried_packet_pays_for_both_blocks_out_of_one_ceiling(
 
 
 # --------------------------------------------------------------------------- #
-# A referent the prior alone supplied yields to a page the turn named
-# (close-memory-loop D2). Each turn below speaks a referential cue AND names a
-# research note, so against a live freshness registry the hot profile would
-# otherwise answer it with whatever was edited last.
+# A turn that speaks a referential cue AND names a page is not referential
+# (close-memory-loop D2, R-G), so the recency prior never answers it: the
+# carry decides it exactly as U3 shipped, and a referential turn — which names
+# nothing — never runs the carry at all (R-H). The hottest anchor is Cargo
+# Sled throughout, so a prior that leaked would show.
 # --------------------------------------------------------------------------- #
 
 
-#: `CARRY_TURN`'s page, named by a turn that also says it points back.
-REFERENTIAL_CARRY_TURN = "what's next for the quillon vantry window"
-#: `TIE_TURN`'s two near-twin notes, named by a turn that also points back.
-REFERENTIAL_TIE_TURN = "status of the tarn rollover cadence"
+#: `CARRY_TURN`'s page, named by a turn that also speaks a referential cue.
+CUE_AND_PAGE_TURN = "what's next for the quillon vantry window"
+#: `TIE_TURN`'s two near-twin notes, named by a turn that also speaks a cue.
+CUE_AND_TWO_PAGES_TURN = "status of the tarn rollover cadence"
 
 
 def _make_cargo_sled_the_freshest_edit(vault: Path) -> None:
@@ -1681,18 +1682,13 @@ def _make_cargo_sled_the_freshest_edit(vault: Path) -> None:
     working_set_runtime.reset_caches_for_tests()
 
 
-def test_a_referential_turn_that_names_a_page_is_served_that_page(
+def test_a_cue_turn_that_names_a_page_is_carried_not_answered_by_recency(
     carry_vault: Path, budget_free
 ) -> None:
-    """"What's next for the <page>" names no anchor the resolver can reach,
-    and speaks a referential cue. The prior may supply the referent of a turn
-    that names nothing — not of one that names a page."""
     _make_cargo_sled_the_freshest_edit(carry_vault)
-    assert working_set_resolve.analyze_turn(REFERENTIAL_CARRY_TURN).referential
+    assert not working_set_resolve.analyze_turn(CUE_AND_PAGE_TURN).referential
 
-    packet = working_set.compile_packet(
-        carry_vault, turn=REFERENTIAL_CARRY_TURN, max_chars=4000
-    )
+    packet = working_set.compile_packet(carry_vault, turn=CUE_AND_PAGE_TURN, max_chars=4000)
 
     assert packet["abstained"] is False, packet.get("abstention")
     assert packet["generation"]["carried_by"] == "retrieval"
@@ -1700,18 +1696,41 @@ def test_a_referential_turn_that_names_a_page_is_served_that_page(
     assert _unit_paths(packet) == {CARRY_PAGE}
 
 
-def test_a_referential_turn_that_names_two_pages_abstains_rather_than_guess(
+def test_a_cue_turn_whose_carry_is_unaffordable_abstains_rather_than_use_recency(
+    carry_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's budget case (p5): three seconds left of six and a first
+    lexical pass that took three, so the carry is refused. The turn named a
+    page, so it abstains as it did before the prior existed; it is never
+    answered with the hottest anchor instead."""
+    _make_cargo_sled_the_freshest_edit(carry_vault)
+    budget = request_budget.RequestBudget(seconds=6.0)
+    token = request_budget.set_current(budget)
+    try:
+        monkeypatch.setattr(budget, "deadline", budget.deadline - 3.0)
+        packet = working_set.compile_packet(
+            carry_vault, turn=CUE_AND_PAGE_TURN, max_chars=4000, lexical_seconds=3.0
+        )
+    finally:
+        request_budget.reset_current(token)
+
+    assert "working_set.carry" in (budget.as_response_block() or {}).get("skipped", [])
+    assert packet["abstained"] is True
+    assert packet["abstention"] == {"reason": "unresolved"}
+    assert packet["units"] == []
+    assert all("recency" not in item["evidence"] for item in packet["anchors"])
+
+
+def test_a_cue_turn_that_names_two_pages_abstains_listing_them(
     carry_vault: Path, budget_free
 ) -> None:
-    """The turn named something — two things — so the prior is disqualified,
-    and choosing between the two is still the agent's call."""
     _make_cargo_sled_the_freshest_edit(carry_vault)
-    assert working_set_resolve.analyze_turn(REFERENTIAL_TIE_TURN).referential
-    hits, _state = working_set_runtime.carry_candidates(carry_vault, REFERENTIAL_TIE_TURN)
+    assert not working_set_resolve.analyze_turn(CUE_AND_TWO_PAGES_TURN).referential
+    hits, _state = working_set_runtime.carry_candidates(carry_vault, CUE_AND_TWO_PAGES_TURN)
     assert len(hits) >= 2, hits
 
     packet = working_set.compile_packet(
-        carry_vault, turn=REFERENTIAL_TIE_TURN, max_chars=4000
+        carry_vault, turn=CUE_AND_TWO_PAGES_TURN, max_chars=4000
     )
 
     assert packet["abstained"] is True
@@ -1723,20 +1742,30 @@ def test_a_referential_turn_that_names_two_pages_abstains_rather_than_guess(
     }
 
 
-def test_a_referential_turn_the_carry_declines_keeps_its_hot_referent(
-    carry_vault: Path, budget_free
+@pytest.mark.parametrize("hot", [True, False], ids=["hot-profile", "empty-profile"])
+def test_a_referential_turn_never_runs_the_carry(
+    carry_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch, hot: bool
 ) -> None:
-    """Asking the carry costs a genuine "continue" nothing and changes
-    nothing: it names no page, so the prior's referent stands."""
-    _make_cargo_sled_the_freshest_edit(carry_vault)
+    """It names nothing, so there is no page for the carry to find — whether
+    the prior answers it or, with nothing hot, it abstains."""
+    if hot:
+        _make_cargo_sled_the_freshest_edit(carry_vault)
+    asked: list[str] = []
+    monkeypatch.setattr(
+        working_set, "_carry_by_retrieval", lambda *_a, **_k: asked.append("carry") or ()
+    )
 
-    packet = working_set.compile_packet(carry_vault, turn="continue", max_chars=4000)
+    for turn in ("continue", "let's continue the work, what's pending?"):
+        packet = working_set.compile_packet(carry_vault, turn=turn, max_chars=4000)
+        resolved = [item for item in packet["anchors"] if item["status"] == "resolved"]
+        if hot:
+            assert [item["path"] for item in resolved] == [
+                "Knowledge Base/Products/Cargo Sled.md"
+            ], (turn, packet["anchors"])
+        else:
+            assert packet["abstention"] == {"reason": "unresolved"}, turn
 
-    assert packet["abstained"] is False, packet.get("abstention")
-    assert "carried_by" not in packet["generation"]
-    assert [
-        item["path"] for item in packet["anchors"] if item["status"] == "resolved"
-    ] == ["Knowledge Base/Products/Cargo Sled.md"]
+    assert asked == []
 
 
 # --------------------------------------------------------------------------- #

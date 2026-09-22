@@ -1583,8 +1583,8 @@ def test_c3_a_function_word_alone_does_not_earn_rare_term() -> None:
 
 # --------------------------------------------------------------------------- #
 # Referential turns (close-memory-loop D2, as narrowed): a turn that SAYS it
-# points back at what the session was doing. A declared cue is the whole test,
-# matched on whole tokens; being short is not a signal.
+# points back at what the session was doing. A declared cue, matched on whole
+# tokens, AND nothing else said (R-G); being short is not a signal.
 # --------------------------------------------------------------------------- #
 
 
@@ -1660,25 +1660,78 @@ def test_a_long_turn_with_no_cue_is_not_referential() -> None:
     assert analysis.referential is False
 
 
-def test_a_cue_inside_a_longer_sentence_still_reads_as_referential() -> None:
-    """A long turn that says "continue" is referential by cue.
+#: The turns that only point back: every one must stay referential (R-G;
+#: the reviewer's keep list, p11, plus the aligned cues).
+POINTING_BACK_TURNS = (
+    "continue",
+    "ok continue",
+    "please continue",
+    "where were we",
+    "so where were we?",
+    "status?",
+    "status update",
+    "status report?",
+    "what's next",
+    "what's next?",
+    "let's continue the work, what's pending?",
+    "Let's continue the work... what's pending?",
+    "pick up where we left off",
+    "continue from where we stopped yesterday",
+    "okay, where did we leave off?",
+    "resume",
+    "carry on",
+    "same as before",
+    "what were we doing?",
+)
 
-    Pinned rather than left undefined because it is the shape the rule has to
-    survive: such a turn usually names something too, and `resolve()`'s own
-    guard — no recency resolution while ANY candidate holds worded contact —
-    is what keeps the cue from mattering there. The cue alone decides nothing.
-    """
-    analysis = resolve_module.analyze_turn(
-        "should I continue with the cheaper cargo sled or wait for the dearer one"
-    )
+#: Turns that speak a cue word in its ordinary sense, or name something
+#: besides it: none may be referential (R-G; the reviewer's p3, p11 and p15
+#: misfires and named turns).
+CUE_WORD_BUT_NOT_POINTING_BACK_TURNS = (
+    "update my resume",
+    "carry on luggage limits for a short flight",
+    "what's the status of the parcel?",
+    "continue the recipe from the book",
+    "can I resume my gym membership after the injury?",
+    "check the status of my flight",
+    "I want to continue learning Spanish",
+    "what is next year's tax deadline",
+    "is the status quo fine for the lease?",
+    "what's next for the quillon vantry window",
+    "status of the tarn rollover cadence",
+    "summarize this article as before",
+    "use the same format as before",
+    "same as before but shorter",
+    "translate it as before",
+    "resume the download",
+    "what's the status code for not found",
+    "continue the story",
+    "what's next in the tutorial?",
+    "carry on with the essay",
+    "should I continue with the cheaper cargo sled or wait for the dearer one",
+)
 
-    assert analysis.referential is True
+
+@pytest.mark.parametrize("turn", POINTING_BACK_TURNS)
+def test_a_turn_that_only_points_back_is_referential(turn: str) -> None:
+    assert resolve_module.analyze_turn(turn).referential is True
 
 
-def test_a_cue_word_in_its_ordinary_sense_is_the_known_residual() -> None:
-    """Recorded in design section 8 as known, not fixed: whole-token matching
-    cannot tell "resume" the verb from "resume" the document."""
-    assert resolve_module.analyze_turn("update my resume").referential is True
+@pytest.mark.parametrize("turn", CUE_WORD_BUT_NOT_POINTING_BACK_TURNS)
+def test_a_cue_word_with_anything_else_said_is_not_referential(turn: str) -> None:
+    """The cue was spoken — it is recorded — but the turn also says what it
+    is about, so recency is not asked to supply a referent for it."""
+    analysis = resolve_module.analyze_turn(turn)
+
+    assert "referential" in analysis.cues
+    assert analysis.referential is False
+
+
+def test_the_filler_set_is_closed_and_declared() -> None:
+    assert "work" in resolve_module.REFERENTIAL_FILLER
+    assert "resume" not in resolve_module.REFERENTIAL_FILLER
+    assert "report" not in resolve_module.REFERENTIAL_FILLER
+    assert len(resolve_module.REFERENTIAL_FILLER) == 33
 
 
 # --------------------------------------------------------------------------- #

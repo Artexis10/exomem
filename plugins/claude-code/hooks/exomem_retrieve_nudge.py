@@ -1067,13 +1067,61 @@ def _recent_lines(packet: dict) -> list[str]:
     return lines
 
 
+#: The evidence kinds that mean the TURN reached an anchor: its own words, a
+#: ranking engine, or the agent's choice. Spelled here rather than imported,
+#: because this hook runs as a standalone script.
+_TURN_CONTACT_KINDS = frozenset(
+    {
+        "exact_alias",
+        "lexical_overlap",
+        "claims_match",
+        "rare_term",
+        "retrieval",
+        "vector_band",
+        "agent_choice",
+    }
+)
+
+
+def _recency_referent_lines(packet: dict) -> list[str]:
+    """One line when every resolved anchor stood on recency alone.
+
+    Such a packet answers "continue" with what the vault was last working
+    on, and the agent must be able to tell that from an answer the turn's own
+    words reached: nothing else in the block says so, since evidence is not
+    rendered. Absent for every other packet.
+    """
+    resolved = [
+        anchor
+        for anchor in packet.get("anchors") or ()
+        if isinstance(anchor, dict) and anchor.get("status") == "resolved"
+    ]
+    if not resolved:
+        return []
+    for anchor in resolved:
+        evidence = {str(kind) for kind in anchor.get("evidence") or ()}
+        if "recency" not in evidence or evidence & _TURN_CONTACT_KINDS:
+            return []
+    titles = "; ".join(
+        str(anchor.get("title") or anchor.get("ref") or "").strip() for anchor in resolved
+    )
+    ref = str(resolved[0].get("ref") or "") if len(resolved) == 1 else ""
+    return [
+        _packet_line(
+            "referent",
+            f"{titles} — taken from recent work, not from the turn's own words",
+            ref,
+        )
+    ]
+
+
 def _packet_lines(packet: dict) -> list[str]:
-    """Recent context first, then current state, units and pointers — the
-    packet's own order.
+    """Recent context first, then where a recency referent came from, then
+    current state, units and pointers — the packet's own order.
 
     That order is the packet's priority order, so it is also the order the
     ceiling cuts from the end of."""
-    lines: list[str] = _recent_lines(packet)
+    lines: list[str] = [*_recent_lines(packet), *_recency_referent_lines(packet)]
     for entry in packet.get("current_state") or ():
         if not isinstance(entry, dict):
             continue
