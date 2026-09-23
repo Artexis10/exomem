@@ -666,6 +666,13 @@ def test_patch_env_replaces_and_removes_export_prefixed_lines() -> None:
     )
 
 
+@pytest.mark.parametrize("separator", [" ", "\t", " \t ", "\t\t"])
+def test_patch_env_removes_an_export_line_with_any_whitespace(separator: str) -> None:
+    text = f"KEEP=1\nexport{separator}{OWNER_KEY}=github:1234\n"
+    assert rsw.parse_env(text) == {"KEEP": "1", OWNER_KEY: "github:1234"}
+    assert rsw.patch_env(text, {OWNER_KEY: None}) == "KEEP=1\n"
+
+
 def test_no_remote_owner_removes_an_export_prefixed_binding(tmp_path: Path) -> None:
     """Removal must hold for python-dotenv too, which reads `export KEY=`."""
     from dotenv import dotenv_values

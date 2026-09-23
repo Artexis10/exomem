@@ -147,10 +147,10 @@ def _env_line_key(line: str) -> tuple[str | None, str]:
     if not stripped or stripped.startswith("#") or "=" not in stripped:
         return None, ""
     prefix = ""
-    head, separator, rest = stripped.partition(" ")
-    if head == "export" and separator:
+    parts = stripped.split(None, 1)
+    if len(parts) == 2 and parts[0] == "export":
         prefix = "export "
-        stripped = rest.lstrip()
+        stripped = parts[1]
     key = stripped.partition("=")[0].strip()
     return (key or None), prefix
 
