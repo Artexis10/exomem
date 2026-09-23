@@ -2,28 +2,46 @@
 
 ### Requirement: A cloud cell runs the standalone runtime with its own custody
 
-When `EXOMEM_CLOUD_CELL=1`, the runtime SHALL start on the standalone path: local runtime activation, the authorization-session middleware, in-process schema migration and the local writer lease. It MUST NOT load hosted cell configuration, projected custody, serving membership or attestation state, and MUST NOT read a `.env` file. Standalone custody SHALL resolve under the image user's home directory on the tenant volume, so that custody survives pod replacement and is included in backups.
+When `EXOMEM_CLOUD_CELL=1`, the runtime SHALL start on the standalone path: local runtime activation, the authorization-session middleware and the local writer lease. It MUST NOT load hosted cell configuration, projected custody, serving membership or attestation state, and MUST NOT read a `.env` file.
+
+Standalone custody SHALL resolve under the image user's home directory on the tenant volume. Custody and writer-lease state SHALL keep their owner-only file modes across first start, pod replacement and restore.
+
+Before the server starts, a same-image init container SHALL, idempotently:
+
+1. initialize the vault when absent;
+2. run offline state migration;
+3. migrate a schema-v3 governance store to v4 through the standalone plan, stage and commit sequence.
 
 #### Scenario: First start on an empty volume
 
 - **WHEN** a cloud cell starts with an empty tenant volume mounted at `/data`
-- **THEN** it creates the vault at `EXOMEM_VAULT_PATH` and standalone custody under `/data/host`
-- **AND** it becomes ready without any external custody, attestation or migration step
+- **THEN** the init container creates the vault and standalone custody, migrates state, and brings governance to schema v4
+- **AND** the runtime becomes ready, with no external custody, attestation or operator step
 
 #### Scenario: Governed write, then pod replacement
 
 - **WHEN** a governed write commits and the pod is deleted and recreated on the same volume
-- **THEN** the new pod serves recall that includes the committed write
-- **AND** it accepts further governed writes without any acknowledgement from outside the cell
+- **THEN** custody and writer-lease files keep owner-only modes
+- **AND** the new pod serves recall that includes the write, and accepts a further governed write
 
-### Requirement: A cloud cell authenticates only its per-cell bearer
+### Requirement: A cloud cell authenticates only its per-cell bearer as a fixed non-owner principal
 
-A cloud cell SHALL authenticate every MCP request by comparing the presented bearer against `EXOMEM_CLOUD_CELL_TOKEN` in constant time, and SHALL reject any other credential. It SHALL register only the MCP endpoint and `GET /health`, and MUST NOT register REST, upload or download routes. `/health` MUST NOT disclose vault content.
+A cloud cell SHALL authenticate every MCP request by comparing the presented bearer, in constant time, against `EXOMEM_CLOUD_CELL_TOKEN` or, during a rotation, `EXOMEM_CLOUD_CELL_TOKEN_PREVIOUS`, and SHALL reject any other credential.
+
+A request that authenticates SHALL carry the fixed claims `{sub: <cell_id>, iss: "exomem-cloud-cell"}`. Those claims resolve to a non-owner principal, and MUST NOT be derived from the bearer or its key version.
+
+The cell SHALL register only the MCP endpoint, `GET /health` and `GET /health/ready`. It MUST NOT register REST, upload or download routes. Health routes MUST NOT disclose vault content.
 
 #### Scenario: Request without the cell bearer
 
 - **WHEN** a request reaches `/mcp` with a missing, malformed or different bearer
 - **THEN** the cell answers 401 without executing a tool
+
+#### Scenario: Governed write and an owner-only operation through the bearer
+
+- **WHEN** an authenticated client performs a governed product write, and then an owner-only governance authoring operation
+- **THEN** the write commits and is recalled
+- **AND** the owner-only operation is refused with `GOVERNANCE_OWNER_REQUIRED`
 
 #### Scenario: REST route requested
 
@@ -40,9 +58,19 @@ A cloud cell SHALL publish the standard product tool surface, minus the members 
 - **THEN** `transfer_artifact`, `adopt_vault`, `process_media` and `read_media` are absent
 - **AND** every other product tool, including `configure_memory` and `activate_context`, is present
 
+### Requirement: A cloud cell can serve read-only
+
+With `EXOMEM_CLOUD_READ_ONLY=1`, a cloud cell SHALL refuse every mutating command with `CLOUD_CELL_READ_ONLY` before vault access, and SHALL continue to serve every read. Mutation SHALL be classified from the command registry.
+
+#### Scenario: Write while read-only
+
+- **WHEN** a client calls a mutating tool on a read-only cell
+- **THEN** the call is refused with `CLOUD_CELL_READ_ONLY` and the vault is unchanged
+- **AND** a recall on the same cell succeeds
+
 ### Requirement: A cloud cell keeps content out of logs
 
-A cloud cell SHALL enable content-private logging. Query text, arguments, note bodies and results MUST NOT appear in runtime or access logs; only content-free identifiers, sizes, durations and error codes may appear.
+A cloud cell SHALL enable content-private logging and the content-free call trace. Query text, arguments, note bodies and results MUST NOT appear in runtime or access logs; only content-free identifiers, sizes, durations and error codes may appear.
 
 #### Scenario: A recall is logged
 
@@ -53,14 +81,16 @@ A cloud cell SHALL enable content-private logging. Query text, arguments, note b
 
 cellctl SHALL read desired cell state from the control database and converge the cluster to it with Kubernetes server-side apply under one field manager. It SHALL write observed state back, and SHALL hold no database, lease, fence or checkpoint of its own.
 
-- A transient condition MUST be recorded as a non-terminal observed state and retried. Transient conditions include a pending volume, a pulling image, a terminating pod and an unavailable API.
-- Only an identity conflict SHALL mark a cell `failed`: an existing namespace or volume that belongs to a different cell.
+- It SHALL read readiness from pod conditions, and MUST NOT connect to a cell over the network.
+- A transient condition MUST be recorded as a non-terminal observed state and retried. Transient conditions include a pending volume, a pulling image, a running init container, a terminating pod and an unavailable API.
+- Only an identity conflict, or an init container still failing after its deadline, SHALL mark a cell `failed`. An identity conflict is an existing namespace or volume that belongs to a different cell.
 - `observed_generation` SHALL advance only when the observation matches the applied desired generation.
 
 #### Scenario: New cell requested
 
 - **WHEN** a row is inserted with `desired_state = running`
-- **THEN** cellctl creates the cell's resources, reports `provisioning` while the volume binds and the pod starts, and reports `running` and ready once `/health` answers
+- **THEN** cellctl creates the cell's resources and reports `provisioning` while the volume binds and the init container runs
+- **AND** it reports `running` and ready once the pod's readiness condition holds
 
 #### Scenario: Controller restarts mid-apply
 
@@ -74,90 +104,128 @@ cellctl SHALL read desired cell state from the control database and converge the
 
 ### Requirement: Cells are isolated per tenant
 
-Each cell SHALL have its own namespace, ResourceQuota, encrypted volume, Secret and backup key. Its namespace SHALL enforce Pod Security `restricted`. Its pods SHALL run non-root, with seccomp `RuntimeDefault`, a read-only root filesystem, dropped capabilities and no ServiceAccount token.
+Each cell SHALL have its own namespace, ResourceQuota, encrypted volume, Secret, backup key and object-storage key. Its namespace SHALL enforce Pod Security `restricted`. Its pods SHALL run non-root, with seccomp `RuntimeDefault`, a read-only root filesystem, dropped capabilities and no ServiceAccount token.
 
-A default-deny network policy SHALL admit runtime ingress only from the cloud gateway, and MUST NOT grant the runtime pod internet egress. No request field, path or header SHALL select a cell.
+A default-deny network policy SHALL:
+- admit runtime ingress only from the cloud gateway;
+- grant the runtime pod no egress;
+- limit backup and restore pods to object-storage egress.
+
+No request field, path or header SHALL select a cell. An admission policy SHALL confine cellctl's own writes to cell namespaces, restricted namespaces and digest-pinned images from the configured repository.
 
 #### Scenario: Another workload attempts direct access
 
 - **WHEN** a pod other than the gateway, including another tenant's cell, connects to a cell's port
 - **THEN** the network policy drops the connection
 
-#### Scenario: Runtime attempts outbound internet access
+#### Scenario: Runtime attempts outbound access
 
-- **WHEN** the runtime process attempts an outbound connection to an internet address
+- **WHEN** the runtime process attempts any outbound connection, including DNS
 - **THEN** the connection is refused by policy
 
-### Requirement: A release is one image digest rolled out one cell at a time
+#### Scenario: Controller attempts an out-of-scope write
 
-The platform release SHALL be the digest in the `cell_image` setting. When it changes, cellctl SHALL:
+- **WHEN** cellctl's ServiceAccount writes outside a cell namespace, creates a namespace without the restricted labels, or applies an image that is not digest-pinned from the cell repository
+- **THEN** admission denies the request
 
-1. take a pre-upgrade snapshot of each cell before changing its image;
-2. move cells one at a time, lowest `rollout_priority` first;
-3. advance only after the new pod is ready.
+### Requirement: A release is one image digest, rolled out one cell at a time with restore-based rollback
 
-If a cell is not ready within 10 minutes, cellctl SHALL return that cell to its previous digest, pause the rollout and record the error. A row's own `desired_image` SHALL override the setting for that cell. No candidate, lock, fixture or promotion artifact SHALL be required to release.
+The platform release SHALL be the digest in the `cell_image` setting. A cell's target image SHALL be:
+
+- its row's `desired_image`, if set;
+- otherwise `cell_image` while the rollout is not paused;
+- otherwise `last_good_image`.
+
+cellctl SHALL change at most one cell's image at a time, lowest `rollout_priority` first. Each attempt SHALL:
+
+1. stop the cell;
+2. take a backup;
+3. start the target image;
+4. wait up to 10 minutes for readiness.
+
+If readiness does not arrive, cellctl SHALL stop the cell, restore the pre-attempt backup, start the previous image, and pause the rollout, recording the error and the held cell. It MUST NOT roll back by image digest alone. While paused, no ready cell SHALL change image, and new cells SHALL use `last_good_image`.
+
+No candidate, lock, fixture or promotion artifact SHALL be required to release.
 
 #### Scenario: Upgrade succeeds
 
 - **WHEN** the `cell_image` setting changes to a new digest
-- **THEN** the canary cell is snapshotted, restarted on the new digest and becomes ready, and then the next cell follows
-- **AND** the vault content is unchanged and recall answers as before
+- **THEN** the canary cell is stopped, backed up, started on the new digest and becomes ready
+- **AND** `last_good_image` becomes the new digest, the next cell follows, and vault content and recall are unchanged
 
-#### Scenario: Canary fails readiness
+#### Scenario: Canary fails readiness after migrating state
 
-- **WHEN** the canary cell is not ready on the new digest within 10 minutes
-- **THEN** cellctl restores the previous digest on that cell, sets `rollout_paused`, and changes no other cell
+- **WHEN** the canary's new image migrates state and then fails to become ready within 10 minutes
+- **THEN** cellctl restores the pre-attempt backup, starts the previous image, and pauses the rollout, recording the error and the held cell
+- **AND** no other cell changes, and the canary serves its pre-attempt content
 
-### Requirement: Each cell is backed up encrypted with its own key
+### Requirement: Each cell is backed up consistently, encrypted with its own key
 
-Each cell SHALL be backed up nightly, and before every image change, to object storage under its own prefix. The backup SHALL be encrypted with a random per-cell data key that is envelope-encrypted by a master key held outside the database. A backup SHALL include both the vault and the custody home. A restore into a new namespace SHALL produce a cell that serves the same notes.
+cellctl SHALL back up each cell nightly and before every image change. The cell SHALL be stopped during the copy, so the copy is crash-consistent.
+
+A backup SHALL:
+- include both the vault and the custody home;
+- be written to the cell's own object-storage prefix with a key restricted to that prefix;
+- be encrypted with a random per-cell data key, envelope-encrypted by a master key held outside the database.
+
+A restore into a new namespace SHALL produce a cell that answers recall, reports governance schema v4, and accepts a governed write.
 
 #### Scenario: Restore drill
 
 - **WHEN** a backup is restored into a scratch namespace and a cell starts on it
-- **THEN** recall returns the notes that existed at backup time
+- **THEN** recall returns the notes that existed at backup time, governance status reports schema v4, and a governed write commits
 - **AND** the source cell is unaffected
+
+#### Scenario: Backup job attempts another tenant's prefix
+
+- **WHEN** a cell's backup credentials are used against another cell's prefix
+- **THEN** object storage refuses the request
 
 ### Requirement: Deleting a cell removes all of its data and destroys its key
 
-When a row's `desired_state` becomes `deleted`, cellctl SHALL remove the cell's namespace, volume and backup prefix, and SHALL destroy its wrapped backup key. It SHALL report `deleted` only after it has observed that the namespace, persistent volume, provider volume and backup prefix are all absent. A failed observation MUST NOT count as absence.
+When a row's `desired_state` becomes `deleted`, cellctl SHALL remove the cell's namespace and volume and every object version under its backup prefix. It SHALL delete its object-storage key and destroy its wrapped backup key.
+
+It SHALL report `deleted` only after it has observed that the namespace, persistent volume, provider volume and every backup object version are all absent. A failed observation MUST NOT count as absence.
+
+Encrypted cluster-state snapshots MAY retain the cell's Secret until their retention expires. That bound SHALL be documented in the operator runbook.
 
 #### Scenario: Tenant deletes their account
 
 - **WHEN** a tenant's cell row is set to `deleted`
-- **THEN** the namespace, persistent volume, provider volume and backup objects are all eventually absent, and `backup_key_wrapped` is null
-- **AND** the row reports `deleted`
+- **THEN** the namespace, persistent volume, provider volume and every backup object version are eventually absent
+- **AND** the per-cell object-storage key and `backup_key_wrapped` are gone, and the row reports `deleted`
 
 #### Scenario: Provider listing unavailable during deletion
 
-- **WHEN** the provider volume listing fails during deletion
+- **WHEN** the provider volume listing or object-version listing fails during deletion
 - **THEN** the row stays `deleting` and the check is retried
 
 ### Requirement: Capacity is published from observed limits
 
-cellctl SHALL publish, for each node, the provider volume attachments in use, the provider's per-server limit, and the configured headroom. Admission SHALL use this published capacity. No reservation ledger SHALL exist that can hold capacity after a cell is gone.
+For each node, cellctl SHALL publish `cell_slots`, equal to the provider's per-server attachment limit minus configured headroom minus attachments not owned by cells, together with attachments in use. Admission SHALL count non-deleted cell rows against the sum of `cell_slots`. No reservation ledger SHALL exist that can hold capacity after a cell is gone.
 
 #### Scenario: Node is full
 
-- **WHEN** non-deleted rows equal the published capacity
-- **THEN** the published capacity leaves no room for another cell until a node is added or a cell is deleted
+- **WHEN** non-deleted cell rows equal the published `cell_slots`
+- **THEN** no further cell is admitted until a node is added or a cell is deleted
 
 ### Requirement: Vault traffic is TLS-terminated only on our own servers
 
-The cloud MCP hostname SHALL be served by the platform ingress with certificates obtained through ACME, and its DNS record SHALL NOT be proxied by a third party. Only the gateway route SHALL be public. Cells, cellctl and the cluster API MUST NOT be reachable from the internet.
+The cloud MCP hostname SHALL be served by the platform ingress, exposed only through its TLS entrypoint. Its certificate SHALL be obtained through ACME, and its DNS record SHALL NOT be proxied by a third party. Only the gateway route SHALL be public. Cells, cellctl, the plaintext entrypoint and the cluster API MUST NOT be reachable from the internet.
 
-#### Scenario: Public request to a cell or controller
+#### Scenario: Public request to anything but the gateway
 
-- **WHEN** an internet client requests any host or path other than the gateway's routes
-- **THEN** no cell, controller or cluster API responds
+- **WHEN** an internet client requests any host, port or path other than the gateway's routes on 443
+- **THEN** no cell, controller, plaintext entrypoint or cluster API responds
 
 ### Requirement: The control database runs on its own server with point-in-time recovery
 
 The control database SHALL run on a server separate from any fleet node, provisioned by the same Terraform and Ansible tree. It SHALL:
 
 - use TLS with verify-full for every client;
-- give the gateway and cellctl least-privilege roles;
+- separate the schema-owner role from runtime roles;
+- give the gateway and cellctl least-privilege roles, reachable only over the private network;
+- admit only the Substrate roles on its public listener, with SCRAM;
 - archive WAL to object storage for point-in-time recovery;
 - have its backup restore verified weekly.
 
@@ -168,5 +236,10 @@ The control database SHALL run on a server separate from any fleet node, provisi
 
 #### Scenario: Controller exceeds its privileges
 
-- **WHEN** cellctl attempts to modify a desired-state column or any table other than cell observations, capacity and wrapped keys
+- **WHEN** cellctl attempts to modify a desired-state column, the settings table, or any table other than cell observations, capacity, the rollout row and wrapped keys
 - **THEN** the database refuses the statement
+
+#### Scenario: Gateway role from the internet
+
+- **WHEN** a client on the public listener authenticates as the gateway or cellctl role
+- **THEN** the connection is refused
