@@ -4309,6 +4309,23 @@ class ContentHashMismatchError(RuntimeError):
 
 
 _BATCH_COMMIT_LOCK = threading.RLock()
+
+
+@contextmanager
+def batch_commit_if_idle() -> Iterator[bool]:
+    """Take the in-process batch commit lock only if no batch is committing.
+
+    For work that already holds the writers' canonical boundary and must write
+    a batch of its own: a batch that holds this lock may be in its post-commit
+    fan-out waiting for that very boundary, so waiting here would stall every
+    writer behind it. Yields False instead; the caller retries later.
+    """
+    acquired = _BATCH_COMMIT_LOCK.acquire(blocking=False)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            _BATCH_COMMIT_LOCK.release()
 MISSING_CONTENT_HASH = "<missing>"
 
 

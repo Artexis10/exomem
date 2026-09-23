@@ -910,7 +910,13 @@ def recover_full_receipt_graph_epoch(vault_root: Path, *, build: bool = True) ->
             ):
                 epoch = graph_sync.classify_epoch(root)
                 if epoch.kind in {"pre_floor", "recoverable"}:
-                    graph_sync.recover_checkpoint(root)
+                    # Not while a batch commits: it may be waiting in its
+                    # post-commit fan-out for the boundary held here.
+                    from . import vault as vault_module
+
+                    with vault_module.batch_commit_if_idle() as idle:
+                        if idle:
+                            graph_sync.recover_checkpoint(root)
                 if graph_sync.classify_epoch(root).kind != "coherent":
                     return False
         elif epoch.kind == "legacy":

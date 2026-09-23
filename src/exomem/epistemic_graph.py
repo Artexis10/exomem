@@ -7760,7 +7760,13 @@ def _converge_full_graph_marker(vault_root: Path) -> GraphDispatchResult:
                 return GraphDispatchResult.not_required()
             state = graph_sync.classify_epoch(root)
             if state.kind in {"pre_floor", "recoverable"}:
-                graph_sync.recover_checkpoint(root)
+                # Never wait on a committing batch while holding the writers'
+                # boundary: that batch may be in its post-commit fan-out waiting
+                # for this boundary, and each writer queued behind it would be
+                # refused in turn (CG-2). The epoch is left for the next tick.
+                with vault_module.batch_commit_if_idle() as idle:
+                    if idle:
+                        graph_sync.recover_checkpoint(root)
                 state = graph_sync.classify_epoch(root)
             checkpoint = graph_sync.read_checkpoint(root)
             if state.kind not in {"legacy", "coherent"}:
