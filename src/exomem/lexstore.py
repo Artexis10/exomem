@@ -920,6 +920,57 @@ def lexical_path(vault_root: Path) -> Path:
     return state_paths.vault_state_dir(vault_root) / ".lexical.sqlite"
 
 
+class _RebuildTempLock:
+    """An advisory lock naming one rebuild temp, held for its build's life.
+
+    The lock file lives in the user's private lock directory, not beside the
+    sidecar, and is keyed by the temp's path. An exclusive lock on it is taken
+    before the temp is created and released after the temp is cleaned up; a
+    build that dies releases it with its process. `held()` probes without
+    waiting, so the orphan sweep can tell a live build's temp from a dead one's
+    even when the build has closed every connection or the clock has jumped.
+    """
+
+    def __init__(self, temp: Path) -> None:
+        from .vault import _private_lock_directory
+
+        digest = hashlib.sha256(os.fsencode(str(temp))).hexdigest()[:32]
+        self.path = _private_lock_directory() / f"lexical-rebuild-{digest}.lock"
+        self._lock: Any = None
+
+    def acquire(self) -> None:
+        from .vault import _InterprocessFileLock
+
+        lock = _InterprocessFileLock(self.path, deadline=time.monotonic() + 5.0)
+        lock.__enter__()
+        self._lock = lock
+
+    def release(self) -> None:
+        if self._lock is None:
+            return
+        self._lock.__exit__(None, None, None)
+        self._lock = None
+        self.discard()
+
+    def held(self) -> bool:
+        """Does a live build hold this lock? Never waits."""
+        from .vault import VaultLockError, _InterprocessFileLock
+
+        if not self.path.exists():
+            return False
+        probe = _InterprocessFileLock(self.path, deadline=time.monotonic())
+        try:
+            probe.__enter__()
+        except VaultLockError:
+            return True
+        probe.__exit__(None, None, None)
+        return False
+
+    def discard(self) -> None:
+        with contextlib.suppress(OSError):
+            self.path.unlink()
+
+
 def _remove_lexical_rebuild_artifact(
     vault_root: Path,
     path: Path,
@@ -2972,7 +3023,9 @@ class LexicalStore:
 
         An exclusive lock with no busy wait succeeds only when no connection,
         in this process or another, has the database open. A file SQLite
-        cannot read at all is not in use.
+        cannot read at all is not in use. This catches a reader; a live build
+        is recognised by its `_RebuildTempLock`, since it closes its own
+        connection after the WAL fold.
         """
         try:
             conn = self._connect(base)
@@ -2997,8 +3050,10 @@ class LexicalStore:
 
         Each temp is a whole catalogue, and a catalogue version bump sends
         every install through a rebuild. A temp family (the temp and its
-        WAL/SHM/journal) goes when every member is older than
-        `_ORPHAN_REBUILD_TEMP_AGE_SECONDS` and no connection holds the temp.
+        WAL/SHM/journal) goes only when no build holds its advisory lock
+        (`_RebuildTempLock`, held for the build's whole life and released by
+        the OS when a build dies), every member is older than
+        `_ORPHAN_REBUILD_TEMP_AGE_SECONDS`, and no connection holds the temp.
         """
         from . import vault as vault_module
 
@@ -3015,6 +3070,8 @@ class LexicalStore:
         removed: list[Path] = []
         now = time.time()
         for base, members in families.items():
+            if _RebuildTempLock(base).held():
+                continue
             try:
                 if any(
                     now - member.stat().st_mtime < _ORPHAN_REBUILD_TEMP_AGE_SECONDS
@@ -3031,6 +3088,7 @@ class LexicalStore:
                         removed.append(member)
                 except (OSError, RuntimeError):
                     continue
+            _RebuildTempLock(base).discard()
         if removed:
             log.info("lexical rebuild: removed %d orphan temp file(s)", len(removed))
         return removed
@@ -5133,6 +5191,15 @@ class LexicalStore:
             )
             return self._decline_rebuild("transient_failure")
         temp_path = self.path.with_name(f"{self.path.name}.rebuild-{uuid.uuid4().hex}.tmp")
+        # The build holds an advisory lock on its temp from before the temp
+        # exists until after it is cleaned up, so a sweep never takes a live
+        # build's temp for an orphan, however long the build stalls.
+        temp_lock = _RebuildTempLock(temp_path)
+        try:
+            temp_lock.acquire()
+        except VaultLockError as e:
+            log.warning("lexical atomic rebuild could not lock its temp (%s)", e)
+            return self._decline_rebuild("transient_failure")
         try:
             try:
                 published = self._build_and_publish(
@@ -5159,6 +5226,7 @@ class LexicalStore:
                 return self._decline_rebuild("error")
         finally:
             self._cleanup_sidecar_files(temp_path)
+            temp_lock.release()
 
         if published:
             self._last_rebuild_result = "published"
