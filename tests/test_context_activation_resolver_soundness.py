@@ -389,3 +389,168 @@ def test_r3_a_named_project_carries_the_packet_past_two_weak_unrelated_entities(
     assert all(unit.get("provenance", {}).get("path") != south_gate for unit in packet["units"])
     assert all(pointer.get("ref") != north_gate for pointer in packet["pointers"])
     assert all(pointer.get("ref") != south_gate for pointer in packet["pointers"])
+
+
+# --------------------------------------------------------------------------- #
+# The same turns with a LIVE hot profile (close-memory-loop D2). Every test
+# above resolves without one, which is exactly why they could not see a prior
+# answering a novel turn. Here the freshness registry is seeded the way the
+# running service keeps it, with one page freshly edited, and each negative
+# is paired with a "continue" that proves the profile is actually on.
+# --------------------------------------------------------------------------- #
+
+
+def _live_hot_profile(vault: Path, *, freshest: str) -> None:
+    """Every page old, `freshest` just edited, the registry seeded. The old
+    pages are a minute apart: each its own edit, not a write burst."""
+    import os
+    import time
+
+    from exomem import file_watcher
+
+    now = time.time()
+    for index, page in enumerate(sorted((vault / "Knowledge Base").rglob("*.md"))):
+        os.utime(page, (now - 10_000 - index * 60, now - 10_000 - index * 60))
+    target = vault / freshest
+    os.utime(target, (now, now))
+    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+
+
+def _statuses(packet: dict) -> dict[str, str]:
+    return {item["path"]: item["status"] for item in packet["anchors"]}
+
+
+@pytest.fixture
+def hot_probe(probe):
+    vault, manifest = probe
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    _live_hot_profile(vault, freshest=manifest.hub_paths[0])
+    return vault, manifest
+
+
+def test_the_negative_twins_stay_unresolved_with_a_live_hot_profile(hot_probe) -> None:
+    """T10 and T11 name nothing and say nothing about pointing back. The
+    hottest hub is right there, and neither turn is answered with it."""
+    from exomem import working_set
+
+    vault, manifest = hot_probe
+    control = working_set.compile_packet(vault, turn="continue", max_chars=4000)
+    assert _statuses(control).get(manifest.hub_paths[0]) == "resolved", (
+        "the profile must be live, or the negatives below prove nothing"
+    )
+
+    for turn in (T10_TURN, T11_TURN):
+        packet = working_set.compile_packet(vault, turn=turn, max_chars=4000)
+
+        assert packet["abstained"] is True, turn
+        assert packet["abstention"] == {"reason": "unresolved"}, turn
+        assert "resolved" not in _statuses(packet).values(), turn
+        assert packet["units"] == [], turn
+        assert all("recency" not in item["evidence"] for item in packet["anchors"]), turn
+        # The block, not an answer: what was recently worked on is still said.
+        assert packet["recent_context"], turn
+
+
+def test_the_one_word_reference_is_unchanged_by_a_live_hot_profile(hot_probe) -> None:
+    """C10 reaches its page on its own words; the prior adds nothing to it."""
+    from exomem import working_set
+
+    vault, manifest = hot_probe
+
+    packet = working_set.compile_packet(vault, turn=C10_TURN, max_chars=4000)
+
+    assert _statuses(packet).get(manifest.bike_path) == "resolved"
+    assert all("recency" not in item["evidence"] for item in packet["anchors"])
+
+
+@pytest.mark.parametrize(
+    "retire",
+    [
+        pytest.param(("status: active", "status: archived"), id="archived"),
+        pytest.param(
+            ("status: active", 'status: active\nsuperseded_by: "[[Cluster node 02]]"'),
+            id="superseded",
+        ),
+    ],
+)
+def test_a_retired_hot_hub_is_never_offered(probe, retire: tuple[str, str]) -> None:
+    """The freshest page in the vault is a retired hub. A prior never
+    resurrects superseded state: "continue" is answered from the next
+    current page instead, and the retired hub appears nowhere in the packet."""
+    from exomem import working_set
+
+    vault, manifest = probe
+    hub = vault / manifest.hub_paths[0]
+    before, after = retire
+    text = hub.read_text(encoding="utf-8")
+    assert before in text
+    hub.write_text(text.replace(before, after, 1), encoding="utf-8")
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    _live_hot_profile(vault, freshest=manifest.hub_paths[0])
+
+    packet = working_set.compile_packet(vault, turn="continue", max_chars=4000)
+
+    assert manifest.hub_paths[0] not in _statuses(packet)
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert all(
+        manifest.hub_paths[0] not in str(unit.get("ref") or "") for unit in packet["units"]
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Every turn of the context-activation corpus, with a live hot profile.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(scope="module")
+def hot_product_corpus(tmp_path_factory: pytest.TempPathFactory):
+    from epistemic.corpora.context_activation import build_corpus
+
+    root = tmp_path_factory.mktemp("hot-corpus") / "vault"
+    manifest = build_corpus(root, distractor_count=0)
+    return root, manifest
+
+
+@pytest.mark.timeout(240)
+def test_no_corpus_turn_consults_the_prior_under_a_live_hot_profile(
+    hot_product_corpus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """None of the corpus's turns or reminder turns points back, so none of
+    them may be answered, or even ranked, by recency: the hot profile is not
+    computed for any of them, and no anchor they reach carries `recency`.
+    The freshest page is C1's gold collection, so a prior that leaked into
+    T1 — C1's negative twin — would show."""
+    from epistemic.corpora.context_activation import FIXTURES
+
+    from exomem import lexstore, working_set, working_set_runtime
+
+    vault, manifest = hot_product_corpus
+    freshest = manifest.key_to_path["c1_subscriptions_collection"]
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild()
+    assert freshest in {row.path for row in index.anchors()}, "must be an anchor to be hot"
+    _live_hot_profile(vault, freshest=freshest)
+
+    control = working_set.compile_packet(vault, turn="continue", max_chars=4000)
+    assert _statuses(control).get(freshest) == "resolved", (
+        "the profile must be live, or the corpus run below proves nothing"
+    )
+
+    real = working_set.hot_profile
+    consulted: list[str] = []
+
+    def _spy(*args, **kwargs):
+        consulted.append("hot_profile")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(working_set, "hot_profile", _spy)
+    for fixture in FIXTURES:
+        for turn in (fixture.turn, fixture.reminder_turn):
+            packet = working_set.compile_packet(vault, turn=turn, max_chars=4000)
+            assert all(
+                "recency" not in item["evidence"] for item in packet["anchors"]
+            ), (fixture.case_id, turn)
+
+    assert consulted == []

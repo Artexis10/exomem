@@ -2422,6 +2422,69 @@ def guard_referents(
     return guarded
 
 
+def quick_page_visible(
+    vault_root: Path,
+    rel_path: str,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> bool:
+    """Is `rel_path` visible to the CURRENT principal, decided on the release
+    plane alone — no packet, no compile.
+
+    For an activation `anchor` naming a page rather than an index row
+    (design close-memory-loop, agent-picked page), the expensive part —
+    `_carried_packet`'s full unit lane, current-state lookup and budget
+    assembly — buys NOTHING when the answer was always going to be the
+    refusal a withheld page gets: measured at 80 ms against 15 ms for an
+    unknown ref, because the compile ran to completion before the release
+    plane was ever consulted. This is that consultation, moved first.
+
+    Reuses `_decide_path` — the SAME per-path decision `guard_working_set`
+    makes after compiling, memoized per request identity AND page identity —
+    so calling it again from `guard_working_set` for the identical path is
+    the memo hit, never a second stat or a second parse.
+
+    Errs towards compiling on anything this function does not itself fully
+    resolve: an ungoverned vault (`policy.empty`) is visible outright, and a
+    principal or policy state this function cannot decide returns `True` and
+    leaves the actual call to `guard_working_set`, which already owns it and
+    runs regardless. This can only ever produce an EARLY refusal matching
+    what the guard would decide anyway, or a no-op that falls through to the
+    unchanged compile-then-guard path — never a decision the guard would not
+    also have made.
+    """
+    if lifecycle.is_tombstoned(vault_root, rel_path):
+        return False
+    policy, _release_gate_active = gate_state(vault_root)
+    if policy.empty:
+        return True
+    if policy.blocked:
+        return False
+    who = principal if principal is not None else effective_principal()
+    if not who.resolved:
+        return False
+    grants_hash = _grants_hash(policy)
+    declared_purpose = _declared_purpose(vault_root, who, purpose)
+    decision = _decide_path(
+        vault_root,
+        rel_path,
+        policy=policy,
+        audience=who.audience_id,
+        purpose=declared_purpose,
+        grants_hash=grants_hash,
+        authorization_session=who.authorization_session_id,
+        authorization_context=who.verified_authorization_session,
+    )
+    if decision is None:
+        # Undecidable is not admissible: `guard_working_set` withholds an
+        # existing-but-undecided path the same way. The caller has already
+        # proven the path exists (`_eligible_agent_page`), so `None` here
+        # means genuinely undecidable, never merely absent.
+        return False
+    return decision.level >= RELEASE_FLOOR
+
+
 def guard_working_set(
     vault_root: Path,
     packet: dict[str, Any],
@@ -2617,6 +2680,26 @@ def guard_working_set(
     ]
     _note_removal("anchors", len(original_anchors), len(guarded["anchors"]))
 
+    original_recent = [
+        item for item in guarded.get("recent_context") or () if isinstance(item, Mapping)
+    ]
+    guarded["recent_context"] = [
+        entry
+        for entry in (
+            _guarded_recent(item, frozen, invalid_refs) for item in original_recent
+        )
+        if entry is not None
+    ]
+    _note_removal("recent_context", len(original_recent), len(guarded["recent_context"]))
+    # `used_chars` is the caller's account of what it was charged for, and the
+    # compiler budgeted these entries before this guard saw them. What was
+    # removed is subtracted — a subtraction, never a recount: every other
+    # block's characters are in that number too and are not this guard's to
+    # re-derive.
+    _charge_back_removed_recent(
+        guarded, original_recent, guarded["recent_context"]
+    )
+
     original_units = [
         item for item in guarded.get("units") or () if isinstance(item, Mapping)
     ]
@@ -2668,10 +2751,20 @@ def guard_working_set(
             guarded[section] = []
         # `missing` is deliberately NOT cleared: its markers are the only thing
         # left saying the packet is empty because the guard emptied it, rather
-        # than because the compiler found nothing.
+        # than because the compiler found nothing. `recent_context` is not
+        # cleared either: it hangs from no anchor — it is what the vault has
+        # been working on, decided on its own paths above — and it is precisely
+        # what a turn with no anchors left still has to say.
         budget = guarded.get("budget")
         if isinstance(budget, Mapping):
-            guarded["budget"] = {**dict(budget), "used_chars": 0}
+            guarded["budget"] = {
+                **dict(budget),
+                "used_chars": sum(
+                    _recent_entry_chars(entry)
+                    for entry in guarded.get("recent_context") or ()
+                    if isinstance(entry, Mapping)
+                ),
+            }
     return guarded
 
 
@@ -3083,7 +3176,15 @@ def _working_set_paths(
             for item in value:
                 _collect(item, ref_strict=ref_strict)
 
-    for section in ("anchors", "units", "pointers", "current_state", "ambiguity", "missing"):
+    for section in (
+        "recent_context",
+        "anchors",
+        "units",
+        "pointers",
+        "current_state",
+        "ambiguity",
+        "missing",
+    ):
         for item in packet.get(section) or ():
             if isinstance(item, Mapping):
                 _collect(item, ref_strict=not _item_has_own_page_field(item))
@@ -3288,6 +3389,74 @@ def _guarded_anchor(
         if isinstance(stripped, Mapping):
             out.update(stripped)
     return out
+
+
+def _recent_entry_chars(entry: Mapping[str, Any]) -> int:
+    """What one recent entry cost the packet's budget.
+
+    The same arithmetic `working_set._budgeted_recent` charged for it — title
+    plus statement — spelled once so the guard's refund cannot drift from the
+    compiler's charge.
+    """
+    return len(str(entry.get("title") or "")) + len(str(entry.get("statement") or ""))
+
+
+def _charge_back_removed_recent(
+    guarded: dict[str, Any],
+    before: Sequence[Mapping[str, Any]],
+    after: Sequence[Mapping[str, Any]],
+) -> None:
+    """Subtract the removed recent entries' characters from `used_chars`."""
+    removed = sum(map(_recent_entry_chars, before)) - sum(map(_recent_entry_chars, after))
+    if removed <= 0:
+        return
+    budget = guarded.get("budget")
+    if isinstance(budget, Mapping):
+        used = budget.get("used_chars")
+        if isinstance(used, int):
+            guarded["budget"] = {**dict(budget), "used_chars": max(0, used - removed)}
+
+
+def _guarded_recent(
+    entry: Mapping[str, Any],
+    withheld: frozenset[str],
+    invalid_refs: frozenset[str] = frozenset(),
+) -> dict[str, Any] | None:
+    """One `recent_context` entry, decided exactly like a unit.
+
+    The block leads the packet and is served on turns that resolved nothing, so
+    it is the one place where "what has this vault been working on" could
+    become an existence oracle for a page the audience may not have. It gets
+    the same three checks a unit gets, for the same reasons:
+
+    * its typed page fields (`path`, and `ref` when it stands in for one) must
+      not name a withheld page, and must not be an un-unwrappable candidate
+      (which never joins `withheld` and so is matched by exact text);
+    * its authored prose (`title`, `statement`, `why`) must not name one
+      either — an entry reading "status: superseded by [[…]]" names the page as
+      plainly as a path field would, and a statement cannot be edited
+      surgically without the server authoring a claim;
+    * and the item invariant (b): at least one TYPED page reference it carries
+      was decided and ADMITTED. A compiled entry always has a real `path`
+      (`working_set._recent_context`), so `path` is the typed field and `ref`
+      is merely tolerated beside it.
+    """
+    path = str(entry.get("path") or "")
+    ref = str(entry.get("ref") or "")
+    if path in invalid_refs or ref in invalid_refs:
+        return None
+    if _names_withheld(path, withheld) or _names_withheld(ref, withheld, reference_field=True):
+        return None
+    if any(
+        _names_withheld(entry.get(field), withheld, reference_field=True)
+        for field in _WORKING_SET_PROSE_FIELDS
+    ):
+        return None
+    if _value_names_an_invalid_reference(entry, invalid_refs):
+        return None
+    if not _is_admitted_typed_reference(path or ref, invalid_refs):
+        return None
+    return dict(entry)
 
 
 def _guarded_unit(
