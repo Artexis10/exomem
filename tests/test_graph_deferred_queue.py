@@ -928,3 +928,51 @@ def test_a_drain_records_the_topology_it_derived_under(
 
     assert "stored_topology_fingerprint_mismatch" not in caplog.text
     assert EpistemicGraphIndex(vault).available()
+
+
+def test_a_drain_under_recorded_movement_still_lands_the_rows_it_proved(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Movement elsewhere in the vault is not a reason to throw proven rows away.
+
+    The drain proves every page it indexed against that page's own bytes at
+    commit. A write landing on another page moves the vault-global projection,
+    which bars the marker, lineage and acknowledgement -- not the rows. Rolling
+    the whole pass back made every drain lose to the next write under a steady
+    writer, so the queue never shrank while writes kept landing.
+    """
+    committed = _write_without_graph_repair(
+        vault, monkeypatch, {PAGE_A: _page("A", "A is revised against [[queue-b]].")}
+    )
+    real_index_path = EpistemicGraphIndex._index_path
+    landed: list[int] = []
+
+    def index_then_write(self: Any, conn: Any, path: Path, **kwargs: Any) -> bool:
+        outcome = real_index_path(self, conn, path, **kwargs)
+        if Path(path).name == Path(PAGE_A).name:
+            landed.append(1)
+            # A steady writer: every pass over A, the batch and its isolated
+            # retry alike, sees another write land elsewhere. Its post-commit
+            # registry update lands outside the drain's hold, which is what
+            # moves the projection under a real drain.
+            (vault / PAGE_C).write_text(
+                _page("C", f"C lands mid-drain, revision {len(landed)}."), encoding="utf-8"
+            )
+            _seed_live_freshness(vault)
+            deferred_index.add_graph_receipts(vault, [PAGE_C])
+        return outcome
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_index_path", index_then_write)
+    index_sync.drain_graph_work(vault)
+    monkeypatch.undo()
+
+    assert landed
+    assert deferred_index.list_graph_paths(vault) == [PAGE_C], (
+        "the drain threw away rows it proved against their own bytes"
+    )
+    assert _acknowledged(vault) < committed, "a drain the vault moved under acknowledged"
+
+    index_sync.drain_graph_work(vault)
+
+    assert deferred_index.list_graph_paths(vault) == []
+    assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
