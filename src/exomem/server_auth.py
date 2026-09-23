@@ -196,9 +196,19 @@ def _shared_storage_settings() -> tuple[str, str, str, float] | None:
     return storage_url, namespace, storage_token, timeout
 
 
+def _allowed_github_user_id() -> int | None:
+    """The account allowed to sign in, or None when none is configured."""
+    try:
+        value = int(os.environ.get("EXOMEM_GITHUB_USER_ID", "").strip())
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
 def build_session_authority(*, base_url: str) -> SessionAuthority:
     """Build the authoritative durable session store for this deployment."""
     signing_root = _required_signing_root()
+    allowed_github_user_id = _allowed_github_user_id()
     issuer = base_url.rstrip("/")
     audience = f"{issuer}/mcp"
     shared = _shared_storage_settings()
@@ -232,6 +242,7 @@ def build_session_authority(*, base_url: str) -> SessionAuthority:
             timeout=timeout,
             validation_cache=cache,
             stale_grace_seconds=stale_grace_seconds,
+            allowed_github_user_id=allowed_github_user_id,
         )
 
     from fastmcp import settings
@@ -241,6 +252,7 @@ def build_session_authority(*, base_url: str) -> SessionAuthority:
         signing_root=signing_root,
         issuer=issuer,
         audience=audience,
+        allowed_github_user_id=allowed_github_user_id,
     )
 
 

@@ -792,3 +792,68 @@ async def test_rejected_sessions_name_their_reason_without_leaking_material(
         assert record.token_digest not in message
         assert str(record.github_user_id) not in message
         assert record.github_login not in message
+
+
+def _allowing(store: AtomicMemoryStore, allowed: int | None) -> SessionAuthority:
+    return SessionAuthority(
+        storage=store,
+        signing_root="test-signing-root",
+        issuer="https://memory.example",
+        audience="https://memory.example/mcp",
+        clock=lambda: 1_800_000_000.0,
+        allowed_github_user_id=allowed,
+    )
+
+
+@pytest.mark.anyio
+async def test_sessions_of_an_account_no_longer_allowed_stop_validating(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Changing the allowed sign-in account ends every session of the former
+    one in the same step, with no separate `revoke --all`."""
+    store = AtomicMemoryStore()
+    issuing = _allowing(store, 123456)
+    legacy, legacy_record = await issuing.issue(
+        client_id="codex", scopes=("exomem:read",), identity=_identity()
+    )
+    access, access_record, refresh = await issuing.issue_offline(
+        client_id="chatgpt",
+        scopes=("offline_access", "exomem:read"),
+        identity=_identity(),
+    )
+    assert await issuing.validate(legacy) == legacy_record
+    assert await issuing.validate(access) == access_record
+
+    rotated = _allowing(store, 654321)
+    with caplog.at_level("INFO", logger="exomem.auth_sessions"):
+        assert await rotated.validate(legacy) is None
+        assert await rotated.validate(access) is None
+    assert await rotated.validate_refresh(refresh, client_id="chatgpt") is None
+    with pytest.raises(InvalidRefreshToken):
+        await rotated.rotate_refresh(
+            refresh, client_id="chatgpt", scopes=("offline_access", "exomem:read")
+        )
+    rejections = [r.getMessage() for r in caplog.records if "session_rejected" in r.getMessage()]
+    assert rejections and all("reason=identity_not_allowed" in m for m in rejections)
+    assert not any("123456" in m or "654321" in m for m in caplog.messages)
+
+    # Rotating back restores them: nothing was revoked, only refused.
+    restored = _allowing(store, 123456)
+    assert await restored.validate(legacy) == legacy_record
+    assert await restored.validate_refresh(refresh, client_id="chatgpt") is not None
+
+
+@pytest.mark.anyio
+async def test_an_install_without_an_allowed_account_validates_as_before() -> None:
+    store = AtomicMemoryStore()
+    authority = _allowing(store, None)
+    bearer, record = await authority.issue(
+        client_id="codex", scopes=("exomem:read",), identity=_identity()
+    )
+    assert await authority.validate(bearer) == record
+
+
+def test_allowed_account_must_be_a_positive_integer() -> None:
+    for bad in (0, -1, True):
+        with pytest.raises(ValueError):
+            _allowing(AtomicMemoryStore(), bad)
