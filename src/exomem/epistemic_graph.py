@@ -10172,8 +10172,10 @@ def _embedding_proximity_candidates(vault_root: Path, page) -> list[dict[str, An
     try:
         from . import corpus_aware
 
+        # The page is stored: its current rows already hold a vector for each of
+        # these chunk texts, so only a text they lack is encoded.
         scores = corpus_aware._best_cosine_per_file(
-            vault_root, title=page.title, body=page.body, k=10
+            vault_root, title=page.title, body=page.body, k=10, published_path=page.rel_path
         )
     except Exception:  # noqa: BLE001 - writer hooks must not break Markdown writes
         return []

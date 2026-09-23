@@ -11782,6 +11782,61 @@ HOSTED_SURFACE_EXCLUSIONS = MappingProxyType(
 )
 
 
+CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
+    {
+        exclusion.command: exclusion
+        for exclusion in (
+            HostedSurfaceExclusion(
+                command="transfer_artifact",
+                reason=(
+                    "An Exomem Cloud cell has no browser transfer or "
+                    "gateway-mediated upload flow to bridge this leaf into; "
+                    "direct browser transfers are out of scope for Exomem Cloud "
+                    "(design Non-Goals)."
+                ),
+                lifted_when=(
+                    "a browser transfer or artifact-upload path is added to "
+                    "Exomem Cloud"
+                ),
+            ),
+            HostedSurfaceExclusion(
+                command="adopt_vault",
+                reason=(
+                    "There is no upload-then-adopt staging flow for Exomem "
+                    "Cloud cells; a self-serve export/import UI is out of scope "
+                    "for Exomem Cloud (design Non-Goals)."
+                ),
+                lifted_when="an upload/import path is added to Exomem Cloud",
+            ),
+            HostedSurfaceExclusion(
+                command="process_media",
+                reason=(
+                    "The `cloud` image is built from the `hosted` runtime "
+                    "stage, which installs only the `embeddings-onnx` extra "
+                    "and gates the build on torch being absent, so media "
+                    "extraction has no dependencies in the image."
+                ),
+                lifted_when=(
+                    "a media-capable cloud image ships with the required "
+                    "decoding dependencies"
+                ),
+            ),
+            HostedSurfaceExclusion(
+                command="read_media",
+                reason=(
+                    "Sampling video frames needs the same decoding "
+                    "dependencies the cloud image omits."
+                ),
+                lifted_when=(
+                    "a media-capable cloud image ships with the required "
+                    "decoding dependencies"
+                ),
+            ),
+        )
+    }
+)
+
+
 def hosted_complete_surface_names() -> tuple[str, ...]:
     """The product command surface minus the recorded hosted exclusions.
 

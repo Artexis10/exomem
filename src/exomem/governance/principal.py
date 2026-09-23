@@ -31,7 +31,9 @@ resolved here.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterator
+import os
+import re
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
@@ -76,6 +78,23 @@ _REQUEST_PRINCIPAL: ContextVar[RequestPrincipal | None] = ContextVar(
     "exomem_request_principal", default=None
 )
 
+# The host's explicit binding of one remote OAuth identity as the owner. It is
+# read only from the process environment the host's service configuration
+# supplies -- never from the vault, a policy document, a request or a claim --
+# so no remote surface can create or widen it. The grammar is spelled out in
+# ASCII because `\d`, `str.isdecimal()` and `int()` all accept Unicode digits.
+REMOTE_OWNER_SUBJECT_ENV = "EXOMEM_OWNER_OAUTH_SUBJECT"
+_GITHUB_OWNER_SUBJECT = re.compile(r"github:([1-9][0-9]{0,18})", re.ASCII)
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteOwnerBinding:
+    """One armed binding: the provider subject and the issuer it must come from."""
+
+    provider: str
+    user_id: int
+    issuer: str
+
 
 @dataclass(frozen=True, slots=True)
 class RequestPrincipal:
@@ -89,6 +108,18 @@ class RequestPrincipal:
     resolved: bool = True
     issuer_family: str | None = None
     verified_authorization_session: AuthorizationSessionContext | None = None
+    # True only for the owner audience reached through the host's explicit
+    # remote binding. It labels the request; it never changes a decision.
+    remote_owner: bool = False
+
+    @property
+    def principal_kind(self) -> str:
+        """Closed audit label: `owner`, `owner-oauth`, `principal` or `unresolved`."""
+        if not self.resolved:
+            return "unresolved"
+        if self.audience_id == OWNER_AUDIENCE:
+            return "owner-oauth" if self.remote_owner else "owner"
+        return "principal"
 
     def with_purpose(self, purpose: str | None) -> RequestPrincipal:
         """Layer a per-call declared purpose on without mutating the binding."""
@@ -200,6 +231,98 @@ def _mcp_identity_claims() -> tuple[dict[str, Any] | None, str | None]:
     return None, "authenticated"
 
 
+def _allowed_github_user_id(environ: Mapping[str, str]) -> int | None:
+    """The account the sign-in verifier admits, parsed as `build_oauth` does."""
+    raw = str(environ.get("EXOMEM_GITHUB_USER_ID", "") or "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _parse_remote_owner_subject(raw: str) -> int | None:
+    match = _GITHUB_OWNER_SUBJECT.fullmatch(raw)
+    return int(match.group(1)) if match is not None else None
+
+
+def remote_owner_binding_state(environ: Mapping[str, str] | None = None) -> str:
+    """`unset`, `malformed`, `mismatch` or `active` -- content-free by design.
+
+    `mismatch` is a well-formed binding that names an account other than the
+    one allowed to sign in, so it can never apply.
+    """
+    env = os.environ if environ is None else environ
+    raw = str(env.get(REMOTE_OWNER_SUBJECT_ENV, "") or "").strip()
+    if not raw:
+        return "unset"
+    user_id = _parse_remote_owner_subject(raw)
+    if user_id is None:
+        return "malformed"
+    if user_id != _allowed_github_user_id(env):
+        return "mismatch"
+    return "active"
+
+
+def remote_owner_binding(
+    environ: Mapping[str, str] | None = None,
+) -> RemoteOwnerBinding | None:
+    """The armed binding, or None -- which is exactly today's behaviour.
+
+    Unset, malformed, naming an account other than the allowed sign-in account,
+    or lacking this install's base URL all read as "no binding": failing closed
+    on privilege while the service stays up.
+    """
+    env = os.environ if environ is None else environ
+    if remote_owner_binding_state(env) != "active":
+        return None
+    issuer = str(env.get("EXOMEM_BASE_URL", "") or "").strip().rstrip("/")
+    if not issuer:
+        return None
+    user_id = _parse_remote_owner_subject(
+        str(env.get(REMOTE_OWNER_SUBJECT_ENV, "") or "").strip()
+    )
+    if user_id is None:  # pragma: no cover - the state check above parsed it
+        return None
+    return RemoteOwnerBinding(provider="github", user_id=user_id, issuer=issuer)
+
+
+def _verified_access_token() -> object | None:
+    """The live request's verified access token, or None. Never reads headers."""
+    try:
+        from fastmcp.server.dependencies import get_access_token
+    except ImportError:  # pragma: no cover - fastmcp is a hard dependency
+        return None
+    try:
+        return get_access_token()
+    except (LookupError, RuntimeError, TypeError):
+        return None
+
+
+def _is_bound_remote_owner(token: object, binding: RemoteOwnerBinding | None) -> bool:
+    """Whether a verified token is the host's bound remote owner.
+
+    Provenance first: only the durable session proxy's own token type carries
+    the marker, so a raw bearer header, a plain `AccessToken`, another
+    verifier, or a hosted or cell credential with copied claims never matches.
+    Then this install's issuer, and a typed id that `sub` agrees with.
+    """
+    if binding is None or token is None:
+        return False
+    if getattr(type(token), "EXOMEM_SESSION_PROVENANCE", False) is not True:
+        return False
+    claims = getattr(token, "claims", None)
+    if not isinstance(claims, Mapping):
+        return False
+    user_id = claims.get("github_user_id")
+    return (
+        type(user_id) is int
+        and user_id == binding.user_id
+        and claims.get("sub") == str(user_id)
+        and claims.get("iss") == binding.issuer
+    )
+
+
 def resolve_mcp_principal() -> RequestPrincipal:
     """MCP boundary: OAuth principal, bearer credential, or local-stdio owner."""
     claims, expectation = _mcp_identity_claims()
@@ -208,6 +331,20 @@ def resolve_mcp_principal() -> RequestPrincipal:
         if audience != MOST_RESTRICTIVE_AUDIENCE:
             issuer = str(claims.get("iss") or "verified-principal").strip()
             issuer_digest = hashlib.sha256(issuer.encode()).hexdigest()
+            binding = remote_owner_binding()
+            if binding is not None and _is_bound_remote_owner(
+                _verified_access_token(), binding
+            ):
+                # One more explicit owner entry point, not a normalisation: the
+                # remote issuer family is kept so session authority never
+                # crosses between the owner's local and remote doors.
+                return RequestPrincipal(
+                    audience_id=OWNER_AUDIENCE,
+                    surface="mcp",
+                    resolved=True,
+                    issuer_family=f"mcp-oauth:{issuer_digest}",
+                    remote_owner=True,
+                )
             return RequestPrincipal(
                 audience_id=audience,
                 surface="mcp",

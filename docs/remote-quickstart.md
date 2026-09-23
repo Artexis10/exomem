@@ -239,6 +239,38 @@ Then add Exomem behavior to the hosted client. Paste the instruction block from
 [ai-assistant-guide.md](ai-assistant-guide.md), or at minimum start new chats by
 asking it to call `bootstrap(profile="compact")` once before using the KB.
 
+### Act as the owner from your remote connectors (optional)
+
+By default a remote sign-in is a separate, non-owner principal: governance
+treats your phone or web connector as someone other than you. If the GitHub
+account in `EXOMEM_GITHUB_USER_ID` is your own, add one line to `.env` (or the
+managed install's `service.env`) and restart the service:
+
+```text
+EXOMEM_OWNER_OAUTH_SUBJECT=github:<the value of EXOMEM_GITHUB_USER_ID>
+```
+
+`exomem setup --remote` asks this once and writes the line for you; with
+`--yes` it writes it only when you pass `--remote-owner` (`--no-remote-owner`
+removes it).
+
+Remote sign-ins by that account then act as the owner: default-deny scopes,
+owner-only governance and your per-owner state (episode ledgers, prominence)
+are the same as on your local doors. They stay labelled remote: ledger rows say
+`principal_kind: owner-oauth` with the remote caller hash, and a governance
+session opened locally cannot be resumed remotely, or the reverse.
+
+- The value is only ever read from the service environment, never from the
+  vault. A malformed value is treated as unset and never stops the service.
+- `exomem doctor --profile remote` reports `env.EXOMEM_OWNER_OAUTH_SUBJECT` as
+  unset, active, mismatch or malformed. Before enabling it, read
+  `governance.remote_owner_former_audience`: rules or grants that name your
+  remote connector's former `principal:` audience stop applying to it once
+  bound. Nothing is migrated; removing the line restores them.
+- `exomem auth sessions` marks the sessions that act as the owner.
+- On an HA pair, set the line on every replica, or the audience flips between
+  replicas.
+
 ### Reuse this service from Claude Code and Codex
 
 Do not leave desktop clients on separate full stdio processes after installing

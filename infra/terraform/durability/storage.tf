@@ -203,3 +203,56 @@ resource "b2_application_key" "etcd_snapshot_restore" {
   name_prefix  = "etcd-snapshot/"
   capabilities = ["listBuckets", "listFiles", "readFiles"]
 }
+
+# The control database's pgBackRest repository (D12): its own bucket, not
+# a prefix inside database_backup, which serves the older provisioner's
+# pg_dump-based backup instead -- a different tool, different database,
+# different retention shape. Like etcd_snapshot, this deliberately has NO
+# Object Lock: pgBackRest owns its own retention (repo1-retention-full) and
+# actively deletes files it expires. Enabling B2 governance retention would
+# make those deletes fail once a file was still under lock, the same
+# Content-MD5/x-amz-checksum-header conflict already documented above for
+# k3s's uploader would apply here too (pgBackRest's PUTs carry neither), and
+# either way the bucket only ever holds cluster-adjacent backup state that
+# is reconstructible from a prior full backup and WAL, not the one tenant
+# copy an Object-Lock bucket exists to protect. days_from_hiding_to_deleting
+# = 1 is the actual ask: once pgBackRest's own expire deletes a file (which
+# hides it, since the bucket is versioned), the hidden version is purged a
+# day later instead of lingering. days_from_uploading_to_hiding is set far
+# outside pgBackRest's own retention window so it is a pure backstop -- in
+# normal operation pgBackRest's own expire is what creates hidden versions,
+# not this rule.
+resource "b2_bucket" "control_db_pgbackrest" {
+  bucket_name = "${var.bucket_prefix}-control-db-${random_id.bucket_suffix.hex}"
+  bucket_type = "allPrivate"
+
+  default_server_side_encryption {
+    mode      = "SSE-B2"
+    algorithm = "AES256"
+  }
+
+  lifecycle_rules {
+    file_name_prefix              = ""
+    days_from_uploading_to_hiding = 3650
+    days_from_hiding_to_deleting  = 1
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# One key, not a split upload/restore/delete set: pgBackRest needs to list,
+# read, write and delete within its own repository path to back up, restore
+# and expire old backups, and nothing here reads it outside that one
+# process. Scoped to control-db/ (postgres_pgbackrest_s3_key_prefix's
+# default), matching pgbackrest.conf's repo1-path, even though the bucket
+# is already dedicated -- the same defense-in-depth every other key in this
+# file applies to its own dedicated bucket. No retention capabilities: this
+# bucket has no Object Lock.
+resource "b2_application_key" "control_db_pgbackrest" {
+  key_name     = "exomem-control-db-pgbackrest"
+  bucket_ids   = [b2_bucket.control_db_pgbackrest.bucket_id]
+  name_prefix  = "control-db/"
+  capabilities = ["listBuckets", "listFiles", "readFiles", "writeFiles", "deleteFiles"]
+}
