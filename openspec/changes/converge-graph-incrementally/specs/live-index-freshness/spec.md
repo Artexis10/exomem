@@ -67,6 +67,11 @@ A Class C mark SHALL name the unexplained paths when the proof can enumerate the
 SHALL be unscoped only when it cannot. It is allocated once per proof, and its clearers
 are unchanged.
 
+The recall corpus SHALL read each page it walked by the spelling the walk found, as the
+freshness identity names it, so a page whose name is not in NFKC form -- a macOS-origin
+NFD name on a byte-exact file system -- is in the resolver, and is never evidence under
+(1). Classifying reserved names still reads the NFKC, case-folded form.
+
 #### Scenario: Governed writes during every attempt of a whole-vault pass
 
 - **WHEN** governed writes commit during every attempt of a whole-vault pass until its
@@ -80,6 +85,12 @@ are unchanged.
 - **WHEN** a page's bytes change during a whole-vault pass without any recorder
   observing it
 - **THEN** the pass raises Class C and the external-pending mark names exactly that page
+
+#### Scenario: A page with a decomposed name does not block a whole-vault rebuild
+
+- **WHEN** the vault holds a page whose name is NFD on a byte-exact file system
+- **THEN** a whole-vault pass reads it into the resolver, publishes, and the graph shows
+  no drift
 
 #### Scenario: An incomplete registry history is not evidence
 
