@@ -183,6 +183,29 @@ def test_a_failing_watch_is_counted_not_raised(monkeypatch: pytest.MonkeyPatch) 
     assert watch.failures == 1
 
 
+def test_a_breach_log_names_only_the_client_family_in_content_private_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The watch still keys on the caller's own name, so `bootstrap_block`
+    matches it; only the logged field is bounded (cloud design D1.2)."""
+    from exomem import log_events
+
+    events: list[dict] = []
+    monkeypatch.setattr(
+        log_events, "log_event",
+        lambda logger, level, event, *, fields=None, content=None, exc_info=None: events.append(
+            {"event": event, "fields": dict(fields or {})}
+        ),
+    )
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    phrase = "lwx-crimson-marmot my private project title"
+    watch, _clock = _watch()
+    _fill(watch, n=25, total_ms=3000, client=phrase)
+    assert [e["event"] for e in events] == ["latency_ceiling_exceeded"]
+    assert events[0]["fields"]["client"] == "other"
+    assert watch.breaches(client=phrase), "the watch itself still keys on the real name"
+
+
 def test_a_breach_logs_one_event_per_interval(monkeypatch: pytest.MonkeyPatch) -> None:
     from exomem import log_events
 

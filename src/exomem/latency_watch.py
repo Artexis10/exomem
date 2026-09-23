@@ -287,6 +287,7 @@ class Watch:
                     return
                 self._reported[key] = now
             from .log_events import log_event
+            from .privacy_log import log_client_label
 
             log_event(
                 log,
@@ -294,7 +295,9 @@ class Watch:
                 EVENT,
                 fields={
                     "tool": row["tool"],
-                    "client": row["client"],
+                    # Keyed by the caller's own name above, so bootstrap_block
+                    # still matches it; only the logged value is bounded.
+                    "client": log_client_label(row["client"]),
                     "deep": row["deep"],
                     "samples": row["samples"],
                     "p50_ms": row["p50_ms"],
