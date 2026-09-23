@@ -961,8 +961,8 @@ def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
                 "graph_sync.state",
                 "warn",
                 f"graph_sync is current at generation {generation}, but {quarantined} "
-                "page(s) could not be read and are left out of the graph.",
-                "Check the files' permissions; a later write to a page queues it again.",
+                "page(s) could not be read; the graph keeps their last readable version.",
+                "Check the files' permissions or encoding; a change to a page retries it.",
                 details=details,
             )
         return _check(

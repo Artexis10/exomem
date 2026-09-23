@@ -326,8 +326,11 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   topology it derived under (else the next topology-changing write fell back on
   `stored_topology_fingerprint_mismatch`), keeps the rows it proved when the vault moves
   elsewhere, a late refresh of an already-acknowledged generation is a no-op, and a
-  receipt no drain can derive is quarantined after `GRAPH_POISON_ATTEMPTS` rather than
-  rotated forever (`tests/test_graph_deferred_queue.py`). The marker invariant is parked
+  receipt whose page's own bytes fail -- not UTF-8, or an `OSError` older than
+  `GRAPH_POISON_MIN_AGE_SECONDS` -- is quarantined after `GRAPH_POISON_ATTEMPTS` rather
+  than rotated forever, keeping the page's rows and retried on a stat change or after
+  `GRAPH_QUARANTINE_RETRY_SECONDS`; a busy boundary, a locked store or a brief lock never
+  counts (`tests/test_graph_deferred_queue.py`). The marker invariant is parked
   with 7.2.
 - [x] 7.7 Cool the event registry only on evidence it is behind the disk: classify a
   moved whole-vault pass against the registry's own history; recorded movement is a

@@ -431,20 +431,42 @@ owed, and the fallback would withdraw a current marker or register a whole-vault
 
 ### Requirement: An underivable receipt is quarantined, not rotated forever
 
-A queued path whose isolated drain attempt fails for a reason other than a race -- its
-bytes cannot be read -- SHALL be counted, and after a bounded number of failed attempts
-its receipt SHALL be quarantined: its graph rows are dropped, as a whole-vault pass
-derives none for a page it cannot read, and its receipt leaves the queue by exact
-revision. A movement or readiness refusal SHALL NOT count. A queued path that derived to
-no rows -- deleted, or no longer recall Markdown -- SHALL retire its receipt with the
-deletion. The residual lag and the doctor SHALL report quarantined paths; a path that
-later derives forgets its failures, and a later write queues it as ordinary work.
+A queued path whose isolated drain attempt fails on its own bytes -- they are not UTF-8,
+or reading them raises an operating-system error that persists past a minimum age of
+minutes since its first failure -- SHALL be counted, and after a bounded number of such
+failures its receipt SHALL be quarantined: it leaves the queue by exact revision so the
+queue can empty around it. Quarantine SHALL only stop hot retries: the rows of a page
+that still exists SHALL NOT be deleted. A movement or readiness refusal SHALL NOT count:
+anything raised out of the drain pass -- a busy mutation boundary, a locked store -- and
+a page that reads and decodes when checked rotate their receipt, however long they last.
+A queued path that derived to no rows -- deleted, or no longer recall Markdown -- SHALL
+retire its receipt with the deletion.
+
+A quarantined path SHALL be queued again when its stat signature changes, and otherwise
+on a slow periodic retry. Any pass that derives the page, including a whole-vault
+rebuild, SHALL clear its failure record. The residual lag and the doctor SHALL report
+quarantined paths.
 
 #### Scenario: One unreadable page does not keep the queue from emptying
 
-- **WHEN** a queued page's bytes cannot be read on every drain attempt
-- **THEN** after the bounded attempts its receipt is quarantined, the rest of the queue
-  converges, and the lag and doctor report one quarantined path
+- **WHEN** a queued page's bytes cannot be read on every drain attempt for longer than
+  the minimum age
+- **THEN** after the bounded attempts its receipt is quarantined, its existing rows stay,
+  the rest of the queue converges, and the lag and doctor report one quarantined path
+
+#### Scenario: A busy boundary or a brief lock never quarantines a page
+
+- **WHEN** the drain pass is refused by a busy boundary or a locked store, or a page is
+  unreadable for a few drain ticks and then reads normally
+- **THEN** its receipt rotates without counting, its rows stay, and the drain repairs it
+  once the refusal ends
+
+#### Scenario: A quarantined page is retried and its record cleared once it derives
+
+- **WHEN** a quarantined page changes, its retry interval passes, or a whole-vault
+  rebuild derives it
+- **THEN** it is queued again or derived, and a pass that derives it clears its record
+  and the doctor's warning
 
 ### Requirement: Residual graph lag is reported
 

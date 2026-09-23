@@ -1113,10 +1113,13 @@ def _drain_graph_work(
         try:
             single = index.drain_paths([path])
         except Exception:  # noqa: BLE001 - one poison page must not pin the queue
+            # A busy boundary, a locked store, anything raised out of the pass:
+            # a readiness refusal, never the page's fault, so it never counts.
             log.warning(
                 "deferred graph receipt failed; work remains queued", exc_info=True
             )
-            single = {"failed": 1}
+            deferred_index.rotate_graph_receipts(vault_root, [receipt])
+            continue
         if receipt.rel_path in set(single.get("indexed", ())):
             processed += deferred_index.clear_graph_receipts(vault_root, [receipt])
             continue
@@ -1125,32 +1128,40 @@ def _drain_graph_work(
             # counting it would quarantine a page for being written to.
             deferred_index.rotate_graph_receipts(vault_root, [receipt])
             continue
-        if not single.get("failed") and index._derives_no_rows(receipt.rel_path):
+        cause = index._underivable_cause(receipt.rel_path)
+        if cause == "no_rows":
             # Deleted, or no longer recall Markdown: the pass removed its rows,
             # which is the whole repair, so the receipt retires with them
             # rather than rotating behind the queue forever.
             processed += deferred_index.clear_graph_receipts(vault_root, [receipt])
             continue
-        if deferred_index.note_graph_failure(vault_root, receipt.rel_path) < (
-            epistemic_graph.GRAPH_POISON_ATTEMPTS
-        ):
+        if cause is None:
+            # The page reads and decodes now: whatever stopped the pass was not
+            # its bytes.
             log.warning("deferred graph receipt incomplete; work remains queued")
             deferred_index.rotate_graph_receipts(vault_root, [receipt])
             continue
-        # Bounded: the page has failed every isolated attempt. Its rows go --
-        # a whole-vault pass derives none for a page it cannot read -- and its
-        # receipt is set aside, so it no longer keeps the queue from emptying.
-        # A later write to it queues it as ordinary work again.
-        try:
-            index.delete_paths([receipt.rel_path])
-        except Exception:  # noqa: BLE001 - the receipt stays queued and rotates
-            log.warning("deferred graph quarantine failed; work remains queued", exc_info=True)
+        attempts, first_failed_at = deferred_index.note_graph_failure(
+            vault_root, receipt.rel_path
+        )
+        if attempts < epistemic_graph.GRAPH_POISON_ATTEMPTS or (
+            cause == "unreadable"
+            and time.time() - first_failed_at < epistemic_graph.GRAPH_POISON_MIN_AGE_SECONDS
+        ):
+            log.warning("deferred graph receipt %s; work remains queued", cause)
             deferred_index.rotate_graph_receipts(vault_root, [receipt])
             continue
-        if deferred_index.quarantine_graph_receipt(vault_root, receipt):
+        # Bounded: the page's own bytes have failed every attempt. Its receipt
+        # is set aside so the queue can empty around it; its rows stay, because
+        # the page still exists. A change to it, or the slow retry timer,
+        # queues it again (`requeue_quarantined_graph_paths`).
+        if deferred_index.quarantine_graph_receipt(
+            vault_root, receipt, signature=_graph_stat_token(path)
+        ):
             log.warning(
-                "deferred graph receipt quarantined after %d failed attempts",
-                epistemic_graph.GRAPH_POISON_ATTEMPTS,
+                "deferred graph receipt quarantined after %d failed attempts cause=%s",
+                attempts,
+                cause,
             )
             processed += 1
         else:
@@ -1160,6 +1171,41 @@ def _drain_graph_work(
         # whatever withdrew while it ran.
         _republish_graph_availability(index)
     return processed
+
+
+def _graph_stat_token(path: Path) -> str:
+    """The stat signature a quarantined page is retried on a change to."""
+    try:
+        st = path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return "absent"
+    except OSError:
+        return "unstatable"
+    return f"{st.st_mtime_ns}:{st.st_ctime_ns}:{st.st_size}"
+
+
+def requeue_quarantined_graph_paths(vault_root: Path) -> int:
+    """Give quarantined pages one more attempt; return how many were queued.
+
+    A page is retried when its stat signature has changed since it was set
+    aside -- edited, replaced, deleted -- and otherwise once
+    `GRAPH_QUARANTINE_RETRY_SECONDS` have passed since its last failure. One
+    readonly read when nothing is quarantined, so the drain can call it on
+    every wake.
+    """
+    from . import epistemic_graph
+
+    quarantined = deferred_index.quarantined_graph_paths(vault_root)
+    if not quarantined:
+        return 0
+    now = time.time()
+    due = [
+        rel
+        for rel, signature, last_failed_at in quarantined
+        if _graph_stat_token(vault_root / rel) != signature
+        or now - last_failed_at >= epistemic_graph.GRAPH_QUARANTINE_RETRY_SECONDS
+    ]
+    return deferred_index.release_graph_quarantine(vault_root, due)
 
 
 def _republish_graph_availability(index) -> None:

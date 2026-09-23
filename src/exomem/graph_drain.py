@@ -223,6 +223,20 @@ def _queue_pending(vault_root: Path) -> bool:
         return False
 
 
+def _requeue_quarantined(vault_root: Path) -> None:
+    """Queue quarantined pages that changed or are due a slow retry. Never raises.
+
+    Here rather than in the drain: a settled graph is never drained, and a
+    quarantined page's retry has to reach it anyway.
+    """
+    from . import index_sync
+
+    try:
+        index_sync.requeue_quarantined_graph_paths(vault_root)
+    except Exception:  # noqa: BLE001 - a missed retry waits for the next wake
+        log.debug("graph drain: quarantined paths unreadable", exc_info=True)
+
+
 def _pending(vault_root: Path) -> bool:
     """True when the graph owes work of either kind.
 
@@ -434,6 +448,7 @@ def _run(vault_root: Path) -> None:
             # Settle. `wait` returning True here means a stop was requested.
             if _stop.wait(DEBOUNCE_SECONDS):
                 break
+        _requeue_quarantined(vault_root)
         if not _pending(vault_root):
             backoff = 0.0
             held_since = None

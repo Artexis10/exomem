@@ -267,8 +267,11 @@ What landed from that work stands on its own:
   waiting on the batch lock a writer holds while it waits for that boundary.
 - **The queue keeps converging under a steady writer.** A drain records the topology it
   derived under, keeps rows it proved when the vault moves elsewhere, a late refresh of
-  an acknowledged generation is a no-op, and an underivable receipt is quarantined after
-  bounded attempts.
+  an acknowledged generation is a no-op, and a receipt whose page's own bytes keep
+  failing is quarantined after bounded attempts. Quarantine only stops hot retries: the
+  page keeps its rows, and a change to it or a slow timer retries it. A busy boundary or
+  a brief lock never counts, because the cost of quarantining a healthy page -- missing
+  or stale rows nothing repairs -- is far higher than the hot retries it saves.
 - **Residual lag is reported** wherever unavailability is reported, without a vault walk;
   the read fence stays fail-closed.
 

@@ -88,9 +88,20 @@ REBUILD_PUBLICATION_ATTEMPTS = REBUILD_STABILIZATION_ATTEMPTS * 2
 REBUILD_SUPERSESSION_RETRIES = 1
 #: Isolated drain attempts a queued path may fail before its receipt is
 #: quarantined. A page whose bytes cannot be read derives nothing and leaves
-#: its receipt queued; rotated forever, it keeps the queue from ever emptying
-#: and the page keeps the rows of its last readable version.
+#: its receipt queued; rotated forever, it keeps the queue from ever emptying.
+#: Only a fault of the page's own bytes counts -- bytes that are not UTF-8, or
+#: an `OSError` that outlives `GRAPH_POISON_MIN_AGE_SECONDS` -- never a busy
+#: boundary, a locked store or a race, which rotate. Quarantine only stops the
+#: hot retries: the page keeps the rows of its last readable version.
 GRAPH_POISON_ATTEMPTS = 3
+#: How long an `OSError` reading a page must persist, from its first failed
+#: attempt, before it counts toward quarantine. Minutes, not ticks: an editor
+#: or a sync tool holding a page for a moment is not poison.
+GRAPH_POISON_MIN_AGE_SECONDS = 600.0
+#: How long a quarantined page waits, from its last failure, before one more
+#: attempt with no change to it. A change to its stat signature retries it at
+#: the drain's next wake instead.
+GRAPH_QUARANTINE_RETRY_SECONDS = 3600.0
 # The epoch kinds a *per-path* repair may run against. `recoverable` is excluded
 # on purpose: it means the checkpoint is behind its floor, so the lineage does
 # not yet say what the paths should be repaired to. See
@@ -2948,6 +2959,7 @@ class EpistemicGraphIndex:
                 )
         if published is not None:
             _retire_covered_full_marker(self.vault_root, paid_marker)
+            self._forget_rebuilt_graph_failures()
             return published
         if epoch_error is not None:
             raise epoch_error
@@ -3996,26 +4008,66 @@ class EpistemicGraphIndex:
             finally:
                 conn.close()
 
-    def _derives_no_rows(self, rel: str) -> bool:
-        """Whether `rel` has no graph rows to derive, read at commit time.
+    def _forget_rebuilt_graph_failures(self) -> None:
+        """Forget the failures of pages a just-published whole-vault pass derived.
 
-        What `_index_path` deletes rather than indexes: an absent path, one
-        that is not recall Markdown, or bytes that are not UTF-8. A receipt for
-        such a path is repaired by the deletion, so it clears with the indexed
-        ones instead of rotating behind the queue forever.
+        The pass started from empty tables, so a page with rows in the published
+        sidecar is a page it read. Its record describes a failure that no longer
+        holds, and left standing it keeps the doctor warning about a page the
+        graph now carries. Never raises: a stale record costs a warning until
+        the page's next retry, never the publication.
+        """
+        try:
+            failed = deferred_index.graph_failure_paths(self.vault_root)
+            if not failed:
+                return
+            conn = self._connect_existing(readonly=True)
+            try:
+                derived = {
+                    rel
+                    for rel in failed
+                    if conn.execute(
+                        "SELECT 1 FROM graph_nodes WHERE path = ? LIMIT 1", (rel,)
+                    ).fetchone()
+                    is not None
+                }
+            finally:
+                conn.close()
+            if derived:
+                deferred_index.forget_graph_failures(self.vault_root, derived)
+        except Exception:  # noqa: BLE001 - a stale record never fails a publication
+            log.warning(
+                "graph publication could not forget derived page failures", exc_info=True
+            )
+
+    def _underivable_cause(self, rel: str) -> str | None:
+        """Why a pass that did not index `rel` could not, if the page is why.
+
+        `"no_rows"`: nothing to derive -- an absent path, or one that is not
+        recall Markdown, which `_index_path` deletes rather than indexes -- so
+        the receipt is repaired by that deletion. `"undecodable"`: its bytes
+        are not UTF-8. `"unreadable"`: reading it raised `OSError`. None: the
+        page reads and decodes now, so whatever stopped the pass was not the
+        page.
         """
         path = self.vault_root / rel
         if not rel.lower().endswith(".md") or vault_module.in_excluded_scan_dir(rel):
-            return True
-        if not path.exists() or not recall_policy.is_recall_candidate(self.vault_root, path):
-            return True
+            return "no_rows"
         try:
+            path.stat()
+        except (FileNotFoundError, NotADirectoryError):
+            return "no_rows"
+        except OSError:
+            return "unreadable"
+        try:
+            if not recall_policy.is_recall_candidate(self.vault_root, path):
+                return "no_rows"
             vault_module.read_bytes_without_pinning(path).decode("utf-8")
         except UnicodeDecodeError:
-            return True
+            return "undecodable"
         except OSError:
-            return False
-        return False
+            return "unreadable"
+        return None
 
     def _read_barrier_value(self) -> str | None:
         """The persisted read barrier's value, or None. An unreadable sidecar reads None."""
