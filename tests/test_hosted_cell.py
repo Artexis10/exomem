@@ -382,6 +382,57 @@ def test_feature_grants_limits_and_privacy_defaults_are_deterministic(
     assert error.value.code == "HOSTED_FEATURE_UNKNOWN"
 
 
+def test_a_planted_remote_owner_binding_never_reaches_a_hosted_cell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A personal owner binding is cleared from a hosted cell, and no hosted
+    principal or cell credential matches one even when it is present."""
+    from fastmcp.server import dependencies as fastmcp_dependencies
+    from fastmcp.server.auth.auth import AccessToken
+
+    from exomem.governance.principal import (
+        OWNER_AUDIENCE,
+        resolve_hosted_principal,
+        resolve_mcp_principal,
+    )
+
+    config = HostedCellConfig.from_env(_env(tmp_path), require_provisioned=False)
+    planted = {
+        "EXOMEM_OWNER_OAUTH_SUBJECT": "github:4242",
+        "EXOMEM_GITHUB_USER_ID": "4242",
+        "EXOMEM_BASE_URL": "https://planted.invalid",
+    }
+    process_env = dict(planted)
+    config.apply_process_environment(process_env)
+    assert "EXOMEM_OWNER_OAUTH_SUBJECT" not in process_env
+
+    # Even with the binding present in the environment, a hosted gateway
+    # principal and a cell service credential carrying copied claims stay
+    # non-owner: neither is the durable session proxy's token type.
+    for key, value in planted.items():
+        monkeypatch.setenv(key, value)
+    for scope in ("principal-scope-4242", "4242", "github:4242"):
+        hosted = resolve_hosted_principal(scope)
+        assert hosted.audience_id != OWNER_AUDIENCE
+        assert hosted.principal_kind == "principal"
+    cell_token = AccessToken(
+        token="hosted-cell-service",
+        client_id=config.cell_id,
+        scopes=["hosted:cell"],
+        claims={
+            "cell_id": config.cell_id,
+            "kind": "hosted-cell-service",
+            "sub": "4242",
+            "github_user_id": 4242,
+            "iss": "https://planted.invalid",
+        },
+    )
+    monkeypatch.setattr(fastmcp_dependencies, "get_access_token", lambda: cell_token)
+    resolved = resolve_mcp_principal()
+    assert resolved.audience_id != OWNER_AUDIENCE
+    assert resolved.remote_owner is False
+
+
 def test_hosted_config_rejects_protocol_versions_not_implemented_by_this_release(
     tmp_path: Path,
 ) -> None:
