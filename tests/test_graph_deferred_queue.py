@@ -863,3 +863,68 @@ def test_every_generation_recording_enqueue_declares_its_path_set() -> None:
         "half owns. Declare the site and its claim, or pass generation=None -- "
         "an unknown row never counts as coverage."
     )
+
+
+# --- The drain records what it derived under ------------------------------------
+
+
+def _acknowledged(root: Path) -> int:
+    acknowledged = graph_sync.acknowledged_checkpoint(root)
+    return 0 if acknowledged is None else int(acknowledged.generation)
+
+
+def _write_without_graph_repair(
+    root: Path, monkeypatch: pytest.MonkeyPatch, pages: dict[str, str]
+) -> int:
+    """One canonical batch whose graph repair is left to the queue.
+
+    The batch enqueues its paths and records its debt generation before it
+    commits, exactly as every canonical batch does; only the dispatch that
+    would repair them in-line is switched off, so the drain is what converges
+    them.
+    """
+    with monkeypatch.context() as patch:
+        patch.setattr(epistemic_graph, "graph_scheduling_enabled", lambda: False)
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(root / rel, content) for rel, content in pages.items()],
+            vault_root=root,
+        )
+    checkpoint = graph_sync.read_checkpoint(root)
+    assert checkpoint is not None
+    assert _acknowledged(root) < int(checkpoint.generation)
+    return int(checkpoint.generation)
+
+
+def test_a_drain_records_the_topology_it_derived_under(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A drain that repairs a created page leaves the stored topology behind it.
+
+    The next topology-changing write rebuilds the old resolver from the stored
+    entries it changed and compares its fingerprint to the stored one. A drain
+    that re-derived rows under a topology it never recorded makes that compare
+    fail, and the write falls back to a whole-vault rebuild.
+    """
+    import logging
+
+    created = "Knowledge Base/Notes/Insights/queue-n.md"
+    _write_without_graph_repair(
+        vault, monkeypatch, {created: _page("N", "N is new and cites [[queue-a]].")}
+    )
+    index_sync.drain_graph_work(vault)
+    assert deferred_index.list_graph_paths(vault) == []
+    assert EpistemicGraphIndex(vault).available()
+
+    caplog.set_level(logging.INFO, logger="exomem.epistemic_graph")
+    vault_module.batch_atomic_write(
+        [
+            vault_module.PlannedWrite(
+                vault / "Knowledge Base/Notes/Insights/queue-m.md",
+                _page("M", "M is new too."),
+            )
+        ],
+        vault_root=vault,
+    )
+
+    assert "stored_topology_fingerprint_mismatch" not in caplog.text
+    assert EpistemicGraphIndex(vault).available()
