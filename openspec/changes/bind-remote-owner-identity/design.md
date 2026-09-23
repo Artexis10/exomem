@@ -125,11 +125,15 @@ server becomes claims `{"sub": X, "iss": "bearer"}`, so any owner rule that look
   on and sessions list their `client_id` for revocation. Accepted residual.
 - **T8. Planting the binding through the vault.** The variable is read only from the
   process environment; the only file loaded is `service.env` or the working directory's
-  `.env`. Startup refuses that `.env` when the working directory is inside the configured
-  vault (or any directory that is structurally a vault), logs one line naming it, and
-  keeps serving. That stops a vault-planted `.env` from setting service secrets; a wrong
-  refusal costs an operator who runs from inside the vault one unloaded `.env`, which the
-  log line names.
+  `.env`. Startup refuses that `.env` when the working directory, or the directory the
+  file resolves into through a symlink, is inside the configured vault (or any directory
+  that is structurally a vault), and logs one line naming the file and the remedy: move
+  the `.env` out of the vault, or put the settings in `service.env`. That stops a
+  vault-planted `.env` from setting service secrets. A wrong refusal costs more than one
+  unloaded file when that file held required settings (the vault path, OAuth or signing
+  keys): startup then stops on the missing setting. The operator who pays is one running
+  the service from a checkout or directory inside a vault; the log line tells them what
+  to do. The ancestor walk stays, because the refused file can carry service secrets.
 
 ## Migration Plan
 

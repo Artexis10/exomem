@@ -39,10 +39,12 @@ line, and SHALL NOT prevent the service from starting.
 
 #### Scenario: A vault-planted environment file is not loaded even from inside the vault
 
-- **WHEN** the service is started with its working directory inside the vault and a
-  `.env` there names the binding
-- **THEN** startup loads no `.env` from that directory, logs one line naming the refused
-  file, keeps serving, and no request resolves to the owner because of it
+- **WHEN** the service is started with its working directory inside the vault, or its
+  working-directory `.env` resolves into the vault, and that file names the binding
+- **THEN** startup loads nothing from that file and logs one line naming it and the
+  remedy (move the `.env` out of the vault, or put the settings in `service.env`), and no
+  request resolves to the owner because of it; startup continues without the file, so it
+  stops only if the file held a setting the service requires
 
 ### Requirement: Only this install's verified session matches the binding
 

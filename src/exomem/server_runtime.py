@@ -67,14 +67,20 @@ _VAULT_PATH_ENV = ("EXOMEM_VAULT_PATH", "KB_MCP_VAULT_PATH")
 
 
 def _working_directory_dotenv() -> Path | None:
-    """`<cwd>/.env`, or None when the working directory is inside a vault.
+    """`<cwd>/.env`, or None when it would come from inside a vault.
 
     Vault content is writable by remote principals through the file tools and
     arrives through sync, so a `.env` found there must never become service
-    configuration (owner binding, signing key, REST key). "Inside a vault" is
-    the configured vault (process environment, or the vault that `.env` would
-    itself configure) or any enclosing directory that is structurally a vault.
-    The cost of a wrong refusal is one unloaded `.env`, and the log line names it.
+    configuration (owner binding, signing key, REST key). Both the working
+    directory and the directory the `.env` resolves into (a symlink may point
+    into the vault) are checked. "Inside a vault" is the configured vault
+    (process environment, or the vault that `.env` would itself configure) or
+    any enclosing directory that is structurally a vault.
+
+    A wrong refusal is not free: when the refused file held required settings
+    (the vault path, OAuth or signing keys), startup then stops on the missing
+    setting. The log line says so and names the remedy; the ancestor walk is
+    kept because the file it guards can carry service secrets.
     """
     cwd = Path.cwd().resolve()
     candidate = cwd / ".env"
@@ -94,12 +100,20 @@ def _working_directory_dotenv() -> Path | None:
                 roots.append(Path(raw.strip()).expanduser().resolve())
             except (OSError, RuntimeError):
                 continue
-    inside = any(cwd == root or root in cwd.parents for root in roots) or any(
-        _is_vault(directory) for directory in (cwd, *cwd.parents)
-    )
-    if inside:
+    try:
+        resolved_parent = candidate.resolve().parent
+    except (OSError, RuntimeError):
+        resolved_parent = cwd
+
+    def _inside(directory: Path) -> bool:
+        return any(directory == root or root in directory.parents for root in roots) or any(
+            _is_vault(ancestor) for ancestor in (directory, *directory.parents)
+        )
+
+    if _inside(cwd) or _inside(resolved_parent):
         log.warning(
-            "event=dotenv_refused reason=working_directory_inside_vault path=%s",
+            "event=dotenv_refused reason=inside_vault path=%s remedy=move the .env out "
+            "of the vault, or put the settings in service.env",
             candidate,
         )
         return None

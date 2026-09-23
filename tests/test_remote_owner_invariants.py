@@ -222,3 +222,41 @@ def test_startup_refuses_a_working_directory_inside_any_vault(
 
     assert _start_until_dotenv(monkeypatch) == []
     assert "EXOMEM_OWNER_OAUTH_SUBJECT" not in os.environ
+
+
+def test_startup_refuses_an_env_file_that_is_a_symlink_into_the_vault(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The working directory is outside the vault, but its `.env` resolves to a
+    file a remote writer can plant inside it: the file, not just the directory,
+    decides."""
+    planted = vault / "Knowledge Base" / ".env"
+    planted.write_text("EXOMEM_OWNER_OAUTH_SUBJECT=github:4242\n", encoding="utf-8")
+    service_root = tmp_path / "service-root"
+    service_root.mkdir()
+    (service_root / ".env").symlink_to(planted)
+    monkeypatch.chdir(service_root)
+
+    with caplog.at_level("WARNING", logger=server_runtime.log.name):
+        assert _start_until_dotenv(monkeypatch) == []
+
+    assert "EXOMEM_OWNER_OAUTH_SUBJECT" not in os.environ
+    refusals = [r.getMessage() for r in caplog.records if "dotenv_refused" in r.getMessage()]
+    assert len(refusals) == 1
+
+
+def test_the_refusal_line_names_the_remedy(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A refused `.env` can stop startup when it held required settings, so the
+    one line an operator sees must say what to do."""
+    _plant(vault)
+    monkeypatch.chdir(vault)
+    with caplog.at_level("WARNING", logger=server_runtime.log.name):
+        _start_until_dotenv(monkeypatch)
+    refusals = [r.getMessage() for r in caplog.records if "dotenv_refused" in r.getMessage()]
+    assert len(refusals) == 1
+    assert "move the .env out of the vault, or put the settings in service.env" in refusals[0]
