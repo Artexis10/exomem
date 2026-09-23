@@ -15,6 +15,8 @@ exercised by the unit tests and by the live operation.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
@@ -40,6 +42,7 @@ EVIDENCE_KINDS: tuple[str, ...] = (
     "retrieval",
     "graph_corroboration",
     "usage_prior",
+    "recency",
     "continuity",
     "agent_choice",
 )
@@ -48,10 +51,62 @@ EVIDENCE_KINDS: tuple[str, ...] = (
 #: `_finalize_anchor_aliases`'s derived-short-name rarity gate needs it too,
 #: and that module has no dependency on this one.
 
+#: The shortest term that may be a LEAD to an anchor. Rarity among anchor
+#: NAMES cannot tell a genuinely short name from an everyday two-letter word
+#: that happens to appear in a title: "go" is no stopword, it names few
+#: anchors in any small catalogue, and an ordinary "so should I go with the
+#: cheaper one?" therefore reached a page titled "... Go ..." on that one word.
+#: Length is the discriminator a counting table has no way to supply. Three
+#: is the floor because real short names start there ("hob", "van", "PR");
+#: below it a shared term is coincidence, not reference.
+#:
+#: Applied only to a term written entirely in ASCII LETTERS. The reasoning
+#: above is about an alphabet where an ordinary word is several letters
+#: long; two characters is an ordinary word in CJK — a city, a company, a
+#: person — and counting code points there turns a real name into a
+#: non-name. A term that is not all-ASCII keeps whatever rarity its
+#: document count earns it.
+#:
+#: And not to a two-letter ACRONYM both sides spell as one: the turn writes
+#: it as exactly two capitals ("AI", "UI", "EU") AND the anchor's own title
+#: writes it in capitals too ("AI Subscriptions"). Either half alone is not
+#: enough. Capitals in a turn are also emphasis ("should I GO with..."), a
+#: grade ("I got a C"), or a dotted abbreviation ("U.S."), and each of those
+#: reached an unrelated anchor and served it when the turn's casing sufficed;
+#: an anchor whose title writes the word "Go" is not named by an emphatic
+#: "GO". A single capital never qualifies — a one-letter name is reached by
+#: its own spelling (`exact_alias`), never as a lead — and a turn with no
+#: lower-case letter at all carries no casing signal and is read as lower
+#: case (`TurnAnalysis.acronyms`).
+RARE_TERM_MIN_CHARS = 3
+
+#: Exactly two ASCII capitals, found on the RAW text because `normalize()`
+#: casefolds. Bounded on both sides by anything that is not a letter, a digit
+#: or a dot, so "AI's" and "AI-driven" still show "AI" while "HTTPS" and a
+#: dotted "U.S." show nothing.
+_ACRONYM_RE = re.compile(r"(?<![A-Za-z0-9.])[A-Z]{2}(?![A-Za-z0-9]|\.[A-Za-z])")
+
 #: `usage_prior` is a tie-break only. It never contributes to the two-kinds
 #: rule, because "you looked at this a lot" is not evidence that this turn is
 #: about it — that is how a rich-get-richer prior turns into a wrong anchor.
 TIE_BREAK_KINDS: frozenset[str] = frozenset({"usage_prior"})
+
+#: The prior class, and its one member. `recency` says "this anchor is at the
+#: top of the hot profile" — the previous packet's own answer, the freshest
+#: edit, the most-read page — and design §8's narrow amendment lets exactly
+#: that fact supply the REFERENT of a turn that names nothing at all.
+#:
+#: Deliberately in none of the other classes. Not a tie-break, because it is
+#: not ordering anything: on a referential turn it is the whole reason an
+#: anchor is a candidate. Not a worded or a retrieved contact kind, because
+#: the turn's words never reached this anchor and no ranking engine put it
+#: there. Not in `CONTACT_KINDS`, which is what keeps `_status_for`'s four
+#: existing clauses exactly as they were: the third resolves `rare_term` plus
+#: any other CONTACT kind, and admitting a prior there would let one shared
+#: word plus a hot page resolve an anchor nobody named. It is stripped from
+#: the soundness rule's `deciding` set for the same reason, so it can never be
+#: the second kind that promotes somebody else.
+PRIOR_CONTACT_KINDS: frozenset[str] = frozenset({"recency"})
 
 #: Kinds that resolve an anchor by themselves. `exact_alias` because the turn
 #: spelled the anchor's own name; `agent_choice` because the agent IS the
@@ -59,7 +114,31 @@ TIE_BREAK_KINDS: frozenset[str] = frozenset({"usage_prior"})
 #: already taken. Every other kind needs a second one.
 DECIDING_ALONE_KINDS: frozenset[str] = frozenset({"exact_alias", "agent_choice"})
 
-ANCHOR_STATUSES: tuple[str, ...] = ("resolved", "partial", "unresolved")
+#: The status of a page a packet was CARRIED on (design D3), never one this
+#: module produces. `resolve()` cannot return it and `_status_for` has no
+#: clause for it: retrieval alone still never resolves an anchor. It is the
+#: spelling a packet uses to say "no anchor was named; recall alone put this
+#: page here", and it is deliberately not `resolved`, so everything keyed on
+#: that word — `mint_continuity`'s ref list above all — declines it without
+#: needing to know this feature exists.
+RETRIEVAL_CARRIED_STATUS = "retrieval_carried"
+
+#: The status of a page a turn NAMED but that carries nothing, because the
+#: turn named another one too. Deliberately not `retrieval_carried`, which
+#: says "this page carries the packet", and deliberately not reported as
+#: `ambiguous`, which says two anchors RESOLVED and the agent must choose
+#: between senses. This is neither: nothing resolved, nothing was carried,
+#: and here are the pages the turn's own words reached, so the client can
+#: ask for one by name instead of being handed an empty packet.
+RETRIEVAL_NAMED_STATUS = "retrieval_named"
+
+ANCHOR_STATUSES: tuple[str, ...] = (
+    "resolved",
+    "partial",
+    "unresolved",
+    RETRIEVAL_CARRIED_STATUS,
+    RETRIEVAL_NAMED_STATUS,
+)
 TURN_STATUSES: tuple[str, ...] = ("resolved", "ambiguous", "unresolved")
 
 MAX_CANDIDATES = 24
@@ -78,7 +157,64 @@ CUE_PATTERNS: Mapping[str, tuple[str, ...]] = {
     "question": ("?", "what about", "why does"),
     "recent_change": ("again", "still", "changed", "since"),
     "precedent": ("last time", "before", "previously"),
+    # A turn that says it points back at what the session was doing
+    # (close-memory-loop D2). Unlike every other cue this one is not a lens on
+    # WHAT to look for. It is NECESSARY for a turn to be referential but not
+    # sufficient: the turn must also say nothing else (`REFERENTIAL_FILLER`
+    # and `analyze_turn`), because every cue word has an ordinary sense —
+    # "update my resume", "check the status of my flight", "continue the
+    # story" — and a prior must never answer one of those. Matched on whole
+    # tokens, not as a substring (`_REFERENTIAL_CUE_PHRASES`), so
+    # "discontinue" and "statuses" are not cues; bare "go on" and "pick up"
+    # are absent because their ordinary senses are far commoner.
+    "referential": (
+        "continue",
+        "where were we",
+        "where did we leave",
+        "what were we doing",
+        "carry on",
+        "status",
+        "status update",
+        "status report",
+        "what's next",
+        "whats next",
+        "what is next",
+        "same as before",
+        "as before",
+        "pick up where",
+        "resume",
+    ),
 }
+
+#: The referential cues as token runs, spelled the way `tokens_of` spells a
+#: turn, longest first so an overlapping pair ("same as before", "as before")
+#: is removed as the longer one. A cue matches only a contiguous run of whole
+#: turn tokens.
+_REFERENTIAL_CUE_PHRASES: tuple[str, ...] = tuple(
+    sorted(
+        {" ".join(tokens_of(normalize(pattern))) for pattern in CUE_PATTERNS["referential"]},
+        key=lambda phrase: (-len(phrase), phrase),
+    )
+)
+
+#: The closed set of words a referential turn may carry besides its cue and
+#: function words: fillers and words that refer to the work itself rather
+#: than name any of it ("let's continue the work, what's pending?", "continue
+#: from where we stopped yesterday"). A turn with ANY other word left over
+#: after the cue, the stopwords and these is saying something of its own —
+#: "status of my flight", "resume the download", "continue learning
+#: Spanish" — and is not referential, whatever cue it spoke. Closed and
+#: deliberately small: every word added here is a word a turn can say while
+#: still being answered by recency. "okay", "lets", "what's" and "whats" are
+#: the spellings of listed words that the tokeniser keeps distinct.
+REFERENTIAL_FILLER: frozenset[str] = frozenset(
+    {
+        "ok", "okay", "so", "now", "let's", "lets", "please",
+        "work", "task", "thing", "things", "stuff", "it", "this", "that",
+        "pending", "left", "off", "up", "from", "where", "what", "what's", "whats",
+        "here", "today", "yesterday", "last", "stopped", "doing", "on", "with", "again",
+    }
+)
 
 #: Worded contact: the turn's OWN WORDS reached the anchor's own names, terms
 #: or claims. Two of these together (or one plus any other kind besides
@@ -133,6 +269,16 @@ class TurnAnalysis:
     tokens: tuple[str, ...]
     ngrams: tuple[str, ...]
     cues: tuple[str, ...]
+    #: Does this turn point at recent work instead of naming anything? A
+    #: property of the TURN alone — whether anything hot exists to point at,
+    #: and whether the turn's words reached an anchor after all, are facts
+    #: about the vault and the candidate set, decided in `resolve()`.
+    referential: bool = False
+    #: The two-capital words the turn spelled as acronyms, casefolded like
+    #: `tokens`: the casing the analysis otherwise discards, kept only because
+    #: the rare-term length floor needs it (`RARE_TERM_MIN_CHARS`). Empty for
+    #: a turn with no lower-case letter, where capitals carry no signal.
+    acronyms: frozenset[str] = frozenset()
 
     @property
     def cue_categories(self) -> frozenset[str]:
@@ -277,6 +423,42 @@ def _depossessive_token(token: str) -> str:
     return token if folded in STOPWORDS else folded
 
 
+def _clears_rare_term_length(term: str, *, acronyms: frozenset[str] = frozenset()) -> bool:
+    """Is `term` long enough to be a lead?
+
+    `RARE_TERM_MIN_CHARS` code points, for an all-ASCII-letter term only.
+    Any term carrying a character outside `a-z` is exempt: the floor's whole
+    argument is about English word lengths, and a script that writes a name
+    in two characters is not the case it was reasoned about. So is a term in
+    `acronyms` — the caller's intersection of the turn's two-capital words
+    with the anchor title's (`RARE_TERM_MIN_CHARS`).
+    """
+    return (
+        len(term) >= RARE_TERM_MIN_CHARS
+        or not term.isascii()
+        or not term.isalpha()
+        or term in acronyms
+    )
+
+
+def _acronyms_of(text: str) -> frozenset[str]:
+    """The casefolded two-capital words `text` spells, or nothing when the
+    whole text is in capitals (caps lock says nothing about any one word).
+
+    Used on a turn and on an anchor's title alike. Function words and the
+    referential filler are left out: "SO" or "OK" in capitals name nothing,
+    and "OK continue" must not reach an anchor titled "OK Go" by its "OK".
+    """
+    raw = unicodedata.normalize("NFKC", str(text or ""))
+    if not any(character.islower() for character in raw):
+        return frozenset()
+    return frozenset(
+        folded
+        for word in _ACRONYM_RE.findall(raw)
+        if (folded := word.casefold()) not in _STOPWORDS and folded not in REFERENTIAL_FILLER
+    )
+
+
 def _fold_lexical_term(term: str) -> str | None:
     """One term's fold for the LEXICAL COMPARISON (fix/activation-competing-
     senses, correction round 1, C1) -- `fold_plural(fold_possessive(term))`,
@@ -298,6 +480,24 @@ def _fold_lexical_term(term: str) -> str | None:
     if folded in STOPWORDS:
         return None
     return fold_plural(folded)
+
+
+def _referential_residue(token_text: str) -> tuple[str, ...]:
+    """The words a cue-speaking turn says besides its cues, function words and
+    `REFERENTIAL_FILLER` — empty for a turn that only points back.
+
+    `token_text` is the turn's tokens joined by single spaces and padded with
+    one on each side, the form `analyze_turn` matches cues against.
+    """
+    text = token_text
+    for phrase in _REFERENTIAL_CUE_PHRASES:
+        while f" {phrase} " in text:
+            text = text.replace(f" {phrase} ", " ")
+    return tuple(
+        token
+        for token in text.split()
+        if token not in _STOPWORDS and token not in REFERENTIAL_FILLER
+    )
 
 
 def analyze_turn(turn: str) -> TurnAnalysis:
@@ -329,12 +529,28 @@ def analyze_turn(turn: str) -> TurnAnalysis:
                 if phrase not in seen:
                     seen.add(phrase)
                     ngrams.append(phrase)
+    token_text = f" {' '.join(tokens)} "
     cues = tuple(
         name
         for name, patterns in CUE_PATTERNS.items()
-        if any(pattern in text for pattern in patterns)
+        if (
+            any(f" {phrase} " in token_text for phrase in _REFERENTIAL_CUE_PHRASES)
+            if name == "referential"
+            else any(pattern in text for pattern in patterns)
+        )
     )
-    return TurnAnalysis(text=text, tokens=tokens, ngrams=tuple(ngrams), cues=cues)
+    # A declared cue, and nothing else said (close-memory-loop D2, as
+    # narrowed twice): the turn has to say it points back, and must not also
+    # say what it is about.
+    referential = "referential" in cues and not _referential_residue(token_text)
+    return TurnAnalysis(
+        text=text,
+        tokens=tokens,
+        ngrams=tuple(ngrams),
+        cues=cues,
+        referential=referential,
+        acronyms=_acronyms_of(turn),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -351,6 +567,7 @@ def candidates_for(
     routing_targets: Sequence[Any] = (),
     retrieval_paths: frozenset[str] = frozenset(),
     used_paths: frozenset[str] = frozenset(),
+    hot_paths: frozenset[str] = frozenset(),
     term_anchor_counts: Mapping[str, int] | None = None,
     config: RankingConfig | None = None,
 ) -> tuple[CandidateFacts, ...]:
@@ -360,6 +577,15 @@ def candidates_for(
     (`WorkingSetIndex.term_anchor_counts()`), the structure `rare_term`'s
     rarity check is measured against. Absent (`None`) simply means no anchor
     can earn `rare_term` this call — never a fabricated rarity.
+
+    `hot_paths` is the top of the caller's recency profile
+    (`working_set.hot_profile`), passed in like `used_paths` because it is a
+    fact about the vault, not about the turn. It earns `recency`, and on a
+    REFERENTIAL turn only it also admits an anchor the turn's own words never
+    reached — the one widening design §8 allows, so that a turn whose whole
+    content is a reference has something to refer to. Whether such a
+    candidate then resolves is `resolve()`'s call, not this function's: the
+    condition is about the whole candidate set.
     """
     config = config or DEFAULT_RANKING
     term_counts = term_anchor_counts or {}
@@ -498,7 +724,16 @@ def candidates_for(
         elif len(shared_name) == 1:
             (only_shared_name_term,) = shared_name
             count = term_counts.get(only_shared_name_term)
-            if count is not None and count <= RARE_TERM_MAX_ANCHORS:
+            if (
+                _clears_rare_term_length(
+                    only_shared_name_term,
+                    acronyms=analysis.acronyms & _acronyms_of(row.title)
+                    if analysis.acronyms
+                    else frozenset(),
+                )
+                and count is not None
+                and count <= RARE_TERM_MAX_ANCHORS
+            ):
                 # R2: a turn term all of whose occurrences lie inside the
                 # token span of a DIFFERENT anchor's own spelled-out
                 # multi-token name is consumed and cannot be the single
@@ -528,9 +763,15 @@ def candidates_for(
         if row.path and row.path in retrieval_paths:
             evidence.add("retrieval")
         # Qualifiers, applied only to an anchor the turn already reached. An
-        # anchor with no contact kind is not a candidate at all.
-        if not evidence & CONTACT_KINDS:
+        # anchor with no contact kind is not a candidate at all — unless the
+        # turn is referential and this anchor is at the top of the hot
+        # profile, which is the one case where the absence of worded contact
+        # is the point rather than a disqualification.
+        hot = bool(row.path) and row.path in hot_paths
+        if not evidence & CONTACT_KINDS and not (hot and analysis.referential):
             continue
+        if hot:
+            evidence.add("recency")
         if cue_categories and cue_categories & frozenset(row.categories):
             evidence.add("category_match")
         if row.path and row.path in used_paths:
@@ -551,6 +792,17 @@ def candidates_for(
             )
         )
     out.sort(key=_candidate_order)
+    if analysis.referential:
+        # The hot candidates survive the cut on a referential turn. Only they
+        # can resolve it, and they carry no contact kind, so the ordinary
+        # order ranks them behind every recall hit the turn's filler words
+        # happened to reach — six of those were enough to drop the referent
+        # before `resolve()` ever saw it. Bounded by `hot_paths`, which the
+        # caller cuts at `working_set.HOT_PROFILE_K`; every other turn is cut
+        # exactly as before.
+        hot = [item for item in out if "recency" in item.evidence][:MAX_CANDIDATES]
+        rest = [item for item in out if "recency" not in item.evidence]
+        return tuple(sorted([*hot, *rest[: MAX_CANDIDATES - len(hot)]], key=_candidate_order))
     return tuple(out[:MAX_CANDIDATES])
 
 
@@ -659,6 +911,21 @@ def anchor_ref(row: Any) -> str:
     )
 
 
+def names_row(refs: frozenset[str] | set[str], row: Any) -> bool:
+    """Does a continuity token's ref list name `row`?
+
+    By the ref the packet reported (`anchor_ref`) or by the row's path. A
+    token minted while a page had no identifier names it by path; once the
+    page gains one (`backfill-ids`), its reported ref changes and the path is
+    the only spelling the two still share. The path is the page, so matching
+    it names nothing the token did not.
+    """
+    if not refs:
+        return False
+    path = str(getattr(row, "path", "") or "")
+    return anchor_ref(row) in refs or (bool(path) and path in refs)
+
+
 def apply_continuity(
     candidates: Sequence[CandidateFacts],
     refs: frozenset[str] | set[str],
@@ -675,7 +942,7 @@ def apply_continuity(
     if not refs:
         return tuple(candidates)
     return tuple(
-        replace(item, evidence=item.evidence | {"continuity"}) if anchor_ref(item) in refs else item
+        replace(item, evidence=item.evidence | {"continuity"}) if names_row(refs, item) else item
         for item in candidates
     )
 
@@ -744,14 +1011,17 @@ def _candidate_order(candidate: CandidateFacts) -> tuple:
     """
     return (
         0 if candidate.deciding_kinds & DECIDING_ALONE_KINDS else 1,
-        -len(candidate.deciding_kinds),
+        # The prior is not counted: heat never reorders candidates the turn
+        # named. Where a recency referent must survive a cut, `resolve()` and
+        # `candidates_for` keep it explicitly instead.
+        -len(candidate.deciding_kinds - PRIOR_CONTACT_KINDS),
         0 if "exact_alias" in candidate.evidence else 1,
         0 if "usage_prior" in candidate.evidence else 1,
         candidate.anchor_id,
     )
 
 
-def _status_for_evidence(evidence: frozenset[str]) -> str:
+def _status_for_evidence(evidence: frozenset[str], *, recency_resolves: bool = False) -> str:
     """The three-clause soundness rule (design.md decision 1), plus continuity.
 
     `resolved` iff: `exact_alias` or `agent_choice` (either decides alone —
@@ -772,8 +1042,20 @@ def _status_for_evidence(evidence: frozenset[str]) -> str:
     clause against a candidate's evidence with `exact_alias` removed, to ask
     "would this anchor still resolve on its OTHER evidence alone" — without
     building a throwaway `CandidateFacts` just to hold a modified set.
+
+    `recency_resolves` is the FIFTH clause (close-memory-loop D2), and it is
+    the caller's answer to a question about the WHOLE candidate set, not
+    about this evidence: is the turn referential, and did no candidate
+    anywhere carry worded contact? `resolve()` is where that is visible and
+    where it is computed; here it only opens the clause.
+
+    `PRIOR_CONTACT_KINDS` leaves `deciding` along with the tie-breaks, so a
+    prior can never be the second kind that promotes somebody else. That
+    subtraction cannot change any evidence set that was expressible before
+    `recency` existed, so the four clauses above are the four clauses that
+    were there.
     """
-    deciding = evidence - TIE_BREAK_KINDS
+    deciding = evidence - TIE_BREAK_KINDS - PRIOR_CONTACT_KINDS
     if deciding & DECIDING_ALONE_KINDS:
         return "resolved"
     if deciding & {"lexical_overlap", "claims_match"} and len(deciding) >= 2:
@@ -782,14 +1064,25 @@ def _status_for_evidence(evidence: frozenset[str]) -> str:
         return "resolved"
     if "continuity" in deciding and deciding & CONTACT_KINDS:
         return "resolved"
+    if recency_resolves and "recency" in evidence:
+        return "resolved"
+    # A candidate the PRIOR admitted — hot, on a referential turn, with no
+    # contact of its own — whose clause stayed shut because something else
+    # was named. Its qualifiers (`continuity`, `category_match`) would make
+    # `deciding` non-empty and list it `partial`, a menu entry whose only
+    # claim is that somebody edited it. Before `recency` existed no such
+    # candidate could be built, so this reads only sets that contain it.
+    if evidence & PRIOR_CONTACT_KINDS and not evidence & CONTACT_KINDS:
+        return "unresolved"
     if deciding:
         return "partial"
+    # Nothing but tie-breaks: not a candidate this turn reached at all.
     return "unresolved"
 
 
-def _status_for(candidate: CandidateFacts) -> str:
+def _status_for(candidate: CandidateFacts, *, recency_resolves: bool = False) -> str:
     """`_status_for_evidence`, applied to one candidate's own evidence."""
-    return _status_for_evidence(candidate.evidence)
+    return _status_for_evidence(candidate.evidence, recency_resolves=recency_resolves)
 
 
 def _phrase_spans(tokens: Sequence[str], phrase_tokens: Sequence[str]) -> list[tuple[int, int]]:
@@ -913,7 +1206,10 @@ def _demote_subsumed_same_kind_aliases(
 
 
 def resolve(
-    candidates: Sequence[CandidateFacts], *, turn_tokens: Sequence[str] = ()
+    candidates: Sequence[CandidateFacts],
+    *,
+    turn_tokens: Sequence[str] = (),
+    referential: bool = False,
 ) -> Resolution:
     """Derive anchor statuses and the turn's verdict from categorical evidence.
 
@@ -921,15 +1217,27 @@ def resolve(
     only by R1's position-aware free-standing-mention exception; production
     callers pass `analysis.tokens`, and omitting it (as most direct unit-test
     callers do) simply leaves that exception unavailable.
+
+    `referential` is `TurnAnalysis.referential`: the turn pointed at recent
+    work instead of naming any. It is half of the fifth soundness clause; the
+    other half is decided here, because it is a fact about the whole set —
+    a prior may supply a referent only where NO candidate anywhere carries
+    worded contact. One candidate the turn actually named, of any strength,
+    and recency is back to reporting a fact about the vault and deciding
+    nothing. Omitting it (every direct unit-test caller that has no opinion)
+    leaves the clause shut.
     """
     for candidate in candidates:
         unknown = sorted(candidate.evidence - frozenset(EVIDENCE_KINDS))
         if unknown:
             raise ValueError(f"unknown activation evidence kind: {unknown[0]}")
+    recency_resolves = referential and not any(
+        candidate.evidence & WORDED_CONTACT_KINDS for candidate in candidates
+    )
     ordered = sorted(candidates, key=_candidate_order)
     anchors: list[ResolvedAnchor] = []
     for candidate in ordered:
-        status = _status_for(candidate)
+        status = _status_for(candidate, recency_resolves=recency_resolves)
         if status == "unresolved":
             continue
         anchors.append(
@@ -948,6 +1256,13 @@ def resolve(
                 exact_alias_phrases=candidate.exact_alias_phrases,
             )
         )
+    if recency_resolves:
+        # A recency referent carries no contact kind, so the ordinary order
+        # puts it behind every partial the turn's filler words reached, and the
+        # cut below dropped it. Where the fifth clause is open, resolved
+        # anchors go first — stably, so each group keeps its order. Every
+        # other resolution is cut exactly as before.
+        anchors.sort(key=lambda item: 0 if item.status == "resolved" else 1)
     anchors = anchors[:MAX_ANCHORS]
     anchors = _demote_subsumed_same_kind_aliases(anchors, turn_tokens)
     resolved = [anchor for anchor in anchors if anchor.status == "resolved"]

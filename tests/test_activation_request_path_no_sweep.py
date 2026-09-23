@@ -1177,3 +1177,182 @@ def test_a_caller_with_no_scope_pays_nothing_for_the_memo(
         state_paths.resolved_vault_path(tmp_path)
 
     assert built, "inside a scope the key is what keeps the answer honest"
+
+
+#: A SECOND Records collection, about something the turn never mentions. The
+#: shipped fixture holds one, and one collection cannot tell "the request read
+#: the collection its answer came from" apart from "the request read every
+#: collection there is" — the two are the same directory.
+OTHER_COLLECTION_ID = "7a1b3c5d-2e4f-4082-8b6c-1d3e5f7a9b02"
+
+
+def _write_unrelated_collection(vault: Path) -> Path:
+    directory = vault / "Knowledge Base" / "Records" / "Lantern Stock"
+    (directory / "Items").mkdir(parents=True, exist_ok=True)
+    (directory / "_collection.md").write_text(
+        _manifest_text(identifier=OTHER_COLLECTION_ID)
+        .replace("title: Depot stock", "title: Lantern stock")
+        .replace("terms: [cargo, sled, depot]", "terms: [lantern, wick, oil]"),
+        encoding="utf-8",
+    )
+    for day in ("01", "02", "03"):
+        (directory / "Items" / f"2026-09-{day}.md").write_text(
+            "---\ntype: record\n"
+            f"collection_id: {OTHER_COLLECTION_ID}\n"
+            f"record_id: 3c1c4d5e-6f70-4812-9a3b-4c5d6e7f80{day}\n"
+            "schema_version: 1\n"
+            f"observed_on: 2026-09-{day}\n"
+            "asset: Lantern\n"
+            "state: at the southern shed\n"
+            "---\n\nObserved.\n",
+            encoding="utf-8",
+        )
+    return directory
+
+
+def test_a_collection_the_turn_never_named_stays_off_the_request_path(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
+) -> None:
+    """The working-continuity block is chosen by RECENCY, not by the turn.
+
+    So every page it carries is a page the turn did not ask for, and anything
+    the block reads through a governed collection query drags that collection's
+    storage onto the request path — the exact sweep the ceilings exist to
+    forbid, and invisible on a one-collection fixture because there the only
+    collection is also the answer's own.
+    """
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _write_collection(vault)
+    unrelated = _write_unrelated_collection(vault)
+    _warm_activation(vault, warm_managed_cell)
+    _drain_background_walks()
+
+    scheduled = _no_background_walks(monkeypatch)
+    calls = _FilesystemCalls(vault)
+    calls.install(monkeypatch)
+
+    packet = commands.op_activate_context(vault, turn=TURN)
+
+    assert scheduled == [], scheduled
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert packet["recent_context"], "the block must be ON, or this proves nothing"
+    unasked = [
+        path
+        for path in calls.enumerated
+        if path == str(unrelated) or path.startswith(str(unrelated) + os.sep)
+    ]
+    assert unasked == [], calls.report()
+    assert calls.enumerations <= WARM_REQUEST_ENUMERATION_CEILING, calls.report()
+    assert calls.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, calls.report()
+
+
+def test_a_referential_turn_with_the_hot_profile_on_holds_the_same_ceilings(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
+) -> None:
+    """"continue" is the one turn that computes the hot profile and runs the
+    lanes of an anchor it never named (close-memory-loop D2). It pays the same
+    ceilings as every other warm request: the profile reads the rows, the
+    registry and the activation snapshot already in hand, plus at most
+    `HOT_PROFILE_K` cached page reads, and enumerates nothing."""
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _write_collection(vault)
+    # The seeding above is one write burst, and a burst carries no edit
+    # signal (close-memory-loop D2, R-J), so without this the profile would
+    # be empty and the turn would abstain before the lanes this test measures.
+    # Every page is spread a second apart, oldest first, with the product
+    # page edited last on its own — before the warm-up, which reads them.
+    now = time.time()
+    pages = sorted((vault / "Knowledge Base").rglob("*.md"))
+    for index, page in enumerate(pages):
+        os.utime(page, (now - 10_000 - index * 2, now - 10_000 - index * 2))
+    sled = vault / "Knowledge Base" / "Products" / "Cargo Sled.md"
+    os.utime(sled, (now - 60, now - 60))
+    _warm_activation(vault, warm_managed_cell)
+    _drain_background_walks()
+
+    scheduled = _no_background_walks(monkeypatch)
+    calls = _FilesystemCalls(vault)
+    calls.install(monkeypatch)
+
+    packet = commands.op_activate_context(vault, turn="continue")
+
+    assert scheduled == [], scheduled
+    assert packet["abstained"] is False, (
+        "the hot profile must be ON and resolve, or this proves nothing",
+        packet.get("abstention"),
+    )
+    assert any("recency" in item["evidence"] for item in packet["anchors"]), packet["anchors"]
+    assert packet["units"] or packet["current_state"], "its lanes must actually run"
+    assert calls.enumerations <= WARM_REQUEST_ENUMERATION_CEILING, calls.report()
+    assert calls.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, calls.report()
+    assert calls.unattributable == 0, calls.report()
+    assert WARM_REQUEST_ENUMERATION_CEILING == 8
+    assert WARM_REQUEST_FILESYSTEM_CALL_CEILING == 1200
+
+
+def _write_uncatalogued_page(vault: Path) -> Path:
+    """An ordinary compiled research note that is NOT an activation-index
+    row — the same shape U3's retrieval carry serves a packet from, and now
+    also what an agent-picked `anchor` falls back to when the ref names no
+    index row."""
+    page = (
+        vault / "Knowledge Base" / "Notes" / "Research" / "quillon-vantry-window.md"
+    )
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\n"
+        "type: research-note\n"
+        "status: active\n"
+        "updated: 2026-09-10\n"
+        "---\n"
+        "\n"
+        "# Quillon vantry window\n"
+        "\n"
+        "## Summary\n"
+        "\n"
+        "- [decision] The quillon vantry window was widened to nine minutes. "
+        "^q-decision\n",
+        encoding="utf-8",
+    )
+    return page
+
+
+def test_an_agent_picked_page_holds_the_same_ceilings(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
+) -> None:
+    """U7: `anchor` naming an ordinary compiled page, not an activation-index
+    row, falls back to `working_set._eligible_agent_page` and reuses
+    `_carried_packet` — the same bounded page-cache reads the retrieval carry
+    already pays for, never a directory sweep. It pays the same ceilings as
+    every other warm request."""
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _write_collection(vault)
+    page = _write_uncatalogued_page(vault)
+    _warm_activation(vault, warm_managed_cell)
+    _drain_background_walks()
+
+    scheduled = _no_background_walks(monkeypatch)
+    calls = _FilesystemCalls(vault)
+    calls.install(monkeypatch)
+
+    packet = commands.op_activate_context(
+        vault,
+        turn="zqxwvu plonktastic frobnitz quibblewhomp",
+        anchor="Knowledge Base/Notes/Research/quillon-vantry-window.md",
+    )
+
+    assert scheduled == [], scheduled
+    assert packet["abstained"] is False, packet.get("abstention")
+    (anchor,) = packet["anchors"]
+    assert anchor["ref"] == str(page.relative_to(vault))
+    assert anchor["kind"] == "page"
+    assert anchor["status"] == "resolved"
+    assert anchor["evidence"] == ["agent_choice"]
+    assert packet["generation"]["carried_by"] == "agent_choice"
+    assert packet["units"], "its lanes must actually run, or this proves nothing"
+    assert calls.enumerations <= WARM_REQUEST_ENUMERATION_CEILING, calls.report()
+    assert calls.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, calls.report()
+    assert calls.unattributable == 0, calls.report()

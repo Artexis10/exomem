@@ -16,6 +16,7 @@ import pytest
 from exomem import working_set, working_set_index, working_set_resolve
 
 PACKET_KEYS = {
+    "recent_context",
     "anchors",
     "roles",
     "units",
@@ -414,8 +415,18 @@ def test_compile_abstains_on_a_turn_that_reaches_nothing(stateful_vault: Path) -
 
     assert packet["abstained"] is True
     assert packet["abstention"]["reason"] == "unresolved"
+    # Abstention injects no ANSWER — no units, no pointers, no current state.
+    # Working continuity is the one exception and it is not an answer: it says
+    # what was recently worked on, which is true of the session whatever this
+    # turn reached. Its cost is pinned to the block's own arithmetic so the
+    # abstained packet cannot quietly start carrying anything else.
     assert packet["units"] == []
-    assert packet["budget"]["used_chars"] == 0
+    assert packet["pointers"] == []
+    assert packet["current_state"] == []
+    assert packet["budget"]["used_chars"] == sum(
+        len(str(entry.get("title") or "")) + len(str(entry.get("statement") or ""))
+        for entry in packet["recent_context"]
+    )
 
 
 def test_compile_returns_a_bounded_packet_for_a_resolved_turn(stateful_vault: Path) -> None:
@@ -815,3 +826,1045 @@ def test_an_exact_limit_read_does_not_claim_truncation(monkeypatch: pytest.Monke
     )
     assert result.truncated is False
     assert len(result.items) == working_set.UNIT_LANE_LIMIT
+
+
+# --------------------------------------------------------------------------- #
+# Recent context — the always-on working-continuity block
+# --------------------------------------------------------------------------- #
+
+
+def _recent(
+    name: str,
+    *,
+    why: str = "edited",
+    statement: str | None = None,
+    title: str | None = None,
+) -> dict:
+    entry: dict = {
+        "ref": f"Knowledge Base/Notes/{name}.md",
+        "path": f"Knowledge Base/Notes/{name}.md",
+        "title": title if title is not None else name.replace("-", " "),
+        "kind": "note",
+        "why": why,
+        "as_of": "2026-09-20",
+    }
+    if statement is not None:
+        entry["statement"] = statement
+    return entry
+
+
+def test_recent_context_is_the_first_declared_block() -> None:
+    """Working continuity is what a fresh session opens with, so it leads."""
+    assert working_set.PACKET_BLOCKS[0] == "recent_context"
+    assert working_set.PACKET_BLOCKS.index("recent_context") < working_set.PACKET_BLOCKS.index(
+        "current_state"
+    )
+
+
+def test_a_resolved_packet_carries_recent_context_before_current_state() -> None:
+    packet = working_set.build_packet(
+        items=(_item("resources"),),
+        anchors=(),
+        roles=(),
+        current_state=({"anchor": "a", "source": "records", "as_of": "", "statement": "s" * 20},),
+        recent_context=(_recent("harbour-refit"),),
+        ambiguity=(),
+        missing=(),
+        max_chars=4000,
+        generation=_generation(),
+        status="resolved",
+    )
+
+    keys = list(packet)
+    assert keys.index("recent_context") < keys.index("current_state")
+    assert [entry["path"] for entry in packet["recent_context"]] == [
+        "Knowledge Base/Notes/harbour-refit.md"
+    ]
+    assert set(packet["recent_context"][0]) == {
+        "ref",
+        "path",
+        "title",
+        "kind",
+        "why",
+        "as_of",
+    }
+
+
+def test_recent_context_is_budgeted_first_and_counted_in_used_chars() -> None:
+    """The block is budgeted before `current_state`, inside the same ceiling."""
+    entry = _recent("harbour-refit", statement="status: waiting on the yard")
+    cost = len(entry["title"]) + len(entry["statement"])
+    packet = working_set.build_packet(
+        items=(),
+        anchors=(),
+        roles=(),
+        current_state=(),
+        recent_context=(entry,),
+        ambiguity=(),
+        missing=(),
+        max_chars=working_set.MIN_BUDGET_CHARS,
+        generation=_generation(),
+        status="resolved",
+    )
+
+    assert packet["budget"]["used_chars"] == cost
+
+
+def test_a_recent_entry_that_does_not_fit_is_dropped_whole() -> None:
+    """Like `current_state`: a half-sentence about recent work is worse than none."""
+    small = _recent("harbour-refit", statement="status: waiting")
+    huge = _recent("long-note", statement="x" * (working_set.RECENT_CONTEXT_MAX_CHARS + 50))
+    packet = working_set.build_packet(
+        items=(),
+        anchors=(),
+        roles=(),
+        current_state=(),
+        recent_context=(small, huge),
+        ambiguity=(),
+        missing=(),
+        max_chars=4000,
+        generation=_generation(),
+        status="resolved",
+    )
+
+    assert [entry["path"] for entry in packet["recent_context"]] == [small["path"]]
+    assert packet["budget"]["used_chars"] == len(small["title"]) + len(small["statement"])
+
+
+def test_recent_context_is_capped_at_its_entry_ceiling() -> None:
+    packet = working_set.build_packet(
+        items=(),
+        anchors=(),
+        roles=(),
+        current_state=(),
+        recent_context=tuple(_recent(f"note-{index}") for index in range(12)),
+        ambiguity=(),
+        missing=(),
+        max_chars=8000,
+        generation=_generation(),
+        status="resolved",
+    )
+
+    assert len(packet["recent_context"]) == working_set.RECENT_CONTEXT_MAX_ENTRIES == 8
+
+
+def test_an_abstained_packet_still_carries_recent_context() -> None:
+    """Abstention injects no ANSWER; it still says what was recently worked on."""
+    entry = _recent("harbour-refit", statement="status: waiting on the yard")
+    packet = working_set.abstained_packet(
+        reason="unresolved",
+        max_chars=4000,
+        generation=_generation(),
+        recent_context=(entry,),
+    )
+
+    assert packet["abstained"] is True
+    assert [item["path"] for item in packet["recent_context"]] == [entry["path"]]
+    assert packet["units"] == []
+    assert packet["budget"]["used_chars"] == len(entry["title"]) + len(entry["statement"])
+
+
+def _live_cell(vault: Path) -> None:
+    """Seed the freshness registry the way the running service does.
+
+    `recent_context` reads per-path mtimes out of that registry rather than
+    walking the vault, so a test that never seeds it is testing the
+    not-live fallback, not the block.
+    """
+    from exomem import file_watcher
+
+    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+
+
+def _touch(path: Path, *, when: float) -> None:
+    import os
+
+    os.utime(path, (when, when))
+
+
+def test_an_unresolved_turn_still_carries_the_recently_edited_page_first(
+    stateful_vault: Path,
+) -> None:
+    """The whole point: a turn that resolves nothing must still say what was
+    recently worked on."""
+    import time
+
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    newest = stateful_vault / "Knowledge Base" / "Products" / "Cargo Sled.md"
+    now = time.time()
+    for index, page in enumerate(sorted((stateful_vault / "Knowledge Base").rglob("*.md"))):
+        _touch(page, when=now - 10_000 - index)
+    _touch(newest, when=now)
+    _live_cell(stateful_vault)
+
+    packet = working_set.compile_packet(
+        stateful_vault, turn="zzz qqq unrelated gibberish", max_chars=4000
+    )
+
+    assert packet["abstained"] is True
+    assert packet["recent_context"], "an abstained packet still carries recent context"
+    first = packet["recent_context"][0]
+    assert first["path"] == "Knowledge Base/Products/Cargo Sled.md"
+    assert first["why"] == "edited"
+    assert first["title"] == "Cargo Sled"
+    assert first["as_of"]
+
+
+def test_a_resolved_turn_carries_recent_context_as_well(stateful_vault: Path) -> None:
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _live_cell(stateful_vault)
+
+    packet = working_set.compile_packet(
+        stateful_vault,
+        turn="I'm planning to tow the Cargo Sled north — how much depot stock is left?",
+        max_chars=4000,
+    )
+
+    assert packet["abstained"] is False
+    assert packet["recent_context"]
+    assert all(entry["path"] for entry in packet["recent_context"])
+    assert len(packet["recent_context"]) <= working_set.RECENT_CONTEXT_MAX_ENTRIES
+
+
+def test_a_captured_session_page_carries_its_title_and_date_only(
+    stateful_vault: Path,
+) -> None:
+    import time
+
+    sessions = stateful_vault / "Knowledge Base" / "Sources" / "Sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    captured = sessions / "2026-09-21-corridor-call.md"
+    captured.write_text(
+        "---\ntype: source\nstatus: active\nsummary: a summary nobody asked for\n---\n\nRaw notes.\n",
+        encoding="utf-8",
+    )
+    other = stateful_vault / "Knowledge Base" / "Sources" / "corridor-report.md"
+    other.write_text("---\ntype: source\n---\n\nAn ordinary source.\n", encoding="utf-8")
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    now = time.time()
+    for index, page in enumerate(sorted((stateful_vault / "Knowledge Base").rglob("*.md"))):
+        _touch(page, when=now - 10_000 - index)
+    _touch(captured, when=now)
+    _touch(other, when=now - 1)
+    _live_cell(stateful_vault)
+
+    packet = working_set.compile_packet(
+        stateful_vault, turn="zzz qqq unrelated gibberish", max_chars=4000
+    )
+
+    paths = [entry["path"] for entry in packet["recent_context"]]
+    assert "Knowledge Base/Sources/Sessions/2026-09-21-corridor-call.md" in paths
+    assert "Knowledge Base/Sources/corridor-report.md" not in paths, (
+        "a raw Source page is not working context — only a captured session is"
+    )
+    entry = packet["recent_context"][paths.index(
+        "Knowledge Base/Sources/Sessions/2026-09-21-corridor-call.md"
+    )]
+    assert entry["why"] == "captured"
+    assert entry["as_of"]
+    assert "statement" not in entry, "a captured session carries its title and date only"
+
+
+def test_recent_context_gets_its_own_timing_span(stateful_vault: Path) -> None:
+    from exomem import find_types
+
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _live_cell(stateful_vault)
+    timings = find_types.FindTimings()
+
+    working_set.compile_packet(
+        stateful_vault, turn="zzz qqq unrelated gibberish", max_chars=4000, timings=timings
+    )
+
+    assert "working_set.recent" in timings.as_dict()["stages"]
+
+
+def test_an_open_planning_item_survives_a_flood_of_fresh_edits(
+    stateful_vault: Path,
+) -> None:
+    """The open commitment nobody has touched is the one a resumed session
+    forgets — and ranking purely by recency is exactly what buries it.
+
+    `_recent_planning` exists to carry it, but its offers competed with the
+    edits on mtime and lost every time there were eight fresher pages, so the
+    `planning` reason could never appear at all.
+    """
+    import time
+
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    now = time.time()
+    planning_pages = []
+    for index, page in enumerate(sorted((stateful_vault / "Knowledge Base").rglob("*.md"))):
+        rel = page.relative_to(stateful_vault).as_posix()
+        if "/Planning/" in rel:
+            planning_pages.append(page)
+            _touch(page, when=now - 90 * 86_400)
+        else:
+            # A minute apart: each its own edit, not a write burst.
+            _touch(page, when=now - index * 60)
+    assert planning_pages, "the fixture must hold a Planning item to bury"
+    _live_cell(stateful_vault)
+
+    packet = working_set.compile_packet(
+        stateful_vault, turn="zzz qqq unrelated gibberish", max_chars=4000
+    )
+
+    block = packet["recent_context"]
+    assert len(block) == working_set.RECENT_CONTEXT_MAX_ENTRIES
+    planning = [entry for entry in block if entry["why"] == "planning"]
+    assert len(planning) == 1, [entry["why"] for entry in block]
+    # One slot, not a takeover: the fresh edits keep the rest of the block.
+    assert len([entry for entry in block if entry["why"] == "edited"]) == 7
+
+
+def test_a_collections_own_item_files_never_enter_the_block(
+    stateful_vault: Path,
+) -> None:
+    """A Records collection's items are its storage, not working context.
+
+    Writing one record touches a file per observation, so on any vault that
+    actually uses Records the raw item pages are always the most recently
+    edited thing there is — and they carry a date and a state field, not a
+    subject. Four of the eight slots went to one collection's storage.
+    """
+    import time
+
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    now = time.time()
+    for index, page in enumerate(sorted((stateful_vault / "Knowledge Base").rglob("*.md"))):
+        _touch(page, when=now - 10_000 - index)
+    items = sorted((stateful_vault / "Knowledge Base" / "Records").rglob("Items/*.md"))
+    assert items, "the fixture must hold collection item files"
+    for page in items:
+        _touch(page, when=now)
+    _live_cell(stateful_vault)
+
+    packet = working_set.compile_packet(
+        stateful_vault, turn="zzz qqq unrelated gibberish", max_chars=4000
+    )
+
+    paths = [entry["path"] for entry in packet["recent_context"]]
+    assert paths, "the block must still carry something"
+    assert not [path for path in paths if "/Items/" in path], paths
+
+
+def test_a_collection_manifest_never_appears_beside_its_own_item(
+    stateful_vault: Path,
+) -> None:
+    """Both carry the same authored title, so serving both spends two of eight
+    slots saying one thing."""
+    import time
+
+    planning = stateful_vault / "Knowledge Base" / "Planning" / "Corridor"
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    now = time.time()
+    for index, page in enumerate(sorted((stateful_vault / "Knowledge Base").rglob("*.md"))):
+        _touch(page, when=now - 10_000 - index)
+    for index, page in enumerate(sorted(planning.rglob("*.md"))):
+        _touch(page, when=now - index)
+    _live_cell(stateful_vault)
+
+    packet = working_set.compile_packet(
+        stateful_vault, turn="zzz qqq unrelated gibberish", max_chars=4000
+    )
+
+    titles = [entry["title"].casefold() for entry in packet["recent_context"]]
+    assert len(titles) == len(set(titles)), [
+        (entry["title"], entry["path"]) for entry in packet["recent_context"]
+    ]
+
+
+def test_the_block_never_takes_more_than_half_the_packet() -> None:
+    """At the budget floor the block was spending 500 of 500 characters, so a
+    caller who asked for a small packet got working continuity and no answer
+    at all. It leads the packet; it does not get to be the packet."""
+    packet = working_set.build_packet(
+        items=(_item("resources", text="u" * 100),),
+        anchors=(),
+        roles=({"id": "resources", "source": "anchor_default", "lane": "units"},),
+        current_state=(),
+        recent_context=tuple(
+            _recent(f"note-{index}", statement="s" * 80) for index in range(8)
+        ),
+        ambiguity=(),
+        missing=(),
+        max_chars=working_set.MIN_BUDGET_CHARS,
+        generation=_generation(),
+        status="resolved",
+    )
+
+    recent_chars = sum(
+        len(entry["title"]) + len(entry.get("statement") or "")
+        for entry in packet["recent_context"]
+    )
+    assert recent_chars <= working_set.MIN_BUDGET_CHARS // 2
+    assert packet["units"], "the rest of the packet must still be affordable"
+
+
+def _minutes_ago(minutes: int) -> int:
+    """An edit time in ns, `minutes` before a fixed instant: fake registry
+    entries a minute apart, each its own edit rather than a write burst."""
+    return 1_800_000_000_000_000_000 - minutes * 60_000_000_000
+
+
+def test_the_reserved_planning_slot_never_shrinks_the_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reserving a slot must not throw away the offers that did not get it.
+
+    An untouched plan is absent from the freshness map — that is what makes it
+    untouched — so open plans reach the block only through `_recent_planning`.
+    Keeping one and discarding the rest, while also cutting the other sources
+    to `limit - 1`, left slots empty on exactly the vault this block exists
+    for: someone resuming after a break, whose open commitments outnumber
+    their recent edits.
+    """
+    others = {f"Knowledge Base/Notes/note-{index}.md": _minutes_ago(index) for index in range(2)}
+    plans = tuple(f"Knowledge Base/Planning/Plan {index}/_collection.md" for index in range(5))
+    monkeypatch.setattr(working_set, "_recent_mtimes", lambda _root: dict(others))
+    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a: True)
+    monkeypatch.setattr(working_set, "_recently_activated", lambda *a, **k: ())
+    monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: plans)
+    monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
+    monkeypatch.setattr(working_set, "_recent_collection_dirs", lambda _mtimes: frozenset())
+
+    entries = working_set._recent_context(Path("/nonexistent"), rows=[])
+
+    assert len(entries) == 7, [entry["path"] for entry in entries]
+    assert [entry["why"] for entry in entries].count("planning") == len(plans)
+    assert [entry["why"] for entry in entries][:2] == ["edited", "edited"], (
+        "the reservation must not promote a plan above a fresher edit"
+    )
+
+
+def test_the_reserved_slot_still_holds_when_the_block_is_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The backfill must not undo the reservation: with more recent edits than
+    slots, the newest open plan still gets one."""
+    others = {f"Knowledge Base/Notes/note-{index}.md": _minutes_ago(index) for index in range(20)}
+    plans = ("Knowledge Base/Planning/Plan 0/_collection.md",)
+    monkeypatch.setattr(working_set, "_recent_mtimes", lambda _root: dict(others))
+    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a: True)
+    monkeypatch.setattr(working_set, "_recently_activated", lambda *a, **k: ())
+    monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: plans)
+    monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
+    monkeypatch.setattr(working_set, "_recent_collection_dirs", lambda _mtimes: frozenset())
+
+    entries = working_set._recent_context(Path("/nonexistent"), rows=[])
+    whys = [entry["why"] for entry in entries]
+
+    assert len(entries) == working_set.RECENT_CONTEXT_MAX_ENTRIES
+    assert whys.count("planning") == 1
+    assert whys[-1] == "planning", "the plan keeps its place in recency order"
+
+
+def test_collection_storage_stays_out_on_the_cold_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exclusion must not depend on the freshness registry being live.
+
+    Without a watcher `live_entries` answers None, so the mtimes are empty —
+    but `_recently_activated` and `_recent_planning` still run off the index's
+    own rows, and deriving the collection directories from the mtimes alone
+    left them offering exactly the raw item pages the exclusion exists to keep
+    out.
+    """
+    from exomem import usage
+
+    manifest = "Knowledge Base/Records/Depot Stock/_collection.md"
+    item = "Knowledge Base/Records/Depot Stock/Items/2026-09-05.md"
+    rows = [
+        SimpleNamespace(
+            path=manifest, ref=None, title="Depot stock", kind="collection", lifecycle="active"
+        ),
+        SimpleNamespace(
+            path=item, ref=None, title="2026-09-05", kind="page", lifecycle="active"
+        ),
+    ]
+    monkeypatch.setattr(working_set, "_recent_mtimes", lambda _root: {})
+    monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
+    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a: True)
+    monkeypatch.setattr(
+        usage, "activation_map", lambda *a, **k: {usage.canon(item): 5.0, usage.canon(manifest): 4.0}
+    )
+
+    entries = working_set._recent_context(Path("/nonexistent"), rows=rows)
+    paths = [entry["path"] for entry in entries]
+
+    assert item not in paths, paths
+    assert manifest in paths, "the manifest itself is still working context"
+
+
+# --------------------------------------------------------------------------- #
+# One unit, once (correction round 1, C4)
+# --------------------------------------------------------------------------- #
+
+
+def test_a_unit_two_roles_both_selected_is_served_once() -> None:
+    """Role categories overlap by design — `recent_change` and `precedents`
+    both select `decision`, `resources` and `baseline` both select `fact` —
+    so two selected roles routinely read the SAME unit off the same page.
+
+    Served twice it is the same sentence printed twice in the agent's
+    context and charged twice against the character budget, which is the one
+    thing the packet promises not to do. The first role to reach it keeps
+    it: roles are in registry priority order, so that is the most specific
+    lens that asked for it.
+    """
+    shared = "exomem://vault/Knowledge%20Base/Notes/p.md#unit-shared"
+    packet = working_set.build_packet(
+        items=(
+            _item("recent_change", ref=shared, text="One decision, read twice."),
+            _item("precedents", ref=shared, text="One decision, read twice."),
+            _item("precedents", ref="other", text="A different unit entirely."),
+        ),
+        anchors=(
+            {
+                "ref": "a",
+                "title": "A",
+                "kind": "hub",
+                "status": "resolved",
+                "evidence": ["exact_alias"],
+            },
+        ),
+        roles=(
+            {"id": "recent_change", "source": "anchor_default", "lane": "units"},
+            {"id": "precedents", "source": "anchor_default", "lane": "units"},
+        ),
+        current_state=(),
+        ambiguity=(),
+        missing=(),
+        max_chars=4000,
+        generation=_generation(),
+        status="resolved",
+    )
+
+    refs = [unit["ref"] for unit in packet["units"]]
+    assert refs == [shared, "other"], refs
+    assert [unit["role"] for unit in packet["units"]] == ["recent_change", "precedents"]
+    # The duplicate is gone, not deferred: a pointer to it would be the same
+    # ref a second time under a different name.
+    assert [pointer["ref"] for pointer in packet["pointers"]] == []
+    assert packet["budget"]["used_chars"] == sum(len(unit["text"]) for unit in packet["units"])
+
+
+# --------------------------------------------------------------------------- #
+# The hot profile and referential turns (close-memory-loop D2). `_live_cell`
+# is what makes these real: the profile reads the freshness registry, so a
+# test that never seeds it has no hot profile at all — which is one of the
+# cases below.
+# --------------------------------------------------------------------------- #
+
+
+def _age_everything(vault: Path, *, newest: Path) -> None:
+    """One page freshly edited, every other page old, in the registry the
+    service maintains. The old pages are a minute apart: each its own edit,
+    not a write burst (`working_set.HOT_PROFILE_BURST_GAP_NS`)."""
+    import time
+
+    now = time.time()
+    for index, page in enumerate(sorted((vault / "Knowledge Base").rglob("*.md"))):
+        _touch(page, when=now - 10_000 - index * 60)
+    _touch(newest, when=now)
+    _live_cell(vault)
+
+
+def test_a_referential_turn_resolves_to_the_hottest_anchor(stateful_vault: Path) -> None:
+    """The unit's whole point: "continue" names nothing, and is served the
+    thing this vault was last working on, through the ordinary lanes."""
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _age_everything(
+        stateful_vault, newest=stateful_vault / "Knowledge Base" / "Products" / "Cargo Sled.md"
+    )
+
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    resolved = [item for item in packet["anchors"] if item["status"] == "resolved"]
+    assert [item["path"] for item in resolved] == [
+        "Knowledge Base/Products/Cargo Sled.md"
+    ]
+    assert "recency" in resolved[0]["evidence"]
+    assert packet["units"], "a recency-resolved anchor runs its lanes like any other"
+    assert packet["recent_context"]
+
+
+def test_a_referential_turn_with_no_hot_profile_still_abstains(
+    stateful_vault: Path,
+) -> None:
+    """No freshness registry, no reads, no token: nothing is hot, so nothing
+    is referred to. The turn abstains exactly as it did before this rule."""
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+
+    assert packet["abstained"] is True
+    assert packet["abstention"] == {"reason": "unresolved"}
+    assert not [item for item in packet["anchors"] if item["status"] == "resolved"]
+
+
+def test_a_named_anchor_beats_the_hottest_page(stateful_vault: Path) -> None:
+    """The half of design section 8 that did not move."""
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _age_everything(
+        stateful_vault,
+        newest=stateful_vault / "Knowledge Base" / "Entities" / "People" / "Marit Solheim.md",
+    )
+
+    turn = "continue: I'm planning to tow the Cargo Sled north — what are its constraints?"
+    # The cue is spoken, and the turn names something besides it, so it is
+    # not referential at all (R-G): the named anchor wins by construction.
+    # `resolve()`'s own guard for the case is pinned in the resolver tests.
+    analysis = working_set_resolve.analyze_turn(turn)
+    assert "referential" in analysis.cues
+    assert not analysis.referential
+
+    packet = working_set.compile_packet(stateful_vault, turn=turn, max_chars=4000)
+
+    resolved = {item["path"] for item in packet["anchors"] if item["status"] == "resolved"}
+    assert "Knowledge Base/Products/Cargo Sled.md" in resolved
+    # Not resolved, and not listed either: the prior admitted it, and the
+    # prior decides nothing once the turn names something.
+    assert "Knowledge Base/Entities/People/Marit Solheim.md" not in {
+        item["path"] for item in packet["anchors"]
+    }
+
+
+def test_a_retired_page_is_never_the_hottest_anchor(stateful_vault: Path) -> None:
+    """A prior may not resurrect superseded state (design section 8). The
+    freshest page in the vault is archived, so the profile skips it."""
+    retired = stateful_vault / "Knowledge Base" / "Products" / "Retired Sled.md"
+    retired.write_text(
+        "---\ntype: resource\nstatus: archived\n---\n\nThe old sled, withdrawn.\n",
+        encoding="utf-8",
+    )
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _age_everything(stateful_vault, newest=retired)
+    rows = working_set_resolve.facts_from_rows(
+        working_set_index.WorkingSetIndex(stateful_vault).anchors()
+    )
+    # Not vacuous: the retired page IS an anchor, and IS the freshest edit.
+    assert "Knowledge Base/Products/Retired Sled.md" in {row.path for row in rows}
+
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+
+    offered = {item["path"] for item in packet["anchors"]}
+    assert "Knowledge Base/Products/Retired Sled.md" not in offered
+    assert "Knowledge Base/Products/Retired Sled.md" not in working_set.hot_profile(
+        stateful_vault, rows=rows
+    )
+    # The profile falls through to the next-freshest current page rather
+    # than going empty because the freshest one was retired.
+    assert packet["abstained"] is False, packet.get("abstention")
+
+
+def test_the_hot_profile_is_bounded_and_ranked_deterministically(
+    stateful_vault: Path,
+) -> None:
+    """One function, one order, and a bound on how wide a tie may be."""
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _age_everything(
+        stateful_vault, newest=stateful_vault / "Knowledge Base" / "Products" / "Cargo Sled.md"
+    )
+    index = working_set_index.WorkingSetIndex(stateful_vault)
+    rows = working_set_resolve.facts_from_rows(index.anchors())
+
+    first = working_set.hot_profile(stateful_vault, rows=rows)
+    second = working_set.hot_profile(stateful_vault, rows=rows)
+
+    assert first == second
+    assert first == frozenset({"Knowledge Base/Products/Cargo Sled.md"})
+    assert len(first) <= working_set.HOT_PROFILE_K == 5
+
+
+def test_the_previous_packets_own_anchor_outranks_a_fresher_edit(
+    stateful_vault: Path,
+) -> None:
+    """A continuity reference is the strongest statement of what this
+    conversation was about — stronger than whichever file was written last."""
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _age_everything(
+        stateful_vault, newest=stateful_vault / "Knowledge Base" / "Products" / "Cargo Sled.md"
+    )
+    index = working_set_index.WorkingSetIndex(stateful_vault)
+    rows = working_set_resolve.facts_from_rows(index.anchors())
+    carried = next(row for row in rows if row.path.endswith("Marit Solheim.md"))
+
+    hot = working_set.hot_profile(
+        stateful_vault,
+        rows=rows,
+        continuity_refs=frozenset({working_set_resolve.anchor_ref(carried)}),
+    )
+
+    assert hot == frozenset({carried.path})
+
+
+def test_a_page_superseded_by_another_is_never_hot(stateful_vault: Path) -> None:
+    """Supersession an index row cannot see: the page still says `active`
+    and only its `superseded_by` pointer retires it. The prior must not
+    resurrect it either (design section 8)."""
+    stale = stateful_vault / "Knowledge Base" / "Products" / "Old Sled.md"
+    stale.write_text(
+        "---\ntype: resource\nstatus: active\nsuperseded_by: \"[[Cargo Sled]]\"\n---\n\n"
+        "The previous sled plan.\n",
+        encoding="utf-8",
+    )
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _age_everything(stateful_vault, newest=stale)
+    rows = working_set_resolve.facts_from_rows(
+        working_set_index.WorkingSetIndex(stateful_vault).anchors()
+    )
+    stale_rows = [row for row in rows if row.path == "Knowledge Base/Products/Old Sled.md"]
+    assert stale_rows and stale_rows[0].lifecycle == "active", "the index cannot see it"
+
+    hot = working_set.hot_profile(stateful_vault, rows=rows)
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+
+    assert "Knowledge Base/Products/Old Sled.md" not in hot
+    assert hot, "the next-freshest current page takes its place"
+    assert "Knowledge Base/Products/Old Sled.md" not in {
+        item["path"] for item in packet["anchors"]
+    }
+
+
+def test_the_previous_packets_anchors_are_one_tier_taken_whole(
+    stateful_vault: Path,
+) -> None:
+    """The previous packet resolved two anchors side by side; "continue"
+    refers to that answer, not to whichever of its pages was edited last."""
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _age_everything(
+        stateful_vault, newest=stateful_vault / "Knowledge Base" / "Products" / "Cargo Sled.md"
+    )
+    rows = working_set_resolve.facts_from_rows(
+        working_set_index.WorkingSetIndex(stateful_vault).anchors()
+    )
+    by_path = {row.path: row for row in rows}
+    carried = (
+        by_path["Knowledge Base/Products/Cargo Sled.md"],
+        by_path["Knowledge Base/Entities/People/Marit Solheim.md"],
+    )
+
+    hot = working_set.hot_profile(
+        stateful_vault,
+        rows=rows,
+        continuity_refs=frozenset(working_set_resolve.anchor_ref(row) for row in carried),
+    )
+
+    assert hot == frozenset(row.path for row in carried)
+
+
+def test_a_turn_that_is_not_referential_never_computes_the_hot_profile(
+    stateful_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On any other turn the prior decides nothing, so it costs nothing: the
+    turn resolves exactly as it did before the prior could supply a referent."""
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _age_everything(
+        stateful_vault, newest=stateful_vault / "Knowledge Base" / "Products" / "Cargo Sled.md"
+    )
+
+    def _refuse(*_args, **_kwargs):
+        raise AssertionError("hot profile computed for a turn that is not referential")
+
+    monkeypatch.setattr(working_set, "hot_profile", _refuse)
+
+    packet = working_set.compile_packet(
+        stateful_vault,
+        turn=(
+            "I'm planning to tow the Cargo Sled north along the winter corridor "
+            "this week — what are its constraints and who coordinates freight?"
+        ),
+        max_chars=4000,
+    )
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert all("recency" not in item["evidence"] for item in packet["anchors"])
+
+
+def test_one_request_copies_the_freshness_registry_once(
+    stateful_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hot profile and the recent-context block read the same map; the
+    request copies it once and hands it to both."""
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    _age_everything(
+        stateful_vault, newest=stateful_vault / "Knowledge Base" / "Products" / "Cargo Sled.md"
+    )
+    real = working_set._recent_mtimes
+    calls: list[Path] = []
+
+    def _counting(vault_root: Path) -> dict[str, int]:
+        calls.append(vault_root)
+        return real(vault_root)
+
+    monkeypatch.setattr(working_set, "_recent_mtimes", _counting)
+
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert packet["recent_context"]
+    assert len(calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# R-P3: the recent-context block agrees with the hot profile.
+# --------------------------------------------------------------------------- #
+
+_KB = "Knowledge Base"
+
+
+def _journal_notes(vault: Path, stem: str, count: int) -> list[Path]:
+    journal = vault / _KB / "Notes" / "Journal"
+    journal.mkdir(parents=True, exist_ok=True)
+    pages = [journal / f"{stem}-{index}.md" for index in range(count)]
+    for index, page in enumerate(pages):
+        page.write_text(
+            f"---\ntype: note\nstatus: active\n---\n\n# {stem} {index}\n\nTidied.\n",
+            encoding="utf-8",
+        )
+    return pages
+
+
+def _age_all(vault: Path, *, now: float) -> None:
+    """Every page old and each its own edit, a minute apart."""
+    for index, page in enumerate(sorted((vault / _KB).rglob("*.md"))):
+        _touch(page, when=now - 10_000 - index * 60)
+
+
+def test_a_write_burst_and_the_edits_before_it_stay_out_of_the_block(
+    stateful_vault: Path,
+) -> None:
+    """(a) A maintenance batch rewrote four notes after the user's last edit.
+    The hot profile gives neither the batch nor any edit older than it an
+    edit signal; the block listed the batch and the older edits anyway. An
+    edit made after the batch is work again."""
+    import time
+
+    batch = _journal_notes(stateful_vault, "batch-note", 4)
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    now = time.time()
+    _age_all(stateful_vault, now=now)
+    _touch(stateful_vault / _KB / "Products" / "Cargo Sled.md", when=now - 100)
+    for index, page in enumerate(batch):
+        _touch(page, when=now - 50 + index * 0.05)
+    _touch(stateful_vault / _KB / "Systems" / "Depot Ledger.md", when=now)
+    _live_cell(stateful_vault)
+
+    packet = working_set.compile_packet(
+        stateful_vault, turn="zzz qqq unrelated gibberish", max_chars=4000
+    )
+
+    edited = [entry["path"] for entry in packet["recent_context"] if entry["why"] == "edited"]
+    assert edited == [f"{_KB}/Systems/Depot Ledger.md"], edited
+
+
+def test_the_most_read_page_keeps_a_slot_under_a_live_registry(
+    stateful_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(b) Read pages were ranked by their last EDIT time, so under a live
+    registry eight fresher edits always cut them and `activated` never
+    appeared. They rank by activation and the most-read one keeps a slot,
+    even when a less-read page was edited more recently."""
+    import time
+
+    fresh = _journal_notes(stateful_vault, "fresh-note", 9)
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    now = time.time()
+    _age_all(stateful_vault, now=now)
+    hub = f"{_KB}/Notes/Insights/northern-corridor-hub.md"
+    person = f"{_KB}/Entities/People/Marit Solheim.md"
+    _touch(stateful_vault / hub, when=now - 90_000)
+    _touch(stateful_vault / person, when=now - 20_000)
+    for index, page in enumerate(fresh):
+        _touch(page, when=now - index * 60)
+    _live_cell(stateful_vault)
+    monkeypatch.setattr(working_set, "_activation_snapshot", lambda: {hub: 5.0, person: 3.0})
+
+    packet = working_set.compile_packet(
+        stateful_vault, turn="zzz qqq unrelated gibberish", max_chars=4000
+    )
+
+    block = packet["recent_context"]
+    assert len(block) == working_set.RECENT_CONTEXT_MAX_ENTRIES
+    assert [entry["path"] for entry in block if entry["why"] == "activated"] == [hub], [
+        (entry["why"], entry["path"]) for entry in block
+    ]
+
+
+def test_retired_and_superseded_pages_stay_out_of_the_block(stateful_vault: Path) -> None:
+    """(c) The block led with a superseded page labelled "status: active" and
+    an archived anchor, both of which the hot profile skips."""
+    import time
+
+    products = stateful_vault / _KB / "Products"
+    (products / "Old Sled.md").write_text(
+        "---\ntype: resource\nstatus: active\nsuperseded_by: \"[[Cargo Sled]]\"\n---\n\n"
+        "The previous sled plan.\n",
+        encoding="utf-8",
+    )
+    (products / "Retired Sled.md").write_text(
+        "---\ntype: resource\nstatus: archived\n---\n\nThe old sled, withdrawn.\n",
+        encoding="utf-8",
+    )
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    now = time.time()
+    _age_all(stateful_vault, now=now)
+    _touch(products / "Cargo Sled.md", when=now - 200)
+    _touch(products / "Retired Sled.md", when=now - 100)
+    _touch(products / "Old Sled.md", when=now)
+    _live_cell(stateful_vault)
+
+    packet = working_set.compile_packet(
+        stateful_vault, turn="zzz qqq unrelated gibberish", max_chars=4000
+    )
+
+    paths = [entry["path"] for entry in packet["recent_context"]]
+    assert f"{_KB}/Products/Old Sled.md" not in paths
+    assert f"{_KB}/Products/Retired Sled.md" not in paths
+    assert paths[0] == f"{_KB}/Products/Cargo Sled.md", paths
+
+
+# --------------------------------------------------------------------------- #
+# R-P4: the recent statement is what the page says, not where it is in its life.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("frontmatter", "expected"),
+    [
+        # The review's a2b shape: the lifecycle word shadowed the summary.
+        (
+            "status: active\nsummary: Reconciled the winter stock count against the ledger.\n",
+            "summary: Reconciled the winter stock count against the ledger.",
+        ),
+        ("status: active\n", ""),
+        ("status: draft\n", ""),
+        ("status: concluded\n", ""),
+        ("status: published\n", ""),
+        ("status: in storage abroad\n", "status: in storage abroad"),
+    ],
+)
+def test_the_recent_statement_is_never_a_lifecycle_word(
+    vault: Path, frontmatter: str, expected: str
+) -> None:
+    rel = f"{_KB}/Systems/Winter Ledger.md"
+    page = vault / rel
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(f"---\ntype: resource\n{frontmatter}---\n\nThe ledger.\n", encoding="utf-8")
+
+    assert working_set._recent_frontmatter_statement(vault, rel) == expected
+
+
+# --------------------------------------------------------------------------- #
+# R-Q N4: the recent block finds the latest burst without sorting the registry.
+# --------------------------------------------------------------------------- #
+
+
+def _reference_recent_edits(
+    mtimes: dict[str, int], *, limit: int, collections: frozenset[str]
+) -> dict[str, str]:
+    """The edit source by full sort: every burst computed over the whole
+    registry, the newest `limit` pages with a reason, less any edit at or
+    before the latest burst. For edits this is exactly what R-P3 shipped (it
+    stopped at the first entry not after the burst, and every entry after
+    it is newer than every entry before it); a captured session is never
+    cut (R-Q N5)."""
+    burst = working_set._burst_paths(mtimes)
+    after = max((int(mtimes[path]) for path in burst), default=0)
+    newest: dict[str, tuple[str, int]] = {}
+    for rel in sorted(mtimes, key=lambda item: (-mtimes[item], item)):
+        if len(newest) >= limit:
+            break
+        why = working_set._recent_reason_for(rel, collections=collections)
+        if why:
+            newest[rel] = (why, int(mtimes[rel]))
+    return {
+        rel: why for rel, (why, mtime) in newest.items() if why == "captured" or mtime > after
+    }
+
+
+def _random_registry(seed: int) -> dict[str, int]:
+    import random
+
+    rng = random.Random(seed)
+    kinds = (
+        "Knowledge Base/Notes/Journal/note-{}.md",
+        "Knowledge Base/Sources/Sessions/2026-09-{}-session.md",
+        "Knowledge Base/Evidence/receipt-{}.md",
+        "Knowledge Base/Notes/Area {}/index.md",
+        "Knowledge Base/Records/Depot Stock/Items/item-{}.md",
+    )
+    gaps_s = (0, 0, 0.1, 1, 2.9, 4.9, 5, 5.1, 6, 60, 3600)
+    stamp = 1_800_000_000_000_000_000
+    mtimes: dict[str, int] = {"Knowledge Base/Records/Depot Stock/_collection.md": stamp}
+    for index in range(rng.randrange(1, 60)):
+        stamp -= int(rng.choice(gaps_s) * 1e9)
+        path = rng.choice(kinds).format(index)
+        mtimes[path] = 0 if rng.random() < 0.03 else stamp
+    return mtimes
+
+
+def test_the_recent_edits_are_identical_to_the_full_sort() -> None:
+    """Bounded work, same answer: the burst fixtures' shapes (chains of three
+    or more within five seconds, a stalled tail, equal times, navigation
+    pages, zero times, captures and collection storage) at every limit."""
+    collections = frozenset({"Knowledge Base/Records/Depot Stock"})
+    for seed in range(400):
+        mtimes = _random_registry(seed)
+        for limit in (1, 3, 8):
+            assert working_set._recent_edits(
+                mtimes, limit=limit, collections=collections
+            ) == _reference_recent_edits(mtimes, limit=limit, collections=collections), (
+                seed,
+                limit,
+            )
+
+
+def test_the_recent_block_never_computes_every_burst(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the latest burst and the edits after it matter to the block, so
+    it must not sort the whole registry to find every burst: +5.7 ms a turn
+    at 8,000 notes."""
+
+    def every_burst(_mtimes):
+        raise AssertionError("the recent block computed every burst")
+
+    monkeypatch.setattr(working_set, "_burst_paths", every_burst)
+    monkeypatch.setattr(working_set, "_recently_activated", lambda *a, **k: ())
+    monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: ())
+    monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
+    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a: True)
+    mtimes = {f"Knowledge Base/Notes/note-{index}.md": _minutes_ago(index) for index in range(20)}
+
+    entries = working_set._recent_context(Path("/nonexistent"), rows=[], mtimes=mtimes)
+
+    assert [entry["path"] for entry in entries] == [
+        f"Knowledge Base/Notes/note-{index}.md" for index in range(8)
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# R-Q N5: a captured session is not cut by the burst after it.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_captured_session_survives_the_burst_after_it() -> None:
+    """The reviewer's d_save3: an ordinary agent save wrote three pages a
+    second apart, sixty seconds after the session was captured. The capture
+    is the record of what was spoken about, not a batch edit, so the save
+    cuts the user's earlier edit but not the capture."""
+    session = "Knowledge Base/Sources/Sessions/2026-09-22-session.md"
+    edited = "Knowledge Base/Systems/Depot Ledger.md"
+    saved = [
+        "Knowledge Base/Notes/Research/sluice-gate-trial.md",
+        "Knowledge Base/Entities/People/Marit Solheim.md",
+        "Knowledge Base/Notes/Insights/northern-corridor-hub.md",
+    ]
+    stamp = 1_800_000_000_000_000_000
+    mtimes = {edited: stamp - 120 * 10**9, session: stamp - 60 * 10**9}
+    mtimes.update({page: stamp + index * 10**9 for index, page in enumerate(saved)})
+
+    offered = working_set._recent_edits(mtimes, limit=8)
+
+    assert offered == {session: "captured"}, offered

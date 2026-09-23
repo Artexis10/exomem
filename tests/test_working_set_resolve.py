@@ -431,6 +431,38 @@ def test_a_common_shared_term_is_neither_rare_term_nor_lexical_overlap() -> None
     assert candidates == ()
 
 
+def test_a_two_letter_shared_term_never_earns_rare_term() -> None:
+    """D4: a term shorter than three characters is never a lead.
+
+    "so should i go with the first option" is ordinary English, not a
+    reference to a page whose title happens to contain the word "Go" — but
+    "go" is no stopword, it names few anchors in a small catalogue, and it
+    was therefore a perfectly rare single shared name term. Length is the
+    only thing that separates that accident from a real short name, so a
+    two-character term earns no contact kind at all and the anchor is not a
+    candidate.
+    """
+    row = _term_row("release-go-checklist.md", "Release Go Checklist", terms=("release", "go"))
+    analysis = resolve_module.analyze_turn("so should i go with the first option")
+    candidates = resolve_module.candidates_for(
+        analysis, (row,), term_anchor_counts={"go": 1}
+    )
+
+    assert candidates == ()
+
+
+def test_a_three_letter_shared_term_still_earns_rare_term() -> None:
+    """The floor is exactly three characters: a genuinely short NAME still leads."""
+    row = _term_row("hob-service-log.md", "Hob Service Log", terms=("hob", "service"))
+    analysis = resolve_module.analyze_turn("is the hob booked in yet")
+    candidates = resolve_module.candidates_for(
+        analysis, (row,), term_anchor_counts={"hob": 1}
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].evidence == frozenset({"rare_term"})
+
+
 # --------------------------------------------------------------------------- #
 # Correction round 1 (`close-memory-loop`): rarity among ANCHOR NAMES is not
 # rarity of the WORD. A single shared name term never earns `lexical_overlap`,
@@ -953,6 +985,10 @@ def test_evidence_vocabulary_is_closed() -> None:
         "retrieval",
         "graph_corroboration",
         "usage_prior",
+        # Added by `close-memory-loop` D2: the hot profile's own top, which
+        # may supply the referent of a turn that names nothing and decides
+        # nothing on any other turn.
+        "recency",
         # Added by `activate-context-on-host-turns`: a client-carried token
         # qualifies an anchor the turn already reached, and an agent's own choice
         # of sense resolves one outright.
@@ -1543,3 +1579,525 @@ def test_c3_a_function_word_alone_does_not_earn_rare_term() -> None:
     )
 
     assert candidates == ()
+
+
+# --------------------------------------------------------------------------- #
+# Referential turns (close-memory-loop D2, as narrowed): a turn that SAYS it
+# points back at what the session was doing. A declared cue, matched on whole
+# tokens, AND nothing else said (R-G); being short is not a signal.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "continue",
+        "ok continue",
+        "carry on",
+        "where were we",
+        "where did we leave off",
+        "what's next",
+        "what\u2019s next?",
+        "same as before",
+        "as before",
+        "pick up where we left off",
+        "resume",
+        "status",
+        "status?",
+    ],
+)
+def test_a_declared_referential_cue_makes_the_turn_referential(turn: str) -> None:
+    analysis = resolve_module.analyze_turn(turn)
+
+    assert "referential" in analysis.cues
+    assert analysis.referential is True
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "and the northern depot?",
+        "zzz qqq unrelated gibberish",
+        "What's a good name for a new houseplant?",
+        "so should I go with the cheaper one?",
+    ],
+)
+def test_a_short_turn_without_a_cue_is_not_referential(turn: str) -> None:
+    """Being short is not a signal. A novel turn is short too, and a prior
+    must never answer one with whatever was edited last."""
+    analysis = resolve_module.analyze_turn(turn)
+
+    assert "referential" not in analysis.cues
+    assert analysis.referential is False
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "discontinue the winter schedule",
+        "list the statuses of every depot",
+        "go online and check the depot",
+        "go on the northern route",
+        "pick up the parcel at the depot",
+        "wherever we were going",
+    ],
+)
+def test_a_cue_is_matched_on_whole_tokens_only(turn: str) -> None:
+    """A cue inside a longer word, or a dropped cue's ordinary sense, is not
+    a turn pointing back."""
+    analysis = resolve_module.analyze_turn(turn)
+
+    assert "referential" not in analysis.cues
+    assert analysis.referential is False
+
+
+def test_a_long_turn_with_no_cue_is_not_referential() -> None:
+    analysis = resolve_module.analyze_turn(
+        "I'm planning to tow the cargo sled north along the winter corridor "
+        "and I need to know what the depot stock looks like"
+    )
+
+    assert analysis.referential is False
+
+
+#: The turns that only point back: every one must stay referential (R-G;
+#: the reviewer's keep list, p11, plus the aligned cues).
+POINTING_BACK_TURNS = (
+    "continue",
+    "ok continue",
+    "please continue",
+    "where were we",
+    "so where were we?",
+    "status?",
+    "status update",
+    "status report?",
+    "what's next",
+    "what's next?",
+    "let's continue the work, what's pending?",
+    "Let's continue the work... what's pending?",
+    "pick up where we left off",
+    "continue from where we stopped yesterday",
+    "okay, where did we leave off?",
+    "resume",
+    "carry on",
+    "same as before",
+    "what were we doing?",
+)
+
+#: Turns that speak a cue word in its ordinary sense, or name something
+#: besides it: none may be referential (R-G; the reviewer's p3, p11 and p15
+#: misfires and named turns).
+CUE_WORD_BUT_NOT_POINTING_BACK_TURNS = (
+    "update my resume",
+    "carry on luggage limits for a short flight",
+    "what's the status of the parcel?",
+    "continue the recipe from the book",
+    "can I resume my gym membership after the injury?",
+    "check the status of my flight",
+    "I want to continue learning Spanish",
+    "what is next year's tax deadline",
+    "is the status quo fine for the lease?",
+    "what's next for the quillon vantry window",
+    "status of the tarn rollover cadence",
+    "summarize this article as before",
+    "use the same format as before",
+    "same as before but shorter",
+    "translate it as before",
+    "resume the download",
+    "what's the status code for not found",
+    "continue the story",
+    "what's next in the tutorial?",
+    "carry on with the essay",
+    "should I continue with the cheaper cargo sled or wait for the dearer one",
+)
+
+
+@pytest.mark.parametrize("turn", POINTING_BACK_TURNS)
+def test_a_turn_that_only_points_back_is_referential(turn: str) -> None:
+    assert resolve_module.analyze_turn(turn).referential is True
+
+
+@pytest.mark.parametrize("turn", CUE_WORD_BUT_NOT_POINTING_BACK_TURNS)
+def test_a_cue_word_with_anything_else_said_is_not_referential(turn: str) -> None:
+    """The cue was spoken — it is recorded — but the turn also says what it
+    is about, so recency is not asked to supply a referent for it."""
+    analysis = resolve_module.analyze_turn(turn)
+
+    assert "referential" in analysis.cues
+    assert analysis.referential is False
+
+
+def test_the_filler_set_is_closed_and_declared() -> None:
+    assert "work" in resolve_module.REFERENTIAL_FILLER
+    assert "resume" not in resolve_module.REFERENTIAL_FILLER
+    assert "report" not in resolve_module.REFERENTIAL_FILLER
+    assert len(resolve_module.REFERENTIAL_FILLER) == 33
+
+
+# --------------------------------------------------------------------------- #
+# `recency`, the prior that may supply a referent (close-memory-loop D2)
+# --------------------------------------------------------------------------- #
+
+
+def test_recency_is_its_own_class_and_no_other() -> None:
+    assert "recency" in resolve_module.EVIDENCE_KINDS
+    assert resolve_module.PRIOR_CONTACT_KINDS == frozenset({"recency"})
+    assert "recency" not in resolve_module.TIE_BREAK_KINDS
+    assert "recency" not in resolve_module.WORDED_CONTACT_KINDS
+    assert "recency" not in resolve_module.RETRIEVED_CONTACT_KINDS
+    # Deliberately NOT a contact kind: `_status_for`'s third clause resolves
+    # `rare_term` plus any other CONTACT kind, and admitting a prior there
+    # would let one shared word plus a hot page resolve an anchor.
+    assert "recency" not in resolve_module.CONTACT_KINDS
+
+
+def test_a_referential_turn_resolves_to_the_one_hot_anchor() -> None:
+    resolution = resolve_module.resolve(
+        (_facts("hot.md", evidence=("recency",)),), referential=True
+    )
+
+    assert resolution.status == "resolved"
+    assert resolution.anchors[0].status == "resolved"
+    assert resolution.anchors[0].evidence == ("recency",)
+
+
+def test_two_equally_hot_anchors_on_a_referential_turn_are_ambiguous() -> None:
+    """Never a guess: the profile put two anchors of one kind at the top and
+    nothing relates them, so the agent is handed both."""
+    resolution = resolve_module.resolve(
+        (
+            _facts("first.md", kind="hub", evidence=("recency",)),
+            _facts("second.md", kind="hub", evidence=("recency",)),
+        ),
+        referential=True,
+    )
+
+    assert resolution.status == "ambiguous"
+    assert {item["ref"] for item in resolution.ambiguity} == {"first.md", "second.md"}
+
+
+def test_a_worded_candidate_anywhere_stops_recency_resolving() -> None:
+    """The named anchor carries the packet and the hot one decides nothing,
+    even though the turn read as referential by cue."""
+    resolution = resolve_module.resolve(
+        (
+            _facts("hot.md", kind="hub", evidence=("recency",)),
+            _facts("named.md", kind="resource", evidence=("exact_alias",)),
+        ),
+        referential=True,
+    )
+
+    assert resolution.status == "resolved"
+    assert [anchor.anchor_id for anchor in resolution.resolved_anchors] == ["named.md"]
+    assert "hot.md" not in {anchor.anchor_id for anchor in resolution.anchors}
+
+
+def test_recency_never_resolves_on_a_turn_that_is_not_referential() -> None:
+    resolution = resolve_module.resolve((_facts("hot.md", evidence=("recency",)),))
+
+    assert resolution.status == "unresolved"
+    assert resolution.anchors == ()
+
+
+def test_recency_never_completes_the_two_kinds_rule() -> None:
+    """The whole of section 8 that survives: a prior cannot be the second
+    kind that promotes another candidate, referential turn or not."""
+    for referential in (False, True):
+        resolution = resolve_module.resolve(
+            (_facts("a.md", evidence=("lexical_overlap", "recency")),),
+            referential=referential,
+        )
+
+        assert resolution.anchors[0].status == "partial", referential
+        assert resolution.status == "unresolved", referential
+
+
+def test_recency_does_not_promote_a_rare_term_candidate() -> None:
+    resolution = resolve_module.resolve(
+        (_facts("a.md", evidence=("rare_term", "recency")),), referential=True
+    )
+
+    assert resolution.anchors[0].status == "partial"
+
+
+def test_a_hot_anchor_is_a_candidate_only_on_a_referential_turn() -> None:
+    row = _row("Products/Hot Page.md", "Hot Page", kind="resource")
+    hot = frozenset({"Products/Hot Page.md"})
+
+    referential = resolve_module.candidates_for(
+        resolve_module.analyze_turn("continue"), (row,), hot_paths=hot
+    )
+    ordinary = resolve_module.candidates_for(
+        resolve_module.analyze_turn(
+            "I am planning to tow the cargo sled north along the winter corridor "
+            "and need the depot stock figures"
+        ),
+        (row,),
+        hot_paths=hot,
+    )
+
+    assert [item.anchor_id for item in referential] == ["Products/Hot Page.md"]
+    assert referential[0].evidence == frozenset({"recency"})
+    assert ordinary == ()
+
+
+def test_a_hot_anchor_the_turn_also_named_keeps_its_own_evidence() -> None:
+    """`recency` joins the evidence of an anchor already in contact — it is
+    reported, so a reader sees the page was hot, and it still decides
+    nothing (the clause above)."""
+    row = _term_row("Products/Hot Page.md", "Hot Page", terms=("hot", "page"))
+    candidates = resolve_module.candidates_for(
+        resolve_module.analyze_turn("the hot page"),
+        (row,),
+        hot_paths=frozenset({"Products/Hot Page.md"}),
+    )
+
+    assert candidates[0].evidence >= frozenset({"exact_alias", "recency"})
+
+
+def test_a_candidate_only_the_prior_admitted_is_dropped_when_something_was_named() -> None:
+    """A hot page the turn never reached rides in on the prior alone. Once
+    the turn names something else the prior decides nothing, and a qualifier
+    it happens to carry (`continuity`, `category_match`) must not turn it into
+    a `partial` menu entry whose only claim is that somebody edited it."""
+    for qualifier in ("continuity", "category_match"):
+        resolution = resolve_module.resolve(
+            (
+                _facts("hot.md", kind="hub", evidence=("recency", qualifier)),
+                _facts("named.md", kind="resource", evidence=("exact_alias",)),
+            ),
+            referential=True,
+        )
+
+        assert resolution.status == "resolved", qualifier
+        assert [anchor.anchor_id for anchor in resolution.anchors] == ["named.md"], qualifier
+
+
+def test_a_hot_anchor_with_continuity_resolves_on_a_referential_turn_naming_nothing() -> None:
+    """The previous packet's anchor, hot, on "continue": the fifth clause
+    resolves it, and both kinds are reported so a reader can see why."""
+    resolution = resolve_module.resolve(
+        (_facts("carried.md", evidence=("recency", "continuity")),), referential=True
+    )
+
+    assert resolution.status == "resolved"
+    assert resolution.anchors[0].evidence == ("continuity", "recency")
+
+
+# --------------------------------------------------------------------------- #
+# R-E (amends D4), narrowed by R-N1: a short ASCII term clears the rare-term
+# floor only when the turn spells it as exactly two capitals AND the anchor's
+# own title spells it in capitals too.
+# --------------------------------------------------------------------------- #
+
+
+def test_an_upper_case_two_letter_acronym_earns_rare_term() -> None:
+    """"AI" in "my AI usage limits" is a name the turn spelled as one — the
+    D4 floor exists for everyday words, and nobody writes "go" as "GO" in a
+    sentence of ordinary case."""
+    row = _term_row(
+        "Records/AI Subscriptions/_collection.md", "AI Subscriptions", terms=("ai", "subscriptions")
+    )
+    analysis = resolve_module.analyze_turn("I keep hitting my AI usage limits again this week.")
+
+    assert analysis.acronyms == frozenset({"ai"})
+    candidates = resolve_module.candidates_for(analysis, (row,), term_anchor_counts={"ai": 1})
+
+    assert len(candidates) == 1
+    assert "rare_term" in candidates[0].evidence
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "I keep hitting my ai usage limits again this week.",
+        "I keep hitting my Ai usage limits again this week.",
+    ],
+)
+def test_a_short_term_not_spelled_as_an_acronym_stays_refused(turn: str) -> None:
+    """Lower or mixed case is how an everyday word is written, so D4 holds."""
+    row = _term_row(
+        "Records/AI Subscriptions/_collection.md", "AI Subscriptions", terms=("ai", "subscriptions")
+    )
+    analysis = resolve_module.analyze_turn(turn)
+
+    assert analysis.acronyms == frozenset()
+    assert resolve_module.candidates_for(analysis, (row,), term_anchor_counts={"ai": 1}) == ()
+
+
+def test_an_all_capitals_turn_carries_no_casing_signal() -> None:
+    """A turn typed with caps lock on spells every word in upper case, so
+    upper case says nothing there: "GO" in it is still the verb."""
+    row = _term_row("release-go-checklist.md", "Release Go Checklist", terms=("release", "go"))
+    analysis = resolve_module.analyze_turn("SO SHOULD I GO WITH THE FIRST OPTION")
+
+    assert analysis.acronyms == frozenset()
+    assert resolve_module.candidates_for(analysis, (row,), term_anchor_counts={"go": 1}) == ()
+
+
+def test_a_capitalised_short_word_is_not_an_acronym() -> None:
+    """"Go" at the start of a sentence is the verb with a capital, not a name."""
+    row = _term_row("release-go-checklist.md", "Release Go Checklist", terms=("release", "go"))
+    analysis = resolve_module.analyze_turn("Go with the first option, I think")
+
+    assert analysis.acronyms == frozenset()
+    assert resolve_module.candidates_for(analysis, (row,), term_anchor_counts={"go": 1}) == ()
+
+
+# --------------------------------------------------------------------------- #
+# R-I / R-K: a recency referent survives the cuts, and heat never reorders
+# candidates the turn named.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "partial_evidence",
+    [("retrieval", "usage_prior"), ("retrieval", "category_match"), ("retrieval", "vector_band")],
+)
+def test_a_recency_referent_survives_the_anchor_cut(partial_evidence: tuple[str, ...]) -> None:
+    """The reviewer's probe p1: eight retrieval-only partials whose ids sort
+    ahead of the hot anchor used to fill `MAX_ANCHORS` and drop it."""
+    candidates = [_facts("z-hot.md", kind="hub", evidence=("recency",))] + [
+        _facts(f"a-partial-{index}.md", kind="note", evidence=partial_evidence)
+        for index in range(8)
+    ]
+
+    resolution = resolve_module.resolve(candidates, referential=True)
+
+    assert resolution.status == "resolved"
+    assert [anchor.anchor_id for anchor in resolution.resolved_anchors] == ["z-hot.md"]
+    assert resolution.anchors[0].anchor_id == "z-hot.md"
+    assert len(resolution.anchors) == resolve_module.MAX_ANCHORS
+
+
+def test_the_anchor_cut_is_unchanged_when_recency_cannot_resolve() -> None:
+    candidates = [_facts("z-hot.md", kind="hub", evidence=("recency",))] + [
+        _facts(f"a-partial-{index}.md", kind="note", evidence=("retrieval", "usage_prior"))
+        for index in range(8)
+    ]
+
+    resolution = resolve_module.resolve(candidates)
+
+    assert resolution.status == "unresolved"
+    assert [anchor.anchor_id for anchor in resolution.anchors] == [
+        f"a-partial-{index}.md" for index in range(resolve_module.MAX_ANCHORS)
+    ]
+
+
+def test_a_hot_candidate_survives_the_candidate_cut_on_a_referential_turn() -> None:
+    rows = [_row(f"Notes/a-hit-{index:02d}.md", f"Hit {index}") for index in range(30)]
+    rows.append(_row("Products/z-hot.md", "Hot Page", kind="resource"))
+    hits = frozenset(f"Notes/a-hit-{index:02d}.md" for index in range(30))
+    hot = frozenset({"Products/z-hot.md"})
+
+    referential = resolve_module.candidates_for(
+        resolve_module.analyze_turn("let's continue the work, what's pending?"),
+        rows,
+        retrieval_paths=hits,
+        hot_paths=hot,
+    )
+    ordinary = resolve_module.candidates_for(
+        resolve_module.analyze_turn("the depot corridor hits for the winter north"),
+        rows,
+        retrieval_paths=hits,
+        hot_paths=hot,
+    )
+
+    assert len(referential) == resolve_module.MAX_CANDIDATES
+    assert "Products/z-hot.md" in {item.anchor_id for item in referential}
+    # Any other turn is cut exactly as before: the prior admits nothing there,
+    # and the first MAX_CANDIDATES recall hits by the ordinary order remain.
+    assert [item.anchor_id for item in ordinary] == [
+        f"Notes/a-hit-{index:02d}.md" for index in range(resolve_module.MAX_CANDIDATES)
+    ]
+
+
+def test_heat_never_reorders_candidates_the_turn_named() -> None:
+    """R-K: `a` is hot and `b` is not; `b` holds more of the turn's own
+    evidence and so comes first, whatever the heat."""
+    hot = _facts("a.md", evidence=("lexical_overlap", "recency"))
+    colder = _facts("b.md", evidence=("lexical_overlap", "claims_match"))
+
+    ordered = sorted([hot, colder], key=resolve_module._candidate_order)
+
+    assert [item.anchor_id for item in ordered] == ["b.md", "a.md"]
+
+
+@pytest.mark.parametrize(
+    ("turn", "title", "term"),
+    [
+        ("I got a C on my chemistry exam", "Building C", "c"),
+        ("should I GO with the cheaper build machines?", "Go Toolchain", "go"),
+        ("U.S. tax deadline?", "Model S Lease", "s"),
+        ("the S in HTTPS stands for secure", "Model S Lease", "s"),
+        ("I keep hitting my AI usage limits again this week.", "Ai Tools", "ai"),
+    ],
+)
+def test_capitals_alone_never_make_a_short_word_a_lead(turn: str, title: str, term: str) -> None:
+    """R-N1, the reviewer's r2 probes: a single capital, emphasis capitals on
+    an everyday word, a dotted abbreviation, or an acronym the anchor's own
+    title does not spell in capitals. Each used to earn `rare_term`, and with
+    an ordinary recall hit beside it, to resolve and serve the anchor."""
+    row = _term_row(f"{title}.md", title, terms=tuple(title.casefold().split()))
+
+    candidates = resolve_module.candidates_for(
+        resolve_module.analyze_turn(turn), (row,), term_anchor_counts={term: 1}
+    )
+
+    assert all("rare_term" not in item.evidence for item in candidates), candidates
+
+
+def test_a_two_capital_acronym_the_title_also_capitalises_is_a_lead() -> None:
+    """C1's shape, which must keep resolving."""
+    row = _term_row("PM Handbook.md", "PM Handbook", terms=("pm", "handbook"))
+
+    candidates = resolve_module.candidates_for(
+        resolve_module.analyze_turn("where is the PM checklist kept"),
+        (row,),
+        term_anchor_counts={"pm": 1},
+    )
+
+    assert [item.evidence for item in candidates] == [frozenset({"rare_term"})]
+
+
+def test_only_two_capital_words_are_acronyms() -> None:
+    analysis = resolve_module.analyze_turn("the S in HTTPS and the U.S. plan for AI")
+
+    assert analysis.acronyms == frozenset({"ai"})
+
+
+def test_a_one_letter_name_still_resolves_by_its_own_spelling() -> None:
+    """Single capitals never earn `rare_term`, but a page named exactly "R"
+    is still reached by the turn spelling its name."""
+    row = _term_row("R.md", "R", terms=("r",))
+
+    candidates = resolve_module.candidates_for(
+        resolve_module.analyze_turn("Is R worth learning for statistics?"),
+        (row,),
+        term_anchor_counts={"r": 1},
+    )
+
+    assert candidates and "exact_alias" in candidates[0].evidence
+    assert resolve_module.resolve(candidates).status == "resolved"
+
+
+def test_a_filler_word_in_capitals_is_not_an_acronym() -> None:
+    """R-O3, the reviewer's r4 alias probe: "OK continue" spelled "OK" in
+    capitals, an anchor titled "OK Go" earned `rare_term` from it, and that
+    worded candidate shut the recency referent the turn asked for."""
+    rows = (
+        _term_row("Music/OK Go.md", "OK Go", terms=("ok", "go")),
+        _term_row("Products/Hot Page.md", "Hot Page", terms=("hot", "page")),
+    )
+    analysis = resolve_module.analyze_turn("OK continue")
+
+    candidates = resolve_module.candidates_for(
+        analysis,
+        rows,
+        hot_paths=frozenset({"Products/Hot Page.md"}),
+        term_anchor_counts={"ok": 1},
+    )
+    resolution = resolve_module.resolve(candidates, referential=analysis.referential)
+
+    assert analysis.acronyms == frozenset()
+    assert [anchor.anchor_id for anchor in resolution.resolved_anchors] == ["Products/Hot Page.md"]
