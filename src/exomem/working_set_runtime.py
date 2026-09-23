@@ -678,17 +678,22 @@ def content_stems(turn: str) -> tuple[str, ...]:
     there are talking about the same word. Used for the rarity lookup and
     the corroboration list, which compare against the catalogue's STORED
     stems directly; never for the ranking query, which stems what it is
-    given (see `content_words`).
+    given (see `content_words`). Query side: an accented word is its surface
+    form only, so rarity is read on what the turn wrote, not on the folded
+    variant the index also stores.
     """
     from . import bm25 as bm25_module
 
-    return tuple(dict.fromkeys(bm25_module.tokenize(content_words(turn))))
+    return tuple(dict.fromkeys(bm25_module.tokenize(content_words(turn), query=True)))
 
 
 #: What ends a proximity window. Sentence-ending punctuation and a line
 #: break; a comma deliberately does not, being punctuation inside a phrase
 #: rather than between two of them.
 _SENTENCE_BREAK = re.compile(r"[.!?;\n\r]+")
+#: The joiners `working_set_index.tokens_of` admits inside a term. The parts
+#: they join are separate words of one compound.
+_TOKEN_JOINERS = re.compile(r"['\-]+")
 
 
 def adjacent_rare_pairs(
@@ -716,7 +721,11 @@ def adjacent_rare_pairs(
 
     One raw token may carry several stems ("girvan-slot", "o'brien"), and
     all of them are placed at that token's position: a compound is the
-    phrase said as tightly as a phrase can be said.
+    phrase said as tightly as a phrase can be said. But a pair needs two
+    UNITS: the stems of one word ("jätka" and its folded variant) or of one
+    unspaced run (every bigram of 東京タワーの高さ) are one thing said once,
+    never a phrase with itself. The raw token is split on its joiners first,
+    so the parts of a joined compound still pair at distance zero.
 
     Each pair is returned once, sorted, so the caller's query sees a stable
     set.
@@ -731,19 +740,23 @@ def adjacent_rare_pairs(
     # Split the RAW text: `normalize` folds case and width but keeps the
     # punctuation, and splitting per sentence is what keeps a window from
     # reaching across one.
+    unit_id = 0
     for sentence in _SENTENCE_BREAK.split(str(turn)):
-        placed: list[tuple[int, str]] = []
+        placed: list[tuple[int, int, str]] = []
         for index, token in enumerate(
             working_set_index.tokens_of(working_set_index.normalize(sentence))
         ):
-            for stem in bm25_module.tokenize(token):
-                if stem in wanted:
-                    placed.append((index, stem))
-        for position, (left_at, left) in enumerate(placed):
-            for right_at, right in placed[position + 1 :]:
+            for part in _TOKEN_JOINERS.split(token):
+                for unit in bm25_module.token_units(part, query=True):
+                    unit_id += 1
+                    for stem in dict.fromkeys(unit.stems):
+                        if stem in wanted:
+                            placed.append((index, unit_id, stem))
+        for position, (left_at, left_unit, left) in enumerate(placed):
+            for right_at, right_unit, right in placed[position + 1 :]:
                 if right_at - left_at > span:
                     break
-                if left != right:
+                if left != right and left_unit != right_unit:
                     first, second = sorted((left, right))
                     pairs.add((first, second))
     return tuple(sorted(pairs))
