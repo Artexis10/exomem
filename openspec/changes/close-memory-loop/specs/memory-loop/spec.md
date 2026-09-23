@@ -40,6 +40,18 @@ Where evidence supplies them, event occurrence, knowledge acquisition and claim 
 - **THEN** the system preserves its historical timing and applies the supported correction when presenting current state
 - **AND** the fresh write timestamp does not make the old event new or the superseded claim current
 
+#### Scenario: A conversation that saved nothing else reaches the next session on another client
+
+- **WHEN** a session records only an episode recap of what it worked on, decided and left open, and a later session on a different supported client sends a turn that names nothing
+- **THEN** that later session's recent-context block carries the recap's title, summary and episode reference with the reason `episode`
+- **AND** the entry crosses the same release plane as every other recent-context item
+
+#### Scenario: Two revisions of one episode appear once
+
+- **WHEN** an episode's recap has been revised, so one revision is superseded and one is live
+- **THEN** the recent-context block shows that episode once, from its newest revision
+- **AND** the recaps hold their bounded share of the block, and the block pays no extra enumeration for them
+
 ### Requirement: Canonical ownership and provenance survive routing
 
 Stable identity/facets SHALL belong to entities, mutable state/events to Records or appropriate domain stores, and original provenance to Sources/Evidence. Hubs SHALL be navigation/projections. Markdown semantic units and supported structured collections SHALL remain canonical; graph/search/profile stores SHALL be rebuildable with explicit currency. Routing SHALL preserve direct verification, reported claims, user hypotheses, attributed interpretations, inferences and uncertainty distinctly and SHALL NOT invent user Planning commitments. A durable user hypothesis or interpretation SHALL retain speaker or source attribution and uncertainty and SHALL NOT be silently omitted or represented as a direct fact.
@@ -161,6 +173,12 @@ MCP, CLI and REST SHALL expose the same core semantics and versioned capabilitie
 - **WHEN** an ordinary answer cites a memory result and the client would display its opaque reference
 - **THEN** the answer follows the existing title-first presentation contract with a plain readable title and an optional human-readable disambiguator
 - **AND** stable identity remains available internally without becoming the default visible label
+
+#### Scenario: A tool-only client is asked at a boundary and never forced
+
+- **WHEN** a client without lifecycle hooks has activated context for several turns in a conversation without recording its episode
+- **THEN** the server asks, at most once in a bounded interval, for a recap at the next decision or stopping point, and only while proactive capture is permitted
+- **AND** nothing is recorded unless the agent authors and submits the recap, and the client's capability report still says best-effort initiation
 
 ### Requirement: Canonical vocabulary precedes destination projection
 

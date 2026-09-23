@@ -171,3 +171,57 @@ Episode work SHALL have explicit per-pass resource bounds, durable continuation 
 - **WHEN** canonical writes commit but projection publication or remaining candidates exceed the pass budget
 - **THEN** the receipt reports durable effects and explicit pending work/publication
 - **AND** the next eligible pass resumes within bounds rather than claiming a fully current graph
+
+### Requirement: An episode recap is retained canonically, bounded and attributable
+
+The active agent SHALL be able to record a bounded recap of a conversation through one typed operation on MCP, CLI and REST. The recap SHALL be retained as a canonical episode Source through the existing Source writer and SHALL be bound to the caller's episode ledger as input evidence from that writer's receipt, without walking the corpus to find the committed page. Recap fields SHALL be closed and individually bounded, and the rendered recap SHALL NOT exceed 4 KiB. Credential-shaped, oversize or malformed input SHALL be refused before any write. The server SHALL validate and render the recap and SHALL NOT summarise a conversation itself. Source bodies SHALL remain append-only: a revised recap SHALL be a new page, and the same write SHALL mark the episode's previous live revision superseded, so one episode has at most one live recap. The caller's principal SHALL be resolved before any write, and each audience SHALL keep its own ledger history of an episode key.
+
+#### Scenario: A record retains a bounded recap and binds it as input
+
+- **WHEN** an agent records a recap with a subject, a summary and what was worked on, decided and left open
+- **THEN** one episode Source is committed through the ordinary Source writer
+- **AND** the caller's ledger holds a new input revision bound to that page's reference, with recovery reported as available or unavailable rather than assumed
+
+#### Scenario: An identical retry writes nothing new
+
+- **WHEN** the same recap is recorded again for the same episode
+- **THEN** no page is written, no revision is superseded and no input revision is appended
+- **AND** the response names the existing recap and reports the call as idempotent
+
+#### Scenario: Transcript-sized or credential-bearing input is refused
+
+- **WHEN** a recap exceeds its field or 4 KiB bounds, or contains credential-shaped text
+- **THEN** the operation fails with a typed refusal
+- **AND** no page, supersession mark or ledger revision is written
+
+#### Scenario: Another audience continues the same key
+
+- **WHEN** a different audience records a recap under an episode key already used by another audience
+- **THEN** each audience's ledger holds only its own revisions of that key
+- **AND** each audience sees a recap page only under its own release decisions
+
+#### Scenario: An unresolved principal fails before any write
+
+- **WHEN** a record arrives from a caller whose principal cannot be resolved
+- **THEN** the operation fails closed
+- **AND** nothing is written to the vault or to any ledger
+
+### Requirement: A hook checkpoint counts only an episode record as coverage
+
+A host lifecycle checkpoint that asks the agent to record an episode SHALL treat only a successful episode record for that session as coverage. Another successful write, a Saved marker or a failed record SHALL NOT reset the pending state. The ask SHALL carry the session's stable episode key, and that key SHALL survive context compaction of the same session.
+
+#### Scenario: An unrelated committed note leaves the episode pending
+
+- **WHEN** the agent commits an ordinary note but records no episode during the checkpoint interval
+- **THEN** the checkpoint still asks for an episode record at its next eligible boundary
+
+#### Scenario: A failed record is attempted, not covered
+
+- **WHEN** the agent calls the episode record operation and it fails
+- **THEN** the checkpoint treats the episode as still pending
+- **AND** only a later successful record resets it
+
+#### Scenario: Compaction keeps the episode key
+
+- **WHEN** the host compacts the session's context and the checkpoint asks again
+- **THEN** the ask names the same episode key as before compaction, so a new record revises the same episode
