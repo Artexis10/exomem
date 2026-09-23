@@ -442,3 +442,31 @@ def test_handed_on_vectors_follow_the_resident_model_under_concurrent_reloads(
         f"{wrong[0]} of {judged[0]} upsert vectors came from a model no longer resident "
         f"({reloads[0]} reloads)"
     )
+
+
+def test_a_remembered_long_text_does_not_pin_its_own_bytes(live) -> None:
+    """The hand-off holds a vector per text, never the text: chunking caps words,
+    not characters, so one unbroken paragraph can be a megabyte."""
+    import gc
+    import tracemalloc
+
+    _vault, _target, _encoder = live
+    embeddings.clear_passage_vectors()
+    stamp = embeddings.passage_memo_stamp()
+    vector = np.ones((1, embeddings.VECTOR_DIM), dtype=np.float32)
+    gc.collect()
+    tracemalloc.start()
+    try:
+        before = tracemalloc.get_traced_memory()[0]
+        for i in range(16):
+            text = f"{i:02d}" + "y" * 1_000_000
+            embeddings.remember_passage_vectors([text], vector, stamp=stamp)
+            del text
+        gc.collect()
+        held = tracemalloc.get_traced_memory()[0] - before
+    finally:
+        tracemalloc.stop()
+
+    assert held < 1_000_000, f"16 remembered 1 MB texts still hold {held / 2**20:.1f} MiB"
+    probe = "07" + "y" * 1_000_000
+    assert set(embeddings.recall_passage_vectors([probe], stamp=stamp)) == {probe}

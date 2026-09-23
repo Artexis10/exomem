@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import gc
+import hashlib
 import logging
 import math
 import os
@@ -1535,8 +1536,19 @@ def passage_memo_stamp() -> PassageStamp:
     return PassageStamp(_vector_space(), _MODEL_GENERATION, (embed_texts, _embed_texts))
 
 
-_PASSAGE_MEMO: OrderedDict[str, tuple[PassageStamp, np.ndarray]] = OrderedDict()
+_PASSAGE_MEMO: OrderedDict[bytes, tuple[PassageStamp, np.ndarray]] = OrderedDict()
 _PASSAGE_MEMO_LOCK = threading.Lock()
+
+
+def _passage_key(text: str) -> bytes:
+    """A fixed 16-byte key for a text: the memo must hold vectors, not texts.
+
+    Chunking caps a paragraph's words, not its characters, so one unbroken
+    paragraph can be a megabyte; keyed by the text itself, a full memo could pin
+    a gigabyte. A 128-bit digest makes a collision between two remembered texts
+    negligible.
+    """
+    return hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=16).digest()
 
 
 def remember_passage_vectors(
@@ -1557,15 +1569,16 @@ def remember_passage_vectors(
         rows = [np.array(vector, dtype=np.float32) for vector in vectors]
         if len(rows) != len(texts):
             return
+        keys = [_passage_key(text) for text in texts]
         with _PASSAGE_MEMO_LOCK:
             if stamp != passage_memo_stamp():
                 return
-            for text, row in zip(texts, rows, strict=True):
+            for key, row in zip(keys, rows, strict=True):
                 if row.shape != (VECTOR_DIM,):
                     continue
                 row.setflags(write=False)
-                _PASSAGE_MEMO[text] = (stamp, row)
-                _PASSAGE_MEMO.move_to_end(text)
+                _PASSAGE_MEMO[key] = (stamp, row)
+                _PASSAGE_MEMO.move_to_end(key)
             while len(_PASSAGE_MEMO) > PASSAGE_MEMO_MAX_TEXTS:
                 _PASSAGE_MEMO.popitem(last=False)
     except Exception as e:  # noqa: BLE001 - the hand-off is an economy, never a failure
@@ -1581,15 +1594,18 @@ def recall_passage_vectors(
     served once the encoder has moved on from it.
     """
     try:
+        if not _PASSAGE_MEMO:
+            return {}
+        wanted = [(text, _passage_key(text)) for text in dict.fromkeys(texts)]
         with _PASSAGE_MEMO_LOCK:
-            if not _PASSAGE_MEMO or stamp != passage_memo_stamp():
+            if stamp != passage_memo_stamp():
                 return {}
             found: dict[str, np.ndarray] = {}
-            for text in texts:
-                entry = _PASSAGE_MEMO.get(text)
+            for text, key in wanted:
+                entry = _PASSAGE_MEMO.get(key)
                 if entry is not None and entry[0] == stamp:
                     found[text] = entry[1]
-                    _PASSAGE_MEMO.move_to_end(text)
+                    _PASSAGE_MEMO.move_to_end(key)
             return found
     except Exception as e:  # noqa: BLE001 - a failed lookup costs an encode, nothing more
         log.debug("passage vectors not recalled (%s)", type(e).__name__)
