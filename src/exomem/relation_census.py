@@ -9,10 +9,14 @@ catching up) it says so and never reports a zero.
 Egress (N1c). Every number is a reduction over the caller's admitted subgraph.
 A node is admitted when its page passes the caller's `keep` predicate (from
 `release_walk_filter`) and structural exclusion; an edge is admitted only when
-both endpoints and the page that authored it are admitted. Filtering happens
-inside the walk, so a withheld page cannot change any count, and the graph
-generation (a vault-wide write counter) is reported only to an unrestricted
-caller. Counts mode names no path, title, label or vault extension key.
+both endpoints are admitted indexed nodes and the page that authored it is
+admitted. A placeholder for a missing target is never admitted: a bare-title
+link resolves into a withheld folder when its page exists and to a placeholder
+elsewhere when it does not, so admitting placeholders would tell a restricted
+caller that a withheld page exists. Filtering happens inside the walk, so a
+withheld page cannot change any count, and the graph generation (a vault-wide
+write counter) is reported only to an unrestricted caller. Counts mode names no
+path, title, label or vault extension key.
 """
 
 from __future__ import annotations
@@ -235,10 +239,8 @@ class _Page:
 class _Edge:
     src_page: str
     dst_page: str
-    dst_kind: str | None  # unit kind, "file", or None for a placeholder
+    dst_kind: str  # "file" or the unit kind
     dst_anchor: str | None
-    src_known: bool
-    dst_known: bool
     relation: str | None
     raw_relation: str
     status: str
@@ -260,10 +262,13 @@ class _Snapshot:
     pages: dict[str, _Page]
     units_by_page: dict[str, set[str]]
     edges: list[_Edge] = field(default_factory=list)
+    # Authoring page of each authored row whose other end is outside the
+    # caller's view: a missing target and a withheld one count alike.
+    outside_view: list[str] = field(default_factory=list)
 
 
 def _load(vault_root: Path, *, keep: Keep) -> _Snapshot | None:
-    from .epistemic_graph import EpistemicGraphIndex, _placeholder_path_allowed
+    from .epistemic_graph import EpistemicGraphIndex
 
     connection = EpistemicGraphIndex(vault_root)._open_read_snapshot()
     if connection is None:
@@ -308,24 +313,18 @@ def _load(vault_root: Path, *, keep: Keep) -> _Snapshot | None:
             units[key] = (kind, path, anchor)
             units_by_page.setdefault(path, set()).add(kind)
 
-        def endpoint(key: str) -> tuple[str | None, str | None, str | None, bool, bool]:
-            """(page path, kind, anchor, known node, admitted) for one endpoint."""
+        def endpoint(key: str) -> tuple[str, str, str | None] | None:
+            """(page path, kind, anchor) of an admitted indexed endpoint, else None."""
             path = file_keys.get(key)
             if path is not None:
-                return path, "file", None, True, pages[path].admitted
+                return (path, "file", None) if pages[path].admitted else None
             unit = units.get(key)
             if unit is not None:
                 kind, page_path, anchor = unit
                 page = pages.get(page_path)
-                allowed = page.admitted if page is not None else path_ok(page_path)
-                return page_path, kind, anchor, True, allowed
-            if key.startswith("file:"):
-                placeholder = key[len("file:") :]
-                allowed = _placeholder_path_allowed(vault_root, placeholder) and path_ok(
-                    placeholder
-                )
-                return placeholder, None, None, False, allowed
-            return None, None, None, False, False
+                if page is not None and page.admitted:
+                    return page_path, kind, anchor
+            return None
 
         snapshot = _Snapshot(
             generation=_int_or_none(generation_row[0] if generation_row else None),
@@ -355,18 +354,18 @@ def _load(vault_root: Path, *, keep: Keep) -> _Snapshot | None:
             author = pages.get(source_path)
             if not (author.admitted if author is not None else path_ok(source_path)):
                 continue
-            src_page, _src_kind, _src_anchor, src_known, src_ok = endpoint(src_key)
-            dst_page, dst_kind, dst_anchor, dst_known, dst_ok = endpoint(dst_key)
-            if not (src_ok and dst_ok) or src_page is None or dst_page is None:
+            source_end = endpoint(src_key)
+            target_end = endpoint(dst_key)
+            if source_end is None or target_end is None:
+                if origin in _AUTHORED_ORIGINS:
+                    snapshot.outside_view.append(source_path)
                 continue
             snapshot.edges.append(
                 _Edge(
-                    src_page=src_page,
-                    dst_page=dst_page,
-                    dst_kind=dst_kind,
-                    dst_anchor=dst_anchor,
-                    src_known=src_known,
-                    dst_known=dst_known,
+                    src_page=source_end[0],
+                    dst_page=target_end[0],
+                    dst_kind=target_end[1],
+                    dst_anchor=target_end[2],
                     relation=relation,
                     raw_relation=raw_relation,
                     status=status,
@@ -495,6 +494,7 @@ def _census_payload(
 
     metrics: dict[str, Any] = {
         "authored_edges": authored_edges,
+        "unresolved_target_edges": sum(path in eligible for path in snapshot.outside_view),
         "by_status": by_status,
         "generic_share": _ratio(by_status["core_generic"], registered_edges),
         "typed_coverage": {
@@ -651,13 +651,9 @@ def _structural_checks(
 
     chain = _UnionFind()
     for edge in supersession:
-        if edge.src_known and edge.dst_known and edge.src_page != edge.dst_page:
+        if edge.src_page != edge.dst_page:
             chain.union(edge.src_page, edge.dst_page)
-    directed = {
-        (edge.src_page, edge.dst_page, edge.relation)
-        for edge in population
-        if edge.src_known and edge.dst_known
-    }
+    directed = {(edge.src_page, edge.dst_page, edge.relation) for edge in population}
 
     for edge in population:
         definition = registry.definition(edge.relation or "")
@@ -677,8 +673,6 @@ def _structural_checks(
                 )
             )
             record("signature_mismatch", edge.status == "scope_violation" or bool(outside))
-        if not (edge.src_known and edge.dst_known):
-            continue  # a placeholder endpoint cannot satisfy or break a rule
         same_page = edge.src_page == edge.dst_page
         if edge.relation == "supersedes" and not same_page:
             newer = _origin_date(_page_origin(snapshot, edge.src_page))
@@ -720,11 +714,7 @@ def _inverse_duplicates(
     population: Iterable[_Edge], registry: relation_registry.RelationRegistry
 ) -> dict[str, int]:
     """Pairs where a->b is typed P and b->a is typed P's registered inverse."""
-    edges = [
-        edge
-        for edge in population
-        if edge.src_known and edge.dst_known and edge.src_page != edge.dst_page
-    ]
+    edges = [edge for edge in population if edge.src_page != edge.dst_page]
     present = {(edge.src_page, edge.dst_page, edge.relation) for edge in edges}
     applicable = 0
     pairs: set[tuple[tuple[str, str, str], tuple[str, str, str]]] = set()

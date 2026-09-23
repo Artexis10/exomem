@@ -44,15 +44,22 @@ a placeholder endpoint SHALL NOT count as applicable to a rule that inspects end
 
 ### Requirement: The census follows the caller's release filter
 The census SHALL admit a node only when its page passes the caller's release filter and
-structural exclusion, and an edge only when both endpoints and the page that authored it
-are admitted, filtering inside the walk. No withheld page SHALL change any count, ratio or
-check. The graph generation SHALL be reported only to a caller without a release
+structural exclusion, and an edge only when both endpoints are admitted indexed nodes and
+the page that authored it is admitted, filtering inside the walk. A placeholder for a
+missing target SHALL NOT be admitted, so that a target outside the caller's view reads the
+same whether it is withheld or does not exist; authored rows whose target is outside the
+view SHALL be counted together as `unresolved_target_edges`. No withheld page SHALL change
+any count, ratio or check. The graph generation SHALL be reported only to a caller without a release
 restriction. In counts mode the output SHALL name no path, title, label or vault
 extension key; `detail="keys"` MAY add predicate keys and per-predicate counts.
 
 #### Scenario: Withheld material is invisible
 - **WHEN** two vaults differ only in a withheld page, its authored edges, and edges from visible pages to it
 - **THEN** a caller for whom that page is withheld receives byte-identical census output from both, in counts and keys detail
+
+#### Scenario: A withheld target reads like a missing one
+- **WHEN** a visible page names a target by bare title, and in one vault that target exists inside a withheld folder while in the other it does not exist
+- **THEN** the restricted caller receives byte-identical census output from both vaults, with the row counted once in `unresolved_target_edges` and not as a connection
 
 #### Scenario: Counts mode carries no identifiers
 - **WHEN** the census runs in counts mode on a vault with extension keys, unregistered labels and distinctive titles

@@ -506,6 +506,31 @@ def test_counts_follow_the_callers_walk_filter(tmp_path: Path) -> None:
     assert views[1]["metrics"] == restricted["metrics"]
 
 
+def test_a_withheld_target_reads_exactly_like_a_missing_one(tmp_path: Path) -> None:
+    """A visible page names a target by bare title. When the target exists it
+    resolves into the withheld folder; when it does not, the graph keeps a
+    placeholder at another path. A restricted caller must not tell them apart."""
+    views = []
+    for name, exists in (("missing", False), ("withheld", True)):
+        vault = _seed_census_vault(tmp_path / name)
+        _write(
+            vault,
+            f"{NOTES}/pointer.md",
+            _page("insight", "Pointer", "- supports [[secret-plan]]", created="2026-04-01"),
+        )
+        if exists:
+            _write(vault, f"{_WITHHELD}-plan.md", _page("insight", "Secret plan", "Text."))
+        views.append(
+            relation_census.census(_built(vault), keep=lambda path: "/Withheld/" not in path)
+        )
+
+    assert json.dumps(views[0]) == json.dumps(views[1])
+    # Neither view counts the row as a connection; both count it as a row whose
+    # target lies outside the caller's view.
+    assert views[0]["metrics"]["unresolved_target_edges"] == 1
+    assert views[0]["metrics"]["disconnected"] == {"pages": 4, "isolated": 2}
+
+
 def test_unavailable_graph_reports_unavailable_not_zero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

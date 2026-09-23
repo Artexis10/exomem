@@ -35,7 +35,8 @@ An unavailable snapshot (disabled, warming, catching up) yields
   census skips them everywhere; they would otherwise inflate specific counts and connect
   every page to itself.
 - **Authored edges**: origin `semantic_relation` or `markdown_relation`, authored on an
-  eligible page. `by_status` splits them into `core_specific`, `core_generic`
+  eligible page, between admitted indexed nodes. Rows whose target is missing or withheld
+  are `unresolved_target_edges` instead. `by_status` splits them into `core_specific`, `core_generic`
   (`relates_to`), `extension`, `alias`, `deprecated`, `unregistered` and
   `scope_violation`. `generic_share` is `core_generic / (authored - unregistered)`.
 - **Typed edge**: a registered edge that is not `links_to` and not a wikilink, from any
@@ -54,10 +55,18 @@ An unavailable snapshot (disabled, warming, catching up) yields
 
 ### 3. Egress: admit, then count
 A node is admitted when its page passes the caller's `release_walk_filter` predicate and
-structural exclusion (the excluded tier, `_Governance/`, Records placeholders); unit nodes
-inherit their page. An edge is admitted only when both endpoints and its authoring page
-are admitted, so an edge authored on a withheld page never counts, even between two
-visible pages. Every number is therefore a function of the caller's admitted subgraph,
+structural exclusion (the excluded tier, `_Governance/`); unit nodes inherit their page.
+An edge is admitted only when both endpoints are admitted indexed nodes and its authoring
+page is admitted, so an edge authored on a withheld page never counts, even between two
+visible pages.
+
+Placeholders are never admitted. A bare-title link resolves into a withheld folder when
+its page exists and becomes a placeholder at another path when it does not, so admitting
+placeholders through the release filter would let a restricted caller tell "exists and
+withheld" from "missing" by a count. Instead both are outside the view: the row is not a
+connection, and it is counted once in `unresolved_target_edges`. The graph-intelligence
+kernel's rule that "a placeholder is admitted when the edge that names it is admitted"
+has the same channel and needs this treatment before group 2 relies on it. Every number is therefore a function of the caller's admitted subgraph,
 and a test compares twin vaults that differ only in withheld material byte for byte. The
 graph generation counts every write, withheld ones included, so it is reported only to an
 unrestricted caller.
