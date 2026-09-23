@@ -612,8 +612,9 @@ A previous packet's continuity references SHALL rank first and SHALL form one
 tier taken whole: that packet already resolved them together — but only while
 no anchor outside them has a last edit, not in a write burst, later than the
 time that packet was served. A last-edit time
-that fell in a write burst — a declared number of pages or more, navigation
-pages not counted, edited within a declared short interval of one another —
+that fell in a write burst — a chain of a declared number of pages or more,
+navigation pages not counted, each edited within a declared interval of the
+next, so that one stall inside a batch does not split it —
 SHALL carry no edit signal, because a batch rewrites pages nobody chose, and
 neither SHALL a last-edit time older than the latest such burst, because the
 batch may have rewritten the page the user was working on; such an anchor

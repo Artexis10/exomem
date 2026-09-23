@@ -1349,12 +1349,13 @@ def test_a_unit_two_roles_both_selected_is_served_once() -> None:
 
 def _age_everything(vault: Path, *, newest: Path) -> None:
     """One page freshly edited, every other page old, in the registry the
-    service maintains."""
+    service maintains. The old pages are a minute apart: each its own edit,
+    not a write burst (`working_set.HOT_PROFILE_BURST_GAP_NS`)."""
     import time
 
     now = time.time()
     for index, page in enumerate(sorted((vault / "Knowledge Base").rglob("*.md"))):
-        _touch(page, when=now - 10_000 - index)
+        _touch(page, when=now - 10_000 - index * 60)
     _touch(newest, when=now)
     _live_cell(vault)
 

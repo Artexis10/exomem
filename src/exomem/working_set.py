@@ -77,28 +77,33 @@ RECENT_CONTEXT_REASONS: tuple[str, ...] = ("edited", "activated", "captured", "p
 #: there are none to select on: `resolve()` hands the tie to the agent.
 HOT_PROFILE_K = 5
 
-#: A write burst: this many pages or more whose last edits fall within
-#: `HOT_PROFILE_BURST_NS` of one another. A burst is a batch — a maintenance
-#: pass, an import, a sync — not the user's work, and a batch rewrites pages
-#: nobody chose. Its edit times say only that the batch ran, so an anchor in
-#: one carries no edit signal in the hot profile and is ordered by its reads
-#: instead. And so does every edit OLDER than the latest burst: a batch may
-#: have rewritten the page the user was working on, taking its signal with
-#: it, and then the freshest page left outside the batch is only the
-#: freshest survivor — two days old, in the measured case — not the user's
-#: last work. Only an edit made after the latest batch still says what the
-#: user was doing.
+#: A write burst: a chain of this many pages or more whose last edits follow
+#: one another with no gap longer than `HOT_PROFILE_BURST_GAP_NS`. A burst is
+#: a batch — a maintenance pass, an import, a sync — not the user's work, and
+#: a batch rewrites pages nobody chose. Its edit times say only that the batch
+#: ran, so an anchor in one carries no edit signal in the hot profile and is
+#: ordered by its reads instead. And so does every edit OLDER than the latest
+#: burst: a batch may have rewritten the page the user was working on, taking
+#: its signal with it, and then the freshest page left outside the batch is
+#: only the freshest survivor — two days old, in the measured case — not the
+#: user's last work. Only an edit made after the latest batch still says what
+#: the user was doing.
+#:
+#: A chain, not a fixed window: on a loaded machine a batch stalled 2.9 s
+#: between two pages, and a window of one second cut the two pages after the
+#: stall off the batch, where the newest of them became the referent. Each
+#: gap is measured to the next edit alone, so a single stall no longer
+#: splits the run. The cost is known: an agent writing three notes in quick
+#: succession is a burst too, and loses its edit signal; that turn falls
+#: through to what was read, or abstains, and is never served wrong material.
 #:
 #: Counted over every page the freshness registry holds, not over anchors
-#: alone: a real batch interleaves anchors with ordinary notes — a measured
-#: identifier backfill wrote thirty pages about a hundred milliseconds apart,
-#: and its last two anchors fell 300 ms apart with no third anchor near them,
-#: so an anchor-only count left the batch's final anchor as the referent.
-#: Navigation pages are left out of the count, because every ordinary write
-#: also rewrites the activity log and the index, and those must not turn the
+#: alone: a real batch interleaves anchors with ordinary notes. Navigation
+#: pages are left out of the count, because every ordinary write also
+#: rewrites the activity log and the index, and those must not turn the
 #: user's own single edit into a "burst".
 HOT_PROFILE_BURST_PAGES = 3
-HOT_PROFILE_BURST_NS = 1_000_000_000
+HOT_PROFILE_BURST_GAP_NS = 5_000_000_000
 
 #: How many ranked rows the carry asks for before it filters. The ranking
 #: limit truncated BEFORE raw material and retired pages were dropped, so a
@@ -2031,13 +2036,13 @@ def hot_profile(
 
 
 def _burst_paths(edited: Mapping[str, int]) -> frozenset[str]:
-    """The pages whose last edit fell in a write burst: at least
-    `HOT_PROFILE_BURST_PAGES` of them within `HOT_PROFILE_BURST_NS`,
-    navigation pages not counted.
+    """The pages whose last edit fell in a write burst: a maximal chain of at
+    least `HOT_PROFILE_BURST_PAGES` edits, each within
+    `HOT_PROFILE_BURST_GAP_NS` of the next, navigation pages not counted.
 
-    One pass over the registry's edit times, sorted, with a sliding window:
-    no read, no walk — the map is the one the request already copied. A page
-    with no recorded edit is never in a burst.
+    One pass over the registry's edit times, sorted: no read, no walk — the
+    map is the one the request already copied. A page with no recorded edit
+    is never in a burst.
     """
     from . import find_corpus
 
@@ -2048,15 +2053,17 @@ def _burst_paths(edited: Mapping[str, int]) -> frozenset[str]:
         and path.rsplit("/", 1)[-1].casefold() not in find_corpus.NAVIGATION_BASENAMES
     )
     burst: set[str] = set()
-    start = 0
-    marked = -1
-    for end in range(len(times)):
-        while times[end][0] - times[start][0] > HOT_PROFILE_BURST_NS:
-            start += 1
-        if end - start + 1 >= HOT_PROFILE_BURST_PAGES:
-            for index in range(max(start, marked + 1), end + 1):
-                burst.add(times[index][1])
-            marked = end
+    chain: list[str] = []
+    previous: int | None = None
+    for mtime, path in times:
+        if previous is not None and mtime - previous > HOT_PROFILE_BURST_GAP_NS:
+            if len(chain) >= HOT_PROFILE_BURST_PAGES:
+                burst.update(chain)
+            chain = []
+        chain.append(path)
+        previous = mtime
+    if len(chain) >= HOT_PROFILE_BURST_PAGES:
+        burst.update(chain)
     return frozenset(burst)
 
 
