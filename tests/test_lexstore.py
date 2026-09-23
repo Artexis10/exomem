@@ -1661,3 +1661,210 @@ def test_one_vault_reached_two_ways_shares_a_single_store(tmp_path: Path) -> Non
         )
     finally:
         lexstore.clear_stores()
+
+
+# ---------------------------------------------------------------- tokenizer v2
+
+
+_MULTILINGUAL_BODY = (
+    "Mättik résumé İstanbul Straße ﬁnal Ｒｕｎ\n"
+    "東京タワーの高さ 会議の議事録\n"
+    "Поставка книгами йод\n"
+    "Λόγος քաղաքներ "
+    "हिन्दी ภาษาไทย "
+    "한국어 ʼokina x́y girvan-slot 2026年"
+)
+
+
+def _fts_declarations(path: Path) -> dict[str, str]:
+    conn = sqlite3.connect(path)
+    try:
+        return {
+            name: sql
+            for name, sql in conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE name IN ('fts', 'unit_fts')"
+            )
+        }
+    finally:
+        conn.close()
+
+
+def _vocabulary_and_stored_tokens(path: Path, table: str) -> tuple[set[str], set[str]]:
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(f"CREATE VIRTUAL TABLE temp.vocab USING fts5vocab(main, {table}, row)")
+        vocabulary = {row[0] for row in conn.execute("SELECT term FROM temp.vocab")}
+        stored = {
+            token
+            for (text,) in conn.execute(f"SELECT stemmed FROM {table}")
+            for token in (text or "").split(" ")
+            if token
+        }
+        return vocabulary, stored
+    finally:
+        conn.close()
+
+
+def test_catalogue_schema_carries_tokenizer_v2():
+    """Tokenizer v2 changes the stored tokens, so the catalogue version moves
+    and every existing sidecar is rebuilt by the existing drift healer."""
+    from exomem import bm25
+
+    assert bm25.TOKENIZER_VERSION == 2
+    assert lexstore.SCHEMA_VERSION == 11
+
+
+def test_fts5_vocabulary_round_trips_every_tokenizer_token(tmp_path):
+    """unicode61 with no diacritic removal and marks as token characters: the
+    catalogue never re-folds or re-splits a token the tokenizer emitted, so
+    FTS and the in-process scorer still see byte-identical tokens."""
+    from exomem import bm25
+
+    _write_page(tmp_path, "Knowledge Base/multi.md", _MULTILINGUAL_BODY, title="Multi")
+    unit_page = tmp_path / "Knowledge Base/Sources/units.md"
+    unit_page.parent.mkdir(parents=True, exist_ok=True)
+    unit_page.write_text(
+        "---\ntype: source\ntitle: Units\n"
+        "exomem_id: 66666666-6666-4666-8666-666666666666\n---\n# Units\n\n"
+        "- [config] 東京タワーの高さ Mättik ^first\n"
+        "- [rule] книгами हिन्दी ^second\n",
+        encoding="utf-8",
+    )
+    assert lexstore.search_bm25(tmp_path, "mattik", k=5, scope="kb") is not None
+    assert lexstore.search_semantic_units(tmp_path, "東京", k=5, scope="kb")
+    side = lexstore.lexical_path(tmp_path)
+
+    for table in ("fts", "unit_fts"):
+        declaration = _fts_declarations(side)[table]
+        assert "remove_diacritics 0" in declaration
+        assert "categories 'L* N* Co M*'" in declaration
+        vocabulary, stored = _vocabulary_and_stored_tokens(side, table)
+        assert stored, table
+        assert vocabulary == stored, (table, vocabulary ^ stored)
+
+    _vocab, stored = _vocabulary_and_stored_tokens(side, "fts")
+    expected = set(bm25.tokenize("Multi " + _MULTILINGUAL_BODY))
+    assert expected <= stored
+    for token in ("mättik", "mattik", "東京", "книг", "final", "run"):
+        assert token in stored
+
+
+def test_a_cjk_query_finds_its_page_through_fts(tmp_path):
+    _write_page(
+        tmp_path,
+        "Knowledge Base/tower.md",
+        "東京タワーの高さは三百メートル",
+    )
+    _write_page(tmp_path, "Knowledge Base/minutes.md", "会議の議事録を共有")
+    _write_page(tmp_path, "Knowledge Base/english.md", "tokyo tower height notes")
+    hits = lexstore.search_bm25(tmp_path, "東京タワー", k=5, scope="kb")
+    assert hits is not None
+    assert [path for path, _score in hits] == ["Knowledge Base/tower.md"]
+    hits = lexstore.search_bm25(tmp_path, "議事録", k=5, scope="kb")
+    assert [path for path, _score in hits] == ["Knowledge Base/minutes.md"]
+
+
+def test_accent_free_query_finds_the_accented_page_and_exact_ranks_first(tmp_path):
+    _write_page(tmp_path, "Knowledge Base/accented.md", "Mättik owns the rollout")
+    _write_page(tmp_path, "Knowledge Base/plain.md", "Mattik owns the rollout")
+    _write_page(tmp_path, "Knowledge Base/other.md", "unrelated words")
+    folded = lexstore.search_bm25(tmp_path, "mattik", k=5, scope="kb")
+    assert {path for path, _score in folded} == {
+        "Knowledge Base/accented.md",
+        "Knowledge Base/plain.md",
+    }
+    exact = lexstore.search_bm25(tmp_path, "Mättik", k=5, scope="kb")
+    assert [path for path, _score in exact] == ["Knowledge Base/accented.md"]
+
+
+def test_russian_inflections_match_through_the_catalogue(tmp_path):
+    _write_page(
+        tmp_path,
+        "Knowledge Base/books.md",
+        "мы заказали книги",
+    )
+    hits = lexstore.search_bm25(tmp_path, "книгами", k=5, scope="kb")
+    assert [path for path, _score in hits] == ["Knowledge Base/books.md"]
+
+
+def test_corroboration_counts_units_not_stems(tmp_path):
+    """One accented word (surface plus fold) or one CJK run (many bigrams) is
+    ONE unit of corroboration; English distinct stems count as before."""
+    from test_latency_gate import _seed_freshness_live
+
+    _write_page(tmp_path, "Knowledge Base/tower.md", "東京タワー 会議 alpha beta")
+    _write_page(tmp_path, "Knowledge Base/name.md", "Mättik mattik mättik")
+    _write_page(tmp_path, "Knowledge Base/rotation.md", "rotation rotating rotations")
+    _seed_freshness_live(tmp_path)
+    lexstore.ensure_fresh(tmp_path)
+
+    def corroborated(query: str) -> list[str]:
+        result = lexstore.search_bm25_result(
+            tmp_path, query, 5, min_matched_terms=2, allow_delta=False
+        )
+        assert result.readiness.complete
+        return [path for path, _score in result.value]
+
+    assert corroborated("東京タワー") == []
+    assert corroborated("東京タワー 会議") == ["Knowledge Base/tower.md"]
+    assert corroborated("Mättik") == []
+    assert corroborated("mattik mättik") == ["Knowledge Base/name.md"]
+    assert corroborated("rotation rotating") == []
+    assert corroborated("alpha beta") == ["Knowledge Base/tower.md"]
+
+
+def _downgrade_to_v10(vault: Path) -> None:
+    """Reshape a current catalogue into what tokenizer v1 left behind: schema 10
+    and FTS tables declared with the default unicode61 tokenizer."""
+    conn = sqlite3.connect(lexstore.lexical_path(vault))
+    try:
+        for table in ("fts", "unit_fts"):
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
+            conn.execute(f"CREATE VIRTUAL TABLE {table} USING fts5(stemmed)")
+        conn.execute("UPDATE meta SET value = '10' WHERE key = 'schema_version'")
+        conn.commit()
+    finally:
+        conn.close()
+    lexstore.clear_stores()
+
+
+def test_a_v10_catalogue_rebuilds_in_place_with_the_new_declaration(tmp_path):
+    _write_page(tmp_path, "Knowledge Base/accented.md", "Mättik owns the rollout")
+    assert lexstore.search_bm25(tmp_path, "rollout", k=5, scope="kb")
+    _downgrade_to_v10(tmp_path)
+
+    hits = lexstore.search_bm25(tmp_path, "mattik", k=5, scope="kb")
+
+    assert [path for path, _score in hits] == ["Knowledge Base/accented.md"]
+    for declaration in _fts_declarations(lexstore.lexical_path(tmp_path)).values():
+        assert "remove_diacritics 0" in declaration
+    vocabulary, stored = _vocabulary_and_stored_tokens(lexstore.lexical_path(tmp_path), "fts")
+    assert vocabulary == stored
+
+
+def test_a_v10_catalogue_is_replaced_whole_by_the_atomic_rebuild(tmp_path):
+    _write_page(tmp_path, "Knowledge Base/tower.md", "東京タワー notes")
+    assert lexstore.search_bm25(tmp_path, "notes", k=5, scope="kb")
+    _downgrade_to_v10(tmp_path)
+
+    assert lexstore.get_store(tmp_path).rebuild_atomic()
+
+    for declaration in _fts_declarations(lexstore.lexical_path(tmp_path)).values():
+        assert "categories 'L* N* Co M*'" in declaration
+    hits = lexstore.search_bm25(tmp_path, "東京", k=5, scope="kb")
+    assert [path for path, _score in hits] == ["Knowledge Base/tower.md"]
+
+
+def test_a_not_current_catalogue_falls_back_to_the_in_process_rung(tmp_path):
+    from exomem import bm25
+
+    _write_page(tmp_path, "Knowledge Base/tower.md", "東京タワー notes")
+    _write_page(tmp_path, "Knowledge Base/other.md", "unrelated notes")
+    assert lexstore.search_bm25(tmp_path, "notes", k=5, scope="kb")
+    _downgrade_to_v10(tmp_path)
+    bm25.clear_cache()
+
+    assert lexstore.search_bm25(tmp_path, "東京", k=5, scope="kb", repair=False) is None
+    hits = bm25.search(tmp_path, "東京", 5, scope="kb", repair=False)
+
+    assert [path for path, _score in hits] == ["Knowledge Base/tower.md"]

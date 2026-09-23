@@ -4,12 +4,15 @@
 model) holds one row per markdown page and two FTS5 indexes over it:
 
 - `fts` — an inverted index over PRE-STEMMED text. Both the indexed text and
-  every query pass through `bm25.tokenize()` (lowercase → `[a-z0-9]+` →
-  Snowball), so token and stemming semantics are byte-identical to the
-  in-process `rank_bm25` scorer; FTS5 contributes only the posting lists and
-  its C `bm25()` ranking. Queries are OR-joined to mirror `get_scores()`
-  membership (any-term match), so per-query cost scales with the query's
-  posting lists, not with N.
+  every query pass through `bm25.tokenize()` (tokenizer v2: Unicode runs,
+  bigrams for unspaced scripts, script-keyed Snowball; the v1 `[a-z0-9]+`
+  path unchanged on ASCII), so token and stemming semantics are
+  byte-identical to the in-process `rank_bm25` scorer; FTS5 contributes only
+  the posting lists and its C `bm25()` ranking. The table is declared with
+  `unicode61 remove_diacritics 0` and every letter, number and mark as a token
+  character, so FTS5 never re-folds or re-splits a token it is handed.
+  Queries are OR-joined to mirror `get_scores()` membership (any-term match),
+  so per-query cost scales with the query's posting lists, not with N.
 - `tri` — a trigram index over the SAME Python-lowercased title/body strings
   the keyword lane's reference scan compares against (`case_sensitive 1`
   because both sides are already Python-folded; SQLite-side folding could
@@ -529,7 +532,16 @@ def _eligibility_predicate(eligibility: Any, scope_column: str) -> tuple[str, li
     )
 
 
-SCHEMA_VERSION = 10
+#: 11: tokenizer v2 (`bm25.TOKENIZER_VERSION` 2) and the unicode61 declaration
+#: that keeps its Unicode tokens whole. A v10 catalogue reads not-current and is
+#: rebuilt by the existing background rebuild.
+SCHEMA_VERSION = 11
+
+#: FTS5 tokenizer for the pre-stemmed `fts` and `unit_fts` columns. Tokens arrive
+#: already NFKC-casefolded and stemmed; unicode61 must store each one verbatim:
+#: no diacritic removal, and letters, numbers and marks all token characters
+#: (the default drops marks, which splits Indic words at every vowel sign).
+_FTS_TOKENIZE = "tokenize=\"unicode61 remove_diacritics 0 categories 'L* N* Co M*'\""
 CATALOG_FOREGROUND_DELTA_CAP = 32
 
 # Publication-barrier timeouts. Every LIVE-sidecar mutation and journal-mode
@@ -1743,6 +1755,15 @@ def _catalog_usable() -> bool:
     return backend() != "python"
 
 
+def _term_units(units) -> dict[str, int]:
+    """Each distinct stem mapped to the first query unit it came from."""
+    owner: dict[str, int] = {}
+    for index, unit in enumerate(units):
+        for stem in unit.stems:
+            owner.setdefault(stem, index)
+    return owner
+
+
 def search_bm25(
     vault_root: Path,
     query: str,
@@ -1763,7 +1784,7 @@ def search_bm25(
         return []
     from . import bm25 as bm25_module
 
-    tokens = bm25_module.tokenize(query)
+    tokens = bm25_module.tokenize(query, query=True)
     if not tokens:
         return []
     store = get_store(vault_root)
@@ -1792,7 +1813,8 @@ def search_bm25_result(
         return CatalogQueryResult([], CatalogReadiness("available", True, backend()))
     from . import bm25 as bm25_module
 
-    tokens = bm25_module.tokenize(query)
+    units = bm25_module.token_units(query, query=True)
+    tokens = [stem for unit in units for stem in unit.stems]
     if not tokens:
         return CatalogQueryResult([], CatalogReadiness("available", True, backend()))
     return get_store(vault_root).search_bm25_result(
@@ -1804,6 +1826,7 @@ def search_bm25_result(
         allow_delta=allow_delta,
         min_matched_terms=min_matched_terms,
         recall_checkpoint=recall_checkpoint,
+        term_units=_term_units(units),
     )
 
 
@@ -1941,7 +1964,7 @@ def search_semantic_units(
         return result.value if result.readiness.complete else None
     if not _catalog_usable():
         return None
-    tokens = bm25_module.tokenize(query) if query.strip() else []
+    tokens = bm25_module.tokenize(query, query=True) if query.strip() else []
     literal_tokens = tuple(query.lower().split()) if literal_all else ()
     if query.strip() and not tokens and not literal_tokens:
         return []
@@ -3600,18 +3623,40 @@ class LexicalStore:
         if not fts5_available():
             return
         try:
-            conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(stemmed)")
+            conn.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(stemmed, {_FTS_TOKENIZE})"
+            )
             conn.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS tri USING fts5("
                 "title_lower, body_lower, tokenize='trigram case_sensitive 1')"
             )
-            conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS unit_fts USING fts5(stemmed)")
+            conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS unit_fts "
+                f"USING fts5(stemmed, {_FTS_TOKENIZE})"
+            )
         except sqlite3.Error as e:
             log.debug(
                 "lexical FTS/trigram virtual tables unavailable (%s); "
                 "the normal-table catalog stays FTS-independent",
                 e,
             )
+
+    def _replace_stale_fts_tables(self, conn: sqlite3.Connection) -> None:
+        """Re-declare `fts`/`unit_fts` when an older tokenizer declared them.
+
+        `CREATE ... IF NOT EXISTS` keeps an existing table's declaration, so an
+        in-place rebuild of a v10 catalogue would otherwise refill tables whose
+        default unicode61 folds diacritics and splits at combining marks. Both
+        tables are disposable: the rebuild that calls this repopulates them.
+        """
+        for table in ("fts", "unit_fts"):
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table,),
+            ).fetchone()
+            if row is not None and _FTS_TOKENIZE not in (row[0] or ""):
+                conn.execute(f"DROP TABLE {table}")
+        self._ensure_fts_schema(conn)
 
     # -------------------------------------------------------------- freshness
 
@@ -4044,6 +4089,7 @@ class LexicalStore:
             conn.execute("DELETE FROM pages")
             conn.execute("DELETE FROM semantic_units")
             if fts5_available():
+                self._replace_stale_fts_tables(conn)
                 conn.execute("DELETE FROM fts")
                 conn.execute("DELETE FROM tri")
                 conn.execute("DELETE FROM unit_fts")
@@ -5653,6 +5699,7 @@ class LexicalStore:
         allow_delta: bool = True,
         min_matched_terms: int = 1,
         recall_checkpoint: Any | None = None,
+        term_units: Mapping[str, int] | None = None,
     ) -> CatalogQueryResult[list[tuple[str, float]]]:
         return self._serve_from_ready_catalog_result(
             scope,
@@ -5660,6 +5707,7 @@ class LexicalStore:
             lambda conn: self._bm25_query(
                 conn, stemmed_tokens, k, scope, allowed_paths,
                 min_matched_terms=min_matched_terms,
+                term_units=term_units,
             ),
             "lexical sidecar BM25 query failed (%s)",
             allow_delta=allow_delta,
@@ -5675,9 +5723,11 @@ class LexicalStore:
         allowed_paths: set[str] | None = None,
         *,
         min_matched_terms: int = 1,
+        term_units: Mapping[str, int] | None = None,
     ) -> list[tuple[str, float]]:
-        # Tokens are [a-z0-9]+ — no FTS5 syntax can hide in them, but quote
-        # anyway; OR mirrors get_scores() membership (any-term match).
+        # Tokens are runs of letters, numbers and marks: no quote or other FTS5
+        # syntax can hide in them, but quote anyway; OR mirrors get_scores()
+        # membership (any-term match).
         match = " OR ".join(f'"{t}"' for t in tokens)
         col = "in_vault" if scope == "vault" else "in_kb"
         allowed_clause = ""
@@ -5686,13 +5736,24 @@ class LexicalStore:
             allowed_clause = " AND p.path IN (SELECT value FROM json_each(?))"
             params.append(json.dumps(sorted(allowed_paths), ensure_ascii=False))
         if min_matched_terms > 1:
-            # Corroboration counts distinct stems, not repetitions of one word.
-            # Filter before LIMIT so one-term hits cannot crowd out valid pages.
+            # Corroboration counts distinct UNITS, not repetitions of one word:
+            # each stem names the first word or unspaced run it came from, and a
+            # unit counts once however many of its stems (an accented word's
+            # folded variant, a run's bigrams) occur. Without units, every
+            # distinct stem is its own unit, which is the v1 rule. Filter before
+            # LIMIT so one-unit hits cannot crowd out valid pages.
+            if term_units is None:
+                term_units = {stem: index for index, stem in enumerate(dict.fromkeys(tokens))}
             allowed_clause += (
-                " AND (SELECT COUNT(*) FROM json_each(?) AS term "
-                "WHERE instr(' ' || fts.stemmed || ' ', ' ' || term.value || ' ') > 0) >= ?"
+                " AND (SELECT COUNT(DISTINCT term.value) FROM json_each(?) AS term "
+                "WHERE instr(' ' || fts.stemmed || ' ', ' ' || term.key || ' ') > 0) >= ?"
             )
-            params.extend((json.dumps(sorted(set(tokens))), min_matched_terms))
+            params.extend(
+                (
+                    json.dumps(dict(sorted(term_units.items())), ensure_ascii=False),
+                    min_matched_terms,
+                )
+            )
         params.append(k)
         rows = conn.execute(
             "SELECT p.path, -bm25(fts) AS score "
