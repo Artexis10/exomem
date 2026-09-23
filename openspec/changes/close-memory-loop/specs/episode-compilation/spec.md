@@ -174,7 +174,7 @@ Episode work SHALL have explicit per-pass resource bounds, durable continuation 
 
 ### Requirement: An episode recap is retained canonically, bounded and attributable
 
-The active agent SHALL be able to record a bounded recap of a conversation through one typed operation on MCP, CLI and REST. The recap SHALL be retained as a canonical episode Source through the existing Source writer and SHALL be bound to the caller's episode ledger as input evidence from that writer's receipt, without walking the corpus to find the committed page. Recap fields SHALL be closed and individually bounded, and the rendered recap SHALL NOT exceed 4 KiB. Credential-shaped, oversize or malformed input SHALL be refused before any write. The server SHALL validate and render the recap and SHALL NOT summarise a conversation itself. Source bodies SHALL remain append-only: a revised recap SHALL be a new page, and the same write SHALL mark the episode's previous live revision superseded, so one episode has at most one live recap. The caller's principal SHALL be resolved before any write, and each audience SHALL keep its own ledger history of an episode key.
+The active agent SHALL be able to record a bounded recap of a conversation through one typed operation on MCP, CLI and REST. The recap SHALL be retained as a canonical episode Source through the existing Source writer and SHALL be bound to the caller's episode ledger as input evidence from that writer's receipt, without walking the corpus to find the committed page. Recap fields SHALL be closed and individually bounded, and the rendered recap SHALL NOT exceed 4 KiB. Credential-shaped, oversize or malformed input SHALL be refused before any write. The server SHALL validate and render the recap and SHALL NOT summarise a conversation itself. Source bodies SHALL remain append-only: a revised recap SHALL be a new page, and the same write SHALL mark the audience's previous live revisions of the episode superseded, guarded by the content each was read with, so after any completed write one episode has one live recap per audience. Marking a revision superseded writes only system-managed frontmatter (`status`, `updated`, `superseded_by`) and leaves its body byte-identical, on the same footing as `ingested_into`. The caller's principal SHALL be resolved before any write. Each audience SHALL keep its own ledger history and its own revisions of an episode key, and SHALL NOT list, supersede or replay another audience's recap. Memory references a recap concerns SHALL be retained only in the recording audience's ledger, never on the shared page.
 
 #### Scenario: A record retains a bounded recap and binds it as input
 
@@ -198,6 +198,7 @@ The active agent SHALL be able to record a bounded recap of a conversation throu
 
 - **WHEN** a different audience records a recap under an episode key already used by another audience
 - **THEN** each audience's ledger holds only its own revisions of that key
+- **AND** the first audience's recap stays live and byte-identical, whether or not the second audience may read it
 - **AND** each audience sees a recap page only under its own release decisions
 
 #### Scenario: An unresolved principal fails before any write
