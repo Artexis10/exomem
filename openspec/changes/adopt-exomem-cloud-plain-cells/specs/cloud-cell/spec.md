@@ -8,14 +8,15 @@ Standalone custody SHALL resolve under the image user's home directory on the te
 
 Before the server starts, a same-image init container SHALL, idempotently:
 
-1. initialize the vault when absent;
-2. run offline state migration;
-3. migrate a schema-v3 governance store to v4 through the standalone plan, stage and commit sequence.
+1. initialize the vault when absent, atomically, so that an interrupted initialization never leaves a partial vault in place;
+2. run offline state migration.
+
+It MUST NOT migrate the governance schema. A cell runs standalone governance defaults, like a fresh desktop install.
 
 #### Scenario: First start on an empty volume
 
 - **WHEN** a cloud cell starts with an empty tenant volume mounted at `/data`
-- **THEN** the init container creates the vault and standalone custody, migrates state, and brings governance to schema v4
+- **THEN** the init container creates the vault and migrates state, and governance stays at the schema a fresh store starts with
 - **AND** the runtime becomes ready, with no external custody, attestation or operator step
 
 #### Scenario: Governed write, then pod replacement
@@ -70,12 +71,13 @@ With `EXOMEM_CLOUD_READ_ONLY=1`, a cloud cell SHALL refuse every mutating comman
 
 ### Requirement: A cloud cell keeps content out of logs
 
-A cloud cell SHALL enable content-private logging and the content-free call trace. Query text, arguments, note bodies and results MUST NOT appear in runtime or access logs; only content-free identifiers, sizes, durations and error codes may appear.
+A cloud cell SHALL enable content-private logging and the content-free call trace. Query text, arguments, argument values or their hashes, note paths, note bodies and results MUST NOT appear in runtime logs, access logs or any observability journal the runtime writes, including the query, read, write and call ledgers. Only content-free identifiers, sizes, durations and error codes may appear. This covers logs and journals, not the tenant's own state on the tenant's own volume, such as retrieval indexes or graph checkpoints.
 
 #### Scenario: A recall is logged
 
-- **WHEN** a client runs a recall containing a distinctive phrase
-- **THEN** no log line from the cell contains that phrase
+- **WHEN** a client runs a recall containing a distinctive phrase, and a governed write whose note path contains another
+- **THEN** no log line from the cell contains either phrase
+- **AND** no log or journal file the cell writes contains either phrase
 
 ### Requirement: The cell controller converges desired rows without its own state
 
@@ -201,12 +203,12 @@ A backup SHALL:
 
 The wrapped data key and the wrapped per-cell object-storage key SHALL be stored once on the cell row, so that a stateless controller can re-render the cell's Secret and delete the key later.
 
-A restore into a new namespace SHALL produce a cell that answers recall, reports governance schema v4, and accepts a governed write.
+A restore into a new namespace SHALL produce a cell that answers recall, reports the same governance schema as its source cell, and accepts a governed write.
 
 #### Scenario: Restore drill
 
 - **WHEN** a backup is restored into a scratch namespace and a cell starts on it
-- **THEN** recall returns the notes that existed at backup time, governance status reports schema v4, and a governed write commits
+- **THEN** recall returns the notes that existed at backup time, governance status matches the source cell, and a governed write commits
 - **AND** the source cell is unaffected
 
 #### Scenario: Backup job attempts another tenant's prefix

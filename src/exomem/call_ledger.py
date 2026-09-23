@@ -32,7 +32,14 @@ Redaction is a property of what the row builder puts in the row, never of a
 downstream filter: arguments are recorded as name, byte length, and sha256 of
 the value, and the value itself is never written. That has to hold by
 construction, because `privacy_log`'s process-wide redactor is gated on
-`EXOMEM_HOSTED_CELL` and is simply off for local installs.
+`EXOMEM_HOSTED_CELL`/`EXOMEM_CLOUD_CELL` and is simply off for local installs.
+
+Under content-private logging (`privacy_log.content_private_logging_enabled()`,
+true for a hosted or cloud cell, design D1.2), a row goes further: no target
+paths, positional argument names (`arg0`, `arg1`, ...) instead of the
+caller-chosen ones, and no per-argument sha256 -- a hash of a short guessed
+value is an offline confirmation oracle, so hashing is itself content there.
+Byte length always survives; it is not content.
 
 **Single writer.** The chain head is held in-process under a cheap lock rather
 than behind a cross-process file lock, because every MCP tool call is dispatched
@@ -138,20 +145,32 @@ def _argument_shape(arguments: dict[str, Any]) -> tuple[list[str], dict[str, dic
     The serialized form is hashed rather than `repr`, so the same argument
     hashes identically across calls and processes -- which is what makes the
     ledger answer "is this client sending the same call over and over?".
+
+    Under content-private logging (design D1.2), a caller-chosen argument
+    name and a value's sha256 are both content: a hash of a short guessed
+    value is an offline confirmation oracle, and a name like a distinctive
+    query phrase would defeat the redaction this function exists to do. A
+    hosted or cloud cell keeps only positional names and byte lengths.
     """
+    from .privacy_log import content_private_logging_enabled
+
     names = sorted(str(name) for name in arguments)
     truncated = len(names) > _MAX_ARGS
+    private = content_private_logging_enabled()
     shape: dict[str, dict] = {}
-    for name in names[:_MAX_ARGS]:
+    clipped_names: list[str] = []
+    for index, name in enumerate(names[:_MAX_ARGS]):
         try:
             raw = canonical_json({"v": arguments[name]})
         except (TypeError, ValueError):
             raw = repr(arguments[name]).encode("utf-8", "replace")
-        shape[_clip(name)] = {
-            "len": len(raw),
-            "sha256": hashlib.sha256(raw).hexdigest(),
-        }
-    return [_clip(name) for name in names[:_MAX_ARGS]], shape, truncated
+        key = f"arg{index}" if private else _clip(name)
+        clipped_names.append(key)
+        entry: dict[str, Any] = {"len": len(raw)}
+        if not private:
+            entry["sha256"] = hashlib.sha256(raw).hexdigest()
+        shape[key] = entry
+    return clipped_names, shape, truncated
 
 
 #: Argument names that address a page rather than carry content. Recorded
@@ -163,6 +182,13 @@ _TARGET_ARG_NAMES = ("path", "old_path", "new_path", "paths", "target", "targets
 def _target_paths(
     arguments: dict[str, Any], committed: Sequence[str] | None = None
 ) -> tuple[list[str], bool]:
+    from .privacy_log import content_private_logging_enabled
+
+    if content_private_logging_enabled():
+        # A note path is content under D1.2 -- a hosted or cloud row keeps no
+        # target paths at all, the same way mutation_journal keeps only
+        # `target_count` (see its docstring).
+        return [], False
     found: list[str] = []
     for name in _TARGET_ARG_NAMES:
         value = arguments.get(name)
