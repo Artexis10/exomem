@@ -6506,9 +6506,39 @@ def op_read_memory(
             )
         resolved_path = _resolve_memory_identifier(vault_root, path)
         try:
-            page = get_page_module.get_page(vault_root, path=resolved_path)
+            prepared = get_page_module.prepare_page_read(vault_root, path=resolved_path)
         except get_page_module.GetError as e:
             raise ValueError(f"{e.code}: {e.reason}") from e
+        _refuse_policy_tree_read(
+            prepared.resolved_relative,
+            missing_path=prepared.missing_path,
+        )
+        try:
+            page = get_page_module.get_page(vault_root, path=resolved_path, _prepared=prepared)
+        except get_page_module.GetError as e:
+            raise ValueError(f"{e.code}: {e.reason}") from e
+        # The page decision `op_get` takes, taken BEFORE any unit is resolved.
+        # A unit, its parent citation and its surrounding Markdown are the
+        # page's own contents, and whether a reference resolves is itself a
+        # fact about the page. A unit is served only from a page released in
+        # full: its span and context are offsets into the raw body, and below
+        # L6 the released body is a projection no window of which is that
+        # span. Anything less answers exactly as an absent page does.
+        released = egress_module.annotate_page(
+            vault_root,
+            page.as_dict(include_raw=False),
+            snapshot_content=page.content,
+            stable_ref=_snapshot_memory_ref(vault_root, page.path, page.frontmatter),
+        )
+        if (
+            released is None
+            or released.get("body") != page.body
+            or released.get("content_hash") != page.content_hash
+        ):
+            raise ValueError(
+                "NOT_FOUND: file does not exist: "
+                f"{get_page_module.missing_path_for(resolved_path)}"
+            )
         query_log.log_get_call(
             read_path=page.path,
             frontmatter_only=False,
@@ -6518,6 +6548,7 @@ def op_read_memory(
             vault_root,
             page=page,
             unit_ref=unit_ref,
+            frontmatter=released.get("frontmatter"),
         ).as_dict()
     return op_get(
         vault_root,
