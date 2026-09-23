@@ -196,7 +196,7 @@ def test_armenian_uses_armenian_snowball() -> None:
 
 
 def test_other_spaced_scripts_and_non_ascii_latin_are_not_stemmed() -> None:
-    assert bm25.stem_word("mättikud") == "mättikud"
+    assert bm25.stem_word("zölvarnud") == "zölvarnud"
     assert bm25.stem_word("हिन्दी") == "हिन्दी"
     # A token mixing two scripts' letters is left alone rather than guessed at.
     assert bm25.stem_word("книгami") == "книгami"
@@ -206,14 +206,14 @@ def test_other_spaced_scripts_and_non_ascii_latin_are_not_stemmed() -> None:
 
 
 def test_index_side_adds_an_accent_folded_variant_for_latin_words() -> None:
-    assert bm25.tokenize("Mättik") == ["mättik", "mattik"]
+    assert bm25.tokenize("Zölvarn") == ["zölvarn", "zolvarn"]
     assert bm25.tokenize("résumé") == ["résumé", "resum"]
     assert bm25.tokenize("İstanbul") == ["i̇stanbul", "istanbul"]
 
 
 def test_query_side_emits_the_surface_form_only() -> None:
-    assert bm25.tokenize("Mättik", query=True) == ["mättik"]
-    assert bm25.tokenize("mattik", query=True) == ["mattik"]
+    assert bm25.tokenize("Zölvarn", query=True) == ["zölvarn"]
+    assert bm25.tokenize("zolvarn", query=True) == ["zolvarn"]
     assert bm25.tokenize("résumé", query=True) == ["résumé"]
 
 
@@ -234,17 +234,17 @@ def test_a_word_with_no_marks_gets_no_variant() -> None:
 
 
 def test_token_units_group_stems_by_word_and_run() -> None:
-    text = "Mättik and 東京タワー"
+    text = "Zölvarn and 東京タワー"
     index_units = bm25.token_units(text)
     assert [unit.stems for unit in index_units] == [
-        ("mättik", "mattik"),
+        ("zölvarn", "zolvarn"),
         ("and",),
         ("東京", "京タ", "タワ", "ワー"),
     ]
     assert [unit.run for unit in index_units] == [False, False, True]
     query_units = bm25.token_units(text, query=True)
     assert [unit.stems for unit in query_units] == [
-        ("mättik",),
+        ("zölvarn",),
         ("and",),
         ("東京", "京タ", "タワ", "ワー"),
     ]
@@ -253,7 +253,7 @@ def test_token_units_group_stems_by_word_and_run() -> None:
 def test_tokenize_is_the_flattened_units() -> None:
     rng = random.Random(3)
     samples = [
-        "Mättik and 東京タワー",
+        "Zölvarn and 東京タワー",
         "Поставка — résumé, girvan-slot",
         "ภาษาไทย हिन्दी 한국어",
     ] + [_random_ascii(rng) for _ in range(200)]
@@ -264,8 +264,8 @@ def test_tokenize_is_the_flattened_units() -> None:
 
 
 def test_a_word_is_present_when_any_form_occurs_and_a_run_when_most_bigrams_do() -> None:
-    word = bm25.token_units("Mättik")[0]
-    assert bm25.unit_present(word, {"mattik"})
+    word = bm25.token_units("Zölvarn")[0]
+    assert bm25.unit_present(word, {"zolvarn"})
     assert not bm25.unit_present(word, {"other"})
     run = bm25.token_units("会議の議事録", query=True)[0]
     assert run.run and len(set(run.stems)) == 5
@@ -301,7 +301,7 @@ def test_spaced_scripts_are_not_scriptio_continua(character: str) -> None:
 
 
 def test_uniform_letter_script_names_the_stemmed_and_folded_scripts() -> None:
-    assert text_scripts.uniform_letter_script("mättik2") == "latin"
+    assert text_scripts.uniform_letter_script("zölvarn2") == "latin"
     assert text_scripts.uniform_letter_script("книга") == "cyrillic"
     assert text_scripts.uniform_letter_script("λογοσ") == "greek"
     assert text_scripts.uniform_letter_script("քաղաք") == "armenian"

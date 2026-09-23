@@ -58,7 +58,7 @@ def stem_tokens_present(page: ParsedPage, query_norm: str) -> bool:
     Used only as a fallback in hybrid mode; keyword mode keeps the strict
     substring gate. An ASCII token is stemmed whole, as it always was. A
     non-ASCII token is present when each of its words is (in any indexed form,
-    so "mattik" finds "Mättik") and each unspaced run in it has a strict
+    so "zolvarn" finds "Zölvarn") and each unspaced run in it has a strict
     majority of its bigrams present.
     """
     if not query_norm:

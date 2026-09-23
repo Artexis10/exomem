@@ -152,10 +152,10 @@ def test_derived_text_invalidates_with_page(vault: Path) -> None:
 def test_stem_set_holds_cjk_bigrams_and_accent_folded_variants(vault: Path) -> None:
     p = vault / "Knowledge Base" / "Notes" / "derived-multilingual-probe.md"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("# 東京タワー\n\nMättik prüft книги\n", encoding="utf-8")
+    p.write_text("# 東京タワー\n\nZölvarn prüft книги\n", encoding="utf-8")
     page = find_module._CACHE.get(p, vault)
     assert {"東京", "京タ", "タワ", "ワー"} <= page.stem_set
-    assert {"mättik", "mattik", "prüft", "pruft", "книг"} <= page.stem_set
+    assert {"zölvarn", "zolvarn", "prüft", "pruft", "книг"} <= page.stem_set
 
 
 @pytest.mark.parametrize("prefer_compiled", [True, False])

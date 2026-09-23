@@ -236,7 +236,7 @@ _MULTILINGUAL_PAGES: dict[str, tuple[str, str]] = {
     ),
     "Notes/delivery-check.md": (
         "Lieferung",
-        "Mättik prüft die Lieferung am Montag.",
+        "Zölvarn prüft die Lieferung am Montag.",
     ),
     "Notes/budget.md": (
         "Budget",
@@ -277,10 +277,10 @@ def test_japanese_query_sharing_one_bigram_is_vetoed(multilingual_vault: Path) -
 
 
 def test_accent_free_query_retains_the_accented_page(multilingual_vault: Path) -> None:
-    hits = find_module.find(multilingual_vault, query="mattik lieferung")
+    hits = find_module.find(multilingual_vault, query="zolvarn lieferung")
     assert hits
     assert hits[0].path.endswith("delivery-check.md")
-    assert "Mättik" in hits[0].excerpt
+    assert "Zölvarn" in hits[0].excerpt
 
 
 def test_cjk_page_passes_the_strict_veto_when_the_vector_lane_is_live(
@@ -306,17 +306,17 @@ def test_cjk_page_passes_the_strict_veto_when_the_vector_lane_is_live(
 def test_query_word_groups_count_an_unspaced_run_as_one_word() -> None:
     from exomem import find_policy
 
-    groups = find_policy.query_word_stem_groups("the drift-index 東京タワー Python入門 Mättik")
+    groups = find_policy.query_word_stem_groups("the drift-index 東京タワー Python入門 Zölvarn")
     assert [(sorted(stems), function, required) for stems, function, required in groups] == [
         (["the"], True, 1),
         (["drift", "index"], False, 2),
         (sorted(["東京", "京タ", "タワ", "ワー"]), False, 3),
         (["python"], False, 1),
         (["入門"], False, 1),
-        (["mättik"], False, 1),
+        (["zölvarn"], False, 1),
     ]
     present, total, content = find_policy.stem_word_coverage(
-        frozenset({"the", "東京", "京タ", "タワ", "python", "mattik"}), groups
+        frozenset({"the", "東京", "京タ", "タワ", "python", "zolvarn"}), groups
     )
     assert (present, total, content) == (3, 6, 2)
 
@@ -332,15 +332,15 @@ def test_stem_gates_read_cjk_and_folded_query_words(multilingual_vault: Path) ->
     )
     assert find_results.stem_tokens_present(tower, "東京タワーの高さ")
     assert not find_results.stem_tokens_present(tower, "東京の天気予報")
-    assert find_results.stem_tokens_present(delivery, "mattik lieferung")
+    assert find_results.stem_tokens_present(delivery, "zolvarn lieferung")
     assert find_module._any_stem_present(tower, "タワー")
-    assert find_module._any_stem_present(delivery, "mattik")
+    assert find_module._any_stem_present(delivery, "zolvarn")
 
     from types import SimpleNamespace
 
     long_body = "静かな記録。" * 60 + "東京タワーの高さは三百メートル。" + "別の話題。" * 60
     excerpt = find_results.stem_anchored_excerpt(SimpleNamespace(body=long_body), "高さ")
     assert "東京タワーの高さ" in excerpt
-    folded_body = "x " * 200 + "Mättik prüft die Lieferung." + " y" * 200
-    excerpt = find_results.stem_anchored_excerpt(SimpleNamespace(body=folded_body), "mattik")
-    assert "Mättik prüft" in excerpt
+    folded_body = "x " * 200 + "Zölvarn prüft die Lieferung." + " y" * 200
+    excerpt = find_results.stem_anchored_excerpt(SimpleNamespace(body=folded_body), "zolvarn")
+    assert "Zölvarn prüft" in excerpt

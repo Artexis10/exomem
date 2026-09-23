@@ -25,7 +25,7 @@ byte-identical to v1 on ASCII text:
   by English Snowball, all-Cyrillic by Russian, all-Greek by Greek,
   all-Armenian by Armenian; anything else is left as written.
 - On the INDEX side only, a Latin word whose accents fold away also emits the
-  folded form, so "mattik" finds "Mättik" while "Mättik" still matches its
+  folded form, so "zolvarn" finds "Zölvarn" while "Zölvarn" still matches its
   exact surface. The query side emits surface forms only, so no query term is
   counted twice.
 

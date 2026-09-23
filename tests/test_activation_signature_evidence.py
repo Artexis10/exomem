@@ -276,9 +276,9 @@ def test_publication_between_evidence_and_compilation_cannot_mix_generations(
     [
         ("東京タワーの高さ", False),
         ("東京タワー、会議の議事録", True),
-        ("Mättik", False),
-        ("Mättik rollout", True),
-        ("mattik rollout", True),
+        ("Zölvarn", False),
+        ("Zölvarn rollout", True),
+        ("zolvarn rollout", True),
     ],
 )
 def test_one_word_or_one_unspaced_run_is_one_unit_of_lexical_evidence(
@@ -293,7 +293,7 @@ def test_one_word_or_one_unspaced_run_is_one_unit_of_lexical_evidence(
     _write(
         vault / "Knowledge Base/Products/Tower Wagon.md",
         "---\ntype: note\nstatus: active\n---\n# Tower Wagon\n\n"
-        "東京タワーの高さは三百メートル。会議の議事録を共有。Mättik plans the rollout.\n",
+        "東京タワーの高さは三百メートル。会議の議事録を共有。Zölvarn plans the rollout.\n",
     )
     index = working_set_index.WorkingSetIndex(vault)
     index.rebuild()

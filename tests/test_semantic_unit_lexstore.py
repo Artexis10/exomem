@@ -244,8 +244,8 @@ def test_in_process_unit_rung_matches_the_catalogue_for_cjk_and_folded_queries(
     contents = {
         "tower": "東京タワーの高さ",
         "minutes": "会議の議事録",
-        "delivery": "Mättik prüft die Lieferung",
-        "plain": "Mattik plans the rollout",
+        "delivery": "Zölvarn prüft die Lieferung",
+        "plain": "Zolvarn plans the rollout",
     }
     path = _write_page(
         tmp_path,
@@ -260,8 +260,8 @@ def test_in_process_unit_rung_matches_the_catalogue_for_cjk_and_folded_queries(
     for query, expected in (
         ("東京タワー", {"tower"}),
         ("議事録", {"minutes"}),
-        ("mattik", {"delivery", "plain"}),
-        ("Mättik", {"delivery"}),
+        ("zolvarn", {"delivery", "plain"}),
+        ("Zölvarn", {"delivery"}),
     ):
         hits = lexstore.search_semantic_units(tmp_path, query, k=10, scope="kb")
         assert hits is not None
