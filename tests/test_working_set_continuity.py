@@ -1367,7 +1367,12 @@ def test_a_maintenance_batch_does_not_pick_the_referent(
         assert _resolved_paths(after) == [SLED], after["anchors"]
     else:
         assert after["abstention"] == {"reason": "unresolved"}, after["anchors"]
-        assert after["recent_context"]
+        # The block agrees with the empty profile (R-P3): neither the batch
+        # nor the edit before it is offered as recent work.
+        assert "recent_context" in after
+        assert not [e for e in after["recent_context"] if e["why"] == "edited"], after[
+            "recent_context"
+        ]
 
 
 @pytest.mark.parametrize("read", [None, SLED], ids=["nothing-read", "sled-read"])

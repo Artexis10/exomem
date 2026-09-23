@@ -747,7 +747,8 @@ from recent work and not from the turn's own words.
 - **THEN** a referential turn resolves neither the page the batch wrote last
   nor the freshest page the batch left alone, however old
 - **AND** it resolves the anchor the usage snapshot shows was read, or
-  abstains `unresolved` with its recent-context block when nothing was read
+  abstains `unresolved` when nothing was read, its recent-context block
+  offering neither the batch nor the edits before it
 
 #### Scenario: A previous packet's answer is resumed whole
 
