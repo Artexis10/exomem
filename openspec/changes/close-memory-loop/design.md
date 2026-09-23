@@ -356,11 +356,12 @@ and `evidence: ["agent_choice"]` rather than `retrieval_carried`/`retrieval`:
 `agent_choice` already decides an anchor alone in the soundness rule
 (decision 1 of `make-anchor-resolution-sound`), and an agent-picked page gets
 the identical outcome a resolved index anchor gets, never a third status
-invented for it. Unlike a retrieval-carried page, this one DOES mint a
-continuity token — `mint_continuity` mints from any `resolved` anchor, and an
-agent-picked page is one — so a later referential turn ("continue") can pick
-it back up through the same mechanism a resolved anchor already gets, which a
-carried page, never `resolved`, deliberately cannot (§8 above). A ref naming
+invented for it. Like a retrieval-carried page, it mints a continuity token
+naming its path, so a later referential turn ("continue") resumes it through
+`continuity_page`, which serves that one page at `resolved` on `continuity`
+and `recency`. A token ref the current audience may not see is dropped before
+anything is derived from it, so it answers exactly as a ref naming nothing.
+A ref naming
 neither an index row nor an eligible page, or one this audience may not see,
 is refused with the identical `INVALID_ANCHOR` error an unknown or withheld
 anchor already share — canonicalised first (no leading `./`, no doubled

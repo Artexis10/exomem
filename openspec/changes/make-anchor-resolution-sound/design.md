@@ -63,7 +63,8 @@ for the same turn scored 13.16 at one corpus size and 6.81 at another, and a two
 stub sharing three ordinary words with a long turn outscored the page the turn was
 actually about. Rarity is corpus-relative, so it does not drift as the vault grows; that page's units are served under one anchor entry of
 kind `page` at status `retrieval_carried`, marked `generation.carried_by = "retrieval"`,
-and no continuity token is minted from it. It never runs when any anchor resolved, when the
+and the continuity token minted from it names the carried page's path, which a following
+"continue" resumes through `continuity_page`. It never runs when any anchor resolved, when the
 turn is ambiguous, when the agent named a sense, or when the turn is referential and so
 names nothing (close-memory-loop design §8); a near tie takes the abstention the
 turn already had. The rejected alternative stands as written — a score is still no way to
@@ -78,9 +79,9 @@ of the activation index. This is not a fourth resolved case above it:
 `agent_choice` is already one of the two kinds this rule lets decide alone
 (with `exact_alias`), so an agent-picked page gets exactly the SAME
 `resolved`/`agent_choice` outcome a resolved index anchor already gets —
-never `retrieval_carried`, never a status invented for it. Unlike a
-retrieval-carried page it DOES mint a continuity token, since minting keys on
-`resolved` status alone and this status is `resolved`. A ref naming neither
+never `retrieval_carried`, never a status invented for it. Like a
+retrieval-carried page it mints a continuity token naming its path, which a
+following "continue" resumes through `continuity_page`. A ref naming neither
 an index row nor an eligible page, or one this audience may not see, is
 refused identically to an unknown or withheld one, canonicalised and checked
 against the lexical catalogue's own row before any file is read, so a

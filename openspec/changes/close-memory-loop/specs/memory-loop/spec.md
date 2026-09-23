@@ -483,7 +483,8 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
   other candidate
 - **THEN** the packet serves that note's units under one anchor entry of kind
   `page` at status `retrieval_carried`, marked as carried by retrieval
-- **AND** no continuity token is minted from it, and no anchor is resolved
+- **AND** no anchor is resolved, and the continuity token minted from it names
+  the carried page's path, which a following "continue" resumes
 
 #### Scenario: A corpus too small to measure rarity carries nothing
 
