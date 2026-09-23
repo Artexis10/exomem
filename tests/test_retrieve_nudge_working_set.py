@@ -220,8 +220,15 @@ def _serve(monkeypatch: pytest.MonkeyPatch, packet: dict | None) -> list[dict]:
     """Answer the working-set rung with `packet`, recording every request body."""
     seen: list[dict] = []
 
-    def _fetch(prompt, api_key, continuity="", timeout=0.0):
-        seen.append({"prompt": prompt, "continuity": continuity, "key": api_key})
+    def _fetch(prompt, api_key, continuity="", timeout=0.0, attribution=None):
+        seen.append(
+            {
+                "prompt": prompt,
+                "continuity": continuity,
+                "key": api_key,
+                "attribution": attribution,
+            }
+        )
         return packet
 
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
@@ -736,7 +743,7 @@ def test_the_packet_replaces_the_reminder(
     tmp_path: Path,
     working_set_mode: None,
 ) -> None:
-    _serve(monkeypatch, _packet())
+    seen = _serve(monkeypatch, _packet())
 
     context = _context(_run(monkeypatch, capsys, _event(), tmp_path / "home"))
 
@@ -744,6 +751,11 @@ def test_the_packet_replaces_the_reminder(
     assert hook.REMINDER not in context
     assert "depot stock: 180 kg" in context
     assert len(context) <= hook._working_set_max_chars()
+    # The rung carries the session's attribution, never the raw session id.
+    assert seen[0]["attribution"] == {
+        "client": "claude-code",
+        "session": hook.episode_key("claude-code", SESSION),
+    }
 
 
 def test_a_transport_failure_falls_back_to_the_reminder(
