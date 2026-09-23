@@ -43,11 +43,12 @@ The fold is restricted to Latin because dropping marks destroys Indic words ("�
 
 ### D4. Find's word coverage treats an unspaced run as one word
 
-Find's degraded-retention gate and its all-words veto count whole query words. A whitespace word keeps its v1 rule: present when every subtoken stem is present, so exact-marker compounds stay precise. An unspaced run is its own word, present when a strict majority of its content bigrams occur in the page. Its content bigrams are those without hiragana, the script Japanese writes particles and inflections in; a run whose every bigram holds hiragana keeps them all, and runs in other scripts keep every bigram.
+Find's degraded-retention gate and its all-words veto count whole query words. A whitespace word keeps its v1 rule: present when every subtoken stem is present, so exact-marker compounds stay precise. An unspaced run is its own word, present when a strict majority of its content bigrams occur in the page. Its content bigrams are those without hiragana, the script Japanese writes particles and inflections in, and without the question kanji 何, which builds question words with a counter (何度, 何時, 何月) that ask rather than name. A run with no such bigram keeps its hiragana-free bigrams, a run whose every bigram holds hiragana keeps them all, and runs in other scripts keep every bigram.
 
 - Requiring every bigram, or a majority of all of them, would demand the query's particles: "会議の議事録はいつ共有" would miss a page that says "議事録は翌日までに共有します", and "抹茶の用意" would miss "抹茶と和菓子は講師が用意します".
 - Accepting any one bigram would retain a page that shares a single particle bigram.
 - A query made only of particles ("についてですか") has no content and finds nothing.
+- The trade-off: a content word written in hiragana ("りんごの値段") drops out of its run's content, so only 値段 is required and a page about banana prices is retained. It touches only whether a lexically matched candidate is kept (find's retention gates) or corroborates (D3); BM25 still ranks on every bigram, so the page naming りんご ranks above it, and vector-ranked candidates skip the gates.
 
 Rerank's word count counts whitespace words as before, and each unspaced run inside a non-ASCII word as a word.
 
@@ -57,7 +58,7 @@ Rerank's word count counts whitespace words as before, and each unspaced run ins
 
 `SCHEMA_VERSION` moves from 10 to 11. A v10 catalogue reads not-current until the existing atomic background rebuild publishes. Meanwhile `find` answers `RETRIEVAL_INDEX_WARMING` on a vault of more than 64 pages or under a managed runtime (a smaller unmanaged vault rebuilds inline); `find` does not fall back to the in-process rung, which serves only direct BM25 callers and the `EXOMEM_LEXICAL_BACKEND=python` kill switch. Activation reports `stale`. The in-place rebuild path re-declares FTS tables whose declaration predates v2; `CREATE ... IF NOT EXISTS` alone would refill them under the old tokenizer.
 
-The version bump sends every install through a rebuild, and a killed rebuild leaves a whole catalogue behind as a temp file. Each rebuild therefore starts by removing rebuild temps, with their WAL and SHM, that no one has touched for ten minutes and no connection holds open.
+The version bump sends every install through a rebuild, and a killed rebuild leaves a whole catalogue behind as a temp file. Each rebuild therefore starts by removing rebuild temps, with their WAL and SHM, that are orphans. A build holds an advisory lock on its temp, in the user's private lock directory, from before the temp exists until it is cleaned up, and the OS releases it when the build's process dies. A temp is an orphan when no build holds its lock, it has been untouched for ten minutes, and no connection holds it open. The lock is what protects a live build that has closed its connection or stalled, or whose mtimes look old after a clock jump.
 
 ### D6. English non-regression is measured, not assumed
 

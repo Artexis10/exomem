@@ -98,7 +98,7 @@ Tokenization SHALL expose the stems grouped by the word or unspaced run they cam
 
 ### Requirement: Find's word coverage treats an unspaced run as one word
 
-Find's coverage gates SHALL treat each whitespace word as before and each unspaced run as one word, present when a strict majority of its content bigrams occur in the page. A run's content bigrams SHALL be its bigrams without hiragana, or all of its bigrams when every one holds hiragana. Rerank's query word count SHALL count ASCII whitespace words as before, and each unspaced run inside a non-ASCII word as a word.
+Find's coverage gates SHALL treat each whitespace word as before and each unspaced run as one word, present when a strict majority of its content bigrams occur in the page. A run's content bigrams SHALL be its bigrams without hiragana and without the question kanji 何; when none remain, its bigrams without hiragana; and when every bigram holds hiragana, all of them. Rerank's query word count SHALL count ASCII whitespace words as before, and each unspaced run inside a non-ASCII word as a word.
 
 #### Scenario: A Japanese question keeps its page with embeddings off
 
@@ -109,6 +109,11 @@ Find's coverage gates SHALL treat each whitespace word as before and each unspac
 
 - **WHEN** the query is "抹茶の用意" and a page says "抹茶と和菓子は講師が用意します"
 - **THEN** the page is retained, although the query's particle bigrams are not on it
+
+#### Scenario: A question built on 何 finds its page
+
+- **WHEN** the query is "パンは何度で焼きますか" and a page says "天然酵母のパンは一晩発酵させてから二百度で焼きます"
+- **THEN** the page is retained: 何度 asks a question and is not required on the page
 
 #### Scenario: A query of particles only finds nothing
 
@@ -122,7 +127,7 @@ Find's coverage gates SHALL treat each whitespace word as before and each unspac
 
 ### Requirement: The lexical catalogue stores tokens verbatim and rebuilds on upgrade
 
-The catalogue's pre-stemmed FTS5 tables SHALL be declared so that FTS5 neither removes diacritics nor splits a token at a letter, number or mark, and every token the tokenizer emits SHALL be the token FTS5 stores. A token change SHALL move the catalogue schema version. A catalogue at an older version SHALL read not-current, be rebuilt by the existing background rebuild, and be re-declared by an in-place rebuild. Until then `find` SHALL answer `RETRIEVAL_INDEX_WARMING` for a vault it may not rebuild inline (more than 64 pages, or a managed runtime), and activation's lexical evidence SHALL report the catalogue as stale. A rebuild SHALL begin by removing rebuild temporaries, with their WAL and SHM, that are older than ten minutes and held open by no connection.
+The catalogue's pre-stemmed FTS5 tables SHALL be declared so that FTS5 neither removes diacritics nor splits a token at a letter, number or mark, and every token the tokenizer emits SHALL be the token FTS5 stores. A token change SHALL move the catalogue schema version. A catalogue at an older version SHALL read not-current, be rebuilt by the existing background rebuild, and be re-declared by an in-place rebuild. Until then `find` SHALL answer `RETRIEVAL_INDEX_WARMING` for a vault it may not rebuild inline (more than 64 pages, or a managed runtime), and activation's lexical evidence SHALL report the catalogue as stale. A build SHALL hold an advisory lock on its temporary from before the temporary exists until it is cleaned up, and a rebuild SHALL begin by removing rebuild temporaries, with their WAL and SHM, whose lock no build holds, that are older than ten minutes, and that no connection holds open.
 
 #### Scenario: FTS5 stores what the tokenizer emitted
 
@@ -137,9 +142,9 @@ The catalogue's pre-stemmed FTS5 tables SHALL be declared so that FTS5 neither r
 
 #### Scenario: A killed rebuild's temp is reclaimed
 
-- **WHEN** a rebuild temp and its WAL have been untouched for more than ten minutes and no connection holds them
+- **WHEN** a rebuild temp and its WAL have been untouched for more than ten minutes, no build holds the temp's lock and no connection holds it open
 - **THEN** the next rebuild removes them before it builds
-- **AND** a fresh temp, or one another connection holds open, is kept
+- **AND** a fresh temp, one another connection holds open, and one whose build still holds its lock are kept, however old they look
 
 ### Requirement: Lexical multilingual acceptance is gated
 
