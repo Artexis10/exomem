@@ -15,7 +15,7 @@ long-lived token by the `v1.` prefix). Stateless — no server-side store; valid
 is just "signature matches AND not past exp".
 
 A download capability also names WHO minted it:
-`v2.<exp_unix>.<audience_base64url>.<hmac_sha256_hex>`, the audience signed with
+`v2.<exp_unix>.<audience_utf8_hex>.<hmac_sha256_hex>`, the audience signed with
 the expiry. `/download` decides every requested path under that audience, so a
 caller cannot download more than it could read — the owner's secret signs the
 token, but only the owner's own mint carries the owner's audience.
@@ -23,7 +23,6 @@ token, but only the owner's own mint carries the owner's audience.
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 import time
@@ -66,17 +65,20 @@ BOUND_PREFIX = "v2."
 
 
 def _encode_audience(audience: str) -> str:
-    return base64.urlsafe_b64encode(audience.encode("utf-8")).rstrip(b"=").decode("ascii")
+    # Lower-case hex, like the signature beside it. The handoff crosses the
+    # dispatcher's terminal credential scrubber, which rewrites long
+    # mixed-case runs; a base64 claim for a principal id is one, so it would
+    # reach a non-owner as a dead token.
+    return audience.encode("utf-8").hex()
 
 
 def _decode_audience(claim: str) -> str | None:
     try:
-        raw = base64.b64decode(claim + "=" * (-len(claim) % 4), altchars=b"-_", validate=True)
-        audience = raw.decode("utf-8")
-    except ValueError:  # binascii.Error and UnicodeDecodeError are both ValueErrors
+        audience = bytes.fromhex(claim).decode("utf-8")
+    except ValueError:  # a bad hex digit and a bad UTF-8 sequence are both ValueErrors
         return None
-    # One spelling per audience: a claim that does not re-encode to itself was
-    # not written by `mint_bound`.
+    # One spelling per audience: a claim that does not re-encode to itself
+    # (upper-case digits, whitespace) was not written by `mint_bound`.
     if not audience or _encode_audience(audience) != claim:
         return None
     return audience
@@ -101,7 +103,8 @@ def mint_bound(
     if not audience:
         raise ValueError("a bound token requires an audience")
     exp = int(now if now is not None else time.time()) + ttl
-    return f"{BOUND_PREFIX}{exp}.{_encode_audience(audience)}.{_bound_sig(secret, scope, exp, audience)}"
+    claim = _encode_audience(audience)
+    return f"{BOUND_PREFIX}{exp}.{claim}.{_bound_sig(secret, scope, exp, audience)}"
 
 
 def bound_audience(

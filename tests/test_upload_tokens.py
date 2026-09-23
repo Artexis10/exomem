@@ -160,7 +160,8 @@ def test_legacy_download_token_names_no_audience() -> None:
 def test_bound_claim_has_one_spelling() -> None:
     t = upload_tokens.mint_bound(SECRET, audience="owner", now=1000)
     prefix, exp, claim, sig = t.split(".")
-    assert upload_tokens.bound_audience(f"{prefix}.{exp}.{claim}=.{sig}", SECRET, now=1000) is None
+    for variant in (claim.upper(), f"{claim[:2]} {claim[2:]}"):
+        assert upload_tokens.bound_audience(f"{prefix}.{exp}.{variant}.{sig}", SECRET, now=1000) is None
 
 
 def test_bound_malformed_fails() -> None:

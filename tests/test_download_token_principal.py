@@ -17,7 +17,7 @@ from starlette.requests import Request
 from starlette.testclient import TestClient
 
 from exomem import commands, server, server_transfer, upload_tokens
-from exomem.governance import egress, membership, policy
+from exomem.governance import egress, membership, policy, scrubber
 from exomem.governance import principal as principal_module
 
 SECRET = "synthetic-upload-secret-0123456789abcdef"
@@ -215,6 +215,56 @@ def test_unbound_mint_is_not_the_owner(vault: Path) -> None:
 
     assert resolved.audience_id != principal_module.OWNER_AUDIENCE
     assert resolved.resolved is False
+
+
+@pytest.mark.parametrize(
+    "audience",
+    [principal_module.OWNER_AUDIENCE, principal_module.MOST_RESTRICTIVE_AUDIENCE, ALICE],
+)
+def test_bound_token_survives_the_terminal_scrubber(audience: str) -> None:
+    token = upload_tokens.mint_bound(SECRET, audience=audience)
+    handoff = {"token": token, "ttl_seconds": 900, "download_url": "https://memory.example/download"}
+
+    scrubbed, changed = scrubber.scrub_value(handoff)
+
+    assert changed is False
+    assert scrubbed["token"] == token
+
+
+def test_cf_access_rest_round_trip_through_the_dispatcher(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mint over REST as a Cloudflare Access principal, then download.
+
+    The handoff crosses the shared dispatcher, whose terminal credential
+    scrubber rewrites high-entropy runs in unlabelled fields. A bound token
+    must survive it intact, or a non-owner receives a dead capability."""
+    _withhold(vault, audience=CF_AUDIENCE)
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "synthetic-rest-key-0123456789")
+    monkeypatch.setenv("EXOMEM_CF_ACCESS_TEAM_DOMAIN", "team.cloudflareaccess.example")
+    monkeypatch.setenv("EXOMEM_CF_ACCESS_AUD", "synthetic-aud")
+    monkeypatch.setattr("exomem.cf_access.make_jwks_client", lambda _team: object())
+    monkeypatch.setattr(
+        "exomem.cf_access.verified_claims",
+        lambda token, **_kw: {"iss": CF_ISSUER, "sub": CF_SUBJECT} if token == "cf-jwt" else None,
+    )
+    client = _client()
+
+    minted = client.post(
+        "/api/transfer_artifact",
+        json={"operation": "download"},
+        headers={"Cf-Access-Jwt-Assertion": "cf-jwt"},
+    )
+    assert minted.status_code == 200, minted.text
+    token = minted.json()["data"]["token"]
+    assert upload_tokens.bound_audience(token, SECRET) == CF_AUDIENCE
+
+    withheld = _download(client, WITHHELD, token)
+    released = _download(client, RELEASED, token)
+
+    assert withheld.status_code == 404, withheld.text
+    assert released.status_code == 200, released.text
+    assert released.content == (vault / RELEASED).read_bytes()
 
 
 # ---------------------------------------------------------------------------
