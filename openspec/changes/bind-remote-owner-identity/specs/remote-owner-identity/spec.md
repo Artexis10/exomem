@@ -37,6 +37,13 @@ line, and SHALL NOT prevent the service from starting.
   binding's name and a matching value
 - **THEN** no request resolves to the owner because of it
 
+#### Scenario: A vault-planted environment file is not loaded even from inside the vault
+
+- **WHEN** the service is started with its working directory inside the vault and a
+  `.env` there names the binding
+- **THEN** startup loads no `.env` from that directory, logs one line naming the refused
+  file, keeps serving, and no request resolves to the owner because of it
+
 ### Requirement: Only this install's verified session matches the binding
 
 A request SHALL match the binding only when its access token was issued and validated by

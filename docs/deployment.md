@@ -967,7 +967,9 @@ value must equal `EXOMEM_GITHUB_USER_ID`: `github:` then ASCII digits, no
 leading zero. Anything else is treated as unset, and
 `exomem doctor --profile remote` reports it as `malformed` or `mismatch`. It is
 read only from the process environment (`service.env`, or the working
-directory's `.env`), never from the vault, and a hosted cell clears it.
+directory's `.env`), never from the vault, and a hosted cell clears it. The
+service refuses to load `.env` from a working directory inside the vault and
+logs `event=dotenv_refused` naming the file; run it from its service root.
 
 Enable it with one line and a restart. Before enabling, read doctor's
 `governance.remote_owner_former_audience`: policy rules and grants that name the

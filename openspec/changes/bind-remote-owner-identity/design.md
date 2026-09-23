@@ -125,7 +125,11 @@ server becomes claims `{"sub": X, "iss": "bearer"}`, so any owner rule that look
   on and sessions list their `client_id` for revocation. Accepted residual.
 - **T8. Planting the binding through the vault.** The variable is read only from the
   process environment; the only file loaded is `service.env` or the working directory's
-  `.env`, never the vault.
+  `.env`. Startup refuses that `.env` when the working directory is inside the configured
+  vault (or any directory that is structurally a vault), logs one line naming it, and
+  keeps serving. That stops a vault-planted `.env` from setting service secrets; a wrong
+  refusal costs an operator who runs from inside the vault one unloaded `.env`, which the
+  log line names.
 
 ## Migration Plan
 

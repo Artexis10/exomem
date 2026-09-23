@@ -75,7 +75,19 @@ def test_only_the_operator_setup_wizard_writes_an_environment_file() -> None:
     assert _importers(modules, "setup_wizard") <= {"__main__.py"}
 
 
-def test_every_environment_file_the_process_loads_is_the_working_directory_s() -> None:
+#: Loaders whose file comes from `server_runtime._working_directory_dotenv`,
+#: which is `<cwd>/.env` unless the working directory is inside a vault.
+_GUARDED_LOADERS = {
+    ("server_runtime.py", "_working_directory_dotenv"),
+    ("server_runtime.py", "initialize_runtime"),
+}
+
+
+def test_every_env_file_loader_reads_only_the_working_directory_env() -> None:
+    """Structural pin: each `.env` loader in the package names `<cwd>/.env`
+    (directly or through the service's vault guard), or is the setup wizard
+    reloading the file it just wrote. It does not by itself prove the working
+    directory is outside the vault; the startup tests below do that."""
     offenders: list[str] = []
     for name, tree in _modules():
         for function in ast.walk(tree):
@@ -91,34 +103,122 @@ def test_every_environment_file_the_process_loads_is_the_working_directory_s() -
             if (name, function.name) == ("remote_setup_wizard.py", "_load_env"):
                 # Reloads the file the operator's setup command just wrote.
                 continue
-            if "Path.cwd() / '.env'" not in ast.unparse(function):
-                offenders.append(f"{name}:{function.name}")
+            source = ast.unparse(function)
+            if "Path.cwd() / '.env'" in source:
+                continue
+            if (name, function.name) in _GUARDED_LOADERS:
+                continue
+            offenders.append(f"{name}:{function.name}")
     assert offenders == []
+    # The guarded service loader still derives its file from the working
+    # directory, and service startup loads only what that guard returns.
+    guard = next(
+        node
+        for module, tree in _modules()
+        if module == "server_runtime.py"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_working_directory_dotenv"
+    )
+    assert "Path.cwd().resolve()" in ast.unparse(guard)
+    assert "cwd / '.env'" in ast.unparse(guard)
 
 
-def test_the_service_never_loads_an_environment_file_from_the_vault(
-    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    (vault / ".env").write_text("EXOMEM_OWNER_OAUTH_SUBJECT=github:4242\n", encoding="utf-8")
-    service_root = tmp_path / "service-root"
-    service_root.mkdir()
-    monkeypatch.chdir(service_root)
-    monkeypatch.delenv("EXOMEM_HOSTED_CELL", raising=False)
+class _Stop(Exception):
+    pass
+
+
+def _start_until_dotenv(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Run local startup up to the `.env` step; return what the loader was given."""
     loaded: list[Path] = []
-
-    class _Stop(Exception):
-        pass
 
     def recording_loader(*, dotenv_path: Path, override: bool) -> None:
         from dotenv import load_dotenv
 
         loaded.append(Path(dotenv_path))
         load_dotenv(dotenv_path=dotenv_path, override=override)
+
+    def stop() -> list[str]:
         raise _Stop
 
+    monkeypatch.delenv("EXOMEM_HOSTED_CELL", raising=False)
+    # Register the planted key with monkeypatch first, so anything a loader sets
+    # is undone at teardown instead of leaking into later tests.
+    monkeypatch.setenv("EXOMEM_OWNER_OAUTH_SUBJECT", "")
+    monkeypatch.delenv("EXOMEM_OWNER_OAUTH_SUBJECT")
+    monkeypatch.setattr(server_runtime.env_compat, "promote_legacy", stop)
     with pytest.raises(_Stop):
         server_runtime.initialize_runtime(load_dotenv_func=recording_loader)
+    return loaded
 
-    assert loaded == [service_root / ".env"]
-    assert not loaded[0].resolve().is_relative_to(vault.resolve())
+
+def _plant(directory: Path) -> None:
+    (directory / ".env").write_text(
+        "EXOMEM_OWNER_OAUTH_SUBJECT=github:4242\n", encoding="utf-8"
+    )
+
+
+def test_startup_loads_the_working_directory_env_file_and_not_the_vault_s(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """From a service root outside the vault, only `<cwd>/.env` is loaded; a
+    `.env` planted at the vault root is never read."""
+    _plant(vault)
+    service_root = tmp_path / "service-root"
+    service_root.mkdir()
+    monkeypatch.chdir(service_root)
+
+    assert _start_until_dotenv(monkeypatch) == [service_root / ".env"]
+    assert "EXOMEM_OWNER_OAUTH_SUBJECT" not in os.environ
+
+
+@pytest.mark.parametrize("where", ["vault-root", "vault-subdirectory"])
+def test_startup_refuses_a_working_directory_env_file_inside_the_vault(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    where: str,
+) -> None:
+    """A `.env` a remote writer planted in the vault must not become the service's
+    configuration just because the service was started from there."""
+    cwd = vault if where == "vault-root" else vault / "Knowledge Base"
+    _plant(cwd)
+    monkeypatch.chdir(cwd)
+
+    with caplog.at_level("WARNING", logger=server_runtime.log.name):
+        assert _start_until_dotenv(monkeypatch) == []
+
+    assert "EXOMEM_OWNER_OAUTH_SUBJECT" not in os.environ
+    refusals = [r.getMessage() for r in caplog.records if "dotenv_refused" in r.getMessage()]
+    assert len(refusals) == 1
+    assert str(cwd.resolve() / ".env") in refusals[0]
+
+
+def test_startup_refuses_when_the_env_file_itself_names_the_enclosing_vault(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no vault in the process environment, the `.env` that would configure
+    it is still refused when it sits inside the vault it names."""
+    (vault / ".env").write_text(
+        f"EXOMEM_VAULT_PATH={vault}\nEXOMEM_OWNER_OAUTH_SUBJECT=github:4242\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("EXOMEM_VAULT_PATH")
+    monkeypatch.chdir(vault)
+
+    assert _start_until_dotenv(monkeypatch) == []
+    assert "EXOMEM_OWNER_OAUTH_SUBJECT" not in os.environ
+
+
+def test_startup_refuses_a_working_directory_inside_any_vault(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The configured vault may be elsewhere; a directory that is itself a vault
+    is still content that remote writers can reach."""
+    other = tmp_path / "configured-elsewhere"
+    other.mkdir()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(other))
+    _plant(vault)
+    monkeypatch.chdir(vault)
+
+    assert _start_until_dotenv(monkeypatch) == []
     assert "EXOMEM_OWNER_OAUTH_SUBJECT" not in os.environ
