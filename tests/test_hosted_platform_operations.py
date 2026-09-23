@@ -225,6 +225,8 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
         "require_python_distribution checkov",
         "collection list community.general",
         "collection list community.library_inventory_filtering_v1",
+        "collection list community.postgresql",
+        "collection list community.docker",
         "require_output_version trivy",
         "require_output_version shellcheck",
         "require_output_version oras",

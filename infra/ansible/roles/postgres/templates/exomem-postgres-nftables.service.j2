@@ -1,0 +1,13 @@
+[Unit]
+Description=Exomem control database PgBouncer connection limits (nftables)
+After=network-pre.target
+Before=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/nftables.d/exomem-postgres.nft
+ExecStop=/usr/sbin/nft delete table inet exomem_postgres
+
+[Install]
+WantedBy=multi-user.target
