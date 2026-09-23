@@ -241,16 +241,19 @@ def inspect(vault_root: Path, *, episode: Any) -> dict[str, Any]:
     if not isinstance(episode, str) or not episode_capture.EPISODE_KEY_RE.fullmatch(episode):
         raise EpisodeError("EPISODE_KEY_INVALID", "episode must be an ep- key of 32 lowercase hex")
     history = EpisodeInputOwner(Path(vault_root)).input_history(episode)
+    revisions = [dict(item) for item in history["revisions"]]
     latest = history["latest_reference"]
     # Released at bind time is not released now: a policy change since then
-    # withholds the ref rather than disclosing that the page exists.
+    # withholds the ref rather than disclosing that the page exists, and a
+    # page this caller may not read is not recoverable by it either.
     if latest is not None and latest not in egress.visible_memory_refs(
         Path(vault_root), [latest], principal=effective_principal()
     ):
         latest = None
+        revisions[-1]["recovery"] = "unavailable"
     return {
         "episode": episode,
-        "revisions": history["revisions"],
+        "revisions": revisions,
         "latest_source_ref": latest,
         "coverage_current": "unchecked",
     }

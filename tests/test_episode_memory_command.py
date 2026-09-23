@@ -537,7 +537,8 @@ def test_inspect_withholds_a_latest_source_the_caller_can_no_longer_see(vault: P
     with request_scope(_audience("client-a")):
         inspected = commands.op_episode_memory(vault, schema, action="inspect", episode=KEY)
 
-    assert inspected["revisions"] == [{"revision": 1, "recovery": "available"}]
+    # A withheld ref is not recoverable either: the two fields agree.
+    assert inspected["revisions"] == [{"revision": 1, "recovery": "unavailable"}]
     assert inspected["latest_source_ref"] is None
 
 
