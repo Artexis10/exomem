@@ -1137,6 +1137,15 @@ def _poison_min_age() -> float:
     return float(getattr(epistemic_graph, "GRAPH_POISON_MIN_AGE_SECONDS", 600.0))
 
 
+def _change_backoff(attempts: int) -> float:
+    """How long after its last failure a changed quarantined page may be retried."""
+    base = float(getattr(epistemic_graph, "GRAPH_QUARANTINE_CHANGE_BACKOFF_SECONDS", 5.0))
+    return min(
+        epistemic_graph.GRAPH_QUARANTINE_RETRY_SECONDS,
+        base * 2 ** max(0, attempts - epistemic_graph.GRAPH_POISON_ATTEMPTS),
+    )
+
+
 def _drain_ticks(root: Path, ticks: int) -> None:
     for _ in range(ticks):
         index_sync.drain_graph_work(root)
@@ -1321,9 +1330,11 @@ def test_a_quarantined_page_is_retried_when_it_changes_and_on_a_slow_timer(
         assert index_sync.requeue_quarantined_graph_paths(vault) == 0
         assert deferred_index.list_graph_paths(vault) == []
 
-        # Edited out of band while still locked: re-queued, fails, set aside again.
+        # Edited out of band while still locked: re-queued once its change
+        # backoff has passed, fails, set aside again.
         (vault / PAGE_A).write_text(_page("A", "A is edited out of band."), encoding="utf-8")
         _seed_live_freshness(vault)
+        _age_graph_failures(vault, _change_backoff(_failure_attempts(vault, PAGE_A)))
         assert index_sync.requeue_quarantined_graph_paths(vault) == 1
         assert deferred_index.list_graph_paths(vault) == [PAGE_A]
         index_sync.drain_graph_work(vault)
@@ -1340,6 +1351,44 @@ def test_a_quarantined_page_is_retried_when_it_changes_and_on_a_slow_timer(
     assert epistemic_graph.graph_lag(vault)["quarantined_paths"] == 0
     assert _failure_attempts(vault, PAGE_A) == 0
     assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
+
+
+def test_a_page_that_keeps_changing_is_retried_no_faster_than_its_backoff(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stat change earns a retry, but not one per drain wake.
+
+    Re-queueing a quarantined page signals the drain, and the drain re-checks
+    quarantined pages on every wake, so a page a sync tool keeps rewriting with
+    bad bytes was retried about every 1.8 s for as long as it changed (reviewer
+    probe Q2, `hot`). A changed page is retried no sooner than
+    `GRAPH_QUARANTINE_CHANGE_BACKOFF_SECONDS` after its last failure, doubling
+    with each failed attempt past `GRAPH_POISON_ATTEMPTS`.
+    """
+    _write_without_graph_repair(
+        vault, monkeypatch, {PAGE_A: _page("A", "A is revised against [[queue-b]].")}
+    )
+    _undecodable_reads(monkeypatch, vault, PAGE_A)
+    _drain_ticks(vault, epistemic_graph.GRAPH_POISON_ATTEMPTS)
+    assert epistemic_graph.graph_lag(vault)["quarantined_paths"] == 1
+
+    for rewrite in range(3):
+        attempts = _failure_attempts(vault, PAGE_A)
+        (vault / PAGE_A).write_text(
+            _page("A", f"A is rewritten out of band, {rewrite}."), encoding="utf-8"
+        )
+        _seed_live_freshness(vault)
+        assert index_sync.requeue_quarantined_graph_paths(vault) == 0, (
+            f"a changed page was retried inside its backoff after {attempts} attempts"
+        )
+        _age_graph_failures(vault, _change_backoff(attempts) / 2)
+        assert index_sync.requeue_quarantined_graph_paths(vault) == 0
+        _age_graph_failures(vault, _change_backoff(attempts) / 2)
+        assert index_sync.requeue_quarantined_graph_paths(vault) == 1
+        index_sync.drain_graph_work(vault)
+        assert deferred_index.list_graph_paths(vault) == []
+        assert _failure_attempts(vault, PAGE_A) == attempts + 1
+        assert epistemic_graph.graph_lag(vault)["quarantined_paths"] == 1
 
 
 def test_a_full_rebuild_that_derives_a_quarantined_page_clears_its_record(
