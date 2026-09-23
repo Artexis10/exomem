@@ -70,6 +70,10 @@ def _legacy_units(text: str, *, query: bool = False) -> list[bm25.TokenUnit]:
 
 
 def _use_legacy_tokenizer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch tokenizer v1 in at `bm25`'s entry points. Limitation: names bound
+    at import elsewhere (referent attributes' `stem_word`/`word_forms`), excerpt
+    anchoring (`first_stem_span`) and the v11 FTS declaration stay v2 in the v1
+    arm; none of them moves an English page's rank."""
     monkeypatch.setattr(bm25, "tokenize", _legacy_tokenize)
     monkeypatch.setattr(bm25, "_tokenize", _legacy_tokenize)
     monkeypatch.setattr(bm25, "token_units", _legacy_units)

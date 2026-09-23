@@ -368,3 +368,19 @@ def test_a_japanese_x_no_y_query_retains_its_page(multilingual_vault: Path) -> N
 def test_a_japanese_particle_only_query_finds_nothing(multilingual_vault: Path) -> None:
     for query in ("についてですか", "はいつですか", "それはなんですか"):
         assert find_module.find(multilingual_vault, query=query) == [], query
+
+
+def test_typographic_english_query_words_pass_the_stem_gate() -> None:
+    """Intended change: under v1 a query word with a curly apostrophe or an em
+    dash was stemmed whole and never matched; v2 splits it at the punctuation
+    exactly as an ASCII apostrophe or hyphen always split."""
+    from types import SimpleNamespace
+
+    from exomem import bm25, find_results
+
+    page = SimpleNamespace(
+        stem_set=frozenset(bm25.tokenize("What's on the harbor crane schedule? Don't wait."))
+    )
+    for word in ("what\u2019s", "don\u2019t", "harbor\u2014crane"):
+        assert find_results.stem_tokens_present(page, word), word
+    assert not find_results.stem_tokens_present(page, "harbor\u2014dredger")
