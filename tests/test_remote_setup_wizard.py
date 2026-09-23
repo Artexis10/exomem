@@ -548,3 +548,105 @@ def test_setup_remote_yes_without_required_flags_is_usage_error() -> None:
     with pytest.raises(SystemExit) as e:
         main(["setup", "--remote", "--yes", "--vault", "/v"])
     assert e.value.code == 2
+
+
+# ============================================================================
+# the remote owner binding (EXOMEM_OWNER_OAUTH_SUBJECT)
+# ============================================================================
+
+OWNER_KEY = "EXOMEM_OWNER_OAUTH_SUBJECT"
+
+
+def test_patch_env_none_removes_a_key_and_keeps_the_rest() -> None:
+    text = "A=1\n# note\nEXOMEM_OWNER_OAUTH_SUBJECT=github:1234\nB=2\n"
+    assert rsw.patch_env(text, {OWNER_KEY: None}) == "A=1\n# note\nB=2\n"
+    assert rsw.patch_env("A=1\n", {OWNER_KEY: None}) == "A=1\n"
+
+
+def test_yes_without_a_flag_writes_no_binding(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    code, _, _ = _run(env_path)
+    assert code == 0
+    assert OWNER_KEY not in rsw.parse_env(env_path.read_text(encoding="utf-8"))
+
+
+def test_yes_without_a_flag_leaves_an_existing_binding_alone(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(f"{OWNER_KEY}=github:1234\n", encoding="utf-8")
+    code, _, _ = _run(env_path)
+    assert code == 0
+    assert rsw.parse_env(env_path.read_text(encoding="utf-8"))[OWNER_KEY] == "github:1234"
+
+
+def test_remote_owner_flag_binds_the_resolved_id(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    code, out, _ = _run(env_path, remote_owner=True)
+    assert code == 0
+    assert rsw.parse_env(env_path.read_text(encoding="utf-8"))[OWNER_KEY] == "github:1234"
+    assert "remote_owner" in out
+
+
+def test_no_remote_owner_flag_removes_the_binding(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(f"KEEP=1\n{OWNER_KEY}=github:1234\n", encoding="utf-8")
+    code, _, _ = _run(env_path, remote_owner=False)
+    assert code == 0
+    written = rsw.parse_env(env_path.read_text(encoding="utf-8"))
+    assert OWNER_KEY not in written
+    assert written["KEEP"] == "1"
+
+
+@pytest.mark.parametrize(
+    ("answer", "bound"), [("", True), ("y", True), ("Yes", True), ("n", False), ("no", False)]
+)
+def test_interactive_setup_asks_whether_the_account_is_the_owner(
+    tmp_path: Path, answer: str, bound: bool
+) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        f"GITHUB_CLIENT_SECRET=kept\n{OWNER_KEY}=github:1234\n", encoding="utf-8"
+    )
+    prompts: list[str] = []
+
+    def input_fn(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return answer if "owner" in prompt else ""
+
+    code, _, _ = _run(env_path, yes=False, probe=False, input_fn=input_fn)
+    assert code == 0
+    owner_prompts = [prompt for prompt in prompts if "owner" in prompt]
+    assert len(owner_prompts) == 1
+    assert "octocat" in owner_prompts[0]
+    assert "act as you, the owner" in owner_prompts[0]
+    assert "[Y/n]" in owner_prompts[0]
+    written = rsw.parse_env(env_path.read_text(encoding="utf-8"))
+    assert (written.get(OWNER_KEY) == "github:1234") is bound
+    assert (OWNER_KEY in written) is bound
+
+
+_OWNER_FLAG_BASE = [
+    "setup", "--remote",
+    "--vault", "/v", "--base-url", "https://kb.example.com",
+    "--tunnel", "cloudflare",
+    "--github-client-id", "id", "--github-client-secret", "sec",
+    "--github-username", "octocat", "--yes",
+]
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [([], None), (["--remote-owner"], True), (["--no-remote-owner"], False)],
+)
+def test_setup_remote_dispatches_the_owner_flags(
+    monkeypatch: pytest.MonkeyPatch, extra: list[str], expected: bool | None
+) -> None:
+    called: dict = {}
+    monkeypatch.setattr(rsw, "run_remote_setup", lambda **kw: called.update(kw) or 0)
+    assert main([*_OWNER_FLAG_BASE, *extra]) == 0
+    assert called["remote_owner"] is expected
+
+
+def test_setup_remote_owner_flags_are_exclusive() -> None:
+    with pytest.raises(SystemExit) as e:
+        main([*_OWNER_FLAG_BASE, "--remote-owner", "--no-remote-owner"])
+    assert e.value.code == 2

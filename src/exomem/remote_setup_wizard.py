@@ -153,15 +153,17 @@ def parse_env(text: str) -> dict[str, str]:
     return out
 
 
-def patch_env(existing: str, updates: dict[str, str]) -> str:
+def patch_env(existing: str, updates: dict[str, str | None]) -> str:
     """Merge `updates` into `.env` text, preserving every unrelated line.
 
     An existing `KEY=` line is replaced IN PLACE (position, and any surrounding
-    comments/blank lines, preserved); a new key is appended. Comments and keys
-    the wizard doesn't own are never touched. Always returns text ending in a
-    single newline (empty input with no updates returns "").
+    comments/blank lines, preserved); a new key is appended. A `None` value
+    removes every `KEY=` line instead. Comments and keys the wizard doesn't own
+    are never touched. Always returns text ending in a single newline (empty
+    input with no updates returns "").
     """
-    remaining = dict(updates)
+    remaining = {key: value for key, value in updates.items() if value is not None}
+    removed = {key for key, value in updates.items() if value is None}
     out: list[str] = []
     for line in existing.splitlines():
         stripped = line.strip()
@@ -170,6 +172,8 @@ def patch_env(existing: str, updates: dict[str, str]) -> str:
             if stripped and not stripped.startswith("#") and "=" in stripped
             else None
         )
+        if key is not None and key in removed:
+            continue
         if key is not None and key in remaining:
             out.append(f"{key}={remaining.pop(key)}")
         else:
@@ -254,6 +258,7 @@ def run_remote_setup(
     github_client_secret: str | None = None,
     github_username: str | None = None,
     github_user_id: str | int | None = None,
+    remote_owner: bool | None = None,
     yes: bool = False,
     probe: bool = True,
     env_path: Path | None = None,
@@ -409,6 +414,22 @@ def run_remote_setup(
         print_fn(f"setup --remote: could not establish GitHub identity: {error}")
         return 2
 
+    # Whether remote sign-ins by this account act as the owner. Separate from
+    # who may sign in: an install may admit a delegate account, so this is
+    # asked, never inferred. `--yes` changes it only when a flag says so.
+    if remote_owner is None and not yes:
+        answer = input_fn(
+            f"Is {github_username} your own GitHub account? Remote sign-ins by it "
+            "will act as you, the owner. [Y/n]: "
+        )
+        remote_owner = answer.strip().casefold() in ("", "y", "yes")
+    if remote_owner is None:
+        report("remote_owner", "[skipped: unchanged]")
+    elif remote_owner:
+        report("remote_owner", "[done] remote sign-ins act as the owner")
+    else:
+        report("remote_owner", "[done] remote sign-ins stay a separate principal")
+
     # 5. JWT signing key — generate ONCE and keep it (rotating orphans the store).
     signing_key = _existing("EXOMEM_JWT_SIGNING_KEY")
     if signing_key:
@@ -471,7 +492,7 @@ def run_remote_setup(
         )
 
     # 6. Patch .env in place, preserving every other line.
-    updates = {
+    updates: dict[str, str | None] = {
         "EXOMEM_VAULT_PATH": vault_path,
         "EXOMEM_BASE_URL": base_url,
         "GITHUB_CLIENT_ID": github_client_id,
@@ -480,6 +501,10 @@ def run_remote_setup(
         "EXOMEM_GITHUB_USER_ID": str(resolved_user_id),
         "EXOMEM_JWT_SIGNING_KEY": signing_key,
     }
+    if remote_owner is not None:
+        updates["EXOMEM_OWNER_OAUTH_SUBJECT"] = (
+            f"github:{resolved_user_id}" if remote_owner else None
+        )
     if storage_credential is not None:
         updates.update(
             {
@@ -567,6 +592,17 @@ def remote_setup_main(argv: list[str]) -> int:
         dest="github_user_id",
         help="Immutable positive numeric GitHub user ID (avoids the setup lookup).",
     )
+    owner = parser.add_mutually_exclusive_group()
+    owner.add_argument(
+        "--remote-owner", dest="remote_owner", action="store_const", const=True,
+        help="Remote sign-ins by this GitHub account act as you, the owner "
+        "(writes EXOMEM_OWNER_OAUTH_SUBJECT).",
+    )
+    owner.add_argument(
+        "--no-remote-owner", dest="remote_owner", action="store_const", const=False,
+        help="Remote sign-ins stay a separate non-owner principal "
+        "(removes EXOMEM_OWNER_OAUTH_SUBJECT).",
+    )
     parser.add_argument(
         "--yes", action="store_true",
         help="Non-interactive; requires --vault, --base-url, --tunnel, and the three --github-* flags.",
@@ -600,6 +636,7 @@ def remote_setup_main(argv: list[str]) -> int:
         github_client_secret=args.github_client_secret,
         github_username=args.github_username,
         github_user_id=args.github_user_id,
+        remote_owner=args.remote_owner,
         yes=args.yes,
         probe=args.probe,
     )
