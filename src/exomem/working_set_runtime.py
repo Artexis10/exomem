@@ -130,6 +130,7 @@ def cache_key(
     retrieval_paths: frozenset[str] | set[str] | None = None,
     continuity: str | None = None,
     anchor: str | None = None,
+    continuity_refs: frozenset[str] | set[str] = frozenset(),
 ) -> tuple:
     """The packet identity.
 
@@ -144,6 +145,9 @@ def cache_key(
     request carrying either must never be handed a packet compiled without it,
     and two different overrides of one turn must not collide. The token enters as
     a digest rather than whole, so a long-lived session cannot grow the key.
+    `continuity_refs` are the token's refs THIS audience may see
+    (`visible_continuity_refs`), for the reason `retrieval_paths` is here: one
+    token read by two audiences is two packets.
 
     `purpose` is deliberately not a parameter: it may widen or narrow what an
     audience sees, so a purpose-keyed cache would be a second, weaker copy of
@@ -157,6 +161,7 @@ def cache_key(
         int(max_chars),
         retrieval_digest(retrieval_paths),
         continuity_digest(continuity),
+        tuple(sorted(str(ref) for ref in continuity_refs)),
         str(anchor or ""),
         bool(os.environ.get("EXOMEM_DISABLE_EMBEDDINGS")),
     )
@@ -436,6 +441,55 @@ def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
     except Exception:  # noqa: BLE001 - a token is an optimisation, never a promise
         log.debug("continuity token could not be minted; serving without", exc_info=True)
         return ""
+
+
+def visible_continuity_refs(
+    vault_root: Path,
+    rows: Sequence[Any],
+    refs: frozenset[str],
+    *,
+    purpose: str | None = None,
+) -> frozenset[str]:
+    """The refs of a valid token that name something the CURRENT principal
+    may see: an index row, by its reported ref or its path, or an eligible
+    compiled page (`working_set._eligible_agent_page`), whose page the
+    release plane releases to this audience (`egress.quick_page_visible`).
+
+    Every other ref is dropped here — one naming nothing, one naming raw
+    material or a retired page, and one naming a page this audience may not
+    see — before the cache key and the compile are derived from them, so a
+    withheld ref and a missing one reach everything downstream as the same
+    nothing. Decided before the compile rather than inside it because the
+    packet cache is not keyed on the principal: a visibility decision made
+    inside a compiled packet would be served to the next audience that
+    passes the same token. The token itself is still passed, and still
+    leads the hot profile when every ref went (`continuity_passed`), exactly
+    as a token naming nothing does.
+
+    Bounded by the token's own refs (at most `CONTINUITY_MAX_REFS`), each
+    checked against the rows the request already holds and, failing that,
+    one cached page read; the release decision is the one the guard reuses.
+    """
+    if not refs:
+        return frozenset()
+    from .governance import egress
+
+    kept: set[str] = set()
+    for ref in refs:
+        named = frozenset({ref})
+        paths = [
+            str(row.path)
+            for row in rows
+            if getattr(row, "path", "") and working_set_resolve.names_row(named, row)
+        ]
+        if not paths:
+            page = working_set._eligible_agent_page(vault_root, ref)
+            paths = [page] if page is not None else []
+        if paths and all(
+            egress.quick_page_visible(vault_root, path, purpose=purpose) for path in paths
+        ):
+            kept.add(ref)
+    return frozenset(kept)
 
 
 def reset_caches_for_tests() -> None:
@@ -1005,6 +1059,14 @@ def serve(
     except Exception:  # noqa: BLE001 - the whole operation is additive and abstains
         log.warning("continuity evaluation failed; ignoring the token", exc_info=True)
         continuity_refs, continuity_state = frozenset(), CONTINUITY_STALE
+    continuity_passed = continuity_state == CONTINUITY_APPLIED
+    try:
+        continuity_refs = visible_continuity_refs(
+            root, index.anchors(), continuity_refs, purpose=purpose
+        )
+    except Exception:  # noqa: BLE001 - a ref that cannot be decided is not disclosed
+        log.warning("continuity visibility check failed; dropping the refs", exc_info=True)
+        continuity_refs = frozenset()
     key = cache_key(
         freshness_key=freshness_key,
         index_generation=index.generation(),
@@ -1014,6 +1076,7 @@ def serve(
         retrieval_paths=retrieval_paths,
         continuity=continuity,
         anchor=anchor,
+        continuity_refs=continuity_refs,
     )
     cache_identity = (str(root.absolute()), key, lexical_state, index.token())
     with _CACHE_LOCK:
@@ -1049,7 +1112,8 @@ def serve(
             freshness_key=_key_text(freshness_key),
             freshness_snapshot=freshness_snapshot,
             continuity_refs=continuity_refs,
-            continuity_minted_ns=continuity_minted_ns(continuity) if continuity_refs else None,
+            continuity_minted_ns=continuity_minted_ns(continuity) if continuity_passed else None,
+            continuity_passed=continuity_passed,
             anchor=anchor,
             lexical_seconds=lexical_seconds,
         )
@@ -1070,8 +1134,8 @@ def serve(
     except Exception:  # noqa: BLE001 - the whole operation is additive and abstains
         log.warning("activation compilation failed; abstaining", exc_info=True)
         return _abstain_unavailable()
-    # `compile_packet` reports whether a ref of a valid token matched a row or
-    # an eligible page; a token that matched nothing contributed nothing, and
+    # `compile_packet` reports whether a visible ref of a valid token qualified
+    # anything; a token that qualified nothing contributed nothing, and
     # `applied` would claim it had.
     if continuity_state == CONTINUITY_APPLIED:
         continuity_state = packet["generation"].get("continuity") or CONTINUITY_STALE

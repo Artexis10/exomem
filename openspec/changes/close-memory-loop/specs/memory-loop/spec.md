@@ -638,12 +638,16 @@ tier taken whole: that packet already resolved them together — but only while
 no anchor outside them has a last edit, not in a write burst, later than the
 time that packet was served. While that tier leads, the profile SHALL NOT fall
 through to the edit or read tiers: where the references name a compiled page
-that is not an anchor — one the agent picked — that single page SHALL be
-resumed from its own units — or one recall carried — reported `resolved` on `continuity` and `recency`
-and marked `generation.carried_by = "continuity"`, crossing the release guard
-like any unit, so a page the audience may not see abstains `withheld`; where
-they name nothing that can be served, the turn SHALL abstain with its
-recent-context block. A last-edit time
+that is not an anchor — one the agent picked or recall carried — that single
+page SHALL be resumed from its own units, reported `resolved` on `continuity`
+and `recency` and marked `generation.carried_by = "continuity"`; where they
+name nothing that can be served, the turn SHALL abstain with its
+recent-context block. A reference naming a page or an anchor the current
+audience may not see SHALL be treated exactly as one naming nothing, before
+anything is derived from it: the response — its status, its abstention
+reason and its `generation` block — SHALL be identical to the one a reference
+naming a page that does not exist receives, so that continuity cannot be used
+to learn whether a withheld page exists. A last-edit time
 that fell in a write burst — a chain of a declared number of pages or more,
 navigation pages not counted, each edited within a declared interval of the
 next, so that one stall inside a batch does not split it —
@@ -735,9 +739,9 @@ from recent work and not from the turn's own words.
   referential turn passes the token of that packet
 - **THEN** that page resolves on `continuity` and `recency` and its units are
   served, and the vault's freshest anchor is not
-- **AND** a page the audience may not see abstains `withheld`, and a page that
-  no longer exists abstains `unresolved`, neither falling through to another
-  anchor
+- **AND** a page the audience may not see and a page that no longer exists
+  both abstain `unresolved` with identical responses, neither falling through
+  to another anchor
 
 #### Scenario: A maintenance batch does not pick the referent
 

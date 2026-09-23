@@ -1619,6 +1619,7 @@ def compile_packet(
     freshness_snapshot: Any = None,
     continuity_refs: frozenset[str] = frozenset(),
     continuity_minted_ns: int | None = None,
+    continuity_passed: bool | None = None,
     anchor: str | None = None,
     lexical_seconds: float = 0.0,
 ) -> dict[str, Any]:
@@ -1669,16 +1670,12 @@ def compile_packet(
         # Copied once per request and handed to both readers, the hot profile
         # below and the recent-context block after resolution.
         mtimes = _recent_mtimes(root)
-        if continuity_refs:
-            # `applied` only when a ref still names something the token can
-            # act on: an index row, or a page an agent picked or recall
-            # carried. The caller reports this in place of its own `applied`.
-            generation["continuity"] = (
-                "applied"
-                if any(working_set_resolve.names_row(continuity_refs, row) for row in rows)
-                or any(_eligible_agent_page(root, ref) is not None for ref in continuity_refs)
-                else "stale"
-            )
+        # Whether a valid token was passed at all, which is not the same as
+        # whether any of its refs survived: the caller drops every ref the
+        # audience may not see (`working_set_runtime.visible_continuity_refs`),
+        # and a token whose refs all went still leads the hot profile, exactly
+        # as one whose refs name nothing does.
+        passed = bool(continuity_refs) if continuity_passed is None else bool(continuity_passed)
         if anchor:
             chosen = working_set_resolve.override_candidates(rows, anchor)
             # A ref that names no anchor is not a packet with nothing in it: the
@@ -1709,6 +1706,7 @@ def compile_packet(
                         rows=rows,
                         continuity_refs=continuity_refs,
                         continuity_minted_ns=continuity_minted_ns,
+                        continuity_passed=passed,
                         mtimes=mtimes,
                     )
                     if analysis.referential
@@ -1724,6 +1722,17 @@ def compile_packet(
                 candidates,
                 turn_tokens=analysis.tokens,
                 referential=analysis.referential,
+            )
+        if passed:
+            # `applied` only when a ref qualified something: an anchor this
+            # resolution carries on `continuity` here, or the page resumed
+            # below. A ref that merely names a row the turn never reached
+            # contributed nothing. The caller reports this in place of its own
+            # `applied`.
+            generation["continuity"] = (
+                "applied"
+                if any("continuity" in item.evidence for item in resolution.anchors)
+                else "stale"
             )
 
     # BEFORE the resolution branch, and in its own span: working continuity is
@@ -1790,7 +1799,8 @@ def compile_packet(
                 limit=limit,
                 purpose=purpose,
                 timings=timings,
-                generation=generation,
+                # The one place a page-only token qualifies anything.
+                generation={**generation, "continuity": "applied"},
                 index_token=index_token,
                 freshness_snapshot=freshness_snapshot,
                 index=index,
@@ -2034,6 +2044,7 @@ def hot_profile(
     continuity_minted_ns: int | None = None,
     mtimes: Mapping[str, int] | None = None,
     limit: int = HOT_PROFILE_K,
+    continuity_passed: bool | None = None,
 ) -> frozenset[str]:
     """The anchor paths at the TOP of this vault's recency ranking — what a
     turn that names nothing is taken to be referring to (design §8).
@@ -2094,7 +2105,8 @@ def hot_profile(
     eligible = _hot_eligible_rows(rows, times)
     burst = _burst_paths(times)
     after_burst = max((int(times[path]) for path in burst), default=0)
-    leads = bool(continuity_refs) and _continuity_leads(
+    passed = bool(continuity_refs) if continuity_passed is None else bool(continuity_passed)
+    leads = passed and _continuity_leads(
         eligible, times, burst, continuity_refs, continuity_minted_ns
     )
     if leads and not any(working_set_resolve.names_row(continuity_refs, row) for row in eligible):
@@ -2191,8 +2203,11 @@ def continuity_page(
     that page and minted its path. The hot profile only ranks anchor rows, so
     "continue" with that token needs this to resume the page at all. The same
     eligibility test the pick itself passed decides it here — not raw
-    material, not navigation, current — and the page crosses the release
-    guard like any unit when it is served. `None` when the token no longer
+    material, not navigation, current. Visibility is decided before this is
+    ever called: the request path hands over only the refs this audience may
+    see (`working_set_runtime.visible_continuity_refs`), so a withheld page
+    never reaches here and answers exactly as a missing one, and one served
+    still crosses the release guard like any unit. `None` when the token no longer
     leads, names an index row (the profile resumes that), names no eligible
     page, or names several: resuming one of two would be a guess.
     """

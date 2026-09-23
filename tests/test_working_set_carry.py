@@ -1981,8 +1981,9 @@ def test_continue_after_an_agent_pick_resumes_the_picked_page(carry_vault: Path)
 
 
 def test_continue_after_a_pick_the_audience_may_not_see_abstains(carry_vault: Path) -> None:
-    """Withheld is withheld: the resumed page crosses the guard like any
-    unit, and the turn never falls through to the freshest anchor instead."""
+    """A page the audience may not see is treated as a missing one (R-Q N1:
+    `withheld` here told the caller the page existed), and the turn never
+    falls through to the freshest anchor instead."""
     from test_governance_egress import _external, _reset_caches, write_rule, write_scope
 
     from exomem import commands
@@ -1998,7 +1999,9 @@ def test_continue_after_a_pick_the_audience_may_not_see_abstains(carry_vault: Pa
         packet = commands.op_activate_context(carry_vault, turn="continue", continuity=token)
 
     assert packet["abstained"] is True
-    assert packet["abstention"] == {"reason": "withheld"}
+    assert packet["abstention"] == {"reason": "unresolved"}
+    assert packet["generation"]["continuity"] == "stale"
+    assert "carried_by" not in packet["generation"]
     assert packet["units"] == []
     assert not [item for item in packet.get("anchors") or () if item.get("status") == "resolved"]
 
@@ -2160,3 +2163,107 @@ def test_continue_after_a_carried_answer_resumes_the_carried_page(carry_vault: P
     assert packet["generation"]["carried_by"] == "continuity"
     assert packet["generation"]["continuity"] == "applied"
     assert {unit["provenance"]["path"] for unit in packet["units"]} == {CARRY_PAGE}
+
+
+# --------------------------------------------------------------------------- #
+# R-Q N1: a withheld continuity ref answers exactly as a missing one does.
+# --------------------------------------------------------------------------- #
+
+MARIT = "Knowledge Base/Entities/People/Marit Solheim.md"
+_WITHHELD_AND_MISSING = {
+    "page": (CARRY_PAGE, "Knowledge Base/Notes/Research/no-such-page.md"),
+    "row": (MARIT, "Knowledge Base/Entities/People/Nobody Here.md"),
+}
+
+
+def _forged_token(vault: Path, ref: str) -> str:
+    """A token this index would accept, naming `ref`, as a client can build
+    one: the codec is unsigned, so the refs are the caller's choice."""
+    from exomem import commands
+    from exomem.governance.principal import owner_principal, request_scope
+
+    with request_scope(owner_principal()):
+        owner = commands.op_activate_context(vault, turn="what did we decide about the Cargo Sled")
+    payload = working_set_runtime.decode_continuity(owner["continuity"])
+    return working_set_runtime.encode_continuity(
+        identity=payload["identity"],
+        roles_hash=payload["roles_hash"],
+        generation=payload["generation"],
+        refs=[ref],
+        roles=[],
+        minted_ns=None,
+    )
+
+
+@pytest.mark.parametrize("turn", ["continue", "zqxwvu plonktastic"])
+@pytest.mark.parametrize("kind", ["page", "row"])
+def test_a_withheld_continuity_ref_answers_exactly_as_a_missing_one(
+    carry_vault: Path, kind: str, turn: str
+) -> None:
+    """The reviewer's d_cont_oracle and d_cont_rows: a forged token naming a
+    page or an anchor row the audience may not see answered `withheld`,
+    `applied`, `carried_by: continuity`; one naming nothing answered
+    `unresolved`, `stale`. The response shape told the caller the page
+    existed. The owner asks first, so a packet compiled for the owner's
+    view is in the cache when the audience asks."""
+    from test_governance_egress import _external, _reset_caches, write_rule, write_scope
+
+    from exomem import commands
+    from exomem.governance.principal import owner_principal, request_scope
+
+    withheld, missing = _WITHHELD_AND_MISSING[kind]
+    if kind == "row":
+        rows = working_set_index.WorkingSetIndex(carry_vault).anchors()
+        assert withheld in {row.path for row in rows}, "the withheld ref must be a row"
+    tokens = {ref: _forged_token(carry_vault, ref) for ref in (withheld, missing)}
+    write_scope(carry_vault, paths=withheld, name="Withheld")
+    write_rule(carry_vault, ceiling=0)
+    _reset_caches()
+    working_set_runtime.reset_caches_for_tests()
+
+    with request_scope(owner_principal()):
+        seen = commands.op_activate_context(carry_vault, turn=turn, continuity=tokens[withheld])
+    if turn == "continue":
+        assert seen["abstained"] is False, "the owner may see it, or this proves nothing"
+    with request_scope(_external()):
+        answers = {
+            ref: commands.op_activate_context(carry_vault, turn=turn, continuity=token)
+            for ref, token in tokens.items()
+        }
+
+    shown, absent = answers[withheld], answers[missing]
+    assert shown["generation"] == absent["generation"]
+    assert (shown["abstained"], shown.get("abstention")) == (
+        absent["abstained"],
+        absent.get("abstention"),
+    )
+    assert shown["generation"]["continuity"] == "stale"
+    assert "carried_by" not in shown["generation"]
+    assert shown.get("anchors") == absent.get("anchors")
+    assert shown.get("missing") == absent.get("missing")
+
+
+def test_a_page_token_on_a_turn_that_is_not_referential_is_stale(carry_vault: Path) -> None:
+    """`applied` means the token qualified something. A picked page's token
+    on a turn that neither resumes nor reaches it contributed nothing."""
+    from exomem import commands
+
+    _page, token = _picked_page_token(carry_vault)
+
+    packet = commands.op_activate_context(
+        carry_vault, turn="zqxwvu plonktastic", continuity=token
+    )
+
+    assert packet["generation"]["continuity"] == "stale"
+
+
+def test_a_row_token_the_turn_never_reaches_is_stale(carry_vault: Path) -> None:
+    from exomem import commands
+
+    token = _forged_token(carry_vault, "Knowledge Base/Products/Cargo Sled.md")
+
+    packet = commands.op_activate_context(
+        carry_vault, turn="zqxwvu plonktastic", continuity=token
+    )
+
+    assert packet["generation"]["continuity"] == "stale"
