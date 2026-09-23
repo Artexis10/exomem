@@ -1724,3 +1724,34 @@ def test_retired_and_superseded_pages_stay_out_of_the_block(stateful_vault: Path
     assert f"{_KB}/Products/Old Sled.md" not in paths
     assert f"{_KB}/Products/Retired Sled.md" not in paths
     assert paths[0] == f"{_KB}/Products/Cargo Sled.md", paths
+
+
+# --------------------------------------------------------------------------- #
+# R-P4: the recent statement is what the page says, not where it is in its life.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("frontmatter", "expected"),
+    [
+        # The review's a2b shape: the lifecycle word shadowed the summary.
+        (
+            "status: active\nsummary: Reconciled the winter stock count against the ledger.\n",
+            "summary: Reconciled the winter stock count against the ledger.",
+        ),
+        ("status: active\n", ""),
+        ("status: draft\n", ""),
+        ("status: concluded\n", ""),
+        ("status: published\n", ""),
+        ("status: in storage abroad\n", "status: in storage abroad"),
+    ],
+)
+def test_the_recent_statement_is_never_a_lifecycle_word(
+    vault: Path, frontmatter: str, expected: str
+) -> None:
+    rel = f"{_KB}/Systems/Winter Ledger.md"
+    page = vault / rel
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(f"---\ntype: resource\n{frontmatter}---\n\nThe ledger.\n", encoding="utf-8")
+
+    assert working_set._recent_frontmatter_statement(vault, rel) == expected

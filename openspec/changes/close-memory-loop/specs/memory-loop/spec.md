@@ -20,7 +20,7 @@ Activation and episode recovery SHALL reconnect a resumed topic with relevant re
 
 Where evidence supplies them, event occurrence, knowledge acquisition and claim validity SHALL remain distinguishable. Missing times or validity SHALL remain unknown. Capture time, file modification time, repetition and recent retrieval SHALL NOT independently establish event recency, continuing validity or task relevance. Corrections and supersession SHALL qualify current claims, while an older relevant dependency SHALL remain eligible beside recent developments.
 
-The recent-context block SHALL judge recent work by the hot profile's own rules: a last edit inside a write burst, or older than the latest such burst, SHALL NOT make a page recent work; a page offered for its reads SHALL be ranked by its reads and not by its last edit, and the most-read such page SHALL keep a place in the block however many pages were edited more recently; and a retired or superseded page SHALL NOT be offered.
+The recent-context block SHALL judge recent work by the hot profile's own rules: a last edit inside a write burst, or older than the latest such burst, SHALL NOT make a page recent work; a page offered for its reads SHALL be ranked by its reads and not by its last edit, and the most-read such page SHALL keep a place in the block however many pages were edited more recently; and a retired or superseded page SHALL NOT be offered. An entry's one-line statement SHALL be the page's authored summary where it has one, and SHALL NOT be a lifecycle status such as `active` or `draft`.
 
 #### Scenario: A topic resumes after an intervening development
 

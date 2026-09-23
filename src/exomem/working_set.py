@@ -2556,13 +2556,27 @@ def _recent_planning(
     return tuple(plans[:limit])
 
 
+def _lifecycle_statuses() -> frozenset[str]:
+    """Every page lifecycle status this tree defines: the per-type enums
+    `note` validates against, plus the inactive ones `activation` retires."""
+    from . import activation, note
+
+    return frozenset(
+        (*note.STATUS_BASIC, *note.STATUS_EXPERIMENT, *note.STATUS_PRODUCTION)
+    ) | frozenset(activation._INACTIVE_STATUSES)
+
+
 def _recent_frontmatter_statement(vault_root: Path, rel: str) -> str:
-    """The page's authored `status`/`summary`, or `""`.
+    """The page's authored `summary`, else a `status` that is not a
+    lifecycle word, or `""`.
 
     Bounded to the entries the block already chose — at most
     `RECENT_CONTEXT_MAX_ENTRIES` pages, through the shared page cache, never a
     scan. Authored values only, rendered the way `working_set_state` renders
-    them, so nothing here is a sentence the server wrote.
+    them, so nothing here is a sentence the server wrote. A lifecycle status
+    ("active", "draft", "concluded") says where the page is in its life, not
+    what it says: rendered as the statement, "status: active" stood in for
+    the summary the author wrote beside it.
     """
     from . import find_corpus
 
@@ -2574,10 +2588,13 @@ def _recent_frontmatter_statement(vault_root: Path, rel: str) -> str:
     if page is None:
         return ""
     frontmatter = page.frontmatter if isinstance(page.frontmatter, dict) else {}
-    for name in ("status", "summary"):
+    for name in ("summary", "status"):
         value = frontmatter.get(name)
-        if isinstance(value, (str, int, float)) and str(value).strip():
-            return f"{name}: {str(value).strip()}"[: working_set_state.STATEMENT_MAX_CHARS]
+        if not isinstance(value, (str, int, float)) or not str(value).strip():
+            continue
+        if name == "status" and working_set_index.normalize(str(value)) in _lifecycle_statuses():
+            continue
+        return f"{name}: {str(value).strip()}"[: working_set_state.STATEMENT_MAX_CHARS]
     return ""
 
 
