@@ -463,7 +463,12 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
                     {"code": "NOT_FOUND", "reason": f"path does not exist: {requested}"},
                     status_code=404,
                 )
-            return JSONResponse({"code": exc.code, "reason": exc.reason}, status_code=400)
+            # A fixed reason: the resolver's own names the absolute server path
+            # a traversal reached, or the target an escaping symlink points at.
+            return JSONResponse(
+                {"code": "INVALID_PATH", "reason": "path is not a vault-relative file path"},
+                status_code=400,
+            )
         filename = quote(abs_path.name, safe="")
         return Response(
             snapshot.data,

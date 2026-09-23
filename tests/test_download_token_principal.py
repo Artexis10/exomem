@@ -401,3 +401,35 @@ def test_a_folder_refuses_exactly_like_a_missing_path(vault: Path, spelling: str
     assert missing.status_code == 404
     assert folder.status_code == missing.status_code
     assert folder.content == missing.content
+
+
+INVALID_PATH_BODY = {"code": "INVALID_PATH", "reason": "path is not a vault-relative file path"}
+
+
+@pytest.mark.parametrize(
+    "requested",
+    [
+        "../../etc/hostname",
+        "Knowledge Base/Notes/escape-link/hostname",
+        "Knowledge Base/Notes/escape-link/no-such-file",
+    ],
+    ids=["dotdot", "symlink-existing", "symlink-missing"],
+)
+def test_an_escaping_path_is_refused_without_echoing_server_paths(
+    vault: Path, tmp_path: Path, requested: str
+) -> None:
+    outside = tmp_path / "outside-the-vault"
+    outside.mkdir()
+    (outside / "hostname").write_text("outside\n", encoding="utf-8")
+    try:
+        (vault / "Knowledge Base" / "Notes" / "escape-link").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+    client = _client()
+
+    response = _download(client, requested, SECRET)
+
+    assert response.status_code == 400
+    assert response.json() == INVALID_PATH_BODY
+    for server_path in (str(vault), str(outside), str(tmp_path)):
+        assert server_path not in response.text
