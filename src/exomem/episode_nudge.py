@@ -1,8 +1,9 @@
 """The `episode_due` advisory: a tool-only client is asked to record, never forced.
 
-A client with a Stop hook is asked to record an episode by that hook. claude.ai,
-ChatGPT and a generic MCP client have none, so the one call they make every
-turn -- `activate_context` -- carries the ask instead: after
+A client with a Stop hook (Claude Code, Codex) is asked to record an episode by
+that hook, and never by this advisory. claude.ai, ChatGPT and a generic MCP
+client have none, so the one call they make every turn -- `activate_context` --
+carries the ask instead: after
 `EPISODE_NUDGE_ACTIVATIONS` activations from one caller with no
 `episode_memory` record, the packet gets a one-sentence `episode_due` block, at
 most once per `EPISODE_NUDGE_COOLDOWN_SECONDS`.
@@ -49,13 +50,26 @@ _LOCK = threading.Lock()
 _STATE: dict[tuple[str, str, str], list[Any]] = {}
 
 
+def _hook_client(name: str | None) -> bool:
+    """Claude Code or Codex: a client whose Stop hook already asks for the record.
+
+    The same client-name rule `prominence.detect_surface` applies.
+    """
+    folded = (name or "").strip().casefold()
+    return "codex" in folded or "claude-code" in folded or "claude code" in folded
+
+
 def _key(vault_root: Path | None) -> tuple[str, str, str] | None:
-    """The caller's key on the MCP door, or None anywhere else."""
+    """The caller's key on the MCP door, or None anywhere else.
+
+    None for a hook client too: its Stop hook asks, and asking twice is noise.
+    """
     try:
         from . import capture_sweep
         from .command_surface import mcp_caller_identity
 
-        if mcp_caller_identity().get("transport") is None:
+        identity = mcp_caller_identity()
+        if identity.get("transport") is None or _hook_client(identity.get("client_name")):
             return None
         return capture_sweep.ledger_key(vault_root)
     except Exception:  # noqa: BLE001 - an unreadable caller is not advised

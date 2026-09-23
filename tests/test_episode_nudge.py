@@ -30,12 +30,17 @@ def _fresh(monkeypatch: pytest.MonkeyPatch):
     episode_nudge.reset_state()
 
 
-def _as_mcp_caller(monkeypatch: pytest.MonkeyPatch, *, transport: str | None = "http") -> None:
+def _as_mcp_caller(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    transport: str | None = "http",
+    client_name: str = "chatgpt",
+) -> None:
     monkeypatch.setattr(
         command_surface,
         "mcp_caller_identity",
         lambda: {
-            "client_name": "chatgpt",
+            "client_name": client_name,
             "client_version": "1",
             "transport": transport,
             "session_id": None,
@@ -105,6 +110,19 @@ def test_it_is_silent_for_a_caller_with_no_stable_key(
     _as_mcp_caller(monkeypatch)
     monkeypatch.setattr(command_surface, "mcp_retry_scope", lambda: "session:ephemeral")
     assert _activations(vault, 20) == [None] * 20
+
+
+@pytest.mark.parametrize(
+    "client_name", ["claude-code", "Claude Code", "codex-mcp-client", "codex"]
+)
+def test_a_hook_client_gets_only_its_stop_hook_ask(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, client_name: str
+) -> None:
+    """Claude Code and Codex are asked by their Stop hook; the advisory would
+    ask them twice."""
+    _as_mcp_caller(monkeypatch, transport="stdio", client_name=client_name)
+    assert _activations(vault, 20) == [None] * 20
+    assert episode_nudge.tracked_keys() == 0
 
 
 def test_the_proactive_gate_is_the_delegation_envelope(
