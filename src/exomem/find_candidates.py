@@ -142,6 +142,63 @@ def collapse_frame_children(
     return out
 
 
+#: Two pages sharing at least this many index stems are taken to be written in
+#: one vocabulary. Measured on the golden fixture plus the multilingual recall
+#: pages (2026-09-23): any two English pages share 7 or more stems, and a German,
+#: Russian, Japanese or Estonian page shares at most 2 with an English page.
+_SHARED_VOCABULARY_FLOOR = 3
+
+
+def _lexical_votes_withheld(
+    *,
+    query: str,
+    vector_ranking: list[str],
+    lexical_rankings: tuple[list[str], ...],
+    page_of: PageOf,
+) -> frozenset[str]:
+    """Lexical-lane candidates whose votes fusion withholds; empty leaves fusion unchanged.
+
+    The dense lane is the only lane that can match a page written in another
+    language than the query. When its strongest candidate shares no content word
+    with the query, the lexical lanes cannot see that page at all, and their
+    votes rank other pages by vocabulary overlap with the query. Where those
+    pages are written in another vocabulary than the dense lead -- the query's
+    own language, when the lead is in another -- reciprocal-rank fusion would let
+    one partial match plus a weaker dense vote outrank the dense lead.
+
+    So, with the dense lead lexically invisible, a lexical lane stops voting for
+    a page that (a) holds only some of the query's content words and (b) shares
+    fewer than `_SHARED_VOCABULARY_FLOOR` stems with the dense lead. Two pages in
+    one language share its common words; pages in two languages share at most a
+    loanword or a number. The page keeps its dense and other votes. Words are
+    counted as the degraded-retention gate counts them
+    (`find_policy.query_word_stem_groups`), function words excluded. No language
+    is detected: both tests compare token sets.
+    """
+    if not vector_ranking:
+        return frozenset()
+    groups = find_policy.query_word_stem_groups(query)
+    content_words = sum(1 for _stems, is_function, _required in groups if not is_function)
+    if not content_words:
+        return frozenset()
+    lead = page_of(vector_ranking[0])
+    if lead is None or find_policy.stem_word_coverage(lead.stem_set, groups)[2]:
+        return frozenset()
+    lead_stems = lead.stem_set
+    withheld: set[str] = set()
+    for path in dict.fromkeys(path for lane in lexical_rankings for path in lane):
+        page = page_of(path)
+        if page is None:
+            continue
+        stems = page.stem_set
+        if (
+            find_policy.stem_word_coverage(stems, groups)[2] < content_words
+            and len(stems & lead_stems) < _SHARED_VOCABULARY_FLOOR
+        ):
+            withheld.add(path)
+    return frozenset(withheld)
+
+
 def collect_candidates(
     vault_root: Path,
     *,
@@ -551,6 +608,15 @@ def collect_candidates(
         recall_paths=recall_paths,
     )
     keyword_ranking = _eligible(keyword_ranking)
+    withheld = _lexical_votes_withheld(
+        query=query_norm,
+        vector_ranking=vector_ranking,
+        lexical_rankings=(bm25_ranking, keyword_ranking),
+        page_of=page_of,
+    )
+    if withheld:
+        bm25_ranking = [path for path in bm25_ranking if path not in withheld]
+        keyword_ranking = [path for path in keyword_ranking if path not in withheld]
     if capture_trace and mode != "vector":
         lane_statuses["keyword"] = {
             "status": "participated" if keyword_ranking else "available_nonmatching",
