@@ -25,6 +25,7 @@ from key_value.aio.stores.filetree import (
 from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
 
 from .auth_sessions import SessionAuthority
+from .governance.principal import remote_owner_binding_state
 from .remote_oauth_storage import ReadThroughMirrorStorage, RemoteOAuthStorage
 from .session_oauth import OAUTH_AUTHORIZATION_SCOPES, ExomemSessionOAuthProxy
 from .session_validation_cache import SessionValidationCache
@@ -345,6 +346,11 @@ def build_oauth(*, require_auth: bool, base_url: str) -> OAuthProxy | None:
         raise RuntimeError(
             "EXOMEM_GITHUB_USER_ID must be a positive numeric GitHub user ID"
         )
+
+    # The owner binding is optional: a malformed or unreachable value reads as
+    # unset rather than stopping the connector. This line names the state only,
+    # never the bound id or login.
+    log.info("event=remote_owner_binding state=%s", remote_owner_binding_state())
 
     authority = build_session_authority(base_url=base_url)
     client_storage = _build_oauth_client_storage(signing_root=signing_root)

@@ -925,6 +925,9 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
         "EXOMEM_PRELOAD_MODELS",
         "EXOMEM_RELEASE_GPU_WHEN_IDLE",
         "EXOMEM_MODEL_OFFLINE",
+        # An ambient owner binding would turn remote-principal fixtures into
+        # the owner; tests that exercise it set it themselves.
+        "EXOMEM_OWNER_OAUTH_SUBJECT",
     ):
         monkeypatch.delenv(_var, raising=False)
     monkeypatch.setenv("EXOMEM_DISABLE_RELEVANCE_CHECK", "1")
