@@ -34,12 +34,14 @@ from . import (
 from .kbdir import kb_prefix
 from .vault import (
     MISSING_CONTENT_HASH,
+    ContentHashMismatchError,
     InvalidSlugError,
     PlannedWrite,
     PreparedBinaryContent,
     batch_atomic_write,
     content_hash,
     kb_root,
+    parse_frontmatter,
     render_wikilink_target,
     resolve_filename_slug,
     unique_path,
@@ -205,7 +207,7 @@ def add(
     artifact: SourceArtifact | None = None,
     adoption_seed: Mapping[str, object] | None = None,
     extra_frontmatter: Mapping[str, object] | None = None,
-    supersede: Sequence[str] = (),
+    supersede: Sequence[tuple[str, str]] = (),
 ) -> AddResult:
     """Capture a raw source into the KB and update indexes/log atomically.
 
@@ -217,10 +219,13 @@ def add(
 
     `extra_frontmatter` and `supersede` exist for the `episode` kind only, and
     that kind requires the first (`EPISODE_FRONTMATTER_FIELDS`). `supersede`
-    names earlier revisions of the same recap, vault-relative, inside the
-    episode folder: each gets `status: superseded` and a `superseded_by` link in
-    THIS batch, frontmatter only, so the new revision and the retirement of the
-    old one land together or not at all and a Source body is never rewritten.
+    names earlier revisions of the same recap as `(vault-relative path, content
+    hash the caller read)`, inside the episode folder: each gets `status:
+    superseded` and a `superseded_by` link in THIS batch, frontmatter only, so
+    the new revision and the retirement of the old one land together or not at
+    all and a Source body is never rewritten. A revision whose text no longer
+    matches the caller's hash fails the whole call with
+    `ContentHashMismatchError`; one that is already superseded is left alone.
 
     `today` is dependency-injectable for tests; defaults to dt.date.today().
     """
@@ -678,7 +683,7 @@ def _compute_updates_with_counts(
 def _episode_frontmatter_lines(
     kind_key: str,
     fields: Mapping[str, object] | None,
-    supersede: Sequence[str],
+    supersede: Sequence[tuple[str, str]],
 ) -> tuple[str, ...] | None:
     """The episode kind's extra frontmatter lines, or `None` for any other kind.
 
@@ -748,33 +753,47 @@ def _episode_frontmatter_lines(
 
 
 def _supersede_targets(
-    vault_root: Path, folder_path: Path, paths: Sequence[str]
-) -> tuple[Path, ...]:
-    """The earlier revisions `supersede` names, confined to the episode folder.
+    vault_root: Path, folder_path: Path, pairs: Sequence[tuple[str, str]]
+) -> tuple[tuple[Path, str], ...]:
+    """The earlier revisions `supersede` names, confined to the episode folder,
+    each with the content hash its caller read.
 
     Checked before anything is created, so a refused call leaves no folder.
     """
-    targets: list[Path] = []
-    for rel in dict.fromkeys(paths):
-        target = (Path(vault_root) / rel).resolve()
-        if target.parent != folder_path.resolve() or target.suffix != ".md" or not target.is_file():
+    targets: dict[Path, str] = {}
+    for pair in pairs:
+        rel, expected = pair if isinstance(pair, tuple) and len(pair) == 2 else (None, None)
+        target = (Path(vault_root) / rel).resolve() if isinstance(rel, str) else None
+        if (
+            target is None
+            or not isinstance(expected, str)
+            or target.parent != folder_path.resolve()
+            or target.suffix != ".md"
+            or not target.is_file()
+        ):
             raise AddError(
                 code="INVALID_SOURCE",
                 missing=["supersede"],
                 reason="only an earlier recap revision in the episode folder can be superseded",
             )
-        targets.append(target)
-    return tuple(targets)
+        targets.setdefault(target, expected)
+    return tuple(targets.items())
 
 
 def _supersede_writes(
-    vault_root: Path, targets: Sequence[Path], *, new_path: Path, stamp_iso: str
+    vault_root: Path,
+    targets: Sequence[tuple[Path, str]],
+    *,
+    new_path: Path,
+    stamp_iso: str,
 ) -> list[PlannedWrite]:
     """Frontmatter-only supersession of earlier recap revisions, as CAS writes.
 
-    Each write carries the hash of the text it was computed from, so a revision
-    edited between this read and the batch fails the whole batch rather than
-    being overwritten.
+    Guarded by the hash the CALLER read, not by this read: a revision another
+    writer changed after the caller listed it (a concurrent record retiring it,
+    say) fails the whole call here, and the batch carries the same hash, so a
+    change landing after this read fails it at commit. A revision already
+    superseded is not marked a second time.
     """
     if not targets:
         return []
@@ -783,13 +802,17 @@ def _supersede_writes(
     rel_new = new_path.relative_to(vault_root).with_suffix("").as_posix()
     link = render_wikilink_target(rel_new, vault_root)
     writes: list[PlannedWrite] = []
-    for target in targets:
+    for target, expected in targets:
         text = target.read_text(encoding="utf-8")
+        actual = content_hash(text)
+        if actual != expected:
+            raise ContentHashMismatchError(target, expected, actual)
+        frontmatter, _body, _raw = parse_frontmatter(text)
+        if str(frontmatter.get("status") or "").casefold() == "superseded":
+            continue
         updated = _mark_superseded(text, link, stamp_iso)
         if updated != text:
-            writes.append(
-                PlannedWrite(path=target, content=updated, expected_hash=content_hash(text))
-            )
+            writes.append(PlannedWrite(path=target, content=updated, expected_hash=expected))
     return writes
 
 

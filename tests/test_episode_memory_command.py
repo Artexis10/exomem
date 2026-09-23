@@ -334,6 +334,50 @@ def test_a_clock_step_back_still_orders_the_new_revision_last(
     assert working_set._recent_episodes(mtimes, limit=4) == (second["source"]["path"],)
 
 
+def test_a_revision_that_changed_after_it_was_read_loses_and_is_re_read(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another record commits between this record's read and its write. The
+    compare-and-swap guards the text that was read, so this batch loses, is
+    re-read once, and retires the other record's revision instead of marking
+    the already-retired one a second time and leaving two live."""
+    from exomem import episode_memory
+
+    with request_scope(owner_principal(surface="mcp")):
+        first = _record(vault)
+    real = episode_memory._revisions
+    interleaved: list[dict] = []
+    armed = [True]
+
+    def read_then_interleave(vault_root, key, audience):
+        observed = real(vault_root, key, audience)
+        if armed[0]:
+            armed[0] = False
+            interleaved.append(_record(vault, summary="A concurrent account."))
+        return observed
+
+    monkeypatch.setattr(episode_memory, "_revisions", read_then_interleave)
+    with request_scope(owner_principal(surface="mcp")):
+        ours = _record(vault, summary="Chose the brass lamp; delivery booked for Friday.")
+
+    [concurrent] = interleaved
+    live = [page for page in _episodes(vault) if "status" not in _frontmatter(page)]
+    assert [page.relative_to(vault).as_posix() for page in live] == [ours["source"]["path"]]
+    retired_once = _frontmatter(vault / first["source"]["path"])["superseded_by"]
+    assert isinstance(retired_once, str) or len(retired_once) == 1
+    assert concurrent["source"]["path"].removesuffix(".md") in str(retired_once)
+    assert _frontmatter(vault / concurrent["source"]["path"])["status"] == "superseded"
+    assert ours["revision"] == 3
+
+
+def test_episode_memory_holds_the_wide_mutation_boundary() -> None:
+    """Its read of the live revisions and its write must not interleave with
+    another writer's commit; the narrowed boundary would allow exactly that."""
+    from exomem import writer_lease
+
+    assert "episode_memory" not in writer_lease._NARROW_BOUNDARY_COMMANDS
+
+
 def test_a_ledger_failure_after_the_write_is_idempotent_on_retry(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -29,6 +29,7 @@ from .governance.principal import effective_principal
 from .vault import (
     BatchWriteError,
     ContentHashMismatchError,
+    content_hash,
     kb_root,
     parse_frontmatter,
 )
@@ -41,6 +42,9 @@ class _Revision:
     order: str
     path: str
     frontmatter: dict[str, Any]
+    #: The content hash of the text this listing read: what a supersession of
+    #: this revision is guarded by.
+    hash: str
 
     @property
     def live(self) -> bool:
@@ -76,12 +80,18 @@ def _revisions(vault_root: Path, key: str, audience: str) -> list[_Revision]:
     for order, name in matched:
         path = folder / name
         try:
-            frontmatter, _body, _raw = parse_frontmatter(path.read_text(encoding="utf-8"))
+            text = path.read_text(encoding="utf-8")
+            frontmatter, _body, _raw = parse_frontmatter(text)
         except (OSError, UnicodeDecodeError, ValueError):
             continue
         if frontmatter.get("episode") == key:
             revisions.append(
-                _Revision(order, path.relative_to(vault_root).as_posix(), frontmatter)
+                _Revision(
+                    order,
+                    path.relative_to(vault_root).as_posix(),
+                    frontmatter,
+                    content_hash(text),
+                )
             )
     return revisions
 
@@ -103,10 +113,12 @@ def _write(
 ) -> tuple[dict[str, str], bool]:
     """The committed recap page for `recap`, writing it only when it is new.
 
-    Identical to the newest live revision means a retry: nothing is written.
-    Otherwise the new page is written and every live earlier revision is
-    retired in the same batch. A concurrent record that changed one of those
-    revisions first fails that batch's CAS; it is re-read and retried once.
+    Identical to this audience's newest live revision means a retry: nothing is
+    written. Otherwise the new page is written, ordered after every revision
+    listed, and every live revision listed is retired in the same batch,
+    guarded by the hash this listing read. A revision another writer changed
+    after this listing (a concurrent record retiring it, say) fails the call;
+    the listing is then read again and the write retried once.
     """
     for attempt in range(2):
         revisions = _revisions(vault_root, recap.key, audience)
@@ -127,7 +139,7 @@ def _write(
                 slug=recap.slug_at(order),
                 today=when.replace(microsecond=0),
                 extra_frontmatter=recap.frontmatter,
-                supersede=tuple(item.path for item in live),
+                supersede=tuple((item.path, item.hash) for item in live),
             )
         except add_module.AddError as error:
             raise ValueError(f"{error.code}: {error.reason} (missing: {error.missing})") from error

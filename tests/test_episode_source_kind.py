@@ -18,6 +18,7 @@ import yaml
 from exomem import add as add_module
 from exomem import schema as schema_module
 from exomem import source_taxonomy as st
+from exomem.vault import ContentHashMismatchError, content_hash
 
 TODAY = dt.datetime(2026, 5, 18, 9, 12, 33, tzinfo=dt.UTC)
 KEY = "ep-" + "a1" * 16
@@ -39,7 +40,7 @@ def _record(
     source_schema: schema_module.SourceSchema,
     *,
     slug: str = "harbor-lamp-purchase-epa1a1a1a1a1a1-20260518t091233000000-dddddddd",
-    supersede: tuple[str, ...] = (),
+    supersede: tuple[tuple[str, str], ...] = (),
     **fields: object,
 ) -> add_module.AddResult:
     return add_module.add(
@@ -194,7 +195,7 @@ def test_a_new_revision_marks_the_previous_one_superseded_in_the_same_batch(
         vault,
         source_schema,
         slug="harbor-lamp-purchase-epa1a1a1a1a1a1-20260518t101233000000-eeeeeeee",
-        supersede=(first.path,),
+        supersede=((first.path, content_hash(before)),),
         episode_digest="e" * 64,
     )
 
@@ -205,6 +206,57 @@ def test_a_new_revision_marks_the_previous_one_superseded_in_the_same_batch(
     # Body immutability is the property the Sources contract protects.
     assert after.partition("\n---\n")[2] == before.partition("\n---\n")[2]
     assert "status" not in _frontmatter(vault / second.path)
+
+
+def test_supersede_guards_the_text_the_caller_read(
+    vault: Path, source_schema: schema_module.SourceSchema
+) -> None:
+    """A revision that changed after the caller read it loses the whole batch:
+    no new page, and the changed revision is left exactly as it now is."""
+    first = _record(vault, source_schema)
+    read = (vault / first.path).read_text(encoding="utf-8")
+    changed = read.replace("summary:", "summary: (changed)", 1)
+    (vault / first.path).write_text(changed, encoding="utf-8")
+
+    with pytest.raises(ContentHashMismatchError):
+        _record(
+            vault,
+            source_schema,
+            slug="harbor-lamp-purchase-epa1a1a1a1a1a1-20260518t101233000000-eeeeeeee",
+            supersede=((first.path, content_hash(read)),),
+            episode_digest="e" * 64,
+        )
+
+    assert (vault / first.path).read_text(encoding="utf-8") == changed
+    assert len(list((vault / first.path).parent.glob("*.md"))) == 1
+
+
+def test_an_already_superseded_revision_is_not_marked_again(
+    vault: Path, source_schema: schema_module.SourceSchema
+) -> None:
+    first = _record(vault, source_schema)
+    second = _record(
+        vault,
+        source_schema,
+        slug="harbor-lamp-purchase-epa1a1a1a1a1a1-20260518t101233000000-eeeeeeee",
+        supersede=((first.path, content_hash((vault / first.path).read_text("utf-8"))),),
+        episode_digest="e" * 64,
+    )
+    retired = (vault / first.path).read_text(encoding="utf-8")
+
+    _record(
+        vault,
+        source_schema,
+        slug="harbor-lamp-purchase-epa1a1a1a1a1a1-20260518t111233000000-ffffffff",
+        supersede=(
+            (first.path, content_hash(retired)),
+            (second.path, content_hash((vault / second.path).read_text("utf-8"))),
+        ),
+        episode_digest="f" * 64,
+    )
+
+    assert (vault / first.path).read_text(encoding="utf-8") == retired
+    assert _frontmatter(vault / second.path)["status"] == "superseded"
 
 
 def test_supersede_is_refused_outside_the_episode_folder(
@@ -221,7 +273,7 @@ def test_supersede_is_refused_outside_the_episode_folder(
     before = (vault / session.path).read_text(encoding="utf-8")
 
     with pytest.raises(add_module.AddError) as error:
-        _record(vault, source_schema, supersede=(session.path,))
+        _record(vault, source_schema, supersede=((session.path, content_hash(before)),))
 
     assert error.value.code == "INVALID_SOURCE"
     assert (vault / session.path).read_text(encoding="utf-8") == before
