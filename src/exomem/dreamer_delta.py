@@ -179,19 +179,32 @@ def _queue_changes(
         advance_if_drained(store, conn)
 
 
+def live_signature(vault_root: Path, rel_path: str) -> tuple[int, int, int] | None:
+    """One page's live signature, keyed the way the registry keys it."""
+    return freshness.live_signature(vault_root, SCOPE, Path(vault_root) / rel_path)
+
+
+_UNSET = object()
+
+
 def mark_processed(
     store: dreamer_store.DreamerStore,
     conn: sqlite3.Connection,
     vault_root: Path,
     rel_path: str,
+    signature: object = _UNSET,
 ) -> tuple[int, int, int] | None:
-    """Record one page as processed at its current live signature.
+    """Record one page as processed at the signature it was processed under.
 
+    Pass the signature sampled BEFORE the page was read: a write that lands
+    while it is processed then leaves `seen` older than the live map, and the
+    next delta requeues the page. Omitted, the current live signature is used.
     Returns that signature, or None when the page is gone (its `seen` row is
     removed). Call inside the same transaction as the page's contribution, so
     a crash loses at most the page in flight.
     """
-    signature = freshness.live_signature(vault_root, SCOPE, Path(vault_root) / rel_path)
+    if signature is _UNSET:
+        signature = live_signature(vault_root, rel_path)
     if signature is None:
         store.seen_delete(conn, rel_path)
     else:

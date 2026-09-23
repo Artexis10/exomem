@@ -132,13 +132,21 @@ def sleep_after_tick(wall_seconds: float) -> float:
     return max(MIN_SLEEP_SECONDS, DUTY_FACTOR * max(0.0, float(wall_seconds)))
 
 
-def tick_exhausted(*, pages: int, cpu: float, wall: float) -> str | None:
+def tick_exhausted(
+    *,
+    pages: int,
+    cpu: float,
+    wall: float,
+    page_limit: int = PAGES_PER_TICK,
+    cpu_limit: float = TICK_CPU_SECONDS,
+    wall_limit: float = TICK_WALL_SECONDS,
+) -> str | None:
     """Which in-tick budget is spent, or None while the tick may continue."""
-    if pages >= PAGES_PER_TICK:
+    if pages >= page_limit:
         return "pages"
-    if cpu >= TICK_CPU_SECONDS:
+    if cpu >= cpu_limit:
         return "cpu"
-    if wall >= TICK_WALL_SECONDS:
+    if wall >= wall_limit:
         return "wall"
     return None
 

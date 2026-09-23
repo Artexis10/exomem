@@ -167,6 +167,23 @@ def idle_seconds(vault_root: os.PathLike[str] | str) -> float:
     return max(0.0, now - last)
 
 
+def foreground_since(vault_root: os.PathLike[str] | str, since: float) -> bool:
+    """True when a foreground invocation is live now or ended after `since`.
+
+    `since` is a `time.monotonic()` value. A background tick samples it at its
+    start and asks before every unit of work, so a request that arrived and
+    finished between two units still stops the tick.
+    """
+    canonical = _canonical(vault_root)
+    if canonical is None:
+        return True
+    with _LOCK:
+        if _FOREGROUND.get(canonical):
+            return True
+        last = _LAST_EXIT.get(canonical)
+    return last is not None and last >= since
+
+
 def background_active(vault_root: os.PathLike[str] | str) -> bool:
     """Test seam for the active thread's unsuppressed matching scan scope."""
     stack = _background_stack()
