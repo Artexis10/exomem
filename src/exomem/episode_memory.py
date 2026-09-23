@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from . import add as add_module
-from . import episode_capture, episode_nudge, memory_refs, query_log, source_taxonomy
+from . import curation, episode_capture, episode_nudge, memory_refs, query_log, source_taxonomy
 from .episode_model import EpisodeError
 from .episode_recovery import EpisodeInputOwner
 from .governance import egress
@@ -178,12 +178,17 @@ def record(
         bound = owner.bind_committed_input(
             recap.key, path=source["path"], reference=source["ref"]
         )
-    except EpisodeError as error:
-        if error.code == "EPISODE_OWNER_UNRESOLVED":
+    except (EpisodeError, curation.CurationError, OSError) as error:
+        if getattr(error, "code", None) == "EPISODE_OWNER_UNRESOLVED":
             raise
         # The recap is committed and stays readable; only this caller's ledger
-        # missed it. A retry is idempotent and binds it.
-        log.warning("episode ledger bind failed after a committed recap: %s", error.code)
+        # missed it -- a refused or corrupt journal, or an unwritable one. An
+        # error here would invite a retry of a write that already happened; a
+        # retry is idempotent anyway and binds it.
+        log.warning(
+            "episode ledger bind failed after a committed recap: %s",
+            getattr(error, "code", type(error).__name__),
+        )
         ledger, recovery, revision = "unbound", "unavailable", None
     else:
         ledger, recovery, revision = bound["ledger"], bound["recovery"], bound["input_revision"]

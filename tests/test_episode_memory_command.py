@@ -16,7 +16,7 @@ import pytest
 import yaml
 from starlette.testclient import TestClient
 
-from exomem import commands, episode_capture, episode_recovery, memory_refs, server
+from exomem import commands, curation, episode_capture, episode_recovery, memory_refs, server
 from exomem import schema as schema_module
 from exomem.__main__ import main as cli_main
 from exomem.episode_model import EpisodeError
@@ -238,6 +238,36 @@ def test_a_ledger_failure_after_the_write_is_idempotent_on_retry(
     assert retried["ledger"] == "bound"
     assert retried["revision"] == 1
     assert len(_episodes(vault)) == 1
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        lambda: curation.CurationError("CURATION_RUN_CORRUPT", "journal digest mismatch"),
+        lambda: OSError("the ledger directory is unwritable"),
+    ],
+    ids=["corrupt-journal", "os-error"],
+)
+def test_no_ledger_failure_answers_a_committed_recap_with_an_error(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, failure
+) -> None:
+    """The page is committed before the bind. Whatever the bind raises then,
+    the caller gets the receipt with `ledger: unbound`, never an error that
+    invites a retry of a write that already happened."""
+
+    def failing(self, key, *, path, reference, **_kwargs):
+        raise failure()
+
+    monkeypatch.setattr(episode_recovery.EpisodeInputOwner, "bind_committed_input", failing)
+    with request_scope(owner_principal(surface="mcp")):
+        result = _record(vault)
+
+    assert result["ledger"] == "unbound"
+    assert result["recovery"] == "unavailable"
+    assert result["revision"] is None
+    assert [page.relative_to(vault).as_posix() for page in _episodes(vault)] == [
+        result["source"]["path"]
+    ]
 
 
 def test_an_unresolved_principal_fails_before_anything_is_written(vault: Path) -> None:
