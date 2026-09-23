@@ -14,7 +14,7 @@ The standalone runtime already does the hard part in production. It serves remot
 
 ## What Changes
 
-- **Cloud cell mode.** A cell is standalone Exomem in a pod. It owns its custody on its own writable volume, runs schema migrations in-process as the desktop does, and serves MCP itself.
+- **Cloud cell mode.** A cell is standalone Exomem in a pod. It owns its custody on its own writable volume, runs offline state and governance migrations in a same-image init container before the server starts, and serves MCP itself.
   - It accepts one gateway-presented bearer.
   - It publishes the product tool surface minus a short list of technically broken exclusions.
   - It redacts content from logs and registers no REST or transfer routes.
@@ -22,8 +22,8 @@ The standalone runtime already does the hard part in production. It serves remot
   - It reads desired cell rows from the control database and converges them with Kubernetes server-side apply.
   - It writes observed state back.
   - Waiting is normal. Only an identity conflict stops a cell.
-- **Plain, hardened cell manifests.** Namespace with Pod Security `restricted`, quota, default-deny network policy, encrypted volume, one-replica StatefulSet, Service and an encrypted backup CronJob. They contain no custody Secrets and use no bespoke admission policies.
-- **Releases.** A release is one image digest in a control-database setting. cellctl rolls cells one at a time, canary first, and returns a canary that fails readiness to its previous digest.
+- **Plain, hardened cell manifests.** Namespace with Pod Security `restricted`, quota, default-deny network policy, encrypted volume, one-replica StatefulSet and Service. They contain no custody Secrets. cellctl drives encrypted backups with the cell stopped, and one admission policy confines cellctl's own writes.
+- **Releases.** A release is one image digest in a control-database setting. cellctl rolls cells one at a time, canary first, with a backup before each attempt. A canary that fails readiness is restored from that backup onto its previous image, and the rollout pauses.
 - **Direct TLS ingress.** Our own Traefik terminates TLS with ACME certificates for the MCP hostname, so no third party terminates vault traffic. `cloudflared` is not in the Cloud data path.
 - **Own control database.** Postgres on a separate small Hetzner server, with PgBouncer, verify-full TLS, least-privilege roles and point-in-time backups to B2, replaces Neon. It lives in the same Terraform and Ansible tree.
 - **Deletion.** Deleting a tenant removes its namespace, volume and backups, and destroys its wrapped backup key.

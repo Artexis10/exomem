@@ -91,7 +91,7 @@ The tenant PVC is mounted at `/data`. The vault is `/data/vault` (`EXOMEM_VAULT_
 
 - The pod sets `fsGroup: 10001` and `fsGroupChangePolicy: OnRootMismatch`, so kubelet changes ownership only on the first mount of an empty volume and never rewrites modes afterwards.
 - The init container creates `/data/vault` and `/data/host` with explicit mode `0700`.
-- Every Job that touches the volume (init, backup, restore) runs as UID/GID 10001 and preserves modes.
+- Every Job that touches the volume (init, backup, restore) runs as UID/GID 10001 with the same pod-level `fsGroup` and `fsGroupChangePolicy`, and preserves modes. A restore into a fresh PVC is therefore writable.
 - A K3s test asserts `0700`/`0600` on custody and writer-lease state after first start, after pod replacement and after a restore. Each case is followed by a governed write.
 - If `OnRootMismatch` or setgid inheritance still defeats the custody mode checks on the real storage class, the implementer stops and reports rather than weakening the checks.
 
@@ -107,7 +107,14 @@ The StatefulSet has one init container, `cell-init`, using the same image as the
 
 On the desktop, copying a digest by hand is a review step that protects an existing vault from an unreviewed irreversible cutover. On a cell, the plan is produced and committed by the same pinned image against the vault it just initialized, or against a vault it has migrated before. There is nothing for a human to add, and a wrong firing would only delay first start. Automation therefore replaces the copy.
 
-If any step fails, the init container fails, the pod stays not-ready, and cellctl reports `provisioning` until the configured deadline. After that it reports `failed` with the step's error code.
+**Re-entry.** Every run starts from `status`:
+
+- At v3, `cell-init` re-runs the whole plan, stage and commit sequence. A namespace staged by an earlier crashed run is content-addressed and inert until commit, so a fresh plan either reuses it or leaves it unreferenced.
+- A status that is neither exact v3 nor v4, such as an interrupted commit, fails the step with the status error code. No automatic downmigration runs.
+
+Lane A tests a crash between stage and commit, and a crash during commit.
+
+**Failure.** If any step fails, the init container fails, the pod stays not-ready, and cellctl reports `provisioning` until the init deadline. After that it reports `failed` with the step's error code. During an upgrade attempt, D6 owns the deadline instead.
 
 ### D4. cellctl: desired rows in, observed rows out, server-side apply in between
 
@@ -115,17 +122,24 @@ cellctl is one Deployment in namespace `exomem-cloud`, with `replicas: 1` and `s
 
 1. **Select** rows whose `generation <> observed_generation`, or whose observed state is not terminal. Terminal means `running` and ready, `read_only` and ready, `stopped`, `deleted` or `failed`.
 2. **Act** according to `desired_state`, then observe:
-   - `running` or `read_only`: render the D5 manifests for the row and apply them with server-side apply under field manager `cellctl`. `read_only` sets `EXOMEM_CLOUD_READ_ONLY=1`.
+   - `running` or `read_only`: render the D5 manifests for the row with the cell's **current image** (D6), and apply them with server-side apply under field manager `cellctl`. `read_only` sets `EXOMEM_CLOUD_READ_ONLY=1`. No ordinary pass changes a cell's image; only a D6 attempt does.
    - `stopped`: set `replicas: 0`. A row that has never run creates nothing.
    - `deleted`: run D10.
-3. **Write back** `observed_state`, `observed_image` (only from a Ready pod), `ready`, `last_error_code`, `node`, `volume_id` and `observed_at`. `observed_generation` is set only once the observation matches the applied generation.
+3. **Write back** `observed_state`, `observed_image` (only from a Ready pod), `ready`, `last_error_code`, `node`, `volume_id`, `hold_kind`, `hold_started_at` and `observed_at`. `observed_generation` is set only once the observation matches the applied generation.
+
+**Holds.** A maintenance operation owns a cell's image and replica count through one StatefulSet annotation:
+
+- `exomem.io/hold` is `upgrade`, `backup` or `restore`;
+- `exomem.io/hold-started-at` records when it began.
+
+While a hold is present, D4 leaves image and replicas as the holder set them and applies everything else. Starting a hold writes `hold_kind` and `hold_started_at` to the row, and ending one clears them. After a cellctl restart, every hold resumes from its annotations (D6, D8), so a crash mid-maintenance is visible on the row and is finished rather than abandoned.
 
 **Readiness.** cellctl reads readiness from the pod's conditions through the Kubernetes API, which reflect the `/health/ready` probe. It never opens a network connection to a cell.
 
 **Waiting is normal.** A pending PVC, a pulling image, a running init container or a pod still terminating is recorded as `provisioning`, `deleting` or `stopping`, then retried. Only two things fail a cell, setting `last_error_code` and stopping further mutation until the row's generation changes:
 
 - an identity conflict: a namespace whose `exomem.io/cloud-cell` label differs from the row, or a PVC bound to a volume not labelled for the cell;
-- the init deadline in D3.
+- the init deadline in D3, outside a hold.
 
 Server-side apply is idempotent, so a duplicate pass after a crash is harmless.
 
@@ -135,7 +149,7 @@ Server-side apply is idempotent, so a duplicate pass after a crash is harmless.
   - persistentvolumes: get and list;
   - pods and events: get and list;
   - the rendered namespaced kinds;
-  - Secrets: only create, patch and delete.
+  - Secrets: only create, patch and delete. cellctl never reads a Secret: it renders each one from the row (C1) and its master keys on every pass, so server-side apply never drops a field.
   Namespaced rights are bound cluster-wide, because the namespaces are created at runtime.
 - **Admission.** One `ValidatingAdmissionPolicy`, bound to requests from cellctl's ServiceAccount, confines those rights. It denies:
   - any write outside a namespace named `exo-cell-<16 base32>`;
@@ -154,7 +168,7 @@ Namespace `exo-cell-<cell_id>` holds:
   - backup and restore pods may egress only to TCP 443 (object storage), plus DNS.
 - **Secret** holding the cell bearer (current and, during rotation, previous), the backup password, and the per-cell object-storage key.
 - **PVC** of 10 GiB by default, on StorageClass `exomem-cloud-encrypted`: the existing encrypted Hetzner CSI class parameters with `reclaimPolicy: Delete` and `WaitForFirstConsumer`.
-- **StatefulSet** with `replicas: 1` and the D6 target image:
+- **StatefulSet** with the image and replica count D4 and D6 decide (`replicas: 1` outside a hold or `stopped`):
   - the pod runs non-root with `automountServiceAccountToken: false`, seccomp `RuntimeDefault`, `readOnlyRootFilesystem` and all capabilities dropped;
   - it carries the D2 fsGroup settings, the `/tmp` emptyDir and the D3 `cell-init` init container;
   - the readiness probe is `GET /health/ready`, liveness is `GET /health`, and resources come from values.
@@ -162,34 +176,58 @@ Namespace `exo-cell-<cell_id>` holds:
 
 ### D6. Releases: one setting, a stateless rollout, restore-based rollback
 
+**The release setting.**
+
 - `exomem_cloud_settings.cell_image`, written by Substrate, holds `<cell repository>@sha256:<digest>`.
 - The single row of `exomem_cloud_rollout` holds `paused`, `error_code`, `held_cell_id` and `last_good_image`. cellctl and the owner route may write it.
-- **Target image:** `desired_image`, if the row sets one; otherwise `cell_image` while the rollout is not paused, or `last_good_image` while it is paused.
-- **Previous image:** `observed_image`.
-- **Attempt state** lives in StatefulSet annotations: `exomem.io/upgrade-started-at`, `exomem.io/previous-image`, `exomem.io/pre-upgrade-snapshot`.
+- **`last_good_image`** is set to `cell_image` whenever any cell becomes Ready on `cell_image`, including at first provisioning.
 
-An upgrade attempt runs only when:
-- the target differs from `observed_image`;
-- the cell is Ready;
+**Which image a cell runs.**
+
+- **Current image:** the image on the cell's StatefulSet, or `observed_image` when the StatefulSet is gone. D4 always renders it.
+- **Initial image**, for a cell with no StatefulSet yet:
+  - `desired_image` if the row sets one;
+  - otherwise `cell_image` while the rollout is not paused;
+  - otherwise `last_good_image`.
+  - While paused with no `last_good_image`, a new cell waits in `provisioning` with `last_error_code = NO_GOOD_IMAGE`.
+- **Target image**, for an upgrade: `desired_image` if set, otherwise `cell_image`.
+
+**When an attempt runs.** Only when all of these hold:
+
+- the target differs from the current image;
+- the cell is Ready and not held;
 - the rollout is not paused;
-- no other cell carries an attempt annotation.
+- no other cell carries an `upgrade` hold.
 
-The cell with the lowest `rollout_priority` goes first; the owner's cell is the canary. The attempt:
+The cell with the lowest `rollout_priority` goes first; the owner's cell is the canary. The attempt's state lives in annotations: `exomem.io/hold=upgrade`, `exomem.io/hold-started-at`, `exomem.io/previous-image` and `exomem.io/pre-upgrade-snapshot`.
 
-1. Scale the cell to 0 and wait until no pod uses the volume.
-2. Run the backup Job (D8) and record its snapshot id in the annotation.
+**The attempt:**
+
+1. Set the hold, scale the cell to 0, and wait until no pod uses the volume.
+2. Run the backup Job (D8) and record its snapshot id. If the backup does not finish within the backup deadline (15 minutes by default):
+   - restart the cell on the current image;
+   - set `last_error_code = BACKUP_FAILED` and remove the hold;
+   - retry the attempt after a backoff.
+   Object storage is an external, eventually consistent dependency, so its failure must not keep a tenant stopped.
 3. Apply the target image with 1 replica. `cell-init` runs any offline migration.
-4. Wait for Ready, up to 10 minutes.
-   - **On success:** write `observed_image`, set `last_good_image`, and remove the annotations.
+4. Wait for Ready, up to 10 minutes. D6 owns this deadline, not the D3 init deadline.
+   - **On success:** write `observed_image`, set `last_good_image`, and remove the hold.
    - **On timeout:**
      1. Scale to 0.
-     2. Restore the pre-upgrade snapshot into the volume, with a restore Job running as UID 10001.
-     3. Apply the previous image.
+     2. Switch the hold to `restore`, and restore the pre-upgrade snapshot with `restic restore --delete`. The restore Job runs as UID 10001, and `--delete` removes files the new image created.
+     3. Apply the previous image with 1 replica, and remove the hold once Ready.
      4. Set the rollout to `paused`, recording `error_code` and `held_cell_id`.
+     5. A failed restore keeps the `restore` hold with `last_error_code = RESTORE_FAILED` and retries with backoff. It never starts either image on an unrestored volume.
+
+**Resuming after a cellctl restart.**
+
+- An `upgrade` hold without a snapshot restarts from step 1.
+- An `upgrade` hold with a snapshot and the target applied continues waiting against the original `hold-started-at`.
+- A `restore` hold re-runs the restore, which is idempotent with `--delete`.
 
 **Why rollback restores a snapshot.** A never-Ready pod is not in the Service endpoints and served nothing, so the restore loses no writes. Rolling back by digest alone is never done, because a migrated state refuses an older image.
 
-**While paused,** no Ready cell changes image, and new cells use `last_good_image`, so nothing flaps. The owner resumes by setting a new `cell_image` and clearing `paused`.
+**While paused,** no cell changes image, and new cells start on `last_good_image` or wait with `NO_GOOD_IMAGE`, so nothing flaps. The owner resumes by setting a new `cell_image` and clearing `paused`.
 
 Nothing else pins a release: no candidates, locks, fixtures or adoption PRs. A CI job on release tags publishes the image by digest and records it in the release notes.
 
@@ -202,10 +240,13 @@ Nothing else pins a release: no candidates, locks, fixtures or adoption PRs. A C
   3. The gateway switches to the new version.
   4. The previous version is removed.
 - **Backup data key.** Each cell has a random 32-byte key, envelope-encrypted with `backup_master_key` (AES-GCM, versioned).
-  - cellctl writes `backup_key_wrapped` once, with `WHERE backup_key_wrapped IS NULL`, and only then applies the Secret. It re-reads on conflict.
+  - cellctl writes `backup_key_wrapped` once, with `WHERE backup_key_wrapped IS NULL`, and only then applies the Secret. It re-reads on conflict, and renders the Secret from the unwrapped row on every pass.
   - The plaintext lives only in the cell's Secret. The runtime container does not mount it.
   - K3s encrypts Secrets at rest, but etcd snapshots can retain the encrypted Secret until snapshot retention expires. D10 states this residual.
-- **Per-cell object-storage key.** cellctl creates a B2 application key restricted to the name prefix `cells/<cell_id>/`, using a key-management credential that only cellctl holds. It stores the key in the cell's Secret. A backup Job can never touch another tenant's prefix.
+- **Per-cell object-storage key.** cellctl creates a B2 application key restricted to the name prefix `cells/<cell_id>/`, using a key-management credential that only cellctl holds.
+  - B2 returns the secret only at creation. cellctl therefore writes `b2_key_id`, `b2_key_wrapped` (the secret, envelope-encrypted with `backup_master_key`) and `b2_key_version` once, with `WHERE b2_key_id IS NULL`, before it renders the Secret.
+  - If that write loses a race, cellctl deletes the key it just created and uses the stored one.
+  - A backup Job can never touch another tenant's prefix.
 - **Master credentials** are `cell_token_key`, `backup_master_key`, the B2 key-management credential, a read-only Hetzner token (volume listing) and the database DSNs. All use the existing SOPS workflow under `infra/secrets`.
 
 ### D8. Backups are taken while the cell is stopped
@@ -213,20 +254,22 @@ Nothing else pins a release: no candidates, locks, fixtures or adoption PRs. A C
 cellctl drives backups; there is no CronJob.
 
 - **Nightly** within a configured window, when `now - last_backup_at > 24h`:
-  1. scale to 0;
+  1. set `exomem.io/hold=backup` and scale to 0;
   2. run the backup Job;
-  3. scale back to the desired replicas;
+  3. scale back to the desired replicas and remove the hold;
   4. write `last_backup_at` and `last_backup_snapshot`.
+- **Bounded.** A backup that misses the backup deadline restarts the cell, sets `last_error_code = BACKUP_FAILED`, removes the hold, and retries after a backoff within the window. A cellctl restart resumes a `backup` hold from step 2.
 - **Before every image change,** as part of D6.
 - **What the Job does:**
-  - runs as UID 10001;
+  - uses the cell image, which carries `restic` 0.17 or later, so the image-pin admission policy admits it;
+  - runs as UID 10001 with the D2 pod-level `fsGroup`;
   - mounts the volume read-only, with a restic cache on an `emptyDir`;
   - backs up `/data/vault` and `/data/host` to `cells/<cell_id>/` using the per-cell key;
   - applies retention of 7 daily and 4 weekly snapshots.
 - **Why stopped.** Stopping makes the copy crash-consistent across WAL-mode SQLite and the receipts journal, which a live file-by-file copy is not (`governance/store.py:716-746`).
 - **Placement.** Once there is more than one node, backup and restore Jobs carry node affinity to the volume's node.
 
-**Restore** runs a restore Job as UID 10001 into a new or quiesced volume. It is exercised in the local rehearsal: a scratch-namespace restore must answer recall, pass `governance-schema status` at v4, and accept a governed write.
+**Restore** runs a restore Job as UID 10001, with `restic restore --delete`, into a new or quiesced volume. The operator export runbook uses the same Job to restore into a scratch namespace and hand the tenant an archive of their vault. It is exercised in the local rehearsal: a scratch-namespace restore must answer recall, pass `governance-schema status` at v4, and accept a governed write.
 
 ### D9. Capacity is observed, not reserved
 
@@ -247,7 +290,7 @@ A row with `desired_state = deleted` makes cellctl:
 1. **Namespace.** Delete the namespace (the PVC goes with it, and the volume goes through `reclaimPolicy: Delete`).
 2. **Absence.** Confirm that the namespace, the PV and the Hetzner volume `volume_id` are all absent.
 3. **Backups.** Delete every object version under `cells/<cell_id>/` and confirm that no version remains. B2 keeps hidden versions, so "empty" means no versions at all.
-4. **Keys.** Delete the per-cell B2 key, then null `backup_key_wrapped`.
+4. **Keys.** Delete the per-cell B2 key by `b2_key_id` and confirm it is absent, then null `b2_key_id`, `b2_key_wrapped` and `backup_key_wrapped`.
 5. **Report.** Write `observed_state = deleted`.
 
 Each step retries until its check holds. A failed observation never counts as absence.
@@ -260,17 +303,20 @@ Each step retries until its check holds. A failed observation never counts as ab
 - **Certificates.** cert-manager obtains the MCP hostname's certificate with an ACME DNS-01 solver through a Cloudflare DNS-edit token, so certificates live in Secrets and need no volume. The Cloudflare record is DNS-only.
 - **Firewall.** The Hetzner firewall opens 443 and admin SSH.
 - **Public routes.** Only the gateway's IngressRoute is public. Cells, cellctl and the Kubernetes API are not.
+- **Client address.** Traefik `websecure` sets no `trustedIPs`, so it overwrites `X-Real-Ip` with the peer address that `hostPort` preserves. A NetworkPolicy admits ingress to the gateway only from the Traefik pods, which makes that header the gateway's trustworthy client address.
 - **Legacy.** `cloudflared` stays only for the old platform's hostnames until retirement.
 
 ### D12. Control database on its own server
 
-- **Infrastructure.** Terraform adds `hcloud_server.control` (a small x86 instance) attached to the existing `hcloud_network.alpha`, with firewall rules. Ansible adds a `postgres` role: PostgreSQL 17, PgBouncer in transaction mode, and a public TLS certificate for verify-full.
+- **Infrastructure.** Terraform adds `hcloud_server.control` (a small x86 instance) attached to the existing `hcloud_network.alpha`, with firewall rules. Ansible adds a `postgres` role with:
+  - PostgreSQL 17;
+  - PgBouncer in transaction mode, plus a session-mode database alias admitting only `substrate_owner`, because the migration runner holds a session advisory lock (`scripts/migrate.ts`);
+  - a public TLS certificate for verify-full, issued and renewed on the server by an ACME DNS-01 client through the Cloudflare DNS-edit token, with a timer that reloads PgBouncer and Postgres. cert-manager runs in the cluster and cannot serve this server.
 - **Backups.** pgBackRest to B2 with WAL archiving (point-in-time recovery), a nightly full and a weekly restore verification.
 - **Roles:**
   - `substrate_owner`: owns the schema and runs migrations only.
   - `substrate_app`: runtime DML, not the schema owner.
-  - `exomem_gateway`: `SELECT` on token, tenant, entitlement and cell routing columns, plus `INSERT`/`UPDATE` on the rate-limit buckets.
-  - `exomem_cellctl`: column-level `SELECT` on desired columns; `UPDATE` on observed columns, `backup_key_wrapped` and the rollout row; `INSERT`/`UPDATE` on capacity; `SELECT` on settings.
+  - `exomem_gateway` and `exomem_cellctl`: exactly the privileges in the C1 privilege table.
 - **Network access.** The public PgBouncer listener admits only `substrate_app` and `substrate_owner`, with SCRAM authentication. `exomem_gateway` and `exomem_cellctl` connect only over the private network, and cellctl's LISTEN connects to Postgres directly. nftables connection limits and fail2ban protect the public port.
 - **Failure domains.** A separate server keeps the fleet and its records apart.
 
@@ -289,7 +335,7 @@ These must match the companion Substrate change byte for byte. The Substrate mig
 **Desired state, written by Substrate**
 - `desired_state text not null check (desired_state in ('running','read_only','stopped','deleted'))`.
 - `desired_image text null`.
-- `generation bigint not null default 1`. A trigger increments it on any change to a desired column and calls `pg_notify('exomem_cloud_cells', cell_id)`.
+- `generation bigint not null default 1`. A trigger increments it on any change to a desired column and calls `pg_notify('exomem_cloud_cells', cell_id)`. The trigger never fires on observed-column updates.
 
 **Observed state, written by cellctl**
 - `observed_generation bigint`.
@@ -297,9 +343,21 @@ These must match the companion Substrate change byte for byte. The Substrate mig
 - `observed_image text`, `ready boolean not null default false`, `last_error_code text`, `observed_at timestamptz`.
 - `node text` and `volume_id text`, both written at first placement.
 - `last_backup_at timestamptz` and `last_backup_snapshot text`.
-- `backup_key_wrapped bytea` and `backup_key_version int`.
+- `backup_key_wrapped bytea` and `backup_key_version int`, written once.
+- `b2_key_id text`, `b2_key_wrapped bytea` and `b2_key_version int`, written once.
+- `hold_kind text check (hold_kind in ('upgrade','backup','restore'))` and `hold_started_at timestamptz`.
 
 **Timestamps:** `created_at` and `updated_at`.
+
+### C1 privileges
+
+| Role | `SELECT` | `INSERT` / `UPDATE` |
+|---|---|---|
+| `substrate_app` | every C1–C1d column | insert C1 identity and desired columns; update C1 desired columns, C1b, and C1d `paused`, `error_code`, `held_cell_id` |
+| `exomem_cellctl` | every C1 column, C1b, C1c, C1d | update C1 observed columns only; insert and update C1c; update C1d `paused`, `error_code`, `held_cell_id`, `last_good_image`, `updated_at` |
+| `exomem_gateway` | C1 `cell_id`, `tenant_id`, `desired_state` | none on C1–C1d; insert and update the rate-limit buckets |
+
+The observed columns are the ones under "Observed state" above. Substrate's `scripts/exomem-cloud-grants.sql` is the single place that applies this table.
 
 ### C1b `exomem_cloud_settings`
 

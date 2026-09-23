@@ -85,6 +85,8 @@ cellctl SHALL read desired cell state from the control database and converge the
 - A transient condition MUST be recorded as a non-terminal observed state and retried. Transient conditions include a pending volume, a pulling image, a running init container, a terminating pod and an unavailable API.
 - Only an identity conflict, or an init container still failing after its deadline, SHALL mark a cell `failed`. An identity conflict is an existing namespace or volume that belongs to a different cell.
 - `observed_generation` SHALL advance only when the observation matches the applied desired generation.
+- An ordinary pass SHALL render the cell's current image. Only a release attempt SHALL change it.
+- A maintenance operation SHALL hold a cell's image and replica count through one hold marker. The controller SHALL record the hold kind and start time on the row, and SHALL resume the hold after a restart.
 
 #### Scenario: New cell requested
 
@@ -96,6 +98,16 @@ cellctl SHALL read desired cell state from the control database and converge the
 
 - **WHEN** cellctl stops after applying some of a cell's resources
 - **THEN** the next pass re-applies the same manifests with no duplicate resources and no failure state
+
+#### Scenario: Desired state changes during a nightly backup
+
+- **WHEN** a cell's row flips to `read_only` while its backup hold is active
+- **THEN** the cell stays stopped until the backup finishes, and then starts read-only on its current image
+
+#### Scenario: Controller restarts mid-upgrade
+
+- **WHEN** cellctl restarts while a cell carries an upgrade hold
+- **THEN** the row shows the hold kind and start time, and the attempt resumes from its recorded step rather than leaving the cell stopped
 
 #### Scenario: Foreign namespace
 
@@ -130,20 +142,29 @@ No request field, path or header SHALL select a cell. An admission policy SHALL 
 
 ### Requirement: A release is one image digest, rolled out one cell at a time with restore-based rollback
 
-The platform release SHALL be the digest in the `cell_image` setting. A cell's target image SHALL be:
+The platform release SHALL be the digest in the `cell_image` setting.
 
-- its row's `desired_image`, if set;
-- otherwise `cell_image` while the rollout is not paused;
-- otherwise `last_good_image`.
+- A cell's upgrade target SHALL be its row's `desired_image` if set, otherwise `cell_image`.
+- A new cell SHALL start on `desired_image` if set, otherwise on `cell_image` while the rollout is not paused, otherwise on `last_good_image`. While paused with no `last_good_image`, a new cell SHALL wait with `NO_GOOD_IMAGE`.
+- `last_good_image` SHALL be set whenever a cell becomes ready on `cell_image`, including at first provisioning.
 
 cellctl SHALL change at most one cell's image at a time, lowest `rollout_priority` first. Each attempt SHALL:
 
 1. stop the cell;
-2. take a backup;
+2. take a backup, within a bounded deadline;
 3. start the target image;
 4. wait up to 10 minutes for readiness.
 
-If readiness does not arrive, cellctl SHALL stop the cell, restore the pre-attempt backup, start the previous image, and pause the rollout, recording the error and the held cell. It MUST NOT roll back by image digest alone. While paused, no ready cell SHALL change image, and new cells SHALL use `last_good_image`.
+If the backup misses its deadline, cellctl SHALL restart the cell on its current image, record `BACKUP_FAILED`, and retry later. It MUST NOT leave the cell stopped on an object-storage failure.
+
+If readiness does not arrive, cellctl SHALL:
+
+- stop the cell;
+- restore the pre-attempt backup so that no file created by the new image remains;
+- start the previous image;
+- pause the rollout, recording the error and the held cell.
+
+It MUST NOT roll back by image digest alone, and MUST NOT start either image on an unrestored volume. While paused, no cell SHALL change image.
 
 No candidate, lock, fixture or promotion artifact SHALL be required to release.
 
@@ -159,14 +180,26 @@ No candidate, lock, fixture or promotion artifact SHALL be required to release.
 - **THEN** cellctl restores the pre-attempt backup, starts the previous image, and pauses the rollout, recording the error and the held cell
 - **AND** no other cell changes, and the canary serves its pre-attempt content
 
+#### Scenario: Object storage unavailable during an upgrade
+
+- **WHEN** the pre-upgrade backup cannot reach object storage before the backup deadline
+- **THEN** the cell restarts on its current image, the row records `BACKUP_FAILED`, and the attempt is retried after a backoff
+
+#### Scenario: First release fails
+
+- **WHEN** the very first `cell_image` fails readiness on the canary, and no `last_good_image` exists
+- **THEN** the rollout pauses, and new cells wait with `NO_GOOD_IMAGE` instead of starting on no image
+
 ### Requirement: Each cell is backed up consistently, encrypted with its own key
 
-cellctl SHALL back up each cell nightly and before every image change. The cell SHALL be stopped during the copy, so the copy is crash-consistent.
+cellctl SHALL back up each cell nightly and before every image change. The cell SHALL be stopped during the copy, so the copy is crash-consistent. A backup that misses its deadline SHALL restart the cell and record `BACKUP_FAILED`.
 
 A backup SHALL:
 - include both the vault and the custody home;
 - be written to the cell's own object-storage prefix with a key restricted to that prefix;
 - be encrypted with a random per-cell data key, envelope-encrypted by a master key held outside the database.
+
+The wrapped data key and the wrapped per-cell object-storage key SHALL be stored once on the cell row, so that a stateless controller can re-render the cell's Secret and delete the key later.
 
 A restore into a new namespace SHALL produce a cell that answers recall, reports governance schema v4, and accepts a governed write.
 
@@ -226,6 +259,8 @@ The control database SHALL run on a server separate from any fleet node, provisi
 - separate the schema-owner role from runtime roles;
 - give the gateway and cellctl least-privilege roles, reachable only over the private network;
 - admit only the Substrate roles on its public listener, with SCRAM;
+- serve migrations through a session-mode pool, so a migration's session lock never leaks;
+- issue and renew its own public certificate on the server;
 - archive WAL to object storage for point-in-time recovery;
 - have its backup restore verified weekly.
 
@@ -236,7 +271,7 @@ The control database SHALL run on a server separate from any fleet node, provisi
 
 #### Scenario: Controller exceeds its privileges
 
-- **WHEN** cellctl attempts to modify a desired-state column, the settings table, or any table other than cell observations, capacity, the rollout row and wrapped keys
+- **WHEN** cellctl attempts to modify a desired-state column, the settings table, or any table other than cell observed columns (including wrapped keys), capacity and the rollout row
 - **THEN** the database refuses the statement
 
 #### Scenario: Gateway role from the internet
