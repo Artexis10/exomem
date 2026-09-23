@@ -333,8 +333,12 @@ close the same case and would also reject a short turn made entirely of real
 names, which is the turn this feature exists to serve. Above the line the
 dominant page carries the packet: that page's units through the existing units
 lanes, one anchor entry of kind `page` at status `retrieval_carried` whose only
-evidence is `retrieval`, `generation.carried_by = "retrieval"`, and no continuity
-token, because a carried page is not a resolution to carry forward. Retrieval
+evidence is `retrieval`, `generation.carried_by = "retrieval"`, and a continuity
+token naming the carried page's path, so that "continue" after a carried answer
+resumes that page (as it resumes a page the agent picked) rather than the anchor
+held before it; the token still only qualifies anchors a later turn reached, and
+`generation.continuity` reports `applied` only when a ref names an index row or
+an eligible page. Retrieval
 still never resolves an anchor: no evidence kind is added and no status clause
 changes. A named anchor always wins — the carry never runs when resolution
 resolved anything, when the turn is ambiguous, or when the agent named a sense —

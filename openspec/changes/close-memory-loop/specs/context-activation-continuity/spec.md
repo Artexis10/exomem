@@ -31,7 +31,10 @@ or registry hash does not match the serving state, or that cannot be decoded, SH
 ignored and reported as `generation.continuity = "stale"`; a token minted under an
 older generation of the same index remains valid and its refs are re-validated against
 the current index, so ordinary vault writes do not discard continuity. The packet
-SHALL report `generation.continuity` as `applied`, `stale` or `absent`. A request that
+SHALL report `generation.continuity` as `applied`, `stale` or `absent`, and SHALL
+report `applied` only when at least one of a valid token's refs names a row of the
+current index or a compiled page eligible to be resumed; a valid token whose every
+ref names nothing SHALL be reported `stale`. A request that
 carries a token or an `anchor` override SHALL never be served another request's cached
 packet. The server SHALL keep no per-conversation state.
 
@@ -69,6 +72,11 @@ packet. The server SHALL keep no per-conversation state.
   role-registry hash, or is not decodable
 - **THEN** the packet is built without it and reports `generation.continuity =
   "stale"`
+
+#### Scenario: A token that names nothing is not reported applied
+- **WHEN** a token this index issued is passed, and none of its refs names a row
+  of the current index or an eligible compiled page
+- **THEN** the packet reports `generation.continuity = "stale"`
 
 #### Scenario: A vault write does not discard continuity
 - **WHEN** a token was minted under an older generation of the same index and one of

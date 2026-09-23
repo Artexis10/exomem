@@ -1424,9 +1424,8 @@ def _carried_packet(
     `page` at status `retrieval_carried`, whose only evidence is `retrieval`.
     That spelling is the whole honesty of the feature: a reader can tell at a
     glance that no anchor was named and that recall alone put this material
-    here, and `mint_continuity` — which carries `resolved` anchors only —
-    declines to mint a token from it without needing to know the feature
-    exists.
+    here. `mint_continuity` names the carried page's path in the token, so
+    "continue" can resume it through `continuity_page`.
 
     An agent-picked page (`anchor` naming an ordinary compiled page that is
     not an index anchor) reuses this SAME builder and the same units lane,
@@ -1612,6 +1611,16 @@ def compile_packet(
         # Copied once per request and handed to both readers, the hot profile
         # below and the recent-context block after resolution.
         mtimes = _recent_mtimes(root)
+        if continuity_refs:
+            # `applied` only when a ref still names something the token can
+            # act on: an index row, or a page an agent picked or recall
+            # carried. The caller reports this in place of its own `applied`.
+            generation["continuity"] = (
+                "applied"
+                if any(working_set_resolve.names_row(continuity_refs, row) for row in rows)
+                or any(_eligible_agent_page(root, ref) is not None for ref in continuity_refs)
+                else "stale"
+            )
         if anchor:
             chosen = working_set_resolve.override_candidates(rows, anchor)
             # A ref that names no anchor is not a packet with nothing in it: the
@@ -2120,8 +2129,8 @@ def continuity_page(
     or `None`.
 
     A token names a page, not an anchor, when the agent picked that page with
-    `anchor=` (`_eligible_agent_page`): the packet resolved it on the agent's
-    choice and minted its path. The hot profile only ranks anchor rows, so
+    `anchor=` (`_eligible_agent_page`) or recall carried it: the packet served
+    that page and minted its path. The hot profile only ranks anchor rows, so
     "continue" with that token needs this to resume the page at all. The same
     eligibility test the pick itself passed decides it here — not raw
     material, not navigation, current — and the page crosses the release

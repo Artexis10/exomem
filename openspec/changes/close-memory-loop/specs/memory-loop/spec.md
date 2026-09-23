@@ -457,8 +457,10 @@ the ranking scored at or below a declared sanity bound SHALL NOT be carried.
 A carried packet SHALL report that page as its one anchor entry, of kind `page`,
 at status `retrieval_carried`, with `retrieval` as its only evidence, and SHALL
 mark itself `generation.carried_by = "retrieval"`. Its material SHALL come from
-that page through the existing bounded unit lanes. No continuity token SHALL be
-minted from a carried page. The carried page SHALL cross the same release plane
+that page through the existing bounded unit lanes. The continuity token minted
+from a carried packet SHALL name the carried page's path, so that a following
+referential turn can resume it; continuity SHALL still qualify only an anchor a
+later turn reached. The carried page SHALL cross the same release plane
 guard as any other packet reference, and a carried page the current audience may
 not see SHALL abstain `withheld` rather than substitute another candidate.
 
@@ -625,7 +627,7 @@ no anchor outside them has a last edit, not in a write burst, later than the
 time that packet was served. While that tier leads, the profile SHALL NOT fall
 through to the edit or read tiers: where the references name a compiled page
 that is not an anchor — one the agent picked — that single page SHALL be
-resumed from its own units, reported `resolved` on `continuity` and `recency`
+resumed from its own units — or one recall carried — reported `resolved` on `continuity` and `recency`
 and marked `generation.carried_by = "continuity"`, crossing the release guard
 like any unit, so a page the audience may not see abstains `withheld`; where
 they name nothing that can be served, the turn SHALL abstain with its
@@ -706,6 +708,14 @@ from recent work and not from the turn's own words.
 - **AND** a turn that names a compiled page is decided by the retrieval carry,
   and abstains `unresolved` when the carry cannot run, never falling back to
   the hot anchor
+
+#### Scenario: Continuing after a carried answer resumes the carried page
+
+- **WHEN** a turn was answered by a retrieval-carried page, and the next
+  referential turn passes the token of that packet
+- **THEN** the token names the carried page, and that page resolves on
+  `continuity` and `recency` with its units served, not the anchor the
+  conversation held before the carried answer
 
 #### Scenario: Continuing after the agent picked a page resumes that page
 

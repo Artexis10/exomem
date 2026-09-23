@@ -47,7 +47,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from . import context_roles, sidecar_store, working_set, working_set_index
+from . import context_roles, sidecar_store, working_set, working_set_index, working_set_resolve
 
 log = logging.getLogger(__name__)
 
@@ -379,6 +379,10 @@ def read_continuity(
     return frozenset(payload["refs"]), CONTINUITY_APPLIED
 
 
+#: The anchor statuses a token carries forward: what the packet served.
+_MINTED_STATUSES = frozenset({"resolved", working_set_resolve.RETRIEVAL_CARRIED_STATUS})
+
+
 def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
     """The token for a packet AS SERVED, or `""` when there is nothing to carry.
 
@@ -393,13 +397,19 @@ def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
     its ref forward would let a later turn's `continuity` qualifier alone
     promote a candidate no turn ever resolved -- exactly the widening the
     resolver's soundness rule exists to stop.
+
+    A carried page (`retrieval_carried`) is minted too: it is the one page
+    the packet served, not a listed candidate, and "continue" after it can
+    only resume it if the token names it. Its ref is its path, which is what
+    `working_set.continuity_page` resumes; a later turn's `continuity` still
+    only qualifies an anchor that turn reached.
     """
     if not identity or packet.get("abstained"):
         return ""
     anchors = [
         item
         for item in packet.get("anchors") or ()
-        if isinstance(item, Mapping) and item.get("status") == "resolved"
+        if isinstance(item, Mapping) and item.get("status") in _MINTED_STATUSES
     ]
     refs = [str(item.get("ref") or "") for item in anchors]
     refs = [ref for ref in refs if ref]
@@ -1060,6 +1070,11 @@ def serve(
     except Exception:  # noqa: BLE001 - the whole operation is additive and abstains
         log.warning("activation compilation failed; abstaining", exc_info=True)
         return _abstain_unavailable()
+    # `compile_packet` reports whether a ref of a valid token matched a row or
+    # an eligible page; a token that matched nothing contributed nothing, and
+    # `applied` would claim it had.
+    if continuity_state == CONTINUITY_APPLIED:
+        continuity_state = packet["generation"].get("continuity") or CONTINUITY_STALE
     packet["generation"]["continuity"] = continuity_state
     packet["generation"]["lexical_evidence"] = lexical_state
     changed = evidence_changed()

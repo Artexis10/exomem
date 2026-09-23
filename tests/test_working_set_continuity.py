@@ -749,6 +749,27 @@ def test_the_returned_token_is_accepted_and_reported_applied(
     assert "continuity" in evidence
 
 
+@pytest.mark.parametrize("turn", [TURN, "continue"])
+def test_a_valid_token_naming_nothing_is_reported_stale(
+    activation_vault: Path, turn: str
+) -> None:
+    """R-P2: `applied` means a token ref matched an index row or an eligible
+    page. A token this index issued whose every ref names nothing it can
+    match was reported `applied` while contributing nothing."""
+    payload = _decoded(commands.op_activate_context(activation_vault, turn=TURN)["continuity"])
+    nowhere = runtime_module.encode_continuity(
+        identity=payload["identity"],
+        roles_hash=payload["roles_hash"],
+        generation=payload["generation"],
+        refs=["Knowledge Base/Notes/nowhere.md"],
+        roles=payload["roles"],
+    )
+
+    packet = commands.op_activate_context(activation_vault, turn=turn, continuity=nowhere)
+
+    assert packet["generation"]["continuity"] == runtime_module.CONTINUITY_STALE
+
+
 def test_a_listed_partial_candidate_is_not_promoted_on_the_next_turn(
     activation_vault: Path,
 ) -> None:

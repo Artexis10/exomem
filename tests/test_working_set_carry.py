@@ -972,13 +972,17 @@ def test_a_resolved_anchor_wins_over_a_dominant_hit(carry_vault: Path, budget_fr
     assert CARRY_PAGE not in _unit_paths(packet)
 
 
-def test_a_carried_packet_mints_no_continuity_token(carry_vault: Path, budget_free) -> None:
-    """Lane U2 owns referents. A carried page is not a resolution to carry
-    forward, and a later turn's `continuity` must not be able to promote one."""
+def test_a_carried_packet_mints_a_token_naming_the_carried_page(
+    carry_vault: Path, budget_free
+) -> None:
+    """Was "mints no token" (U3); R-P2: "continue" after a carried answer must
+    resume that page, which it can only do if the token names it."""
     packet = working_set.compile_packet(carry_vault, turn=CARRY_TURN, max_chars=4000)
     assert packet["generation"]["carried_by"] == "retrieval"
 
-    assert working_set_runtime.mint_continuity(packet, identity="vault-identity") == ""
+    token = working_set_runtime.mint_continuity(packet, identity="vault-identity")
+
+    assert working_set_runtime.decode_continuity(token)["refs"] == [CARRY_PAGE]
 
 
 def test_the_carry_costs_only_the_turns_that_would_have_abstained(
@@ -2129,3 +2133,30 @@ def test_raw_material_and_navigation_cannot_fill_the_ranking_window(
     assert state == "available"
     assert [path for path, _score in hits] == [GENUINE_PAGE], hits
     assert packet["generation"].get("carried_by") == "retrieval", packet.get("abstention")
+
+
+# --------------------------------------------------------------------------- #
+# R-P2: "continue" after a carried answer resumes the carried page.
+# --------------------------------------------------------------------------- #
+
+
+def test_continue_after_a_carried_answer_resumes_the_carried_page(carry_vault: Path) -> None:
+    """The review's seam B: the carried turn minted no token, the hook kept
+    the previous one, and "continue" answered with the anchor from BEFORE
+    the carried answer."""
+    from exomem import commands
+
+    carried = commands.op_activate_context(carry_vault, turn=CARRY_TURN)
+    assert carried["generation"]["carried_by"] == "retrieval"
+    token = carried["continuity"]
+    assert working_set_runtime.decode_continuity(token)["refs"] == [CARRY_PAGE]
+
+    packet = commands.op_activate_context(carry_vault, turn="continue", continuity=token)
+
+    assert packet["abstained"] is False, (packet.get("abstention"), packet["anchors"])
+    assert [(item["path"], item["status"], item["evidence"]) for item in packet["anchors"]] == [
+        (CARRY_PAGE, "resolved", ["continuity", "recency"])
+    ]
+    assert packet["generation"]["carried_by"] == "continuity"
+    assert packet["generation"]["continuity"] == "applied"
+    assert {unit["provenance"]["path"] for unit in packet["units"]} == {CARRY_PAGE}
