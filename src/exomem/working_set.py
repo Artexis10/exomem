@@ -2245,22 +2245,38 @@ def continuity_page(
     return pages[0] if len(pages) == 1 else None
 
 
+def _counts_toward_burst(path: str) -> bool:
+    """Whether an edit to `path` can make a write burst.
+
+    Not a navigation page, which every confirmed write rewrites, and not an
+    episode recap: a revision writes two recap pages, the new one and the
+    supersede mark on the old, which is one structured record rather than a
+    batch edit. Counted, it turned the note an agent saved in the same turn
+    into a burst of three and cut it. Episodes have their own slot and cap.
+    """
+    from . import find_corpus
+    from .kbdir import kb_prefix
+
+    if path.rsplit("/", 1)[-1].casefold() in find_corpus.NAVIGATION_BASENAMES:
+        return False
+    inner = path[len(kb_prefix()) :] if path.startswith(kb_prefix()) else path
+    return not inner.startswith(_EPISODE_PREFIX)
+
+
 def _burst_paths(edited: Mapping[str, int]) -> frozenset[str]:
     """The pages whose last edit fell in a write burst: a maximal chain of at
     least `HOT_PROFILE_BURST_PAGES` edits, each within
-    `HOT_PROFILE_BURST_GAP_NS` of the next, navigation pages not counted.
+    `HOT_PROFILE_BURST_GAP_NS` of the next, navigation pages and episode
+    recaps not counted (`_counts_toward_burst`).
 
     One pass over the registry's edit times, sorted: no read, no walk — the
     map is the one the request already copied. A page with no recorded edit
     is never in a burst.
     """
-    from . import find_corpus
-
     times = sorted(
         (int(mtime), path)
         for path, mtime in edited.items()
-        if int(mtime) > 0
-        and path.rsplit("/", 1)[-1].casefold() not in find_corpus.NAVIGATION_BASENAMES
+        if int(mtime) > 0 and _counts_toward_burst(path)
     )
     burst: set[str] = set()
     chain: list[str] = []
@@ -2483,8 +2499,6 @@ def _recent_edits(
     """
     import heapq
 
-    from . import find_corpus
-
     if limit <= 0:
         return {}
     heap = [(-int(mtime), rel) for rel, mtime in mtimes.items()]
@@ -2508,11 +2522,7 @@ def _recent_edits(
             # `_recent_episodes`, never per file.
             if why and why != "episode":
                 offers.append((mtime, rel, why))
-        if (
-            after_burst is None
-            and mtime > 0
-            and rel.rsplit("/", 1)[-1].casefold() not in find_corpus.NAVIGATION_BASENAMES
-        ):
+        if after_burst is None and mtime > 0 and _counts_toward_burst(rel):
             if size and last - mtime <= HOT_PROFILE_BURST_GAP_NS:
                 size += 1
             else:

@@ -1742,6 +1742,63 @@ def test_eight_fresh_edits_do_not_bury_the_newest_episode(stateful_vault: Path) 
     ]
 
 
+def test_a_recap_revision_does_not_turn_one_save_into_a_write_burst(vault: Path) -> None:
+    """The stopping point U6 asks for: the agent saves a note and records the
+    episode in the same turn. A revision writes two recap pages (the new one
+    and the supersede mark on the old), so with the note that is three writes
+    inside the burst gap. A recap revision is a structured pair, not a batch
+    edit: the note stays offered and stays eligible as the referent."""
+    import os
+    import time
+
+    from exomem import commands
+    from exomem import schema as schema_module
+    from exomem.governance.principal import owner_principal, request_scope
+
+    key = "ep-" + "5e" * 16
+    note_rel = "Knowledge Base/Notes/Insights/harbor-lamp-decision.md"
+
+    def _record(summary: str) -> None:
+        with request_scope(owner_principal(surface="mcp")):
+            commands.op_episode_memory(
+                vault,
+                schema_module.load_source_schema(vault),
+                action="record",
+                episode=key,
+                subject="Harbor Lamp purchase",
+                summary=summary,
+                worked_on=["Compared two lamps"],
+            )
+
+    _record("First account.")
+    now = time.time()
+    # Every existing page its own edit, minutes apart: nothing is a burst yet.
+    for index, page in enumerate(sorted((vault / "Knowledge Base").rglob("*.md"))):
+        stamp = now - 3600 - index * 120
+        os.utime(page, (stamp, stamp))
+    note = vault / note_rel
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(
+        "---\ntype: insight\ntitle: Harbor lamp decision\nstatus: active\n---\n\n"
+        "# Harbor lamp decision\n\nBrass.\n",
+        encoding="utf-8",
+    )
+    _record("Second account: brass lamp chosen.")
+    mtimes = {
+        path.relative_to(vault).as_posix(): path.stat().st_mtime_ns
+        for path in (vault / "Knowledge Base").rglob("*.md")
+    }
+
+    assert note_rel not in working_set._burst_paths(mtimes)
+    edits = working_set._recent_edits(mtimes, limit=working_set.RECENT_CONTEXT_MAX_ENTRIES)
+    assert note_rel in edits
+    assert len(edits) == working_set.RECENT_CONTEXT_MAX_ENTRIES
+    block = working_set._recent_context(vault, rows=(), mtimes=mtimes)
+    whys = {entry["path"]: entry["why"] for entry in block}
+    assert whys.get(note_rel) == "edited"
+    assert list(whys.values()).count("episode") == 1
+
+
 def _episode_path(index: int) -> str:
     from exomem import episode_capture
 
