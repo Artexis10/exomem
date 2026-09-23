@@ -16,6 +16,7 @@ import pytest
 
 from exomem import commands as commands_module
 from exomem import privacy_log, server
+from exomem.access_log import AccessLogMiddleware
 from exomem.governance import principal as principal_module
 from exomem.governance.tool import GovernanceError, _require_owner
 
@@ -713,3 +714,233 @@ def test_standalone_server_unaffected_by_cloud_module(
         assert "ask_memory" in names
     finally:
         _teardown_activation(mcp)
+
+
+# ---------------------------------------------------------------------------
+# Caller-supplied identifiers stay bounded in logs (content-private mode)
+# ---------------------------------------------------------------------------
+
+
+def _rendered_logs(caplog: pytest.LogCaptureFixture) -> str:
+    """Records as `exomem.log` renders them. `caplog.text` shows only the
+    message, never the structured `fields` a log line also carries."""
+    from exomem.log_events import JsonLinesFormatter
+
+    formatter = JsonLinesFormatter()
+    return "\n".join([caplog.text, *(formatter.format(record) for record in caplog.records)])
+
+
+def test_client_label_is_a_fixed_family_in_content_private_mode() -> None:
+    cloud = {"EXOMEM_CLOUD_CELL": "1"}
+    assert privacy_log.log_client_label("claude-ai", env=cloud) == "claude-ai"
+    assert privacy_log.log_client_label("Codex CLI/1.2.3 (linux)", env=cloud) == "codex"
+    assert privacy_log.log_client_label("openai-mcp", env=cloud) == "chatgpt"
+    assert privacy_log.log_client_label("claude-code/2.1", env=cloud) == "claude-code"
+    for free_text in ["my private project notes", "x" * 500, "line\nbreak"]:
+        assert privacy_log.log_client_label(free_text, env=cloud) == "other"
+    assert privacy_log.log_client_label("", env=cloud) is None
+    # Outside content-private mode the value is kept verbatim, as today.
+    assert privacy_log.log_client_label("line\nbreak", env={}) == "line\nbreak"
+
+
+def test_client_version_keeps_only_a_dotted_number_in_content_private_mode() -> None:
+    cloud = {"EXOMEM_CLOUD_CELL": "1"}
+    assert privacy_log.log_client_version("1.2.3", env=cloud) == "1.2.3"
+    assert privacy_log.log_client_version("1.2.3-beta secret", env=cloud) is None
+    assert privacy_log.log_client_version("1.2.3-beta", env={}) == "1.2.3-beta"
+
+
+def test_session_reference_is_a_digest_in_content_private_mode() -> None:
+    cloud = {"EXOMEM_CLOUD_CELL": "1"}
+    raw = "zz-caller-chosen-session-text"
+    ref = privacy_log.log_session_ref(raw, env=cloud)
+    assert ref is not None and raw not in ref
+    assert ref == privacy_log.log_session_ref(raw, env=cloud)
+    assert ref != privacy_log.log_session_ref(raw + "-other", env=cloud)
+    assert privacy_log.log_session_ref(raw, env={}) == raw
+    assert privacy_log.log_session_ref(None, env=cloud) is None
+
+
+def test_cloud_logs_and_ledger_never_carry_caller_header_text(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    ledger_dir = tmp_path / "ledger"
+    monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(ledger_dir))
+    mcp, _ = _build_cloud_server(monkeypatch)
+    agent_phrase = "zz-user-agent-phrase-never-logged"
+    session_phrase = "zz-session-header-phrase-never-logged"
+    ray_phrase = "zz-cf-ray-header-phrase-never-logged"
+    try:
+        app = mcp.http_app(stateless_http=True, json_response=True)
+        logged_app = AccessLogMiddleware(app)
+
+        async def scenario():
+            async with app.router.lifespan_context(app):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=logged_app), base_url="http://cell.local"
+                ) as client:
+                    return await client.post(
+                        "/mcp",
+                        headers={
+                            **_headers(TOKEN),
+                            "mcp-protocol-version": LEGACY_VERSION,
+                            "user-agent": agent_phrase,
+                            "mcp-session-id": session_phrase,
+                            "cf-ray": ray_phrase,
+                        },
+                        json={
+                            "jsonrpc": "2.0",
+                            "id": 2,
+                            "method": "tools/call",
+                            "params": {"name": "ask_memory", "arguments": {"query": "x"}},
+                        },
+                    )
+
+        with caplog.at_level("DEBUG"):
+            response = asyncio.run(scenario())
+        assert response.status_code == 200, response.text
+        ledger_text = "".join(
+            path.read_text(encoding="utf-8") for path in ledger_dir.rglob("*.jsonl")
+        )
+        assert ledger_text, "the call ledger recorded nothing"
+        logs = _rendered_logs(caplog)
+        assert '"session_id": "sha256:' in logs, "sanity: the access log line was rendered"
+        for phrase in (agent_phrase, session_phrase, ray_phrase):
+            assert phrase not in logs
+            assert phrase not in ledger_text
+    finally:
+        _teardown_activation(mcp)
+
+
+def test_http_method_is_a_standard_verb_or_other_in_content_private_mode() -> None:
+    cloud = {"EXOMEM_CLOUD_CELL": "1"}
+    assert privacy_log.log_http_method("POST", env=cloud) == "POST"
+    assert privacy_log.log_http_method("HDR-VIOLET-QUOKKA", env=cloud) == "OTHER"
+    assert privacy_log.log_http_method("HDR-VIOLET-QUOKKA", env={}) == "HDR-VIOLET-QUOKKA"
+
+
+def test_cloud_logs_never_carry_a_caller_chosen_http_method_or_cf_ray(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    mcp, _ = _build_cloud_server(monkeypatch)
+    method_phrase = "ZZ-METHOD-PHRASE-NEVER-LOGGED"
+    ray = "0123456789abcdef-IDE"  # Cloudflare-shaped, but a cloud cell has no Cloudflare
+    try:
+        app = mcp.http_app(stateless_http=True, json_response=True)
+        # The access log is installed by `mcp.run` in production; wrap the
+        # test app the same way so its record is part of what is checked.
+        logged_app = AccessLogMiddleware(app)
+
+        async def scenario():
+            async with app.router.lifespan_context(app):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=logged_app), base_url="http://cell.local"
+                ) as client:
+                    await client.request(method_phrase, "/mcp", headers=_headers(TOKEN))
+                    await client.post("/mcp", headers={**_headers(TOKEN), "cf-ray": ray}, json={})
+
+        with caplog.at_level("DEBUG"):
+            asyncio.run(scenario())
+        logs = _rendered_logs(caplog)
+        assert '"method": "OTHER"' in logs, "sanity: the access log line was rendered"
+        assert method_phrase not in logs
+        assert ray not in logs
+    finally:
+        _teardown_activation(mcp)
+
+
+# ---------------------------------------------------------------------------
+# Log directory placement
+# ---------------------------------------------------------------------------
+
+
+def test_cloud_mode_ignores_an_empty_log_dir_and_stays_off_the_volume(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import tempfile
+
+    from exomem import logging_config
+
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_LOG_DIR", "")
+    monkeypatch.setenv("HOME", str(tmp_path / "volume-home"))
+    resolved = logging_config.resolve_log_dir()
+    assert resolved == Path(tempfile.gettempdir()) / "exomem-logs"
+    # An explicit directory is still honoured.
+    monkeypatch.setenv("EXOMEM_LOG_DIR", str(tmp_path / "explicit"))
+    assert logging_config.resolve_log_dir() == tmp_path / "explicit"
+
+
+# ---------------------------------------------------------------------------
+# No CLI entry point reads `.env` in cloud mode (design D1.6)
+# ---------------------------------------------------------------------------
+
+_DOTENV_SENTINEL = "EXOMEM_TEST_DOTENV_SENTINEL"
+
+
+def _cwd_with_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text(
+        f"{_DOTENV_SENTINEL}=from-dotenv\nEXOMEM_BASE_URL=https://from-dotenv.invalid\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    # setenv first so monkeypatch restores (deletes) them even if a red run
+    # lets `.env` write them into the process environment.
+    for name in (_DOTENV_SENTINEL, "EXOMEM_BASE_URL"):
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+
+
+def test_auth_sessions_cli_never_reads_dotenv_in_cloud_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import os
+
+    from exomem import __main__ as cli
+
+    _cwd_with_dotenv(monkeypatch, tmp_path)
+    _cloud_env(monkeypatch)
+    with pytest.raises(ValueError, match="EXOMEM_BASE_URL is required"):
+        cli._build_auth_session_authority()
+    assert _DOTENV_SENTINEL not in os.environ
+
+
+def test_doctor_cli_never_reads_dotenv_in_cloud_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import os
+
+    from exomem import __main__ as cli
+    from exomem import doctor as doctor_module
+
+    class _Stop(Exception):
+        pass
+
+    seen: dict[str, str | None] = {}
+
+    def fake_doctor(**_kwargs):
+        seen["sentinel"] = os.environ.get(_DOTENV_SENTINEL)
+        raise _Stop
+
+    _cwd_with_dotenv(monkeypatch, tmp_path)
+    _cloud_env(monkeypatch)
+    monkeypatch.setattr(doctor_module, "doctor", fake_doctor)
+    with pytest.raises(_Stop):
+        cli._doctor_main([])
+    assert seen == {"sentinel": None}
+
+
+def test_cli_dotenv_loaders_still_read_dotenv_outside_cloud_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import os
+
+    from exomem import __main__ as cli
+
+    _cwd_with_dotenv(monkeypatch, tmp_path)
+    monkeypatch.delenv("EXOMEM_CLOUD_CELL", raising=False)
+    cli._load_cwd_dotenv()
+    assert os.environ.get(_DOTENV_SENTINEL) == "from-dotenv"

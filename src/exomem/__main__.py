@@ -308,6 +308,21 @@ def _dispatch_main(raw: list[str]) -> int:
     return _serve_main(raw)
 
 
+def _load_cwd_dotenv() -> None:
+    """Load the operator's cwd `.env`, as the local CLI always has.
+
+    Never in a cloud cell: its environment is the pod spec, and "no `.env`
+    file is loaded" (design D1.6) covers every loader, the CLI's included.
+    """
+    from . import cloud_cell
+
+    if cloud_cell.cloud_mode_enabled():
+        return
+    from dotenv import load_dotenv
+
+    load_dotenv(dotenv_path=Path.cwd() / ".env", override=True)
+
+
 def _build_auth_session_authority():
     """Load operator configuration and reuse the HTTP auth authority factory.
 
@@ -315,9 +330,7 @@ def _build_auth_session_authority():
     issuer, audience, storage namespace, and local-vs-HA selection without
     importing server auth during unrelated CLI startup.
     """
-    from dotenv import load_dotenv
-
-    load_dotenv(dotenv_path=Path.cwd() / ".env", override=True)
+    _load_cwd_dotenv()
     from . import env_compat
 
     env_compat.promote_legacy()
@@ -1035,9 +1048,7 @@ def _doctor_main(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
-    from dotenv import load_dotenv
-
-    load_dotenv(dotenv_path=Path.cwd() / ".env", override=True)
+    _load_cwd_dotenv()
     from . import env_compat
 
     env_compat.promote_legacy()
@@ -2133,13 +2144,12 @@ def _cell_init_main(argv: list[str]) -> int:
     # through a log line this process emits before it exits.
     privacy_log.install_hosted_log_redaction()
 
-    # `/data/host` (design D3.1) is enforced only inside a real cloud cell,
-    # where the image's `usermod --home /data/host` makes `Path.home()`
-    # resolve there -- never for a bare local/dev invocation, which would
-    # otherwise chmod a developer's actual home directory to 0700.
-    host_root = Path.home() if cloud_cell.cloud_mode_enabled() else None
-
     try:
+        # `/data/host` (design D3.1) is enforced only inside a real cloud
+        # cell, where the image's `usermod --home /data/host` makes the passwd
+        # home resolve there -- never for a bare local/dev invocation, which
+        # would otherwise chmod a developer's actual home directory to 0700.
+        host_root = cell_init.account_home() if cloud_cell.cloud_mode_enabled() else None
         result = cell_init.run_cell_init(vault, host_root=host_root)
     except cell_init.CellInitError as error:
         _cell_init_failure_line(error.code, error.step)
