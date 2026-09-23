@@ -263,14 +263,13 @@ def walk_freshness_key(paths) -> tuple[int, int, str]:
     return freshness.triple_from_entries(entries)
 
 
-def _walk_md_entry(anchor: Path, child: Path) -> str | None:
+def _walk_md_entry(anchor: Path, child: Path, reserved_paths) -> str | None:
     """How `walk_md` treats one directory entry: "dir" to descend, "md" to yield.
 
     None skips it. The walk's whole per-entry rule lives here so `walk_md_admits`
-    answers for one path by the same rule, not by a copy that can drift.
+    answers for one path by the same rule, not by a copy that can drift. Callers
+    import `reserved_paths` once per walk and pass it in, as the walk always did.
     """
-    from . import reserved_paths
-
     try:
         relative = child.absolute().relative_to(anchor.absolute()).as_posix()
     except ValueError:
@@ -305,6 +304,8 @@ def walk_md(root: Path):
     Skips Obsidian `*.sync-conflict-*.md` files — transient conflict
     duplicates that would otherwise pollute the index and search results.
     """
+    from . import reserved_paths
+
     anchor = Path(root)
 
     def walk(current: Path):
@@ -313,7 +314,7 @@ def walk_md(root: Path):
         except OSError:
             return
         for child in children:
-            kind = _walk_md_entry(anchor, child)
+            kind = _walk_md_entry(anchor, child, reserved_paths)
             if kind == "dir":
                 yield from walk(child)
             elif kind == "md":
@@ -337,6 +338,8 @@ def walk_md_admits(
     order the walk keeps. `listings` memoizes directory listings (None for a
     directory the walk would not enter) across calls on one pass.
     """
+    from . import reserved_paths
+
     anchor = Path(root)
     try:
         parts = Path(path).relative_to(anchor).parts
@@ -353,10 +356,12 @@ def walk_md_admits(
             return False
         current = current / part
         if depth == len(parts) - 1:
-            return _walk_md_entry(anchor, current) == "md"
+            return _walk_md_entry(anchor, current, reserved_paths) == "md"
         if current not in listings:
             listings[current] = (
-                _listed_names(current) if _walk_md_entry(anchor, current) == "dir" else None
+                _listed_names(current)
+                if _walk_md_entry(anchor, current, reserved_paths) == "dir"
+                else None
             )
         names = listings[current]
     return False
