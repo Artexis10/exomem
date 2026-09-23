@@ -1726,8 +1726,10 @@ def test_eight_fresh_edits_do_not_bury_the_newest_episode(stateful_vault: Path) 
     working_set_index.WorkingSetIndex(stateful_vault).rebuild()
     recap = _write_episode(stateful_vault, key=_episode_key(3))
     now = time.time()
-    for page in sorted((stateful_vault / "Knowledge Base").rglob("*.md")):
-        _touch(page, when=now)
+    # A minute apart: each its own edit, not a write burst the block cuts
+    # (`working_set.HOT_PROFILE_BURST_GAP_NS`).
+    for index, page in enumerate(sorted((stateful_vault / "Knowledge Base").rglob("*.md"))):
+        _touch(page, when=now - index * 60)
     _touch(recap, when=now - 90 * 86_400)
     _live_cell(stateful_vault)
 
@@ -1750,10 +1752,11 @@ def _episode_path(index: int) -> str:
 def test_the_planning_and_episode_reservations_coexist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    others = {f"Knowledge Base/Notes/note-{index}.md": 9_000 - index for index in range(20)}
-    episode = {_episode_path(1): 100}
+    others = {f"Knowledge Base/Notes/note-{index}.md": _minutes_ago(index) for index in range(20)}
+    episode = {_episode_path(1): _minutes_ago(600)}
     plans = ("Knowledge Base/Planning/Plan 0/_collection.md",)
     monkeypatch.setattr(working_set, "_recent_mtimes", lambda _root: {**others, **episode})
+    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a: True)
     monkeypatch.setattr(working_set, "_recently_activated", lambda *a, **k: ())
     monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: plans)
     monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
@@ -1770,9 +1773,10 @@ def test_the_planning_and_episode_reservations_coexist(
 
 def test_episodes_take_at_most_four_slots(monkeypatch: pytest.MonkeyPatch) -> None:
     """A burst of conversations must not crowd out the edits."""
-    episodes = {_episode_path(index): 9_000 - index for index in range(6)}
-    others = {f"Knowledge Base/Notes/note-{index}.md": 100 - index for index in range(6)}
+    episodes = {_episode_path(index): _minutes_ago(index) for index in range(6)}
+    others = {f"Knowledge Base/Notes/note-{index}.md": _minutes_ago(100 + index) for index in range(6)}
     monkeypatch.setattr(working_set, "_recent_mtimes", lambda _root: {**episodes, **others})
+    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a: True)
     monkeypatch.setattr(working_set, "_recently_activated", lambda *a, **k: ())
     monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: ())
     monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
@@ -1797,7 +1801,10 @@ def test_an_activated_older_revision_never_enters_beside_the_newest(
     group = episode_capture.key_group(_episode_key(1), "owner")
     older = f"{EPISODE_FOLDER}/2026-09-21-topic-ep{group}-20260921t090000000000-11111111.md"
     newer = f"{EPISODE_FOLDER}/2026-09-21-topic-ep{group}-20260921t100000000000-22222222.md"
-    monkeypatch.setattr(working_set, "_recent_mtimes", lambda _root: {older: 200, newer: 100})
+    monkeypatch.setattr(
+        working_set, "_recent_mtimes", lambda _root: {older: _minutes_ago(1), newer: _minutes_ago(2)}
+    )
+    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a: True)
     monkeypatch.setattr(working_set, "_activation_snapshot", lambda: {older: 9.0})
     monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: ())
     monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")

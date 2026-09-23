@@ -2103,8 +2103,7 @@ def test_an_episode_entry_renders_as_a_session_line_with_its_summary() -> None:
     lines = hook._recent_lines(packet)
 
     assert lines == [f"- session: Harbor Lamp purchase — summary: Chose the brass lamp. [{path}]"]
-    assert "read_memory" in hook._WORKING_SET_HEADER
-    assert "for a `session` line" in hook._WORKING_SET_HEADER
+    assert "`session` line with `read_memory`" in hook._WORKING_SET_HEADER
 
 
 def test_the_deployed_retrieve_hook_still_matches_the_packaged_one() -> None:
