@@ -713,7 +713,8 @@ def precompute_deliverable(ctx: Context, *, extra_deliveries=()) -> float | None
     Deliverable means: its evidence has settled, its review-state decision for
     `(id, fingerprint)` is open, its family disposition is `normal`, and it is
     not held (delivered twice without a disposition). The two directions of one
-    link pair are one proposal: only the smaller source path is offered. An
+    link pair are one proposal: only the smaller source path is ever offered,
+    so a decision on it holds the other direction too. An
     unreadable review state fails closed: nothing is deliverable.
     """
     from . import review_state
@@ -742,10 +743,13 @@ def precompute_deliverable(ctx: Context, *, extra_deliveries=()) -> float | None
             and review_state.disposition_for(family, payload=payload) == "normal"
             and counts.get((cid, str(row["fingerprint"])), 0) < MAX_DELIVERIES
         )
+    # The pair's offered direction is chosen among its open rows, not its
+    # eligible ones: a decision on that direction (a dismissal, a snooze, two
+    # deliveries) holds the pair, rather than promoting the other direction.
     pairs: dict[tuple[str, ...], list[dict[str, Any]]] = {}
     for row in rows:
         key = _pair_key(row)
-        if key is not None and eligible[str(row["id"])]:
+        if key is not None:
             pairs.setdefault(key, []).append(row)
     for members in pairs.values():
         members.sort(key=lambda row: str(row.get("subject_path") or ""))

@@ -269,11 +269,18 @@ def test_a_symmetric_pair_is_delivered_once(tmp_path: Path) -> None:
     assert forward is not None and reverse is not None
     assert forward["deliverable"] is True
     assert reverse["deliverable"] is False
-    # Dismissing the offered direction lets the other one stand alone.
+    # Dismissing the offered direction holds the pair: the other direction is
+    # the same proposal and is not offered in its place.
     relation_queue.triage(
         vault, ref=forward["ref"], action="dismiss", why="handled: x", source_path=fx.CAVITATION
     )
     _quiet(vault, now=LATER + 60)
     rows = _rows(vault)
     assert _pair(rows, fx.CAVITATION, fx.INLET)["deliverable"] is False
-    assert _pair(rows, fx.INLET, fx.CAVITATION)["deliverable"] is True
+    assert _pair(rows, fx.INLET, fx.CAVITATION)["deliverable"] is False
+    # Reopening it offers the same direction again, still only that one.
+    relation_queue.triage(vault, ref=forward["ref"], action="reopen", source_path=fx.CAVITATION)
+    _quiet(vault, now=LATER + 120)
+    rows = _rows(vault)
+    assert _pair(rows, fx.CAVITATION, fx.INLET)["deliverable"] is True
+    assert _pair(rows, fx.INLET, fx.CAVITATION)["deliverable"] is False
