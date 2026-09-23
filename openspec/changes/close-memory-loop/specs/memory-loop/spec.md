@@ -45,7 +45,8 @@ The recent-context block SHALL judge recent work by the hot profile's own rules:
   the retired or superseded page, and offers an edit made after the batch
 - **AND** the most-read page appears in the block although many pages were
   edited more recently
-- **AND** a session captured before the batch still appears
+- **AND** a session captured before a batch smaller than the block still
+  appears; a batch that fills the block can push it out
 
 #### Scenario: Old information is saved again after a correction
 
