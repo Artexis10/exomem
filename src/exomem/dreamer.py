@@ -239,9 +239,10 @@ def _loop_once(vault_root: Path, clock: Clock) -> float:
         with _LOCK:
             _STATE.waiting_reason = None
             _STATE.waiting_since = None
-        sleep = policy.sleep_after_tick(
-            run_once(vault_root, clock=clock, should_stop=_stop.is_set).wall
-        )
+        result = run_once(vault_root, clock=clock, should_stop=_stop.is_set)
+        # A tick that found nothing to do waits a full poll, not a duty cycle.
+        idle = result.stop_reason in {"idle", "drained"} and not result.processed
+        sleep = policy.POLL_SECONDS if idle else policy.sleep_after_tick(result.wall)
     with _LOCK:
         _STATE.loops += 1
     return sleep
@@ -354,8 +355,13 @@ def run_once(
         conn = store.connect()
         with foreground_activity.background_scope(vault_root):
             generation = freshness.generation(vault_root, dreamer_delta.SCOPE)
-            with store.write(conn):
-                work = dreamer_delta.next_paths(store, conn, vault_root, limit=budget.pages)
+            has_work = dreamer_delta.has_work(store, conn, vault_root)
+            work = dreamer_delta.Work()
+            if has_work:
+                with store.write(conn):
+                    work = dreamer_delta.next_paths(
+                        store, conn, vault_root, limit=budget.pages
+                    )
             if work.waiting:
                 stop_reason = f"waiting:{work.waiting}"
             for rel in work.paths:
@@ -379,13 +385,36 @@ def run_once(
                 if freshness.generation(vault_root, dreamer_delta.SCOPE) != generation:
                     stop_reason = "generation"
                     break
-                _process(store, conn, vault_root, rel, now=clock.time())
+                try:
+                    _process(store, conn, vault_root, rel, now=clock.time())
+                except dreamer_families.Deferred:
+                    stop_reason = "deferred"
+                    break
                 processed.append(rel)
             else:
                 if work.remaining > len(processed):
                     stop_reason = "pages"
-            with store.write(conn):
-                dreamer_delta.advance_if_drained(store, conn)
+            now = clock.time()
+            token = dreamer_families.review_state_token(vault_root)
+            next_settle = store.get_meta(conn, "next_settle_at")
+            refresh = (
+                bool(processed)
+                or token != store.get_meta(conn, "deliverable_token")
+                or (isinstance(next_settle, (int, float)) and now >= float(next_settle))
+            )
+            if has_work or refresh:
+                with store.write(conn):
+                    dreamer_delta.advance_if_drained(store, conn)
+                    if refresh:
+                        ctx = dreamer_families.Context(
+                            vault_root=vault_root, store=store, conn=conn, now=now
+                        )
+                        store.set_meta(
+                            conn, "next_settle_at", dreamer_families.precompute_deliverable(ctx)
+                        )
+                        store.set_meta(conn, "deliverable_token", token)
+            elif stop_reason == "drained":
+                stop_reason = "idle"
     except Exception as exc:  # noqa: BLE001 - a failed tick is recorded, never raised
         log.warning("dreamer: tick failed", exc_info=True)
         error_code = type(exc).__name__
@@ -451,7 +480,7 @@ def _record_tick(
             state.failed_since = None
         state.phase = "failed" if state.consecutive_failures >= policy.FAILED_AFTER else "idle"
         health = _health_locked(now_mono)
-    if conn is None:
+    if conn is None or stop == "idle":
         return
     try:
         pending = store.pending_count(conn)

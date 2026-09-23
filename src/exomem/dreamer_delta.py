@@ -107,6 +107,27 @@ def advance_if_drained(store: dreamer_store.DreamerStore, conn: sqlite3.Connecti
     return True
 
 
+def has_work(
+    store: dreamer_store.DreamerStore, conn: sqlite3.Connection, vault_root: Path
+) -> bool:
+    """Whether a tick would find anything to process. Read-only and O(1).
+
+    False only when nothing is pending and the committed checkpoint is this
+    process's current freshness generation, so an idle poll writes nothing.
+    """
+    if store.pending_count(conn):
+        return True
+    held = checkpoint(store, conn)
+    if held is None:
+        return True
+    current = freshness.generation(Path(vault_root), SCOPE)
+    if current is None:
+        return True
+    return held.instance_id != freshness.consumer_checkpoint_instance() or (
+        held.generation != current
+    )
+
+
 def next_paths(
     store: dreamer_store.DreamerStore,
     conn: sqlite3.Connection,

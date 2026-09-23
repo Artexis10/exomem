@@ -34,6 +34,23 @@ PERMISSION = "consideration does not authorize mutation"
 #: The producer name for detections made by the dreamer itself.
 PRODUCER = "dreamer"
 
+#: A candidate is deliverable only once its evidence has been stable this long.
+SETTLE_SECONDS = 3600.0
+
+#: An undisposed item delivered this many times is held until its fingerprint
+#: changes. It stays listed on explicit review.
+MAX_DELIVERIES = 2
+
+_INACTIVE_STATUSES = frozenset({"superseded", "archived", "draft", "planned", "dropped"})
+
+
+class Deferred(Exception):
+    """A page cannot be processed right now (a derived read is unavailable).
+
+    Not a failure: the tick stops, the page stays pending, and the next tick
+    retries it. Raised instead of proposing from a partial view.
+    """
+
 
 @dataclass
 class Context:
@@ -88,8 +105,210 @@ class Family:
     global_counts: bool = False
 
 
+def _status(page: Any) -> str:
+    status = getattr(page, "status", None)
+    return status.strip().casefold() if isinstance(status, str) else ""
+
+
+def _sig(ctx: Context, rel_path: str) -> str | None:
+    from . import dreamer_delta
+
+    return dreamer_store.encode_sig(dreamer_delta.live_signature(ctx.vault_root, rel_path))
+
+
+def _open_for_subject(ctx: Context, family: str, subject: str) -> set[str]:
+    return {
+        str(row[0])
+        for row in ctx.conn.execute(
+            "SELECT id FROM candidates WHERE family=? AND subject_path=? AND state='open'",
+            (family, subject),
+        )
+    }
+
+
+def _resolve_all(ctx: Context, ids: set[str]) -> None:
+    for cid in sorted(ids):
+        ctx.store.resolve(ctx.conn, cid, producer=PRODUCER, now=ctx.now)
+
+
+# ----------------------------------------------------------------------
+# link: `upkeep_link`
+# ----------------------------------------------------------------------
+
+LINK_FAMILY = "upkeep_link"
+LINK_KIND = "relation.accept"
+
+#: The structural methods upkeep proposes. `wikilink` is relation-typing debt
+#: (already the default `relation_debt` family), `frontmatter_sources` is a page
+#: citing its own source (provenance the author already wrote), and
+#: `embedding_proximity` would mean a model encode; the per-page generator used
+#: here never produces it in the first place.
+LINK_METHODS = frozenset(
+    {"shared_sources", "shared_open_question", "shared_resolution_target", "unit_relation_lift"}
+)
+_LINK_LIMIT_PER_PAGE = 10
+
+
+def _graph_available(ctx: Context) -> bool:
+    from . import epistemic_graph
+
+    if "graph" not in ctx._review:
+        ctx._review["graph"] = epistemic_graph.EpistemicGraphIndex(ctx.vault_root).available()
+    return bool(ctx._review["graph"])
+
+
+def _authored_between(ctx: Context, page: Any, other: Any) -> bool:
+    """True when either page already authors any relation to the other."""
+    from . import epistemic_graph, relation_queue
+
+    for source, target in ((page, other), (other, page)):
+        authored = relation_queue._authored_targets(source, ctx.vault_root)
+        wanted = epistemic_graph._with_md(target.rel_path)
+        if any(path == wanted for _kind, path in authored):
+            return True
+    return False
+
+
+def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
+    """The open relation proposals whose source page is `rel_path`, by relation id."""
+    from . import activation, epistemic_graph, relation_queue, review_state
+
+    page = ctx.page(rel_path)
+    if page is None or not activation._eligible(ctx.vault_root, page):
+        return {}
+    if not _graph_available(ctx):
+        raise Deferred("graph unavailable")
+    payload = ctx.review_payload()
+    if payload is None:
+        payload = review_state.empty_state()
+    out: dict[str, dict[str, Any]] = {}
+    for candidate in relation_queue._page_candidates(
+        ctx.vault_root, page, limit_per_page=_LINK_LIMIT_PER_PAGE
+    ):
+        if str(candidate.get("method") or "") not in LINK_METHODS:
+            continue
+        if epistemic_graph._with_md(str(candidate.get("from") or rel_path)) != rel_path:
+            continue
+        target_rel = epistemic_graph._with_md(str(candidate.get("to") or ""))
+        target = ctx.page(target_rel)
+        if target is None or _status(target) in _INACTIVE_STATUSES:
+            continue
+        if _authored_between(ctx, page, target):
+            continue
+        refs = relation_queue._hinted_candidate_refs(ctx.vault_root, candidate)
+        if refs is None:
+            raise Deferred("reference identity unavailable")
+        reason, enriched = relation_queue._classify_candidate(
+            ctx.vault_root,
+            page,
+            candidate,
+            store=ctx.review_store(),
+            state_payload=payload,
+            exact_refs=refs,
+        )
+        if reason in {"authored_edge", "placeholder_target"} or enriched is None:
+            continue
+        evidence = [
+            {
+                "path": target_rel,
+                "ref": refs[1],
+                "sig": _sig(ctx, target_rel),
+                "role": "target",
+                "origin": "",
+            }
+        ]
+        shared = (candidate.get("evidence") or {}).get("shared_source")
+        if isinstance(shared, str) and _sig(ctx, epistemic_graph._with_md(shared)):
+            shared_rel = epistemic_graph._with_md(shared)
+            evidence.append(
+                {
+                    "path": shared_rel,
+                    "ref": relation_queue._fallback_ref(shared_rel),
+                    "sig": _sig(ctx, shared_rel),
+                    "role": "shared_source",
+                    "origin": "",
+                }
+            )
+        out[str(enriched["review_id"])] = {
+            "candidate": candidate,
+            "enriched": enriched,
+            "refs": refs,
+            "evidence": evidence,
+            "signal_version": relation_queue._evidence_signal_version(page, candidate),
+        }
+    return out
+
+
+def _link_on_page(ctx: Context, rel_path: str) -> None:
+    from . import epistemic_graph
+
+    proposals = _link_proposals(ctx, rel_path)
+    _resolve_all(ctx, _open_for_subject(ctx, LINK_FAMILY, rel_path) - set(proposals))
+    for review_id, proposal in sorted(proposals.items()):
+        candidate = proposal["candidate"]
+        enriched = proposal["enriched"]
+        subject_evidence = {
+            "path": rel_path,
+            "ref": proposal["refs"][0],
+            "sig": _sig(ctx, rel_path),
+            "role": "source",
+            "origin": "",
+        }
+        ctx.store.upsert_proposal(
+            ctx.conn,
+            family=LINK_FAMILY,
+            kind=LINK_KIND,
+            subject_path=rel_path,
+            subject_ref=proposal["refs"][0],
+            proposal_key=review_id,
+            evidence=[subject_evidence, *proposal["evidence"]],
+            route={
+                "tool": "connect_memory",
+                "args": {
+                    "operation": "accept-relation",
+                    "ref": enriched["ref"],
+                    "path": rel_path,
+                    "expected_fingerprint": enriched["fingerprint"],
+                },
+            },
+            reason_code=str(candidate.get("method") or ""),
+            producer=PRODUCER,
+            signal_version=proposal["signal_version"],
+            now=ctx.now,
+            measures={
+                "relation_type": str(candidate.get("relation_type") or ""),
+                "method": str(candidate.get("method") or ""),
+                "to": epistemic_graph._with_md(str(candidate.get("to") or "")),
+            },
+            identity=review_id,
+            ref=enriched["ref"],
+            fingerprint=enriched["fingerprint"],
+        )
+
+
+def _link_on_delete(ctx: Context, rel_path: str) -> None:
+    _resolve_all(ctx, _open_for_subject(ctx, LINK_FAMILY, rel_path))
+
+
+def _link_revalidate(ctx: Context, row: dict[str, Any]) -> None:
+    subject = str(row.get("subject_path") or "")
+    if _sig(ctx, subject) is None:
+        _link_on_delete(ctx, subject)
+        return
+    _link_on_page(ctx, subject)
+
+
+LINK = Family(
+    name=LINK_FAMILY,
+    kinds=(LINK_KIND,),
+    on_page=_link_on_page,
+    on_delete=_link_on_delete,
+    revalidate=_link_revalidate,
+)
+
+
 #: The families this build implements, in registry order.
-REGISTRY: list[Family] = []
+REGISTRY: list[Family] = [LINK]
 
 
 def family_names() -> tuple[str, ...]:
@@ -121,3 +340,89 @@ def process_page(ctx: Context, rel_path: str, *, exists: bool) -> None:
         family = family_for(str(row.get("family") or ""))
         if family is not None:
             family.revalidate(ctx, row)
+
+
+# ----------------------------------------------------------------------
+# deliverability, precomputed by the worker for the carrier
+# ----------------------------------------------------------------------
+
+
+def review_state_token(vault_root: Path) -> str | None:
+    """The review-state file's identity: inode, mtime and size, or None."""
+    from . import review_state
+
+    try:
+        info = review_state.state_path(vault_root).stat()
+    except OSError:
+        return None
+    return f"{info.st_ino}:{info.st_mtime_ns}:{info.st_size}"
+
+
+def _pair_key(row: dict[str, Any]) -> tuple[str, ...] | None:
+    if row.get("family") != LINK_FAMILY:
+        return None
+    measures = row.get("measures") or {}
+    ends = sorted([str(row.get("subject_path") or ""), str(measures.get("to") or "")])
+    return (*ends, str(measures.get("relation_type") or ""), str(measures.get("method") or ""))
+
+
+def precompute_deliverable(ctx: Context, *, extra_deliveries=()) -> float | None:
+    """Mark every open candidate deliverable or not, for the carrier to read.
+
+    Deliverable means: its evidence has settled, its review-state decision for
+    `(id, fingerprint)` is open, its family disposition is `normal`, and it is
+    not held (delivered twice without a disposition). The two directions of one
+    link pair are one proposal: only the smaller source path is offered. An
+    unreadable review state fails closed: nothing is deliverable.
+    """
+    from . import review_state
+
+    token = review_state_token(ctx.vault_root)
+    payload = ctx.review_payload()
+    store = ctx.review_store()
+    counts: dict[tuple[str, str], int] = {}
+    for cid, fingerprint, _caller, _at in (*ctx.store.deliveries(ctx.conn), *extra_deliveries):
+        counts[(cid, fingerprint)] = counts.get((cid, fingerprint), 0) + 1
+    rows = ctx.store.open_candidates(ctx.conn)
+    eligible: dict[str, bool] = {}
+    settled_at: dict[str, float | None] = {}
+    for row in rows:
+        cid = str(row["id"])
+        refreshed = float(row.get("refreshed_at") or ctx.now)
+        settled = ctx.now - refreshed >= SETTLE_SECONDS
+        settled_at[cid] = row.get("settled_at") or (refreshed + SETTLE_SECONDS if settled else None)
+        if payload is None or not settled:
+            eligible[cid] = False
+            continue
+        state, _decision = store.effective_state(cid, str(row["fingerprint"]), payload=payload)
+        family = str(row.get("family") or "")
+        eligible[cid] = (
+            state == "open"
+            and review_state.disposition_for(family, payload=payload) == "normal"
+            and counts.get((cid, str(row["fingerprint"])), 0) < MAX_DELIVERIES
+        )
+    pairs: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    for row in rows:
+        key = _pair_key(row)
+        if key is not None and eligible[str(row["id"])]:
+            pairs.setdefault(key, []).append(row)
+    for members in pairs.values():
+        members.sort(key=lambda row: str(row.get("subject_path") or ""))
+        for row in members[1:]:
+            eligible[str(row["id"])] = False
+    next_settle: float | None = None
+    for row in rows:
+        cid = str(row["id"])
+        if settled_at[cid] is None:
+            due = float(row.get("refreshed_at") or ctx.now) + SETTLE_SECONDS
+            next_settle = due if next_settle is None else min(next_settle, due)
+        if (
+            bool(row.get("deliverable")) == eligible[cid]
+            and row.get("deliverable_token") == token
+            and row.get("settled_at") == settled_at[cid]
+        ):
+            continue
+        ctx.store.set_deliverable(
+            ctx.conn, cid, deliverable=eligible[cid], token=token, settled_at=settled_at[cid]
+        )
+    return next_settle

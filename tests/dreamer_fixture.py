@@ -68,7 +68,7 @@ def insight(
     observation: str = "The measurement repeats across runs.",
     extra: str = "",
 ) -> str:
-    source_lines = "".join(f'  - "[[{name}]]"\n' for name in sources)
+    source_lines = "".join(f'  - "[[Sources/{name}]]"\n' for name in sources)
     return (
         "---\n"
         f"title: {title}\n"
@@ -124,7 +124,8 @@ def build(root: Path, *, with_graph: bool = True) -> Path:
             "Pump cavitation",
             sources=["field-report-one"],
             updated="2026-05-01",
-            links="Cavitation shows up on the [[orbit-pump]] above 40 litres a minute.",
+            links="Cavitation shows up on the [[Notes/Entities/orbit-pump]] above 40 litres "
+            "a minute.",
             observation="Cavitation starts above 40 litres a minute.",
         ),
     )
@@ -135,7 +136,7 @@ def build(root: Path, *, with_graph: bool = True) -> Path:
             "Pump seal wear",
             sources=["field-report-two"],
             updated="2026-05-02",
-            links="Seal wear on the [[orbit-pump]] doubles after a dry start.",
+            links="Seal wear on the [[Notes/Entities/orbit-pump]] doubles after a dry start.",
             observation="Seal wear doubles after a dry start.",
         ),
     )
@@ -179,3 +180,17 @@ def tree_state(vault: Path) -> dict[str, tuple[int, bytes]]:
         for path in sorted(vault.rglob("*"))
         if path.is_file()
     }
+
+
+def run_to_quiet(vault: Path, *, now: float | None = None, limit: int = 60) -> list:
+    """Tick until nothing is left, across budget stops. Returns every result."""
+    from exomem import dreamer
+
+    clock = dreamer.Clock() if now is None else dreamer.Clock(time=lambda: now)
+    results = []
+    for _ in range(limit):
+        result = dreamer.run_once(vault, clock=clock)
+        results.append(result)
+        if result.stop_reason not in {"pages", "cpu", "wall"}:
+            break
+    return results

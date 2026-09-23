@@ -1710,6 +1710,12 @@ def delta_since(
         )
 
 
+def consumer_checkpoint_instance() -> str:
+    """This process's registry instance id, as a checkpoint would carry it."""
+    with _lock:
+        return _instance_id
+
+
 def generation(vault_root: Path, scope: str) -> int | None:
     """The scope's event generation when live, else None. One integer read.
 

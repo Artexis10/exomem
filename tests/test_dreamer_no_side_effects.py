@@ -117,10 +117,10 @@ def _install_all(monkeypatch: pytest.MonkeyPatch) -> Spies:
 
 def _run_to_quiet(vault: Path) -> list[dreamer.TickResult]:
     results = []
-    for _ in range(20):
+    for _ in range(40):
         result = dreamer.run_once(vault)
         results.append(result)
-        if result.stop_reason != "pages" or not result.processed:
+        if result.stop_reason not in {"pages", "cpu", "wall"}:
             break
     return results
 
