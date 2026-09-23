@@ -2817,6 +2817,29 @@ def _resolve_memory_identifier(vault_root: Path, value: str) -> str:
     return resolved
 
 
+def _refuse_withheld_page_seed(vault_root: Path, path: str) -> None:
+    """Answer a withheld seed page exactly as an absent one, as `op_get` does.
+
+    A context seeded from a page is assembled from that page, so whether it
+    assembles at all is a fact about the page. An absent page already raises
+    here, through the same read `op_get` takes.
+    """
+    try:
+        page = get_page_module.get_page(vault_root, path=path)
+    except get_page_module.GetError as e:
+        raise ValueError(f"{e.code}: {e.reason}") from e
+    released = egress_module.annotate_page(
+        vault_root,
+        page.as_dict(include_raw=False),
+        snapshot_content=page.content,
+        stable_ref=_snapshot_memory_ref(vault_root, page.path, page.frontmatter),
+    )
+    if released is None:
+        raise ValueError(
+            f"NOT_FOUND: file does not exist: {get_page_module.missing_path_for(path)}"
+        )
+
+
 def _snapshot_memory_ref(vault_root: Path, path: str, frontmatter: Mapping[str, Any]) -> str | None:
     """A canonical ref only when the index agrees with this exact snapshot."""
     normalized = memory_refs_module.normalize_id(frontmatter.get("exomem_id"))
@@ -3233,11 +3256,19 @@ def op_graph_context(
     """
     if path:
         path = _resolve_memory_identifier(vault_root, path)
+    # A unit seed is a fact about its parent page: resolved against a withheld
+    # parent it answers as a unit of an absent page does (see
+    # `egress.unit_parent_withheld`).
+    graph_unit_ref = unit_ref
+    if unit_ref is not None and egress_module.unit_parent_withheld(
+        vault_root, unit_ref, purpose=purpose
+    ):
+        graph_unit_ref = egress_module.UNRESOLVABLE_UNIT_REF
     context = epistemic_graph_module.graph_context(
         vault_root,
         path=path,
         query=query,
-        unit_ref=unit_ref,
+        unit_ref=graph_unit_ref,
         categories=categories,
         kinds=kinds,
         depth=depth,
@@ -6508,9 +6539,39 @@ def op_read_memory(
             )
         resolved_path = _resolve_memory_identifier(vault_root, path)
         try:
-            page = get_page_module.get_page(vault_root, path=resolved_path)
+            prepared = get_page_module.prepare_page_read(vault_root, path=resolved_path)
         except get_page_module.GetError as e:
             raise ValueError(f"{e.code}: {e.reason}") from e
+        _refuse_policy_tree_read(
+            prepared.resolved_relative,
+            missing_path=prepared.missing_path,
+        )
+        try:
+            page = get_page_module.get_page(vault_root, path=resolved_path, _prepared=prepared)
+        except get_page_module.GetError as e:
+            raise ValueError(f"{e.code}: {e.reason}") from e
+        # The page decision `op_get` takes, taken BEFORE any unit is resolved.
+        # A unit, its parent citation and its surrounding Markdown are the
+        # page's own contents, and whether a reference resolves is itself a
+        # fact about the page. A unit is served only from a page released in
+        # full: its span and context are offsets into the raw body, and below
+        # L6 the released body is a projection no window of which is that
+        # span. Anything less answers exactly as an absent page does.
+        released = egress_module.annotate_page(
+            vault_root,
+            page.as_dict(include_raw=False),
+            snapshot_content=page.content,
+            stable_ref=_snapshot_memory_ref(vault_root, page.path, page.frontmatter),
+        )
+        if (
+            released is None
+            or released.get("body") != page.body
+            or released.get("content_hash") != page.content_hash
+        ):
+            raise ValueError(
+                "NOT_FOUND: file does not exist: "
+                f"{get_page_module.missing_path_for(resolved_path)}"
+            )
         query_log.log_get_call(
             read_path=page.path,
             frontmatter_only=False,
@@ -6520,6 +6581,7 @@ def op_read_memory(
             vault_root,
             page=page,
             unit_ref=unit_ref,
+            frontmatter=released.get("frontmatter"),
         ).as_dict()
     return op_get(
         vault_root,
@@ -7280,12 +7342,18 @@ def op_transfer_artifact(
     secret = os.environ.get("EXOMEM_UPLOAD_TOKEN", "").strip() or None
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     large_base_url = os.environ.get("EXOMEM_LARGE_UPLOAD_BASE_URL", "").strip().rstrip("/") or None
+    # `/download` decides every path under the audience the token carries, so
+    # it carries the caller's: the secret that signs it is the owner's, the
+    # caller need not be. An unresolved caller binds the fail-closed floor.
+    who = principal_module.effective_principal()
+    audience = who.audience_id if who.resolved else principal_module.MOST_RESTRICTIVE_AUDIENCE
     handoff = upload_tokens.mint_for_endpoint(
         secret,
         base_url,
         scope=operation,
         large_base_url=large_base_url if operation == "upload" else None,
         lane=lane if operation == "upload" else None,
+        audience=audience if operation == "download" else None,
     )
     if operation == "upload":
         handoff.update(handoff_status="handoff_prepared", committed=False)
@@ -8773,6 +8841,8 @@ def op_connect_memory(
             limit=limit,
         )
     if operation in ("context", "graph-context"):
+        if path:
+            _refuse_withheld_page_seed(vault_root, path)
         return memory_context_module.assemble_context(
             vault_root,
             path=path,

@@ -8,6 +8,7 @@ from typing import Any
 from . import context_pack, epistemic_graph, get_page, memory_refs, vault
 from . import find as find_module
 from .find_types import Hit, ParsedPage
+from .governance import egress
 
 
 def assemble_context(
@@ -38,8 +39,6 @@ def assemble_context(
     max_edges = max(0, min(int(max_edges), 400))
     limit = max(1, min(int(limit), 10))
     max_body_chars = max(500, min(int(max_body_chars), 6000))
-    from .governance import egress
-
     # A caller other than the owner gets a context assembled from the pages it
     # may see: seeds, packed pages and the neighbourhood are decided before
     # they are assembled, so nothing counted, ranked or packed rests on a
@@ -49,13 +48,19 @@ def assemble_context(
     if unit_controls:
         if path:
             path = _canonical_path(vault_root, path, keep)
-        if unit_ref is not None and path:
-            _validate_unit_parent_path(vault_root, unit_ref=unit_ref, path=path)
+        # A unit seed is a fact about its parent page: against a withheld
+        # parent it resolves, and validates, as a unit of an absent page does.
+        # The caller's own reference is still what the envelope echoes.
+        graph_unit_ref = unit_ref
+        if unit_ref is not None and egress.unit_parent_withheld(vault_root, unit_ref):
+            graph_unit_ref = egress.UNRESOLVABLE_UNIT_REF
+        if graph_unit_ref is not None and path:
+            _validate_unit_parent_path(vault_root, unit_ref=graph_unit_ref, path=path)
         graph = epistemic_graph.graph_context(
             vault_root,
             path=path,
             query=query,
-            unit_ref=unit_ref,
+            unit_ref=graph_unit_ref,
             categories=categories,
             kinds=kinds,
             depth=depth,
@@ -191,8 +196,6 @@ def _context_hits(
         if page is None:
             raise ValueError(f"NOT_FOUND: no readable page at {canonical_path}")
         return [_hit_for_page(page)]
-    from .governance import egress
-
     return find_module.find(
         vault_root,
         query=query or "",

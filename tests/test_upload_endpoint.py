@@ -573,3 +573,25 @@ def test_upload_get_serves_prefilled_form(vault, monkeypatch: pytest.MonkeyPatch
     assert "Add evidence" in r.text
     assert 'value="Yolo"' in r.text
     assert "name=text" in r.text  # searchable-text field present
+
+
+def test_cf_access_upload_beside_a_non_ascii_bearer_is_not_a_server_error(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The bearer fails, Cloudflare Access authorizes, and the lane lookup that
+    # re-reads the bearer must not raise on its non-ASCII bytes.
+    monkeypatch.setattr("exomem.cf_access.verify", lambda *a, **k: True)
+    client = _client(
+        vault,
+        monkeypatch,
+        EXOMEM_UPLOAD_TOKEN="sekret",
+        EXOMEM_CF_ACCESS_TEAM_DOMAIN="t.cloudflareaccess.com",
+        EXOMEM_CF_ACCESS_AUD="aud123",
+    )
+    r = client.post(
+        "/upload",
+        files={"file": ("a.bin", b"viacfaccess", "application/octet-stream")},
+        data={"scope": "S", "category": "C"},
+        headers=[(b"cf-access-jwt-assertion", b"fake.jwt.token"), (b"authorization", b"Bearer \xe9abc")],
+    )
+    assert r.status_code == 201, r.text
