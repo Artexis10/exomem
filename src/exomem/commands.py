@@ -2816,6 +2816,29 @@ def _resolve_memory_identifier(vault_root: Path, value: str) -> str:
     return resolved
 
 
+def _refuse_withheld_page_seed(vault_root: Path, path: str) -> None:
+    """Answer a withheld seed page exactly as an absent one, as `op_get` does.
+
+    A context seeded from a page is assembled from that page, so whether it
+    assembles at all is a fact about the page. An absent page already raises
+    here, through the same read `op_get` takes.
+    """
+    try:
+        page = get_page_module.get_page(vault_root, path=path)
+    except get_page_module.GetError as e:
+        raise ValueError(f"{e.code}: {e.reason}") from e
+    released = egress_module.annotate_page(
+        vault_root,
+        page.as_dict(include_raw=False),
+        snapshot_content=page.content,
+        stable_ref=_snapshot_memory_ref(vault_root, page.path, page.frontmatter),
+    )
+    if released is None:
+        raise ValueError(
+            f"NOT_FOUND: file does not exist: {get_page_module.missing_path_for(path)}"
+        )
+
+
 def _snapshot_memory_ref(vault_root: Path, path: str, frontmatter: Mapping[str, Any]) -> str | None:
     """A canonical ref only when the index agrees with this exact snapshot."""
     normalized = memory_refs_module.normalize_id(frontmatter.get("exomem_id"))
@@ -3232,11 +3255,19 @@ def op_graph_context(
     """
     if path:
         path = _resolve_memory_identifier(vault_root, path)
+    # A unit seed is a fact about its parent page: resolved against a withheld
+    # parent it answers as a unit of an absent page does (see
+    # `egress.unit_parent_withheld`).
+    graph_unit_ref = unit_ref
+    if unit_ref is not None and egress_module.unit_parent_withheld(
+        vault_root, unit_ref, purpose=purpose
+    ):
+        graph_unit_ref = egress_module.UNRESOLVABLE_UNIT_REF
     context = epistemic_graph_module.graph_context(
         vault_root,
         path=path,
         query=query,
-        unit_ref=unit_ref,
+        unit_ref=graph_unit_ref,
         categories=categories,
         kinds=kinds,
         depth=depth,
@@ -8808,6 +8839,8 @@ def op_connect_memory(
             limit=limit,
         )
     if operation in ("context", "graph-context"):
+        if path:
+            _refuse_withheld_page_seed(vault_root, path)
         return memory_context_module.assemble_context(
             vault_root,
             path=path,

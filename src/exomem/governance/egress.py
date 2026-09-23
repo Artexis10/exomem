@@ -4971,6 +4971,55 @@ def release_level_for(
     return level
 
 
+#: A unit reference whose parent names no page. A seed whose parent is withheld
+#: from the caller is resolved as this instead, so the resolver, its drift
+#: accounting and every lane after it take the branch a unit of an absent page
+#: takes, rather than a branch that exists only because the page does.
+UNRESOLVABLE_UNIT_REF = "exomem://memory/unavailable#unavailable"
+
+
+def unit_parent_withheld(
+    vault_root: Path,
+    unit_ref: str,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> bool:
+    """True when a page a unit reference names is not released to the caller.
+
+    Whether a unit reference resolves, and the drift reported while resolving
+    it, are facts about its parent page, so a graph seed is decided by the page
+    before the graph is asked. The candidates are every page the reference's
+    memory id names in the reference index AND every page the graph's own rows
+    resolve it to, so a stale index cannot hide a withheld parent. Decided at
+    `RELEASE_FLOOR`, the level below which the graph guard already withholds a
+    seed; a resolution that ran out of work cannot prove the parent visible.
+    """
+    vault_root = Path(vault_root)
+    policy = policy_module.load(vault_root)
+    if policy.empty and not lifecycle.tombstoned_paths(vault_root):
+        return False
+    parent_ref, separator, _fragment = str(unit_ref or "").rpartition("#")
+    memory_id = memory_refs.parse_memory_ref(parent_ref) if separator else None
+    if memory_id is None:
+        return False
+    from .. import epistemic_graph
+
+    indexed, work_exhausted = epistemic_graph.indexed_unit_parent_path_resolution(
+        vault_root, unit_ref
+    )
+    if work_exhausted:
+        return True
+    candidates = set(indexed) | set(
+        memory_refs.paths_for_ids_read_only(vault_root, (memory_id,)).get(memory_id, ())
+    )
+    for rel_path in sorted(candidates):
+        level = release_level_for(vault_root, rel_path, principal=principal, purpose=purpose)
+        if level is None or level < RELEASE_FLOOR:
+            return True
+    return False
+
+
 def release_level_for_path_only(
     vault_root: Path,
     rel_path: str,
