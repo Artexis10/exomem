@@ -10,6 +10,7 @@ caller that can mint one the owner's full disclosure of every file.
 from __future__ import annotations
 
 import hashlib
+import shutil
 from pathlib import Path
 
 import pytest
@@ -382,3 +383,21 @@ def test_unparseable_expiry_is_refused_on_both_transfer_routes(vault: Path, toke
 
     assert download.status_code == 401, download.text
     assert upload.status_code == 401, upload.text
+
+
+@pytest.mark.parametrize("spelling", ["Knowledge Base/Notes/Patterns", "Knowledge Base/Notes/Patterns/"])
+def test_a_folder_refuses_exactly_like_a_missing_path(vault: Path, spelling: str) -> None:
+    """A folder is never a download, and saying so would confirm that a folder
+    inside a withheld scope exists."""
+    _withhold(vault, audience=ALICE)
+    client = _client()
+    token = _mint_as(vault, _oauth_principal())
+
+    folder = _download(client, spelling, token)
+    shutil.rmtree(vault / "Knowledge Base" / "Notes" / "Patterns")
+    _reset_caches()
+    missing = _download(client, spelling, token)
+
+    assert missing.status_code == 404
+    assert folder.status_code == missing.status_code
+    assert folder.content == missing.content

@@ -451,12 +451,14 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
             except reserved_paths.ReservedPathLeafError:
                 raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}") from None
         except VaultPathError as exc:
-            if exc.code == "NOT_FOUND":
-                # Missing, withheld and reserved all answer with ONE body built
-                # from the request. On a case-insensitive filesystem the
-                # resolver re-spells an existing path to its on-disk casing, so
-                # echoing its spelling would tell a withheld file from a missing
-                # one — and reveal what the withheld file is really called.
+            if exc.code in ("NOT_FOUND", "NOT_A_FILE"):
+                # Missing, withheld, reserved and folder all answer with ONE
+                # body built from the request. On a case-insensitive filesystem
+                # the resolver re-spells an existing path to its on-disk casing,
+                # so echoing its spelling would tell a withheld file from a
+                # missing one — and reveal what the withheld file is really
+                # called. A folder is never a download, and naming it one would
+                # confirm that a folder inside a withheld scope exists.
                 return JSONResponse(
                     {"code": "NOT_FOUND", "reason": f"path does not exist: {requested}"},
                     status_code=404,
