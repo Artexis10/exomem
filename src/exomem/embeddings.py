@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import gc
+import hashlib
 import logging
 import math
 import os
@@ -24,9 +25,11 @@ import sqlite3
 import sys
 import threading
 import time
+from collections import OrderedDict
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, NamedTuple
 
 import numpy as np
 
@@ -75,6 +78,9 @@ CLIP_MODEL_NAME = "clip-ViT-B-32"
 #: queues behind a recall write's bulk encode. Recall itself never changes model.
 ACTIVATION_MODEL_ENV = "EXOMEM_ACTIVATION_MODEL"
 _MODEL = None
+#: Advanced under `_MODEL_LOCK` on every load and every unload of `_MODEL`, so a
+#: vector can say which resident model produced it (see `passage_memo_stamp`).
+_MODEL_GENERATION = 0
 _MODEL_LOCK = threading.Lock()
 _RERANKER = None
 _RERANKER_LOCK = threading.Lock()
@@ -147,11 +153,13 @@ def unload_model() -> bool:
     a worker that already holds the model finishes its encode on its local ref. The busy
     check + null happen under `_MODEL_LOCK`, so no new get_model() can complete a load in
     between (get_model also takes `_MODEL_LOCK`)."""
-    global _MODEL
+    global _MODEL, _MODEL_GENERATION
     with _MODEL_LOCK:
         if _MODEL is None or BGE_GUARD.inflight() > 0:
             return False
         m, _MODEL = _MODEL, None
+        _MODEL_GENERATION += 1
+    clear_passage_vectors()
     # Backends hold runtime memory the reference drop alone will not return: an
     # ONNX session owns arenas outside Python's heap, and torch owns a caching
     # allocator. `release` is where each says how to give it back.
@@ -262,7 +270,7 @@ def get_model():
     stored vector. `embedding_backend.load_encoder` keeps the heavy import local
     for the same reason this function did — a lean install must not pay it.
     """
-    global _MODEL
+    global _MODEL, _MODEL_GENERATION
     with runtime_resources.model_execution():
         if _MODEL is not None:
             return _MODEL
@@ -270,6 +278,9 @@ def get_model():
             if _MODEL is not None:
                 return _MODEL
             _MODEL = embedding_backend.load_encoder(MODEL_NAME)
+            _MODEL_GENERATION += 1
+            # A new model is a new encoder: nothing remembered before it holds.
+            clear_passage_vectors()
         BGE_GUARD.touch()  # start the idle clock at load, not epoch 0
         return _MODEL
 
@@ -1248,10 +1259,15 @@ def clear_embedding_indexes() -> None:
     with _INDEX_CACHE_LOCK:
         _INDEX_CACHE.clear()
         _CLIP_INDEX_CACHE.clear()
+    clear_passage_vectors()
 
 
 def unload_index_caches() -> dict[str, int]:
-    """Evict resident embedding/CLIP matrices from already-shared index objects."""
+    """Evict resident embedding/CLIP matrices from already-shared index objects.
+
+    The passage vectors advisory sweeps hand on are a cache of the same kind
+    and go with them."""
+    clear_passage_vectors()
     with _INDEX_CACHE_LOCK:
         embedding_indexes = list(_INDEX_CACHE.values())
         clip_indexes = list(_CLIP_INDEX_CACHE.values())
@@ -1632,6 +1648,126 @@ def _stored_text_vectors(
     return chunks, units
 
 
+#: Texts whose passage vectors an advisory sweep keeps for the next consumer.
+#: ~3 KiB of vector per text, so the whole hand-off stays a few MiB.
+PASSAGE_MEMO_MAX_TEXTS = 1024
+
+
+class PassageStamp(NamedTuple):
+    """Which encoder produced a passage vector: its vector space and its load.
+
+    Two vectors of one text are interchangeable only when all three agree.
+    ``space`` is the model and pooling a vector lives in; ``generation`` is the
+    load of that model, so a vector filed after an unload and reload is never
+    served to the new load; ``encoder`` is the encode functions in use, because
+    a substituted encoder (the bench's mixed encoder, a test fake) is another
+    space too. Compared with ``==``.
+    """
+
+    space: str
+    generation: int
+    encoder: tuple[Any, Any]
+
+
+def _vector_space() -> str:
+    """The vector space an encode produces now. One seam: an encoder profile's
+    own ``fingerprint()`` replaces this when a vault can hold more than one."""
+    return embedding_backend.fingerprint(MODEL_NAME)
+
+
+def passage_memo_stamp() -> PassageStamp:
+    """The stamp of the encoder in use now.
+
+    A sweep captures it BEFORE it encodes and files its vectors under it; a
+    consumer captures it before it looks vectors up. Any load or unload in
+    between advances ``generation``, so the vectors are dropped or not served
+    rather than trusted under a model that did not produce them.
+    """
+    return PassageStamp(_vector_space(), _MODEL_GENERATION, (embed_texts, _embed_texts))
+
+
+_PASSAGE_MEMO: OrderedDict[bytes, tuple[PassageStamp, np.ndarray]] = OrderedDict()
+_PASSAGE_MEMO_LOCK = threading.Lock()
+
+
+def _passage_key(text: str) -> bytes:
+    """A fixed 16-byte key for a text: the memo must hold vectors, not texts.
+
+    Chunking caps a paragraph's words, not its characters, so one unbroken
+    paragraph can be a megabyte; keyed by the text itself, a full memo could pin
+    a gigabyte. A 128-bit digest makes a collision between two remembered texts
+    negligible.
+    """
+    return hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=16).digest()
+
+
+def remember_passage_vectors(
+    texts: Sequence[str], vectors: Any, *, stamp: PassageStamp
+) -> None:
+    """Keep the passage vectors an advisory sweep just encoded, most recent last.
+
+    A sweep scores text no sidecar row holds: `add` sweeps its draft before the
+    commit publishes it, and an edit sweeps the page's bare paragraphs. Keeping
+    those vectors lets the same write's commit, or the page's next edit, take
+    them instead of encoding the same text again. ``stamp`` is the one the sweep
+    captured before encoding; when the encoder is no longer that one -- the model
+    was unloaded or reloaded, or another encoder is in use -- the whole batch is
+    dropped. Only passages (`is_query=False`) belong here: a query vector is a
+    different function.
+    """
+    try:
+        rows = [np.array(vector, dtype=np.float32) for vector in vectors]
+        if len(rows) != len(texts):
+            return
+        keys = [_passage_key(text) for text in texts]
+        with _PASSAGE_MEMO_LOCK:
+            if stamp != passage_memo_stamp():
+                return
+            for key, row in zip(keys, rows, strict=True):
+                if row.shape != (VECTOR_DIM,):
+                    continue
+                row.setflags(write=False)
+                _PASSAGE_MEMO[key] = (stamp, row)
+                _PASSAGE_MEMO.move_to_end(key)
+            while len(_PASSAGE_MEMO) > PASSAGE_MEMO_MAX_TEXTS:
+                _PASSAGE_MEMO.popitem(last=False)
+    except Exception as e:  # noqa: BLE001 - the hand-off is an economy, never a failure
+        log.debug("passage vectors not remembered (%s)", type(e).__name__)
+
+
+def recall_passage_vectors(
+    texts: Iterable[str], *, stamp: PassageStamp
+) -> dict[str, np.ndarray]:
+    """The remembered passage vector for each of `texts` filed under ``stamp``.
+
+    ``stamp`` is the consumer's own, captured before it looks up; nothing is
+    served once the encoder has moved on from it.
+    """
+    try:
+        if not _PASSAGE_MEMO:
+            return {}
+        wanted = [(text, _passage_key(text)) for text in dict.fromkeys(texts)]
+        with _PASSAGE_MEMO_LOCK:
+            if stamp != passage_memo_stamp():
+                return {}
+            found: dict[str, np.ndarray] = {}
+            for text, key in wanted:
+                entry = _PASSAGE_MEMO.get(key)
+                if entry is not None and entry[0] == stamp:
+                    found[text] = entry[1]
+                    _PASSAGE_MEMO.move_to_end(key)
+            return found
+    except Exception as e:  # noqa: BLE001 - a failed lookup costs an encode, nothing more
+        log.debug("passage vectors not recalled (%s)", type(e).__name__)
+        return {}
+
+
+def clear_passage_vectors() -> None:
+    """Forget every remembered passage vector."""
+    with _PASSAGE_MEMO_LOCK:
+        _PASSAGE_MEMO.clear()
+
+
 def _embed_live_chunks_reusing(
     texts: list[str], stored: dict[str, np.ndarray]
 ) -> np.ndarray:
@@ -1639,13 +1775,22 @@ def _embed_live_chunks_reusing(
 
     A vector is a function of its text, so an unchanged chunk keeps the vector
     the sidecar already published for that exact text. Appending one observation
-    to a ninety-chunk note then encodes one chunk, not ninety. With nothing to
-    reuse this is `_embed_live_chunks` unchanged."""
+    to a ninety-chunk note then encodes one chunk, not ninety. A text the
+    sidecar lacks but an advisory sweep just encoded (`add` sweeps its draft
+    before committing it) takes the sweep's vector. With nothing to reuse this
+    is `_embed_live_chunks` unchanged."""
+    recalled = recall_passage_vectors(
+        (text for text in dict.fromkeys(texts) if text not in stored),
+        stamp=passage_memo_stamp(),
+    )
+    # `reused` counts the page's own rows only, as on `advisory.best_cosine`;
+    # the hand-off is `recalled`, and the two never overlap.
+    fields = {"texts": len(texts), "reused": sum(1 for text in texts if text in stored)}
+    if recalled:
+        fields["recalled"] = sum(1 for text in texts if text in recalled)
+        stored = {**stored, **recalled}
     missing = [text for text in dict.fromkeys(texts) if text not in stored]
-    with call_spans.span(
-        "index.embeddings.reuse",
-        {"texts": len(texts), "reused": sum(1 for text in texts if text in stored)},
-    ):
+    with call_spans.span("index.embeddings.reuse", fields):
         if len(missing) == len(texts):
             return _embed_live_chunks(texts)
         lookup = {text: stored[text] for text in texts if text in stored}

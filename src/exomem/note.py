@@ -1971,7 +1971,11 @@ def note(
                     )
                     if item.path != destination
                 ]
-            cosines = corpus_aware._best_cosine_per_file(root, title=title, body=body_clean)
+            # Post-commit: the commit just published this page's chunk vectors,
+            # so the sweep reads them back instead of encoding the draft again.
+            cosines = corpus_aware._best_cosine_per_file(
+                root, title=title, body=body_clean, published_path=destination
+            )
             duplicate_candidates = corpus_aware.detect_duplicates(
                 root,
                 title=title,

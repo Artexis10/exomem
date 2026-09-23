@@ -142,7 +142,7 @@ Advisory overlap can reduce repeat work but cannot guarantee exclusive action. I
 
 Task-conditioned roles, anchor resolution, bounded typed expansion and current-state qualification produce provenance-bearing packets. Partial or ambiguous anchor resolution cannot masquerade as a complete current context. Evaluate rare anchors, unfamiliar vocabulary, multilingual names, cross-kind relationships, supersession, Records state, distractor padding, negative twins and unavailable publication. Keep existing budgets and false-positive thresholds; embeddings-on smoke is required in addition to deterministic lexical fixtures.
 
-Working continuity must reconnect an interrupted topic with its relevant recent changes, unresolved episode work and older dependencies without requiring the user to identify the earlier conversation. Reuse the existing continuity, `recent_change`, `current_state`, active Planning and pending-episode carriers. The carrier for that reconnection is the always-on `recent_context` packet block: bounded, provenance-bearing, first in the packet and present whether the turn resolved an anchor or abstained, so a turn that names nothing still arrives with what was recently worked on. This requirement does not depend on the later cross-client live-activity feed, and does not infer a commitment from conversation alone.
+Working continuity must reconnect an interrupted topic with its relevant recent changes, unresolved episode work and older dependencies without requiring the user to identify the earlier conversation. Reuse the existing continuity, `recent_change`, `current_state`, active Planning and pending-episode carriers. The carrier for that reconnection is the always-on `recent_context` packet block: bounded, provenance-bearing, first in the packet and present whether the turn resolved an anchor or abstained, so a turn that names nothing still arrives with what was recently worked on. The block reads the hot profile's signals the way the profile does (§8): an edit inside a write burst, or older than the latest burst, is not offered as recent work (a captured session is, since it records what was spoken about rather than an edit), and only the latest burst is looked for, newest first, so no turn sorts the whole registry; a page offered for its reads is ranked by its reads rather than its last edit, and the most-read one keeps a slot the way the newest open Planning item does; and a retired or superseded page is never offered, checked against the offered pages only through the request's page cache. An entry's statement is the page's authored `summary` before its `status`, and never a lifecycle word: "status: active" says where a page is in its life, not what it says. This requirement does not depend on the later cross-client live-activity feed, and does not infer a commitment from conversation alone.
 
 Preserve the distinction between an event's occurrence time, when its evidence became known, and the interval or status for which the claim holds, where the canonical source supplies them. Missing time or validity remains unknown. A recent capture or edit of an old event must not turn it into a new event; a recently repeated superseded claim must not displace its supported correction. Recency is bounded relevance evidence, never a substitute for referent resolution, provenance or current-state checks. An older unresolved dependency may matter more than unrelated fresh activity.
 
@@ -154,7 +154,7 @@ The primary integration observation is an ordinary later response using the righ
 
 User corrections and observed misses create bounded review candidates tied to evidence. The active agent can propose revisions to registered context roles, cues, aliases or vault conventions; application follows each family's applicable authority, with versions and reversible history. The current `context-roles` owner-authored override gate remains in force: agent proposals do not independently grant role-edit authority. A fresh session must consume the accepted result. Do not encode one user's equipment, suppliers or language into product source. Hard identity, provenance, authority and abstention invariants remain stable.
 
-The hot profile is a compact, derived, provenance-bearing projection with invalidation for correction, expiry, deletion and access changes. Priors affect bounded candidate ordering only, with one narrow exception, for recency alone: a recency prior may carry the always-on `recent_context` block, and it may supply the REFERENT for a turn that names nothing — a referential turn, one that speaks a declared referential cue ("continue", "where were we", "what's next"), matched on whole tokens, and says nothing else — once the cue, function words and one closed, declared set of filler words that refer to the work without naming it ("let's", "work", "pending", "yesterday") are removed, nothing may remain. Every cue word has an ordinary sense: "update my resume", "check the status of my flight" and "continue the story" each resolved the hottest anchor when a cue alone sufficed, and served its material as an answer. Being short is not a signal either, because a novel turn is short too, and a prior that answered "what's a good name for a houseplant?" with the most recently edited hub would be serving wrong material. A turn that is not referential is served by the always-on `recent_context` block and, when it names a compiled page, by the retrieval carry; the server does not guess its referent. When a packet's referent came from recency alone, the rendered block says so. That exception exists because the rule without it is what made a fresh session's "continue" resolve to nothing: §7 already requires working continuity to reconnect an interrupted topic without the user identifying the earlier conversation, and a turn whose whole content is the reference cannot be served by a rule that only ever qualifies an anchor the turn's own words already reached. The exception is bounded in every other direction. A named anchor always wins: where any candidate carries worded contact, recency is a qualifier and decides nothing. Recency never breaks a tie between named candidates, never completes the two-kinds rule for another kind, never invents facts and never resurrects superseded state — a retired anchor is not in the profile. Two or more equally hot anchors of one kind that nothing structural relates are reported as ambiguous for the agent to choose between, never guessed between by the server; equally hot anchors of different kinds are complementary and resolve together, as any two such anchors do. A previous packet's continuity references are the profile's first tier, taken whole, so on such a turn the token may supply the referent it never supplied before; on any other turn it still only qualifies an anchor the turn reached. A referential turn names nothing, so the retrieval carry is never run for it. Test stale-profile and popularity-trap negatives alongside latency and usefulness.
+The hot profile is a compact, derived, provenance-bearing projection with invalidation for correction, expiry, deletion and access changes. Priors affect bounded candidate ordering only, with one narrow exception, for recency alone: a recency prior may carry the always-on `recent_context` block, and it may supply the REFERENT for a turn that names nothing — a referential turn, one that speaks a declared referential cue ("continue", "where were we", "what's next"), matched on whole tokens, and says nothing else — once the cue, function words and one closed, declared set of filler words that refer to the work without naming it ("let's", "work", "pending", "yesterday") are removed, nothing may remain. Every cue word has an ordinary sense: "update my resume", "check the status of my flight" and "continue the story" each resolved the hottest anchor when a cue alone sufficed, and served its material as an answer. Being short is not a signal either, because a novel turn is short too, and a prior that answered "what's a good name for a houseplant?" with the most recently edited hub would be serving wrong material. A turn that is not referential is served by the always-on `recent_context` block and, when it names a compiled page, by the retrieval carry; the server does not guess its referent. When a packet's referent came from recency alone, the rendered block says so. That exception exists because the rule without it is what made a fresh session's "continue" resolve to nothing: §7 already requires working continuity to reconnect an interrupted topic without the user identifying the earlier conversation, and a turn whose whole content is the reference cannot be served by a rule that only ever qualifies an anchor the turn's own words already reached. The exception is bounded in every other direction. A named anchor always wins: where any candidate carries worded contact, recency is a qualifier and decides nothing. Recency never breaks a tie between named candidates, never completes the two-kinds rule for another kind, never invents facts and never resurrects superseded state — a retired anchor is not in the profile. Two or more equally hot anchors of one kind that nothing structural relates are reported as ambiguous for the agent to choose between, never guessed between by the server; equally hot anchors of different kinds are complementary and resolve together, as any two such anchors do. A previous packet's continuity references are the profile's first tier, taken whole, so on such a turn the token may supply the referent it never supplied before; on any other turn it still only qualifies an anchor the turn reached — an agent-picked page's own ref among them, since it is `resolved` and therefore continuity-eligible exactly as an index anchor is (D3 amendment below); a retrieval-carried page still never mints one, so it is never among them. A referential turn names nothing, so the retrieval carry is never run for it. Test stale-profile and popularity-trap negatives alongside latency and usefulness.
 
 The dreamer is bounded deterministic consolidation over changed material and indexed evidence, scheduled off the interactive path. It proposes alias/anchor, category/convention, link, hydration and profile work for the active agent. It never writes canonical knowledge autonomously. Default-off background execution, pause/quiet controls, time/memory/work budgets, checkpointed continuation, deduplication and source-version invalidation are required. Quiet optional advice cannot hide integrity failures. Online recall and capture remain usable with the dreamer disabled or failed.
 
@@ -227,7 +227,13 @@ NAMED-CONTACT test. A hit is a candidate only when at least two of the turn's
 stems that it matches are DISTINCTIVE in this corpus — document frequency at
 or below `max(3, ceil(0.5% of the indexed knowledge-base pages))`, measured
 over the same catalogue join the ranking uses, so a frequency and a rank can
-never come from two different corpora. Counting corroboration over ALL the
+never come from two different corpora. Navigation pages are not counted
+toward a stem's frequency, and raw material is counted neither toward a
+stem's frequency nor among the pages: every index that lists a title and
+every captured session that discussed a page repeats its words, and four
+captured sessions put a title word on five pages against a cap of three. The
+same two exclusions sit inside the ranking query, before its row limit, so
+the window counts only rows that can be candidates. Counting corroboration over ALL the
 turn's stems asks whether several of its words occurred on a page, which is
 co-occurrence: a two-line stub titled "Meeting notes" whose one unit read
 "Decision pending" passed that test for an ordinary turn about a meeting and
@@ -327,8 +333,12 @@ close the same case and would also reject a short turn made entirely of real
 names, which is the turn this feature exists to serve. Above the line the
 dominant page carries the packet: that page's units through the existing units
 lanes, one anchor entry of kind `page` at status `retrieval_carried` whose only
-evidence is `retrieval`, `generation.carried_by = "retrieval"`, and no continuity
-token, because a carried page is not a resolution to carry forward. Retrieval
+evidence is `retrieval`, `generation.carried_by = "retrieval"`, and a continuity
+token naming the carried page's path, so that "continue" after a carried answer
+resumes that page (as it resumes a page the agent picked) rather than the anchor
+held before it; the token still only qualifies anchors a later turn reached, and
+`generation.continuity` reports `applied` only when a ref names an index row or
+an eligible page. Retrieval
 still never resolves an anchor: no evidence kind is added and no status clause
 changes. A named anchor always wins — the carry never runs when resolution
 resolved anything, when the turn is ambiguous, or when the agent named a sense —
@@ -337,6 +347,30 @@ crosses `guard_working_set` like any other reference; it is the packet's only
 anchor, so an audience that may not see it gets the abstention the existing
 every-anchor-withheld rule already produces, never the runner-up. Cost falls only
 on turns that would have returned an empty packet.
+
+The agent may also name that same page itself: `anchor` no longer requires a
+row of the activation index. Where the ref names no such row, activation
+tests it against this SAME eligibility — not raw material, not navigation,
+current — and reuses `_carried_packet` unchanged, but at `status: "resolved"`
+and `evidence: ["agent_choice"]` rather than `retrieval_carried`/`retrieval`:
+`agent_choice` already decides an anchor alone in the soundness rule
+(decision 1 of `make-anchor-resolution-sound`), and an agent-picked page gets
+the identical outcome a resolved index anchor gets, never a third status
+invented for it. Like a retrieval-carried page, it mints a continuity token
+naming its path, so a later referential turn ("continue") resumes it through
+`continuity_page`, which serves that one page at `resolved` on `continuity`
+and `recency`. A token ref the current audience may not see is dropped before
+anything is derived from it, so it answers exactly as a ref naming nothing.
+A ref naming
+neither an index row nor an eligible page, or one this audience may not see,
+is refused with the identical `INVALID_ANCHOR` error an unknown or withheld
+anchor already share — canonicalised first (no leading `./`, no doubled
+separator, no backslash, no absolute path, nothing `posixpath.normpath` would
+spell differently) and checked against the lexical catalogue's own row before
+any file is read, so a non-canonical spelling of an ineligible page cannot
+reach the compile it used to reach and cost several times an unknown ref's
+latency on its way to the identical refusal — never a distinguishable answer,
+and never a second existence oracle opened where the first one was closed.
 
 One limit is worth stating because it is invisible from the rule: a turn
 whose content words fall outside the lexical catalogue's `[a-z0-9]`
@@ -365,8 +399,7 @@ turns the carry will not run, and the turn abstains as it did before. That
 is the right trade while the stage costs what it costs: a turn that
 overshoots the door budget comes back `unavailable`, which renders nothing
 and reads as a fault, where abstaining returns the same empty packet
-honestly and half a second sooner. What lifts it is U4, the lexical-stage
-cost work; nothing in the carry can.
+honestly and half a second sooner.
 
 A resolved project anchor was previously pathless AND linkless: built with no
 page and no neighbours, so a project-naming turn resolved the anchor and

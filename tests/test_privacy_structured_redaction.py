@@ -143,3 +143,44 @@ def test_hosted_uncataloged_extra_record_is_fully_blanked(hosted_logger, caplog)
     assert record.getMessage() == "event=hosted_log_redacted code=HOSTED_CONTENT_REDACTED"
     assert not getattr(record, "content", None)
     assert not getattr(record, "fields", None)
+
+
+def test_hosted_uvicorn_access_record_formats_through_the_real_access_formatter(
+    hosted_logger: logging.Logger,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`uvicorn.access` logs a fixed 5-tuple that
+    `uvicorn.logging.AccessFormatter.formatMessage` unpacks positionally.
+    Full blanking (`record.args = ()`, the general unstructured-record path)
+    breaks that unpack with `ValueError: not enough values to unpack
+    (expected 5, got 0)` on every access line in a hosted or cloud cell —
+    this drives a real `AccessFormatter` over the redacted record to prove
+    it formats cleanly and stays content-free (method and status kept,
+    client address and the path/query blanked).
+    """
+    from uvicorn.logging import AccessFormatter
+
+    access_logger = logging.getLogger("uvicorn.access")
+    # `logging_config._silence_uvicorn_access()` disables this logger
+    # process-wide, so an earlier server-logging test would otherwise leave
+    # nothing for caplog to capture.
+    monkeypatch.setattr(access_logger, "disabled", False)
+    monkeypatch.setattr(access_logger, "propagate", True)
+    access_logger.warning(
+        '%s - "%s %s HTTP/%s" %d',
+        "203.0.113.7",
+        "GET",
+        "/mcp?token=sensitive-bearer-value",
+        "1.1",
+        200,
+    )
+    record = caplog.records[-1]
+
+    formatted = AccessFormatter(use_colors=False).format(record)
+
+    assert "203.0.113.7" not in formatted
+    assert "/mcp" not in formatted
+    assert "sensitive-bearer-value" not in formatted
+    assert "GET" in formatted
+    assert "200" in formatted

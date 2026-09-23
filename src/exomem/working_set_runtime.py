@@ -47,7 +47,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from . import context_roles, sidecar_store, working_set, working_set_index
+from . import context_roles, sidecar_store, working_set, working_set_index, working_set_resolve
 
 log = logging.getLogger(__name__)
 
@@ -130,6 +130,7 @@ def cache_key(
     retrieval_paths: frozenset[str] | set[str] | None = None,
     continuity: str | None = None,
     anchor: str | None = None,
+    continuity_refs: frozenset[str] | set[str] = frozenset(),
 ) -> tuple:
     """The packet identity.
 
@@ -144,6 +145,9 @@ def cache_key(
     request carrying either must never be handed a packet compiled without it,
     and two different overrides of one turn must not collide. The token enters as
     a digest rather than whole, so a long-lived session cannot grow the key.
+    `continuity_refs` are the token's refs THIS audience may see
+    (`visible_continuity_refs`), for the reason `retrieval_paths` is here: one
+    token read by two audiences is two packets.
 
     `purpose` is deliberately not a parameter: it may widen or narrow what an
     audience sees, so a purpose-keyed cache would be a second, weaker copy of
@@ -157,6 +161,7 @@ def cache_key(
         int(max_chars),
         retrieval_digest(retrieval_paths),
         continuity_digest(continuity),
+        tuple(sorted(str(ref) for ref in continuity_refs)),
         str(anchor or ""),
         bool(os.environ.get("EXOMEM_DISABLE_EMBEDDINGS")),
     )
@@ -379,6 +384,10 @@ def read_continuity(
     return frozenset(payload["refs"]), CONTINUITY_APPLIED
 
 
+#: The anchor statuses a token carries forward: what the packet served.
+_MINTED_STATUSES = frozenset({"resolved", working_set_resolve.RETRIEVAL_CARRIED_STATUS})
+
+
 def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
     """The token for a packet AS SERVED, or `""` when there is nothing to carry.
 
@@ -393,13 +402,19 @@ def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
     its ref forward would let a later turn's `continuity` qualifier alone
     promote a candidate no turn ever resolved -- exactly the widening the
     resolver's soundness rule exists to stop.
+
+    A carried page (`retrieval_carried`) is minted too: it is the one page
+    the packet served, not a listed candidate, and "continue" after it can
+    only resume it if the token names it. Its ref is its path, which is what
+    `working_set.continuity_page` resumes; a later turn's `continuity` still
+    only qualifies an anchor that turn reached.
     """
     if not identity or packet.get("abstained"):
         return ""
     anchors = [
         item
         for item in packet.get("anchors") or ()
-        if isinstance(item, Mapping) and item.get("status") == "resolved"
+        if isinstance(item, Mapping) and item.get("status") in _MINTED_STATUSES
     ]
     refs = [str(item.get("ref") or "") for item in anchors]
     refs = [ref for ref in refs if ref]
@@ -426,6 +441,55 @@ def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
     except Exception:  # noqa: BLE001 - a token is an optimisation, never a promise
         log.debug("continuity token could not be minted; serving without", exc_info=True)
         return ""
+
+
+def visible_continuity_refs(
+    vault_root: Path,
+    rows: Sequence[Any],
+    refs: frozenset[str],
+    *,
+    purpose: str | None = None,
+) -> frozenset[str]:
+    """The refs of a valid token that name something the CURRENT principal
+    may see: an index row, by its reported ref or its path, or an eligible
+    compiled page (`working_set._eligible_agent_page`), whose page the
+    release plane releases to this audience (`egress.quick_page_visible`).
+
+    Every other ref is dropped here — one naming nothing, one naming raw
+    material or a retired page, and one naming a page this audience may not
+    see — before the cache key and the compile are derived from them, so a
+    withheld ref and a missing one reach everything downstream as the same
+    nothing. Decided before the compile rather than inside it because the
+    packet cache is not keyed on the principal: a visibility decision made
+    inside a compiled packet would be served to the next audience that
+    passes the same token. The token itself is still passed, and still
+    leads the hot profile when every ref went (`continuity_passed`), exactly
+    as a token naming nothing does.
+
+    Bounded by the token's own refs (at most `CONTINUITY_MAX_REFS`), each
+    checked against the rows the request already holds and, failing that,
+    one cached page read; the release decision is the one the guard reuses.
+    """
+    if not refs:
+        return frozenset()
+    from .governance import egress
+
+    kept: set[str] = set()
+    for ref in refs:
+        named = frozenset({ref})
+        paths = [
+            str(row.path)
+            for row in rows
+            if getattr(row, "path", "") and working_set_resolve.names_row(named, row)
+        ]
+        if not paths:
+            page = working_set._eligible_agent_page(vault_root, ref)
+            paths = [page] if page is not None else []
+        if paths and all(
+            egress.quick_page_visible(vault_root, path, purpose=purpose) for path in paths
+        ):
+            kept.add(ref)
+    return frozenset(kept)
 
 
 def reset_caches_for_tests() -> None:
@@ -489,82 +553,6 @@ def ensure_index(
     return READY, index, False
 
 
-#: Above this many distinct content stems, the corroboration count is bounded
-#: (see `_bounded_corroboration_terms`) instead of counting every stem the
-#: turn used. A turn at or under this size pays nothing extra for the bound:
-#: it is small enough that the corroboration filter's own cost was never the
-#: problem, so it is left exactly as it always ran.
-_LEXICAL_CORROBORATION_TRIGGER = 6
-#: How many stems a bounded corroboration count ever keeps. Every RARE stem
-#: (this vault's own rarity cap, the same one the carry lane measures rarity
-#: against) is kept regardless of this number — see `_bounded_corroboration_terms`.
-_LEXICAL_CORROBORATION_CAP = 10
-
-
-def _bounded_corroboration_terms(
-    vault_root: Path,
-    stems: Sequence[str],
-    *,
-    freshness=None,
-    recall_checkpoint=None,
-) -> tuple[str, ...] | None:
-    """The stems `lexical_evidence` asks its corroboration filter to count,
-    bounded so a long turn's per-candidate cost stops growing with every
-    extra word it happened to use.
-
-    The corroboration filter re-scans each candidate anchor's full stemmed
-    text once per counted stem, with no index behind that scan — cost is
-    `O(candidate anchors * counted stems)`, unbounded in the stem count. A
-    turn naming two products by their full names (a handful of RARE stems)
-    wrapped in ordinary sentence filler (a dozen ORDINARY ones) pays for
-    every one of those filler stems today, though the filler was never what
-    made a page a match: `min_matched_terms=2` exists to demand DISTINCTIVE
-    corroboration, and an ordinary word occurring on most of the catalogue is
-    not distinctive.
-
-    Returns `None` — count every stem, exactly as before this bound existed
-    — when the turn is at or under `_LEXICAL_CORROBORATION_TRIGGER` (nothing
-    to save) or when this vault's document frequency is unavailable (an
-    unbounded count is always CORRECT, only sometimes slow; a bound is never
-    guessed from a proof this call could not get).
-
-    Every stem THIS vault's catalogue counts as rare — `frequencies.get(stem,
-    0) <= working_set.rare_document_cap(corpus_pages)`, the identical
-    corpus-relative cutoff `rare_turn_terms` measures the carry lane's
-    rarity against — is kept, unconditionally and with no cap of its own: a
-    bound that dropped one could be dropping the only word left that reaches
-    a named anchor, and a turn can name as many distinct rare things as it
-    likes. Only stems ABOVE that cutoff are ever trimmed, least-frequent
-    first, down to `_LEXICAL_CORROBORATION_CAP` stems in total — narrowing
-    the filter toward its own already-stated purpose (distinctive words),
-    never past the rare stems it must never lose.
-    """
-    if len(stems) <= _LEXICAL_CORROBORATION_TRIGGER:
-        return None
-    from . import lexstore
-
-    result = lexstore.term_document_frequencies(
-        vault_root,
-        stems,
-        scope="kb",
-        freshness=freshness,
-        allow_delta=False,
-        recall_checkpoint=recall_checkpoint,
-    )
-    if not result.readiness.complete:
-        return None
-    frequencies, corpus_pages = result.value or ({}, 0)
-    cap = working_set.rare_document_cap(corpus_pages)
-    ranked = sorted(stems, key=lambda stem: (frequencies.get(stem, 0), stem))
-    rare = [stem for stem in ranked if frequencies.get(stem, 0) <= cap]
-    if len(rare) >= _LEXICAL_CORROBORATION_CAP:
-        return tuple(rare)
-    rare_set = set(rare)
-    filler = [stem for stem in ranked if stem not in rare_set]
-    bounded = rare + filler[: _LEXICAL_CORROBORATION_CAP - len(rare)]
-    return tuple(bounded)
-
-
 def lexical_evidence(
     vault_root: Path, turn: str, rows, *, limit: int, freshness=None, recall_checkpoint=None
 ):
@@ -581,12 +569,9 @@ def lexical_evidence(
     try:
         # A full-page match on the same single name word is not a second fact.
         # Retain two distinct content stems; exact aliases still resolve alone.
-        content_turn = content_words(turn)
-        corroboration_tokens = _bounded_corroboration_terms(
-            vault_root,
-            content_stems(turn),
-            freshness=freshness,
-            recall_checkpoint=recall_checkpoint,
+        content_turn = " ".join(
+            token for token in working_set_index.tokens_of(working_set_index.normalize(turn))
+            if token not in working_set_index.STOPWORDS
         )
         result = lexstore.search_bm25_result(
             vault_root,
@@ -597,7 +582,6 @@ def lexical_evidence(
             allowed_paths=set(by_path),
             allow_delta=False,
             min_matched_terms=2,
-            corroboration_tokens=corroboration_tokens,
             recall_checkpoint=recall_checkpoint,
         )
         if not result.readiness.complete:
@@ -786,6 +770,8 @@ def rare_turn_terms(
     # Navigation pages are not counted: an index or a log repeats the titles
     # it lists, so a folder-level one beside the vault's own pushed a title
     # word past the cap and the page named by its title was never carried.
+    # Raw material is not counted either, nor counted as a page: four
+    # captured sessions that discussed a page did the same to its title.
     result = lexstore.term_document_frequencies(
         vault_root,
         stems,
@@ -794,6 +780,7 @@ def rare_turn_terms(
         allow_delta=False,
         recall_checkpoint=recall_checkpoint,
         exclude_navigation=True,
+        exclude_raw_material=True,
     )
     if not result.readiness.complete:
         return (), 0, result.readiness.status
@@ -900,11 +887,18 @@ def carry_candidates(
             corroboration_tokens=list(rare),
             corroboration_groups=[list(pair) for pair in pairs],
             recall_checkpoint=recall_checkpoint,
+            # Inside the query, so the LIMIT counts only rows that can be
+            # candidates: twelve captures that repeat the turn filled the
+            # window on their own when they were cut after it.
+            exclude_navigation=True,
+            exclude_raw_material=True,
         )
         if not result.readiness.complete:
             return (), result.readiness.status
         # Raw material, navigation pages and retired pages are dropped
-        # BEFORE the caller counts what the turn named. A superseded note
+        # BEFORE the caller counts what the turn named. The query already
+        # left the first two out; the check stays here too, where the path
+        # is read the way the index reads it (backslashes folded). A superseded note
         # and the note that superseded it answer to the same phrase, so
         # leaving it in would read as two named pages and refuse every
         # revised page in the vault; an index or a log repeats every title
@@ -1065,6 +1059,14 @@ def serve(
     except Exception:  # noqa: BLE001 - the whole operation is additive and abstains
         log.warning("continuity evaluation failed; ignoring the token", exc_info=True)
         continuity_refs, continuity_state = frozenset(), CONTINUITY_STALE
+    continuity_passed = continuity_state == CONTINUITY_APPLIED
+    try:
+        continuity_refs = visible_continuity_refs(
+            root, index.anchors(), continuity_refs, purpose=purpose
+        )
+    except Exception:  # noqa: BLE001 - a ref that cannot be decided is not disclosed
+        log.warning("continuity visibility check failed; dropping the refs", exc_info=True)
+        continuity_refs = frozenset()
     key = cache_key(
         freshness_key=freshness_key,
         index_generation=index.generation(),
@@ -1074,6 +1076,7 @@ def serve(
         retrieval_paths=retrieval_paths,
         continuity=continuity,
         anchor=anchor,
+        continuity_refs=continuity_refs,
     )
     cache_identity = (str(root.absolute()), key, lexical_state, index.token())
     with _CACHE_LOCK:
@@ -1109,7 +1112,8 @@ def serve(
             freshness_key=_key_text(freshness_key),
             freshness_snapshot=freshness_snapshot,
             continuity_refs=continuity_refs,
-            continuity_minted_ns=continuity_minted_ns(continuity) if continuity_refs else None,
+            continuity_minted_ns=continuity_minted_ns(continuity) if continuity_passed else None,
+            continuity_passed=continuity_passed,
             anchor=anchor,
             lexical_seconds=lexical_seconds,
         )
@@ -1130,6 +1134,11 @@ def serve(
     except Exception:  # noqa: BLE001 - the whole operation is additive and abstains
         log.warning("activation compilation failed; abstaining", exc_info=True)
         return _abstain_unavailable()
+    # `compile_packet` reports whether a visible ref of a valid token qualified
+    # anything; a token that qualified nothing contributed nothing, and
+    # `applied` would claim it had.
+    if continuity_state == CONTINUITY_APPLIED:
+        continuity_state = packet["generation"].get("continuity") or CONTINUITY_STALE
     packet["generation"]["continuity"] = continuity_state
     packet["generation"]["lexical_evidence"] = lexical_state
     changed = evidence_changed()

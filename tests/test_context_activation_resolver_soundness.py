@@ -401,7 +401,8 @@ def test_r3_a_named_project_carries_the_packet_past_two_weak_unrelated_entities(
 
 
 def _live_hot_profile(vault: Path, *, freshest: str) -> None:
-    """Every page old, `freshest` just edited, the registry seeded."""
+    """Every page old, `freshest` just edited, the registry seeded. The old
+    pages are a minute apart: each its own edit, not a write burst."""
     import os
     import time
 
@@ -409,7 +410,7 @@ def _live_hot_profile(vault: Path, *, freshest: str) -> None:
 
     now = time.time()
     for index, page in enumerate(sorted((vault / "Knowledge Base").rglob("*.md"))):
-        os.utime(page, (now - 10_000 - index, now - 10_000 - index))
+        os.utime(page, (now - 10_000 - index * 60, now - 10_000 - index * 60))
     target = vault / freshest
     os.utime(target, (now, now))
     file_watcher.FileWatcher(vault)._reconcile_once(seed=True)

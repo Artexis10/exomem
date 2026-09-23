@@ -26,11 +26,14 @@ Three properties the timing has to have:
   Draining into a live batch wastes a pass: the epoch will not admit incremental
   repair mid-flight, and a whole-vault rebuild loses its optimistic
   concurrency check to whichever write lands next. Repair wants the quiet moment
-  just after a burst, not the middle of one.
+  just after a burst, not the middle of one. For whole-vault work that moment is
+  a quiet window as long as one whole-vault pass: a shorter gap cannot publish.
+  The window is bounded: no attempt waits for it longer than the retry ceiling.
 * **Bounded.** Debt that cannot be drained -- an unsettled epoch, a vault not yet
   ready -- must not spin. The retry interval backs off to a ceiling, so a queue
   that is stuck costs one attempt every couple of minutes rather than one per
-  second.
+  second. A write's debt signal cannot cut a whole-vault backoff short; only a
+  publication by another owner can, because that is what ends the condition.
 
 The periodic reconcile stays exactly as it was. It remains the cross-process
 backstop for debt this process never observed.
@@ -41,6 +44,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -64,6 +68,17 @@ MAX_RETRY_SECONDS = 120.0
 #: single call, matching the cap the periodic reconcile already applies.
 DRAIN_LIMIT = 64
 
+#: Quiet time a whole-vault repair waits for after the last graph debt signal,
+#: until this process has timed a whole-vault pass. A whole-vault pass publishes
+#: only if no write lands while it runs, so starting one mid-burst buys a pass
+#: the next write throws away. Once a pass has been timed, the window is that
+#: pass's duration instead (up to the retry ceiling), with no floor: a gap
+#: shorter than one pass cannot publish one, and a gap as long as one can.
+#: Either way an attempt is held at most `MAX_RETRY_SECONDS` past the first
+#: debt signal it was held for, because the window is a preference: a stream
+#: that never pauses for one pass must still get attempts.
+WHOLE_VAULT_SETTLE_SECONDS = 5.0
+
 _LOCK = threading.Lock()
 _thread: threading.Thread | None = None
 _stop = threading.Event()
@@ -73,9 +88,31 @@ _stop = threading.Event()
 #: one extra drain that finds an empty queue and goes back to sleep.
 _DEBT = threading.Event()
 
+#: Set when another owner published the graph, which ends any backoff the drain
+#: is serving: the condition that backoff described is gone.
+_PROGRESS = threading.Event()
+
+#: Monotonic time of the last debt signal: the start of the current quiet window.
+_last_debt = 0.0
+
 
 def note_graph_debt() -> None:
-    """Wake the drain: this process just queued epistemic-graph repair."""
+    """Wake the drain: this process just queued epistemic-graph repair.
+
+    A signal from any other thread comes from a write and starts the quiet
+    window whole-vault repair waits for. One from the drain's own thread -- the
+    marker it raises for an unreadable graph -- only wakes the loop: nothing was
+    written, so there is nothing to wait out.
+    """
+    global _last_debt
+    if threading.current_thread() is not _thread:
+        _last_debt = time.monotonic()
+    _DEBT.set()
+
+
+def note_graph_progress() -> None:
+    """Wake the drain without waiting out a backoff: the graph was just published."""
+    _PROGRESS.set()
     _DEBT.set()
 
 
@@ -201,30 +238,26 @@ def _pending(vault_root: Path) -> bool:
     )
 
 
-def _recover_once(vault_root: Path) -> bool:
-    """Re-arm a rebuild that stopped. Never raises; True when it recovered.
-
-    Draining the queue is not the whole of convergence. When the incremental
-    path falls back, the whole-vault rebuild that replaces it is terminal if it
-    stops: `graph_sync` records the error, clears `_running` and returns. The
-    persisted barrier it leaves is the retry signal, and until now the only
-    thing that acted on it was the watcher's reconcile -- 300s, and skipped
-    entirely under `EXOMEM_DISABLE_FILE_WATCHER`.
-
-    A product E2E run showed the cost exactly: the queue settled four times in
-    seven seconds, the rebuild stopped at +7.3s, and the server then answered
-    readiness polls for the remaining 120s without ever attempting another one.
-    `recover_suspended_graph` declines by itself when the barrier is absent or
-    when a publication is already proven doomed for this checkpoint, so calling
-    it on a settled queue costs a few cheap checks in the ordinary case.
-    """
-    from . import epistemic_graph
+def _marker_pending(vault_root: Path) -> bool:
+    """True when a whole-vault rebuild marker stands. Never raises."""
+    from . import deferred_index
 
     try:
-        return bool(epistemic_graph.recover_suspended_graph(vault_root))
-    except Exception:  # noqa: BLE001 - the barrier stays, so the signal stays
-        log.warning("graph drain: barrier recovery failed; barrier remains", exc_info=True)
+        return deferred_index.graph_full_rebuild_pending(vault_root) is not None
+    except Exception:  # noqa: BLE001 - an unreadable marker is not a standing one
         return False
+
+
+def _whole_vault_pending(vault_root: Path) -> bool:
+    """True when this pass would rebuild the whole vault rather than repair paths.
+
+    A standing marker is converged by a whole-vault rebuild, and a barrier is
+    recovered by one. Those are the passes a concurrent write invalidates, so
+    they are the ones that wait for a quiet window and hold their backoff. An
+    unavailable graph on its own is not: the ordinary per-path fence withdraws
+    availability and the drain restores it by repairing the queued paths.
+    """
+    return _marker_pending(vault_root) or _barrier_pending(vault_root)
 
 
 def _drain_once(vault_root: Path) -> int:
@@ -277,13 +310,41 @@ def _republish_once(vault_root: Path) -> bool:
         return False
 
 
+def _per_path_work_once(vault_root: Path) -> int:
+    """The per-path half of a pass, for while whole-vault work is held.
+
+    Per-path repair is never held: it is proportional, and a write landing
+    mid-drain only appends work. It runs only when no marker stands -- with one
+    standing, the queue's next step is the marker's whole-vault convergence.
+    Never raises.
+    """
+    if not _queue_pending(vault_root) or _marker_pending(vault_root):
+        return 0
+    return _drain_once(vault_root)
+
+
 def _work_once(vault_root: Path) -> int:
     """Drain what is queued, then repair a barrier if one is still standing.
 
     Both in one pass, in that order: draining is proportional and may itself
     clear the condition the rebuild would have been re-run for.
+
+    When the marker's convergence ran a whole-vault pass in this pass, barrier
+    recovery waits for the next one: it would rebuild the same graph again, and
+    a publication would have cleared the barrier anyway. A convergence that ran
+    no pass -- a busy boundary, an unavailable epoch -- does not hold recovery
+    back.
     """
-    processed = _drain_once(vault_root) if _queue_pending(vault_root) else 0
+    from . import epistemic_graph
+
+    processed = 0
+    attempted = False
+    if _queue_pending(vault_root):
+        with epistemic_graph.observe_full_marker_dispatches() as dispatches:
+            processed = _drain_once(vault_root)
+        attempted = any(result.whole_vault_attempted for result in dispatches)
+    if attempted:
+        return processed
     if _barrier_pending(vault_root):
         if _recover_once(vault_root):
             processed += 1
@@ -319,40 +380,107 @@ def _work_once(vault_root: Path) -> int:
     return processed
 
 
+def _whole_vault_settle(vault_root: Path) -> float:
+    """The quiet window a whole-vault pass needs: one timed pass, else the floor."""
+    from . import epistemic_graph
+
+    try:
+        last_pass = epistemic_graph.last_whole_vault_pass_seconds(vault_root)
+    except Exception:  # noqa: BLE001 - an unknown duration falls back to the floor
+        last_pass = None
+    if last_pass is None:
+        return WHOLE_VAULT_SETTLE_SECONDS
+    return min(MAX_RETRY_SECONDS, max(0.0, last_pass))
+
+
+def _whole_vault_hold(vault_root: Path, not_before: float, held_since: float | None) -> float:
+    """Seconds a whole-vault pass must still wait, or 0.0 when it may run now.
+
+    Two waits, whichever ends later: the backoff after an attempt that made no
+    progress, and a quiet window since the last debt signal. The quiet window
+    never extends past `MAX_RETRY_SECONDS` after `held_since`, the first debt
+    signal this attempt was held for. Per-path repair is never held -- it is
+    proportional, and a write landing mid-drain only appends work rather than
+    invalidating it.
+    """
+    now = time.monotonic()
+    quiet = _last_debt + _whole_vault_settle(vault_root) - now
+    if held_since is not None:
+        quiet = min(quiet, held_since + MAX_RETRY_SECONDS - now)
+    return max(0.0, not_before - now, quiet)
+
+
 def _run(vault_root: Path) -> None:
     interval = IDLE_POLL_SECONDS
+    # The no-progress backoff (0.0 after progress), the earliest moment the next
+    # whole-vault attempt may start, and the first debt signal the next
+    # whole-vault attempt is being held for (None while nothing is held).
+    backoff = 0.0
+    not_before = 0.0
+    held_since: float | None = None
     while not _stop.is_set():
         signalled = _DEBT.wait(timeout=interval)
         if _stop.is_set():
             break
         _DEBT.clear()
+        if _PROGRESS.is_set():
+            # Another owner published the graph; the backoff described a graph
+            # that no longer exists.
+            _PROGRESS.clear()
+            backoff = 0.0
+            not_before = 0.0
+            held_since = None
         if signalled:
             # Settle. `wait` returning True here means a stop was requested.
             if _stop.wait(DEBOUNCE_SECONDS):
                 break
         if not _pending(vault_root):
+            backoff = 0.0
+            held_since = None
             interval = IDLE_POLL_SECONDS
             continue
+        whole_vault = _whole_vault_pending(vault_root)
+        hold = _whole_vault_hold(vault_root, not_before, held_since) if whole_vault else 0.0
+        if hold > 0.0:
+            # A write signal during the hold only wakes this loop to re-read the
+            # quiet window; it can never start the attempt early. Every write
+            # of a burst therefore shares the one attempt after it. Per-path
+            # work behind a barrier is not held: it drains on every wake.
+            if held_since is None:
+                held_since = _last_debt or time.monotonic()
+            drained = _per_path_work_once(vault_root)
+            interval = min(hold, RETRY_SECONDS) if drained else hold
+            continue
+        # This attempt is no longer held; the next one gets its own ceiling.
+        held_since = None
         processed = _work_once(vault_root)
         if not _pending(vault_root):
             log.info("graph drain: graph settled (%d unit(s) of work cleared)", processed)
+            backoff = 0.0
+            not_before = 0.0
             interval = IDLE_POLL_SECONDS
         elif processed:
             # Progress with work left: come straight back for the remainder.
+            backoff = 0.0
+            not_before = 0.0
             interval = RETRY_SECONDS
         else:
             # No progress. The ordinary cause is an epoch that is not settled
             # yet, which the next pass clears -- so retry, but back off, because
             # the other cause is a queue that cannot drain at all and must not
             # become a busy loop.
-            interval = min(
-                MAX_RETRY_SECONDS, RETRY_SECONDS if interval >= IDLE_POLL_SECONDS else interval * 2
-            )
+            backoff = min(MAX_RETRY_SECONDS, RETRY_SECONDS if backoff <= 0.0 else backoff * 2)
+            interval = backoff
+            if whole_vault:
+                # A whole-vault attempt that lost -- to a busy boundary, a
+                # rebuild already in flight, or a write landing mid-pass -- is
+                # retried on the backoff alone, never on a write's signal.
+                not_before = time.monotonic() + backoff
 
 
 def start(vault_root: Path) -> threading.Thread | None:
     """Start the drain daemon. Idempotent -- a second call returns the live one."""
-    global _thread
+    global _thread, _last_debt
     if disabled():
         log.info("graph drain disabled by EXOMEM_DISABLE_GRAPH_DRAIN")
         return None
@@ -360,6 +488,10 @@ def start(vault_root: Path) -> threading.Thread | None:
         if _thread is not None and _thread.is_alive():
             return _thread
         _stop.clear()
+        _PROGRESS.clear()
+        # A new daemon knows of no burst in progress; its first whole-vault pass
+        # waits only for signals it hears itself.
+        _last_debt = 0.0
         _DEBT.set()  # Drain once at startup: debt can outlive the process that queued it.
         thread = threading.Thread(
             target=_run,

@@ -972,13 +972,17 @@ def test_a_resolved_anchor_wins_over_a_dominant_hit(carry_vault: Path, budget_fr
     assert CARRY_PAGE not in _unit_paths(packet)
 
 
-def test_a_carried_packet_mints_no_continuity_token(carry_vault: Path, budget_free) -> None:
-    """Lane U2 owns referents. A carried page is not a resolution to carry
-    forward, and a later turn's `continuity` must not be able to promote one."""
+def test_a_carried_packet_mints_a_token_naming_the_carried_page(
+    carry_vault: Path, budget_free
+) -> None:
+    """Was "mints no token" (U3); R-P2: "continue" after a carried answer must
+    resume that page, which it can only do if the token names it."""
     packet = working_set.compile_packet(carry_vault, turn=CARRY_TURN, max_chars=4000)
     assert packet["generation"]["carried_by"] == "retrieval"
 
-    assert working_set_runtime.mint_continuity(packet, identity="vault-identity") == ""
+    token = working_set_runtime.mint_continuity(packet, identity="vault-identity")
+
+    assert working_set_runtime.decode_continuity(token)["refs"] == [CARRY_PAGE]
 
 
 def test_the_carry_costs_only_the_turns_that_would_have_abstained(
@@ -1342,7 +1346,9 @@ def test_filtering_happens_after_a_wider_fetch(
     page and turn "two named pages, abstain" into "one named page, carry" —
     the count the whole decision rests on, settled by where the limit
     happened to fall. The rows are stubbed so the ORDER of the cut and the
-    filter is what is under test, not a corpus arranged to produce it.
+    filter is what is under test, not a corpus arranged to produce it. The
+    query itself now leaves raw material out before its LIMIT (R-P1); the
+    stub stands for rows that reach the Python filter anyway.
     """
     asked: list[int] = []
     real = lexstore.search_bm25_result
@@ -1847,9 +1853,9 @@ def test_navigation_pages_are_never_listed_as_named(vault: Path, budget_free) ->
 def test_the_fetch_window_covers_the_navigation_filter(
     prose_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Navigation rows are removed AFTER the full window is fetched, like raw
-    material, so a window whose head is all removed rows still holds the row
-    that proves the turn named two pages. The window is filled to its last
+    """Navigation rows that reach the Python filter are removed AFTER the full
+    window is fetched, like raw material, so a window whose head is all
+    removed rows still holds the row that proves the turn named two pages. The window is filled to its last
     slot with removed rows, at every directory level, and the count of
     removed rows is checked."""
     asked: list[int] = []
@@ -1885,190 +1891,6 @@ def test_the_fetch_window_covers_the_navigation_filter(
     assert removed == window - 2
     assert sum(1 for i in range(window - 2) if _is_navigation(removed_rows[i % 6])) >= 4
     assert working_set.dominant_carry(hits) is None
-
-
-# --------------------------------------------------------------------------- #
-# U4 — bounding `lexical_evidence`'s corroboration term count on a long turn
-# --------------------------------------------------------------------------- #
-#
-# `lexical_evidence`'s corroboration filter (`min_matched_terms=2`) re-scans
-# each CANDIDATE anchor's full stemmed text once per counted stem, with no
-# index behind that scan (`instr()` over raw text) — cost is
-# `O(candidate anchors * counted stems)`, unbounded in how many content words
-# the turn used. A turn wrapping two distinctive product names in a dozen
-# words of ordinary sentence filler paid for every one of those filler words
-# too, though they were never what made a page match.
-
-#: Prose long enough, and repeated across enough anchor pages, that its own
-#: words are genuinely COMMON in this fixture's corpus — the shape that lets
-#: an ordinary-language turn's OR match reach nearly the whole anchor
-#: catalogue, and that makes an uncapped per-candidate corroboration scan
-#: grow with every one of those ordinary words.
-_LEXICAL_COMMON_PROSE = (
-    "This entity's record is reviewed on a regular cadence. The team tracks "
-    "its status, discusses open questions in the weekly meeting, and follows "
-    "up on any pending decision before the next planning call. Nothing about "
-    "the process, the schedule or the owner has changed since the last "
-    "summary, and the timeline remains on track for this project."
-)
-
-#: A turn shaped like the live regression this bound closes: ordinary
-#: sentence filler — words `_LEXICAL_COMMON_PROSE` puts on nearly every
-#: anchor page — wrapped around two distinctive, rare product-style names
-#: being compared. Invented, generic vocabulary throughout.
-_LEXICAL_LONG_TURN = (
-    "Should I still go with the quenlow vantix for this project, given the "
-    "schedule, the owner, the timeline and the pending decision, or "
-    "reconsider the harrow delkin instead"
-)
-#: The turn's own two rare, distinctive product names — the only route to
-#: their pages, and the words a bound must never drop.
-_LEXICAL_RARE_STEMS = frozenset({"quenlow", "vantix", "harrow", "delkin"})
-
-
-def _seed_lexical_cost_vault(vault: Path, *, anchors: int = 60) -> None:
-    """Many anchor ENTITY pages sharing one ordinary paragraph, plus two
-    entities each carrying one genuinely rare, distinctive name."""
-    kb = vault / "Knowledge Base" / "Entities"
-    for index in range(anchors):
-        _write(
-            kb / f"generic-entity-{index:04d}.md",
-            "---\ntype: entity\nstatus: active\nupdated: 2026-09-01\n---\n\n"
-            f"# Generic entity {index:04d}\n\n## Summary\n\n"
-            f"- [note] {_LEXICAL_COMMON_PROSE} ^e-{index}\n",
-        )
-    _write(
-        kb / "quenlow-vantix.md",
-        "---\ntype: entity\nstatus: active\nupdated: 2026-09-01\n---\n\n"
-        "# Quenlow Vantix\n\n## Summary\n\n"
-        f"- [note] {_LEXICAL_COMMON_PROSE} ^r-1\n",
-    )
-    _write(
-        kb / "harrow-delkin.md",
-        "---\ntype: entity\nstatus: active\nupdated: 2026-09-01\n---\n\n"
-        "# Harrow Delkin\n\n## Summary\n\n"
-        f"- [note] {_LEXICAL_COMMON_PROSE} ^r-2\n",
-    )
-    lexstore.ensure_fresh(vault)
-    working_set_runtime.reset_caches_for_tests()
-    working_set_index.WorkingSetIndex(vault).rebuild()
-
-
-@pytest.fixture
-def lexical_cost_vault(vault: Path) -> Path:
-    _seed_lexical_cost_vault(vault)
-    return vault
-
-
-def _capture_corroboration_tokens(monkeypatch: pytest.MonkeyPatch) -> list:
-    """Records the `corroboration_tokens` each `search_bm25_result` call
-    receives, while still running the real query underneath it."""
-    captured: list = []
-    real = lexstore.search_bm25_result
-
-    def capturing(*args, **kwargs):
-        captured.append(kwargs.get("corroboration_tokens"))
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(lexstore, "search_bm25_result", capturing)
-    return captured
-
-
-def test_a_long_turn_bounds_its_corroboration_term_count(
-    lexical_cost_vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A turn with a dozen-plus content words must not make the corroboration
-    filter count every one of them: its cost is per candidate anchor times
-    counted terms, and the candidate set here is the whole catalogue."""
-    captured = _capture_corroboration_tokens(monkeypatch)
-    rows = working_set_index.WorkingSetIndex(lexical_cost_vault).anchors()
-
-    working_set_runtime.lexical_evidence(
-        lexical_cost_vault, _LEXICAL_LONG_TURN, rows, limit=8,
-    )
-
-    assert captured, "the ranking query never ran"
-    tokens = captured[0]
-    assert tokens is not None, "the corroboration count was never bounded"
-    assert len(tokens) < len(working_set_runtime.content_stems(_LEXICAL_LONG_TURN))
-    assert len(tokens) <= working_set_runtime._LEXICAL_CORROBORATION_CAP
-
-
-def test_the_bound_never_drops_a_rare_stem(
-    lexical_cost_vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The turn's two product names are the only route to their pages; a
-    bound that dropped either would break exactly what corroboration exists
-    to protect — recall soundness over raw cost."""
-    captured = _capture_corroboration_tokens(monkeypatch)
-    rows = working_set_index.WorkingSetIndex(lexical_cost_vault).anchors()
-
-    working_set_runtime.lexical_evidence(
-        lexical_cost_vault, _LEXICAL_LONG_TURN, rows, limit=8,
-    )
-
-    tokens = set(captured[0] or ())
-    assert _LEXICAL_RARE_STEMS <= tokens, (_LEXICAL_RARE_STEMS, tokens)
-
-
-def test_a_turn_naming_only_a_rare_product_is_still_ranked_first(
-    lexical_cost_vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Functional check, not just structural: the bound must not change what
-    a turn naming a product together with several of the ordinary words
-    every anchor shares actually resolves to.
-
-    The turn names TWO products in the same way, so which of the two ranks
-    first is a tie the bound has no business deciding. What the bound must
-    preserve is the ranking itself: both named pages above every generic
-    one, in exactly the order the unbounded query gives."""
-    rows = working_set_index.WorkingSetIndex(lexical_cost_vault).anchors()
-
-    hits, status = working_set_runtime.lexical_evidence(
-        lexical_cost_vault, _LEXICAL_LONG_TURN, rows, limit=8,
-    )
-
-    assert status == "available"
-    assert hits, "the turn's own two named products were never ranked"
-    assert {hit.path for hit in hits[:2]} == {
-        "Knowledge Base/Entities/quenlow-vantix.md",
-        "Knowledge Base/Entities/harrow-delkin.md",
-    }
-
-    monkeypatch.setattr(
-        working_set_runtime, "_bounded_corroboration_terms", lambda *a, **k: None
-    )
-    unbounded, unbounded_status = working_set_runtime.lexical_evidence(
-        lexical_cost_vault, _LEXICAL_LONG_TURN, rows, limit=8,
-    )
-    assert unbounded_status == "available"
-    assert [hit.path for hit in hits] == [hit.path for hit in unbounded]
-
-
-def test_a_short_turn_pays_for_no_rarity_lookup(
-    lexical_cost_vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A turn small enough that the corroboration filter's own cost was
-    never the problem pays nothing extra for the bound: no document-
-    frequency round trip, and the filter still counts every one of its
-    (few) stems, exactly as it always has."""
-    calls: list[str] = []
-    real = lexstore.term_document_frequencies
-
-    def counting(*args, **kwargs):
-        calls.append("df")
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(lexstore, "term_document_frequencies", counting)
-    captured = _capture_corroboration_tokens(monkeypatch)
-    rows = working_set_index.WorkingSetIndex(lexical_cost_vault).anchors()
-
-    working_set_runtime.lexical_evidence(
-        lexical_cost_vault, "what about the quenlow vantix", rows, limit=8,
-    )
-
-    assert calls == [], "a short turn paid for a rarity lookup it never needed"
-    assert captured == [None], captured
 
 
 # --------------------------------------------------------------------------- #
@@ -2111,3 +1933,337 @@ def test_folder_navigation_pages_cannot_push_a_title_past_the_rarity_cap(
         "Knowledge Base/Notes/Research/kelvane-throughput.md"
     ]
     assert packet["generation"].get("carried_by") == "retrieval", packet.get("abstention")
+
+
+# --------------------------------------------------------------------------- #
+# R-O2: "continue" after the agent picked a page resumes that page.
+# --------------------------------------------------------------------------- #
+
+
+def _picked_page_token(vault: Path) -> tuple[str, str]:
+    """The agent picks the first page a named-pages abstention listed; the
+    served packet's token names that page. Cargo Sled stays the vault's
+    freshest edit throughout, so a fall-through to the edit tier would show."""
+    from exomem import commands
+
+    _make_cargo_sled_the_freshest_edit(vault)
+    named = commands.op_activate_context(vault, turn=TIE_TURN)
+    pages = [item["ref"] for item in named["anchors"] if item["status"] == "retrieval_named"]
+    assert pages, named["anchors"]
+    picked = commands.op_activate_context(vault, turn=TIE_TURN, anchor=pages[0])
+    assert [item["evidence"] for item in picked["anchors"]] == [["agent_choice"]]
+    token = picked["continuity"]
+    assert working_set_runtime.decode_continuity(token)["refs"] == [pages[0]]
+    return pages[0], token
+
+
+def test_continue_after_an_agent_pick_resumes_the_picked_page(carry_vault: Path) -> None:
+    """The reviewer's r4 pick-continue: the token named the picked research
+    note, which is not an index row, so the continuity tier matched nothing
+    and "continue" answered with the freshest anchor while reporting the
+    token `applied`."""
+    from exomem import commands
+
+    page, token = _picked_page_token(carry_vault)
+
+    packet = commands.op_activate_context(carry_vault, turn="continue", continuity=token)
+
+    assert packet["abstained"] is False, (packet.get("abstention"), packet["anchors"])
+    assert [(item["path"], item["status"], item["evidence"]) for item in packet["anchors"]] == [
+        (page, "resolved", ["continuity", "recency"])
+    ]
+    assert packet["generation"]["carried_by"] == "continuity"
+    assert packet["generation"]["continuity"] == "applied"
+    assert packet["units"]
+    assert {unit["provenance"]["path"] for unit in packet["units"]} == {page}
+    # And the answer carries forward, naming the same page.
+    assert working_set_runtime.decode_continuity(packet["continuity"])["refs"] == [page]
+
+
+def test_continue_after_a_pick_the_audience_may_not_see_abstains(carry_vault: Path) -> None:
+    """A page the audience may not see is treated as a missing one (R-Q N1:
+    `withheld` here told the caller the page existed), and the turn never
+    falls through to the freshest anchor instead."""
+    from test_governance_egress import _external, _reset_caches, write_rule, write_scope
+
+    from exomem import commands
+    from exomem.governance.principal import request_scope
+
+    _page, token = _picked_page_token(carry_vault)
+    write_scope(carry_vault, paths="Knowledge Base/Notes/Research/*", name="Research")
+    write_rule(carry_vault, ceiling=0)
+    _reset_caches()
+    working_set_runtime.reset_caches_for_tests()
+
+    with request_scope(_external()):
+        packet = commands.op_activate_context(carry_vault, turn="continue", continuity=token)
+
+    assert packet["abstained"] is True
+    assert packet["abstention"] == {"reason": "unresolved"}
+    assert packet["generation"]["continuity"] == "stale"
+    assert "carried_by" not in packet["generation"]
+    assert packet["units"] == []
+    assert not [item for item in packet.get("anchors") or () if item.get("status") == "resolved"]
+
+
+def test_continue_with_a_fresh_token_naming_nothing_eligible_abstains(
+    carry_vault: Path,
+) -> None:
+    """The picked page is gone. The token still leads — nothing has been
+    edited since it was served — so the turn abstains with its recent
+    context rather than fall through to the edit tier."""
+    from exomem import commands
+
+    page, token = _picked_page_token(carry_vault)
+    (carry_vault / page).unlink()
+    lexstore.ensure_fresh(carry_vault)
+    working_set_runtime.reset_caches_for_tests()
+
+    packet = commands.op_activate_context(carry_vault, turn="continue", continuity=token)
+
+    assert packet["abstained"] is True
+    assert packet["abstention"] == {"reason": "unresolved"}
+    assert not [item for item in packet["anchors"] if item["status"] == "resolved"]
+    assert packet["recent_context"]
+
+
+# --------------------------------------------------------------------------- #
+# R-P1: raw material counts toward neither rarity nor the ranking window.
+# --------------------------------------------------------------------------- #
+
+
+def _seed_session_captures(
+    vault: Path,
+    count: int,
+    *,
+    line: str = "We talked about the kelvane throughput ceiling again.",
+    repeats: int = 1,
+) -> None:
+    """Captured sessions that discussed the page, as a session-capture flow
+    files them under `Sources/Sessions`."""
+    sessions = vault / "Knowledge Base" / "Sources" / "Sessions"
+    for index in range(count):
+        _write(
+            sessions / f"2026-09-{index + 1:02d}-session.md",
+            "---\ntype: source\n---\n\n# Session\n\n" + f"{line} " * repeats + "\n",
+        )
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+
+
+def test_session_captures_cannot_push_a_title_past_the_rarity_cap(
+    prose_vault: Path, budget_free
+) -> None:
+    """The review's a7a_rf2 shape: every captured session that discussed a
+    page adds one to its words' document frequency. Four of them put
+    "kelvan" on five pages against a cap of three, the word stopped being
+    distinctive, and the page the turn named was never carried. A capture
+    is what a conclusion was drawn from, not a second page of the corpus
+    the carry chooses among, so it counts toward neither the stem nor the
+    page total."""
+    def counted_without_raw_material() -> tuple[dict[str, int], int]:
+        return lexstore.term_document_frequencies(
+            prose_vault,
+            ["kelvan"],
+            scope="kb",
+            exclude_navigation=True,
+            exclude_raw_material=True,
+        ).value
+
+    uncounted = counted_without_raw_material()
+    _seed_session_captures(prose_vault, 4)
+    frequencies, pages = lexstore.term_document_frequencies(
+        prose_vault, ["kelvan"], scope="kb", exclude_navigation=True
+    ).value
+    assert frequencies["kelvan"] == 5 > working_set.rare_document_cap(pages), (
+        "the captures must push it past, or this proves nothing"
+    )
+
+    hits, state = working_set_runtime.carry_candidates(prose_vault, GENUINE_TURN)
+    packet = working_set.compile_packet(prose_vault, turn=GENUINE_TURN, max_chars=4000)
+
+    assert state == "available"
+    assert [path for path, _score in hits] == [GENUINE_PAGE], hits
+    assert packet["generation"].get("carried_by") == "retrieval", packet.get("abstention")
+    # Neither the stem's count nor the page total moved.
+    assert counted_without_raw_material() == uncounted
+    assert uncounted[0] == {"kelvan": 1}
+
+
+def test_raw_material_and_navigation_cannot_fill_the_ranking_window(
+    prose_vault: Path, budget_free
+) -> None:
+    """The exclusions sit inside the ranking query, so the
+    `carry_fetch_size` LIMIT counts only rows that can be candidates.
+    Filtered after the LIMIT, twelve captures and two navigation pages that
+    outrank the page filled the whole window, the filter left nothing, and
+    the turn abstained although it named exactly one page. A capture holds
+    the turns of the session it recorded, so it repeats the turn verbatim."""
+    _seed_session_captures(prose_vault, 12, line=f"Asked: {GENUINE_TURN}.", repeats=3)
+    listing = "- [[Kelvane throughput review]] kelvane throughput ceiling\n" * 4
+    research = prose_vault / "Knowledge Base" / "Notes" / "Research"
+    _write(research / "index.md", f"# Research\n\n{listing}")
+    _write(research / "log.md", f"# Research log\n\n{listing}")
+    lexstore.ensure_fresh(prose_vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(prose_vault).rebuild()
+
+    stems = working_set_runtime.content_stems(GENUINE_TURN)
+    rare, pages, _state = working_set_runtime.rare_turn_terms(prose_vault, stems)
+    pairs = working_set_runtime.adjacent_rare_pairs(GENUINE_TURN, rare)
+    window = working_set.carry_fetch_size(pages)
+    unfiltered = lexstore.search_bm25_result(
+        prose_vault,
+        working_set_runtime.content_words(GENUINE_TURN),
+        window,
+        scope="kb",
+        allow_delta=False,
+        corroboration_tokens=list(rare),
+        corroboration_groups=[list(pair) for pair in pairs],
+    ).value
+    assert len(unfiltered) == window and GENUINE_PAGE not in dict(unfiltered), (
+        "the removed rows must fill the window, or this proves nothing"
+    )
+    assert all(
+        working_set_runtime._is_raw_material(path) or _is_navigation(path)
+        for path, _score in unfiltered
+    ), unfiltered
+
+    hits, state = working_set_runtime.carry_candidates(prose_vault, GENUINE_TURN)
+    packet = working_set.compile_packet(prose_vault, turn=GENUINE_TURN, max_chars=4000)
+
+    assert state == "available"
+    assert [path for path, _score in hits] == [GENUINE_PAGE], hits
+    assert packet["generation"].get("carried_by") == "retrieval", packet.get("abstention")
+
+
+# --------------------------------------------------------------------------- #
+# R-P2: "continue" after a carried answer resumes the carried page.
+# --------------------------------------------------------------------------- #
+
+
+def test_continue_after_a_carried_answer_resumes_the_carried_page(carry_vault: Path) -> None:
+    """The review's seam B: the carried turn minted no token, the hook kept
+    the previous one, and "continue" answered with the anchor from BEFORE
+    the carried answer."""
+    from exomem import commands
+
+    carried = commands.op_activate_context(carry_vault, turn=CARRY_TURN)
+    assert carried["generation"]["carried_by"] == "retrieval"
+    token = carried["continuity"]
+    assert working_set_runtime.decode_continuity(token)["refs"] == [CARRY_PAGE]
+
+    packet = commands.op_activate_context(carry_vault, turn="continue", continuity=token)
+
+    assert packet["abstained"] is False, (packet.get("abstention"), packet["anchors"])
+    assert [(item["path"], item["status"], item["evidence"]) for item in packet["anchors"]] == [
+        (CARRY_PAGE, "resolved", ["continuity", "recency"])
+    ]
+    assert packet["generation"]["carried_by"] == "continuity"
+    assert packet["generation"]["continuity"] == "applied"
+    assert {unit["provenance"]["path"] for unit in packet["units"]} == {CARRY_PAGE}
+
+
+# --------------------------------------------------------------------------- #
+# R-Q N1: a withheld continuity ref answers exactly as a missing one does.
+# --------------------------------------------------------------------------- #
+
+MARIT = "Knowledge Base/Entities/People/Marit Solheim.md"
+_WITHHELD_AND_MISSING = {
+    "page": (CARRY_PAGE, "Knowledge Base/Notes/Research/no-such-page.md"),
+    "row": (MARIT, "Knowledge Base/Entities/People/Nobody Here.md"),
+}
+
+
+def _forged_token(vault: Path, ref: str) -> str:
+    """A token this index would accept, naming `ref`, as a client can build
+    one: the codec is unsigned, so the refs are the caller's choice."""
+    from exomem import commands
+    from exomem.governance.principal import owner_principal, request_scope
+
+    with request_scope(owner_principal()):
+        owner = commands.op_activate_context(vault, turn="what did we decide about the Cargo Sled")
+    payload = working_set_runtime.decode_continuity(owner["continuity"])
+    return working_set_runtime.encode_continuity(
+        identity=payload["identity"],
+        roles_hash=payload["roles_hash"],
+        generation=payload["generation"],
+        refs=[ref],
+        roles=[],
+        minted_ns=None,
+    )
+
+
+@pytest.mark.parametrize("turn", ["continue", "zqxwvu plonktastic"])
+@pytest.mark.parametrize("kind", ["page", "row"])
+def test_a_withheld_continuity_ref_answers_exactly_as_a_missing_one(
+    carry_vault: Path, kind: str, turn: str
+) -> None:
+    """The reviewer's d_cont_oracle and d_cont_rows: a forged token naming a
+    page or an anchor row the audience may not see answered `withheld`,
+    `applied`, `carried_by: continuity`; one naming nothing answered
+    `unresolved`, `stale`. The response shape told the caller the page
+    existed. The owner asks first, so a packet compiled for the owner's
+    view is in the cache when the audience asks."""
+    from test_governance_egress import _external, _reset_caches, write_rule, write_scope
+
+    from exomem import commands
+    from exomem.governance.principal import owner_principal, request_scope
+
+    withheld, missing = _WITHHELD_AND_MISSING[kind]
+    if kind == "row":
+        rows = working_set_index.WorkingSetIndex(carry_vault).anchors()
+        assert withheld in {row.path for row in rows}, "the withheld ref must be a row"
+    tokens = {ref: _forged_token(carry_vault, ref) for ref in (withheld, missing)}
+    write_scope(carry_vault, paths=withheld, name="Withheld")
+    write_rule(carry_vault, ceiling=0)
+    _reset_caches()
+    working_set_runtime.reset_caches_for_tests()
+
+    with request_scope(owner_principal()):
+        seen = commands.op_activate_context(carry_vault, turn=turn, continuity=tokens[withheld])
+    if turn == "continue":
+        assert seen["abstained"] is False, "the owner may see it, or this proves nothing"
+    with request_scope(_external()):
+        answers = {
+            ref: commands.op_activate_context(carry_vault, turn=turn, continuity=token)
+            for ref, token in tokens.items()
+        }
+
+    shown, absent = answers[withheld], answers[missing]
+    assert shown["generation"] == absent["generation"]
+    assert (shown["abstained"], shown.get("abstention")) == (
+        absent["abstained"],
+        absent.get("abstention"),
+    )
+    assert shown["generation"]["continuity"] == "stale"
+    assert "carried_by" not in shown["generation"]
+    assert shown.get("anchors") == absent.get("anchors")
+    assert shown.get("missing") == absent.get("missing")
+
+
+def test_a_page_token_on_a_turn_that_is_not_referential_is_stale(carry_vault: Path) -> None:
+    """`applied` means the token qualified something. A picked page's token
+    on a turn that neither resumes nor reaches it contributed nothing."""
+    from exomem import commands
+
+    _page, token = _picked_page_token(carry_vault)
+
+    packet = commands.op_activate_context(
+        carry_vault, turn="zqxwvu plonktastic", continuity=token
+    )
+
+    assert packet["generation"]["continuity"] == "stale"
+
+
+def test_a_row_token_the_turn_never_reaches_is_stale(carry_vault: Path) -> None:
+    from exomem import commands
+
+    token = _forged_token(carry_vault, "Knowledge Base/Products/Cargo Sled.md")
+
+    packet = commands.op_activate_context(
+        carry_vault, turn="zqxwvu plonktastic", continuity=token
+    )
+
+    assert packet["generation"]["continuity"] == "stale"

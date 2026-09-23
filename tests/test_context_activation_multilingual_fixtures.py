@@ -335,7 +335,7 @@ def test_recency_is_explicit_ordered_and_never_a_burst(corpus) -> None:
     assert tuple(path_to_key[path] for path, _ in ordered[:RECENT_POOL_SIZE]) == POOL_ORDER
     times = [mtime for _, mtime in ordered]
     gaps = [newer - older for newer, older in zip(times, times[1:], strict=False)]
-    assert min(gaps) > working_set.HOT_PROFILE_BURST_NS
+    assert min(gaps) > working_set.HOT_PROFILE_BURST_GAP_NS
     for relative, mtime in manifest.recency.items():
         assert (root / relative).stat().st_mtime_ns == mtime, relative
     others = [

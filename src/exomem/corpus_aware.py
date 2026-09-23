@@ -697,7 +697,12 @@ def suggest_related(
 
 
 def _best_cosine_per_file(
-    vault_root: Path, *, title: str, body: str, k: int = 15
+    vault_root: Path,
+    *,
+    title: str,
+    body: str,
+    k: int = 15,
+    published_path: str | None = None,
 ) -> dict[str, float]:
     """Embed a draft (title+body) as PASSAGES and return the max cosine per
     existing file over the sidecar: ``{file_path: best_score}``.
@@ -709,6 +714,16 @@ def _best_cosine_per_file(
     a query). Returns ``{}`` when embeddings are disabled, unimportable, or the
     sidecar is empty — the no-op contract both callers depend on, so the fast
     test suite and torch-less deploys are unaffected.
+
+    `published_path` names a page whose rows the sidecar may already hold for
+    these very chunk texts — a post-commit sweep passes the page its commit just
+    embedded. A chunk whose exact text has a stored vector takes that vector
+    instead of being encoded again: a vector is a function of its text, the
+    same economy the write's own embedding pass applies. On a CPU-only cell the
+    second encode of a just-written note was most of a 9-13 s sweep. Only the
+    texts the page's rows lack are encoded, so a missing or stale row costs
+    what it always did, and reuse never changes a score while the sidecar's
+    one-model invariant holds.
     """
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return {}
@@ -720,7 +735,7 @@ def _best_cosine_per_file(
     if readiness.should_defer("embeddings"):
         return {}
     try:
-        from . import embeddings, index_paths
+        from . import embeddings
 
         # The advisory sweep runs inline on every governed edit and is where
         # the encode it pays actually lives, so it is timed here rather than at
@@ -731,26 +746,61 @@ def _best_cosine_per_file(
         # `index.embeddings`, and this is the caller it belonged to.
         with call_spans.span("advisory.best_cosine", {}) as measured:
             chunks = embeddings.chunk_text(title, body)
-            if measured is not None:
-                measured["texts"] = len(chunks)
-                measured["chars"] = sum(len(chunk) for chunk in chunks)
             if not chunks:
+                if measured is not None:
+                    measured["texts"] = 0
+                    measured["chars"] = 0
                 return {}
-            vecs = embeddings.embed_texts(chunks, is_query=False)
             idx = embeddings.get_embedding_index(vault_root)
-            allowed_paths = {
-                rel
-                for rel in (
-                    index_paths.rel_to_vault(vault_root, path)
-                    for path in index_paths.iter_index_markdown(vault_root)
-                )
-                if rel is not None
-            }
+            stored = (
+                embeddings._stored_text_vectors(idx, published_path)[0]
+                if published_path
+                else {}
+            )
+            # A text no row holds may still have been encoded by a sweep moments
+            # ago -- an edit's previous generation of these same paragraphs. The
+            # stamp is taken before this sweep encodes anything, so a model
+            # reload during the encode leaves nothing filed under the new model.
+            stamp = embeddings.passage_memo_stamp()
+            recalled = embeddings.recall_passage_vectors(
+                (chunk for chunk in dict.fromkeys(chunks) if chunk not in stored),
+                stamp=stamp,
+            )
+            published = stored
+            if recalled:
+                stored = {**stored, **recalled}
+            encoded = [chunk for chunk in chunks if chunk not in stored]
+            # With nothing to reuse the whole draft is encoded as it always was;
+            # otherwise only the unique texts the stored rows lack.
+            full_encode = len(encoded) == len(chunks)
+            to_encode = chunks if full_encode else list(dict.fromkeys(encoded))
+            if measured is not None:
+                # `texts`/`chars` are what the encoder was handed, so on this
+                # surface they still say what the sweep encoded.
+                measured["texts"] = len(to_encode)
+                measured["chars"] = sum(len(chunk) for chunk in to_encode)
+                if published_path:
+                    measured["reused"] = sum(1 for chunk in chunks if chunk in published)
+                if recalled:
+                    measured["recalled"] = sum(1 for chunk in chunks if chunk in recalled)
+            if full_encode:
+                vecs = embeddings.embed_texts(chunks, is_query=False)
+                embeddings.remember_passage_vectors(chunks, vecs, stamp=stamp)
+            else:
+                lookup = {chunk: stored[chunk] for chunk in chunks if chunk in stored}
+                if to_encode:
+                    fresh = embeddings.embed_texts(to_encode, is_query=False)
+                    embeddings.remember_passage_vectors(to_encode, fresh, stamp=stamp)
+                    lookup.update(zip(to_encode, fresh, strict=True))
+                vecs = [lookup[chunk] for chunk in chunks]
             best_per_file: dict[str, float] = {}
-            for v in vecs:
-                for fp, _cidx, _ctext, score in idx.search(
-                    v, k=k, allowed_paths=allowed_paths
-                ):
+            # Every chunk in one pass over the matrix, asking eligibility only of
+            # the pages that reach a chunk's top-k: a `search` per chunk re-read
+            # the matrix and hydrated text this discards, and the allowed-path
+            # set was a walk of the whole corpus on every write.
+            admits = _index_admitter(vault_root)
+            for hits in idx.search_many(vecs, k, admits=admits):
+                for fp, _cidx, score in hits:
                     if fp not in best_per_file or score > best_per_file[fp]:
                         best_per_file[fp] = score
             return best_per_file
@@ -760,6 +810,31 @@ def _best_cosine_per_file(
     except Exception as e:  # noqa: BLE001 — best-effort
         log.debug("_best_cosine_per_file failed: %s", e)
         return {}
+
+
+def _index_admitter(vault_root: Path):
+    """Which sidecar pages the advisory may score: exactly those the index walk yields.
+
+    Stray rows -- a page moved to `_trash/`, one deleted before its rows were
+    purged, a Records item -- must never reach a warning (observed 2026-07-04:
+    dup warnings flagging trash entries). The KB scope answers per page from
+    that page's own ancestry; the vault scope has no per-page twin and still
+    walks, once per sweep.
+    """
+    from . import index_paths
+
+    admits = index_paths.index_markdown_admitter(vault_root)
+    if admits is not None:
+        return admits
+    allowed = frozenset(
+        rel
+        for rel in (
+            index_paths.rel_to_vault(vault_root, path)
+            for path in index_paths.iter_index_markdown(vault_root)
+        )
+        if rel is not None
+    )
+    return allowed.__contains__
 
 
 def pairwise_best_cosine_from_sidecar(
@@ -854,7 +929,7 @@ def best_cosine_per_file_for_vectors(
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return {}
     try:
-        from . import embeddings, index_paths
+        from . import embeddings
 
         # The same span name as the encoding path, deliberately: both are "the
         # advisory's cosine sweep", and a diagnosis wants to compare them. What
@@ -868,20 +943,13 @@ def best_cosine_per_file_for_vectors(
             if not rows:
                 return {}
             idx = embeddings.get_embedding_index(vault_root)
-            allowed_paths = {
-                rel
-                for rel in (
-                    index_paths.rel_to_vault(vault_root, path)
-                    for path in index_paths.iter_index_markdown(vault_root)
-                )
-                if rel is not None
-            }
             self_canon = _canon(self_path) if self_path else None
             best_per_file: dict[str, float] = {}
-            for v in rows:
-                for fp, _cidx, _ctext, score in idx.search(
-                    v, k=k, allowed_paths=allowed_paths
-                ):
+            # The same scoring and eligibility as the inline sweep, so a
+            # deferred advisory ranks exactly what the synchronous one would.
+            admits = _index_admitter(vault_root)
+            for hits in idx.search_many(rows, k, admits=admits):
+                for fp, _cidx, score in hits:
                     if self_canon and _canon(fp) == self_canon:
                         continue
                     if fp not in best_per_file or score > best_per_file[fp]:

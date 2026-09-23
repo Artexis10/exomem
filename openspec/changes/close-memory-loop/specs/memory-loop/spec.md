@@ -20,6 +20,8 @@ Activation and episode recovery SHALL reconnect a resumed topic with relevant re
 
 Where evidence supplies them, event occurrence, knowledge acquisition and claim validity SHALL remain distinguishable. Missing times or validity SHALL remain unknown. Capture time, file modification time, repetition and recent retrieval SHALL NOT independently establish event recency, continuing validity or task relevance. Corrections and supersession SHALL qualify current claims, while an older relevant dependency SHALL remain eligible beside recent developments.
 
+The recent-context block SHALL judge recent work by the hot profile's own rules: a last edit inside a write burst, or older than the latest such burst, SHALL NOT make a page recent work, except a captured session, which records what was spoken about rather than an edit and SHALL keep its place; a page offered for its reads SHALL be ranked by its reads and not by its last edit, and the most-read such page SHALL keep a place in the block however many pages were edited more recently; and a retired or superseded page SHALL NOT be offered. An entry's one-line statement SHALL be the page's authored summary where it has one, and SHALL NOT be a lifecycle status such as `active` or `draft`.
+
 #### Scenario: A topic resumes after an intervening development
 
 - **WHEN** a supported session resumes an interrupted topic after a relevant development and an unrelated newer event
@@ -33,6 +35,18 @@ Where evidence supplies them, event occurrence, knowledge acquisition and claim 
 - **THEN** activation still returns the bounded recent-context block, first in the packet, naming what was recently worked on with its provenance and the reason each item is recent
 - **AND** no other block claims an anchor was resolved, and every item in the block crosses the same release plane a served unit does
 - **AND** the block's contact times describe the edit, read or capture, not the events the pages record
+
+#### Scenario: A batch, stale edits and retired pages do not fill the recent-context block
+
+- **WHEN** a maintenance batch rewrote several pages after the user's last edit,
+  the vault holds a retired and a superseded page edited more recently than
+  anything else, and pages the user reads often were last edited long ago
+- **THEN** the block offers neither the batch, nor any edit older than it, nor
+  the retired or superseded page, and offers an edit made after the batch
+- **AND** the most-read page appears in the block although many pages were
+  edited more recently
+- **AND** a session captured before a batch smaller than the block still
+  appears; a batch that fills the block can push it out
 
 #### Scenario: Old information is saved again after a correction
 
@@ -413,7 +427,8 @@ resolved any anchor and a referential turn SHALL be untouched. A hit SHALL be a 
 of the turn's stems that it matches are DISTINCTIVE in the indexed corpus,
 measured as a document frequency at or below `max(3, ceil(0.5% of the indexed
 pages in scope))` over the same catalogue the ranking uses, navigation pages not
-counted toward a stem's frequency. A hit SHALL additionally satisfy a proximity
+counted toward a stem's frequency, and raw-material pages counted neither toward
+a stem's frequency nor among the indexed pages. A hit SHALL additionally satisfy a proximity
 condition: two of its matched distinctive stems occur within a declared token
 window of each other, within one sentence of the turn. Distance SHALL be
 measured over the turn's own tokens, function words included; sentence-ending
@@ -443,7 +458,9 @@ vocabulary less the statuses meaning pre-active rather than retired, together
 with a declared supersession; a draft or planned page SHALL remain a
 candidate. The number of ranked rows read before filtering SHALL exceed the
 number of pages the rarity gate can admit at the current corpus size. Candidates SHALL be excluded before they are counted, not after the ranked
-result is limited. A page SHALL be carried only when it is the ONLY surviving
+result is limited, and raw-material and navigation pages SHALL be excluded
+inside the ranking query, before its row limit applies, so that the limit
+counts only rows that can be candidates. A page SHALL be carried only when it is the ONLY surviving
 candidate; where two or more survive, the turn SHALL abstain `unresolved`,
 SHALL NOT select between them by ranking score, and SHALL report them under
 `anchors[]` at a distinct status meaning "named, not carried" — never the
@@ -454,8 +471,10 @@ the ranking scored at or below a declared sanity bound SHALL NOT be carried.
 A carried packet SHALL report that page as its one anchor entry, of kind `page`,
 at status `retrieval_carried`, with `retrieval` as its only evidence, and SHALL
 mark itself `generation.carried_by = "retrieval"`. Its material SHALL come from
-that page through the existing bounded unit lanes. No continuity token SHALL be
-minted from a carried page. The carried page SHALL cross the same release plane
+that page through the existing bounded unit lanes. The continuity token minted
+from a carried packet SHALL name the carried page's path, so that a following
+referential turn can resume it; continuity SHALL still qualify only an anchor a
+later turn reached. The carried page SHALL cross the same release plane
 guard as any other packet reference, and a carried page the current audience may
 not see SHALL abstain `withheld` rather than substitute another candidate.
 
@@ -466,7 +485,8 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
   other candidate
 - **THEN** the packet serves that note's units under one anchor entry of kind
   `page` at status `retrieval_carried`, marked as carried by retrieval
-- **AND** no continuity token is minted from it, and no anchor is resolved
+- **AND** no anchor is resolved, and the continuity token minted from it names
+  the carried page's path, which a following "continue" resumes
 
 #### Scenario: A corpus too small to measure rarity carries nothing
 
@@ -515,6 +535,14 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
   and the vault's index and log pages list that title among others
 - **THEN** the named page is carried, and no navigation page is counted as a
   second named page or listed under `anchors[]`
+
+#### Scenario: Captured sessions do not make a page's title ordinary
+
+- **WHEN** a turn names one compiled page by its distinctive words, and three
+  or more captured sessions in a raw-material folder repeat those words
+- **THEN** the words remain distinctive and the named page is carried
+- **AND** captures and navigation pages that the ranking scores above the page
+  do not consume the rows read before filtering
 
 #### Scenario: A named anchor and raw material are both refused as carriers
 
@@ -611,9 +639,21 @@ snapshot — ranked in a single declared order, ties broken by a stable identity
 A previous packet's continuity references SHALL rank first and SHALL form one
 tier taken whole: that packet already resolved them together — but only while
 no anchor outside them has a last edit, not in a write burst, later than the
-time that packet was served. A last-edit time
-that fell in a write burst — a declared number of pages or more, navigation
-pages not counted, edited within a declared short interval of one another —
+time that packet was served. While that tier leads, the profile SHALL NOT fall
+through to the edit or read tiers: where the references name a compiled page
+that is not an anchor — one the agent picked or recall carried — that single
+page SHALL be resumed from its own units, reported `resolved` on `continuity`
+and `recency` and marked `generation.carried_by = "continuity"`; where they
+name nothing that can be served, the turn SHALL abstain with its
+recent-context block. A reference naming a page or an anchor the current
+audience may not see SHALL be treated exactly as one naming nothing, before
+anything is derived from it: the response — its status, its abstention
+reason and its `generation` block — SHALL be identical to the one a reference
+naming a page that does not exist receives, so that continuity cannot be used
+to learn whether a withheld page exists. A last-edit time
+that fell in a write burst — a chain of a declared number of pages or more,
+navigation pages not counted, each edited within a declared interval of the
+next, so that one stall inside a batch does not split it —
 SHALL carry no edit signal, because a batch rewrites pages nobody chose, and
 neither SHALL a last-edit time older than the latest such burst, because the
 batch may have rewritten the page the user was working on; such an anchor
@@ -688,6 +728,24 @@ from recent work and not from the turn's own words.
   and abstains `unresolved` when the carry cannot run, never falling back to
   the hot anchor
 
+#### Scenario: Continuing after a carried answer resumes the carried page
+
+- **WHEN** a turn was answered by a retrieval-carried page, and the next
+  referential turn passes the token of that packet
+- **THEN** the token names the carried page, and that page resolves on
+  `continuity` and `recency` with its units served, not the anchor the
+  conversation held before the carried answer
+
+#### Scenario: Continuing after the agent picked a page resumes that page
+
+- **WHEN** the agent picked a compiled page that is not an anchor, and the next
+  referential turn passes the token of that packet
+- **THEN** that page resolves on `continuity` and `recency` and its units are
+  served, and the vault's freshest anchor is not
+- **AND** a page the audience may not see and a page that no longer exists
+  both abstain `unresolved` with identical responses, neither falling through
+  to another anchor
+
 #### Scenario: A maintenance batch does not pick the referent
 
 - **WHEN** the user last edited one anchor and a maintenance pass then rewrote
@@ -696,7 +754,8 @@ from recent work and not from the turn's own words.
 - **THEN** a referential turn resolves neither the page the batch wrote last
   nor the freshest page the batch left alone, however old
 - **AND** it resolves the anchor the usage snapshot shows was read, or
-  abstains `unresolved` with its recent-context block when nothing was read
+  abstains `unresolved` when nothing was read, its recent-context block
+  offering neither the batch nor the edits before it
 
 #### Scenario: A previous packet's answer is resumed whole
 

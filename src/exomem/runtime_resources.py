@@ -75,10 +75,18 @@ def resolve_policy() -> ComputePolicy:
 def preload_local_dotenv_policy() -> None:
     """Load only local resource keys before native runtime bootstrap.
 
-    Hosted cells keep their inherited environment authoritative; local servers
-    later load the full cwd ``.env`` through ``initialize_runtime`` as usual.
+    Hosted and cloud cells keep their inherited environment authoritative;
+    local servers later load the full cwd ``.env`` through
+    ``initialize_runtime`` as usual. Cloud mode's "no `.env` file is loaded"
+    (design D1.6) covers every loader, not only the server's, so this early,
+    pre-bootstrap read is gated the same way `initialize_runtime` gates its
+    own later one.
     """
     if os.environ.get("EXOMEM_HOSTED_CELL", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return
+    from . import cloud_cell
+
+    if cloud_cell.cloud_mode_enabled():
         return
     dotenv_path = Path.cwd() / ".env"
     if not dotenv_path.is_file():

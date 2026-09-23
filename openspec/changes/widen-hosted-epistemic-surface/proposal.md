@@ -1,3 +1,5 @@
+> **Superseded (2026-09-23)** by `adopt-exomem-cloud-plain-cells`. Not to be implemented further; removed with its code in that change's retirement phase.
+
 ## Why
 
 Both shipped Hosted profiles are accumulation-only. `hosted-alpha-agent-v1` exposes thirteen commands and `hosted-alpha-agent-v2` adds `record_memory`; neither exposes `replace_memory`, `plan_memory`, or `edit_memory`. A Hosted user therefore cannot supersede a conclusion (no belief revision), cannot state an intent before acting (no planning), and cannot correct a page in place (every correction becomes a second, competing page).

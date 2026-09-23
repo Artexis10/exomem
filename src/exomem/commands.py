@@ -5956,8 +5956,9 @@ def op_activate_context(
     its single `anchors[]` entry has `kind: "page"` and `status:
     "retrieval_carried"`, and `generation.carried_by` is `"retrieval"`. Read that
     as "nothing was named; recall alone put this here" — no anchor was resolved,
-    the packet carries no continuity token, and a turn with nothing distinctive
-    in it abstains `unresolved` rather than guessing between pages. Naming that
+    yet the packet's continuity token names that page, so a following
+    "continue" resumes it; a turn with nothing distinctive in it abstains
+    `unresolved` rather than guessing between pages. Naming that
     SAME page yourself with `anchor` instead resolves it outright, at `status:
     "resolved"` and `generation.carried_by: "agent_choice"` — your choice, not
     recall's guess.
@@ -5985,8 +5986,8 @@ def op_activate_context(
             enters the packet cache key.
         continuity: The opaque `continuity` token a previous packet of this
             conversation returned. On a turn that names nothing ("continue",
-            "where were we") its anchors are the first thing the turn is taken
-            to refer to, and may resolve on that alone. On any other turn it
+            "where were we") the anchors or page it names are the first thing
+            the turn is taken to refer to, and may resolve on that alone. On any other turn it
             only strengthens anchors the turn already reaches on its own
             evidence: it never reaches one by itself there, and never turns an
             `unresolved` turn into a resolved one. It is ignored and reported as
@@ -6007,7 +6008,11 @@ def op_activate_context(
     Returns: {recent_context, anchors, roles, units, pointers, current_state,
              missing, ambiguity, budget, generation, abstained, abstention?,
              continuity?}. `recent_context` is first and is present on an
-             abstained packet too; every other block is empty on one.
+             abstained packet too. An abstained packet always empties
+             `roles`, `units`, `pointers` and `current_state` — no material
+             about an anchor that did not resolve — but `anchors` (a
+             `partial`, `retrieval_named` or competing `ambiguity` candidate),
+             `ambiguity` and `missing` may still be populated.
              `generation.continuity` reports whether a token you passed was
              `applied`, `stale` or `absent`.
     """
@@ -6327,6 +6332,45 @@ def _op_activate_context_body(
     except Exception:  # noqa: BLE001 - the release plane failing means abstain, not serve
         log.warning("activation release plane unavailable; abstaining", exc_info=True)
         return _abstain("unavailable")
+    # An `anchor` naming no row of THIS index but an eligible agent-picked
+    # page (design close-memory-loop, U7) is decided on the release plane
+    # HERE, before the compile that page would otherwise buy nothing for: a
+    # withheld page refuses identically whether or not it was ever compiled,
+    # and running the compile first is the entire cost difference measured
+    # between a withheld ref (80 ms) and an unknown one (15 ms). A ref naming
+    # no eligible page is refused at the same point, so every refused class
+    # leaves in one place. An `anchor` that DOES match a row of the index is
+    # untouched — that path's own timing is not this fix's scope — and any
+    # failure here only skips the early exit: the unmodified
+    # compile-then-guard sequence below still decides every ref exactly as
+    # it always has.
+    if anchor:
+        try:
+            named_rows = {
+                spelling
+                for row in anchor_rows
+                for spelling in (
+                    str(getattr(row, "ref", None) or ""),
+                    str(getattr(row, "path", "") or ""),
+                    str(getattr(row, "anchor_id", "") or ""),
+                )
+                if spelling
+            }
+            if anchor not in named_rows:
+                # Every refused class leaves HERE, at one point: a ref naming
+                # no eligible page (unknown, raw material, navigation, retired,
+                # non-canonical) exactly as a withheld one. Refused after the
+                # compile instead, the unknown classes took about 3 ms longer
+                # than a withheld page, which is its own answer.
+                agent_page = working_set_module._eligible_agent_page(vault_root, anchor)
+                if agent_page is None or not egress_module.quick_page_visible(
+                    vault_root, agent_page, purpose=purpose
+                ):
+                    raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
+        except ValueError:
+            raise
+        except Exception:  # noqa: BLE001 - an optimization that fails just does not apply
+            log.debug("agent-picked-page early visibility check unavailable", exc_info=True)
     packet = working_set_runtime_module.serve(
         vault_root,
         turn=turn,
@@ -11776,6 +11820,61 @@ HOSTED_SURFACE_EXCLUSIONS = MappingProxyType(
                 lifted_when=(
                     "a media-capable hosted image ships and the cell carries the `media` "
                     "feature grant"
+                ),
+            ),
+        )
+    }
+)
+
+
+CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
+    {
+        exclusion.command: exclusion
+        for exclusion in (
+            HostedSurfaceExclusion(
+                command="transfer_artifact",
+                reason=(
+                    "An Exomem Cloud cell has no browser transfer or "
+                    "gateway-mediated upload flow to bridge this leaf into; "
+                    "direct browser transfers are out of scope for Exomem Cloud "
+                    "(design Non-Goals)."
+                ),
+                lifted_when=(
+                    "a browser transfer or artifact-upload path is added to "
+                    "Exomem Cloud"
+                ),
+            ),
+            HostedSurfaceExclusion(
+                command="adopt_vault",
+                reason=(
+                    "There is no upload-then-adopt staging flow for Exomem "
+                    "Cloud cells; a self-serve export/import UI is out of scope "
+                    "for Exomem Cloud (design Non-Goals)."
+                ),
+                lifted_when="an upload/import path is added to Exomem Cloud",
+            ),
+            HostedSurfaceExclusion(
+                command="process_media",
+                reason=(
+                    "The `cloud` image is built from the `hosted` runtime "
+                    "stage, which installs only the `embeddings-onnx` extra "
+                    "and gates the build on torch being absent, so media "
+                    "extraction has no dependencies in the image."
+                ),
+                lifted_when=(
+                    "a media-capable cloud image ships with the required "
+                    "decoding dependencies"
+                ),
+            ),
+            HostedSurfaceExclusion(
+                command="read_media",
+                reason=(
+                    "Sampling video frames needs the same decoding "
+                    "dependencies the cloud image omits."
+                ),
+                lifted_when=(
+                    "a media-capable cloud image ships with the required "
+                    "decoding dependencies"
                 ),
             ),
         )
