@@ -2,8 +2,10 @@
 
 ### Requirement: Counts-only relation census over one published snapshot
 The system SHALL provide a relation-quality census computed from one published graph
-snapshot and the relation and entity-type registries. The census MUST NOT parse
-Markdown, run a model, build an index or write. It SHALL report integers and ratios
+snapshot and the relation and entity-type registries. The census itself MUST NOT parse
+Markdown, run a model, build an index or write; the owner's release filter under a
+governed policy MAY read page bytes to decide release. It SHALL reduce edge rows as it
+reads them, holding memory proportional to pages rather than edges. It SHALL report integers and ratios
 derived from them under fixed definitions: authored edges by status (`core_specific`,
 `core_generic`, `extension`, `alias`, `deprecated`, `unregistered`, `scope_violation`),
 generic share, typed and specific coverage, predicate utilisation, extension use,
@@ -42,24 +44,37 @@ a placeholder endpoint SHALL NOT count as applicable to a rule that inspects end
 - **WHEN** a fixture plants one violation for each check beside edges that pass it and edges it cannot apply to
 - **THEN** each check reports exactly its applicable edges and one violation
 
-### Requirement: The census follows the caller's release filter
-The census SHALL admit a node only when its page passes the caller's release filter and
-structural exclusion, and an edge only when both endpoints are admitted indexed nodes and
-the page that authored it is admitted, filtering inside the walk. A placeholder for a
-missing target SHALL NOT be admitted, so that a target outside the caller's view reads the
-same whether it is withheld or does not exist; authored rows whose target is outside the
-view SHALL be counted together as `unresolved_target_edges`. No withheld page SHALL change
-any count, ratio or check. The graph generation SHALL be reported only to a caller without a release
-restriction. In counts mode the output SHALL name no path, title, label or vault
-extension key; `detail="keys"` MAY add predicate keys and per-predicate counts.
+### Requirement: The census is served whole, to the owner only under a governed policy
+Links resolve against the whole vault, so a withheld page can change how a visible page's
+link resolves (a shared stem, a stem that matches a visible title, or a shared title), and
+the snapshot records only the result. The census, its sample and `infer`'s census counts
+SHALL therefore be served only as a whole view: to every caller under an empty governance
+policy, and under a non-empty policy only to an owner-bound principal. Every other
+audience SHALL receive `available: false` with reason `audience_restricted`, decided before
+the snapshot or any page is read. A governed policy that does not compile SHALL yield
+reason `policy_blocked` for the owner rather than a zero count.
 
-#### Scenario: Withheld material is invisible
-- **WHEN** two vaults differ only in a withheld page, its authored edges, and edges from visible pages to it
-- **THEN** a caller for whom that page is withheld receives byte-identical census output from both, in counts and keys detail
+Within the view it serves, the census SHALL admit a node only when its page passes the
+release filter and structural exclusion, and an edge only when both endpoints are
+admitted indexed nodes and the page that authored it is admitted. A placeholder for a
+missing target SHALL NOT be admitted; authored rows whose target is outside the view
+SHALL be counted together as `unresolved_target_edges`. The graph generation SHALL be
+reported to every caller the census serves. In counts mode the output SHALL name no path,
+title, label or vault extension key; `detail="keys"` MAY add predicate keys and
+per-predicate counts.
 
-#### Scenario: A withheld target reads like a missing one
-- **WHEN** a visible page names a target by bare title, and in one vault that target exists inside a withheld folder while in the other it does not exist
-- **THEN** the restricted caller receives byte-identical census output from both vaults, with the row counted once in `unresolved_target_edges` and not as a connection
+#### Scenario: A restricted audience is refused under a governed policy
+- **WHEN** a withheld page shares a stem with a visible link target, has a stem equal to a visible page's title, or shares a visible page's title, and a non-owner audience asks for the census, a sample or `infer`'s census
+- **THEN** it receives `audience_restricted` from the vault with the withheld page and from its twin without it, byte-identically
+- **AND** the owner receives true counts, including the graph generation, from both
+
+#### Scenario: An unbound caller is not the owner
+- **WHEN** no principal is bound under a governed policy
+- **THEN** the census reports `audience_restricted`, and an owner-local caller that declares itself is served
+
+#### Scenario: A missing target is outside the view
+- **WHEN** a visible page names a target that does not exist
+- **THEN** the row counts once in `unresolved_target_edges` and not as a connection
 
 #### Scenario: Counts mode carries no identifiers
 - **WHEN** the census runs in counts mode on a vault with extension keys, unregistered labels and distinctive titles
@@ -81,11 +96,12 @@ unavailable it SHALL report `available: false` with a reason and no metrics, nev
 
 ### Requirement: Census surfaces
 The census SHALL be reachable as `schema_memory(subject="relations", operation="census")`
-accepting only `detail` and optional `date_from`/`date_to`, as the read-only CLI
-`exomem relations census`, and as one doctor line. The CLI SHALL ask a running managed
-service over REST first and otherwise open the graph sidecar read-only; it MUST NOT run
-out-of-process index work. The doctor line SHALL pass when the census is available and
-warn otherwise.
+accepting only `detail` and optional `date_from`/`date_to` (it refuses `limit`), as the
+read-only CLI `exomem relations census`, and as one doctor line. The CLI SHALL ask a
+running managed service over REST first and otherwise open the graph sidecar read-only as
+the owner-local caller; it MUST NOT run out-of-process index work. When the service
+refuses the REST key the CLI SHALL say so in one line before reading locally. The doctor
+line SHALL pass when the census is available and warn otherwise.
 
 #### Scenario: The operation refuses unrelated arguments
 - **WHEN** the census operation is called with a save flag, a proposal or a hash
@@ -94,11 +110,13 @@ warn otherwise.
 #### Scenario: The CLI prefers the live service
 - **WHEN** a managed service answers the REST census call
 - **THEN** the CLI prints its result and does not open the local sidecar
-- **AND** when no service answers, the CLI reads the local snapshot under the local release filter
+- **AND** when no service answers, the CLI reads the local snapshot as the owner-local caller, and a governed vault still gives the owner its true counts
 
 ### Requirement: Optional agent-judged sample
 The CLI SHALL write, on request, a seeded sample of specific authored edges stratified by
-relation family, as refs only (page path and anchor at each end), to a local file. A
+relation family, as refs only (page path and anchor at each end), to a local file in the
+vault's machine-local state directory unless another path is given, never to the current
+directory by default. A
 judged copy SHALL fold into `false_precision_judged` as counts per verdict (`precise`,
 `too_specific`, `wrong_direction`, `wrong_predicate`, `should_be_generic`) with a 95%
 Wilson interval on the false share. An unknown verdict SHALL be refused, and a sample
@@ -114,11 +132,24 @@ census.
 - **THEN** the census reports a 0.3 false share with its Wilson interval and the per-verdict counts
 
 ### Requirement: Infer reads its census from the snapshot
-Relation inference SHALL read its aggregate census from the current graph snapshot,
-under the caller's release filter, with the keys `relation_counts`, `page_counts` and
-`denominators` unchanged. When the snapshot is unavailable, or the call is scoped to a
-project, inference SHALL keep its Markdown count and remain non-authoring.
+Relation inference SHALL read its aggregate census from the current graph snapshot with
+the keys `relation_counts`, `page_counts` and `denominators` unchanged. An authored row
+SHALL count in `relation_counts` and `zero_authored_relation_rows` whether or not its
+target resolves, so those values match the Markdown count. `zero_body_connections` SHALL
+count pages with no wikilink or relation row that resolves to another page in view. When
+the snapshot is unavailable, or the call is scoped to a project, inference SHALL keep its
+Markdown count and remain non-authoring. A caller the census refuses SHALL receive the
+refusal (`available: false`, reason) in place of the census on every path, the Markdown
+path included.
 
 #### Scenario: Keys and values survive delegation
 - **WHEN** inference runs on a vault with resolved relation targets, with and without a current graph
 - **THEN** both censuses have identical keys and values, and the graph-backed one does not use the Markdown count
+
+#### Scenario: Unresolved targets keep relation counts
+- **WHEN** relation rows name missing, ambiguous or out-of-tree targets
+- **THEN** the snapshot's `relation_counts` and `zero_authored_relation_rows` equal the Markdown count, and `zero_body_connections` counts only pages that reach another page
+
+#### Scenario: A restricted caller gets the refusal on every path
+- **WHEN** a non-owner audience runs inference under a governed policy, with or without a current graph, with or without a project scope
+- **THEN** the census field is `{available: false, reason: audience_restricted}`

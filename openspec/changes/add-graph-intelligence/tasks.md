@@ -8,8 +8,12 @@
       policy); unavailable is not zero. Green: `src/exomem/relation_census.py`, the
       `schema_memory` `census` operation with `detail`, the CLI `exomem relations census`
       (managed service over REST first, else a read-only local snapshot), and the
-      `relations.census` doctor line. Measured: 0.19 s at 3,600 pages and 20,291 edges,
-      5.25 s at 10^6 edges.
+      `relations.census` doctor line. Measured in a fresh process on a synthetic
+      3,640-page vault (embeddings off, one WSL2 desktop), through the real snapshot:
+      10^5 edges 6.6 s and 10^6 edges 13.1 s, peak RSS 73 MB for both; the snapshot's
+      availability proof alone is about 6.7 s of that at this page count. The reduction
+      alone, at 10^5 file nodes and 10^6 edges with the proof bypassed: 11.0 s, peak RSS
+      132 MB (it was 9.9 s and 702 MB before streaming).
 - [x] 1.2 Red `tests/test_relation_census_sample.py`: the sample is seeded and stratified by
       family; a judged file folds with a Wilson interval; absent judgements report
       `unmeasured`. Green: `relation_census.sample`, `fold_judgments`, and the CLI
