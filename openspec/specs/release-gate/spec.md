@@ -999,7 +999,7 @@ A capability SHALL NOT be bound to a path. The tool takes no path, and clients c
 
 A download capability without an audience claim, including one minted before this binding existed, SHALL be refused as an unauthenticated download rather than resolved to any principal.
 
-A path withheld from the resolved audience and a path that does not exist SHALL receive one byte-identical refusal, whose reason is spelled from the request and not from the on-disk spelling the path resolver returns.
+A path withheld from the resolved audience, a folder, and a path that does not exist SHALL receive one byte-identical refusal, whose reason is spelled from the request and not from the on-disk spelling the path resolver returns. A path the resolver refuses as outside the vault SHALL be refused with a fixed reason that names no server path, and a malformed bearer SHALL be refused as unauthenticated, never answered with a server error.
 
 #### Scenario: A non-owner's capability is decided as its minter
 
@@ -1031,3 +1031,13 @@ A path withheld from the resolved audience and a path that does not exist SHALL 
 
 - **WHEN** the same requested spelling is refused once while its target exists but is withheld, and once after the target is removed, including on a filesystem that re-spells an existing path to its on-disk casing
 - **THEN** both refusals have the same status and byte-identical bodies, and neither reveals the on-disk spelling
+
+#### Scenario: A folder answers like a missing path
+
+- **WHEN** a folder is requested, including one inside a withheld scope
+- **THEN** `/download` answers with the same status and body it gives the same spelling once the folder is gone
+
+#### Scenario: An escaping path names no server path
+
+- **WHEN** a requested path traverses out of the vault or through a symlink whose target lies outside it
+- **THEN** the refusal carries a fixed reason and neither the absolute server path nor the link target

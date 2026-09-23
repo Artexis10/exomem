@@ -7,7 +7,15 @@
 - [x] 1.5 Render every download `NOT_FOUND` once, from the request's normalized spelling.
 - [x] 1.6 Keep the claim single-case so the handoff survives the dispatcher's terminal credential scrubber, and pin a Cloudflare Access mint-then-download round trip through the REST dispatcher.
 
-## 2. Verification
+## 2. Hardening from review
 
-- [x] 2.1 Move the tests that minted claimless download tokens onto owner-bound capabilities, without weakening an assertion.
-- [x] 2.2 Scoped suites green for transfer, upload tokens, the transfer routes, egress and principal resolution, plus ruff, the privacy gate, OpenSpec strict, capabilities, the hosted check and the harness module list.
+- [x] 2.1 Refuse an expiry longer than twelve ASCII digits in both token parsers, and compare the v1 signature as bytes.
+- [x] 2.2 Refuse a folder on `/download` with the same request-spelled 404 as a missing path.
+- [x] 2.3 Answer other `/download` path refusals with a fixed `INVALID_PATH` reason that names no server path.
+- [x] 2.4 Compare every presented bearer as bytes on the transfer routes, the REST facade and the lease coordinator.
+- [x] 2.5 Decide release by path before a direct page read reports undecodable or unparseable bytes, and report them with a fixed reason.
+
+## 3. Verification
+
+- [x] 3.1 Move the tests that minted claimless download tokens onto owner-bound capabilities, without weakening an assertion.
+- [x] 3.2 Scoped suites green for transfer, upload tokens, the transfer routes, egress and principal resolution, plus ruff, the privacy gate, OpenSpec strict, capabilities, the hosted check and the harness module list.

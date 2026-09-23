@@ -32,6 +32,8 @@ The claim is hex rather than base64 because the handoff crosses the shared dispa
 
 `bound_audience` returns the verified audience. `download_principal` maps `owner` to the owner principal, maps a reserved `\x00` id (the fail-closed floor) to the most-restrictive principal, and maps any other audience to a resolved `RequestPrincipal` on the `transfer` surface. `op_transfer_artifact` binds `effective_principal()`'s audience when that principal is resolved and the floor otherwise. `effective_principal()` already returns the floor when nothing is bound, so an unbound mint cannot become the owner, and `mint_for_endpoint` defaults to the floor for the same reason.
 
+The floor is not a dead token. Under an empty policy, where no governance is configured, a floor-bound token downloads everything, exactly as `read_memory` returns everything to the same caller. The floor restricts only once a policy exists.
+
 ### Path binding: path-free, audience-bound
 
 The tool takes no path. The handoff is `{token, ttl_seconds, download_url}`, and the scaffold guidance tells clients to mint once and then `GET download_url?path=...`. Binding a path at mint time would need a new tool parameter and a regenerated tool contract, and it would break every client that downloads more than one file per token. It would also add nothing to what a principal may disclose: once the capability is bound to its minter's audience, it downloads at most what that principal could already read in full through `read_memory`. What path binding would still add is a narrower blast radius if a token leaks within its fifteen-minute life. That is left to a future change that also adds the parameter.
@@ -48,8 +50,17 @@ A capability carries the audience alone. It carries neither the minting call's p
 
 Every `NOT_FOUND` from the download route (missing, withheld, reserved leaf) is rendered once, from the request's own normalized spelling. On NTFS and APFS the resolver re-spells an existing path to its on-disk casing but leaves a missing one as typed. Echoing the resolver's spelling would therefore separate a withheld file from a missing one and reveal the withheld file's real name.
 
+### Hardening from review
+
+- **Expiry parsing.** Both token parsers accept an expiry of at most twelve ASCII digits. `str.isdigit` admits superscripts that `int()` refuses, and `int()` refuses more than 4,300 digits outright, so either used to surface as a server error rather than a refusal.
+- **Bearer comparison.** Every presented bearer is compared as bytes: the raw transfer secret, the upload lane lookup, the REST key and the lease coordinator's two tokens. `compare_digest` raises on a non-ASCII str, and a header carries whatever bytes the caller sent.
+- **One refusal for folders.** `/download` renders `NOT_A_FILE` exactly as it renders `NOT_FOUND`, so a folder inside a withheld scope is indistinguishable from a missing path.
+- **No server paths in refusals.** `/download` answers every other path refusal with a fixed `INVALID_PATH` reason. The resolver's own reason names the absolute path a traversal reached, or an escaping symlink's target.
+- **Release before decoding.** A direct page read (`read_memory`, `get`, `fetch`, exact unit reads, and the page and frontmatter helpers beneath them) used to report bytes that failed to decode or parse as `UNREADABLE`, with the codec's message, before the release decision ran. That disclosed existence, one content byte and its offset. An unreadable result is now reported only where a path-only release decision releases the item to the caller, and with a fixed reason. Everywhere else it is the absent refusal, byte-identical to a missing file's. The full decision needs the frontmatter the bytes failed to yield, so a scope that needs frontmatter to classify the path withholds it.
+
 ## Risks / Trade-offs
 
 - A capability minted by a principal with session-scoped grants downloads less than that session could read inline. That is deliberate: it fails closed, and the minter can still read inline.
 - A leaked capability still discloses anything its minter may read in full, for up to fifteen minutes. The same was true before, with the owner's ceiling in place of the minter's.
-- A directory path still answers `NOT_A_FILE`, which reveals that the directory exists. That is pre-existing, the hosted transfer routes behave the same way, and it is out of scope here.
+- Timing still separates a withheld file from a missing one. A missing path stops at the existence check, while a withheld one runs the release decision first, and the review measured roughly 10 ms against 1.6 ms on `/download`. Every direct read shows the same gap, `read_memory` included, so it is a systemic property of the read path and is not fixed here.
+- A symlink that escapes the vault answers `INVALID_PATH`, while a missing path answers `NOT_FOUND`, so the existence of such a link inside a withheld scope is still observable. The refusal names no server path.
