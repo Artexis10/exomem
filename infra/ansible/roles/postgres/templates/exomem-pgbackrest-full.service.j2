@@ -1,0 +1,8 @@
+[Unit]
+Description=Exomem control database nightly full pgBackRest backup
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=postgres
+ExecStart=/usr/bin/pgbackrest --stanza={{ postgres_pgbackrest_stanza }} --type=full backup

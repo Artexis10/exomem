@@ -915,8 +915,9 @@ def test_a_turn_naming_no_anchor_is_served_that_notes_units(
         str((unit.get("provenance") or {}).get("path") or "") for unit in packet["units"]
     } == {CARRY_PAGE}
     assert "working_set.carry" in packet["timings"]["stages"]
-    # Lane U2 owns referents: a carried page is not a resolution to carry on.
-    assert "continuity" not in packet
+    # Was "no token" (U3); R-P2: "continue" resumes a carried page only if the
+    # token names it.
+    assert working_set_runtime.decode_continuity(packet["continuity"])["refs"] == [CARRY_PAGE]
 
 
 def test_a_named_anchor_still_wins_through_the_whole_door(

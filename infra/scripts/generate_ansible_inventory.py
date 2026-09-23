@@ -30,6 +30,12 @@ def _public_output(document: dict[str, Any], name: str) -> str:
     return value
 
 
+def _optional_public_output(document: dict[str, Any], name: str) -> str | None:
+    if name not in document:
+        return None
+    return _public_output(document, name)
+
+
 def main() -> int:
     args = _parser().parse_args()
     if args.terraform_output.stat().st_mode & 0o777 != 0o600:
@@ -41,24 +47,43 @@ def main() -> int:
     try:
         public_ip = str(ipaddress.ip_address(_public_output(document, "server_ipv4")))
         private_ip = str(ipaddress.ip_address(_public_output(document, "private_node_ip")))
+        control_public_ip = _optional_public_output(document, "control_db_server_ipv4")
+        control_private_ip = _optional_public_output(document, "control_db_private_ip")
+        if control_public_ip is not None:
+            control_public_ip = str(ipaddress.ip_address(control_public_ip))
+        if control_private_ip is not None:
+            control_private_ip = str(ipaddress.ip_address(control_private_ip))
     except ValueError as error:
         raise SystemExit(str(error)) from error
 
-    inventory = {
-        "all": {
-            "children": {
-                "hosted_nodes": {
-                    "hosts": {
-                        "exomem-alpha": {
-                            "ansible_host": public_ip,
-                            "ansible_user": args.user,
-                            "private_node_ip": private_ip,
-                        }
-                    }
+    children: dict[str, Any] = {
+        "hosted_nodes": {
+            "hosts": {
+                "exomem-alpha": {
+                    "ansible_host": public_ip,
+                    "ansible_user": args.user,
+                    "private_node_ip": private_ip,
                 }
             }
         }
     }
+
+    # The control database server is optional here: not every Terraform
+    # output set carries it yet (e.g. an apply that predates D12), so it is
+    # added only when both of its coordinates are present, rather than
+    # required unconditionally.
+    if control_public_ip is not None and control_private_ip is not None:
+        children["control_nodes"] = {
+            "hosts": {
+                "exomem-control-db": {
+                    "ansible_host": control_public_ip,
+                    "ansible_user": args.user,
+                    "postgres_private_ip": control_private_ip,
+                }
+            }
+        }
+
+    inventory = {"all": {"children": children}}
 
     args.inventory.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(

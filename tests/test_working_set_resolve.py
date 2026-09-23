@@ -2079,3 +2079,25 @@ def test_a_one_letter_name_still_resolves_by_its_own_spelling() -> None:
 
     assert candidates and "exact_alias" in candidates[0].evidence
     assert resolve_module.resolve(candidates).status == "resolved"
+
+
+def test_a_filler_word_in_capitals_is_not_an_acronym() -> None:
+    """R-O3, the reviewer's r4 alias probe: "OK continue" spelled "OK" in
+    capitals, an anchor titled "OK Go" earned `rare_term` from it, and that
+    worded candidate shut the recency referent the turn asked for."""
+    rows = (
+        _term_row("Music/OK Go.md", "OK Go", terms=("ok", "go")),
+        _term_row("Products/Hot Page.md", "Hot Page", terms=("hot", "page")),
+    )
+    analysis = resolve_module.analyze_turn("OK continue")
+
+    candidates = resolve_module.candidates_for(
+        analysis,
+        rows,
+        hot_paths=frozenset({"Products/Hot Page.md"}),
+        term_anchor_counts={"ok": 1},
+    )
+    resolution = resolve_module.resolve(candidates, referential=analysis.referential)
+
+    assert analysis.acronyms == frozenset()
+    assert [anchor.anchor_id for anchor in resolution.resolved_anchors] == ["Products/Hot Page.md"]

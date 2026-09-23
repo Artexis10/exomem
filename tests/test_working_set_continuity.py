@@ -749,6 +749,27 @@ def test_the_returned_token_is_accepted_and_reported_applied(
     assert "continuity" in evidence
 
 
+@pytest.mark.parametrize("turn", [TURN, "continue"])
+def test_a_valid_token_naming_nothing_is_reported_stale(
+    activation_vault: Path, turn: str
+) -> None:
+    """R-P2: `applied` means a token ref matched an index row or an eligible
+    page. A token this index issued whose every ref names nothing it can
+    match was reported `applied` while contributing nothing."""
+    payload = _decoded(commands.op_activate_context(activation_vault, turn=TURN)["continuity"])
+    nowhere = runtime_module.encode_continuity(
+        identity=payload["identity"],
+        roles_hash=payload["roles_hash"],
+        generation=payload["generation"],
+        refs=["Knowledge Base/Notes/nowhere.md"],
+        roles=payload["roles"],
+    )
+
+    packet = commands.op_activate_context(activation_vault, turn=turn, continuity=nowhere)
+
+    assert packet["generation"]["continuity"] == runtime_module.CONTINUITY_STALE
+
+
 def test_a_listed_partial_candidate_is_not_promoted_on_the_next_turn(
     activation_vault: Path,
 ) -> None:
@@ -1250,7 +1271,15 @@ def _batch_after(
 ) -> tuple[dict, dict]:
     """Every page old, `edits` = {page: seconds ago}, then `backfill-ids` runs.
     Returns the "continue" packets before and after the batch; `read` is the
-    one page the usage snapshot says was read, if any."""
+    one page the usage snapshot says was read, if any.
+
+    The pages the batch rewrote are then re-stamped with explicit times, so
+    the test does not depend on how fast this machine writes (R-O1): a batch
+    on a loaded machine stalled up to 2.9 s between pages. The explicit
+    batch stalls the same way at its end — gaps of 0.2, 2.9 and 0.3 s — and
+    the two pages after the stall are anchors, the tail that escaped a
+    one-second window and became the referent.
+    """
     import os
     import time
 
@@ -1281,8 +1310,36 @@ def _batch_after(
         if page.stat().st_mtime > now - 1
     }
     assert len(rewritten & anchors) >= 3, "the batch must rewrite anchors, or this proves nothing"
+    _restamp_batch(vault, rewritten, anchors=anchors, start=now)
     settle()
     return before, commands.op_activate_context(vault, turn="continue")
+
+
+#: The explicit batch's last three gaps: a stall between two ordinary ones.
+STALLED_TAIL_GAPS_S = (0.2, 2.9, 0.3)
+
+
+def _restamp_batch(vault: Path, rewritten: set[str], *, anchors: set[str], start: float) -> None:
+    """Give the batch's pages deterministic times: 0.1 s apart, ending in
+    `STALLED_TAIL_GAPS_S`, with anchors other than the user's page last."""
+    import os
+
+    from exomem import find_corpus
+
+    pages = [
+        rel
+        for rel in rewritten
+        if rel.rsplit("/", 1)[-1].casefold() not in find_corpus.NAVIGATION_BASENAMES
+    ]
+    tail = sorted(rel for rel in pages if rel in anchors and rel != SLED)
+    head = sorted(rel for rel in pages if rel not in tail)
+    ordered = [*head, *tail]
+    gaps = [0.1] * (len(ordered) - 1 - len(STALLED_TAIL_GAPS_S)) + list(STALLED_TAIL_GAPS_S)
+    stamp = int(start * 1e9)
+    for index, rel in enumerate(ordered):
+        if index:
+            stamp += int(gaps[index - 1] * 1e9)
+        os.utime(vault / rel, ns=(stamp, stamp))
 
 
 def _resolved_paths(packet: dict) -> list[str]:
@@ -1305,12 +1362,17 @@ def test_a_maintenance_batch_does_not_pick_the_referent(
     )
 
     assert _resolved_paths(before) == [SLED]
-    assert (activation_vault / SLED).stat().st_mtime < time_now() - 1, "the batch left it alone"
+    assert (activation_vault / SLED).stat().st_mtime < time_now() - 4, "the batch left it alone"
     if read:
         assert _resolved_paths(after) == [SLED], after["anchors"]
     else:
         assert after["abstention"] == {"reason": "unresolved"}, after["anchors"]
-        assert after["recent_context"]
+        # The block agrees with the empty profile (R-P3): neither the batch
+        # nor the edit before it is offered as recent work.
+        assert "recent_context" in after
+        assert not [e for e in after["recent_context"] if e["why"] == "edited"], after[
+            "recent_context"
+        ]
 
 
 @pytest.mark.parametrize("read", [None, SLED], ids=["nothing-read", "sled-read"])
@@ -1604,3 +1666,37 @@ def test_continuity_qualifies_an_anchor_named_by_its_path() -> None:
     (qualified,) = resolve_module.apply_continuity((candidate,), frozenset({"Products/Page.md"}))
 
     assert "continuity" in qualified.evidence
+
+
+
+# R-O1: a burst is a chain of edits, so one stall does not split a batch.
+
+
+def test_a_stalled_batch_is_one_burst() -> None:
+    """The reviewer's r4 gaps: a loaded machine stalled 2.9 s inside a batch,
+    and the two pages after the stall fell outside a one-second window."""
+    second = 1_000_000_000
+    start = 1_790_000_000 * second
+    edited = {
+        "Knowledge Base/Notes/a.md": start,
+        "Knowledge Base/Notes/b.md": start + int(0.2 * second),
+        "Knowledge Base/Notes/c.md": start + int(3.1 * second),
+        "Knowledge Base/Notes/d.md": start + int(3.4 * second),
+        "Knowledge Base/Products/user-page.md": start - 60 * second,
+    }
+
+    burst = working_set._burst_paths(edited)
+
+    assert burst == frozenset(path for path in edited if not path.endswith("user-page.md"))
+
+
+def test_two_edits_seconds_apart_are_not_a_burst() -> None:
+    second = 1_000_000_000
+    start = 1_790_000_000 * second
+    edited = {
+        "Knowledge Base/Notes/a.md": start,
+        "Knowledge Base/Notes/b.md": start + 2 * second,
+        "Knowledge Base/Notes/c.md": start + 60 * second,
+    }
+
+    assert working_set._burst_paths(edited) == frozenset()

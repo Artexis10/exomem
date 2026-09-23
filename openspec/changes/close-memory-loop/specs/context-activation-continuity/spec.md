@@ -31,7 +31,12 @@ or registry hash does not match the serving state, or that cannot be decoded, SH
 ignored and reported as `generation.continuity = "stale"`; a token minted under an
 older generation of the same index remains valid and its refs are re-validated against
 the current index, so ordinary vault writes do not discard continuity. The packet
-SHALL report `generation.continuity` as `applied`, `stale` or `absent`. A request that
+SHALL report `generation.continuity` as `applied`, `stale` or `absent`, and SHALL
+report `applied` only when at least one of a valid token's refs, visible to the
+current audience, qualified something: an anchor that carries `continuity` evidence,
+or a page a referential turn resumed. A valid token whose refs qualified nothing —
+naming nothing, naming only what this audience may not see, or naming a row or page
+this turn neither reached nor resumed — SHALL be reported `stale`. A request that
 carries a token or an `anchor` override SHALL never be served another request's cached
 packet. The server SHALL keep no per-conversation state.
 
@@ -69,6 +74,18 @@ packet. The server SHALL keep no per-conversation state.
   role-registry hash, or is not decodable
 - **THEN** the packet is built without it and reports `generation.continuity =
   "stale"`
+
+#### Scenario: A token that names nothing is not reported applied
+- **WHEN** a token this index issued is passed, and none of its refs names a row
+  of the current index or an eligible compiled page
+- **THEN** the packet reports `generation.continuity = "stale"`
+
+#### Scenario: A withheld ref answers exactly as a missing one
+- **WHEN** a token names a page or an anchor the current audience may not see,
+  on a referential turn or any other
+- **THEN** the response's status, abstention and `generation` block are identical
+  to those for a token naming a page that does not exist, and report
+  `generation.continuity = "stale"` with no `carried_by`
 
 #### Scenario: A vault write does not discard continuity
 - **WHEN** a token was minted under an older generation of the same index and one of

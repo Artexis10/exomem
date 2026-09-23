@@ -21,7 +21,7 @@
     }
   },
   "activate_context": {
-    "description": "Compile durable context for a raw conversational turn, without a query.\n\nCall this ONCE at the start of a substantive turn, before deciding what to\nsearch for. Pass the user's words verbatim — this is not a search query and\nmust not be rewritten into one. It returns a bounded working-memory packet:\nwhich durable anchors the turn is about (entities, resources, hubs, Records\ncollections, active plans, projects), the context roles it filled, short\nprovenance-bearing units, pointers to what did not fit the budget, and the\ncurrent state of any resource whose collection records one.\n\nEvery packet leads with `recent_context`: up to eight pages this vault has\nrecently been worked on — edited, read, captured as a session, recorded as a\nconversation recap, or left open in Planning — each with its title, why it\nis recent, the date of that contact and, where the page carries one, its own\nauthored `status` or `summary` line. A recap entry (`why: \"episode\"`) is the\nnewest revision of one conversation's `episode_memory` record and carries\nthat conversation's `episode` key; follow it with `read_memory`. That line is the page's, not a current-state reading: these\npages are chosen by recency rather than by the turn, so the block never\nqueries a Records collection the turn did not name. `current_state[]`\nremains the carrier for the resolved anchors' governed state.\nIt is served whether or not the turn resolved anything, so a fresh session\nopening on \"continue\" receives the thread it is picking up. `as_of` dates\nthe CONTACT, not the event the page describes.\n\nRead-only and abstaining by construction. It writes nothing, changes no\n`ask_memory`/`find` result, runs no model beyond the retrieval scorers recall\nalready runs, and returns `abstained: true` with a reason rather than guessing\nwhen the turn resolves nothing (`unresolved`), names two competing senses\n(`ambiguous`), is served while the derived index is still warming\n(`index_warming`), or is switched off (`disabled`). An ambiguous turn lists\nboth anchors under `ambiguity` and runs no role lane — you pick the sense and\ncall again with `anchor` set to the ref you mean.\n\nA turn that named no anchor but whose own distinctive words clearly reach one\ncompiled page is served from that page instead of abstaining, and says so:\nits single `anchors[]` entry has `kind: \"page\"` and `status:\n\"retrieval_carried\"`, and `generation.carried_by` is `\"retrieval\"`. Read that\nas \"nothing was named; recall alone put this here\" — no anchor was resolved,\nthe packet carries no continuity token, and a turn with nothing distinctive\nin it abstains `unresolved` rather than guessing between pages. Naming that\nSAME page yourself with `anchor` instead resolves it outright, at `status:\n\"resolved\"` and `generation.carried_by: \"agent_choice\"` — your choice, not\nrecall's guess.\n\nWhen a turn names SEVERAL pages this way, nothing is carried and the packet\nabstains `unresolved`, listing them under `anchors[]` at `status:\n\"retrieval_named\"`. That is not `ambiguity`, which reports two anchors that\nboth resolved: nothing resolved here. Call again with `anchor` set to the\nref you mean — an ordinary compiled page takes it exactly as a page reached\nby `retrieval_carried` above does — and that page's own units are served.\n\nOn the MCP door a packet may also carry `episode_due`: after several\nactivations with no `episode_memory` record from this caller, it asks you to\nrecord one at the conversation's next decision or stopping point. It is\nadvice, at most once per half hour, and absent when proactive capture is off.\n\nUse `ask_memory` instead when you already know what you are looking for; use\nthis when you do not, and follow it with `read_memory` on whatever ref the\npacket points at.",
+    "description": "Compile durable context for a raw conversational turn, without a query.\n\nCall this ONCE at the start of a substantive turn, before deciding what to\nsearch for. Pass the user's words verbatim — this is not a search query and\nmust not be rewritten into one. It returns a bounded working-memory packet:\nwhich durable anchors the turn is about (entities, resources, hubs, Records\ncollections, active plans, projects), the context roles it filled, short\nprovenance-bearing units, pointers to what did not fit the budget, and the\ncurrent state of any resource whose collection records one.\n\nEvery packet leads with `recent_context`: up to eight pages this vault has\nrecently been worked on — edited, read, captured as a session, or left open\nin Planning — each with its title, why it is recent, the date of that\ncontact and, where the page carries one, its own authored `status` or\n`summary` line. That line is the page's, not a current-state reading: these\npages are chosen by recency rather than by the turn, so the block never\nqueries a Records collection the turn did not name. `current_state[]`\nremains the carrier for the resolved anchors' governed state.\nIt is served whether or not the turn resolved anything, so a fresh session\nopening on \"continue\" receives the thread it is picking up. `as_of` dates\nthe CONTACT, not the event the page describes.\n\nRead-only and abstaining by construction. It writes nothing, changes no\n`ask_memory`/`find` result, runs no model beyond the retrieval scorers recall\nalready runs, and returns `abstained: true` with a reason rather than guessing\nwhen the turn resolves nothing (`unresolved`), names two competing senses\n(`ambiguous`), is served while the derived index is still warming\n(`index_warming`), or is switched off (`disabled`). An ambiguous turn lists\nboth anchors under `ambiguity` and runs no role lane — you pick the sense and\ncall again with `anchor` set to the ref you mean.\n\nA turn that named no anchor but whose own distinctive words clearly reach one\ncompiled page is served from that page instead of abstaining, and says so:\nits single `anchors[]` entry has `kind: \"page\"` and `status:\n\"retrieval_carried\"`, and `generation.carried_by` is `\"retrieval\"`. Read that\nas \"nothing was named; recall alone put this here\" — no anchor was resolved,\nyet the packet's continuity token names that page, so a following\n\"continue\" resumes it; a turn with nothing distinctive in it abstains\n`unresolved` rather than guessing between pages. Naming that\nSAME page yourself with `anchor` instead resolves it outright, at `status:\n\"resolved\"` and `generation.carried_by: \"agent_choice\"` — your choice, not\nrecall's guess.\n\nWhen a turn names SEVERAL pages this way, nothing is carried and the packet\nabstains `unresolved`, listing them under `anchors[]` at `status:\n\"retrieval_named\"`. That is not `ambiguity`, which reports two anchors that\nboth resolved: nothing resolved here. Call again with `anchor` set to the\nref you mean — an ordinary compiled page takes it exactly as a page reached\nby `retrieval_carried` above does — and that page's own units are served.\n\nUse `ask_memory` instead when you already know what you are looking for; use\nthis when you do not, and follow it with `read_memory` on whatever ref the\npacket points at.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -57,7 +57,7 @@
             }
           ],
           "default": null,
-          "description": "The opaque `continuity` token a previous packet of this conversation returned. On a turn that names nothing (\"continue\", \"where were we\") its anchors are the first thing the turn is taken to refer to, and may resolve on that alone. On any other turn it only strengthens anchors the turn already reaches on its own"
+          "description": "The opaque `continuity` token a previous packet of this conversation returned. On a turn that names nothing (\"continue\", \"where were we\") the anchors or page it names are the first thing the turn is taken to refer to, and may resolve on that alone. On any other turn it only strengthens anchors the turn already reaches on its own"
         },
         "anchor": {
           "anyOf": [
@@ -75,30 +75,6 @@
           "default": false,
           "description": "Include per-stage timings for diagnostics.",
           "type": "boolean"
-        },
-        "client": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional lowercase label for the calling client, e.g. `claude-code`, `codex` or `chatgpt`. Recorded in a host-local activation log only; an invalid label is ignored, never refused."
-        },
-        "session": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional opaque conversation identifier, at most 256 characters, such as the `episode` key an `episode_memory` record returned. Only a vault-keyed hash of it is recorded. Neither argument ever changes the packet."
         },
         "authorization_session_credential": {
           "anyOf": [
@@ -2467,171 +2443,6 @@
         "path",
         "why",
         "operation"
-      ],
-      "type": "object"
-    }
-  },
-  "episode_memory": {
-    "description": "Record what a conversation worked on, decided and left open, for the next session on any client.\n\nCall `record` once when a conversation reaches a decision or a stopping\npoint, and skip it when nothing durable happened. You write the recap:\nshort one-line items, never a transcript. It is kept as a bounded Source\nunder `Sources/Episodes/`, and the newest recap of each conversation leads\nthe `recent_context` block `activate_context` serves on every client.\nRecording again under the same `episode` with changed content adds a\nrevision and retires the previous one; an identical retry writes nothing.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "action": {
-          "description": "`record` writes a recap revision; `inspect` reads this episode's revision history back.",
-          "enum": [
-            "record",
-            "inspect"
-          ],
-          "type": "string"
-        },
-        "episode": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "The `ep-` key a previous record returned, or the one a hook named. Omit it on a conversation's first record and reuse the returned key for the rest of that conversation. Required for `inspect`."
-        },
-        "subject": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "What the conversation was about, one line, at most 120 characters."
-        },
-        "summary": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "One line on where it stands, at most 180 characters."
-        },
-        "worked_on": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Up to 5 one-line items, 200 characters each."
-        },
-        "decided": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Up to 5 one-line items, 200 characters each."
-        },
-        "open": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Up to 5 one-line items left open, 200 characters each. At least one of `worked_on`, `decided` or `open` is required."
-        },
-        "said": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Up to 3 verbatim user statements worth keeping, 300 characters each."
-        },
-        "about": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Up to 3 `exomem://` refs of pages the conversation concerned. Refs you cannot see are dropped and counted in `about_skipped`."
-        },
-        "client": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional lowercase client label, e.g. `claude-code` or `chatgpt`."
-        },
-        "response_detail": {
-          "default": "compact",
-          "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
-          "enum": [
-            "compact",
-            "full",
-            "legacy"
-          ],
-          "type": "string"
-        },
-        "authorization_session_credential": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional authorization-session bearer. Consumed by the raw MCP boundary before tool validation."
-        }
-      },
-      "required": [
-        "action"
       ],
       "type": "object"
     }

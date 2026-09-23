@@ -1094,13 +1094,14 @@ def test_an_open_planning_item_survives_a_flood_of_fresh_edits(
     working_set_index.WorkingSetIndex(stateful_vault).rebuild()
     now = time.time()
     planning_pages = []
-    for page in sorted((stateful_vault / "Knowledge Base").rglob("*.md")):
+    for index, page in enumerate(sorted((stateful_vault / "Knowledge Base").rglob("*.md"))):
         rel = page.relative_to(stateful_vault).as_posix()
         if "/Planning/" in rel:
             planning_pages.append(page)
             _touch(page, when=now - 90 * 86_400)
         else:
-            _touch(page, when=now)
+            # A minute apart: each its own edit, not a write burst.
+            _touch(page, when=now - index * 60)
     assert planning_pages, "the fixture must hold a Planning item to bury"
     _live_cell(stateful_vault)
 
@@ -1200,6 +1201,12 @@ def test_the_block_never_takes_more_than_half_the_packet() -> None:
     assert packet["units"], "the rest of the packet must still be affordable"
 
 
+def _minutes_ago(minutes: int) -> int:
+    """An edit time in ns, `minutes` before a fixed instant: fake registry
+    entries a minute apart, each its own edit rather than a write burst."""
+    return 1_800_000_000_000_000_000 - minutes * 60_000_000_000
+
+
 def test_the_reserved_planning_slot_never_shrinks_the_block(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1212,9 +1219,10 @@ def test_the_reserved_planning_slot_never_shrinks_the_block(
     for: someone resuming after a break, whose open commitments outnumber
     their recent edits.
     """
-    others = {f"Knowledge Base/Notes/note-{index}.md": 9_000 - index for index in range(2)}
+    others = {f"Knowledge Base/Notes/note-{index}.md": _minutes_ago(index) for index in range(2)}
     plans = tuple(f"Knowledge Base/Planning/Plan {index}/_collection.md" for index in range(5))
     monkeypatch.setattr(working_set, "_recent_mtimes", lambda _root: dict(others))
+    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a: True)
     monkeypatch.setattr(working_set, "_recently_activated", lambda *a, **k: ())
     monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: plans)
     monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
@@ -1234,9 +1242,10 @@ def test_the_reserved_slot_still_holds_when_the_block_is_full(
 ) -> None:
     """The backfill must not undo the reservation: with more recent edits than
     slots, the newest open plan still gets one."""
-    others = {f"Knowledge Base/Notes/note-{index}.md": 9_000 - index for index in range(20)}
+    others = {f"Knowledge Base/Notes/note-{index}.md": _minutes_ago(index) for index in range(20)}
     plans = ("Knowledge Base/Planning/Plan 0/_collection.md",)
     monkeypatch.setattr(working_set, "_recent_mtimes", lambda _root: dict(others))
+    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a: True)
     monkeypatch.setattr(working_set, "_recently_activated", lambda *a, **k: ())
     monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: plans)
     monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
@@ -1275,6 +1284,7 @@ def test_collection_storage_stays_out_on_the_cold_path(
     ]
     monkeypatch.setattr(working_set, "_recent_mtimes", lambda _root: {})
     monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
+    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a: True)
     monkeypatch.setattr(
         usage, "activation_map", lambda *a, **k: {usage.canon(item): 5.0, usage.canon(manifest): 4.0}
     )
@@ -1349,12 +1359,13 @@ def test_a_unit_two_roles_both_selected_is_served_once() -> None:
 
 def _age_everything(vault: Path, *, newest: Path) -> None:
     """One page freshly edited, every other page old, in the registry the
-    service maintains."""
+    service maintains. The old pages are a minute apart: each its own edit,
+    not a write burst (`working_set.HOT_PROFILE_BURST_GAP_NS`)."""
     import time
 
     now = time.time()
     for index, page in enumerate(sorted((vault / "Knowledge Base").rglob("*.md"))):
-        _touch(page, when=now - 10_000 - index)
+        _touch(page, when=now - 10_000 - index * 60)
     _touch(newest, when=now)
     _live_cell(vault)
 
@@ -1844,3 +1855,265 @@ def test_a_captured_session_still_carries_no_statement_beside_an_episode(
     assert session["why"] == "captured"
     assert "statement" not in session
     assert by_path[recap.relative_to(stateful_vault).as_posix()]["statement"].startswith("summary:")
+
+
+# --------------------------------------------------------------------------- #
+# R-P3: the recent-context block agrees with the hot profile.
+# --------------------------------------------------------------------------- #
+
+_KB = "Knowledge Base"
+
+
+def _journal_notes(vault: Path, stem: str, count: int) -> list[Path]:
+    journal = vault / _KB / "Notes" / "Journal"
+    journal.mkdir(parents=True, exist_ok=True)
+    pages = [journal / f"{stem}-{index}.md" for index in range(count)]
+    for index, page in enumerate(pages):
+        page.write_text(
+            f"---\ntype: note\nstatus: active\n---\n\n# {stem} {index}\n\nTidied.\n",
+            encoding="utf-8",
+        )
+    return pages
+
+
+def _age_all(vault: Path, *, now: float) -> None:
+    """Every page old and each its own edit, a minute apart."""
+    for index, page in enumerate(sorted((vault / _KB).rglob("*.md"))):
+        _touch(page, when=now - 10_000 - index * 60)
+
+
+def test_a_write_burst_and_the_edits_before_it_stay_out_of_the_block(
+    stateful_vault: Path,
+) -> None:
+    """(a) A maintenance batch rewrote four notes after the user's last edit.
+    The hot profile gives neither the batch nor any edit older than it an
+    edit signal; the block listed the batch and the older edits anyway. An
+    edit made after the batch is work again."""
+    import time
+
+    batch = _journal_notes(stateful_vault, "batch-note", 4)
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    now = time.time()
+    _age_all(stateful_vault, now=now)
+    _touch(stateful_vault / _KB / "Products" / "Cargo Sled.md", when=now - 100)
+    for index, page in enumerate(batch):
+        _touch(page, when=now - 50 + index * 0.05)
+    _touch(stateful_vault / _KB / "Systems" / "Depot Ledger.md", when=now)
+    _live_cell(stateful_vault)
+
+    packet = working_set.compile_packet(
+        stateful_vault, turn="zzz qqq unrelated gibberish", max_chars=4000
+    )
+
+    edited = [entry["path"] for entry in packet["recent_context"] if entry["why"] == "edited"]
+    assert edited == [f"{_KB}/Systems/Depot Ledger.md"], edited
+
+
+def test_the_most_read_page_keeps_a_slot_under_a_live_registry(
+    stateful_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(b) Read pages were ranked by their last EDIT time, so under a live
+    registry eight fresher edits always cut them and `activated` never
+    appeared. They rank by activation and the most-read one keeps a slot,
+    even when a less-read page was edited more recently."""
+    import time
+
+    fresh = _journal_notes(stateful_vault, "fresh-note", 9)
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    now = time.time()
+    _age_all(stateful_vault, now=now)
+    hub = f"{_KB}/Notes/Insights/northern-corridor-hub.md"
+    person = f"{_KB}/Entities/People/Marit Solheim.md"
+    _touch(stateful_vault / hub, when=now - 90_000)
+    _touch(stateful_vault / person, when=now - 20_000)
+    for index, page in enumerate(fresh):
+        _touch(page, when=now - index * 60)
+    _live_cell(stateful_vault)
+    monkeypatch.setattr(working_set, "_activation_snapshot", lambda: {hub: 5.0, person: 3.0})
+
+    packet = working_set.compile_packet(
+        stateful_vault, turn="zzz qqq unrelated gibberish", max_chars=4000
+    )
+
+    block = packet["recent_context"]
+    assert len(block) == working_set.RECENT_CONTEXT_MAX_ENTRIES
+    assert [entry["path"] for entry in block if entry["why"] == "activated"] == [hub], [
+        (entry["why"], entry["path"]) for entry in block
+    ]
+
+
+def test_retired_and_superseded_pages_stay_out_of_the_block(stateful_vault: Path) -> None:
+    """(c) The block led with a superseded page labelled "status: active" and
+    an archived anchor, both of which the hot profile skips."""
+    import time
+
+    products = stateful_vault / _KB / "Products"
+    (products / "Old Sled.md").write_text(
+        "---\ntype: resource\nstatus: active\nsuperseded_by: \"[[Cargo Sled]]\"\n---\n\n"
+        "The previous sled plan.\n",
+        encoding="utf-8",
+    )
+    (products / "Retired Sled.md").write_text(
+        "---\ntype: resource\nstatus: archived\n---\n\nThe old sled, withdrawn.\n",
+        encoding="utf-8",
+    )
+    working_set_index.WorkingSetIndex(stateful_vault).rebuild()
+    now = time.time()
+    _age_all(stateful_vault, now=now)
+    _touch(products / "Cargo Sled.md", when=now - 200)
+    _touch(products / "Retired Sled.md", when=now - 100)
+    _touch(products / "Old Sled.md", when=now)
+    _live_cell(stateful_vault)
+
+    packet = working_set.compile_packet(
+        stateful_vault, turn="zzz qqq unrelated gibberish", max_chars=4000
+    )
+
+    paths = [entry["path"] for entry in packet["recent_context"]]
+    assert f"{_KB}/Products/Old Sled.md" not in paths
+    assert f"{_KB}/Products/Retired Sled.md" not in paths
+    assert paths[0] == f"{_KB}/Products/Cargo Sled.md", paths
+
+
+# --------------------------------------------------------------------------- #
+# R-P4: the recent statement is what the page says, not where it is in its life.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("frontmatter", "expected"),
+    [
+        # The review's a2b shape: the lifecycle word shadowed the summary.
+        (
+            "status: active\nsummary: Reconciled the winter stock count against the ledger.\n",
+            "summary: Reconciled the winter stock count against the ledger.",
+        ),
+        ("status: active\n", ""),
+        ("status: draft\n", ""),
+        ("status: concluded\n", ""),
+        ("status: published\n", ""),
+        ("status: in storage abroad\n", "status: in storage abroad"),
+    ],
+)
+def test_the_recent_statement_is_never_a_lifecycle_word(
+    vault: Path, frontmatter: str, expected: str
+) -> None:
+    rel = f"{_KB}/Systems/Winter Ledger.md"
+    page = vault / rel
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(f"---\ntype: resource\n{frontmatter}---\n\nThe ledger.\n", encoding="utf-8")
+
+    assert working_set._recent_frontmatter_statement(vault, rel) == expected
+
+
+# --------------------------------------------------------------------------- #
+# R-Q N4: the recent block finds the latest burst without sorting the registry.
+# --------------------------------------------------------------------------- #
+
+
+def _reference_recent_edits(
+    mtimes: dict[str, int], *, limit: int, collections: frozenset[str]
+) -> dict[str, str]:
+    """The edit source by full sort: every burst computed over the whole
+    registry, the newest `limit` pages with a reason, less any edit at or
+    before the latest burst. For edits this is exactly what R-P3 shipped (it
+    stopped at the first entry not after the burst, and every entry after
+    it is newer than every entry before it); a captured session is never
+    cut (R-Q N5)."""
+    burst = working_set._burst_paths(mtimes)
+    after = max((int(mtimes[path]) for path in burst), default=0)
+    newest: dict[str, tuple[str, int]] = {}
+    for rel in sorted(mtimes, key=lambda item: (-mtimes[item], item)):
+        if len(newest) >= limit:
+            break
+        why = working_set._recent_reason_for(rel, collections=collections)
+        if why:
+            newest[rel] = (why, int(mtimes[rel]))
+    return {
+        rel: why for rel, (why, mtime) in newest.items() if why == "captured" or mtime > after
+    }
+
+
+def _random_registry(seed: int) -> dict[str, int]:
+    import random
+
+    rng = random.Random(seed)
+    kinds = (
+        "Knowledge Base/Notes/Journal/note-{}.md",
+        "Knowledge Base/Sources/Sessions/2026-09-{}-session.md",
+        "Knowledge Base/Evidence/receipt-{}.md",
+        "Knowledge Base/Notes/Area {}/index.md",
+        "Knowledge Base/Records/Depot Stock/Items/item-{}.md",
+    )
+    gaps_s = (0, 0, 0.1, 1, 2.9, 4.9, 5, 5.1, 6, 60, 3600)
+    stamp = 1_800_000_000_000_000_000
+    mtimes: dict[str, int] = {"Knowledge Base/Records/Depot Stock/_collection.md": stamp}
+    for index in range(rng.randrange(1, 60)):
+        stamp -= int(rng.choice(gaps_s) * 1e9)
+        path = rng.choice(kinds).format(index)
+        mtimes[path] = 0 if rng.random() < 0.03 else stamp
+    return mtimes
+
+
+def test_the_recent_edits_are_identical_to_the_full_sort() -> None:
+    """Bounded work, same answer: the burst fixtures' shapes (chains of three
+    or more within five seconds, a stalled tail, equal times, navigation
+    pages, zero times, captures and collection storage) at every limit."""
+    collections = frozenset({"Knowledge Base/Records/Depot Stock"})
+    for seed in range(400):
+        mtimes = _random_registry(seed)
+        for limit in (1, 3, 8):
+            assert working_set._recent_edits(
+                mtimes, limit=limit, collections=collections
+            ) == _reference_recent_edits(mtimes, limit=limit, collections=collections), (
+                seed,
+                limit,
+            )
+
+
+def test_the_recent_block_never_computes_every_burst(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the latest burst and the edits after it matter to the block, so
+    it must not sort the whole registry to find every burst: +5.7 ms a turn
+    at 8,000 notes."""
+
+    def every_burst(_mtimes):
+        raise AssertionError("the recent block computed every burst")
+
+    monkeypatch.setattr(working_set, "_burst_paths", every_burst)
+    monkeypatch.setattr(working_set, "_recently_activated", lambda *a, **k: ())
+    monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: ())
+    monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
+    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a: True)
+    mtimes = {f"Knowledge Base/Notes/note-{index}.md": _minutes_ago(index) for index in range(20)}
+
+    entries = working_set._recent_context(Path("/nonexistent"), rows=[], mtimes=mtimes)
+
+    assert [entry["path"] for entry in entries] == [
+        f"Knowledge Base/Notes/note-{index}.md" for index in range(8)
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# R-Q N5: a captured session is not cut by the burst after it.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_captured_session_survives_the_burst_after_it() -> None:
+    """The reviewer's d_save3: an ordinary agent save wrote three pages a
+    second apart, sixty seconds after the session was captured. The capture
+    is the record of what was spoken about, not a batch edit, so the save
+    cuts the user's earlier edit but not the capture."""
+    session = "Knowledge Base/Sources/Sessions/2026-09-22-session.md"
+    edited = "Knowledge Base/Systems/Depot Ledger.md"
+    saved = [
+        "Knowledge Base/Notes/Research/sluice-gate-trial.md",
+        "Knowledge Base/Entities/People/Marit Solheim.md",
+        "Knowledge Base/Notes/Insights/northern-corridor-hub.md",
+    ]
+    stamp = 1_800_000_000_000_000_000
+    mtimes = {edited: stamp - 120 * 10**9, session: stamp - 60 * 10**9}
+    mtimes.update({page: stamp + index * 10**9 for index, page in enumerate(saved)})
+
+    offered = working_set._recent_edits(mtimes, limit=8)
+
+    assert offered == {session: "captured"}, offered

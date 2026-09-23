@@ -17,6 +17,9 @@ Subcommands:
 - `doctor` — read-only local install/setup preflight
 - `auth sessions|revoke` — operator-only durable MCP session administration
 - `governance-schema status|plan-migration|stage-migration|commit-migration|restore-migration-backup|downmigrate` — offline schema control
+- `cell-init` — idempotent Exomem Cloud cell init-container entrypoint: vault
+  init when absent, then offline state migration; no governance schema
+  migration, no custody environment
 - `status` — resource posture/residency diagnostics without loading models
 - `warm` — pre-download/load the search models (bge, reranker, CLIP) so the first
   server start doesn't pay the download in the background; optional `--vault`
@@ -275,6 +278,8 @@ def _dispatch_main(raw: list[str]) -> int:
         return _lease_main(raw[1:])
     if raw and raw[0] == "governance-schema":
         return _governance_schema_main(raw[1:])
+    if raw and raw[0] == "cell-init":
+        return _cell_init_main(raw[1:])
     # `exomem activate "<turn>"` — the spelled-out contract for the context
     # compiler. A thin alias over the registry command so there is exactly one
     # leaf; the long form `exomem activate_context` keeps working.
@@ -324,10 +329,19 @@ def _build_auth_session_authority():
     return build_session_authority(base_url=base_url)
 
 
-def _session_metadata(record, *, current_generation: str) -> dict[str, object]:
+def _session_metadata(
+    record, *, current_generation: str, binding: object | None = None
+) -> dict[str, object]:
     effective_status = record.status
     if effective_status == "active" and record.generation != current_generation:
         effective_status = "generation_revoked"
+    # Whether this session's identity is the one the host bound as the owner
+    # (EXOMEM_OWNER_OAUTH_SUBJECT): its requests then act as the owner.
+    owner_equivalent = (
+        binding is not None
+        and record.github_user_id == getattr(binding, "user_id", None)
+        and record.issuer == getattr(binding, "issuer", None)
+    )
     return {
         "session_id": record.session_id,
         "client_id": record.client_id,
@@ -336,6 +350,7 @@ def _session_metadata(record, *, current_generation: str) -> dict[str, object]:
         "github_user_id": record.github_user_id,
         "issued_at": record.issued_at,
         "status": effective_status,
+        "owner_equivalent": owner_equivalent,
     }
 
 
@@ -377,11 +392,18 @@ def _auth_main(argv: list[str]) -> int:
 
     async def run() -> dict[str, object]:
         if args.command == "sessions":
+            from .governance.principal import remote_owner_binding
+
             records = await authority.list_sessions()
             current_generation = await authority.current_generation()
+            binding = remote_owner_binding()
             return {
                 "sessions": [
-                    _session_metadata(record, current_generation=current_generation)
+                    _session_metadata(
+                        record,
+                        current_generation=current_generation,
+                        binding=binding,
+                    )
                     for record in records
                 ]
             }
@@ -411,8 +433,9 @@ def _auth_main(argv: list[str]) -> int:
             print("No durable MCP sessions.")
         else:
             for row in rows:
+                owner = "owner" if row["owner_equivalent"] else "-"
                 print(
-                    f"{row['session_id']}  {row['status']}  {row['client_id']}  "
+                    f"{row['session_id']}  {row['status']}  {owner}  {row['client_id']}  "
                     f"{row['github_login']}  {row['issued_at']}"
                 )
     elif result.get("revoked_all"):
@@ -2071,6 +2094,68 @@ def _reclaim_schema_main(argv: list[str]) -> int:
             print(f"  {kb_prefix()}_Schema/{entry['path']} — {entry['reason']}")
     if not report["applied"]:
         print("Re-run with --apply to delete.")
+    return 0
+
+
+def _cell_init_failure_line(error_code: str, step: str) -> None:
+    """Exactly one JSON line: `{"ok": false, "step": ..., "error_code": ...}`
+    (design D3 "Output"). No traceback and no absolute paths: `step` and
+    `error_code` are both fixed vocabulary, never a path or an exception's own
+    message.
+    """
+    print(json.dumps({"ok": False, "step": step, "error_code": error_code}))
+
+
+def _cell_init_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem cell-init",
+        description=(
+            "Idempotent Exomem Cloud cell init-container entrypoint: vault init "
+            "when absent, then offline state migration. No governance schema "
+            "migration and no custody environment -- a cell runs standalone "
+            "governance defaults, like a fresh desktop install."
+        ),
+    )
+    parser.add_argument("--vault", required=True, help="explicit absolute vault root")
+    parser.add_argument("--json", action="store_true", help="emit stable JSON on success")
+    args = parser.parse_args(argv)
+    as_json = bool(args.json)
+
+    vault = Path(args.vault).expanduser()
+    if not vault.is_absolute():
+        _cell_init_failure_line("CELL_INIT_VAULT_INVALID", "vault_path")
+        return 1
+
+    from . import cell_init, cloud_cell, privacy_log
+
+    # The same content redaction the server installs (design D3 "Output"): a
+    # failure below must never let a query- or path-shaped detail escape
+    # through a log line this process emits before it exits.
+    privacy_log.install_hosted_log_redaction()
+
+    # `/data/host` (design D3.1) is enforced only inside a real cloud cell,
+    # where the image's `usermod --home /data/host` makes `Path.home()`
+    # resolve there -- never for a bare local/dev invocation, which would
+    # otherwise chmod a developer's actual home directory to 0700.
+    host_root = Path.home() if cloud_cell.cloud_mode_enabled() else None
+
+    try:
+        result = cell_init.run_cell_init(vault, host_root=host_root)
+    except cell_init.CellInitError as error:
+        _cell_init_failure_line(error.code, error.step)
+        return 1
+    except Exception:  # noqa: BLE001 - fail closed: no traceback, no absolute paths
+        _cell_init_failure_line("CELL_INIT_FAILED", "unknown")
+        return 1
+
+    report = {
+        "vault_created": result.vault_created,
+    }
+    if as_json:
+        print(json.dumps(report))
+    else:
+        for key, value in report.items():
+            print(f"{key}: {value}")
     return 0
 
 

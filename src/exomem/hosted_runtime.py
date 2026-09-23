@@ -51,6 +51,7 @@ _HOSTED_CLEARED_ENV = (
     "EXOMEM_GITHUB_USERNAME",
     "EXOMEM_HOSTED_SERVICE_CREDENTIAL",
     "EXOMEM_LARGE_UPLOAD_BASE_URL",
+    "EXOMEM_OWNER_OAUTH_SUBJECT",
     "EXOMEM_REST_API_KEY",
     "EXOMEM_UPLOAD_TOKEN",
     "EXOMEM_WRITER_LEASE_PREFERRED",
@@ -62,6 +63,9 @@ _HOSTED_CLEARED_ENV = (
     "EXOMEM_WRITER_LEASE_VAULT_ID",
     "GITHUB_CLIENT_ID",
     "GITHUB_CLIENT_SECRET",
+    # The legacy spelling too: `env_compat.promote_legacy()` runs again after
+    # this clearing and would otherwise copy it back to the canonical name.
+    "KB_MCP_OWNER_OAUTH_SUBJECT",
 )
 
 _DEFAULT_STORAGE_LIMIT_BYTES = 5 * 1024 * 1024 * 1024

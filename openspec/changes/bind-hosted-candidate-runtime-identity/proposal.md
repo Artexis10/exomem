@@ -1,3 +1,5 @@
+> **Superseded (2026-09-23)** by `adopt-exomem-cloud-plain-cells`. Not to be implemented further; removed with its code in that change's retirement phase.
+
 ## Why
 
 Exomem now publishes independently attested runtime and provisioner image candidates, but nothing yet composes those candidates into immutable phase-specific deployment units or proves that a provisioned cell is running the selected runtime contract. A merge can therefore produce trustworthy artifacts without making the Hosted control plane safe to deploy, retry, contract, or roll back.

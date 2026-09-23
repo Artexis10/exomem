@@ -16,6 +16,7 @@ under conftest's injected `EXOMEM_STATE_ROOT` on its own tmpdir vault.
 
 from __future__ import annotations
 
+import tracemalloc
 from pathlib import Path
 
 import numpy as np
@@ -666,3 +667,216 @@ def test_exact_ties_may_pick_a_different_equally_scoring_row(tmp_path):
     assert len(hits) == 1
     assert hits[0][0] in allowed
     assert hits[0][3] == pytest.approx(1.0, abs=SCORE_TOLERANCE)
+
+
+# --------------------------------------------------------------------------- #
+# `search_many`: the write advisory's many draft chunks, scored in one pass.
+# --------------------------------------------------------------------------- #
+#
+# The post-commit advisory ran one `search` per draft chunk: one full read of
+# the matrix, one eligibility lookup and one chunk-text hydration per chunk, of
+# which it used only the file path and the score, behind a walk of the whole
+# corpus to build `allowed_paths`. On a CPU-capped cell that was ~90 ms per
+# chunk plus ~0.5 s of walk. `search_many` must answer each query as `search`
+# does under the same eligibility, up to the choice and order among exactly tied
+# scores (same rows, same order, scores within the sgemv/sgemm kernel wobble
+# measured above), without the text it never needed, and asking eligibility only
+# of files that compete for a top-k.
+
+
+def _batch(rng: np.random.Generator, count: int) -> np.ndarray:
+    return np.stack([_unit_query(rng) for _ in range(count)])
+
+
+@pytest.mark.parametrize(
+    "scope,k",
+    [
+        ("empty", 10),
+        ("every_row", 10),
+        ("one_row", 10),
+        ("fewer_than_k", 50),
+        ("half", 10),
+        ("exactly_k", 12),
+    ],
+)
+def test_search_many_answers_each_query_as_search_does(tmp_path, scope, k):
+    rng = np.random.default_rng(1920)
+    vault = _fresh_vault(tmp_path)
+    index, paths = _populated(vault, rng, files=40, per_file=3)
+    allowed = {
+        "empty": set(),
+        "every_row": set(paths),
+        "one_row": {paths[7]},
+        "fewer_than_k": set(paths[:4]),
+        "exactly_k": set(paths[:4]),
+        "half": set(paths[::2]),
+    }[scope]
+    queries = _batch(rng, 25)
+
+    batched = index.search_many(queries, k, admits=allowed.__contains__)
+
+    assert len(batched) == len(queries)
+    for query, hits in zip(queries, batched, strict=True):
+        single = index.search(query, k, allowed_paths=allowed)
+        assert [(fp, ci) for fp, ci, _score in hits] == [
+            (fp, ci) for fp, ci, _text, _score in single
+        ]
+        assert np.allclose(
+            [score for *_rest, score in hits],
+            [score for *_rest, score in single],
+            rtol=0.0,
+            atol=SCORE_TOLERANCE,
+        )
+
+
+def test_search_many_never_returns_an_ineligible_row_under_pathological_queries(tmp_path):
+    rng = np.random.default_rng(1921)
+    vault = _fresh_vault(tmp_path)
+    index, paths = _populated(vault, rng, files=10, per_file=2)
+    allowed = set(paths[:3])
+    queries = np.stack(
+        [
+            np.full(768, np.nan, dtype=np.float32),
+            np.zeros(768, dtype=np.float32),
+            np.full(768, np.inf, dtype=np.float32),
+            _unit_query(rng),
+        ]
+    )
+
+    for k in (1, 3, 6, 20):
+        for hits in index.search_many(queries, k, admits=allowed.__contains__):
+            assert all(fp in allowed for fp, _ci, _score in hits)
+            assert len(hits) <= 6
+            assert not any(np.isinf(score) for *_rest, score in hits)
+
+
+def test_search_many_with_no_queries_or_no_rows_answers_empty(tmp_path):
+    rng = np.random.default_rng(1922)
+    vault = _fresh_vault(tmp_path)
+    empty = embeddings.EmbeddingIndex(vault)
+    assert empty.search_many(_batch(rng, 2), 5, admits=lambda _path: True) == [[], []]
+    index, paths = _populated(vault, rng, files=3, per_file=1)
+    no_queries = np.zeros((0, embeddings.VECTOR_DIM), dtype=np.float32)
+    assert index.search_many(no_queries, 5, admits=set(paths).__contains__) == []
+
+
+def test_search_many_reads_the_matrix_once_and_hydrates_no_text(tmp_path, monkeypatch):
+    rng = np.random.default_rng(1923)
+    vault = _fresh_vault(tmp_path)
+    index, paths = _populated(vault, rng, files=12, per_file=2)
+    calls = {"all_vectors": 0, "texts": 0}
+    real_all_vectors = index.all_vectors
+
+    def counted_all_vectors():
+        calls["all_vectors"] += 1
+        return real_all_vectors()
+
+    def no_text(_pairs):
+        calls["texts"] += 1
+        return {}
+
+    monkeypatch.setattr(index, "all_vectors", counted_all_vectors)
+    monkeypatch.setattr(index, "_texts_for", no_text)
+
+    index.search_many(_batch(rng, 8), 5, admits=set(paths).__contains__)
+
+    assert calls == {"all_vectors": 1, "texts": 0}
+
+
+def test_search_many_asks_eligibility_only_of_files_that_compete(tmp_path):
+    """Each file once, and only files whose rows reach a query's candidate window."""
+    rng = np.random.default_rng(1924)
+    vault = _fresh_vault(tmp_path)
+    index, paths = _populated(vault, rng, files=400, per_file=2)
+    asked: list[str] = []
+
+    def admits(path: str) -> bool:
+        asked.append(path)
+        return True
+
+    index.search_many(_batch(rng, 3), 5, admits=admits)
+
+    assert len(asked) == len(set(asked))
+    assert len(asked) <= 3 * 64  # three windows' worth, not the 400-file corpus
+
+
+def test_search_many_widens_past_a_window_of_ineligible_rows(tmp_path):
+    """When the best rows all belong to refused files, it keeps going until `k`."""
+    vault = _fresh_vault(tmp_path)
+    index = embeddings.EmbeddingIndex(vault)
+    rng = np.random.default_rng(1925)
+    query = _unit_query(rng)
+    # 200 refused files hold near-copies of the query; the admitted ones do not.
+    for n in range(200):
+        near = query + 0.01 * _unit_query(rng)
+        near = (near / np.linalg.norm(near)).reshape(1, -1)
+        index.upsert_file(f"refused-{n:03d}.md", ["r"], near, 1.0)
+    admitted = {f"kept-{n}.md" for n in range(3)}
+    for name in sorted(admitted):
+        index.upsert_file(name, ["k"], _unit_rows(rng, 1), 1.0)
+
+    [hits] = index.search_many(query.reshape(1, -1), 5, admits=admitted.__contains__)
+    single = index.search(query, 5, allowed_paths=admitted)
+
+    assert {fp for fp, _ci, _score in hits} == admitted
+    assert [(fp, ci) for fp, ci, _s in hits] == [(fp, ci) for fp, ci, _t, _s in single]
+
+
+def _synthetic_index(tmp_path: Path, monkeypatch, rng, rows: int):
+    """An index serving a `rows`-row matrix without paying `rows` upserts."""
+    index = embeddings.EmbeddingIndex(_fresh_vault(tmp_path))
+    matrix = _unit_rows(rng, rows)
+    metadata = [(f"note-{n:05d}.md", 0) for n in range(rows)]
+    monkeypatch.setattr(index, "all_vectors", lambda: (metadata, matrix))
+    return index
+
+
+def test_search_many_scores_a_large_draft_in_bounded_blocks(tmp_path, monkeypatch):
+    """A long draft must not hold every chunk's score row at once.
+
+    Scoring all queries in one product costs `queries x rows x 4` bytes: 293 MiB
+    for a 1,000-chunk draft against a 76,000-row matrix, where one `search` per
+    chunk peaked at a single 0.3 MiB row. Here 1,000 queries against 4,096 rows
+    would be 16 MiB in one product; scored in fixed blocks it stays near one block.
+    """
+    rng = np.random.default_rng(1926)
+    rows = 4096
+    index = _synthetic_index(tmp_path, monkeypatch, rng, rows)
+    queries = np.ascontiguousarray(_unit_rows(rng, 1000))
+    one_product = len(queries) * rows * np.dtype(np.float32).itemsize
+
+    tracemalloc.start()
+    try:
+        answers = index.search_many(queries, 15, admits=lambda _path: True)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert len(answers) == len(queries)
+    assert peak < one_product / 4, (
+        f"peak {peak / 2**20:.1f} MiB: the whole draft was scored in one product "
+        f"({one_product / 2**20:.1f} MiB)"
+    )
+
+
+def test_search_many_answers_across_block_boundaries_as_search_does(tmp_path, monkeypatch):
+    """Blocking changes only when rows are scored, never which rows win."""
+    rng = np.random.default_rng(1927)
+    index = _synthetic_index(tmp_path, monkeypatch, rng, 2000)
+    queries = np.ascontiguousarray(_unit_rows(rng, 150))  # three blocks, the last partial
+    allowed = {f"note-{n:05d}.md" for n in range(0, 2000, 3)}
+
+    batched = index.search_many(queries, 10, admits=allowed.__contains__)
+
+    assert len(batched) == len(queries)
+    for query, hits in zip(queries, batched, strict=True):
+        single = index.search(query, 10, allowed_paths=allowed)
+        assert [(fp, ci) for fp, ci, _score in hits] == [
+            (fp, ci) for fp, ci, _text, _score in single
+        ]
+        assert np.allclose(
+            [score for *_rest, score in hits],
+            [score for *_rest, score in single],
+            rtol=0.0,
+            atol=SCORE_TOLERANCE,
+        )

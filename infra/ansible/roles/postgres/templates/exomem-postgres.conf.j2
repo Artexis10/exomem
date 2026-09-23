@@ -1,0 +1,19 @@
+## Managed by Ansible (role: postgres). Loaded from postgresql.conf.d/.
+##
+## Never listens publicly: only loopback (for PgBouncer, which does the
+## public-facing TLS termination) and the private-network address (for
+## cellctl's direct LISTEN, which PgBouncer's transaction pooling cannot
+## carry).
+listen_addresses = '127.0.0.1,{{ postgres_private_ip }}'
+port = 5432
+password_encryption = scram-sha-256
+
+ssl = on
+ssl_cert_file = '{{ postgres_tls_dir }}/fullchain.pem'
+ssl_key_file = '{{ postgres_tls_dir }}/privkey.pem'
+ssl_min_protocol_version = 'TLSv1.2'
+
+wal_level = replica
+archive_mode = on
+archive_command = 'pgbackrest --stanza={{ postgres_pgbackrest_stanza }} archive-push %p'
+max_wal_senders = 3

@@ -62,3 +62,30 @@ output "estimated_fixed_monthly_eur_ex_vat" {
   description = "CX33 plus primary IPv4 estimate; excludes usage-priced B2 and tenant volumes."
   value       = 8.99
 }
+
+output "control_db_server_id" {
+  description = "Opaque Hetzner control database server identifier."
+  value       = hcloud_server.control.id
+}
+
+output "control_db_server_ipv4" {
+  description = "Stable primary IPv4 used only for restricted SSH administration and the public PgBouncer listener."
+  value       = hcloud_primary_ip.control_db.ip_address
+}
+
+output "control_db_private_ip" {
+  description = "Stable private-network address consumed by generated Ansible inventory."
+  value       = var.control_db_private_ip
+}
+
+output "database_hostname" {
+  description = "DNS-only public hostname carrying the control database's PgBouncer TLS listener."
+  value       = var.database_hostname
+}
+
+output "control_db_estimated_fixed_monthly_eur_ex_vat" {
+  # Approximate list price for cpx11 in fsn1 plus a primary IPv4; not fetched
+  # from the live Hetzner pricing API, unlike the alpha estimate above.
+  description = "Approximate control-database server cost; excludes usage-priced B2."
+  value       = 5.36
+}

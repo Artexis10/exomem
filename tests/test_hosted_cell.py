@@ -382,6 +382,84 @@ def test_feature_grants_limits_and_privacy_defaults_are_deterministic(
     assert error.value.code == "HOSTED_FEATURE_UNKNOWN"
 
 
+def test_a_planted_remote_owner_binding_never_reaches_a_hosted_cell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A personal owner binding is cleared from a hosted cell, and no hosted
+    principal or cell credential matches one even when it is present."""
+    from fastmcp.server import dependencies as fastmcp_dependencies
+    from fastmcp.server.auth.auth import AccessToken
+
+    from exomem.governance.principal import (
+        OWNER_AUDIENCE,
+        resolve_hosted_principal,
+        resolve_mcp_principal,
+    )
+
+    config = HostedCellConfig.from_env(_env(tmp_path), require_provisioned=False)
+    planted = {
+        "EXOMEM_OWNER_OAUTH_SUBJECT": "github:4242",
+        "EXOMEM_GITHUB_USER_ID": "4242",
+        "EXOMEM_BASE_URL": "https://planted.invalid",
+    }
+    process_env = dict(planted)
+    config.apply_process_environment(process_env)
+    assert "EXOMEM_OWNER_OAUTH_SUBJECT" not in process_env
+
+    # Even with the binding present in the environment, a hosted gateway
+    # principal and a cell service credential carrying copied claims stay
+    # non-owner: neither is the durable session proxy's token type.
+    for key, value in planted.items():
+        monkeypatch.setenv(key, value)
+    for scope in ("principal-scope-4242", "4242", "github:4242"):
+        hosted = resolve_hosted_principal(scope)
+        assert hosted.audience_id != OWNER_AUDIENCE
+        assert hosted.principal_kind == "principal"
+    cell_token = AccessToken(
+        token="hosted-cell-service",
+        client_id=config.cell_id,
+        scopes=["hosted:cell"],
+        claims={
+            "cell_id": config.cell_id,
+            "kind": "hosted-cell-service",
+            "sub": "4242",
+            "github_user_id": 4242,
+            "iss": "https://planted.invalid",
+        },
+    )
+    monkeypatch.setattr(fastmcp_dependencies, "get_access_token", lambda: cell_token)
+    resolved = resolve_mcp_principal()
+    assert resolved.audience_id != OWNER_AUDIENCE
+    assert resolved.remote_owner is False
+
+
+def test_a_legacy_named_owner_binding_cannot_be_promoted_back_into_a_hosted_cell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`env_compat.promote_legacy()` copies `KB_MCP_X` to an unset `EXOMEM_X`, and
+    later startup code calls it again; clearing only the canonical name would let
+    the legacy spelling re-arm the binding."""
+    from exomem import env_compat
+
+    config = HostedCellConfig.from_env(_env(tmp_path), require_provisioned=False)
+    monkeypatch.setenv("KB_MCP_OWNER_OAUTH_SUBJECT", "github:4242")
+    monkeypatch.setenv("EXOMEM_OWNER_OAUTH_SUBJECT", "github:4242")
+    for name in ("EXOMEM_VAULT_PATH", "EXOMEM_HOSTED_STATE_ROOT", "EXOMEM_STATE_ROOT",
+                 "EXOMEM_WRITER_LEASE_STATE_DIR", "EXOMEM_LOG_DIR", "EXOMEM_UPLOAD_MAX_BYTES",
+                 "TMPDIR"):
+        monkeypatch.setenv(name, os.environ.get(name, ""))
+    config.apply_process_environment()
+    env_compat.promote_legacy()
+    # Compare names only, never the mapping: a failure must not print the
+    # process environment.
+    armed = [
+        name
+        for name in ("KB_MCP_OWNER_OAUTH_SUBJECT", "EXOMEM_OWNER_OAUTH_SUBJECT")
+        if name in os.environ
+    ]
+    assert armed == []
+
+
 def test_hosted_config_rejects_protocol_versions_not_implemented_by_this_release(
     tmp_path: Path,
 ) -> None:

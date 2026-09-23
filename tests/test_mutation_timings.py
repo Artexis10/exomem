@@ -843,6 +843,9 @@ def test_a_governed_edit_records_the_advisory_sweep_with_what_it_encoded(
         def search(self, _vector, *, k=15, allowed_paths=None):
             return []
 
+        def search_many(self, _vectors, _k, *, admits):
+            return []
+
     monkeypatch.setattr(
         embeddings, "chunk_text", lambda title, body: [f"{title}\n{body}"[:200]], raising=True
     )
