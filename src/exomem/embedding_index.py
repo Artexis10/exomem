@@ -929,18 +929,14 @@ class EmbeddingIndex:
                 [],
                 np.zeros((0, VECTOR_DIM), dtype=np.float32),
             )
-        # One decode of the whole matrix: a per-row `frombuffer` + `stack` was
-        # most of a cold reload's CPU at ~58k rows. Every blob must be exactly
-        # one vector wide, or a short one would shift each later row into the
-        # wrong vector instead of failing as the per-row stack did.
-        width = VECTOR_DIM * np.dtype(np.float32).itemsize
-        if any(len(blob) != width for _fp, _idx, blob in rows):
-            raise ValueError("embedding sidecar holds a vector of the wrong width")
-        metadata = [(sys.intern(fp), idx) for fp, idx, _blob in rows]
-        matrix = np.frombuffer(
-            bytearray().join(blob for _fp, _idx, blob in rows), dtype=np.float32
-        ).reshape(len(rows), VECTOR_DIM)
-        return _EmbCache(epoch, gen, instance, mtime, policy_identity, metadata, matrix)
+        metadata: list[tuple[str, int]] = []
+        vectors: list[np.ndarray] = []
+        for fp, idx, blob in rows:
+            metadata.append((sys.intern(fp), idx))
+            vectors.append(np.frombuffer(blob, dtype=np.float32))
+        return _EmbCache(
+            epoch, gen, instance, mtime, policy_identity, metadata, np.stack(vectors, axis=0)
+        )
 
     def search(
         self,
