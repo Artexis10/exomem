@@ -820,6 +820,22 @@ def _seal_named_document(
             destination.fields["secret_key"]: value,
         }
     else:
+        # sops_ansible_vars (the only other kind this function is ever
+        # called for -- see the caller's `destination.kind in
+        # {"sops_escrow", "sops_ansible_vars"}` gate): Ansible Jinja2-
+        # templates every string value it loads from a host_vars/group_vars
+        # file, so a secret value that happens to contain `{{`, `{%` or
+        # `{#` (a generated password can, by chance; an operator could also
+        # paste one in) would not reach the role as the literal secret --
+        # Ansible would re-interpret it, silently handing Postgres a
+        # different password than the one Substrate/secret_handoff actually
+        # holds. Fail closed instead of shipping a value Ansible will not
+        # treat literally.
+        if any(marker in value for marker in ("{{", "{%", "{#")):
+            raise HandoffError(
+                f"secret value for {secret_name} contains a Jinja delimiter "
+                "and cannot be sent to a sops_ansible_vars destination"
+            )
         document = {destination.fields["variable"]: value}
     _seal_sops_document(
         destination=destination,

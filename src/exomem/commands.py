@@ -26,6 +26,7 @@ import logging
 import mimetypes
 import os
 import re
+import time
 import typing
 from collections.abc import Mapping
 from contextvars import ContextVar
@@ -104,6 +105,7 @@ from . import reconcile as reconcile_module
 from . import record_memory as record_memory_module
 from . import recover_from_trash as recover_from_trash_module
 from . import referent_runtime as referent_runtime_module
+from . import relation_census as relation_census_module
 from . import relation_queue as relation_queue_module
 from . import relation_registry as relation_registry_module
 from . import relation_vocabulary as relation_vocabulary_module
@@ -5890,12 +5892,15 @@ def _with_due_state(
 ACTIVATE_RETRIEVAL_LIMIT = 8
 
 
-#: The one refusal an unknown `anchor` ref and a withheld one share. Two
-#: distinguishable answers would turn the argument into an existence oracle: a
-#: caller could learn that a page exists precisely by being told it may not see
-#: it. Neither form names the ref back.
+#: The one refusal an unknown `anchor` ref, a withheld one, raw material, a
+#: navigation page, and a retired page all share. Distinguishable answers
+#: would turn the argument into an existence oracle: a caller could learn
+#: that a page exists, or which rule kept it out, precisely by being told it
+#: may not see it. Neither form names the ref back, and none says WHICH of
+#: those it was.
 ACTIVATE_ANCHOR_REFUSAL = (
-    "INVALID_ANCHOR: anchor must name an available anchor of this activation index"
+    "INVALID_ANCHOR: anchor must name an available anchor of this activation "
+    "index or a visible compiled page"
 )
 
 
@@ -5926,6 +5931,18 @@ def op_activate_context(
     provenance-bearing units, pointers to what did not fit the budget, and the
     current state of any resource whose collection records one.
 
+    Every packet leads with `recent_context`: up to eight pages this vault has
+    recently been worked on — edited, read, captured as a session, or left open
+    in Planning — each with its title, why it is recent, the date of that
+    contact and, where the page carries one, its own authored `status` or
+    `summary` line. That line is the page's, not a current-state reading: these
+    pages are chosen by recency rather than by the turn, so the block never
+    queries a Records collection the turn did not name. `current_state[]`
+    remains the carrier for the resolved anchors' governed state.
+    It is served whether or not the turn resolved anything, so a fresh session
+    opening on "continue" receives the thread it is picking up. `as_of` dates
+    the CONTACT, not the event the page describes.
+
     Read-only and abstaining by construction. It writes nothing, changes no
     `ask_memory`/`find` result, runs no model beyond the retrieval scorers recall
     already runs, and returns `abstained: true` with a reason rather than guessing
@@ -5934,6 +5951,25 @@ def op_activate_context(
     (`index_warming`), or is switched off (`disabled`). An ambiguous turn lists
     both anchors under `ambiguity` and runs no role lane — you pick the sense and
     call again with `anchor` set to the ref you mean.
+
+    A turn that named no anchor but whose own distinctive words clearly reach one
+    compiled page is served from that page instead of abstaining, and says so:
+    its single `anchors[]` entry has `kind: "page"` and `status:
+    "retrieval_carried"`, and `generation.carried_by` is `"retrieval"`. Read that
+    as "nothing was named; recall alone put this here" — no anchor was resolved,
+    yet the packet's continuity token names that page, so a following
+    "continue" resumes it; a turn with nothing distinctive in it abstains
+    `unresolved` rather than guessing between pages. Naming that
+    SAME page yourself with `anchor` instead resolves it outright, at `status:
+    "resolved"` and `generation.carried_by: "agent_choice"` — your choice, not
+    recall's guess.
+
+    When a turn names SEVERAL pages this way, nothing is carried and the packet
+    abstains `unresolved`, listing them under `anchors[]` at `status:
+    "retrieval_named"`. That is not `ambiguity`, which reports two anchors that
+    both resolved: nothing resolved here. Call again with `anchor` set to the
+    ref you mean — an ordinary compiled page takes it exactly as a page reached
+    by `retrieval_carried` above does — and that page's own units are served.
 
     Use `ask_memory` instead when you already know what you are looking for; use
     this when you do not, and follow it with `read_memory` on whatever ref the
@@ -5950,23 +5986,36 @@ def op_activate_context(
             deterministic, not a wildcard. Never affects ranking, and never
             enters the packet cache key.
         continuity: The opaque `continuity` token a previous packet of this
-            conversation returned. It only strengthens anchors this turn already
-            reaches on its own evidence: it never reaches one by itself, never
-            turns an `unresolved` turn into a resolved one, and is ignored and
-            reported as `generation.continuity = "stale"` when it was minted
-            against another vault's index or another role registry. Drop it on a
-            new session or after a compaction.
-        anchor: One canonical ref from a previous `ambiguity` block, naming the
-            sense you mean. That anchor is then treated as resolved on your
-            choice alone, its role lanes run and the competing senses are
-            omitted. A ref that is not an anchor of this index, or one this
-            audience may not see, is refused identically and no packet is built.
+            conversation returned. On a turn that names nothing ("continue",
+            "where were we") the anchors or page it names are the first thing
+            the turn is taken to refer to, and may resolve on that alone. On any other turn it
+            only strengthens anchors the turn already reaches on its own
+            evidence: it never reaches one by itself there, and never turns an
+            `unresolved` turn into a resolved one. It is ignored and reported as
+            `generation.continuity = "stale"` when it was minted against another
+            vault's index or another role registry. Drop it on a new session or
+            after a compaction.
+        anchor: One ref the agent is naming on its own authority: the sense
+            meant from a previous `ambiguity` block, or any ordinary compiled
+            page a packet already listed (`recent_context`, `retrieval_named`,
+            or an `unresolved` turn's candidates) — not raw `Sources`/`Evidence`
+            material, which stays a `read_memory` target. That anchor or page
+            is then treated as resolved on your choice alone, its roles run,
+            and any competing senses are omitted. A ref that names nothing
+            eligible this way, or one this audience may not see, is refused
+            identically and no packet is built.
         include_timings: Include per-stage timings for diagnostics.
 
-    Returns: {anchors, roles, units, pointers, current_state, missing,
-             ambiguity, budget, generation, abstained, abstention?,
-             continuity?}. `generation.continuity` reports whether a token you
-             passed was `applied`, `stale` or `absent`.
+    Returns: {recent_context, anchors, roles, units, pointers, current_state,
+             missing, ambiguity, budget, generation, abstained, abstention?,
+             continuity?}. `recent_context` is first and is present on an
+             abstained packet too. An abstained packet always empties
+             `roles`, `units`, `pointers` and `current_state` — no material
+             about an anchor that did not resolve — but `anchors` (a
+             `partial`, `retrieval_named` or competing `ambiguity` candidate),
+             `ambiguity` and `missing` may still be populated.
+             `generation.continuity` reports whether a token you passed was
+             `applied`, `stale` or `absent`.
     """
     # `RequestBudget` is bound in exactly one place, the MCP dispatch
     # middleware: `request_budget.current()` is always None on the REST and
@@ -6247,8 +6296,17 @@ def _op_activate_context_body(
     # small result limit; none belongs on this bounded request path. The release
     # object is still mandatory: the final guard independently decides every
     # packet reference under the current audience and purpose.
+    lexical_seconds = 0.0
     try:
         _policy, release_active = egress_module.gate_state(vault_root)
+        # Measured unconditionally, not read back off `timings`: the shipped
+        # hook calls this door WITHOUT `include_timings`, so there is no
+        # collector on the very path the carry's budget gate exists to
+        # protect. The carry runs the same query shape against the same
+        # catalogue, so what this pass cost is the best estimate of what the
+        # second one will, and the gate asks the budget for room in
+        # proportion to it.
+        lexical_started = time.monotonic()
         with find_types.timing_span(timings, "working_set.lexical"):
             if anchor:
                 hits, lexical_state = [], "agent_choice"
@@ -6265,6 +6323,7 @@ def _op_activate_context_body(
                     freshness=lexical_freshness,
                     recall_checkpoint=(snapshot.recall_checkpoint("kb") if snapshot else None),
                 )
+        lexical_seconds = max(0.0, time.monotonic() - lexical_started)
         if working_set_module.budget_exhausted("working_set.release"):
             return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
         with find_types.timing_span(timings, "working_set.release"):
@@ -6274,6 +6333,45 @@ def _op_activate_context_body(
     except Exception:  # noqa: BLE001 - the release plane failing means abstain, not serve
         log.warning("activation release plane unavailable; abstaining", exc_info=True)
         return _abstain("unavailable")
+    # An `anchor` naming no row of THIS index but an eligible agent-picked
+    # page (design close-memory-loop, U7) is decided on the release plane
+    # HERE, before the compile that page would otherwise buy nothing for: a
+    # withheld page refuses identically whether or not it was ever compiled,
+    # and running the compile first is the entire cost difference measured
+    # between a withheld ref (80 ms) and an unknown one (15 ms). A ref naming
+    # no eligible page is refused at the same point, so every refused class
+    # leaves in one place. An `anchor` that DOES match a row of the index is
+    # untouched — that path's own timing is not this fix's scope — and any
+    # failure here only skips the early exit: the unmodified
+    # compile-then-guard sequence below still decides every ref exactly as
+    # it always has.
+    if anchor:
+        try:
+            named_rows = {
+                spelling
+                for row in anchor_rows
+                for spelling in (
+                    str(getattr(row, "ref", None) or ""),
+                    str(getattr(row, "path", "") or ""),
+                    str(getattr(row, "anchor_id", "") or ""),
+                )
+                if spelling
+            }
+            if anchor not in named_rows:
+                # Every refused class leaves HERE, at one point: a ref naming
+                # no eligible page (unknown, raw material, navigation, retired,
+                # non-canonical) exactly as a withheld one. Refused after the
+                # compile instead, the unknown classes took about 3 ms longer
+                # than a withheld page, which is its own answer.
+                agent_page = working_set_module._eligible_agent_page(vault_root, anchor)
+                if agent_page is None or not egress_module.quick_page_visible(
+                    vault_root, agent_page, purpose=purpose
+                ):
+                    raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
+        except ValueError:
+            raise
+        except Exception:  # noqa: BLE001 - an optimization that fails just does not apply
+            log.debug("agent-picked-page early visibility check unavailable", exc_info=True)
     packet = working_set_runtime_module.serve(
         vault_root,
         turn=turn,
@@ -6287,6 +6385,7 @@ def _op_activate_context_body(
         lexical_state=lexical_state,
         evidence_token=evidence_token,
         freshness_snapshot=snapshot,
+        lexical_seconds=lexical_seconds,
     )
     # An override that resolved nothing named no anchor of this index. Refused
     # here, before the guard, with the same words a withheld ref gets below —
@@ -9393,6 +9492,7 @@ def op_schema_memory(
     requested_type: _OptionalRelationText = None,
     vocabulary_ref: str | None = None,
     vocabulary_fingerprint: str | None = None,
+    detail: Literal["counts", "keys"] | None = None,
 ) -> dict:
     """Infer, validate, diff, or save governed memory schemas and workflow contracts.
 
@@ -9407,7 +9507,9 @@ def op_schema_memory(
             and why. For `entity-types`, `resolve-entity-type` reads matching
             definitions using query and optional requested_type; `save-entity-types`
             saves a reviewed proposal with why and expected_hash when updating.
-            The current entity registry is included in bootstrap.
+            The current entity registry is included in bootstrap. For `relations`,
+            `census` returns counts-only relation quality from the published graph
+            (optional detail, date_from, date_to) and never writes.
             For `workflow-contracts`, exactly one of: inventory (no workflow
             fields); inspect (name); validate (exactly one of name or proposal);
             resolve (context plus at most one of name or proposal); preview (proposal,
@@ -9448,12 +9550,18 @@ def op_schema_memory(
         requested_type: Entity-type label to resolve for resolve-entity-type.
         vocabulary_ref: Optional vocabulary decision correlated with a registry save.
         vocabulary_fingerprint: Exact reviewed vocabulary fingerprint; grants no write permission.
+        detail: Relation census detail: `counts` (default) or `keys`, which adds
+            predicate keys and counts.
 
     Returns:
         A structured profile/proposal, validation report, contract diff, or workflow result.
     """
     operation = operation.strip().lower()
     subject = subject.strip().lower()
+    if detail is not None and not (subject == "relations" and operation == "census"):
+        raise ValueError(
+            "INVALID_SCHEMA_ARGUMENT: detail is only supported by the relations census"
+        )
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
         supported=operation == "save-entity-types"
@@ -9616,6 +9724,34 @@ def op_schema_memory(
             return result
         raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
     if subject == "relations":
+        if operation == "census":
+            if (
+                save
+                or why is not None
+                or expected_hash is not None
+                or proposal is not None
+                or project is not None
+                or page_type is not None
+                or continuation is not None
+                or include_model_suggestions
+                or compare_to is not None
+                or strict
+                or name is not None
+                or context is not None
+                or limit != 20
+            ):
+                raise ValueError(
+                    "INVALID_RELATION_ARGUMENT: census accepts only detail, date_from, "
+                    "and date_to"
+                )
+            # The census decides the view from the bound principal: served whole
+            # under an empty policy, to the owner only under a governed one.
+            return relation_census_module.census(
+                vault_root,
+                detail=detail or "counts",
+                date_from=date_from,
+                date_to=date_to,
+            )
         if operation == "propose-relation":
             relation_vocabulary_module.validate_candidate_limit(limit)
             if proposal is None or not isinstance(proposal, dict):
@@ -9822,10 +9958,25 @@ def op_schema_memory(
                     raise ValueError(
                         "INCOMPLETE_RELATION_PROPOSAL: save requires a reviewed proposal"
                     )
-                observed = {
-                    item["raw_relation"]
-                    for item in memory_schema_module.relation_observations(vault_root)
-                }
+                # The guard exists to stop a save deleting vocabulary that is in
+                # use, so it protects only observed labels that resolve to a
+                # currently registered extension: its key, and the alias when
+                # the label was one. Core and unregistered labels, in any case,
+                # are nothing a registry save can delete. The registry's own
+                # meaning-continuity check already refuses dropping a used key or
+                # alias, so this guard is defence in depth.
+                current = relation_registry_module.load_registry(vault_root)
+                observed: set[str] = set()
+                for item in memory_schema_module.relation_observations(
+                    vault_root, registry=current
+                ):
+                    canonical = item.get("canonical")
+                    if canonical not in current.extensions:
+                        continue
+                    observed.add(canonical)
+                    label = relation_registry_module.normalize_relation(item["raw_relation"])
+                    if current.aliases.get(label) == canonical:
+                        observed.add(label)
                 result["saved"] = relation_registry_module.save_registry(
                     vault_root,
                     proposal,
@@ -11722,6 +11873,61 @@ HOSTED_SURFACE_EXCLUSIONS = MappingProxyType(
                 lifted_when=(
                     "a media-capable hosted image ships and the cell carries the `media` "
                     "feature grant"
+                ),
+            ),
+        )
+    }
+)
+
+
+CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
+    {
+        exclusion.command: exclusion
+        for exclusion in (
+            HostedSurfaceExclusion(
+                command="transfer_artifact",
+                reason=(
+                    "An Exomem Cloud cell has no browser transfer or "
+                    "gateway-mediated upload flow to bridge this leaf into; "
+                    "direct browser transfers are out of scope for Exomem Cloud "
+                    "(design Non-Goals)."
+                ),
+                lifted_when=(
+                    "a browser transfer or artifact-upload path is added to "
+                    "Exomem Cloud"
+                ),
+            ),
+            HostedSurfaceExclusion(
+                command="adopt_vault",
+                reason=(
+                    "There is no upload-then-adopt staging flow for Exomem "
+                    "Cloud cells; a self-serve export/import UI is out of scope "
+                    "for Exomem Cloud (design Non-Goals)."
+                ),
+                lifted_when="an upload/import path is added to Exomem Cloud",
+            ),
+            HostedSurfaceExclusion(
+                command="process_media",
+                reason=(
+                    "The `cloud` image is built from the `hosted` runtime "
+                    "stage, which installs only the `embeddings-onnx` extra "
+                    "and gates the build on torch being absent, so media "
+                    "extraction has no dependencies in the image."
+                ),
+                lifted_when=(
+                    "a media-capable cloud image ships with the required "
+                    "decoding dependencies"
+                ),
+            ),
+            HostedSurfaceExclusion(
+                command="read_media",
+                reason=(
+                    "Sampling video frames needs the same decoding "
+                    "dependencies the cloud image omits."
+                ),
+                lifted_when=(
+                    "a media-capable cloud image ships with the required "
+                    "decoding dependencies"
                 ),
             ),
         )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import stat
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,6 +93,34 @@ def test_create_only_write_refuses_existing_leaf_and_preserves_legacy_overwrite(
     assert target.read_text(encoding="utf-8") == "old"
     vault.batch_atomic_write([vault.PlannedWrite(target, "legacy")], vault_root=tmp_path)
     assert target.read_text(encoding="utf-8") == "legacy"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="setgid is a POSIX-only directory semantic")
+def test_batch_atomic_write_succeeds_under_a_setgid_volume_root(tmp_path: Path) -> None:
+    """A Kubernetes fsGroup volume leaves its root setgid (`2770`, D2). A
+    freshly created batch workspace directory then inherits the setgid bit
+    from its parent even though it was created with mode `0o700` -- the
+    kernel ORs the parent's setgid bit into the child regardless of the
+    requested mode. `_BatchWorkspace.create`/`_create_held` used to capture
+    the workspace's identity (including the setgid-inflated mode) before
+    clearing it with `fchmod`, so the later `refresh_identity()` recheck saw
+    its own correction as drift and raised `PathGuardError("PATH_GUARD_CHANGED",
+    "batch workspace changed")` on every single write under a setgid root.
+    """
+    root = tmp_path / "setgid-root"
+    root.mkdir()
+    os.chmod(root, 0o2770)  # force the setgid bit; mkdir's mode arg can be masked
+    assert os.stat(root).st_mode & stat.S_ISGID
+
+    target = root / "target.md"
+    vault.batch_atomic_write(
+        [vault.PlannedWrite(target, "content under a setgid root")],
+        vault_root=root,
+    )
+
+    assert target.read_text(encoding="utf-8") == "content under a setgid root"
+    # The workspace directory is gone once the write commits; the property
+    # under test is that no PathGuardError interrupted it along the way.
 
 
 def test_path_guards_allow_fresh_multiwrite_without_self_invalidation(

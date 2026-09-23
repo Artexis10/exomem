@@ -414,14 +414,18 @@ def test_relation_inference_is_evidence_backed_and_proposal_first(tmp_path: Path
 
     with pytest.raises(ValueError, match="INCOMPLETE_RELATION_PROPOSAL"):
         commands.op_schema_memory(vault, operation="infer", subject="relations", save=True)
-    with pytest.raises(ValueError, match="OBSERVED_RELATION_DELETION"):
-        commands.op_schema_memory(
-            vault,
-            operation="infer",
-            subject="relations",
-            save=True,
-            proposal=inferred["proposal"],
-        )
+    # Unregistered observations are not vocabulary a save can delete, so they
+    # no longer block the reviewed proposal; promotion stays an explicit step.
+    saved = commands.op_schema_memory(
+        vault,
+        operation="infer",
+        subject="relations",
+        save=True,
+        proposal=inferred["proposal"],
+    )["saved"]
+    assert saved["created"] is True
+    assert relation_registry.load_registry(vault).extensions == {}
+    assert {page: page.read_bytes() for page in pages} == before
 
 
 def test_relation_inference_preserves_raw_census_and_aggregates_promotions(
@@ -615,6 +619,220 @@ extensions:
     }
 
 
+def test_infer_census_keys_are_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a current graph, infer's census is read from the snapshot.
+
+    The keys, and on resolved targets the values, are the ones the Markdown
+    count produced; without a snapshot infer keeps counting Markdown.
+    """
+    vault = tmp_path / "vault"
+    notes = vault / "Knowledge Base" / "Notes"
+    schema = vault / "Knowledge Base" / "_Schema"
+    notes.mkdir(parents=True)
+    schema.mkdir()
+    (schema / "relation-registry.yaml").write_text(
+        """\
+schema_version: 1
+extensions:
+  vault.applies_to:
+    parent: relates_to
+    description: A synthetic applicability relation.
+    direction: directed
+    aliases: [applies_to]
+  vault.legacy_applies:
+    parent: relates_to
+    description: A retired synthetic applicability relation.
+    direction: directed
+    status: deprecated
+    replaced_by: vault.applies_to
+""",
+        encoding="utf-8",
+    )
+    target = "[[Knowledge Base/Notes/target]]"
+    pages = {
+        "target.md": "---\ncreated: 2020-01-01\ntype: insight\n---\nPlain target.\n",
+        "old-core.md": f"---\ncreated: 2020-01-10\ntype: insight\n---\n- supports {target}\n",
+        "old-canonical-extension.md": (
+            f"---\ncreated: 2020-02-01\ntype: procedure\n---\n- vault.applies_to {target}\n"
+        ),
+        "old-extension.md": (
+            f"---\ncaptured: 2020-02-10\ntype: procedure\n---\n- applies_to {target}\n"
+        ),
+        "old-deprecated.md": (
+            f"---\ncreated: 2020-03-10\ntype: insight\n---\n- vault.legacy_applies {target}\n"
+        ),
+        "old-generic.md": f"---\ncreated: 2020-04-10\ntype: insight\n---\n- relates_to {target}\n",
+        "current-unregistered.md": (
+            f"---\ncreated: 2026-01-10\ntype: insight\n---\n- unregistered.label: {target}\n"
+        ),
+        "current-body-only.md": (
+            f"---\ncreated: 2026-02-10\ntype: insight\n---\nA body-only {target} link.\n"
+        ),
+        "undated.md": (
+            "---\nupdated: 1999-01-01\ntype: insight\n---\n"
+            "Synthetic disconnected page.\n\n"
+            "```text\n[[Ignored fenced target]]\n```\n"
+        ),
+    }
+    for name, body in pages.items():
+        (notes / name).write_text(body, encoding="utf-8")
+    scopes = (
+        {},
+        {"page_type": "insight", "date_from": "2026-01-01", "date_to": "2026-12-31"},
+    )
+    markdown = [
+        commands.op_schema_memory(vault, operation="infer", subject="relations", **scope)[
+            "census"
+        ]
+        for scope in scopes
+    ]
+    assert not epistemic_graph.sidecar_path(vault).exists()
+
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+
+    def refuse(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("a current snapshot answers infer's census")
+
+    monkeypatch.setattr(memory_schema, "_relation_census", refuse)
+    graph = [
+        commands.op_schema_memory(vault, operation="infer", subject="relations", **scope)[
+            "census"
+        ]
+        for scope in scopes
+    ]
+    assert graph == markdown
+    assert set(graph[0]) == {"relation_counts", "page_counts", "denominators"}
+    assert set(graph[0]["relation_counts"]) == {
+        "core",
+        "extension",
+        "deprecated",
+        "generic",
+        "unregistered",
+    }
+    assert set(graph[0]["page_counts"]) == {
+        "zero_authored_relation_rows",
+        "zero_body_connections",
+    }
+    assert set(graph[0]["denominators"]) == {"sampled", "included", "undated", "excluded"}
+    assert graph[0]["relation_counts"] == {
+        "core": 1,
+        "extension": 2,
+        "deprecated": 1,
+        "generic": 1,
+        "unregistered": 1,
+    }
+
+
+def test_infer_census_counts_rows_whose_target_is_outside_the_view(tmp_path: Path) -> None:
+    """Rows naming a missing target still count as authored relation rows, so
+    the snapshot census keeps the Markdown values. `zero_body_connections` now
+    counts pages with no link or relation that resolves to another page."""
+    vault = tmp_path / "vault"
+    notes = "Knowledge Base/Notes"
+    pages = {
+        "resolved.md": f"- supports [[{notes}/target]]\nSee [[{notes}/target]].",
+        "missing-row.md": f"- supports [[{notes}/does-not-exist]]",
+        "missing-generic.md": "- relates_to [[nowhere-page]]",
+        "missing-unregistered.md": f"- zebra.label: [[{notes}/does-not-exist]]",
+        "body-missing-only.md": "Body link to [[Never Written Page]] only.",
+        "ambiguous-row.md": "- supports [[dup]]\nand [[dup]]",
+        "sub1/dup.md": "x",
+        "sub2/dup.md": "x",
+        "target.md": "Plain target.",
+        "reference-row.md": "- supports [[Reference/some-ref]]",
+    }
+    for rel, body in pages.items():
+        path = vault / notes / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\ntype: insight\ncreated: 2026-01-10\n---\n# T\n\n{body}\n", encoding="utf-8"
+        )
+    reference = vault / "Reference" / "some-ref.md"
+    reference.parent.mkdir(parents=True)
+    reference.write_text("---\ntype: reference\n---\n# R\n\nx\n", encoding="utf-8")
+    markdown = commands.op_schema_memory(vault, operation="infer", subject="relations")["census"]
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+
+    graph = commands.op_schema_memory(vault, operation="infer", subject="relations")["census"]
+
+    assert graph["relation_counts"] == markdown["relation_counts"] == {
+        "core": 4,
+        "extension": 0,
+        "deprecated": 0,
+        "generic": 1,
+        "unregistered": 1,
+    }
+    assert graph["denominators"] == markdown["denominators"]
+    assert (
+        graph["page_counts"]["zero_authored_relation_rows"]
+        == markdown["page_counts"]["zero_authored_relation_rows"]
+        == 4
+    )
+    # Only resolved.md reaches another page; every other row or link names a
+    # page that is missing, ambiguous or outside the Knowledge Base.
+    assert graph["page_counts"]["zero_body_connections"] == 9
+
+
+def test_infer_census_is_refused_to_a_restricted_caller_on_every_path(
+    tmp_path: Path,
+) -> None:
+    from exomem import find as find_module
+    from exomem.governance import egress, membership, policy
+    from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+
+    vault = tmp_path / "vault"
+    pages = _seed_pages(vault)
+    secret = vault / "Knowledge Base" / "Notes" / "Withheld" / "secret.md"
+    secret.parent.mkdir(parents=True)
+    secret.write_text(
+        pages[0].read_text(encoding="utf-8") + "\n- zebra.label: [[Knowledge Base/Notes/future]]\n",
+        encoding="utf-8",
+    )
+    governance = vault / "Knowledge Base" / "_Governance"
+    (governance / "scopes").mkdir(parents=True)
+    (governance / "rules").mkdir(parents=True)
+    (governance / "scopes" / "withheld.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\nname: Withheld\n"
+        'paths: ["Notes/Withheld/**"]\n',
+        encoding="utf-8",
+    )
+    (governance / "rules" / "withheld-external.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\n'
+        f"audience: external\nceiling: {egress.LEVEL_NONE}\n",
+        encoding="utf-8",
+    )
+
+    def reset() -> None:
+        policy._CACHE.clear()
+        membership.clear_memo()
+        egress.clear_decision_memo()
+        find_module.clear_cache()
+
+    external = RequestPrincipal(audience_id="external", surface="mcp")
+    for built in (False, True):
+        if built:
+            epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+        for scope in ({}, {"project": "atlas"}):
+            reset()
+            with request_scope(external):
+                census = commands.op_schema_memory(
+                    vault, operation="infer", subject="relations", **scope
+                )["census"]
+            assert census == {"available": False, "reason": "audience_restricted"}, (
+                built,
+                scope,
+            )
+            reset()
+            with request_scope(owner_principal(surface="mcp")):
+                owner = commands.op_schema_memory(
+                    vault, operation="infer", subject="relations", **scope
+                )["census"]
+            assert owner["relation_counts"]["unregistered"] == 1, (built, scope)
+
+
 def test_relation_inference_reserves_canonical_keys_across_distinct_aliases(
     tmp_path: Path,
 ) -> None:
@@ -738,6 +956,79 @@ def test_reviewed_relation_proposal_saves_and_observed_deletion_is_refused(tmp_p
             expected_hash=saved["content_hash"],
             proposal={"schema_version": 1, "extensions": {}},
         )
+
+
+_APPLIES_REGISTRY = {
+    "schema_version": 1,
+    "extensions": {
+        "vault.applies_to": {
+            "parent": "relates_to",
+            "description": "A synthetic applicability relation.",
+            "direction": "directed",
+            "aliases": ["applies_to"],
+        }
+    },
+}
+
+
+def _save_applies_registry(vault: Path) -> str:
+    return relation_registry.save_registry(vault, _APPLIES_REGISTRY)["content_hash"]
+
+
+def test_infer_save_ignores_unregistered_and_capitalised_observed_labels(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    pages = _seed_pages(vault)
+    content_hash = _save_applies_registry(vault)
+    for page, line in zip(
+        pages,
+        (
+            "- Supports: [[Knowledge Base/Notes/future]]",
+            "- zebra.label: [[Knowledge Base/Notes/future]]",
+            "- applies_to: [[Knowledge Base/Notes/future]]",
+        ),
+        strict=False,
+    ):
+        page.write_text(page.read_text(encoding="utf-8") + f"\n{line}\n", encoding="utf-8")
+    inferred = commands.op_schema_memory(vault, operation="infer", subject="relations")
+    assert "vault.applies_to" in inferred["proposal"]["extensions"]
+
+    saved = commands.op_schema_memory(
+        vault,
+        operation="infer",
+        subject="relations",
+        save=True,
+        expected_hash=content_hash,
+        proposal=inferred["proposal"],
+    )["saved"]
+
+    assert saved["previous_hash"] == content_hash
+    assert set(relation_registry.load_registry(vault).extensions) == {"vault.applies_to"}
+
+
+def test_infer_save_still_refuses_dropping_a_used_extension(tmp_path: Path) -> None:
+    for label in ("vault.applies_to", "applies_to"):
+        vault = tmp_path / label
+        pages = _seed_pages(vault)
+        content_hash = _save_applies_registry(vault)
+        pages[0].write_text(
+            pages[0].read_text(encoding="utf-8")
+            + f"\n- {label}: [[Knowledge Base/Notes/future]]\n",
+            encoding="utf-8",
+        )
+        before = relation_registry.extension_registry_path(vault).read_bytes()
+
+        with pytest.raises(ValueError, match="OBSERVED_RELATION_DELETION"):
+            commands.op_schema_memory(
+                vault,
+                operation="infer",
+                subject="relations",
+                save=True,
+                expected_hash=content_hash,
+                proposal={"schema_version": 1, "extensions": {}},
+            )
+        assert relation_registry.extension_registry_path(vault).read_bytes() == before
 
 
 def test_traversal_profile_governance_validates_diffs_and_saves(tmp_path: Path) -> None:

@@ -7,3 +7,9 @@ all:
           ansible_host: 192.0.2.10
           ansible_user: root
           private_node_ip: 10.50.1.10
+    control_nodes:
+      hosts:
+        exomem-control-db:
+          ansible_host: 192.0.2.20
+          ansible_user: root
+          postgres_private_ip: 10.50.1.20

@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly full pgBackRest backup schedule
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -24,6 +24,7 @@ import io
 import json
 import os
 import stat
+import time
 from pathlib import Path
 
 import pytest
@@ -971,15 +972,39 @@ def test_prominence_off_stays_silent_in_working_set_mode(
     assert seen == [], "the transport must never run behind a closed gate"
 
 
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "merge it",
+        "thanks",
+        "ship it",
+        "done yet",
+        # Above `min_chars`, so this one is the case that actually reaches
+        # `_is_obvious_control_prompt`: the four short ones return at the
+        # length gate and prove nothing about the control filter.
+        "cool did you merge it to main?",
+    ],
+)
 def test_a_short_control_prompt_stays_silent_in_working_set_mode(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     working_set_mode: None,
+    prompt: str,
 ) -> None:
-    seen = _serve(monkeypatch, _packet())
+    """The control filter still holds in working-set mode.
 
-    assert _run(monkeypatch, capsys, _event(prompt="continue"), tmp_path / "home") == ""
+    The one exemption is a REFERENTIAL turn ("continue", "where were we"),
+    which names nothing and means the thread the session was on — see
+    `test_a_referential_turn_reaches_activate_context`. An acknowledgement or
+    an instruction to act carries no such question and still costs nothing.
+    """
+    seen = _serve(monkeypatch, _packet())
+    assert not hook._is_referential_prompt(prompt), (
+        "a case this test silences must not be one the exemption claims"
+    )
+
+    assert _run(monkeypatch, capsys, _event(prompt=prompt), tmp_path / "home") == ""
     assert seen == []
 
 
@@ -1535,3 +1560,492 @@ def test_the_mode_is_documented_where_the_hook_is_installed() -> None:
 
     assert "working_set" in source
     assert "EXOMEM_RETRIEVE_INJECT_MAX_CHARS" in source
+
+
+# --------------------------------------------------------------------------- #
+# Recent context — the block a fresh session opens with
+# --------------------------------------------------------------------------- #
+
+
+def _recent(
+    path: str = "Knowledge Base/Products/Cargo Sled.md",
+    *,
+    title: str = "Cargo Sled",
+    why: str = "edited",
+    statement: str | None = None,
+) -> dict:
+    entry = {
+        "ref": path,
+        "path": path,
+        "title": title,
+        "kind": "resource",
+        "why": why,
+        "as_of": "2026-09-21",
+    }
+    if statement is not None:
+        entry["statement"] = statement
+    return entry
+
+
+def test_recent_context_is_rendered_before_everything_else() -> None:
+    packet = _packet()
+    packet["recent_context"] = [_recent(statement="state: in storage abroad")]
+
+    block = hook._format_working_set_block(packet, 4000)
+    body = block.splitlines()[1:]
+
+    assert [line.split(":", 1)[0] for line in body] == [
+        "- recent",
+        "- state",
+        "- unit",
+        "- pointer",
+    ]
+    assert body[0] == (
+        "- recent: Cargo Sled — state: in storage abroad "
+        "[Knowledge Base/Products/Cargo Sled.md]"
+    )
+
+
+def test_a_recent_entry_with_no_statement_says_why_it_is_recent() -> None:
+    packet = _packet(units=[], pointers=[], current_state=[])
+    packet["recent_context"] = [_recent(why="planning", statement=None)]
+
+    body = hook._format_working_set_block(packet, 4000).splitlines()[1:]
+
+    assert body == ["- recent: Cargo Sled — planning [Knowledge Base/Products/Cargo Sled.md]"]
+
+
+@pytest.mark.parametrize("reason", ["unresolved", "index_warming", "disabled"])
+def test_an_abstained_packet_still_renders_its_recent_context(reason: str) -> None:
+    """The whole point of the block: the turns that resolve nothing are exactly
+    the ones a fresh session opens with."""
+    packet = _packet(
+        abstained=True, reason=reason, units=[], pointers=[], current_state=[], continuity=None
+    )
+    packet["anchors"] = []
+    packet["recent_context"] = [_recent(statement="state: in storage abroad")]
+
+    block = hook._format_working_set_block(packet, 4000)
+
+    assert block.startswith(hook._WORKING_SET_HEADER)
+    assert "- recent: Cargo Sled — state: in storage abroad" in block
+
+
+def test_an_unresolved_menu_puts_recent_context_above_its_candidates() -> None:
+    packet = _unresolved_packet(WORDED_AND_RETRIEVAL_ONLY)
+    packet["recent_context"] = [_recent(statement="state: in storage abroad")]
+
+    lines = hook._format_working_set_block(packet, 4000).splitlines()
+
+    assert lines[1].startswith("- recent: Cargo Sled")
+    assert lines[2].startswith("- plan: Winter schedule")
+    assert lines[-1] == hook._WORKING_SET_UNRESOLVED_LINE
+
+
+@pytest.mark.parametrize(
+    "prompt", ["continue", "ok continue", "status", "where were we", "go on"]
+)
+def test_a_referential_turn_reaches_activate_context(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+    prompt: str,
+) -> None:
+    """These are the turns the block exists for, and the control-prompt filter
+    used to drop every one of them before the packet was ever fetched."""
+    packet = _packet(abstained=True, reason="unresolved", units=[], pointers=[], current_state=[])
+    packet["anchors"] = []
+    packet["recent_context"] = [_recent(statement="state: in storage abroad")]
+    seen = _serve(monkeypatch, packet)
+
+    output = _run(monkeypatch, capsys, _event(prompt=prompt), tmp_path / "home")
+
+    assert [request["prompt"] for request in seen] == [prompt]
+    assert "- recent: Cargo Sled" in _context(output)
+
+
+def test_an_ordinary_control_prompt_is_still_filtered(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+) -> None:
+    """Only the referential turns are exempt: an acknowledgement still costs
+    nothing."""
+    seen = _serve(monkeypatch, _packet())
+
+    output = _run(monkeypatch, capsys, _event(prompt="thanks, perfect"), tmp_path / "home")
+
+    assert seen == []
+    assert output.strip() == ""
+
+
+@pytest.mark.parametrize("ceiling", [900, 700, 600, 520])
+def test_a_tight_ceiling_keeps_the_menu_and_cuts_recent_context_instead(
+    ceiling: int,
+) -> None:
+    """The menu is the only thing on the block the agent can ACT on.
+
+    Recent context leads, but laying it out first under one shared ceiling let
+    it eat the disambiguation menu whole — the agent was shown what the vault
+    had been working on and no way to resolve the turn. The menu's room is
+    reserved first; recent context spends what is left.
+    """
+    packet = _unresolved_packet(WORDED_AND_RETRIEVAL_ONLY)
+    packet["recent_context"] = [
+        _recent(
+            f"Knowledge Base/Notes/recent-{index}.md",
+            title=f"A recently edited page number {index}",
+            statement="status: still being worked on this week",
+        )
+        for index in range(8)
+    ]
+
+    block = hook._format_working_set_block(packet, ceiling)
+    lines = block.splitlines()
+
+    assert any(line.startswith("- plan: Winter schedule") for line in lines), block
+    assert lines[-1] == hook._WORKING_SET_UNRESOLVED_LINE
+    assert len(block) <= ceiling
+    # Recent context still leads whatever survived of it.
+    recent_lines = [index for index, line in enumerate(lines) if line.startswith("- recent:")]
+    menu_lines = [index for index, line in enumerate(lines) if line.startswith("- plan:")]
+    assert not recent_lines or max(recent_lines) < min(menu_lines)
+
+
+# --------------------------------------------------------------------------- #
+# `retrieval_named`: the remedy offered must be the one that works
+# --------------------------------------------------------------------------- #
+
+NAMED_PAGES = [
+    {
+        "ref": "Knowledge Base/Notes/Decisions/girvan-slot-decision.md",
+        "path": "Knowledge Base/Notes/Decisions/girvan-slot-decision.md",
+        "title": "Girvan slot decision",
+        "kind": "page",
+        "lifecycle": "active",
+        "status": "retrieval_named",
+        "evidence": ["retrieval"],
+    },
+    {
+        "ref": "Knowledge Base/Notes/Research/girvan-slot-research.md",
+        "path": "Knowledge Base/Notes/Research/girvan-slot-research.md",
+        "title": "Girvan slot research",
+        "kind": "page",
+        "lifecycle": "active",
+        "status": "retrieval_named",
+        "evidence": ["retrieval"],
+    },
+]
+
+
+def test_a_named_page_menu_now_offers_the_anchor_remedy() -> None:
+    """A named page is NOT an anchor of the ACTIVATION INDEX, but `anchor`
+    now also accepts an ordinary compiled page the packet listed
+    (`working_set._eligible_agent_page`), and a `retrieval_named` page is
+    exactly that. `activate_context(anchor=<that page>)` now returns its
+    units instead of raising `INVALID_ANCHOR`, so the closing line offers
+    the remedy that works — the same one every other menu here gives.
+    """
+    block = hook._format_working_set_block(_unresolved_packet(NAMED_PAGES), 4000)
+    closing = block.splitlines()[-1]
+
+    assert "activate_context" in closing, closing
+    assert "`anchor`" in closing, closing
+    lines = block.splitlines()
+    assert lines[1].startswith("- page: Girvan slot decision "), lines
+    assert lines[2].startswith("- page: Girvan slot research "), lines
+
+
+def test_an_ordinary_unresolved_menu_still_offers_anchor() -> None:
+    """The half that must not change: a `partial` candidate IS an anchor of
+    the index, and `anchor=` is exactly the remedy for it."""
+    block = hook._format_working_set_block(
+        _unresolved_packet(WORDED_AND_RETRIEVAL_ONLY), 4000
+    )
+
+    assert "`anchor`" in block, block
+    assert "read_memory" not in block.splitlines()[-1], block
+
+
+# --------------------------------------------------------------------------- #
+# Cooldowns in working-set mode (close-memory-loop D2, orchestrator ruling):
+# the client-wide cooldown gates the bare reminder only, never a packet fetch;
+# the session cooldown stays for ordinary prompts; a referential prompt
+# bypasses both. Stub and reminder-only modes are unchanged.
+# --------------------------------------------------------------------------- #
+
+
+def _fresh_client_wide_stamp(home: Path) -> Path:
+    """Another tab was nudged a moment ago."""
+    stamp = home / ".cache" / "exomem-nudge" / "retrieve_global"
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.write_text("0", encoding="utf-8")
+    old = time.time() - 30
+    os.utime(stamp, (old, old))
+    return stamp
+
+
+def test_a_fresh_sessions_first_prompt_gets_its_packet_under_the_client_wide_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+) -> None:
+    """The acceptance bar: a new session receives context without asking,
+    even when another tab fetched a packet in the last fifteen minutes. And
+    the reminder that cooldown exists for stays suppressed: the stamp it
+    reads is not moved by a packet."""
+    home = tmp_path / "home"
+    stamp = _fresh_client_wide_stamp(home)
+    before = stamp.stat().st_mtime
+    seen = _serve(monkeypatch, _packet())
+
+    context = _context(_run(monkeypatch, capsys, _event(session_id="fresh-tab"), home))
+
+    assert [request["prompt"] for request in seen] == [PROMPT]
+    assert context
+    assert hook.REMINDER not in context
+    assert stamp.stat().st_mtime == before
+
+
+def test_an_empty_packet_under_the_client_wide_cooldown_prints_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+) -> None:
+    """Fetched, found nothing to say, and says nothing: the bare reminder is
+    the one thing the client-wide cooldown still suppresses."""
+    home = tmp_path / "home"
+    _fresh_client_wide_stamp(home)
+    seen = _serve(monkeypatch, None)
+
+    output = _run(monkeypatch, capsys, _event(session_id="fresh-tab"), home)
+
+    assert len(seen) == 1
+    assert output.strip() == ""
+
+
+def test_an_unresolved_block_under_the_client_wide_cooldown_drops_the_reminder(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+) -> None:
+    home = tmp_path / "home"
+    _fresh_client_wide_stamp(home)
+    packet = _packet(abstained=True, reason="unresolved", units=[], pointers=[], current_state=[])
+    packet["anchors"] = []
+    packet["recent_context"] = [_recent(statement="state: in storage abroad")]
+    _serve(monkeypatch, packet)
+
+    context = _context(_run(monkeypatch, capsys, _event(session_id="fresh-tab"), home))
+
+    assert "- recent: Cargo Sled" in context
+    assert hook.REMINDER not in context
+
+
+def test_an_ordinary_second_prompt_inside_the_session_cooldown_is_not_fetched(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+) -> None:
+    """Later substantive turns are the agent's own `activate_context` calls."""
+    home = tmp_path / "home"
+    seen = _serve(monkeypatch, _packet())
+
+    assert _run(monkeypatch, capsys, _event(), home) != ""
+    assert _run(monkeypatch, capsys, _event(), home) == ""
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize("prompt", ["continue", "where were we", "status?"])
+def test_a_referential_prompt_bypasses_both_cooldowns(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+    prompt: str,
+) -> None:
+    """"continue" typed right after a nudged turn still fetches."""
+    home = tmp_path / "home"
+    seen = _serve(monkeypatch, _packet())
+    assert _run(monkeypatch, capsys, _event(), home) != ""
+    _fresh_client_wide_stamp(home)
+
+    context = _context(_run(monkeypatch, capsys, _event(prompt=prompt), home))
+
+    assert [request["prompt"] for request in seen] == [PROMPT, prompt]
+    assert context
+
+
+@pytest.mark.parametrize("mode", ["1", "off"])
+def test_stub_and_reminder_modes_keep_the_client_wide_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    """Unchanged byte for byte: those modes fetch no packet, so a fresh
+    client-wide stamp silences them exactly as before."""
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", mode)
+    home = tmp_path / "home"
+    _fresh_client_wide_stamp(home)
+    fetched: list[str] = []
+
+    def _gather(prompt: str):
+        fetched.append(prompt)
+        return [], "none"
+
+    monkeypatch.setattr(hook, "_gather_hits_with_lane", _gather)
+
+    assert _run(monkeypatch, capsys, _event(session_id="fresh-tab"), home) == ""
+    assert _run(monkeypatch, capsys, _event(prompt="continue", session_id="other"), home) == ""
+    assert fetched == []
+
+
+# --------------------------------------------------------------------------- #
+# R-G: a packet whose referent came from recency alone says so.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_recency_referent_is_rendered_as_such() -> None:
+    packet = _packet()
+    packet["anchors"][0]["evidence"] = ["continuity", "recency"]
+    packet["recent_context"] = [_recent()]
+
+    lines = hook._format_working_set_block(packet, 4000).splitlines()
+
+    assert lines[1].startswith("- recent: Cargo Sled")
+    assert lines[2] == (
+        "- referent: Cargo Sled — taken from recent work, not from the turn's own words "
+        "[Knowledge Base/Products/Cargo Sled.md]"
+    )
+
+
+@pytest.mark.parametrize(
+    "evidence", [["exact_alias"], ["exact_alias", "recency"], ["continuity", "retrieval"]]
+)
+def test_a_referent_the_turn_reached_is_not_labelled_recent_work(evidence: list[str]) -> None:
+    packet = _packet()
+    packet["anchors"][0]["evidence"] = evidence
+
+    block = hook._format_working_set_block(packet, 4000)
+
+    assert "- referent:" not in block
+
+
+# --------------------------------------------------------------------------- #
+# R-L: the hook's referential prompts align with the resolver's, and the
+# client-wide stamp dates only a printed reminder.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "let's continue",
+        "please continue",
+        "where did we leave off?",
+        "as before",
+        "whats next",
+        "status report?",
+        "pick up where you left off",
+        "ok let's continue",
+    ],
+)
+def test_the_hook_exempts_the_resolvers_referential_prompts(prompt: str) -> None:
+    from exomem import working_set_resolve
+
+    assert hook._is_referential_prompt(prompt)
+    assert working_set_resolve.analyze_turn(prompt).referential
+
+
+def test_a_resolved_block_without_the_reminder_leaves_the_client_wide_stamp(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+) -> None:
+    """The reviewer's p13: tab A's resolved block printed no reminder but
+    moved the stamp, so tab B's unresolved block then lost its reminder."""
+    home = tmp_path / "home"
+    stamp = home / ".cache" / "exomem-nudge" / "retrieve_global"
+    _serve(monkeypatch, _packet())
+
+    context_a = _context(_run(monkeypatch, capsys, _event(session_id="tab-a"), home))
+
+    assert context_a and hook.REMINDER not in context_a
+    assert not stamp.exists()
+
+    unresolved = _packet(abstained=True, reason="unresolved", units=[], pointers=[], current_state=[])
+    unresolved["anchors"] = []
+    unresolved["recent_context"] = [_recent()]
+    _serve(monkeypatch, unresolved)
+
+    context_b = _context(_run(monkeypatch, capsys, _event(session_id="tab-b"), home))
+
+    assert hook.REMINDER in context_b
+    assert stamp.exists(), "the printed reminder is what the stamp dates"
+
+
+def test_stub_mode_still_stamps_every_printed_reminder(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", "1")
+    monkeypatch.setattr(hook, "_gather_hits_with_lane", lambda prompt: ([], "none"))
+    home = tmp_path / "home"
+    stamp = home / ".cache" / "exomem-nudge" / "retrieve_global"
+
+    context = _context(_run(monkeypatch, capsys, _event(session_id="stub-tab"), home))
+
+    assert context == hook.REMINDER
+    assert stamp.exists()
+
+
+# --------------------------------------------------------------------------- #
+# R-N3 / R-N4
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "prompt", ["let’s continue", "what’s next?", "ok let‘s continue", "what’s next"]
+)
+def test_a_typographic_apostrophe_is_still_a_referential_prompt(prompt: str) -> None:
+    assert hook._is_referential_prompt(prompt)
+
+
+@pytest.mark.parametrize(
+    ("evidence", "printed"),
+    [
+        (["recency"], True),
+        (["recency", "retrieval"], True),
+        (["recency", "vector_band"], True),
+        (["continuity", "recency"], True),
+        (["category_match", "recency", "usage_prior"], True),
+        (["continuity", "recency", "retrieval"], False),
+        (["exact_alias", "recency"], False),
+        (["rare_term", "recency", "retrieval"], False),
+        (["agent_choice"], False),
+        (["continuity", "retrieval"], False),
+    ],
+)
+def test_the_referent_line_follows_what_actually_supplied_the_referent(
+    evidence: list[str], printed: bool
+) -> None:
+    """R-N4: recency with no worded kind and no agent choice is a referent
+    supplied by recent work, recall hits beside it included — "let's continue
+    the work, what's pending?" resolved on `[recency, retrieval]` and printed
+    nothing. The one exception is continuity together with a retrieved kind,
+    which resolves on the turn's recall and the token without the prior."""
+    packet = _packet()
+    packet["anchors"][0]["evidence"] = evidence
+
+    block = hook._format_working_set_block(packet, 4000)
+
+    assert ("- referent:" in block) is printed

@@ -665,3 +665,119 @@ def test_sweep_span_counts_the_unique_texts_it_actually_encoded(
         "chars": len(fresh_chunk),
         "reused": len(_REUSE_PARAGRAPHS),
     }
+
+
+# ---------------- suggest_relations reads a stored page's vectors back ----------------
+
+
+def test_suggest_relations_reads_a_stored_page_s_vectors_back(
+    vault: Path, counting_encoder: list[str]
+) -> None:
+    from exomem import epistemic_graph
+
+    body = "\n\n".join(_REUSE_PARAGRAPHS)
+    page = _seed_md(vault, "Notes/Insights/relations-reuse.md", type_="insight", body=body)
+    twin = _seed_md(vault, "Notes/Insights/relations-twin.md", type_="insight", body=body)
+    embeddings.get_embedding_index(vault).rebuild_all()
+    find_module.clear_cache()
+    counting_encoder.clear()
+
+    result = epistemic_graph.suggest_relations(vault, path=page, limit=50)
+
+    assert counting_encoder == [], "suggest_relations re-encoded a page whose rows are current"
+    proximity = [c for c in result["candidates"] if c["method"] == "embedding_proximity"]
+    assert any(c["to"] == twin for c in proximity), result["candidates"]
+
+
+# ---------------- a write encodes each new text once ----------------
+#
+# `add` sweeps its draft BEFORE committing it (so the capture cannot match
+# itself) and its commit then published the same chunk texts by encoding them a
+# second time. An edit's sweep scores the page's bare paragraphs, which no
+# sidecar row holds, so the page's next edit encoded every unchanged paragraph
+# again. A vector is a function of its text, so a text the sweep just encoded is
+# handed on instead of being encoded twice.
+
+
+def test_add_commit_reuses_the_vectors_its_own_advisory_encoded(
+    vault: Path, source_schema, counting_encoder: list[str]
+) -> None:
+    embeddings.get_embedding_index(vault).rebuild_all()
+    counting_encoder.clear()
+    body = "\n\n".join(_REUSE_PARAGRAPHS)
+
+    result = add_module.add(
+        vault, source_schema, content=body, source_type="other", title="Capture reuse probe"
+    )
+
+    draft_chunks = embeddings.chunk_text("Capture reuse probe", body)
+    counts = Counter(counting_encoder)
+    assert [counts[chunk] for chunk in draft_chunks] == [1] * len(draft_chunks), (
+        "each capture chunk must be encoded once per add -- by the advisory sweep "
+        "that runs before the commit -- and the commit must reuse that vector"
+    )
+    stored, _units = embeddings.get_embedding_index(vault).stored_text_vectors(result.path)
+    assert set(draft_chunks) <= set(stored)
+    fresh = embeddings.embed_texts(list(stored))
+    assert all(
+        np.array_equal(stored[text], vector)
+        for text, vector in zip(stored, fresh, strict=True)
+    )
+
+
+def test_a_repeated_edit_encodes_only_the_paragraphs_it_changed(
+    vault: Path, counting_encoder: list[str]
+) -> None:
+    body = "\n\n".join(_REUSE_PARAGRAPHS)
+    target = _seed_md(
+        vault, "Notes/Insights/edit-reuse.md", type_="insight", status="draft", body=body
+    )
+    embeddings.get_embedding_index(vault).rebuild_all()
+    find_module.clear_cache()
+    first = "First appended paragraph about lease renewal."
+    second = "Second appended paragraph about fencing tokens."
+    edit_module.edit(vault, path=target, why="first", new_body=f"{body}\n\n{first}")
+    counting_encoder.clear()
+
+    edit_module.edit(vault, path=target, why="second", new_body=f"{body}\n\n{first}\n\n{second}")
+
+    assert counting_encoder, "the second edit encoded nothing, so the count proves nothing"
+    assert all(text.endswith(second) for text in counting_encoder), (
+        "the second edit re-encoded paragraphs the first edit had already encoded: "
+        f"{[text for text in counting_encoder if not text.endswith(second)]}"
+    )
+
+
+def test_sweep_reused_counts_only_published_rows_and_recalled_the_hand_off(
+    vault: Path, counting_encoder: list[str]
+) -> None:
+    """The advisory span means by `reused` what the embedding span means: page rows."""
+    from exomem import call_spans
+
+    embeddings.get_embedding_index(vault).rebuild_all()
+    body = "\n\n".join(_REUSE_PARAGRAPHS)
+    written = note_module.note(
+        vault, content=body, note_type="insight", title="Reused probe", status="draft"
+    ).as_dict()
+    draft = "\n\n".join([*_REUSE_PARAGRAPHS, "A paragraph the commit never saw."])
+    corpus_aware._best_cosine_per_file(
+        vault, title="Reused probe", body=draft, published_path=written["path"]
+    )
+    counting_encoder.clear()
+
+    handle = call_spans.MCP_CALL_TOKEN.set("u5d-sweep-reused")
+    try:
+        corpus_aware._best_cosine_per_file(
+            vault, title="Reused probe", body=draft, published_path=written["path"]
+        )
+        spans = {span["name"]: span for span in call_spans.pop_call_spans("u5d-sweep-reused")}
+    finally:
+        call_spans.MCP_CALL_TOKEN.reset(handle)
+
+    assert counting_encoder == []
+    assert spans["advisory.best_cosine"]["fields"] == {
+        "texts": 0,
+        "chars": 0,
+        "reused": len(_REUSE_PARAGRAPHS),
+        "recalled": 1,
+    }

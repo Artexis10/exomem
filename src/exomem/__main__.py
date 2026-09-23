@@ -17,6 +17,9 @@ Subcommands:
 - `doctor` — read-only local install/setup preflight
 - `auth sessions|revoke` — operator-only durable MCP session administration
 - `governance-schema status|plan-migration|stage-migration|commit-migration|restore-migration-backup|downmigrate` — offline schema control
+- `cell-init` — idempotent Exomem Cloud cell init-container entrypoint: vault
+  init when absent, then offline state migration; no governance schema
+  migration, no custody environment
 - `status` — resource posture/residency diagnostics without loading models
 - `warm` — pre-download/load the search models (bge, reranker, CLIP) so the first
   server start doesn't pay the download in the background; optional `--vault`
@@ -112,6 +115,7 @@ _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
         "logs",
         "lease",
         "governance-schema",
+        "relations",
     }
 )
 
@@ -275,6 +279,10 @@ def _dispatch_main(raw: list[str]) -> int:
         return _lease_main(raw[1:])
     if raw and raw[0] == "governance-schema":
         return _governance_schema_main(raw[1:])
+    if raw and raw[0] == "relations":
+        return _relations_main(raw[1:])
+    if raw and raw[0] == "cell-init":
+        return _cell_init_main(raw[1:])
     # `exomem activate "<turn>"` — the spelled-out contract for the context
     # compiler. A thin alias over the registry command so there is exactly one
     # leaf; the long form `exomem activate_context` keeps working.
@@ -303,6 +311,21 @@ def _dispatch_main(raw: list[str]) -> int:
     return _serve_main(raw)
 
 
+def _load_cwd_dotenv() -> None:
+    """Load the operator's cwd `.env`, as the local CLI always has.
+
+    Never in a cloud cell: its environment is the pod spec, and "no `.env`
+    file is loaded" (design D1.6) covers every loader, the CLI's included.
+    """
+    from . import cloud_cell
+
+    if cloud_cell.cloud_mode_enabled():
+        return
+    from dotenv import load_dotenv
+
+    load_dotenv(dotenv_path=Path.cwd() / ".env", override=True)
+
+
 def _build_auth_session_authority():
     """Load operator configuration and reuse the HTTP auth authority factory.
 
@@ -310,9 +333,7 @@ def _build_auth_session_authority():
     issuer, audience, storage namespace, and local-vs-HA selection without
     importing server auth during unrelated CLI startup.
     """
-    from dotenv import load_dotenv
-
-    load_dotenv(dotenv_path=Path.cwd() / ".env", override=True)
+    _load_cwd_dotenv()
     from . import env_compat
 
     env_compat.promote_legacy()
@@ -324,10 +345,19 @@ def _build_auth_session_authority():
     return build_session_authority(base_url=base_url)
 
 
-def _session_metadata(record, *, current_generation: str) -> dict[str, object]:
+def _session_metadata(
+    record, *, current_generation: str, binding: object | None = None
+) -> dict[str, object]:
     effective_status = record.status
     if effective_status == "active" and record.generation != current_generation:
         effective_status = "generation_revoked"
+    # Whether this session's identity is the one the host bound as the owner
+    # (EXOMEM_OWNER_OAUTH_SUBJECT): its requests then act as the owner.
+    owner_equivalent = (
+        binding is not None
+        and record.github_user_id == getattr(binding, "user_id", None)
+        and record.issuer == getattr(binding, "issuer", None)
+    )
     return {
         "session_id": record.session_id,
         "client_id": record.client_id,
@@ -336,6 +366,7 @@ def _session_metadata(record, *, current_generation: str) -> dict[str, object]:
         "github_user_id": record.github_user_id,
         "issued_at": record.issued_at,
         "status": effective_status,
+        "owner_equivalent": owner_equivalent,
     }
 
 
@@ -377,11 +408,18 @@ def _auth_main(argv: list[str]) -> int:
 
     async def run() -> dict[str, object]:
         if args.command == "sessions":
+            from .governance.principal import remote_owner_binding
+
             records = await authority.list_sessions()
             current_generation = await authority.current_generation()
+            binding = remote_owner_binding()
             return {
                 "sessions": [
-                    _session_metadata(record, current_generation=current_generation)
+                    _session_metadata(
+                        record,
+                        current_generation=current_generation,
+                        binding=binding,
+                    )
                     for record in records
                 ]
             }
@@ -411,8 +449,9 @@ def _auth_main(argv: list[str]) -> int:
             print("No durable MCP sessions.")
         else:
             for row in rows:
+                owner = "owner" if row["owner_equivalent"] else "-"
                 print(
-                    f"{row['session_id']}  {row['status']}  {row['client_id']}  "
+                    f"{row['session_id']}  {row['status']}  {owner}  {row['client_id']}  "
                     f"{row['github_login']}  {row['issued_at']}"
                 )
     elif result.get("revoked_all"):
@@ -1012,9 +1051,7 @@ def _doctor_main(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
-    from dotenv import load_dotenv
-
-    load_dotenv(dotenv_path=Path.cwd() / ".env", override=True)
+    _load_cwd_dotenv()
     from . import env_compat
 
     env_compat.promote_legacy()
@@ -1047,6 +1084,149 @@ def _doctor_main(argv: list[str]) -> int:
             "inspect with exomem status --resources --json."
         )
     return 0 if report.success else 1
+
+
+def _relations_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem relations",
+        description="Relation-quality tools over the published graph snapshot.",
+    )
+    sub = parser.add_subparsers(dest="action", required=True)
+    census_parser = sub.add_parser(
+        "census",
+        help="counts-only relation-quality census",
+        description=(
+            "Counts-only relation-quality census. Asks the running managed service "
+            "first, so it reads the live published snapshot; otherwise opens the "
+            "local graph sidecar read-only. Reports unavailable, never zero."
+        ),
+    )
+    census_parser.add_argument(
+        "--vault",
+        default=None,
+        help=(
+            f"vault root containing '{kb_prefix()}'; reads its snapshot locally "
+            "instead of asking the service (default: the service, else $EXOMEM_VAULT_PATH)"
+        ),
+    )
+    census_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+    census_parser.add_argument(
+        "--keys",
+        action="store_true",
+        help="also name predicate keys, including vault extension keys",
+    )
+    census_parser.add_argument(
+        "--sample",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "also write a seeded sample of N specific edges, stratified by family, as "
+            "refs only, for an agent to judge (reads the local snapshot)"
+        ),
+    )
+    census_parser.add_argument(
+        "--sample-out",
+        default=None,
+        metavar="FILE",
+        help=(
+            "where --sample writes its refs (default: relation-census/sample.json in "
+            "the vault's machine-local state directory, never the current directory)"
+        ),
+    )
+    census_parser.add_argument(
+        "--seed", type=int, default=0, help="sample seed (default: 0)"
+    )
+    census_parser.add_argument(
+        "--judged",
+        default=None,
+        metavar="FILE",
+        help="fold an agent-judged sample into false_precision_judged",
+    )
+    args = parser.parse_args(argv)
+
+    from . import relation_census
+    from .governance.principal import library_scope
+
+    try:
+        judged = None
+        if args.judged is not None:
+            judged = relation_census.fold_judgments(
+                json.loads(Path(args.judged).expanduser().read_text(encoding="utf-8"))
+            )
+        detail = "keys" if args.keys else "counts"
+        # The sample names refs, which only a local read can hand back.
+        local_only = args.vault is not None or args.sample is not None
+        result = None
+        if not local_only:
+            try:
+                result = relation_census.service_census(detail)
+            except relation_census.ServiceKeyRefused as refused:
+                print(
+                    f"note: {refused}; reading the local snapshot instead",
+                    file=sys.stderr,
+                )
+        served_by = "service"
+        sample = None
+        sample_out: Path | None = None
+        if result is None:
+            vault = args.vault or os.environ.get("EXOMEM_VAULT_PATH")
+            if not vault:
+                raise ValueError(
+                    "VAULT_REQUIRED: no managed service answered; pass --vault or set "
+                    "EXOMEM_VAULT_PATH"
+                )
+            vault_root = Path(vault).expanduser()
+            served_by = "local-snapshot"
+            # A terminal on the owner's machine reading its own sidecar is the
+            # owner-local caller, the one audience a governed vault serves.
+            with library_scope():
+                result = relation_census.census(vault_root, detail=detail)
+                if args.sample is not None and result.get("available"):
+                    sample = relation_census.sample(
+                        vault_root, size=args.sample, seed=args.seed
+                    )
+            if sample is not None:
+                if args.sample_out is not None:
+                    sample_out = Path(args.sample_out).expanduser()
+                else:
+                    from . import state_paths
+
+                    sample_out = (
+                        state_paths.ensure_vault_state_dir(vault_root)
+                        / "relation-census"
+                        / "sample.json"
+                    )
+                    sample_out.parent.mkdir(mode=0o700, exist_ok=True)
+                sample_out.write_text(
+                    json.dumps(sample, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+                )
+    except (OSError, ValueError) as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 2
+    result = {**result, "served_by": served_by}
+    if result.get("available"):
+        metrics = dict(result["metrics"])
+        if judged is not None:
+            metrics["false_precision_judged"] = judged
+        result["metrics"] = metrics
+        if sample is not None and sample.get("kind") == "relation_census_sample":
+            result["sample"] = {
+                "requested": sample["requested"],
+                "drawn": sample["drawn"],
+                "strata": sample["strata"],
+            }
+    if sample_out is not None and result.get("sample"):
+        print(
+            f"sample: {result['sample']['drawn']} refs written to {sample_out}",
+            file=sys.stderr,
+        )
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(relation_census.summary_line(result))
+        print(f"  served by: {served_by}")
+    return 0
 
 
 def _warm_main(argv: list[str]) -> int:
@@ -2071,6 +2251,67 @@ def _reclaim_schema_main(argv: list[str]) -> int:
             print(f"  {kb_prefix()}_Schema/{entry['path']} — {entry['reason']}")
     if not report["applied"]:
         print("Re-run with --apply to delete.")
+    return 0
+
+
+def _cell_init_failure_line(error_code: str, step: str) -> None:
+    """Exactly one JSON line: `{"ok": false, "step": ..., "error_code": ...}`
+    (design D3 "Output"). No traceback and no absolute paths: `step` and
+    `error_code` are both fixed vocabulary, never a path or an exception's own
+    message.
+    """
+    print(json.dumps({"ok": False, "step": step, "error_code": error_code}))
+
+
+def _cell_init_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem cell-init",
+        description=(
+            "Idempotent Exomem Cloud cell init-container entrypoint: vault init "
+            "when absent, then offline state migration. No governance schema "
+            "migration and no custody environment -- a cell runs standalone "
+            "governance defaults, like a fresh desktop install."
+        ),
+    )
+    parser.add_argument("--vault", required=True, help="explicit absolute vault root")
+    parser.add_argument("--json", action="store_true", help="emit stable JSON on success")
+    args = parser.parse_args(argv)
+    as_json = bool(args.json)
+
+    vault = Path(args.vault).expanduser()
+    if not vault.is_absolute():
+        _cell_init_failure_line("CELL_INIT_VAULT_INVALID", "vault_path")
+        return 1
+
+    from . import cell_init, cloud_cell, privacy_log
+
+    # The same content redaction the server installs (design D3 "Output"): a
+    # failure below must never let a query- or path-shaped detail escape
+    # through a log line this process emits before it exits.
+    privacy_log.install_hosted_log_redaction()
+
+    try:
+        # `/data/host` (design D3.1) is enforced only inside a real cloud
+        # cell, where the image's `usermod --home /data/host` makes the passwd
+        # home resolve there -- never for a bare local/dev invocation, which
+        # would otherwise chmod a developer's actual home directory to 0700.
+        host_root = cell_init.account_home() if cloud_cell.cloud_mode_enabled() else None
+        result = cell_init.run_cell_init(vault, host_root=host_root)
+    except cell_init.CellInitError as error:
+        _cell_init_failure_line(error.code, error.step)
+        return 1
+    except Exception:  # noqa: BLE001 - fail closed: no traceback, no absolute paths
+        _cell_init_failure_line("CELL_INIT_FAILED", "unknown")
+        return 1
+
+    report = {
+        "vault_created": result.vault_created,
+    }
+    if as_json:
+        print(json.dumps(report))
+    else:
+        for key, value in report.items():
+            print(f"{key}: {value}")
     return 0
 
 

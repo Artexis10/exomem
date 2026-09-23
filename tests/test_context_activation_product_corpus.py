@@ -565,3 +565,30 @@ def test_freeze_refuses_a_stale_canonical_source_file(tmp_path: Path) -> None:
 
     with pytest.raises(FixtureError, match="corpus digest"):
         freeze_reference_binding(tmp_path, manifest, manifest.key_to_path)
+
+
+def test_c1_resolves_its_gold_collection_through_the_door(tmp_path: Path) -> None:
+    """R-E: C1 says "my AI usage limits", and "AI" is the only word it shares
+    with its gold collection's name. D4's three-letter floor refused that
+    word as an everyday one; spelled as an acronym it is a name, and C1
+    resolves its gold as it did before the floor. Its own tree, not the
+    shared module corpus, because activation writes index state."""
+    from epistemic.corpora.context_activation import fixture_by_id
+
+    from exomem import commands, lexstore, working_set_runtime
+
+    root = tmp_path / "vault"
+    manifest = build_corpus(root, distractor_count=0)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(root).rebuild()
+    lexstore.ensure_fresh(root)
+    working_set_runtime.reset_caches_for_tests()
+    gold = manifest.key_to_path["c1_subscriptions_collection"]
+
+    packet = commands.op_activate_context(root, turn=fixture_by_id("C1").turn)
+
+    assert packet["abstained"] is False, (packet.get("abstention"), packet["anchors"])
+    resolved = {item["path"]: item["evidence"] for item in packet["anchors"] if item["status"] == "resolved"}
+    assert gold in resolved, packet["anchors"]
+    assert "rare_term" in resolved[gold]
+    assert "carried_by" not in packet["generation"]

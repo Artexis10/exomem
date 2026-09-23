@@ -1027,6 +1027,50 @@ def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
     )
 
 
+def _check_relation_census(vault_root: Path | None) -> DoctorCheck:
+    """One line of relation quality from the published graph snapshot.
+
+    Informational: edge quality is never a setup failure, so an available
+    census passes and an unavailable one only warns (`graph_sync.state` owns
+    the graph's health). Doctor is a read-only local preflight run by the
+    owner, so it declares the owner-local caller the census serves.
+    """
+    if vault_root is None:
+        return _check(
+            "relations.census",
+            "pass",
+            "No vault configured; the relation census was not read.",
+        )
+    from . import relation_census
+    from .governance.principal import library_scope
+
+    try:
+        with library_scope():
+            result = relation_census.census(vault_root)
+    except Exception as error:  # noqa: BLE001 - diagnostics must not crash doctor
+        return _check(
+            "relations.census",
+            "warn",
+            f"Relation census unavailable: {type(error).__name__}.",
+        )
+    if not result.get("available"):
+        return _check(
+            "relations.census",
+            "warn",
+            relation_census.summary_line(result),
+            "Run `exomem relations census` once the graph is current.",
+        )
+    return _check(
+        "relations.census",
+        "pass",
+        relation_census.summary_line(result),
+        details={
+            "graph_generation": result.get("graph_generation"),
+            "eligible_pages": result["cohort"]["eligible_pages"],
+        },
+    )
+
+
 def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
     """Machine-local state placement: external root, marker, in-vault leftovers.
 
@@ -2247,6 +2291,8 @@ def _check_remote_env() -> list[DoctorCheck]:
             "Set EXOMEM_GITHUB_USER_ID to the positive numeric ID returned by GitHub.",
         ))
 
+    checks.append(_check_remote_owner_binding())
+
     host = os.environ.get("EXOMEM_HOST", "127.0.0.1")
     checks.append(_check("env.EXOMEM_HOST", "pass", f"EXOMEM_HOST resolves to {host}."))
     if os.environ.get("EXOMEM_REST_API_KEY"):
@@ -2268,6 +2314,104 @@ def _check_remote_env() -> list[DoctorCheck]:
             "Run `uv run python scripts/set-upload-token.py` if you want binary upload/download.",
         ))
     return checks
+
+
+_REMOTE_OWNER_LINE = "EXOMEM_OWNER_OAUTH_SUBJECT=github:<the value of EXOMEM_GITHUB_USER_ID>"
+
+
+def _check_remote_owner_binding() -> DoctorCheck:
+    """The owner binding's state. Never prints the bound id or the login."""
+    from .governance.principal import remote_owner_binding_state
+
+    check_id = "env.EXOMEM_OWNER_OAUTH_SUBJECT"
+    state = remote_owner_binding_state()
+    if state == "active":
+        return _check(
+            check_id,
+            "pass",
+            "Remote sign-ins by the allowed GitHub account act as the owner. "
+            "They stay labelled remote (owner-oauth) in ledgers.",
+        )
+    if state == "mismatch":
+        return _check(
+            check_id,
+            "fail",
+            "The owner subject is not the account allowed to sign in, so owner "
+            "equivalence can never apply.",
+            f"Set {_REMOTE_OWNER_LINE}, or remove it, and restart.",
+        )
+    if state == "malformed":
+        return _check(
+            check_id,
+            "fail",
+            "EXOMEM_OWNER_OAUTH_SUBJECT is malformed. Treated as unset. "
+            "Expected `github:<numeric id>`.",
+            f"Set {_REMOTE_OWNER_LINE}, or remove it, and restart.",
+        )
+    return _check(
+        check_id,
+        "pass",
+        "Remote sign-ins act as a separate non-owner principal.",
+        f"To act as the owner remotely, set {_REMOTE_OWNER_LINE} and restart.",
+    )
+
+
+def _check_remote_owner_former_audience(vault_root: Path | None) -> list[DoctorCheck]:
+    """Rules and grants naming the audience remote sign-ins had before binding.
+
+    Binding makes the allowed account's remote sessions the owner, so anything
+    authored against its separate `principal:` audience stops applying to them.
+    Reported while the binding is active, and previewed while it is unset so
+    the owner can read it before enabling. Counts only; never the audience.
+    """
+    if vault_root is None:
+        return []
+    from .governance import policy as policy_module
+    from .governance.principal import (
+        _allowed_github_user_id,
+        normalize_audience,
+        remote_owner_binding_state,
+    )
+
+    state = remote_owner_binding_state()
+    if state not in ("active", "unset"):
+        return []
+    allowed = _allowed_github_user_id(os.environ)
+    issuer = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
+    if allowed is None or not issuer:
+        return []
+    former = normalize_audience(subject=str(allowed), issuer=issuer)
+    try:
+        pol = policy_module.load(vault_root)
+    except Exception:  # noqa: BLE001 - doctor reports, it never breaks
+        return []
+    if pol.empty or pol.blocked:
+        return []
+    rules = sum(1 for rule in pol.rules if rule.audience == former)
+    grants = sum(1 for grant in pol.grants if grant.audience == former) + sum(
+        1 for grant in pol.release_grants if grant.to_audience == former
+    )
+    total = rules + grants
+    if total == 0:
+        return []
+    details = {"rules": rules, "grants": grants}
+    if state == "active":
+        return [_check(
+            "governance.remote_owner_former_audience",
+            "warn",
+            f"{total} rules/grants name your former remote audience and no longer "
+            "apply to your remote sessions.",
+            "Review them; removing EXOMEM_OWNER_OAUTH_SUBJECT and restarting "
+            "applies them again.",
+            details=details,
+        )]
+    return [_check(
+        "governance.remote_owner_former_audience",
+        "pass",
+        f"{total} rules/grants name your remote audience; they would stop applying "
+        "to your remote sessions if EXOMEM_OWNER_OAUTH_SUBJECT were set.",
+        details=details,
+    )]
 
 
 def _check_ha_env() -> list[DoctorCheck]:
@@ -3265,6 +3409,7 @@ def doctor(
         _check_write_path_env_flags(vault_root),
         _check_frozen_verifier(),
         check_graph_recovery_age(vault_root),
+        _check_relation_census(vault_root),
     ]
     runtime_processes = _check_runtime_processes()
     if runtime_processes is not None:
@@ -3306,6 +3451,7 @@ def doctor(
 
     if profile == "remote":
         checks.extend(_check_remote_env())
+        checks.extend(_check_remote_owner_former_audience(vault_root))
         if _ha_auth_configured():
             checks.extend(_check_ha_env())
         # Opt-in live-endpoint verification (three read-only GETs). The
