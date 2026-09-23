@@ -413,7 +413,8 @@ resolved any anchor and a referential turn SHALL be untouched. A hit SHALL be a 
 of the turn's stems that it matches are DISTINCTIVE in the indexed corpus,
 measured as a document frequency at or below `max(3, ceil(0.5% of the indexed
 pages in scope))` over the same catalogue the ranking uses, navigation pages not
-counted toward a stem's frequency. A hit SHALL additionally satisfy a proximity
+counted toward a stem's frequency, and raw-material pages counted neither toward
+a stem's frequency nor among the indexed pages. A hit SHALL additionally satisfy a proximity
 condition: two of its matched distinctive stems occur within a declared token
 window of each other, within one sentence of the turn. Distance SHALL be
 measured over the turn's own tokens, function words included; sentence-ending
@@ -443,7 +444,9 @@ vocabulary less the statuses meaning pre-active rather than retired, together
 with a declared supersession; a draft or planned page SHALL remain a
 candidate. The number of ranked rows read before filtering SHALL exceed the
 number of pages the rarity gate can admit at the current corpus size. Candidates SHALL be excluded before they are counted, not after the ranked
-result is limited. A page SHALL be carried only when it is the ONLY surviving
+result is limited, and raw-material and navigation pages SHALL be excluded
+inside the ranking query, before its row limit applies, so that the limit
+counts only rows that can be candidates. A page SHALL be carried only when it is the ONLY surviving
 candidate; where two or more survive, the turn SHALL abstain `unresolved`,
 SHALL NOT select between them by ranking score, and SHALL report them under
 `anchors[]` at a distinct status meaning "named, not carried" — never the
@@ -515,6 +518,14 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
   and the vault's index and log pages list that title among others
 - **THEN** the named page is carried, and no navigation page is counted as a
   second named page or listed under `anchors[]`
+
+#### Scenario: Captured sessions do not make a page's title ordinary
+
+- **WHEN** a turn names one compiled page by its distinctive words, and three
+  or more captured sessions in a raw-material folder repeat those words
+- **THEN** the words remain distinctive and the named page is carried
+- **AND** captures and navigation pages that the ranking scores above the page
+  do not consume the rows read before filtering
 
 #### Scenario: A named anchor and raw material are both refused as carriers
 

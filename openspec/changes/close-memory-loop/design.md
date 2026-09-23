@@ -227,7 +227,13 @@ NAMED-CONTACT test. A hit is a candidate only when at least two of the turn's
 stems that it matches are DISTINCTIVE in this corpus — document frequency at
 or below `max(3, ceil(0.5% of the indexed knowledge-base pages))`, measured
 over the same catalogue join the ranking uses, so a frequency and a rank can
-never come from two different corpora. Counting corroboration over ALL the
+never come from two different corpora. Navigation pages are not counted
+toward a stem's frequency, and raw material is counted neither toward a
+stem's frequency nor among the pages: every index that lists a title and
+every captured session that discussed a page repeats its words, and four
+captured sessions put a title word on five pages against a cap of three. The
+same two exclusions sit inside the ranking query, before its row limit, so
+the window counts only rows that can be candidates. Counting corroboration over ALL the
 turn's stems asks whether several of its words occurred on a page, which is
 co-occurrence: a two-line stub titled "Meeting notes" whose one unit read
 "Decision pending" passed that test for an ordinary turn about a meeting and

@@ -706,6 +706,8 @@ def rare_turn_terms(
     # Navigation pages are not counted: an index or a log repeats the titles
     # it lists, so a folder-level one beside the vault's own pushed a title
     # word past the cap and the page named by its title was never carried.
+    # Raw material is not counted either, nor counted as a page: four
+    # captured sessions that discussed a page did the same to its title.
     result = lexstore.term_document_frequencies(
         vault_root,
         stems,
@@ -714,6 +716,7 @@ def rare_turn_terms(
         allow_delta=False,
         recall_checkpoint=recall_checkpoint,
         exclude_navigation=True,
+        exclude_raw_material=True,
     )
     if not result.readiness.complete:
         return (), 0, result.readiness.status
@@ -820,11 +823,18 @@ def carry_candidates(
             corroboration_tokens=list(rare),
             corroboration_groups=[list(pair) for pair in pairs],
             recall_checkpoint=recall_checkpoint,
+            # Inside the query, so the LIMIT counts only rows that can be
+            # candidates: twelve captures that repeat the turn filled the
+            # window on their own when they were cut after it.
+            exclude_navigation=True,
+            exclude_raw_material=True,
         )
         if not result.readiness.complete:
             return (), result.readiness.status
         # Raw material, navigation pages and retired pages are dropped
-        # BEFORE the caller counts what the turn named. A superseded note
+        # BEFORE the caller counts what the turn named. The query already
+        # left the first two out; the check stays here too, where the path
+        # is read the way the index reads it (backslashes folded). A superseded note
         # and the note that superseded it answer to the same phrase, so
         # leaving it in would read as two named pages and refuse every
         # revised page in the vault; an index or a log repeats every title

@@ -1342,7 +1342,9 @@ def test_filtering_happens_after_a_wider_fetch(
     page and turn "two named pages, abstain" into "one named page, carry" —
     the count the whole decision rests on, settled by where the limit
     happened to fall. The rows are stubbed so the ORDER of the cut and the
-    filter is what is under test, not a corpus arranged to produce it.
+    filter is what is under test, not a corpus arranged to produce it. The
+    query itself now leaves raw material out before its LIMIT (R-P1); the
+    stub stands for rows that reach the Python filter anyway.
     """
     asked: list[int] = []
     real = lexstore.search_bm25_result
@@ -1847,9 +1849,9 @@ def test_navigation_pages_are_never_listed_as_named(vault: Path, budget_free) ->
 def test_the_fetch_window_covers_the_navigation_filter(
     prose_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Navigation rows are removed AFTER the full window is fetched, like raw
-    material, so a window whose head is all removed rows still holds the row
-    that proves the turn named two pages. The window is filled to its last
+    """Navigation rows that reach the Python filter are removed AFTER the full
+    window is fetched, like raw material, so a window whose head is all
+    removed rows still holds the row that proves the turn named two pages. The window is filled to its last
     slot with removed rows, at every directory level, and the count of
     removed rows is checked."""
     asked: list[int] = []
@@ -2016,3 +2018,114 @@ def test_continue_with_a_fresh_token_naming_nothing_eligible_abstains(
     assert packet["abstention"] == {"reason": "unresolved"}
     assert not [item for item in packet["anchors"] if item["status"] == "resolved"]
     assert packet["recent_context"]
+
+
+# --------------------------------------------------------------------------- #
+# R-P1: raw material counts toward neither rarity nor the ranking window.
+# --------------------------------------------------------------------------- #
+
+
+def _seed_session_captures(
+    vault: Path,
+    count: int,
+    *,
+    line: str = "We talked about the kelvane throughput ceiling again.",
+    repeats: int = 1,
+) -> None:
+    """Captured sessions that discussed the page, as a session-capture flow
+    files them under `Sources/Sessions`."""
+    sessions = vault / "Knowledge Base" / "Sources" / "Sessions"
+    for index in range(count):
+        _write(
+            sessions / f"2026-09-{index + 1:02d}-session.md",
+            "---\ntype: source\n---\n\n# Session\n\n" + f"{line} " * repeats + "\n",
+        )
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+
+
+def test_session_captures_cannot_push_a_title_past_the_rarity_cap(
+    prose_vault: Path, budget_free
+) -> None:
+    """The review's a7a_rf2 shape: every captured session that discussed a
+    page adds one to its words' document frequency. Four of them put
+    "kelvan" on five pages against a cap of three, the word stopped being
+    distinctive, and the page the turn named was never carried. A capture
+    is what a conclusion was drawn from, not a second page of the corpus
+    the carry chooses among, so it counts toward neither the stem nor the
+    page total."""
+    def counted_without_raw_material() -> tuple[dict[str, int], int]:
+        return lexstore.term_document_frequencies(
+            prose_vault,
+            ["kelvan"],
+            scope="kb",
+            exclude_navigation=True,
+            exclude_raw_material=True,
+        ).value
+
+    uncounted = counted_without_raw_material()
+    _seed_session_captures(prose_vault, 4)
+    frequencies, pages = lexstore.term_document_frequencies(
+        prose_vault, ["kelvan"], scope="kb", exclude_navigation=True
+    ).value
+    assert frequencies["kelvan"] == 5 > working_set.rare_document_cap(pages), (
+        "the captures must push it past, or this proves nothing"
+    )
+
+    hits, state = working_set_runtime.carry_candidates(prose_vault, GENUINE_TURN)
+    packet = working_set.compile_packet(prose_vault, turn=GENUINE_TURN, max_chars=4000)
+
+    assert state == "available"
+    assert [path for path, _score in hits] == [GENUINE_PAGE], hits
+    assert packet["generation"].get("carried_by") == "retrieval", packet.get("abstention")
+    # Neither the stem's count nor the page total moved.
+    assert counted_without_raw_material() == uncounted
+    assert uncounted[0] == {"kelvan": 1}
+
+
+def test_raw_material_and_navigation_cannot_fill_the_ranking_window(
+    prose_vault: Path, budget_free
+) -> None:
+    """The exclusions sit inside the ranking query, so the
+    `carry_fetch_size` LIMIT counts only rows that can be candidates.
+    Filtered after the LIMIT, twelve captures and two navigation pages that
+    outrank the page filled the whole window, the filter left nothing, and
+    the turn abstained although it named exactly one page. A capture holds
+    the turns of the session it recorded, so it repeats the turn verbatim."""
+    _seed_session_captures(prose_vault, 12, line=f"Asked: {GENUINE_TURN}.", repeats=3)
+    listing = "- [[Kelvane throughput review]] kelvane throughput ceiling\n" * 4
+    research = prose_vault / "Knowledge Base" / "Notes" / "Research"
+    _write(research / "index.md", f"# Research\n\n{listing}")
+    _write(research / "log.md", f"# Research log\n\n{listing}")
+    lexstore.ensure_fresh(prose_vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(prose_vault).rebuild()
+
+    stems = working_set_runtime.content_stems(GENUINE_TURN)
+    rare, pages, _state = working_set_runtime.rare_turn_terms(prose_vault, stems)
+    pairs = working_set_runtime.adjacent_rare_pairs(GENUINE_TURN, rare)
+    window = working_set.carry_fetch_size(pages)
+    unfiltered = lexstore.search_bm25_result(
+        prose_vault,
+        working_set_runtime.content_words(GENUINE_TURN),
+        window,
+        scope="kb",
+        allow_delta=False,
+        corroboration_tokens=list(rare),
+        corroboration_groups=[list(pair) for pair in pairs],
+    ).value
+    assert len(unfiltered) == window and GENUINE_PAGE not in dict(unfiltered), (
+        "the removed rows must fill the window, or this proves nothing"
+    )
+    assert all(
+        working_set_runtime._is_raw_material(path) or _is_navigation(path)
+        for path, _score in unfiltered
+    ), unfiltered
+
+    hits, state = working_set_runtime.carry_candidates(prose_vault, GENUINE_TURN)
+    packet = working_set.compile_packet(prose_vault, turn=GENUINE_TURN, max_chars=4000)
+
+    assert state == "available"
+    assert [path for path, _score in hits] == [GENUINE_PAGE], hits
+    assert packet["generation"].get("carried_by") == "retrieval", packet.get("abstention")
