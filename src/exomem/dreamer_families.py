@@ -57,8 +57,9 @@ class Context:
     """One page's processing context: the store transaction and small memos."""
 
     vault_root: Path
-    store: dreamer_store.DreamerStore
-    conn: sqlite3.Connection
+    #: None on the request path, where a proposal is only recomputed in memory.
+    store: dreamer_store.DreamerStore | None
+    conn: sqlite3.Connection | None
     now: float
     _pages: dict[str, Any] = field(default_factory=dict)
     _review: dict[str, Any] = field(default_factory=dict)
@@ -101,6 +102,10 @@ class Family:
     on_page: Callable[[Context, str], None]
     on_delete: Callable[[Context, str], None]
     revalidate: Callable[[Context, dict[str, Any]], None]
+    #: Recompute one candidate's current proposal in memory, writing nothing:
+    #: the upsert arguments with its current fingerprint, or None when the
+    #: proposal no longer holds. The request path revalidates through this.
+    propose: Callable[[Context, dict[str, Any]], dict[str, Any] | None] | None = None
     #: Needs vault-wide counts, so stays silent until a reseed drains.
     global_counts: bool = False
 
@@ -215,11 +220,13 @@ def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
                 "sig": _sig(ctx, target_rel),
                 "role": "target",
                 "origin": "",
+                "title": getattr(target, "title", None),
             }
         ]
         shared = (candidate.get("evidence") or {}).get("shared_source")
         if isinstance(shared, str) and _sig(ctx, epistemic_graph._with_md(shared)):
             shared_rel = epistemic_graph._with_md(shared)
+            shared_page = ctx.page(shared_rel)
             evidence.append(
                 {
                     "path": shared_rel,
@@ -227,6 +234,7 @@ def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
                     "sig": _sig(ctx, shared_rel),
                     "role": "shared_source",
                     "origin": "",
+                    "title": getattr(shared_page, "title", None),
                 }
             )
         out[str(enriched["review_id"])] = {
@@ -239,51 +247,72 @@ def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _link_on_page(ctx: Context, rel_path: str) -> None:
+def _link_kwargs(
+    ctx: Context, rel_path: str, review_id: str, proposal: dict[str, Any]
+) -> dict[str, Any]:
+    """One link proposal as the store's upsert arguments."""
     from . import epistemic_graph
 
+    candidate = proposal["candidate"]
+    enriched = proposal["enriched"]
+    page = ctx.page(rel_path)
+    subject_evidence = {
+        "path": rel_path,
+        "ref": proposal["refs"][0],
+        "sig": _sig(ctx, rel_path),
+        "role": "source",
+        "origin": "",
+        "title": getattr(page, "title", None),
+    }
+    return {
+        "family": LINK_FAMILY,
+        "kind": LINK_KIND,
+        "subject_path": rel_path,
+        "subject_ref": proposal["refs"][0],
+        "proposal_key": review_id,
+        "evidence": [subject_evidence, *proposal["evidence"]],
+        "route": {
+            "tool": "connect_memory",
+            "args": {
+                "operation": "accept-relation",
+                "ref": enriched["ref"],
+                "path": rel_path,
+                "expected_fingerprint": enriched["fingerprint"],
+            },
+        },
+        "reason_code": str(candidate.get("method") or ""),
+        "signal_version": proposal["signal_version"],
+        "measures": {
+            "relation_type": str(candidate.get("relation_type") or ""),
+            "method": str(candidate.get("method") or ""),
+            "to": epistemic_graph._with_md(str(candidate.get("to") or "")),
+        },
+        "identity": review_id,
+        "ref": enriched["ref"],
+        "fingerprint": enriched["fingerprint"],
+    }
+
+
+def _link_on_page(ctx: Context, rel_path: str) -> None:
     proposals = _link_proposals(ctx, rel_path)
     _resolve_all(ctx, _open_for_subject(ctx, LINK_FAMILY, rel_path) - set(proposals))
     for review_id, proposal in sorted(proposals.items()):
-        candidate = proposal["candidate"]
-        enriched = proposal["enriched"]
-        subject_evidence = {
-            "path": rel_path,
-            "ref": proposal["refs"][0],
-            "sig": _sig(ctx, rel_path),
-            "role": "source",
-            "origin": "",
-        }
         ctx.store.upsert_proposal(
             ctx.conn,
-            family=LINK_FAMILY,
-            kind=LINK_KIND,
-            subject_path=rel_path,
-            subject_ref=proposal["refs"][0],
-            proposal_key=review_id,
-            evidence=[subject_evidence, *proposal["evidence"]],
-            route={
-                "tool": "connect_memory",
-                "args": {
-                    "operation": "accept-relation",
-                    "ref": enriched["ref"],
-                    "path": rel_path,
-                    "expected_fingerprint": enriched["fingerprint"],
-                },
-            },
-            reason_code=str(candidate.get("method") or ""),
             producer=PRODUCER,
-            signal_version=proposal["signal_version"],
             now=ctx.now,
-            measures={
-                "relation_type": str(candidate.get("relation_type") or ""),
-                "method": str(candidate.get("method") or ""),
-                "to": epistemic_graph._with_md(str(candidate.get("to") or "")),
-            },
-            identity=review_id,
-            ref=enriched["ref"],
-            fingerprint=enriched["fingerprint"],
+            **_link_kwargs(ctx, rel_path, review_id, proposal),
         )
+
+
+def _link_propose(ctx: Context, row: dict[str, Any]) -> dict[str, Any] | None:
+    subject = str(row.get("subject_path") or "")
+    if _sig(ctx, subject) is None:
+        return None
+    proposal = _link_proposals(ctx, subject).get(str(row.get("id") or ""))
+    if proposal is None:
+        return None
+    return _link_kwargs(ctx, subject, str(row["id"]), proposal)
 
 
 def _link_on_delete(ctx: Context, rel_path: str) -> None:
@@ -304,6 +333,7 @@ LINK = Family(
     on_page=_link_on_page,
     on_delete=_link_on_delete,
     revalidate=_link_revalidate,
+    propose=_link_propose,
 )
 
 
@@ -347,7 +377,8 @@ _ENTITY_TARGETS_SQL = (
 )
 
 _CONTRIBUTORS_SQL = (
-    "SELECT DISTINCT e.source_path, e.src_key, f.updated_date, f.origin_date, f.exomem_id "
+    "SELECT DISTINCT e.source_path, e.src_key, f.updated_date, f.origin_date, f.exomem_id, "
+    "f.title "
     "FROM graph_edges e JOIN graph_nodes f "
     "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
     "WHERE e.dst_key = ? AND e.source_path <> ? "
@@ -418,7 +449,7 @@ def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
     graph = _read_snapshot(ctx)
     try:
         node = graph.execute(
-            "SELECT page_type, lifecycle_status, updated_date, origin_date, exomem_id "
+            "SELECT page_type, lifecycle_status, updated_date, origin_date, exomem_id, title "
             "FROM graph_nodes WHERE node_key = ? AND kind = 'file'",
             (f"file:{entity}",),
         ).fetchone()
@@ -439,13 +470,14 @@ def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
             ),
         ).fetchall()
         contributors: dict[str, dict[str, Any]] = {}
-        for path, src_key, updated, origin, exomem_id in rows:
+        for path, src_key, updated, origin, exomem_id, title in rows:
             path = str(path)
             fact_date = _date(updated, origin)
             if not fact_date or fact_date <= entity_date:
                 continue
             entry = contributors.setdefault(
-                path, {"exomem_id": exomem_id, "units": set(), "page_level": False}
+                path,
+                {"exomem_id": exomem_id, "title": title, "units": set(), "page_level": False},
             )
             if str(src_key) == f"file:{path}":
                 entry["page_level"] = True
@@ -494,6 +526,7 @@ def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
     )
     return {
         "entity_ref": _memory_or_path_ref(entity, node[4]),
+        "entity_title": node[5],
         "contributors": contributors,
         "origins": origins,
         "signal_version": review_state_digest(pairs),
@@ -508,15 +541,11 @@ def review_state_digest(value: Any) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
 
-def _hydration_refresh(ctx: Context, entity: str) -> None:
-    """Recompute one entity's proposal and write or resolve it."""
-    from . import dreamer_store as store_module
-
-    cid = store_module.candidate_id(HYDRATION_KIND, entity, "")
+def _hydration_kwargs(ctx: Context, entity: str) -> dict[str, Any] | None:
+    """One entity's hydration proposal as the store's upsert arguments."""
     proposal = _hydration_detect(ctx, entity) if _sig(ctx, entity) else None
     if proposal is None:
-        ctx.store.resolve(ctx.conn, cid, producer=PRODUCER, now=ctx.now)
-        return
+        return None
     contributors = proposal["contributors"]
     origins = proposal["origins"]
     ordered = sorted(contributors, key=lambda path: (origins[path], path))
@@ -527,28 +556,30 @@ def _hydration_refresh(ctx: Context, entity: str) -> None:
             "sig": _sig(ctx, path),
             "role": "contributor",
             "origin": origins[path],
+            "title": contributors[path]["title"],
         }
-        for path in ordered[: dreamer_store.EVIDENCE_CAP]
+        # One slot is the entity itself, so the whole list fits the cap.
+        for path in ordered[: dreamer_store.EVIDENCE_CAP - 1]
     ]
-    ctx.store.upsert_proposal(
-        ctx.conn,
-        family=HYDRATION_FAMILY,
-        kind=HYDRATION_KIND,
-        subject_path=entity,
-        subject_ref=proposal["entity_ref"],
-        proposal_key="",
-        evidence=[
+    return {
+        "family": HYDRATION_FAMILY,
+        "kind": HYDRATION_KIND,
+        "subject_path": entity,
+        "subject_ref": proposal["entity_ref"],
+        "proposal_key": "",
+        "evidence": [
             {
                 "path": entity,
                 "ref": proposal["entity_ref"],
                 "sig": _sig(ctx, entity),
                 "role": "subject",
                 "origin": "",
+                "title": proposal["entity_title"],
             },
             *evidence,
         ],
-        evidence_count=len(contributors) + 1,
-        route={
+        "evidence_count": len(contributors) + 1,
+        "route": {
             "tool": "maintain_memory",
             "args": {
                 "mode": "curation",
@@ -556,16 +587,41 @@ def _hydration_refresh(ctx: Context, entity: str) -> None:
                 "paths": [entity, *ordered[:_HYDRATION_ROUTE_PAGES]],
             },
         },
-        reason_code="newer_linked_facts",
-        producer=PRODUCER,
-        signal_version=proposal["signal_version"],
-        now=ctx.now,
-        measures={
+        "reason_code": "newer_linked_facts",
+        "signal_version": proposal["signal_version"],
+        "measures": {
             "origins": len(set(origins.values())),
             "contributors": len(contributors),
             "units": sum(len(entry["units"]) for entry in contributors.values()),
         },
+    }
+
+
+def _hydration_refresh(ctx: Context, entity: str) -> None:
+    """Recompute one entity's proposal and write or resolve it."""
+    kwargs = _hydration_kwargs(ctx, entity)
+    if kwargs is None:
+        ctx.store.resolve(
+            ctx.conn,
+            dreamer_store.candidate_id(HYDRATION_KIND, entity, ""),
+            producer=PRODUCER,
+            now=ctx.now,
+        )
+        return
+    ctx.store.upsert_proposal(ctx.conn, producer=PRODUCER, now=ctx.now, **kwargs)
+
+
+def _hydration_propose(ctx: Context, row: dict[str, Any]) -> dict[str, Any] | None:
+    kwargs = _hydration_kwargs(ctx, str(row.get("subject_path") or ""))
+    if kwargs is None:
+        return None
+    kwargs["fingerprint"] = dreamer_store.proposal_fingerprint(
+        family=kwargs["family"],
+        subject_ref=kwargs["subject_ref"],
+        signal_version=kwargs["signal_version"],
+        evidence=kwargs["evidence"],
     )
+    return kwargs
 
 
 def _hydration_on_page(ctx: Context, rel_path: str) -> None:
@@ -574,11 +630,9 @@ def _hydration_on_page(ctx: Context, rel_path: str) -> None:
 
 
 def _hydration_on_delete(ctx: Context, rel_path: str) -> None:
-    from . import dreamer_store as store_module
-
     ctx.store.resolve(
         ctx.conn,
-        store_module.candidate_id(HYDRATION_KIND, rel_path, ""),
+        dreamer_store.candidate_id(HYDRATION_KIND, rel_path, ""),
         producer=PRODUCER,
         now=ctx.now,
     )
@@ -594,6 +648,7 @@ HYDRATION = Family(
     on_page=_hydration_on_page,
     on_delete=_hydration_on_delete,
     revalidate=_hydration_revalidate,
+    propose=_hydration_propose,
 )
 
 
@@ -716,3 +771,24 @@ def precompute_deliverable(ctx: Context, *, extra_deliveries=()) -> float | None
             ctx.conn, cid, deliverable=eligible[cid], token=token, settled_at=settled_at[cid]
         )
     return next_settle
+
+
+def propose(ctx: Context, row: dict[str, Any]) -> dict[str, Any] | None:
+    """One stored candidate's current proposal, recomputed in memory.
+
+    The result carries the current evidence, signal version and fingerprint.
+    None when the proposal no longer holds or its family is not registered.
+    Writes nothing: it is the request path's bounded revalidation.
+    """
+    family = family_for(str(row.get("family") or ""))
+    if family is None or family.propose is None:
+        return None
+    proposal = family.propose(ctx, row)
+    if proposal is None:
+        return None
+    proposal = dict(proposal)
+    proposal.pop("identity", None)
+    proposal["evidence"] = sorted(
+        proposal["evidence"], key=lambda item: str(item.get("path") or "")
+    )[: dreamer_store.EVIDENCE_CAP]
+    return proposal

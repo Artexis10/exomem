@@ -6047,7 +6047,7 @@
       "additionalProperties": false,
       "properties": {
         "ref": {
-          "description": "Stable `exomem://review/<id>` reference. An `exomem://review/adoption/<id>` ref returns the bounded Adoption Studio proposal context (proposal record, live binding check, and target-page summary) instead.",
+          "description": "Stable `exomem://review/<id>` reference. An `exomem://review/adoption/<id>` ref returns the bounded Adoption Studio proposal context (proposal record, live binding check, and target-page summary) instead. An `exomem://review/upkeep/<id>` ref returns one upkeep item's revalidated proposal with bounded excerpts of its subject and evidence pages and its route.",
           "type": "string"
         },
         "expected_fingerprint": {
@@ -6130,7 +6130,7 @@
       "properties": {
         "mode": {
           "default": "attention",
-          "description": "attention, activation, item, audit, dispositions, vocabulary, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, adoption, plan-progress, or write-advisory-result. `write-advisory-result` resolves exactly one opaque `exomem://write-advisory-result/<id>` reference returned by a committed write and reports only that job's current `pending`, `ready`, `failed`, or `superseded` state; it requires `ref`, has no list, browse, search, rank, count, continuation, or implicit-current form, and a malformed, unknown, unauthorized, or expired reference returns the shared not-found outcome. `plan-progress` reports, for each committed Planning item declaring `progress_evidence`, the counts its bound Records views return; it is derived and read-only, and it scores nothing. `dispositions` lists every signal family a user has set to `quiet` or `off` through `triage_memory`, with its reason code, why, timestamp, origin, and per-family manual dismissal count; a quiet family is silent on the carriers, not clean. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`. `adoption` returns the read-only Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints); approve a proposal via `adoption_studio(action=\"apply-proposal\")` or dismiss via `triage_memory`.",
+          "description": "attention, activation, item, audit, dispositions, vocabulary, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, adoption, upkeep, plan-progress, or write-advisory-result. `write-advisory-result` resolves exactly one opaque `exomem://write-advisory-result/<id>` reference returned by a committed write and reports only that job's current `pending`, `ready`, `failed`, or `superseded` state; it requires `ref`, has no list, browse, search, rank, count, continuation, or implicit-current form, and a malformed, unknown, unauthorized, or expired reference returns the shared not-found outcome. `plan-progress` reports, for each committed Planning item declaring `progress_evidence`, the counts its bound Records views return; it is derived and read-only, and it scores nothing. `dispositions` lists every signal family a user has set to `quiet` or `off` through `triage_memory`, with its reason code, why, timestamp, origin, and per-family manual dismissal count; a quiet family is silent on the carriers, not clean. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`. `adoption` returns the read-only Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints); approve a proposal via `adoption_studio(action=\"apply-proposal\")` or dismiss via `triage_memory`. `upkeep` lists the background worker's bounded upkeep proposals (default 10), each with its evidence, the governed route that would act on it, and triage verbs; a proposal authorizes nothing. Link items carry a relation-queue ref and source path.",
           "type": "string"
         },
         "categories": {
@@ -6146,7 +6146,7 @@
             }
           ],
           "default": null,
-          "description": "Optional category filter for attention/activation/audit."
+          "description": "Optional category filter for attention/activation/audit, or an upkeep family filter for upkeep."
         },
         "limit": {
           "anyOf": [
@@ -6267,7 +6267,7 @@
             }
           ],
           "default": null,
-          "description": "Stable `exomem://review/<id>` reference for item mode, or the opaque `exomem://write-advisory-result/<id>` reference for write-advisory-result mode. Required by both. For a vocabulary relation-type question, optionally provide a current relation-queue candidate ref alongside its source path and your meaning question. This reviews both endpoints and returns the exact application route."
+          "description": "Stable `exomem://review/<id>` reference for item mode (an `exomem://review/upkeep/<id>` ref revalidates that one upkeep item), or the opaque `exomem://write-advisory-result/<id>` reference for write-advisory-result mode. Required by both. For a vocabulary relation-type question, optionally provide a current relation-queue candidate ref alongside its source path and your meaning question. This reviews both endpoints and returns the exact application route."
         },
         "detail": {
           "default": "actionable",
@@ -6638,7 +6638,7 @@
       "additionalProperties": false,
       "properties": {
         "ref": {
-          "description": "Stable `exomem://review/<id>` reference from review_memory. An `exomem://review/adoption/<id>` ref triages an Adoption Studio proposal instead, keyed the same way (`review_id:fingerprint`). An `exomem://review/family/<family>` ref addresses a whole signal FAMILY instead of one item.",
+          "description": "Stable `exomem://review/<id>` reference from review_memory. An `exomem://review/adoption/<id>` ref triages an Adoption Studio proposal instead, keyed the same way (`review_id:fingerprint`). An `exomem://review/family/<family>` ref addresses a whole signal FAMILY instead of one item. An `exomem://review/upkeep/<id>` ref dismisses, snoozes or reopens one upkeep proposal, bound to its current fingerprint.",
           "type": "string"
         },
         "action": {

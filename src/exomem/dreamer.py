@@ -126,6 +126,11 @@ _thread: threading.Thread | None = None
 _stop = threading.Event()
 _STATE = _State()
 
+#: `(id, fingerprint)` pairs disposed of in this process since the worker's last
+#: precompute: delivery stops at once rather than on the next pass. Bounded.
+_DISPOSED: dict[tuple[str, str], None] = {}
+_DISPOSED_LIMIT = 512
+
 
 def setting() -> str:
     """The resolved operator setting: env, then config file, then `off`."""
@@ -164,11 +169,26 @@ def write_setting(value: str) -> Path:
     return path
 
 
+def note_disposition(cid: str, fingerprint: str) -> None:
+    """Record that an item was just triaged, so this process stops offering it."""
+    with _LOCK:
+        _DISPOSED.pop((cid, fingerprint), None)
+        _DISPOSED[(cid, fingerprint)] = None
+        while len(_DISPOSED) > _DISPOSED_LIMIT:
+            _DISPOSED.pop(next(iter(_DISPOSED)))
+
+
+def disposed(cid: str, fingerprint: str) -> bool:
+    with _LOCK:
+        return (cid, fingerprint) in _DISPOSED
+
+
 def reset_for_tests() -> None:
     global _STATE
     stop()
     with _LOCK:
         _STATE = _State()
+        _DISPOSED.clear()
 
 
 # ----------------------------------------------------------------------

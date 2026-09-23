@@ -161,6 +161,28 @@ def _sanitize_health(health: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+def proposal_fingerprint(
+    *,
+    family: str,
+    subject_ref: str,
+    signal_version: str,
+    evidence: Iterable[Mapping[str, Any]],
+) -> str:
+    """The review-state fingerprint of one proposal: its signal, not its pages.
+
+    Keyed on the family, the subject, the minimal structural evidence
+    (`signal_version`) and the evidence refs, so a dismissal stays quiet while
+    that evidence is the same and reopens only when it changes.
+    """
+    ordered = sorted(evidence, key=lambda item: str(item.get("path") or ""))
+    return review_state.fingerprint(
+        target_ref=subject_ref,
+        categories=[family],
+        reasons=[{"category": family, "meta": {"signal_version": signal_version}}],
+        related_refs=[str(item.get("ref") or "") for item in ordered[:EVIDENCE_CAP]],
+    )
+
+
 def _merge_evidence(producers: Mapping[str, Any]) -> tuple[list[dict[str, Any]], int]:
     merged: dict[str, dict[str, Any]] = {}
     counts = [0]
@@ -422,11 +444,11 @@ class DreamerStore:
         merged, count = _merge_evidence(producers)
         version = _merged_signal_version(producers)
         if fingerprint is None:
-            fingerprint = review_state.fingerprint(
-                target_ref=subject_ref,
-                categories=[family],
-                reasons=[{"category": family, "meta": {"signal_version": version}}],
-                related_refs=[str(item.get("ref") or "") for item in merged],
+            fingerprint = proposal_fingerprint(
+                family=family,
+                subject_ref=subject_ref,
+                signal_version=version,
+                evidence=merged,
             )
         signatures = sorted((str(i.get("path") or ""), str(i.get("sig") or "")) for i in merged)
         created_at = now
