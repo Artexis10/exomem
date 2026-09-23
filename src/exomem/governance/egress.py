@@ -5532,7 +5532,53 @@ _ENTRY_PATH_FIELDS = (
     "ordering_path",
     "resource",
     "resource_path",
+    # Derived graph and review structures: relation endpoints, pair members,
+    # timeline anchors, and graph node keys (`file:<path>`). A proposed
+    # relation names its target in `to`, a tension pair in `a`/`b`, and a
+    # graph edge in `src_key`/`dst_key`, each as surely as `path` does.
+    "to",
+    "from",
+    "a",
+    "b",
+    "topic_anchor",
+    "chain_id",
+    "src_key",
+    "dst_key",
 )
+
+#: An unlisted key whose NAME says it carries an identifier is decided as if it
+#: were listed. The enumeration above is what we have seen; this is the rule
+#: for what we have not, so a new derived field such as `shared_source` or
+#: `seed_key` fails closed on arrival instead of waiting to be noticed. A
+#: non-path value in such a field is never decided, so the rule costs nothing
+#: where it does not apply.
+_IDENTIFIER_KEY_SUFFIXES = ("_path", "_key", "_anchor", "_source", "_target", "_ref")
+
+#: Free-text fields whose wikilinks name pages, such as a proposed relation
+#: bullet. An entry whose text links a withheld page is dropped whole: the
+#: text is the proposal, and rewriting it would propose something else.
+_ENTRY_TEXT_FIELDS = ("bullet",)
+
+#: Prefixes that wrap a vault path in an identifier: a graph node key and the
+#: vault/source URIs.
+_IDENTIFIER_PATH_PREFIXES = ("file:", *_EXOMEM_PATH_PREFIXES)
+
+
+def _is_identifier_key(key: Any) -> bool:
+    """True when a mapping key names a field that carries a vault identifier."""
+    if not isinstance(key, str):
+        return False
+    return key in _ENTRY_PATH_FIELDS or key.endswith(_IDENTIFIER_KEY_SUFFIXES)
+
+
+def _strip_identifier_prefix(value: str) -> str:
+    """The path inside a `file:` node key or an `exomem://vault/` URI."""
+    stripped = value.strip()
+    lowered = stripped.casefold()
+    for prefix in _IDENTIFIER_PATH_PREFIXES:
+        if lowered.startswith(prefix):
+            return unquote(stripped[len(prefix) :])
+    return value
 
 
 def _decode_pathish(value: str) -> str | None:
@@ -5638,6 +5684,8 @@ def _entry_candidate_paths(entry: Any, directory: str | None = None) -> list[str
     found: list[str] = []
 
     def _add(value: Any) -> None:
+        if isinstance(value, str):
+            value = _strip_identifier_prefix(value)
         full = _path_like(value)
         if full is not None:
             found.append(full)
@@ -5650,6 +5698,13 @@ def _entry_candidate_paths(entry: Any, directory: str | None = None) -> list[str
                 raw = value.strip().replace("\\", "/").strip("/")
                 if raw and raw != full and raw.lower().endswith(".md"):
                     found.append(raw)
+            # A reference field names a page the way a wikilink does: without
+            # its extension, and possibly with a heading or alias. Decide the
+            # page it names, not only the literal (which names no file).
+            if not full.lower().endswith(".md"):
+                target = full.split("#", 1)[0].split("|", 1)[0].rstrip()
+                if target:
+                    found.append(f"{target}.md")
             return
         bare = _bare_name(value)
         if bare is None:
@@ -5661,8 +5716,12 @@ def _entry_candidate_paths(entry: Any, directory: str | None = None) -> list[str
 
     _add(entry)
     if isinstance(entry, Mapping):
-        for name in _ENTRY_PATH_FIELDS:
-            _add(entry.get(name))
+        for name, value in entry.items():
+            if _is_identifier_key(name):
+                _add(value)
+            elif name in _ENTRY_TEXT_FIELDS and isinstance(value, str):
+                for target in _WIKILINK_ANYWHERE.findall(value):
+                    _add(target)
     return found
 
 
@@ -5964,7 +6023,7 @@ def filter_withheld_entries(
                 # through its KEYS, which no amount of value filtering reaches.
                 if _path_like(key) is not None and not _keep({"path": key}, here):
                     continue
-                if key in _ENTRY_PATH_FIELDS and not _keep(value, here):
+                if _is_identifier_key(key) and not _keep(value, here):
                     continue
                 # …and a map VALUE that is itself an entry gets the same
                 # predicate a list entry gets. Without this, the whole check
