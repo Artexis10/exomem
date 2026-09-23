@@ -4920,15 +4920,28 @@ class EpistemicGraphIndex:
                 )
             )
             predecessor = graph_checkpoint.generation - 1
+            acknowledged = _graph_sync_acknowledgement(graph_values)
             if not (
                 predecessor == 0
                 and "graph_sync_generation" not in graph_values
                 and "graph_sync_digest" not in graph_values
-            ) and not (
-                (acknowledged := _graph_sync_acknowledgement(graph_values)) is not None
-                and acknowledged.generation == predecessor
-            ):
+            ) and not (acknowledged is not None and acknowledged.generation == predecessor):
                 snapshot.close()
+                if acknowledged is not None and graph_sync.GraphBuildOutcome.covering(
+                    acknowledged
+                ).covers(graph_checkpoint):
+                    # A drain already covers this generation: this refresh
+                    # arrived after the repair it would have made. Nothing is
+                    # owed, and falling back would withdraw a marker that
+                    # describes a current graph -- or register a whole-vault
+                    # rebuild for one.
+                    log.info(
+                        "graph incremental refresh found its generation already "
+                        "acknowledged generation=%s acknowledged=%s",
+                        graph_checkpoint.generation,
+                        acknowledged.generation,
+                    )
+                    return {"indexed_files": 0, "nodes": 0, "edges": 0}
                 return fallback("acknowledgement_is_not_the_predecessor")
         stored_checkpoint = self._stored_recall_checkpoint(snapshot)
         if stored_checkpoint is None or not freshness.recall_is_live(self.vault_root, "vault"):
