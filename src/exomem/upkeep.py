@@ -84,8 +84,7 @@ def _not_found(ref: str) -> ValueError:
 
 def _changed(ref: str) -> ValueError:
     return ValueError(
-        "REVIEW_ITEM_CHANGED: the upkeep proposal changed; review "
-        f"{ref} again before acting"
+        f"REVIEW_ITEM_CHANGED: the upkeep proposal changed; review {ref} again before acting"
     )
 
 
@@ -336,14 +335,14 @@ def _current(vault_root: Path, ref: str) -> tuple[dict[str, Any], dict[str, Any]
             "REVIEW_REFRESH_REQUIRED: the upkeep proposal cannot be revalidated right "
             f"now; try {ref} again shortly"
         ) from exc
+    finally:
+        ctx.close()
     if proposal is None:
         raise _not_found(ref)
     return row, {**row, **proposal}
 
 
-def item(
-    vault_root: Path, ref: str, *, expected_fingerprint: str | None = None
-) -> dict[str, Any]:
+def item(vault_root: Path, ref: str, *, expected_fingerprint: str | None = None) -> dict[str, Any]:
     """One upkeep item, revalidated, or REVIEW_ITEM_CHANGED / REVIEW_ITEM_NOT_FOUND."""
     from .governance import egress
 
@@ -449,9 +448,7 @@ def triage(
 
     action = str(action or "").strip().lower()
     if action not in _TRIAGE_ACTIONS:
-        raise ValueError(
-            f"INVALID_REVIEW_ACTION: upkeep items accept {sorted(_TRIAGE_ACTIONS)}"
-        )
+        raise ValueError(f"INVALID_REVIEW_ACTION: upkeep items accept {sorted(_TRIAGE_ACTIONS)}")
     _stored, current = _current(Path(vault_root), ref)
     if expected_fingerprint and expected_fingerprint != current["fingerprint"]:
         raise _changed(ref)

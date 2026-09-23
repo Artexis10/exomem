@@ -141,12 +141,12 @@ def test_item_context_is_bounded_and_refuses_a_stale_fingerprint(tmp_path: Path)
     assert context["subject"]["truncated"] is True
     assert context["subject"]["content_hash"]
     assert {entry["path"] for entry in context["evidence"]} == {fx.CAVITATION, fx.SEAL_WEAR}
-    assert all(len(entry["excerpt"]) <= upkeep.CONTEXT_EVIDENCE_CHARS for entry in context["evidence"])
+    assert all(
+        len(entry["excerpt"]) <= upkeep.CONTEXT_EVIDENCE_CHARS for entry in context["evidence"]
+    )
     assert context["route"]["tool"] == "maintain_memory"
     with pytest.raises(ValueError, match="REVIEW_ITEM_CHANGED"):
-        commands.op_review_item_context(
-            vault, ref=_hydration_ref(), expected_fingerprint="0" * 24
-        )
+        commands.op_review_item_context(vault, ref=_hydration_ref(), expected_fingerprint="0" * 24)
     with pytest.raises(ValueError, match="INVALID_UPKEEP_CONTEXT_ARGUMENTS"):
         commands.op_review_item_context(vault, ref=_hydration_ref(), max_graph_nodes=5)
 
@@ -177,4 +177,3 @@ def test_an_absent_sidecar_reports_unavailable(tmp_path: Path) -> None:
     assert listed["status"] == "unavailable"
     assert listed["items"] == []
     assert not dreamer_store.sidecar_path(vault).exists()
-

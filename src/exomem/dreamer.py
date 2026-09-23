@@ -371,17 +371,18 @@ def run_once(
     error_code: str | None = None
     store = dreamer_store.DreamerStore(vault_root)
     conn = None
+    from . import state_paths
+
     try:
         conn = store.connect()
-        with foreground_activity.background_scope(vault_root):
+        # One tick is one unit of placement: resolve the state directory once.
+        with state_paths.resolution_scope(), foreground_activity.background_scope(vault_root):
             generation = freshness.generation(vault_root, dreamer_delta.SCOPE)
             has_work = dreamer_delta.has_work(store, conn, vault_root)
             work = dreamer_delta.Work()
             if has_work:
                 with store.write(conn):
-                    work = dreamer_delta.next_paths(
-                        store, conn, vault_root, limit=budget.pages
-                    )
+                    work = dreamer_delta.next_paths(store, conn, vault_root, limit=budget.pages)
             if work.waiting:
                 stop_reason = f"waiting:{work.waiting}"
             for rel in work.paths:
@@ -441,8 +442,15 @@ def run_once(
         stop_reason = "error"
     wall = clock.monotonic() - started_wall
     cpu = max(0.0, clock.thread_time() - started_cpu)
-    _record_tick(store, conn, clock=clock, processed=processed, stop=stop_reason,
-                 error_code=error_code, cpu=cpu)
+    _record_tick(
+        store,
+        conn,
+        clock=clock,
+        processed=processed,
+        stop=stop_reason,
+        error_code=error_code,
+        cpu=cpu,
+    )
     if conn is not None:
         conn.close()
     return TickResult(
@@ -465,10 +473,13 @@ def _process(
 ) -> None:
     """One page, one transaction: contribution, `seen` and `pending` together."""
     signature = dreamer_delta.live_signature(vault_root, rel)
-    with store.write(conn):
-        ctx = dreamer_families.Context(vault_root=vault_root, store=store, conn=conn, now=now)
-        dreamer_families.process_page(ctx, rel, exists=signature is not None)
-        dreamer_delta.mark_processed(store, conn, vault_root, rel, signature)
+    ctx = dreamer_families.Context(vault_root=vault_root, store=store, conn=conn, now=now)
+    try:
+        with store.write(conn):
+            dreamer_families.process_page(ctx, rel, exists=signature is not None)
+            dreamer_delta.mark_processed(store, conn, vault_root, rel, signature)
+    finally:
+        ctx.close()
 
 
 def _record_tick(

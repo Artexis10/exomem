@@ -185,9 +185,7 @@ def test_same_proposal_from_two_producers_is_one_row(vault: Path) -> None:
         store, conn, evidence=("two", "three"), producer="correction", signal_version="c1"
     )
     assert first == second
-    assert first == dreamer_store.candidate_id(
-        KIND, "Knowledge Base/Notes/Entities/Acme.md", ""
-    )
+    assert first == dreamer_store.candidate_id(KIND, "Knowledge Base/Notes/Entities/Acme.md", "")
     rows = conn.execute("SELECT evidence_json, evidence_count FROM candidates").fetchall()
     assert len(rows) == 1
     paths = sorted(item["path"] for item in json.loads(rows[0][0]))

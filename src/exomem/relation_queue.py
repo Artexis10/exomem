@@ -310,14 +310,19 @@ def _body_wikilink_candidates(
     page: Any,
     *,
     limit: int,
+    snapshot: sqlite3.Connection | None = None,
 ) -> list[dict[str, Any]]:
-    """Reproduce Lane B's indexed body-wikilink evidence for one source."""
+    """Reproduce Lane B's indexed body-wikilink evidence for one source.
+
+    `snapshot` is a validated graph read snapshot the caller already holds; it
+    is used as is and left open.
+    """
     document = _relation_document(page, vault_root)
     canonical_lines = {
         relation.line for relation in document.note_relations if relation.canonical
     }
     index = epistemic_graph_module.EpistemicGraphIndex(vault_root)
-    connection = index._open_read_snapshot()
+    connection = snapshot if snapshot is not None else index._open_read_snapshot()
     if connection is None:
         return []
     try:
@@ -334,7 +339,8 @@ def _body_wikilink_candidates(
     except sqlite3.Error:
         return []
     finally:
-        connection.close()
+        if snapshot is None:
+            connection.close()
 
     indexed: dict[tuple[Any, ...], dict[str, Any]] = {}
     resolver_entries: list[tuple[str, str | None]] = []
@@ -395,10 +401,11 @@ def _shared_source_candidates(
     rel_path: str,
     *,
     limit: int,
+    snapshot: sqlite3.Connection | None = None,
 ) -> list[dict[str, Any]]:
     """Reproduce Lane B's bounded shared-source candidates for one source."""
     index = epistemic_graph_module.EpistemicGraphIndex(vault_root)
-    connection = index._open_read_snapshot()
+    connection = snapshot if snapshot is not None else index._open_read_snapshot()
     if connection is None:
         return []
     try:
@@ -422,7 +429,8 @@ def _shared_source_candidates(
     except sqlite3.Error:
         return []
     finally:
-        connection.close()
+        if snapshot is None:
+            connection.close()
     return [
         {
             "from": rel_path,
@@ -440,7 +448,11 @@ def _shared_source_candidates(
 
 
 def _page_candidates(
-    vault_root: Path, page: Any, *, limit_per_page: int
+    vault_root: Path,
+    page: Any,
+    *,
+    limit_per_page: int,
+    snapshot: sqlite3.Connection | None = None,
 ) -> list[dict[str, Any]]:
     """Re-derive one source's deterministic candidate neighborhood.
 
@@ -448,6 +460,10 @@ def _page_candidates(
     inspect the one hinted page and bounded graph neighborhoods, but deliberately
     excludes embedding proximity.  Explicit per-page ``suggest_relations`` keeps
     that discovery method; relation review decisions never recompute it.
+
+    A caller that already holds a validated graph read snapshot passes it as
+    `snapshot`, so the three graph-backed generators share it instead of each
+    validating their own; it is left open.
     """
     budget = max(0, int(limit_per_page))
     method_cap = min(
@@ -456,11 +472,13 @@ def _page_candidates(
     )
     generated = [
         *epistemic_graph_module._structural_candidates(
-            vault_root, page.rel_path
+            vault_root, page.rel_path, connection=snapshot
         )[:method_cap],
-        *_body_wikilink_candidates(vault_root, page, limit=method_cap),
+        *_body_wikilink_candidates(vault_root, page, limit=method_cap, snapshot=snapshot),
         *epistemic_graph_module._frontmatter_source_candidates(page)[:method_cap],
-        *_shared_source_candidates(vault_root, page.rel_path, limit=method_cap),
+        *_shared_source_candidates(
+            vault_root, page.rel_path, limit=method_cap, snapshot=snapshot
+        ),
     ]
     return epistemic_graph_module._dedupe_candidates(generated)
 

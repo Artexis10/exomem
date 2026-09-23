@@ -107,9 +107,7 @@ def advance_if_drained(store: dreamer_store.DreamerStore, conn: sqlite3.Connecti
     return True
 
 
-def has_work(
-    store: dreamer_store.DreamerStore, conn: sqlite3.Connection, vault_root: Path
-) -> bool:
+def has_work(store: dreamer_store.DreamerStore, conn: sqlite3.Connection, vault_root: Path) -> bool:
     """Whether a tick would find anything to process. Read-only and O(1).
 
     False only when nothing is pending and the committed checkpoint is this

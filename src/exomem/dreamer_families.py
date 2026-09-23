@@ -63,6 +63,27 @@ class Context:
     now: float
     _pages: dict[str, Any] = field(default_factory=dict)
     _review: dict[str, Any] = field(default_factory=dict)
+    _graph: list[Any] = field(default_factory=list)
+
+    def graph(self) -> Any:
+        """One validated graph read snapshot for this page, opened once.
+
+        Closed by `close()` at the end of the page, so no read transaction
+        outlives the page it served. Raises `Deferred` when the graph is not
+        available: nothing is proposed from a partial view.
+        """
+        if not self._graph:
+            from . import epistemic_graph
+
+            conn = epistemic_graph.EpistemicGraphIndex(self.vault_root)._open_read_snapshot()
+            if conn is None:
+                raise Deferred("graph unavailable")
+            self._graph.append(conn)
+        return self._graph[0]
+
+    def close(self) -> None:
+        while self._graph:
+            self._graph.pop().close()
 
     def page(self, rel_path: str) -> Any | None:
         """One parsed page through the shared parse cache, or None when gone.
@@ -154,14 +175,6 @@ LINK_METHODS = frozenset(
 _LINK_LIMIT_PER_PAGE = 10
 
 
-def _graph_available(ctx: Context) -> bool:
-    from . import epistemic_graph
-
-    if "graph" not in ctx._review:
-        ctx._review["graph"] = epistemic_graph.EpistemicGraphIndex(ctx.vault_root).available()
-    return bool(ctx._review["graph"])
-
-
 def _authored_between(ctx: Context, page: Any, other: Any) -> bool:
     """True when either page already authors any relation to the other."""
     from . import epistemic_graph, relation_queue
@@ -181,14 +194,13 @@ def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
     page = ctx.page(rel_path)
     if page is None or not activation._eligible(ctx.vault_root, page):
         return {}
-    if not _graph_available(ctx):
-        raise Deferred("graph unavailable")
+    snapshot = ctx.graph()  # raises Deferred when the graph cannot be read
     payload = ctx.review_payload()
     if payload is None:
         payload = review_state.empty_state()
     out: dict[str, dict[str, Any]] = {}
     for candidate in relation_queue._page_candidates(
-        ctx.vault_root, page, limit_per_page=_LINK_LIMIT_PER_PAGE
+        ctx.vault_root, page, limit_per_page=_LINK_LIMIT_PER_PAGE, snapshot=snapshot
     ):
         if str(candidate.get("method") or "") not in LINK_METHODS:
             continue
@@ -392,15 +404,6 @@ _CONTRIBUTORS_SQL = (
 )
 
 
-def _read_snapshot(ctx: Context) -> Any:
-    from . import epistemic_graph
-
-    conn = epistemic_graph.EpistemicGraphIndex(ctx.vault_root)._open_read_snapshot()
-    if conn is None:
-        raise Deferred("graph unavailable")
-    return conn
-
-
 def _memory_or_path_ref(rel_path: str, exomem_id: str | None) -> str:
     from . import memory_refs, relation_queue
 
@@ -419,20 +422,17 @@ def _date(updated: Any, origin: Any) -> str:
 
 def _hydration_entities(ctx: Context, rel_path: str) -> list[str]:
     """The entity pages this page is about: itself, and what it links (at most 8)."""
-    graph = _read_snapshot(ctx)
-    try:
-        own = graph.execute(
-            "SELECT page_type FROM graph_nodes WHERE node_key = ? AND kind = 'file'",
-            (f"file:{rel_path}",),
-        ).fetchone()
-        linked = [
-            str(row[0])
-            for row in graph.execute(
-                _ENTITY_TARGETS_SQL, (rel_path, rel_path, _HYDRATION_ENTITIES_PER_PAGE)
-            )
-        ]
-    finally:
-        graph.close()
+    graph = ctx.graph()
+    own = graph.execute(
+        "SELECT page_type FROM graph_nodes WHERE node_key = ? AND kind = 'file'",
+        (f"file:{rel_path}",),
+    ).fetchone()
+    linked = [
+        str(row[0])
+        for row in graph.execute(
+            _ENTITY_TARGETS_SQL, (rel_path, rel_path, _HYDRATION_ENTITIES_PER_PAGE)
+        )
+    ]
     entities = [rel_path] if own is not None and own[0] == "entity" else []
     return [*entities, *(path for path in linked if path not in entities)]
 
@@ -446,74 +446,70 @@ def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
     """
     from . import provenance
 
-    graph = _read_snapshot(ctx)
-    try:
-        node = graph.execute(
-            "SELECT page_type, lifecycle_status, updated_date, origin_date, exomem_id, title "
-            "FROM graph_nodes WHERE node_key = ? AND kind = 'file'",
-            (f"file:{entity}",),
-        ).fetchone()
-        if node is None or node[0] != "entity":
-            return None
-        if str(node[1] or "").strip().casefold() in _INACTIVE_STATUSES:
-            return None
-        entity_date = _date(node[2], node[3])
-        rows = graph.execute(
-            _CONTRIBUTORS_SQL,
-            (
-                f"file:{entity}",
-                entity,
-                *_HYDRATION_TYPES,
-                *sorted(_INACTIVE_STATUSES),
-                entity,
-                _HYDRATION_ROW_LIMIT,
-            ),
-        ).fetchall()
-        contributors: dict[str, dict[str, Any]] = {}
-        for path, src_key, updated, origin, exomem_id, title in rows:
-            path = str(path)
-            fact_date = _date(updated, origin)
-            if not fact_date or fact_date <= entity_date:
-                continue
-            entry = contributors.setdefault(
-                path,
-                {"exomem_id": exomem_id, "title": title, "units": set(), "page_level": False},
-            )
-            if str(src_key) == f"file:{path}":
-                entry["page_level"] = True
-            else:
-                unit = graph.execute(
-                    "SELECT unit_ref FROM graph_nodes WHERE node_key = ? "
-                    "AND unit_ref IS NOT NULL",
-                    (str(src_key),),
-                ).fetchone()
-                if unit is not None:
-                    entry["units"].add(str(unit[0]))
-        sources: dict[str, set[str]] = {}
-        for path, entry in list(contributors.items()):
-            if entry["page_level"]:
-                entry["units"].update(
-                    str(row[0])
-                    for row in graph.execute(
-                        "SELECT unit_ref FROM graph_nodes WHERE path = ? "
-                        "AND unit_ref IS NOT NULL ORDER BY unit_ref LIMIT ?",
-                        (path, _HYDRATION_UNITS_PER_PAGE),
-                    )
-                )
-            if not entry["units"]:
-                contributors.pop(path)
-                continue
-            sources[path] = {
+    graph = ctx.graph()
+    node = graph.execute(
+        "SELECT page_type, lifecycle_status, updated_date, origin_date, exomem_id, title "
+        "FROM graph_nodes WHERE node_key = ? AND kind = 'file'",
+        (f"file:{entity}",),
+    ).fetchone()
+    if node is None or node[0] != "entity":
+        return None
+    if str(node[1] or "").strip().casefold() in _INACTIVE_STATUSES:
+        return None
+    entity_date = _date(node[2], node[3])
+    rows = graph.execute(
+        _CONTRIBUTORS_SQL,
+        (
+            f"file:{entity}",
+            entity,
+            *_HYDRATION_TYPES,
+            *sorted(_INACTIVE_STATUSES),
+            entity,
+            _HYDRATION_ROW_LIMIT,
+        ),
+    ).fetchall()
+    contributors: dict[str, dict[str, Any]] = {}
+    for path, src_key, updated, origin, exomem_id, title in rows:
+        path = str(path)
+        fact_date = _date(updated, origin)
+        if not fact_date or fact_date <= entity_date:
+            continue
+        entry = contributors.setdefault(
+            path,
+            {"exomem_id": exomem_id, "title": title, "units": set(), "page_level": False},
+        )
+        if str(src_key) == f"file:{path}":
+            entry["page_level"] = True
+        else:
+            unit = graph.execute(
+                "SELECT unit_ref FROM graph_nodes WHERE node_key = ? AND unit_ref IS NOT NULL",
+                (str(src_key),),
+            ).fetchone()
+            if unit is not None:
+                entry["units"].add(str(unit[0]))
+    sources: dict[str, set[str]] = {}
+    for path, entry in list(contributors.items()):
+        if entry["page_level"]:
+            entry["units"].update(
                 str(row[0])
                 for row in graph.execute(
-                    "SELECT dst_key FROM graph_edges WHERE src_key = ? "
-                    "AND origin = 'frontmatter' AND source_anchor = 'sources' "
-                    "AND relation_type = 'derived_from'",
-                    (f"file:{path}",),
+                    "SELECT unit_ref FROM graph_nodes WHERE path = ? "
+                    "AND unit_ref IS NOT NULL ORDER BY unit_ref LIMIT ?",
+                    (path, _HYDRATION_UNITS_PER_PAGE),
                 )
-            }
-    finally:
-        graph.close()
+            )
+        if not entry["units"]:
+            contributors.pop(path)
+            continue
+        sources[path] = {
+            str(row[0])
+            for row in graph.execute(
+                "SELECT dst_key FROM graph_edges WHERE src_key = ? "
+                "AND origin = 'frontmatter' AND source_anchor = 'sources' "
+                "AND relation_type = 'derived_from'",
+                (f"file:{path}",),
+            )
+        }
     if not contributors:
         return None
     origins = provenance.origin_keys(sources)

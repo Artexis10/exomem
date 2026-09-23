@@ -39,7 +39,9 @@ def _clean(monkeypatch: pytest.MonkeyPatch):
 def _write(vault: Path, rel: str, body: str = "body") -> Path:
     path = vault / rel
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"---\ntype: insight\nstatus: active\n---\n# Page\n\n{body}\n", encoding="utf-8")
+    path.write_text(
+        f"---\ntype: insight\nstatus: active\n---\n# Page\n\n{body}\n", encoding="utf-8"
+    )
     return path
 
 

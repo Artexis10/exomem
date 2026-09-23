@@ -9898,14 +9898,18 @@ _SHARED_RESOLUTION_TARGET_SQL = f"""
 """
 
 
-def _structural_candidates(vault_root: Path, rel_path: str) -> list[dict[str, Any]]:
+def _structural_candidates(
+    vault_root: Path, rel_path: str, *, connection: sqlite3.Connection | None = None
+) -> list[dict[str, Any]]:
     """Three structural generators over ONE validated read snapshot.
 
     `_open_read_snapshot` re-checks freshness, recall-policy identity and graph
     status on every call, and `relation_queue.build_queue` runs
     `suggest_relations` for up to 50 pages, so the three generators share a
     single connection rather than opening three. Soft-fails to `[]` when the
-    snapshot is unavailable, exactly like `_shared_source_candidates`.
+    snapshot is unavailable, exactly like `_shared_source_candidates`. A caller
+    that already holds a validated snapshot passes it as `connection`; it is
+    used as is and left open.
 
     All three target PAGES. That is why the two co-participation generators
     propose only `relates_to`: "both pages carry the same question" would look
@@ -9914,7 +9918,7 @@ def _structural_candidates(vault_root: Path, rel_path: str) -> list[dict[str, An
     false — only their question units do. Revisit once `to` can address a unit.
     """
     index = EpistemicGraphIndex(vault_root)
-    conn = index._open_read_snapshot()
+    conn = connection if connection is not None else index._open_read_snapshot()
     if conn is None:
         return []
     try:
@@ -9928,7 +9932,8 @@ def _structural_candidates(vault_root: Path, rel_path: str) -> list[dict[str, An
     except sqlite3.Error:  # a structural suggestion must never break a read
         return []
     finally:
-        conn.close()
+        if connection is None:
+            conn.close()
     # The two co-participation generators routinely find the SAME peer — pages
     # that share a question usually also answer the same thing — and both
     # propose `relates_to`, so they emit the identical bullet. `_dedupe_candidates`

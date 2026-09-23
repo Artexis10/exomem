@@ -127,9 +127,7 @@ def test_link_items_triage_through_the_relation_namespace(tmp_path: Path) -> Non
     vault = _settled(tmp_path)
     listed = upkeep.review(vault, categories=["upkeep_link"])["items"]
     link = next(
-        item
-        for item in listed
-        if item["dispose"]["args"].get("source_path") == fx.CAVITATION
+        item for item in listed if item["dispose"]["args"].get("source_path") == fx.CAVITATION
     )
     assert link["ref"].startswith("exomem://review/relation/")
     assert link["dispose"]["args"]["ref"] == link["ref"]

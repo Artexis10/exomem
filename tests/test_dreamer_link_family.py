@@ -64,11 +64,7 @@ def _all(conn):
 
 def _pair(rows: list[dict], subject: str, to: str) -> dict | None:
     return next(
-        (
-            row
-            for row in rows
-            if row["subject_path"] == subject and row["measures"].get("to") == to
-        ),
+        (row for row in rows if row["subject_path"] == subject and row["measures"].get("to") == to),
         None,
     )
 
@@ -226,8 +222,9 @@ def test_evidence_change_refreshes_the_fingerprint(tmp_path: Path) -> None:
         fx.edit(
             vault,
             rel,
-            fx.insight(title, sources=["field-report-three"], updated="2026-05-05",
-                       observation=observation),
+            fx.insight(
+                title, sources=["field-report-three"], updated="2026-05-05", observation=observation
+            ),
             graph=False,
         )
     fx.publish_graph(vault)

@@ -193,9 +193,10 @@ def test_revalidate_reads_only_the_candidate_pages(tmp_path: Path, monkeypatch) 
     )
     store = dreamer_store.DreamerStore(vault)
     conn = store.connect()
+    ctx = dreamer_families.Context(vault_root=vault, store=store, conn=conn, now=1.0)
     with store.write(conn):
-        ctx = dreamer_families.Context(vault_root=vault, store=store, conn=conn, now=1.0)
         dreamer_families.HYDRATION.revalidate(ctx, row)
+    ctx.close()
     conn.close()
     assert looked_up
     assert set(looked_up) <= allowed
