@@ -284,7 +284,7 @@ def test_reaper_unloads_model_slots_without_preload() -> None:
 def test_default_slots_label_the_model_singletons() -> None:
     by_name = {s.name: s for s in model_reaper.default_slots()}
 
-    assert [n for n, s in by_name.items() if s.is_model] == ["embeddings", "reranker", "clip"]
+    assert [n for n, s in by_name.items() if s.is_model] == ["embeddings", "activation", "reranker", "clip"]
 
 
 def test_preloaded_model_survives_a_reap_tick(monkeypatch: pytest.MonkeyPatch) -> None:

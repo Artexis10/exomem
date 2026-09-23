@@ -68,12 +68,22 @@ MAX_WORDS_PER_CHUNK = 350
 # by visual content. An EMBEDDER (measurement) like bge — not a captioning VLM —
 # so it stays in-bounds for the pure-substrate server. ViT-B/32 → 512-dim.
 CLIP_MODEL_NAME = "clip-ViT-B-32"
+#: The activation index's own encoder (close-memory-loop, step 4). Unset, or naming
+#: `MODEL_NAME`, is the shared topology: activation uses the recall singleton on the
+#: process-wide model gate, exactly as before. Any other model is a second guarded
+#: singleton with an execution slot of its own, so an interactive query encode never
+#: queues behind a recall write's bulk encode. Recall itself never changes model.
+ACTIVATION_MODEL_ENV = "EXOMEM_ACTIVATION_MODEL"
 _MODEL = None
 _MODEL_LOCK = threading.Lock()
 _RERANKER = None
 _RERANKER_LOCK = threading.Lock()
 _CLIP_MODEL = None
 _CLIP_LOCK = threading.Lock()
+_ACTIVATION_MODEL = None
+_ACTIVATION_MODEL_LOCK = threading.Lock()
+_ACTIVATION_GATE: runtime_resources.ModelAdmissionGate | None = None
+_ACTIVATION_GATE_LOCK = threading.Lock()
 _IMPORT_FAILED = False  # one-time soft-fail flag for upsert_after_write
 _CLIP_IMPORT_FAILED = False
 
@@ -127,6 +137,7 @@ class _ModelGuard:
 BGE_GUARD = _ModelGuard("embeddings")
 RERANKER_GUARD = _ModelGuard("reranker")
 CLIP_GUARD = _ModelGuard("clip")
+ACTIVATION_GUARD = _ModelGuard("activation")
 
 
 def unload_model() -> bool:
@@ -144,6 +155,24 @@ def unload_model() -> bool:
     # Backends hold runtime memory the reference drop alone will not return: an
     # ONNX session owns arenas outside Python's heap, and torch owns a caching
     # allocator. `release` is where each says how to give it back.
+    release = getattr(m, "release", None)
+    if release is not None:
+        with contextlib.suppress(Exception):  # unload must never raise
+            release()
+    del m
+    gc.collect()
+    accel.empty_cache()
+    return True
+
+
+def unload_activation_model() -> bool:
+    """Drop a separate activation encoder. See `unload_model`; the shared
+    topology holds nothing here, so this is then a no-op."""
+    global _ACTIVATION_MODEL
+    with _ACTIVATION_MODEL_LOCK:
+        if _ACTIVATION_MODEL is None or ACTIVATION_GUARD.inflight() > 0:
+            return False
+        m, _ACTIVATION_MODEL = _ACTIVATION_MODEL, None
     release = getattr(m, "release", None)
     if release is not None:
         with contextlib.suppress(Exception):  # unload must never raise
@@ -1043,6 +1072,127 @@ def embed_query_if_loaded(text: str) -> np.ndarray | None:
                 show_progress_bar=False,
             )
         return vecs.astype(np.float32, copy=False)[0]
+
+
+def activation_model_name() -> str:
+    """The activation encoder's model: `EXOMEM_ACTIVATION_MODEL`, else recall's."""
+    return (os.environ.get(ACTIVATION_MODEL_ENV) or "").strip() or MODEL_NAME
+
+
+def activation_encoder_is_shared() -> bool:
+    """True when activation uses the recall singleton itself."""
+    return activation_model_name() == MODEL_NAME
+
+
+def activation_execution(*, wait: bool = True):
+    """The execution slot activation encodes run in.
+
+    Shared topology: the process-wide gate, as every recall encode. Separate
+    model: a gate private to that singleton, so the activation query never meets
+    the recall writer's bulk encodes and the nonblocking rule reads `busy` only
+    when activation's own encoder is busy.
+    """
+    global _ACTIVATION_GATE
+    if activation_encoder_is_shared():
+        return runtime_resources.model_execution(wait=wait)
+    with _ACTIVATION_GATE_LOCK:
+        if _ACTIVATION_GATE is None:
+            _ACTIVATION_GATE = runtime_resources.ModelAdmissionGate(
+                runtime_resources.resolve_policy().model_admission
+            )
+        gate = _ACTIVATION_GATE
+    return gate.execution(wait=wait)
+
+
+def get_activation_model():
+    """The activation encoder, loading it if needed — never from a request thread.
+
+    The recall singleton in the shared topology; otherwise a second lazily loaded
+    singleton, registered with the reaper and preloaded by warm-up like the rest.
+    """
+    global _ACTIVATION_MODEL
+    if activation_encoder_is_shared():
+        return get_model()
+    with activation_execution():
+        if _ACTIVATION_MODEL is not None:
+            return _ACTIVATION_MODEL
+        with _ACTIVATION_MODEL_LOCK:
+            if _ACTIVATION_MODEL is None:
+                _ACTIVATION_MODEL = embedding_backend.load_encoder(activation_model_name())
+        ACTIVATION_GUARD.touch()
+        return _ACTIVATION_MODEL
+
+
+def _activation_prefixes(model) -> tuple[str, str]:
+    """The query and passage prefixes the activation model was trained with."""
+    profile = getattr(model, "profile", None)
+    if isinstance(profile, embedding_backend.EncoderProfile):
+        return profile.query_prefix, profile.passage_prefix
+    query, passage, _pooling, _pad = embedding_backend._DECLARED.get(
+        activation_model_name(), embedding_backend._UNDECLARED
+    )
+    return query, passage
+
+
+def embed_activation_query_if_loaded(text: str) -> np.ndarray | None:
+    """Encode one activation turn only when its encoder is already resident.
+
+    Never loads and never waits: `None` when cold, `ModelBusyError` when the
+    encoder's own slot is taken. In the shared topology this is exactly
+    `embed_query_if_loaded`.
+    """
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return None
+    if activation_encoder_is_shared():
+        return embed_query_if_loaded(text)
+    if not _ACTIVATION_MODEL_LOCK.acquire(blocking=False):
+        raise runtime_resources.ModelBusyError("model compute is busy; retry shortly")
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(ACTIVATION_GUARD.active())
+            model = _ACTIVATION_MODEL
+        finally:
+            _ACTIVATION_MODEL_LOCK.release()
+        if model is None:
+            return None
+        query_prefix, _passage_prefix = _activation_prefixes(model)
+        caller = _encode_caller() if call_spans.MCP_CALL_TOKEN.get() is not None else "off-path"
+        with (
+            call_spans.span("embeddings.encode", {"texts": 1, "chars": len(text)}),
+            call_spans.span(f"encode.by.{caller}"),
+            activation_execution(wait=False),
+        ):
+            vecs = model.encode(
+                [query_prefix + text],
+                batch_size=encode_batch_size(model),
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+        return np.asarray(vecs, dtype=np.float32)[0]
+
+
+def embed_activation_passages(texts: list[str]) -> np.ndarray:
+    """Encode activation signatures with the activation encoder's passage prefix.
+
+    Loads the encoder when it is cold, so it belongs to the background index
+    build, never to a request thread. The shared topology is `embed_texts`.
+    """
+    if activation_encoder_is_shared():
+        return embed_texts(texts, is_query=False)
+    if not texts:
+        return np.zeros((0, 0), dtype=np.float32)
+    model = get_activation_model()
+    _query_prefix, passage_prefix = _activation_prefixes(model)
+    with ACTIVATION_GUARD.active(), activation_execution():
+        vecs = model.encode(
+            [passage_prefix + text for text in texts],
+            batch_size=encode_batch_size(model),
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+    return np.asarray(vecs, dtype=np.float32)
 
 
 def vector_backend_active(vault_root: Path) -> bool:

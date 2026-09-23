@@ -46,6 +46,19 @@ def test_embed_query_if_loaded_honors_embedding_kill_switch(
     assert embeddings.embed_query_if_loaded("activation") is None
 
 
+def test_activation_query_honors_embedding_kill_switch_in_both_topologies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setattr(embeddings, "_MODEL", object())
+    monkeypatch.setattr(embeddings, "_ACTIVATION_MODEL", object())
+
+    monkeypatch.delenv(embeddings.ACTIVATION_MODEL_ENV, raising=False)
+    assert embeddings.embed_activation_query_if_loaded("activation") is None
+    monkeypatch.setenv(embeddings.ACTIVATION_MODEL_ENV, "intfloat/multilingual-e5-small")
+    assert embeddings.embed_activation_query_if_loaded("activation") is None
+
+
 def test_embed_query_if_loaded_uses_resident_query_encoding_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

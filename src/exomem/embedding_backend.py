@@ -19,10 +19,12 @@ and CLIP, so only the hosted lane — which withholds both — can drop it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Protocol
 
 import numpy as np
@@ -53,6 +55,8 @@ class Encoder(Protocol):
     backend: str
     #: Device the model actually landed on, in torch's vocabulary.
     device: str
+    #: How the model encodes — pooling, prefixes, limit — and so which vectors.
+    profile: EncoderProfile
 
     def encode(
         self,
@@ -107,6 +111,150 @@ def _importable(module: str) -> bool:
         return False
 
 
+#: What a model repository does not say about itself: the prefixes each model was
+#: trained with, and the pooling and padding token to assume when a cached copy
+#: predates the files that do say (an ONNX cache from before profiles existed
+#: holds no `1_Pooling/config.json`). Recall's model keeps exactly what the
+#: shipped encoder always did: CLS, `[PAD]`, and its query prefix.
+_DECLARED: dict[str, tuple[str, str, str, str]] = {
+    # model: (query prefix, passage prefix, pooling, padding token)
+    "BAAI/bge-base-en-v1.5": (
+        "Represent this sentence for searching relevant passages: ",
+        "",
+        _POOLING_CLS,
+        "[PAD]",
+    ),
+    "intfloat/multilingual-e5-small": ("query: ", "passage: ", "mean", "<pad>"),
+    "intfloat/multilingual-e5-base": ("query: ", "passage: ", "mean", "<pad>"),
+    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2": ("", "", "mean", "<pad>"),
+}
+_UNDECLARED = ("", "", _POOLING_CLS, "[PAD]")
+
+
+@dataclass(frozen=True)
+class EncoderProfile:
+    """How one model turns text into a vector: read from the model, never guessed.
+
+    Pooling, the sequence limit and the padding token come from the repository's
+    own `1_Pooling/config.json`, `sentence_bert_config.json` and
+    `tokenizer_config.json` (or from the loaded sentence-transformers model, which
+    read the same files). The prefixes are the model's training convention, which
+    no file records, so they come from `_DECLARED`.
+    """
+
+    model: str
+    pooling: str
+    query_prefix: str
+    passage_prefix: str
+    max_seq: int
+    pad_token: str
+    onnx_file: str = "onnx/model.onnx"
+
+    def fingerprint(self) -> str:
+        """Identity of the vector space: model, pooling, prefixes, limit, L2.
+
+        Never the backend, the padding token or the ONNX file: those are how a
+        runtime computes a vector, not which vector it computes, and a backend
+        swap must not look like a model change.
+        """
+        identity = json.dumps(
+            {
+                "model": self.model,
+                "pooling": self.pooling,
+                "query_prefix": self.query_prefix,
+                "passage_prefix": self.passage_prefix,
+                "max_seq": self.max_seq,
+                "normalize": "l2",
+            },
+            sort_keys=True,
+        )
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+        return f"{self.model}|{self.pooling}|l2|{digest}"
+
+
+def _read_json(model_name: str, filename: str) -> dict | None:
+    try:
+        with open(_resolve(model_name, filename), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:  # noqa: BLE001 — an absent config falls back to the declared value
+        log.debug("no %s for %s; using the declared value", filename, model_name)
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _pooling_from_config(config: dict | None) -> str | None:
+    if not config:
+        return None
+    if config.get("pooling_mode_cls_token"):
+        return _POOLING_CLS
+    if config.get("pooling_mode_mean_tokens"):
+        return "mean"
+    return None
+
+
+def _pad_from_config(config: dict | None) -> str | None:
+    value = (config or {}).get("pad_token")
+    if isinstance(value, dict):
+        value = value.get("content")
+    return str(value) if value else None
+
+
+def read_profile(model_name: str) -> EncoderProfile:
+    """The profile of `model_name`, read from its repository files.
+
+    Called where a model loads, never on a request thread: it resolves up to
+    three small files from the local hub cache, offline-first.
+    """
+    query, passage, pooling, pad = _DECLARED.get(model_name, _UNDECLARED)
+    return EncoderProfile(
+        model=model_name,
+        pooling=_pooling_from_config(_read_json(model_name, "1_Pooling/config.json")) or pooling,
+        query_prefix=query,
+        passage_prefix=passage,
+        max_seq=_max_seq_length(model_name),
+        pad_token=_pad_from_config(_read_json(model_name, "tokenizer_config.json")) or pad,
+    )
+
+
+def profile_from_sentence_transformer(model_name: str, model) -> EncoderProfile:
+    """The same profile, read off a loaded sentence-transformers model.
+
+    That model already parsed the repository's pooling and tokenizer files, so
+    reading them back costs no I/O and gives the torch lane exactly the profile
+    `read_profile` gives the ONNX lane.
+    """
+    query, passage, pooling, pad = _DECLARED.get(model_name, _UNDECLARED)
+    try:
+        for module in model:
+            mode = getattr(module, "get_pooling_mode_str", None)
+            if callable(mode):
+                pooling = str(mode())
+                break
+    except TypeError:  # not a module sequence — keep the declared pooling
+        pass
+    max_seq = getattr(model, "max_seq_length", None)
+    tokenizer_pad = getattr(getattr(model, "tokenizer", None), "pad_token", None)
+    return EncoderProfile(
+        model=model_name,
+        pooling=pooling,
+        query_prefix=query,
+        passage_prefix=passage,
+        max_seq=int(max_seq) if isinstance(max_seq, int) and max_seq > 0 else _DEFAULT_MAX_SEQ,
+        pad_token=str(tokenizer_pad) if isinstance(tokenizer_pad, str) and tokenizer_pad else pad,
+    )
+
+
+def _pool(hidden: np.ndarray, mask: np.ndarray, pooling: str) -> np.ndarray:
+    """Pool token states the way the model was trained to: CLS, or the mean of
+    the tokens the attention mask keeps (padding never counts)."""
+    if pooling == _POOLING_CLS:
+        return hidden[:, 0]
+    if pooling == "mean":
+        weights = mask[..., None].astype(hidden.dtype)
+        return (hidden * weights).sum(axis=1) / np.maximum(weights.sum(axis=1), 1e-9)
+    raise ValueError(f"unsupported pooling {pooling!r}")
+
+
 def fingerprint(model_name: str) -> str:
     """Identity of the vectors a vault holds — model and pooling, not backend.
 
@@ -131,6 +279,7 @@ class _TorchEncoder:
             model_name,
             lambda **kw: SentenceTransformer(model_name, device=device, **kw),
         )
+        self.profile = profile_from_sentence_transformer(model_name, model)
         self._model = _maybe_half(model, device) if half else model
         self.device = device
 
@@ -148,9 +297,12 @@ class _TorchEncoder:
 class _OnnxEncoder:
     """ONNX Runtime over the model's published ONNX export.
 
-    Reimplements only what sentence-transformers did for this model: tokenize,
-    run the encoder, take the CLS vector, L2-normalise. There is no torch here,
-    which is the entire reason the hosted image can shed ~300 MiB per cell.
+    Reimplements only what sentence-transformers does: tokenize, run the encoder,
+    pool the way the model's profile says (CLS for bge, the masked mean for e5 and
+    MiniLM), L2-normalise. Padding uses the tokenizer's own padding token, which
+    is `[PAD]` (id 0) for BERT vocabularies and `<pad>` (id 1) for XLM-R ones.
+    There is no torch here, which is the entire reason the hosted image can shed
+    ~300 MiB per cell.
     """
 
     backend = ONNX
@@ -159,12 +311,16 @@ class _OnnxEncoder:
         import onnxruntime as ort
         from tokenizers import Tokenizer
 
-        onnx_path = _resolve(model_name, "onnx/model.onnx")
+        self.profile = read_profile(model_name)
+        onnx_path = _resolve(model_name, self.profile.onnx_file)
         tokenizer_path = _resolve(model_name, "tokenizer.json")
 
         self._tokenizer = Tokenizer.from_file(tokenizer_path)
-        self._tokenizer.enable_truncation(max_length=_max_seq_length(model_name))
-        self._tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")
+        self._tokenizer.enable_truncation(max_length=self.profile.max_seq)
+        pad_id = self._tokenizer.token_to_id(self.profile.pad_token)
+        if pad_id is None:
+            raise ValueError(f"{model_name}: padding token {self.profile.pad_token!r} is not in its tokenizer")
+        self._tokenizer.enable_padding(pad_id=pad_id, pad_token=self.profile.pad_token)
 
         options = ort.SessionOptions()
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
@@ -192,14 +348,20 @@ class _OnnxEncoder:
         return np.vstack(out)
 
     def _encode_batch(self, batch: list[str], normalize: bool) -> np.ndarray:
-        encodings = self._tokenizer.encode_batch(batch)
+        # Collapse whitespace first. A sentencepiece tokenizer (XLM-R: e5, MiniLM)
+        # strips and collapses it in its own normaliser, which the exported
+        # `tokenizer.json` does not reproduce: a trailing space became an extra
+        # word-boundary token and moved e5's vector to cosine 0.96 against torch.
+        # A BERT tokenizer uses whitespace only as a separator, so for bge this
+        # changes no token id.
+        encodings = self._tokenizer.encode_batch([" ".join(text.split()) for text in batch])
         feed = {
             "input_ids": np.array([e.ids for e in encodings], dtype=np.int64),
             "attention_mask": np.array([e.attention_mask for e in encodings], dtype=np.int64),
             "token_type_ids": np.array([e.type_ids for e in encodings], dtype=np.int64),
         }
         hidden = self._session.run(None, {k: v for k, v in feed.items() if k in self._inputs})[0]
-        pooled = hidden[:, 0]  # CLS
+        pooled = _pool(hidden, feed["attention_mask"], self.profile.pooling)
         if normalize:
             norms = np.linalg.norm(pooled, axis=1, keepdims=True)
             pooled = pooled / np.maximum(norms, 1e-12)

@@ -440,6 +440,7 @@ def test_framework_adapters_receive_explicit_thread_budget(monkeypatch: pytest.M
     tokenizer = types.SimpleNamespace(
         enable_truncation=lambda **_kwargs: None,
         enable_padding=lambda **_kwargs: None,
+        token_to_id=lambda _token: 0,
     )
     monkeypatch.setitem(sys.modules, "onnxruntime", ort)
     monkeypatch.setitem(

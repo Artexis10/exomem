@@ -552,6 +552,14 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         if drained:
             log.info("drained %d deferred write-embed batch(es)", len(drained))
 
+        if not embeddings.activation_encoder_is_shared():
+            # A separate activation encoder is never loaded by activation itself
+            # (its query encode is resident-only), so warm-up is what makes it
+            # resident; the shared topology is the recall model just preloaded.
+            log.info("preloading activation encoder %s", embeddings.activation_model_name())
+            if _preload("model_activation", embeddings.get_activation_model, lambda m: m.encode(["warm"])):
+                log.info("activation encoder ready")
+
         if embeddings.ranking_enabled():
             log.info("preloading reranker %s", embeddings.RERANKER_NAME)
             if _preload(
