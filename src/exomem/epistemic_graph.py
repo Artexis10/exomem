@@ -3914,11 +3914,23 @@ class EpistemicGraphIndex:
         *,
         checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
         graph_checkpoint: graph_sync.GraphSyncCheckpoint | None = None,
+        topology: str | None = None,
     ) -> None:
+        """Publish the availability marker and the lineage it stands on.
+
+        `topology`, when given, is the resolver topology fingerprint the rows
+        were derived under, which the next topology-changing refresh proves its
+        old resolver against.
+        """
         conn.execute(
             "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
             (_AVAILABILITY_FRESHNESS_KEY, _availability_freshness_value(identity)),
         )
+        if topology is not None:
+            conn.execute(
+                "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                (_RESOLVER_TOPOLOGY_KEY, topology),
+            )
         conn.execute(
             "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
             ("schema_version", str(SCHEMA_VERSION)),
@@ -5355,6 +5367,12 @@ class EpistemicGraphIndex:
                     # now, not the one that was committed when the drain
                     # started.
                     graph_checkpoint=self._drained_graph_checkpoint(batch),
+                    # The resolver this drain derived under, which already
+                    # holds every page the registry names: a queued topology
+                    # change is repaired from its own receipt, and a stale
+                    # fingerprint only sends the next topology-changing write
+                    # to a whole-vault rebuild (stored_topology_fingerprint_mismatch).
+                    topology=_resolver_topology_fingerprint(resolver),
                 )
                 published = True
 
