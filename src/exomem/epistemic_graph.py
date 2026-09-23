@@ -17,7 +17,7 @@ import sqlite3
 import threading
 import time
 import weakref
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -7065,8 +7065,19 @@ def graph_context(
     max_nodes: int = 40,
     max_edges: int = 80,
     traversal_profile: str | None = None,
+    keep: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
-    """Return a bounded, read-only graph neighborhood for a path or query."""
+    """Return a bounded, read-only graph neighborhood for a path or query.
+
+    `keep` is the caller's release decision (`None` for the owner). A page it
+    refuses is treated like an excluded page: never a seed, a neighbour, an
+    edge endpoint or an edge author, and never a hop on the way to another
+    page, so the neighbourhood and its caps are what the caller could reach.
+    """
+
+    def _allowed(rel_path: str) -> bool:
+        return _recall_path_allowed(vault_root, rel_path) and (keep is None or keep(rel_path))
+
     idx = EpistemicGraphIndex(vault_root)
     entity_type_registry = load_entity_types(vault_root)
     profile_registry = traversal_profiles.load_profiles(vault_root, registry=idx.registry)
@@ -7184,9 +7195,7 @@ def graph_context(
                 p for p in current_parent_paths if not _records_suppressed_path(vault_root, p)
             ]
             canonical_seeds = [
-                seed
-                for seed in canonical_seeds
-                if _recall_path_allowed(vault_root, str(seed.get("path") or ""))
+                seed for seed in canonical_seeds if _allowed(str(seed.get("path") or ""))
             ]
             for code, count in parent_drift_counts.items():
                 drift_counts[code] = max(drift_counts.get(code, 0), count)
@@ -7253,9 +7262,7 @@ def graph_context(
         # An `excluded` page is never a seed — by path OR by query — mirroring
         # find's hit-assembly filter (find.py:2601), which this lane otherwise
         # bypasses.
-        seeds = [
-            seed for seed in seeds if _recall_path_allowed(vault_root, str(seed.get("path") or ""))
-        ]
+        seeds = [seed for seed in seeds if _allowed(str(seed.get("path") or ""))]
         if not seeds:
             empty: dict[str, Any] = {
                 "available": True,
@@ -7353,6 +7360,7 @@ def graph_context(
                     vault_root,
                     edge,
                     endpoint_overrides=seed_node_overrides,
+                    keep=keep,
                 ):
                     continue
                 status = edge.get("registry_status")
@@ -7396,9 +7404,7 @@ def graph_context(
                         continue
                     node = _node_by_key(conn, key)
                     endpoint_nodes[key] = node
-                    if node is not None and not _recall_path_allowed(
-                        vault_root, str(node.get("path") or "")
-                    ):
+                    if node is not None and not _allowed(str(node.get("path") or "")):
                         endpoint_excluded = True
                     elif node is None:
                         placeholder_path = _path_for_node_key(conn, key)
@@ -7445,7 +7451,7 @@ def graph_context(
             _entity_family_metadata(node, entity_type_registry)
             for node in _nodes_by_keys(conn, seen_nodes)
             if _current_record(node, parent_path=str(node.get("path") or ""))
-            and _recall_path_allowed(vault_root, str(node.get("path") or ""))
+            and _allowed(str(node.get("path") or ""))
         ]
         present_node_keys = {str(node["node_key"]) for node in nodes}
         nodes.extend(
@@ -9639,23 +9645,30 @@ def _edge_recall_allowed(
     edge: dict[str, Any],
     *,
     endpoint_overrides: dict[str, dict[str, Any]] | None = None,
+    keep: Callable[[str], bool] | None = None,
 ) -> bool:
     """Reject an edge before it can reconstruct a suppressed endpoint.
 
     Collision recovery may have revalidated a current semantic-unit node whose
     key is still owned by a stale graph row.  Only that bounded graph-context
     recovery path supplies an override; ordinary public reads remain tied to
-    the sidecar's stored endpoint rows.
+    the sidecar's stored endpoint rows. `keep` is the caller's release
+    decision: an edge a withheld page authored, or one that ends on a withheld
+    page, is rejected like an excluded one.
     """
+
+    def _allowed(rel_path: str) -> bool:
+        return _recall_path_allowed(vault_root, rel_path) and (keep is None or keep(rel_path))
+
     source = str(edge.get("source_path") or "")
-    if not _recall_path_allowed(vault_root, source):
+    if not _allowed(source):
         return False
     for key in (str(edge.get("src_key") or ""), str(edge.get("dst_key") or "")):
         node = endpoint_overrides.get(key) if endpoint_overrides is not None else None
         if node is None:
             node = _node_by_key(conn, key)
         if node is not None:
-            if not _recall_path_allowed(vault_root, str(node.get("path") or "")):
+            if not _allowed(str(node.get("path") or "")):
                 return False
         else:
             path = _path_for_node_key(conn, key)

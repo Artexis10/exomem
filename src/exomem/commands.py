@@ -3246,6 +3246,7 @@ def op_graph_context(
         max_nodes=max_nodes,
         max_edges=max_edges,
         traversal_profile=traversal_profile,
+        keep=egress_module.restricted_release_filter(vault_root, purpose=purpose),
     )
     # A neighborhood is provenance: a sub-notice page must not appear as a
     # seed, a node, or an edge endpoint (design D4 / graph-find-ranking).

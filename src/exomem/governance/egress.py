@@ -2163,7 +2163,9 @@ def guard_seed(payload: dict[str, Any], withheld_paths: frozenset[str]) -> dict[
     """
     if not withheld_paths:
         return payload
-    dropped_keys: set[str] = set()
+    # A page's own node key, so an edge to a withheld page that was not
+    # returned as a node (a capped neighbour, a placeholder) is dropped too.
+    dropped_keys: set[str] = {f"file:{path}" for path in withheld_paths}
     nodes = payload.get("nodes")
     if isinstance(nodes, list):
         kept_nodes = []
@@ -2247,6 +2249,19 @@ def guard_graph_context(
         for node in (payload.get(section) or [])
         if isinstance(node, Mapping) and node.get("path")
     }
+    if not (who.resolved and who.audience_id == OWNER_AUDIENCE):
+        # An edge may name a page that was not returned as a node: a capped
+        # neighbour, or a target the node list never carried. Decide the page
+        # behind every `file:` endpoint that exists, so the edge cannot outlive
+        # the node it points at. A key that names no file is a placeholder for
+        # an unresolved link, not a page, and is left to the link's own text.
+        for edge in payload.get("edges") or []:
+            if not isinstance(edge, Mapping):
+                continue
+            for field_name in ("src_key", "dst_key"):
+                key = str(edge.get(field_name) or "")
+                if key.startswith("file:") and (vault_root / key[5:]).is_file():
+                    candidate_paths.add(key[5:])
     withheld = {
         rel_path
         for rel_path in candidate_paths
@@ -5435,6 +5450,26 @@ def release_walk_filter(
         return allowed
 
     return keep
+
+
+def restricted_release_filter(
+    vault_root: Path,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> Any:
+    """`release_walk_filter` for any caller but the owner; `None` for the owner.
+
+    A derived structure (a relation proposal, a context pack, a timeline, a
+    listing) decides its candidates before it counts, ranks or emits them, so
+    what it returns reads as if the withheld pages were absent. The owner
+    keeps exactly the answer and the cost it had: its reads still pass the
+    dispatcher's entry filter, as before, and nothing here decides for it.
+    """
+    who = principal if principal is not None else effective_principal()
+    if who.resolved and who.audience_id == OWNER_AUDIENCE:
+        return None
+    return release_walk_filter(vault_root, principal=who, purpose=purpose)
 
 
 def release_allows_download(

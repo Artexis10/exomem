@@ -326,3 +326,64 @@ def test_no_restricted_timeline_is_anchored_on_a_withheld_page(
 
     assert "__error__" not in answer, answer
     assert not _names_withheld(answer), answer
+
+
+# ---------------------------------------------------------------------------
+# Connect context and graph-context decide what they assemble
+# ---------------------------------------------------------------------------
+
+
+def _inbound_linker() -> tuple[dict[str, str], dict[str, str]]:
+    """A withheld page mentions visible pages and contradicts one of them."""
+    base = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page("Alpha", "Alpha rollout notes.", type="insight"),
+        f"{NOTES}/beta.md": _page("Beta", "Beta rollout background.", type="insight"),
+    }
+    withheld = {
+        f"{WITHHELD_DIR}/linker.md": _page(
+            "Hidden Draft",
+            f"Mentions [[{NOTES}/beta]] and [[{NOTES}/lonely]].\n\n## Relations\n\n"
+            f"- supports [[{NOTES}/beta]]\n- contradicts [[{NOTES}/alpha]]\n",
+            type="insight",
+        )
+    }
+    return base, withheld
+
+
+_CONTEXT_SURFACES: dict[str, dict[str, Any]] = {
+    "graph-context-query": {"operation": "graph-context", "query": "beta"},
+    "context-query": {"operation": "context", "query": "beta"},
+    "graph-context-alpha-depth-2": {
+        "operation": "graph-context",
+        "path": f"{NOTES}/alpha.md",
+        "depth": 2,
+    },
+    "context-beta": {"operation": "context", "path": f"{NOTES}/beta.md"},
+    "context-withheld-path": {"operation": "context", "path": f"{WITHHELD_DIR}/linker.md"},
+}
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_context_reads_as_if_the_withheld_page_were_absent(
+    tmp_path: Path, audience: str
+) -> None:
+    base, withheld = _inbound_linker()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    principal = _principal(audience)
+
+    answers = {
+        variant: {
+            label: _call(vault, principal, "connect_memory", **kwargs)
+            for label, kwargs in _CONTEXT_SURFACES.items()
+        }
+        for variant, vault in vaults.items()
+    }
+
+    for label in _CONTEXT_SURFACES:
+        assert _text(answers["A"][label]) == _text(answers["B"][label]), label
+        assert _text(answers["C"][label]) == _text(answers["B"][label]), label
+    assert answers["A"]["context-withheld-path"]["message"].startswith("NOT_FOUND")
+    # The owner still receives the withheld page as a neighbour of beta.
+    owner = _call(vaults["A"], None, "connect_memory", operation="context", path=f"{NOTES}/beta.md")
+    assert f"{WITHHELD_DIR}/linker.md" in _text(owner)
