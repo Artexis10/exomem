@@ -291,3 +291,33 @@ def test_mcp_path_named_unit_seeds_of_a_withheld_page_answer_like_an_absent_page
 
     assert withheld == absent
     assert not any("IDLESS" in text for text in withheld)
+
+
+# ---------------------------------------------------------------------------
+# The owner's view never changes, even when the index is stale
+# ---------------------------------------------------------------------------
+
+
+def test_owner_seed_view_is_unchanged_by_a_policy_with_a_stale_index(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _source, compact, _rich = _unit_context_fixture(vault)
+    text = (vault / _SOURCE).read_text(encoding="utf-8")
+    duplicates = [
+        vault / f"Knowledge Base/Notes/Insights/aa-duplicate-{index:02d}.md" for index in range(20)
+    ]
+    for duplicate in duplicates:
+        duplicate.write_text(text, encoding="utf-8")
+    _rebuild_with_live_checkpoint(vault)
+    for duplicate in duplicates:
+        duplicate.unlink()
+    _reset_caches()
+    client = _rest_client(monkeypatch)
+    body = {"unit_ref": compact.unit_ref}
+
+    ungoverned = _context(client, body, OWNER_HEADERS)
+    _withhold_insights(vault)
+    governed = _context(client, body, OWNER_HEADERS)
+
+    assert b"parent_ref_validation_work_exhausted" in ungoverned[1]
+    assert governed == ungoverned

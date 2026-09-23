@@ -4999,12 +4999,19 @@ def unit_parent_withheld(
     withholds a seed; a path that cannot be decided counts as withheld, and a
     walk with more rows than the resolver examines cannot prove every page
     visible.
+
+    The owner is never substituted. The decision exists to keep a caller from
+    learning about pages withheld from it, and the owner's own answer,
+    including its drift and budget reports, must not change because a policy
+    exists.
     """
     vault_root = Path(vault_root)
     policy = policy_module.load(vault_root)
     if policy.empty and not lifecycle.tombstoned_paths(vault_root):
         return False
     who = principal if principal is not None else effective_principal()
+    if who.resolved and who.audience_id == OWNER_AUDIENCE:
+        return False
     parent_ref, separator, _fragment = str(unit_ref or "").rpartition("#")
     if not separator or not parent_ref:
         return False
