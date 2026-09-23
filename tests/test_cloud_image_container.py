@@ -289,7 +289,7 @@ def _assert_no_phrase_leak(server_container: str, phrases: list[str]) -> None:
     stderr, the log directory (the image default `/tmp/exomem-logs`), and
     any `*.log` or `*.jsonl` file anywhere on the volume outside the vault.
     The last part catches a log directory that ends up on the tenant volume
-    that backups copy. Tenant *state* under `/data/host` (retrieval indexes,
+    that backups copy, and no such file may exist there at all. Tenant *state* under `/data/host` (retrieval indexes,
     graph-sync checkpoints, custody, writer leases) is not a log. It sits on
     the tenant's own encrypted volume and names only the tenant's own notes,
     so the vault already holds the same information and it is not scanned.
@@ -320,6 +320,31 @@ def _assert_no_phrase_leak(server_container: str, phrases: list[str]) -> None:
             "-print0 | xargs -0 -r grep -I . 2>/dev/null || true",
         ],
         check=False,
+    )
+    # Placement, not only content: a log or journal file on the volume is a
+    # defect even when it happens to hold none of the phrases, because the
+    # next request's content would land in it and D8 backs the volume up.
+    placement = _docker(
+        [
+            "run",
+            "--rm",
+            "-u",
+            "0:0",
+            "-v",
+            f"{VOLUME}:/data",
+            "--entrypoint",
+            "sh",
+            IMAGE_TAG,
+            "-c",
+            "find /data -path /data/vault -prune -o -type f "
+            "\\( -name '*.log' -o -name '*.log.*' -o -name '*.jsonl' -o -name '*.jsonl.*' \\) "
+            "-print",
+        ],
+        check=False,
+    )
+    assert placement.returncode == 0, "the placement scan itself did not run"
+    assert placement.stdout.strip() == "", (
+        f"log or journal files on the tenant volume: {placement.stdout.split()}"
     )
     logs = _docker(["logs", server_container], check=False)
     haystack = "\n".join([tmp_scan.stdout, data_scan.stdout, logs.stdout, logs.stderr])
