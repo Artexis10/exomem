@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import os
+import random
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -55,6 +57,11 @@ _EVIDENCE_FOLDERS = ("Sources/", "Evidence/")
 _GOVERNANCE_SEGMENT = "/_Governance/"
 _UNMEASURED = "unmeasured"
 _DETAILS = frozenset({"counts", "keys"})
+#: Verdicts the judging agent records per sampled edge; only `precise` is not
+#: false precision.
+VERDICTS = ("precise", "too_specific", "wrong_direction", "wrong_predicate", "should_be_generic")
+DEFAULT_SAMPLE_SIZE = 40
+_WILSON_Z = 1.959964
 
 Keep = Callable[[str], bool] | None
 
@@ -229,6 +236,7 @@ class _Edge:
     src_page: str
     dst_page: str
     dst_kind: str | None  # unit kind, "file", or None for a placeholder
+    dst_anchor: str | None
     src_known: bool
     dst_known: bool
     relation: str | None
@@ -292,32 +300,32 @@ def _load(vault_root: Path, *, keep: Keep) -> _Snapshot | None:
                 admitted=tier != "excluded" and path_ok(path),
             )
             file_keys[key] = path
-        units: dict[str, tuple[str, str]] = {}
+        units: dict[str, tuple[str, str, str | None]] = {}
         units_by_page: dict[str, set[str]] = {}
-        for key, kind, path in connection.execute(
-            "SELECT node_key, kind, path FROM graph_nodes WHERE kind != 'file'"
+        for key, kind, path, anchor in connection.execute(
+            "SELECT node_key, kind, path, anchor FROM graph_nodes WHERE kind != 'file'"
         ):
-            units[key] = (kind, path)
+            units[key] = (kind, path, anchor)
             units_by_page.setdefault(path, set()).add(kind)
 
-        def endpoint(key: str) -> tuple[str | None, str | None, bool, bool]:
-            """(page path, kind, known node, admitted) for one edge endpoint."""
+        def endpoint(key: str) -> tuple[str | None, str | None, str | None, bool, bool]:
+            """(page path, kind, anchor, known node, admitted) for one endpoint."""
             path = file_keys.get(key)
             if path is not None:
-                return path, "file", True, pages[path].admitted
+                return path, "file", None, True, pages[path].admitted
             unit = units.get(key)
             if unit is not None:
-                kind, page_path = unit
+                kind, page_path, anchor = unit
                 page = pages.get(page_path)
                 allowed = page.admitted if page is not None else path_ok(page_path)
-                return page_path, kind, True, allowed
+                return page_path, kind, anchor, True, allowed
             if key.startswith("file:"):
                 placeholder = key[len("file:") :]
                 allowed = _placeholder_path_allowed(vault_root, placeholder) and path_ok(
                     placeholder
                 )
-                return placeholder, None, False, allowed
-            return None, None, False, False
+                return placeholder, None, None, False, allowed
+            return None, None, None, False, False
 
         snapshot = _Snapshot(
             generation=_int_or_none(generation_row[0] if generation_row else None),
@@ -347,8 +355,8 @@ def _load(vault_root: Path, *, keep: Keep) -> _Snapshot | None:
             author = pages.get(source_path)
             if not (author.admitted if author is not None else path_ok(source_path)):
                 continue
-            src_page, _src_kind, src_known, src_ok = endpoint(src_key)
-            dst_page, dst_kind, dst_known, dst_ok = endpoint(dst_key)
+            src_page, _src_kind, _src_anchor, src_known, src_ok = endpoint(src_key)
+            dst_page, dst_kind, dst_anchor, dst_known, dst_ok = endpoint(dst_key)
             if not (src_ok and dst_ok) or src_page is None or dst_page is None:
                 continue
             snapshot.edges.append(
@@ -356,6 +364,7 @@ def _load(vault_root: Path, *, keep: Keep) -> _Snapshot | None:
                     src_page=src_page,
                     dst_page=dst_page,
                     dst_kind=dst_kind,
+                    dst_anchor=dst_anchor,
                     src_known=src_known,
                     dst_known=dst_known,
                     relation=relation,
@@ -394,30 +403,7 @@ def _census_payload(
 
     registry = relation_registry.load_registry(vault_root)
     types = entity_types.load_entity_types(vault_root)
-    prefix = kb_prefix()
-
-    eligible: set[str] = set()
-    undated = outside = 0
-    for page in snapshot.pages.values():
-        if not page.admitted or not page.path.startswith(prefix):
-            continue
-        if not audit.relation_debt_eligible(
-            vault_root,
-            page_type=page.page_type,
-            rel_path=page.path,
-            status=page.status,
-            tags=page.tags,
-        ):
-            continue
-        if start is not None or end is not None:
-            origin = _origin_date(page.origin_date)
-            if origin is None:
-                undated += 1
-                continue
-            if (start and origin < start) or (end and origin > end):
-                outside += 1
-                continue
-        eligible.add(page.path)
+    eligible, undated, outside = _eligible_cohort(vault_root, snapshot, start=start, end=end)
 
     def entity_family(path: str) -> str | None:
         page = snapshot.pages.get(path)
@@ -603,6 +589,40 @@ def _census_payload(
     return payload
 
 
+def _eligible_cohort(
+    vault_root: Path,
+    snapshot: _Snapshot,
+    *,
+    start: dt.date | None = None,
+    end: dt.date | None = None,
+) -> tuple[set[str], int, int]:
+    """Admitted pages that pass the shared relation-debt predicate, date-scoped."""
+    prefix = kb_prefix()
+    eligible: set[str] = set()
+    undated = outside = 0
+    for page in snapshot.pages.values():
+        if not page.admitted or not page.path.startswith(prefix):
+            continue
+        if not audit.relation_debt_eligible(
+            vault_root,
+            page_type=page.page_type,
+            rel_path=page.path,
+            status=page.status,
+            tags=page.tags,
+        ):
+            continue
+        if start is not None or end is not None:
+            origin = _origin_date(page.origin_date)
+            if origin is None:
+                undated += 1
+                continue
+            if (start and origin < start) or (end and origin > end):
+                outside += 1
+                continue
+        eligible.add(page.path)
+    return eligible, undated, outside
+
+
 def _structural_checks(
     snapshot: _Snapshot,
     population: list[_Edge],
@@ -718,6 +738,169 @@ def _inverse_duplicates(
         if reverse in present:
             pairs.add((min(forward, reverse), max(forward, reverse)))
     return {"applicable": applicable, "pairs": len(pairs)}
+
+
+# ---------------------------------------------------------------------------
+# Judged sample (optional): refs only, seeded, stratified by family
+# ---------------------------------------------------------------------------
+
+
+def sample(
+    vault_root: Path,
+    *,
+    keep: Keep = None,
+    size: int = DEFAULT_SAMPLE_SIZE,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Draw a seeded, family-stratified sample of specific authored edges.
+
+    Items are refs only (page path and anchor at each end) so the owner's agent
+    can read and judge them locally; the file never leaves the machine, and
+    nothing but the folded counts re-enters the census. Specific means an
+    authored, registered edge that is neither `relates_to` nor `links_to`.
+    """
+    if type(size) is not int or size < 1:
+        raise ValueError("INVALID_RELATION_ARGUMENT: sample size must be a positive integer")
+    snapshot = _load(vault_root, keep=keep)
+    if snapshot is None:
+        return _unavailable("counts")
+    registry = relation_registry.load_registry(vault_root)
+    eligible, _undated, _outside = _eligible_cohort(vault_root, snapshot)
+    strata: dict[str, list[_Edge]] = {}
+    for edge in snapshot.edges:
+        if (
+            edge.source_path not in eligible
+            or edge.origin not in _AUTHORED_ORIGINS
+            or edge.relation in (None, _GENERIC, _LINK)
+            or edge.status == "unregistered"
+        ):
+            continue
+        definition = registry.definition(edge.relation or "")
+        family = definition.family if definition is not None else "unknown"
+        strata.setdefault(family, []).append(edge)
+    for edges in strata.values():
+        edges.sort(key=_edge_order)
+    quotas = _allocate(size, {family: len(edges) for family, edges in strata.items()})
+    rng = random.Random(seed)
+    items: list[dict[str, Any]] = []
+    for family in sorted(strata):
+        chosen = sorted(
+            rng.sample(range(len(strata[family])), quotas.get(family, 0))
+        )
+        for index in chosen:
+            edge = strata[family][index]
+            items.append(
+                {
+                    "id": f"s{len(items) + 1:03d}",
+                    "family": family,
+                    "relation": edge.relation,
+                    "source": {"path": edge.source_path, "anchor": edge.source_anchor},
+                    "target": {"path": edge.dst_page, "anchor": edge.dst_anchor},
+                    "verdict": None,
+                }
+            )
+    return {
+        "kind": "relation_census_sample",
+        "census_version": CENSUS_VERSION,
+        "graph_generation": snapshot.generation if keep is None else None,
+        "registry": {
+            "core_version": registry.core_version,
+            "extension_hash": registry.extension_hash,
+        },
+        "seed": seed,
+        "requested": size,
+        "drawn": len(items),
+        "strata": {family: len(strata[family]) for family in sorted(strata)},
+        "verdicts": list(VERDICTS),
+        "items": items,
+    }
+
+
+def fold_judgments(judged: Mapping[str, Any]) -> dict[str, Any] | str:
+    """Fold an agent-judged sample into counts with a 95% Wilson interval.
+
+    Unjudged items (verdict null) are counted but not scored; a sample with no
+    verdict at all stays `unmeasured`. An unknown verdict is refused, not
+    guessed: a parser that meets an unexpected value is looking at a bad file.
+    """
+    items = judged.get("items") if isinstance(judged, Mapping) else None
+    if not isinstance(items, list):
+        raise ValueError("INVALID_JUDGMENT: judged file must hold a sample's items")
+    by_verdict = dict.fromkeys(VERDICTS, 0)
+    unjudged = 0
+    for item in items:
+        verdict = item.get("verdict") if isinstance(item, Mapping) else None
+        if verdict is None:
+            unjudged += 1
+            continue
+        if verdict not in by_verdict:
+            raise ValueError(f"INVALID_JUDGMENT: unknown verdict {verdict!r}")
+        by_verdict[verdict] += 1
+    count = sum(by_verdict.values())
+    if count == 0:
+        return _UNMEASURED
+    false = count - by_verdict["precise"]
+    return {
+        "judged": count,
+        "unjudged": unjudged,
+        "false": false,
+        "rate": round(false / count, 4),
+        "wilson_95": _wilson(false, count),
+        "by_verdict": by_verdict,
+    }
+
+
+def _allocate(size: int, counts: Mapping[str, int]) -> dict[str, int]:
+    """Quota per family: one each first (largest families first), then by share."""
+    families = sorted(counts, key=lambda family: (-counts[family], family))
+    quotas = dict.fromkeys(families, 0)
+    remaining = min(size, sum(counts.values()))
+    for family in families:
+        if remaining == 0:
+            break
+        if counts[family]:
+            quotas[family] = 1
+            remaining -= 1
+    while remaining:
+        capacity = {family: counts[family] - quotas[family] for family in families}
+        open_total = sum(capacity.values())
+        shares = {family: remaining * capacity[family] / open_total for family in families}
+        grants = {family: min(capacity[family], int(shares[family])) for family in families}
+        if not any(grants.values()):
+            # `families` is ordered largest first, then by name, and max keeps
+            # the first of equals, so the tie-break is deterministic.
+            best = max(
+                (family for family in families if capacity[family]),
+                key=lambda family: shares[family],
+            )
+            grants[best] = 1
+        for family, grant in grants.items():
+            quotas[family] += grant
+            remaining -= grant
+    return quotas
+
+
+def _edge_order(edge: _Edge) -> tuple[str, str, str, str, str]:
+    return (
+        edge.source_path,
+        edge.source_anchor or "",
+        edge.relation or "",
+        edge.dst_page,
+        edge.dst_anchor or "",
+    )
+
+
+def _wilson(successes: int, total: int) -> list[float]:
+    z2 = _WILSON_Z * _WILSON_Z
+    proportion = successes / total
+    denominator = 1 + z2 / total
+    centre = (proportion + z2 / (2 * total)) / denominator
+    half = (
+        _WILSON_Z
+        * math.sqrt(proportion * (1 - proportion) / total + z2 / (4 * total * total))
+        / denominator
+    )
+    return [round(max(0.0, centre - half), 4), round(min(1.0, centre + half), 4)]
 
 
 # ---------------------------------------------------------------------------

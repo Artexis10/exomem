@@ -1081,35 +1081,89 @@ def _relations_main(argv: list[str]) -> int:
         action="store_true",
         help="also name predicate keys, including vault extension keys",
     )
+    census_parser.add_argument(
+        "--sample",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "also write a seeded sample of N specific edges, stratified by family, as "
+            "refs only, for an agent to judge (reads the local snapshot)"
+        ),
+    )
+    census_parser.add_argument(
+        "--sample-out",
+        default="relation-census-sample.json",
+        metavar="FILE",
+        help="where --sample writes its refs (default: ./relation-census-sample.json)",
+    )
+    census_parser.add_argument(
+        "--seed", type=int, default=0, help="sample seed (default: 0)"
+    )
+    census_parser.add_argument(
+        "--judged",
+        default=None,
+        metavar="FILE",
+        help="fold an agent-judged sample into false_precision_judged",
+    )
     args = parser.parse_args(argv)
 
     from . import relation_census
 
-    detail = "keys" if args.keys else "counts"
-    result = relation_census.service_census(detail) if args.vault is None else None
-    served_by = "service"
-    if result is None:
-        vault = args.vault or os.environ.get("EXOMEM_VAULT_PATH")
-        if not vault:
-            print(
-                "Error [VAULT_REQUIRED]: no managed service answered; pass --vault "
-                "or set EXOMEM_VAULT_PATH",
-                file=sys.stderr,
+    try:
+        judged = None
+        if args.judged is not None:
+            judged = relation_census.fold_judgments(
+                json.loads(Path(args.judged).expanduser().read_text(encoding="utf-8"))
             )
-            return 2
-        from .governance import egress
+        detail = "keys" if args.keys else "counts"
+        # The sample names refs, which only a local read can hand back.
+        local_only = args.vault is not None or args.sample is not None
+        result = None if local_only else relation_census.service_census(detail)
+        served_by = "service"
+        sample = None
+        if result is None:
+            vault = args.vault or os.environ.get("EXOMEM_VAULT_PATH")
+            if not vault:
+                raise ValueError(
+                    "VAULT_REQUIRED: no managed service answered; pass --vault or set "
+                    "EXOMEM_VAULT_PATH"
+                )
+            from .governance import egress
 
-        vault_root = Path(vault).expanduser()
-        result = relation_census.census(
-            vault_root, keep=egress.release_walk_filter(vault_root), detail=detail
-        )
-        served_by = "local-snapshot"
+            vault_root = Path(vault).expanduser()
+            keep = egress.release_walk_filter(vault_root)
+            result = relation_census.census(vault_root, keep=keep, detail=detail)
+            served_by = "local-snapshot"
+            if args.sample is not None and result.get("available"):
+                sample = relation_census.sample(
+                    vault_root, keep=keep, size=args.sample, seed=args.seed
+                )
+                Path(args.sample_out).expanduser().write_text(
+                    json.dumps(sample, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+                )
+    except (OSError, ValueError) as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 2
     result = {**result, "served_by": served_by}
+    if result.get("available"):
+        metrics = dict(result["metrics"])
+        if judged is not None:
+            metrics["false_precision_judged"] = judged
+        result["metrics"] = metrics
+        if sample is not None and sample.get("kind") == "relation_census_sample":
+            result["sample"] = {
+                "requested": sample["requested"],
+                "drawn": sample["drawn"],
+                "strata": sample["strata"],
+            }
     if args.json:
         print(json.dumps(result, ensure_ascii=False))
     else:
         print(relation_census.summary_line(result))
         print(f"  served by: {served_by}")
+        if result.get("sample"):
+            print(f"  sample: {result['sample']['drawn']} refs written to {args.sample_out}")
     return 0
 
 
