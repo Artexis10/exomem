@@ -830,6 +830,22 @@ release pinning, rollout, and rollback. Exomem deliberately has no cross-machine
 auto-updater, and the readiness contract is independent of Syncthing or any other
 replication product.
 
+## Reranking and languages
+
+The cross-encoder reranker reorders a query's top candidates. It runs on explicit
+`rerank=True`, or automatically in performance mode on an accelerated device; CPU
+services leave it off by default. `EXOMEM_DISABLE_RANKING` turns it off entirely.
+
+Each reranker declares what it can judge, and `find` keeps the fused order outside
+it (`retrieval_profile.rerank.reason` says why):
+
+| Reranker | Scripts | Across languages | Notes |
+|---|---|---|---|
+| `BAAI/bge-reranker-base` (default) | Latin, Han | no | Trained on English and Chinese. Skipped for a query written mostly in another script (`query_script_not_covered`), and for a request whose best dense match shares no content word with the query while the query's words lead only into another vocabulary (`cross_language_not_covered`). |
+| `BAAI/bge-reranker-v2-m3` (opt-in) | all | yes | Multilingual, about 1.3-1.8 GB more memory and roughly 45 s per 30-pair rerank on 2 CPU cores, so meant for accelerated hosts. Select it with `EXOMEM_RANKING_MODEL=BAAI/bge-reranker-v2-m3`. Its coverage is declared from its model card. |
+
+A reranker named in `EXOMEM_RANKING_MODEL` without a declaration is not gated.
+
 ## GPU notes (CUDA / Blackwell / Apple Silicon MPS)
 
 Blackwell GPUs (RTX 50-series, compute capability 12.0 / `sm_120`) need CUDA

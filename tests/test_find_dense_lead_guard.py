@@ -127,7 +127,9 @@ def test_fusion_is_unchanged_when_the_dense_lead_shares_a_content_word(
     _plant_vector_lane(monkeypatch, [_POISON, _GOLD, _OTHER])
     guarded = _ranked(vault, "Wiederholung mit Ausbilder")
     monkeypatch.setattr(
-        find_module.find_candidates, "_lexical_votes_withheld", lambda **_kwargs: frozenset()
+        find_module.find_candidates,
+        "_lexical_visibility",
+        lambda **_kwargs: find_module.find_candidates.LexicalVisibility(frozenset(), False),
     )
     find_module.clear_cache()
     assert guarded == _ranked(vault, "Wiederholung mit Ausbilder")
@@ -140,7 +142,9 @@ def test_a_query_of_function_words_only_is_fused_as_before(
     _plant_vector_lane(monkeypatch, [_GOLD, _POISON, _OTHER])
     guarded = _ranked(vault, "what is the")
     monkeypatch.setattr(
-        find_module.find_candidates, "_lexical_votes_withheld", lambda **_kwargs: frozenset()
+        find_module.find_candidates,
+        "_lexical_visibility",
+        lambda **_kwargs: find_module.find_candidates.LexicalVisibility(frozenset(), False),
     )
     find_module.clear_cache()
     assert guarded == _ranked(vault, "what is the")
@@ -156,7 +160,9 @@ def test_a_partial_match_in_the_dense_leads_own_vocabulary_keeps_its_votes(
     _plant_vector_lane(monkeypatch, [_GOLD, _OTHER, _REVIEW])
     guarded = _ranked(vault, "incident severity sev1")
     monkeypatch.setattr(
-        find_module.find_candidates, "_lexical_votes_withheld", lambda **_kwargs: frozenset()
+        find_module.find_candidates,
+        "_lexical_visibility",
+        lambda **_kwargs: find_module.find_candidates.LexicalVisibility(frozenset(), False),
     )
     find_module.clear_cache()
     assert guarded == _ranked(vault, "incident severity sev1")

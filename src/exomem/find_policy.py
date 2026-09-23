@@ -6,6 +6,7 @@ import heapq
 import math
 import re
 from collections.abc import Callable, Set
+from dataclasses import dataclass
 from datetime import date, timedelta
 
 from .find_types import Hit
@@ -596,3 +597,91 @@ def should_rerank(
     overlap = len(set(vec) & set(bm))
     disagreement = 1.0 - overlap / max(len(vec), len(bm))
     return disagreement > 0.5
+
+
+@dataclass(frozen=True)
+class RerankerCoverage:
+    """What a reranker can judge, declared per model as data.
+
+    `scripts` names the letter scripts it reads (None: every script), as
+    `dominant_script` reads them. `cross_lingual` says whether it can judge a
+    query against a passage written in another language.
+    """
+
+    scripts: frozenset[str] | None
+    cross_lingual: bool
+
+
+#: `BAAI/bge-reranker-base` was trained on English and Chinese. On the
+#: multilingual recall fixture over bge-m3 recall (2026-09-23) it improved
+#: English (golden NDCG@10 0.931 -> 0.962) and left same-language Latin queries
+#: whole, but moved a Russian gold from rank 1 to 3 and another out of the top
+#: ten, and on German and Estonian queries answered by an English page it put
+#: the same-language look-alike first again. `BAAI/bge-reranker-v2-m3` is the
+#: multilingual opt-in for accelerated hosts (`EXOMEM_RANKING_MODEL`); its
+#: coverage is declared from its model card, not measured here.
+_RERANKER_COVERAGE: dict[str, RerankerCoverage] = {
+    "BAAI/bge-reranker-base": RerankerCoverage(frozenset({"latin", "han"}), cross_lingual=False),
+    "BAAI/bge-reranker-v2-m3": RerankerCoverage(None, cross_lingual=True),
+}
+#: A reranker the owner configured without a declaration is trusted as configured.
+_UNDECLARED_RERANKER = RerankerCoverage(None, cross_lingual=True)
+
+#: Block-name markers that split the declared unspaced blocks into scripts; any
+#: other unspaced block (CJK, Kangxi, the ideographic planes) is Han.
+_UNSPACED_SCRIPT_MARKERS = (
+    ("Hiragana", "kana"),
+    ("Katakana", "kana"),
+    ("Kana", "kana"),
+    ("Hangul", "hangul"),
+    ("Thai", "thai"),
+    ("Lao", "lao"),
+    ("Khmer", "khmer"),
+    ("Myanmar", "myanmar"),
+)
+
+
+def reranker_coverage(model_name: str) -> RerankerCoverage:
+    """The declared coverage of `model_name`; an undeclared reranker is not gated."""
+    return _RERANKER_COVERAGE.get(model_name, _UNDECLARED_RERANKER)
+
+
+def _letter_script(character: str) -> str:
+    from . import text_scripts
+
+    if text_scripts.is_scriptio_continua(character):
+        code_point = ord(character)
+        for start, end, name in text_scripts.SCRIPTIO_CONTINUA_BLOCKS:
+            if start <= code_point <= end:
+                for marker, script in _UNSPACED_SCRIPT_MARKERS:
+                    if marker in name:
+                        return script
+                return "han"
+    return text_scripts.uniform_letter_script(character) or "other"
+
+
+def dominant_script(query: str) -> str | None:
+    """The script most of the query's letters are written in; None with no letters.
+
+    Read from the declared Unicode blocks in `text_scripts`, after NFKC, so a
+    full-width Latin letter is Latin. Scripts the table does not declare read as
+    "other". No language is detected.
+    """
+    import unicodedata
+
+    counts: dict[str, int] = {}
+    for character in unicodedata.normalize("NFKC", query or ""):
+        if unicodedata.category(character).startswith("L"):
+            script = _letter_script(character)
+            counts[script] = counts.get(script, 0) + 1
+    if not counts:
+        return None
+    return min(counts, key=lambda script: (-counts[script], script))
+
+
+def reranker_reads_query(coverage: RerankerCoverage, query: str) -> bool:
+    """True when the reranker declares the script most of the query is written in."""
+    if coverage.scripts is None:
+        return True
+    script = dominant_script(query)
+    return script is None or script in coverage.scripts

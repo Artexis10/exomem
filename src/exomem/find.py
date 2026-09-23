@@ -4546,6 +4546,20 @@ def _find_semantic(
         do_rerank = False  # EXOMEM_DISABLE_RANKING — hard off, even for explicit rerank=True
         rerank_outcome = {"decision": "skipped", "reason": "hard_disabled"}
 
+    if do_rerank:
+        # A reranker judges only what it declares it can: the script most of the
+        # query is written in, and a query against a passage in another language
+        # only if it is cross-lingual. Outside that it reorders by the wrong
+        # signal (find_policy._RERANKER_COVERAGE), so the fused order stands,
+        # explicit rerank=True included.
+        coverage = find_policy.reranker_coverage(embeddings.RERANKER_NAME)
+        if not find_policy.reranker_reads_query(coverage, query):
+            do_rerank = False
+            rerank_outcome = {"decision": "skipped", "reason": "query_script_not_covered"}
+        elif bundle.crosses_language and not coverage.cross_lingual:
+            do_rerank = False
+            rerank_outcome = {"decision": "skipped", "reason": "cross_language_not_covered"}
+
     if do_rerank and readiness.should_defer("reranker"):
         # Background warm-up owns the reranker load right now — calling
         # rerank_pairs would block on the singleton lock. Skip; caller marks

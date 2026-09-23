@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import find_policy, find_results, find_types
 from .find_types import FindTimings, GraphProvenance, ParsedPage
@@ -49,6 +49,10 @@ class CandidateBundle:
     raw_fused_score_by_path: dict[str, float]
     adjusted_score_by_path: dict[str, float]
     multiplier_chain_by_path: dict[str, list[dict[str, float | str]]] | None
+    #: The dense lead shares no content word with the query and the lexical
+    #: lanes voted in another vocabulary or matched no content word: the
+    #: request crosses languages (see `_lexical_visibility`).
+    crosses_language: bool = False
 
 
 def empty_bundle(
@@ -149,14 +153,27 @@ def collapse_frame_children(
 _SHARED_VOCABULARY_FLOOR = 3
 
 
-def _lexical_votes_withheld(
+class LexicalVisibility(NamedTuple):
+    """What fusion learned about the lexical lanes against the dense lead."""
+
+    #: Lexical-lane candidates whose votes fusion withholds.
+    withheld: frozenset[str]
+    #: The request crosses languages: the dense lead is lexically invisible and
+    #: the lexical lanes voted in another vocabulary or matched no content word.
+    crosses_language: bool
+
+
+_LEXICALLY_VISIBLE = LexicalVisibility(frozenset(), False)
+
+
+def _lexical_visibility(
     *,
     query: str,
     vector_ranking: list[str],
     lexical_rankings: tuple[list[str], ...],
     page_of: PageOf,
-) -> frozenset[str]:
-    """Lexical-lane candidates whose votes fusion withholds; empty leaves fusion unchanged.
+) -> LexicalVisibility:
+    """Which lexical votes fusion withholds, and whether the request crosses languages.
 
     The dense lane is the only lane that can match a page written in another
     language than the query. When its strongest candidate shares no content word
@@ -174,29 +191,34 @@ def _lexical_votes_withheld(
     counted as the degraded-retention gate counts them
     (`find_policy.query_word_stem_groups`), function words excluded. No language
     is detected: both tests compare token sets.
+
+    The request crosses languages when, with the dense lead invisible, some vote
+    was withheld or no lexical candidate holds any content word of the query:
+    the query's words then lead only into another vocabulary, or nowhere. A
+    reranker that cannot judge across languages is skipped on such a request.
     """
     if not vector_ranking:
-        return frozenset()
+        return _LEXICALLY_VISIBLE
     groups = find_policy.query_word_stem_groups(query)
     content_words = sum(1 for _stems, is_function, _required in groups if not is_function)
     if not content_words:
-        return frozenset()
+        return _LEXICALLY_VISIBLE
     lead = page_of(vector_ranking[0])
     if lead is None or find_policy.stem_word_coverage(lead.stem_set, groups)[2]:
-        return frozenset()
+        return _LEXICALLY_VISIBLE
     lead_stems = lead.stem_set
     withheld: set[str] = set()
+    any_content_match = False
     for path in dict.fromkeys(path for lane in lexical_rankings for path in lane):
         page = page_of(path)
         if page is None:
             continue
         stems = page.stem_set
-        if (
-            find_policy.stem_word_coverage(stems, groups)[2] < content_words
-            and len(stems & lead_stems) < _SHARED_VOCABULARY_FLOOR
-        ):
+        matched = find_policy.stem_word_coverage(stems, groups)[2]
+        any_content_match = any_content_match or matched > 0
+        if matched < content_words and len(stems & lead_stems) < _SHARED_VOCABULARY_FLOOR:
             withheld.add(path)
-    return frozenset(withheld)
+    return LexicalVisibility(frozenset(withheld), bool(withheld) or not any_content_match)
 
 
 def collect_candidates(
@@ -608,15 +630,15 @@ def collect_candidates(
         recall_paths=recall_paths,
     )
     keyword_ranking = _eligible(keyword_ranking)
-    withheld = _lexical_votes_withheld(
+    visibility = _lexical_visibility(
         query=query_norm,
         vector_ranking=vector_ranking,
         lexical_rankings=(bm25_ranking, keyword_ranking),
         page_of=page_of,
     )
-    if withheld:
-        bm25_ranking = [path for path in bm25_ranking if path not in withheld]
-        keyword_ranking = [path for path in keyword_ranking if path not in withheld]
+    if visibility.withheld:
+        bm25_ranking = [path for path in bm25_ranking if path not in visibility.withheld]
+        keyword_ranking = [path for path in keyword_ranking if path not in visibility.withheld]
     if capture_trace and mode != "vector":
         lane_statuses["keyword"] = {
             "status": "participated" if keyword_ranking else "available_nonmatching",
@@ -922,4 +944,5 @@ def collect_candidates(
         raw_fused_score_by_path=raw_fused_score_by_path,
         adjusted_score_by_path=adjusted_score_by_path,
         multiplier_chain_by_path=multiplier_chain_by_path,
+        crosses_language=visibility.crosses_language,
     )
