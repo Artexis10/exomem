@@ -758,9 +758,13 @@ def _best_cosine_per_file(
                 else {}
             )
             # A text no row holds may still have been encoded by a sweep moments
-            # ago -- an edit's previous generation of these same paragraphs.
+            # ago -- an edit's previous generation of these same paragraphs. The
+            # stamp is taken before this sweep encodes anything, so a model
+            # reload during the encode leaves nothing filed under the new model.
+            stamp = embeddings.passage_memo_stamp()
             recalled = embeddings.recall_passage_vectors(
-                chunk for chunk in dict.fromkeys(chunks) if chunk not in stored
+                (chunk for chunk in dict.fromkeys(chunks) if chunk not in stored),
+                stamp=stamp,
             )
             published = stored
             if recalled:
@@ -781,12 +785,12 @@ def _best_cosine_per_file(
                     measured["recalled"] = sum(1 for chunk in chunks if chunk in recalled)
             if full_encode:
                 vecs = embeddings.embed_texts(chunks, is_query=False)
-                embeddings.remember_passage_vectors(chunks, vecs)
+                embeddings.remember_passage_vectors(chunks, vecs, stamp=stamp)
             else:
                 lookup = {chunk: stored[chunk] for chunk in chunks if chunk in stored}
                 if to_encode:
                     fresh = embeddings.embed_texts(to_encode, is_query=False)
-                    embeddings.remember_passage_vectors(to_encode, fresh)
+                    embeddings.remember_passage_vectors(to_encode, fresh, stamp=stamp)
                     lookup.update(zip(to_encode, fresh, strict=True))
                 vecs = [lookup[chunk] for chunk in chunks]
             best_per_file: dict[str, float] = {}

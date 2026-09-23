@@ -7,13 +7,25 @@ the text each vector was computed from, so an unchanged text keeps its vector.
 
 from __future__ import annotations
 
+import itertools
+import random
 import sqlite3
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from exomem import embeddings, readiness, semantic_index
+from exomem import (
+    call_spans,
+    corpus_aware,
+    embedding_backend,
+    embeddings,
+    readiness,
+    runtime_resources,
+    semantic_index,
+)
 from exomem import find as find_module
 
 PAGE = "Knowledge Base/Notes/Insights/reuse.md"
@@ -186,7 +198,9 @@ def test_stored_text_vectors_never_creates_the_sidecar(tmp_path, monkeypatch) ->
 
 def test_an_upsert_reuses_a_text_a_sweep_just_encoded(live, monkeypatch) -> None:
     vault, target, encoder = live
-    embeddings.remember_passage_vectors(["alpha", "beta"], encoder(["alpha", "beta"]))
+    embeddings.remember_passage_vectors(
+        ["alpha", "beta"], encoder(["alpha", "beta"]), stamp=embeddings.passage_memo_stamp()
+    )
     encoder.calls.clear()
     monkeypatch.setattr(embeddings, "_chunks_for_page", lambda *_a, **_k: ["alpha", "beta", "gamma"])
     target.write_text(_source(["- [config_rule] Keep WAL enabled #sqlite ^obs-aaaa1111"]), encoding="utf-8")
@@ -203,12 +217,15 @@ def test_an_upsert_reuses_a_text_a_sweep_just_encoded(live, monkeypatch) -> None
 
 
 def test_a_handed_on_vector_is_never_served_to_another_encoder(live, monkeypatch) -> None:
+    """A substituted encoder -- the bench's, a test's -- is another vector space."""
     vault, target, encoder = live
-    embeddings.remember_passage_vectors(["alpha"], encoder(["alpha"]))
+    embeddings.remember_passage_vectors(
+        ["alpha"], encoder(["alpha"]), stamp=embeddings.passage_memo_stamp()
+    )
     other = type(encoder)()
     monkeypatch.setattr(embeddings, "embed_texts", other)
 
-    assert embeddings.recall_passage_vectors(["alpha"]) == {}
+    assert embeddings.recall_passage_vectors(["alpha"], stamp=embeddings.passage_memo_stamp()) == {}
     monkeypatch.setattr(embeddings, "_chunks_for_page", lambda *_a, **_k: ["alpha"])
     target.write_text(_source(["- [config_rule] Keep WAL enabled #sqlite ^obs-aaaa1111"]), encoding="utf-8")
     embeddings.upsert_after_write_status(vault, [target])
@@ -219,15 +236,209 @@ def test_handed_on_vectors_are_bounded_and_released_with_the_model(live, monkeyp
     _vault, _target, encoder = live
     limit = embeddings.PASSAGE_MEMO_MAX_TEXTS
     texts = [f"text {i}" for i in range(limit + 5)]
-    embeddings.remember_passage_vectors(texts, encoder(texts))
+    stamp = embeddings.passage_memo_stamp()
+    embeddings.remember_passage_vectors(texts, encoder(texts), stamp=stamp)
 
-    assert embeddings.recall_passage_vectors(texts[:5]) == {}
-    assert set(embeddings.recall_passage_vectors(texts[-3:])) == set(texts[-3:])
+    assert embeddings.recall_passage_vectors(texts[:5], stamp=stamp) == {}
+    assert set(embeddings.recall_passage_vectors(texts[-3:], stamp=stamp)) == set(texts[-3:])
 
     embeddings.unload_index_caches()
-    assert embeddings.recall_passage_vectors(texts[-3:]) == {}
+    assert embeddings.recall_passage_vectors(texts[-3:], stamp=stamp) == {}
 
-    embeddings.remember_passage_vectors(texts[:2], encoder(texts[:2]))
+    embeddings.remember_passage_vectors(texts[:2], encoder(texts[:2]), stamp=stamp)
     monkeypatch.setattr(embeddings, "_MODEL", object())
     assert embeddings.unload_model() is True
-    assert embeddings.recall_passage_vectors(texts[:2]) == {}
+    assert embeddings.recall_passage_vectors(texts[:2], stamp=stamp) == {}
+    assert embeddings.recall_passage_vectors(texts[:2], stamp=embeddings.passage_memo_stamp()) == {}
+
+
+# ---------------- the hand-off follows the resident model ----------------
+#
+# These drive the real model lifecycle -- `get_model`, `unload_model`, the idle
+# reaper's cache eviction -- with only the loader replaced, so every vector says
+# which load produced it. A sweep's encode can finish just before the reaper
+# unloads the model and something loads another; the sweep then files vectors
+# of a model that is no longer resident.
+
+
+def _model_tag(name: str) -> float:
+    return float(sum(name.encode("utf-8")) % 997 + 1)
+
+
+class _TaggedModel:
+    """A loaded encoder whose vectors carry its own model tag in column 0."""
+
+    backend = "fake"
+    device = "cpu"
+    delay = 0.0
+
+    def __init__(self, name: str, log: list[tuple[str, str]]) -> None:
+        self.name = name
+        self.tag = _model_tag(name)
+        self._log = log
+
+    def encode(self, texts, **_kwargs) -> np.ndarray:
+        if self.delay:
+            time.sleep(self.delay)
+        self._log.extend((self.name, text) for text in texts)
+        out = np.zeros((len(texts), embeddings.VECTOR_DIM), dtype=np.float32)
+        out[:, 0] = self.tag
+        out[:, 1] = [float(sum(text.encode("utf-8")) % 9973) for text in texts]
+        return out
+
+    def release(self) -> None:
+        pass
+
+
+@pytest.fixture
+def lifecycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("EXOMEM_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
+    readiness.reset()
+    log: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        embedding_backend, "load_encoder", lambda name, **_k: _TaggedModel(name, log)
+    )
+    monkeypatch.setattr(embeddings, "MODEL_NAME", "model-a")
+    monkeypatch.setattr(embeddings, "_MODEL", None)
+    embeddings.clear_embedding_indexes()
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
+    yield vault, log
+    embeddings.clear_embedding_indexes()
+    readiness.reset()
+
+
+def test_a_vector_encoded_before_a_model_reload_is_never_handed_on(
+    lifecycle, monkeypatch
+) -> None:
+    """The sweep encodes on model A; A is unloaded and B loaded before it files them."""
+    vault, log = lifecycle
+    embeddings.get_model()
+    real_record = call_spans.record_span
+    reloaded: list[str] = []
+
+    def reload_after_the_encode(name, elapsed_ms, fields=None):
+        real_record(name, elapsed_ms, fields)
+        if name == "embeddings.encode" and not reloaded:
+            reloaded.append(name)
+            assert embeddings.unload_model() is True
+            monkeypatch.setattr(embeddings, "MODEL_NAME", "model-b")
+            embeddings.get_model()
+
+    monkeypatch.setattr(call_spans, "record_span", reload_after_the_encode)
+    body = "First probe paragraph.\n\nSecond probe paragraph."
+    corpus_aware._best_cosine_per_file(vault, title="Reload probe", body=body)
+    monkeypatch.setattr(call_spans, "record_span", real_record)
+    chunks = embeddings.chunk_text("Reload probe", body)
+    assert reloaded and [name for name, _t in log] == ["model-a"] * len(chunks)
+
+    vectors = embeddings._embed_live_chunks_reusing(chunks, {})
+
+    assert vectors[:, 0].tolist() == [_model_tag("model-b")] * len(chunks), (
+        "the upsert took vectors model-a produced while model-b is the resident model"
+    )
+
+
+def test_handed_on_vectors_follow_the_resident_model_under_concurrent_reloads(
+    lifecycle, monkeypatch
+) -> None:
+    """Sweeps, the reaper's unload plus the next load, cache evictions and upserts race.
+
+    Every sweep encodes fresh text, so it always files vectors; the reaper unloads
+    whenever nothing is encoding and the model is loaded straight back under the
+    other name. An upsert is judged only when one model was resident throughout.
+    """
+    from exomem import accel
+
+    vault, _log = lifecycle
+    monkeypatch.setattr(_TaggedModel, "delay", 0.0005)
+    # An unload's full collection takes tens of milliseconds and would space the
+    # reloads out; the race is about ordering, not about garbage.
+    monkeypatch.setattr(embeddings.gc, "collect", lambda *_a: 0)
+    accel.empty_cache()  # the first call imports the runtime; keep it out of the window
+    embeddings.get_model()
+    recent: list[list[str]] = []
+    recent_lock = threading.Lock()
+    stop = time.monotonic() + 3.0
+    errors: list[str] = []
+    judged = [0]
+    wrong = [0]
+    reloads = [0]
+
+    def admitted(call):
+        # The model gate refuses past its admission capacity; a real caller retries.
+        try:
+            return call()
+        except runtime_resources.ModelBusyError:
+            return None
+
+    def guarded(fn):
+        def run():
+            try:
+                fn()
+            except Exception as error:  # noqa: BLE001 - collected and asserted below
+                errors.append(repr(error))
+
+        return run
+
+    def sweeper(seed: int):
+        local = random.Random(seed)
+
+        def run():
+            while time.monotonic() < stop:
+                body = "\n\n".join(f"Race paragraph {local.random():.12f}." for _ in range(3))
+                corpus_aware._best_cosine_per_file(vault, title="Race probe", body=body)
+                with recent_lock:
+                    recent.append(embeddings.chunk_text("Race probe", body))
+                    del recent[:-32]
+
+        return run
+
+    def reaper():
+        names = itertools.cycle(["model-b", "model-a"])
+        local = random.Random(3)
+        while time.monotonic() < stop:
+            if embeddings.unload_model():
+                reloads[0] += 1
+                embeddings.MODEL_NAME = next(names)  # restored by the fixture
+                admitted(embeddings.get_model)
+            if local.random() < 0.05:
+                embeddings.clear_embedding_indexes()
+            if local.random() < 0.05:
+                embeddings.unload_index_caches()
+            time.sleep(0.0005)
+
+    def consumer():
+        local = random.Random(4)
+        while time.monotonic() < stop:
+            with recent_lock:
+                chunks = local.choice(recent) if recent else None
+            if chunks is None:
+                continue
+            model = embeddings._MODEL
+            vectors = admitted(
+                lambda chunks=chunks: embeddings._embed_live_chunks_reusing(chunks, {})
+            )
+            if vectors is None or model is None or model is not embeddings._MODEL:
+                continue  # judge only an upsert the same model saw start to end
+            judged[0] += len(chunks)
+            wrong[0] += int(np.count_nonzero(vectors[:, 0] != model.tag))
+            assert len(embeddings._PASSAGE_MEMO) <= embeddings.PASSAGE_MEMO_MAX_TEXTS
+
+    threads = [
+        threading.Thread(target=guarded(target))
+        for target in (sweeper(1), sweeper(2), reaper, consumer)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert errors == []
+    assert reloads[0] > 0 and judged[0] > 0
+    assert wrong[0] == 0, (
+        f"{wrong[0]} of {judged[0]} upsert vectors came from a model no longer resident "
+        f"({reloads[0]} reloads)"
+    )
