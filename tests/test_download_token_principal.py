@@ -10,6 +10,7 @@ caller that can mint one the owner's full disclosure of every file.
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 from pathlib import Path
 
@@ -627,3 +628,49 @@ def test_a_released_undecodable_file_is_unreadable_without_echoing_its_bytes(vau
     assert refusal.startswith("UNREADABLE:")
     assert "0xfe" not in refusal
     assert "position" not in refusal
+
+
+def _withheld_outcomes(vault: Path) -> list[tuple[str, str]]:
+    events = vault / "Knowledge Base" / "_Governance" / "events"
+    records = (
+        [
+            json.loads(line)
+            for path in sorted(events.rglob("*.jsonl"))
+            if path.is_file()
+            for line in path.read_text(encoding="utf-8").splitlines()
+        ]
+        if events.exists()
+        else []
+    )
+    outcomes = []
+    for record in records:
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else record
+        for outcome in payload.get("outcomes") or ():
+            outcomes.append((str(outcome.get("decision")), str(outcome.get("audience"))))
+    return outcomes
+
+
+def test_a_withheld_undecodable_read_leaves_the_same_receipt_as_a_decodable_one(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _withhold(vault, audience=CF_AUDIENCE)
+    client = _cf_rest_client(monkeypatch)
+    target = vault / UNDECODABLE
+
+    def read_and_collect(data: bytes) -> list[tuple[str, str]]:
+        target.write_bytes(data)
+        _reset_caches()
+        before = len(_withheld_outcomes(vault))
+        response = client.post(
+            "/api/read_memory",
+            json={"path": UNDECODABLE},
+            headers={"Cf-Access-Jwt-Assertion": "cf-jwt"},
+        )
+        assert response.status_code == 404, response.text
+        return _withheld_outcomes(vault)[before:]
+
+    decodable = read_and_collect(PAGE_BYTES)
+    undecodable = read_and_collect(NON_UTF8_BYTES)
+
+    assert ("withheld", CF_AUDIENCE) in decodable
+    assert undecodable == decodable

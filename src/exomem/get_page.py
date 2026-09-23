@@ -151,6 +151,10 @@ def unreadable_or_absent(
 
     for rel in dict.fromkeys(relatives):
         if egress.release_level_for_path_only(vault_root, rel) <= egress.LEVEL_NONE:
+            # Leave the withheld receipt a decodable read of this page leaves.
+            # The first decision records nothing, because above the floor the
+            # outcome is an unreadable report, not a release.
+            egress.release_level_for_path_only(vault_root, rel, receipt_decision="withheld")
             return GetError(code="NOT_FOUND", reason=f"file does not exist: {missing_path}")
     return GetError(code="UNREADABLE", reason=reason)
 
