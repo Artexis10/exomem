@@ -183,6 +183,48 @@ def test_server_bootstrap_keeps_hosted_dotenv_resource_budget_isolated(tmp_path:
     assert probe.read_text(encoding="utf-8") == "ok"
 
 
+def test_server_bootstrap_keeps_cloud_dotenv_resource_budget_isolated(tmp_path: Path) -> None:
+    """Design D1.6: "no `.env` file is loaded" covers every loader, not only
+    the server's later one -- this pre-bootstrap read must be gated on cloud
+    mode too, or a cwd `.env` still reaches the native env before `serve`'s
+    own dotenv gate ever runs. Exercises the real `preload_local_dotenv_policy`
+    end-to-end (not a spy on `server.load_dotenv`, which this finding showed
+    does not cover this call site)."""
+    probe = tmp_path / "cloud-dotenv-probe"
+    (tmp_path / ".env").write_text("EXOMEM_CPU_THREADS=3\n", encoding="utf-8")
+    (tmp_path / "numpy.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "assert os.environ['OMP_NUM_THREADS'] == '1'\n"
+        "Path(os.environ['EXOMEM_RUNTIME_PROBE']).write_text('ok')\n",
+        encoding="utf-8",
+    )
+    env = os.environ | {
+        "EXOMEM_CLOUD_CELL": "1",
+        "EXOMEM_RUNTIME_PROBE": str(probe),
+        "PYTHONPATH": f"{tmp_path}{os.pathsep}{Path(__file__).parents[1] / 'src'}",
+    }
+    env.pop("EXOMEM_CPU_THREADS", None)
+    env.pop("EXOMEM_HOSTED_CELL", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import exomem.__main__ as entry; "
+            "entry._dispatch_main = lambda _raw: __import__('numpy') and 0; "
+            "raise SystemExit(entry.main(['serve']))",
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert probe.read_text(encoding="utf-8") == "ok"
+
+
 def test_media_child_bootstrap_replaces_native_env_before_model_import(tmp_path: Path) -> None:
     probe = tmp_path / "media-probe"
     (tmp_path / "numpy.py").write_text(
