@@ -51,15 +51,17 @@ def _folder(vault_root: Path) -> Path:
     return kb_root(vault_root) / source_taxonomy.SOURCES_ROOT / source_taxonomy.EPISODE_PATH_LABEL
 
 
-def _revisions(vault_root: Path, key: str) -> list[_Revision]:
-    """This episode's recap pages, oldest first, from ONE listing of one folder.
+def _revisions(vault_root: Path, key: str, audience: str) -> list[_Revision]:
+    """This audience's recap pages of this episode, oldest first, from ONE
+    listing of one folder.
 
-    The filename carries the key's group and the recording time, so only the
-    pages of this group are read, and only their frontmatter matters: a group
-    collision is ruled out by the `episode` field itself.
+    The filename carries the audience-scoped group and the recording time, so
+    only this audience's pages of this group are read, and only their
+    frontmatter matters: a group collision is ruled out by the `episode` field
+    itself.
     """
     folder = _folder(vault_root)
-    group = episode_capture.key_group(key)
+    group = episode_capture.key_group(key, audience)
     try:
         with os.scandir(folder) as entries:
             names = [entry.name for entry in entries if entry.is_file()]
@@ -93,7 +95,11 @@ def _source(revision_path: str, frontmatter: dict[str, Any]) -> dict[str, str]:
 
 
 def _write(
-    vault_root: Path, source_schema: Any, recap: episode_capture.Recap, when: Any
+    vault_root: Path,
+    source_schema: Any,
+    recap: episode_capture.Recap,
+    when: Any,
+    audience: str,
 ) -> tuple[dict[str, str], bool]:
     """The committed recap page for `recap`, writing it only when it is new.
 
@@ -103,7 +109,7 @@ def _write(
     revisions first fails that batch's CAS; it is re-read and retried once.
     """
     for attempt in range(2):
-        revisions = _revisions(vault_root, recap.key)
+        revisions = _revisions(vault_root, recap.key, audience)
         live = [item for item in revisions if item.live]
         if live and live[-1].frontmatter.get("episode_digest") == recap.digest:
             return _source(live[-1].path, live[-1].frontmatter), True
@@ -148,7 +154,7 @@ def record(
     vault_root = Path(vault_root)
     owner = EpisodeInputOwner(vault_root)
     # Before anything else, so an unresolved caller writes nothing at all.
-    owner._owner()  # noqa: SLF001 - the facade's own owner resolution
+    audience = owner._owner()  # noqa: SLF001 - the facade's own owner resolution
     # Microseconds kept for the filename's order token only; the Source writer
     # dates the page to the second, as it dates every page.
     when = dt.datetime.now().astimezone()
@@ -161,7 +167,9 @@ def record(
         "said": said,
         "client": client,
     }
-    recap = episode_capture.prepare(episode=episode, about=about, when=when, **fields)
+    recap = episode_capture.prepare(
+        episode=episode, about=about, when=when, audience=audience, **fields
+    )
     about_skipped = 0
     if recap.about:
         visible = egress.visible_memory_refs(
@@ -170,9 +178,11 @@ def record(
         kept = [ref for ref in recap.about if ref in visible]
         about_skipped = len(recap.about) - len(kept)
         if about_skipped:
-            recap = episode_capture.prepare(episode=recap.key, about=kept, when=when, **fields)
+            recap = episode_capture.prepare(
+                episode=recap.key, about=kept, when=when, audience=audience, **fields
+            )
 
-    source, idempotent = _write(vault_root, source_schema, recap, when)
+    source, idempotent = _write(vault_root, source_schema, recap, when, audience)
     revision: int | None
     try:
         bound = owner.bind_committed_input(

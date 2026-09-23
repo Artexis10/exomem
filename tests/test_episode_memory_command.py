@@ -16,7 +16,15 @@ import pytest
 import yaml
 from starlette.testclient import TestClient
 
-from exomem import commands, curation, episode_capture, episode_recovery, memory_refs, server
+from exomem import (
+    commands,
+    curation,
+    episode_capture,
+    episode_recovery,
+    memory_refs,
+    server,
+    working_set,
+)
 from exomem import schema as schema_module
 from exomem.__main__ import main as cli_main
 from exomem.episode_model import EpisodeError
@@ -213,6 +221,77 @@ def test_one_key_used_by_two_audiences_keeps_separate_ledgers(vault: Path) -> No
     assert second["revision"] == 1
     assert [item["revision"] for item in inspected["revisions"]] == [1]
     assert all((vault / r["source"]["path"]).exists() for r in (first, second))
+
+
+def _withhold_episodes_from(vault: Path, audience: str) -> None:
+    root = vault / "Knowledge Base" / "_Governance"
+    (root / "scopes").mkdir(parents=True, exist_ok=True)
+    (root / "rules").mkdir(parents=True, exist_ok=True)
+    (root / "scopes" / "episodes.yaml").write_text(
+        "governance_version: 1\n"
+        "id: 01ARZ3NDEKTSV4RRFFQ69G5FBA\n"
+        "name: Recaps\n"
+        'paths: ["Sources/Episodes/*.md"]\n',
+        encoding="utf-8",
+    )
+    (root / "rules" / "episodes.yaml").write_text(
+        "governance_version: 1\n"
+        "id: 01ARZ3NDEKTSV4RRFFQ69G5FBB\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FBA"]\n'
+        f"audience: {audience}\n"
+        "ceiling: 0\n",
+        encoding="utf-8",
+    )
+    egress.clear_decision_memo()
+    from exomem.governance import membership, policy
+
+    membership.clear_memo()
+    policy._CACHE.clear()
+
+
+@pytest.mark.parametrize("withheld", [True, False], ids=["withheld", "visible"])
+def test_another_audience_never_retires_or_replays_the_owners_recap(
+    vault: Path, withheld: bool
+) -> None:
+    """Revisions are grouped per audience, so another audience continuing the
+    same key writes its own history: the owner's recap stays live, byte for
+    byte, and stays the owner's newest revision in recent context."""
+    with request_scope(owner_principal(surface="mcp")):
+        owned = _record(vault)
+    owner_page = vault / owned["source"]["path"]
+    before = owner_page.read_bytes()
+    if withheld:
+        _withhold_episodes_from(vault, "client-b")
+
+    with request_scope(_audience("client-b")):
+        other = _record(vault, summary="Audience B's own account of the same thread.")
+        replay = _record(vault)  # the owner's exact content, replayed
+
+    assert owner_page.read_bytes() == before
+    assert "status" not in _frontmatter(owner_page)
+    assert other["source"]["path"] != owned["source"]["path"]
+    assert other["idempotent"] is False and other["revision"] == 1
+    assert replay["idempotent"] is False and replay["revision"] == 2
+    assert replay["source"]["path"] not in {owned["source"]["path"], other["source"]["path"]}
+    assert replay["source"]["ref"] != owned["source"]["ref"]
+    mtimes = {
+        page.relative_to(vault).as_posix(): page.stat().st_mtime_ns for page in _episodes(vault)
+    }
+    assert owned["source"]["path"] in working_set._recent_episodes(mtimes, limit=4)
+
+    with request_scope(owner_principal(surface="mcp")):
+        inspected = commands.op_episode_memory(
+            vault, schema_module.load_source_schema(vault), action="inspect", episode=KEY
+        )
+        revised = _record(vault, open=["Confirm the delivery date", "Choose a bulb"])
+    assert inspected["revisions"] == [{"revision": 1, "recovery": "available"}]
+    assert inspected["latest_source_ref"] == owned["source"]["ref"]
+    assert revised["revision"] == 2
+    assert _frontmatter(owner_page)["status"] == "superseded"
+    # Audience B's own live revision (its replay superseded its first) is
+    # untouched by the owner's revision.
+    assert _frontmatter(vault / other["source"]["path"])["status"] == "superseded"
+    assert "status" not in _frontmatter(vault / replay["source"]["path"])
 
 
 def test_a_ledger_failure_after_the_write_is_idempotent_on_retry(

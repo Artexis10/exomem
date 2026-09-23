@@ -1623,7 +1623,7 @@ def _write_episode(
     folder = vault / EPISODE_FOLDER
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / (
-        f"2026-09-21-harbor-lamp-purchase-ep{episode_capture.key_group(key)}-{order}-{digest8}.md"
+        f"2026-09-21-harbor-lamp-purchase-ep{episode_capture.key_group(key, 'owner')}-{order}-{digest8}.md"
     )
     lines = [
         "---",
@@ -1732,7 +1732,7 @@ def test_eight_fresh_edits_do_not_bury_the_newest_episode(stateful_vault: Path) 
 def _episode_path(index: int) -> str:
     from exomem import episode_capture
 
-    group = episode_capture.key_group(_episode_key(index))
+    group = episode_capture.key_group(_episode_key(index), "owner")
     return f"{EPISODE_FOLDER}/2026-09-21-topic-{index}-ep{group}-20260921t100000000000-0a0b0c0d.md"
 
 
@@ -1783,7 +1783,7 @@ def test_an_activated_older_revision_never_enters_beside_the_newest(
     """The read-activation source must not bring a retired revision back."""
     from exomem import episode_capture
 
-    group = episode_capture.key_group(_episode_key(1))
+    group = episode_capture.key_group(_episode_key(1), "owner")
     older = f"{EPISODE_FOLDER}/2026-09-21-topic-ep{group}-20260921t090000000000-11111111.md"
     newer = f"{EPISODE_FOLDER}/2026-09-21-topic-ep{group}-20260921t100000000000-22222222.md"
     monkeypatch.setattr(working_set, "_recent_mtimes", lambda _root: {older: 200, newer: 100})

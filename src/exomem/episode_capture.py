@@ -81,13 +81,10 @@ class Recap:
     body: str
     digest: str
     slug: str
+    group: str
     about: tuple[str, ...] = ()
     client: str | None = None
     frontmatter: dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def group(self) -> str:
-        return key_group(self.key)
 
 
 def _error(code: str, reason: str) -> EpisodeError:
@@ -111,9 +108,16 @@ def hook_key(client: str, session_id: str) -> str:
     return "ep-" + hashlib.sha256(material).hexdigest()[:32]
 
 
-def key_group(key: str) -> str:
-    """The 12-hex filename token every revision of one episode shares."""
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
+def key_group(key: str, audience: str) -> str:
+    """The 12-hex filename token every revision of one episode shares, per audience.
+
+    Scoped by the recording audience, so one key continued by two audiences is
+    two groups: neither lists, supersedes nor replays the other's revisions.
+    The owner's stdio, CLI and REST doors are one audience, so the owner's
+    conversation is one group on every door.
+    """
+    material = f"{audience}\0{key}".encode("utf-8", "surrogatepass")
+    return hashlib.sha256(material).hexdigest()[:12]
 
 
 def filename_parts(name: str) -> tuple[str, str, str] | None:
@@ -190,6 +194,7 @@ def prepare(
     about: Any = None,
     client: Any = None,
     when: dt.datetime,
+    audience: str,
 ) -> Recap:
     """Validate, render and digest one recap revision, or refuse it.
 
@@ -251,7 +256,8 @@ def prepare(
     subject_slug = slugify_title(title, max_length=_SUBJECT_SLUG_CHARS)
     if subject_slug == "untitled" and "untitled" not in title.casefold():
         subject_slug = _FALLBACK_SLUG
-    slug = f"{subject_slug}-ep{key_group(key)}-{order}-{digest[:8]}"
+    group = key_group(key, audience)
+    slug = f"{subject_slug}-ep{group}-{order}-{digest[:8]}"
 
     frontmatter: dict[str, Any] = {"summary": line, "episode": key, "episode_digest": digest}
     if label is not None:
@@ -265,6 +271,7 @@ def prepare(
         body=body,
         digest=digest,
         slug=slug,
+        group=group,
         about=refs,
         client=label,
         frontmatter=frontmatter,

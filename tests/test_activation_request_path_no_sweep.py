@@ -1368,7 +1368,7 @@ def _write_episodes(vault: Path, count: int, *, start: int = 0) -> list[Path]:
     for index in range(start, start + count):
         key = "ep-" + f"{index:032x}"
         page = folder / (
-            f"2026-09-21-topic-{index}-ep{episode_capture.key_group(key)}"
+            f"2026-09-21-topic-{index}-ep{episode_capture.key_group(key, 'owner')}"
             f"-20260921t{index:012d}-0a0b0c0d.md"
         )
         page.write_text(

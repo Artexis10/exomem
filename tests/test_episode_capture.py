@@ -30,6 +30,7 @@ def _prepare(**overrides: object) -> capture.Recap:
         "about": [],
         "client": None,
         "when": WHEN,
+        "audience": "owner",
     }
     args.update(overrides)
     return capture.prepare(**args)
@@ -61,17 +62,27 @@ def test_a_recap_renders_its_sections_and_frontmatter() -> None:
 def test_the_digest_and_slug_are_deterministic() -> None:
     first, second = _prepare(), _prepare()
 
+    group = hashlib.sha256(f"owner\0{KEY}".encode()).hexdigest()[:12]
     assert first.digest == second.digest
     assert first.slug == second.slug
-    assert first.slug == (
-        f"harbor-lamp-purchase-ep{hashlib.sha256(KEY.encode()).hexdigest()[:12]}"
-        f"-20260518t091233000000-{first.digest[:8]}"
-    )
+    assert first.slug == f"harbor-lamp-purchase-ep{group}-20260518t091233000000-{first.digest[:8]}"
     assert capture.filename_parts(f"2026-05-18-{first.slug}.md") == (
-        hashlib.sha256(KEY.encode()).hexdigest()[:12],
+        group,
         "20260518t091233000000",
         first.digest[:8],
     )
+
+
+def test_the_filename_group_is_scoped_by_audience() -> None:
+    """One key, two audiences: two groups, so neither ever lists, supersedes or
+    replays the other's revisions. The digest is the content's alone."""
+    owner, other = _prepare(), _prepare(audience="client-b")
+
+    assert owner.group == capture.key_group(KEY, "owner")
+    assert other.group == capture.key_group(KEY, "client-b")
+    assert owner.group != other.group
+    assert f"-ep{owner.group}-" in owner.slug and f"-ep{other.group}-" in other.slug
+    assert owner.digest == other.digest
 
 
 def test_any_authored_change_moves_the_digest() -> None:
