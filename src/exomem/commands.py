@@ -4448,12 +4448,15 @@ def op_replace(
 
 
 def _replacement_predecessor_hash(vault_root: Path, old_path: str) -> str:
+    unavailable = f"OLD_NOT_FOUND: replacement predecessor is unavailable: {old_path}"
+    # A predecessor the caller may not see is unavailable exactly as a missing
+    # one is, and is never read.
+    if egress_module.write_target_withheld(vault_root, old_path):
+        raise ValueError(unavailable)
     try:
         return hashlib.sha256((Path(vault_root) / old_path).read_bytes()).hexdigest()
     except OSError as error:
-        raise ValueError(
-            f"OLD_NOT_FOUND: replacement predecessor is unavailable: {old_path}"
-        ) from error
+        raise ValueError(unavailable) from error
 
 
 def _replacement_review_hash(
@@ -6928,7 +6931,14 @@ def op_observe_memory(
             "INVALID_PATH: observe_memory requires a governed KB-relative path or reference"
         )
     try:
-        resolved_path = memory_refs_module.resolve_identifier_read_only(vault_root, path)
+        if raw_path.lower().startswith(
+            memory_refs_module.REF_PREFIX
+        ) and egress_module.restricted_release_filter(vault_root) is not None:
+            # A reference only a page withheld from the caller holds resolves as
+            # an unknown one, before anything is loaded or validated.
+            resolved_path = egress_module.resolve_visible_identifier(vault_root, path)
+        else:
+            resolved_path = memory_refs_module.resolve_identifier_read_only(vault_root, path)
     except memory_refs_module.ReferenceError as error:
         raise ValueError(f"{error.code}: {error.reason}") from error
     if raw_path.lower().startswith(("exomem://vault/", "exomem://source/")) and not (

@@ -330,7 +330,10 @@ def _resolve_kb_path(vault_root: Path, path: str) -> tuple[Path, str]:
             missing=["old_path"],
             reason=f"path escapes {kb_prefix()}: {e}",
         ) from None
-    if not candidate.exists():
+    from .governance import egress
+
+    # A page the caller may not see is answered exactly as a missing one.
+    if not candidate.exists() or egress.write_target_withheld(vault_root, rel):
         raise ReplaceError(
             code="OLD_NOT_FOUND",
             missing=["old_path"],

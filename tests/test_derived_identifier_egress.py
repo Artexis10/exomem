@@ -67,11 +67,13 @@ def _filler() -> dict[str, str]:
 
 
 def _govern(vault: Path, audience: str, scope: str = "Notes/Withheld/**") -> None:
+    """Withhold `scope` (one glob, or several separated by commas) at L0."""
     governance = vault / KB / "_Governance"
     (governance / "scopes").mkdir(parents=True, exist_ok=True)
     (governance / "rules").mkdir(parents=True, exist_ok=True)
+    paths = json.dumps([glob.strip() for glob in scope.split(",")])
     (governance / "scopes" / "withheld.yaml").write_text(
-        f'governance_version: 1\nid: {SCOPE_ID}\nname: Withheld\npaths: ["{scope}"]\n',
+        f"governance_version: 1\nid: {SCOPE_ID}\nname: Withheld\npaths: {paths}\n",
         encoding="utf-8",
     )
     (governance / "rules" / "withheld.yaml").write_text(
@@ -727,3 +729,142 @@ def test_restricted_browsing_reads_as_if_the_withheld_folder_were_absent(
         assert _text(answers["A"][label]) == _text(answers["B"][label]), label
     owner = _call(vaults["A"], None, "browse_memory", mode="list", path=NOTES)
     assert WITHHELD_DIR in _text(owner)
+
+
+# ---------------------------------------------------------------------------
+# Write doors decide their target before resolving or mutating it
+# ---------------------------------------------------------------------------
+
+_WITHHELD_TARGET = f"{WITHHELD_DIR}/target.md"
+_WITHHELD_SOURCE = f"{KB}/Sources/Withheld/private-source.md"
+_WRITE_SCOPE = "Notes/Withheld/**, Sources/Withheld/**"
+
+
+def _write_door_fixture() -> tuple[dict[str, str], dict[str, str]]:
+    base = {
+        f"{NOTES}/alpha.md": _page("Alpha", "Alpha conclusions.", type="insight"),
+        f"{KB}/Sources/open-source.md": _page("Open Source", "Raw text.", type="source"),
+    }
+    withheld = {
+        _WITHHELD_TARGET: _page(
+            "Hidden Draft",
+            "Withheld body text.\n\n## Observations\n\n- [finding] A withheld finding\n",
+            type="insight",
+            exomem_id="0192f0a4-6b7c-4d8e-9f10-a1b2c3d4e5f6",
+        ),
+        _WITHHELD_SOURCE: _page(
+            "Hidden Source", "Withheld raw text.", type="source", ingested_into="[]"
+        ),
+    }
+    return base, withheld
+
+
+_WRITE_DOORS: dict[str, tuple[str, dict[str, Any]]] = {
+    "edit-replace-string": (
+        "edit_memory",
+        {
+            "path": _WITHHELD_TARGET,
+            "why": "fix",
+            "operation": {"kind": "replace_string", "old_string": "Withheld", "new_string": "X"},
+        },
+    ),
+    "edit-bare-path": (
+        "edit_memory",
+        {
+            "path": "Notes/Withheld/target",
+            "why": "fix",
+            "operation": {"kind": "replace_tags", "tags": ["x"]},
+        },
+    ),
+    "observe-add": (
+        "observe_memory",
+        {"path": _WITHHELD_TARGET, "operation": "add", "category": "finding", "content": "New."},
+    ),
+    "replace": (
+        "replace_memory",
+        {
+            "old_path": _WITHHELD_TARGET,
+            "content": "Replacement.\n\n## Observations\n\n- [finding] Replaced\n",
+            "title": "Replacement Page",
+            "reason": "supersede",
+        },
+    ),
+    "append": (
+        "manage_memory_file",
+        {"operation": "append", "path": _WITHHELD_TARGET, "content": "More text."},
+    ),
+    "move": (
+        "manage_memory_file",
+        {"operation": "move", "old_path": _WITHHELD_TARGET, "new_path": f"{NOTES}/moved.md"},
+    ),
+    "delete": (
+        "manage_memory_file",
+        {"operation": "delete", "path": _WITHHELD_TARGET, "confirm": True},
+    ),
+    "delete-folder": (
+        "manage_memory_file",
+        {"operation": "delete", "path": WITHHELD_DIR, "confirm": True, "recursive": True},
+    ),
+    "observe-by-reference": (
+        "observe_memory",
+        {
+            "path": "exomem://memory/0192f0a4-6b7c-4d8e-9f10-a1b2c3d4e5f6",
+            "operation": "add",
+            "category": "finding",
+            "content": "New.",
+        },
+    ),
+    "reclassify": (
+        "manage_memory_file",
+        {
+            "operation": "reclassify",
+            "path": _WITHHELD_SOURCE,
+            "source_kind": "article",
+            "reason": "correct",
+        },
+    ),
+    "remember-cites-withheld-source": (
+        "remember",
+        {
+            "content": "A cited note.\n\n## Observations\n\n- [finding] Cited\n",
+            "title": "Cited Note",
+            "note_type": "insight",
+            "sources": [f"[[{_WITHHELD_SOURCE.removesuffix('.md')}]]"],
+        },
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_WRITE_DOORS))
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_write_door_answers_a_withheld_target_as_an_absent_one(
+    tmp_path: Path, audience: str, door: str
+) -> None:
+    base, withheld = _write_door_fixture()
+    vaults = {
+        "B": _materialize(tmp_path / "B" / "vault", dict(base), audience, scope=_WRITE_SCOPE),
+        "A": _materialize(
+            tmp_path / "A" / "vault", {**base, **withheld}, audience, scope=_WRITE_SCOPE
+        ),
+    }
+    before = {rel: (vaults["A"] / rel).read_bytes() for rel in withheld}
+    command, kwargs = _WRITE_DOORS[door]
+
+    answers = {
+        variant: _call(vault, _principal(audience), command, **kwargs)
+        for variant, vault in vaults.items()
+    }
+
+    assert _text(answers["A"]) == _text(answers["B"])
+    assert {rel: (vaults["A"] / rel).read_bytes() for rel in withheld} == before
+
+
+def test_the_owner_still_writes_to_a_page_withheld_from_others(tmp_path: Path) -> None:
+    base, withheld = _write_door_fixture()
+    vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external", scope=_WRITE_SCOPE)
+    command, kwargs = _WRITE_DOORS["append"]
+
+    answer = _call(vault, None, command, **kwargs)
+
+    assert "__error__" not in answer, answer
+    assert "More text." in (vault / _WITHHELD_TARGET).read_text(encoding="utf-8")

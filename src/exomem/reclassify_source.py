@@ -142,7 +142,10 @@ def _require_source(vault_root: Path, path: str) -> tuple[str, Path]:
         raise ReclassifyError("INVALID_PATH", error.reason) from error
     except Exception as error:  # noqa: BLE001 - reported as a refusal, not a crash
         raise ReclassifyError("INVALID_PATH", str(error)) from error
-    if not absolute.is_file():
+    from .governance import egress
+
+    # A source the caller may not see is answered exactly as a missing one.
+    if not absolute.is_file() or egress.write_target_withheld(vault_root, rel):
         raise ReclassifyError("NOT_FOUND", f"no source page at {rel}.")
     return rel, absolute
 

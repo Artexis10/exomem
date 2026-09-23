@@ -193,7 +193,7 @@ def move_file(
     """
     try:
         old_abs, old_rel = resolve_under_vault(
-            vault_root, old_path, must_exist=True, must_be_file=True
+            vault_root, old_path, must_exist=True, must_be_file=True, refuse_withheld=True
         )
     except VaultPathError as e:
         raise MoveFileError(code=e.code, reason=e.reason) from e

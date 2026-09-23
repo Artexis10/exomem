@@ -5521,6 +5521,35 @@ def restricted_release_filter(
     return release_walk_filter(vault_root, principal=who, purpose=purpose)
 
 
+def write_target_withheld(
+    vault_root: Path,
+    rel_path: str,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> bool:
+    """True when a write door must answer as if an existing file were absent.
+
+    A write door (edit, observe, replace, append, move, delete, reclassify)
+    decides its target before resolving or mutating it. For a caller other
+    than the owner, a file it may not see is answered exactly as a file that
+    does not exist, and is never touched. What this prevents: a restricted
+    writer learning a withheld page exists, or changing it, by naming it. When
+    it fires wrongly the writer cannot edit a page it could not read either;
+    that writer pays, and the owner never does (`False` for the owner and on
+    an ungoverned vault).
+    """
+    keep = restricted_release_filter(vault_root, principal=principal, purpose=purpose)
+    if keep is None:
+        return False
+    rel = str(rel_path or "").replace("\\", "/").strip().lstrip("/")
+    try:
+        exists = bool(rel) and (Path(vault_root) / rel).is_file()
+    except OSError:
+        return False
+    return exists and not keep(rel)
+
+
 def visible_page_filter(
     vault_root: Path,
     *,

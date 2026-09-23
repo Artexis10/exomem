@@ -431,6 +431,12 @@ def _existing_page_outside_kb(vault_root: Path, given: str) -> str | None:
     return rel if resolved.is_file() else None
 
 
+def _write_target_withheld(vault_root: Path, rel: str) -> bool:
+    from .governance import egress
+
+    return egress.write_target_withheld(vault_root, rel)
+
+
 def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
     if not path or not path.strip():
         raise EditError(code="INVALID_PATH", missing=["path"], reason="path is empty")
@@ -446,7 +452,9 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
             missing=["path"],
             reason=f"path escapes {kb_prefix()}: {e}",
         ) from None
-    if not candidate.exists():
+    # A page the caller may not see is answered exactly as a missing one, and
+    # never loaded (see `egress.write_target_withheld`).
+    if not candidate.exists() or _write_target_withheld(vault_root, rel):
         # The read side (`get_page`) accepts a vault-relative path and will read
         # a page living OUTSIDE the governed Knowledge Base/ root. Governed edits
         # re-root every bare path under Knowledge Base/, so a caller re-using

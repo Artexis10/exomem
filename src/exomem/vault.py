@@ -5678,6 +5678,17 @@ class VaultPathResolution:
     resolved_relative: str
 
 
+def _write_target_withheld(vault_root: Path, resolved: Path, vault_resolved: Path) -> bool:
+    """Whether a write door must treat this resolved file as absent."""
+    from .governance import egress
+
+    try:
+        rel = resolved.relative_to(vault_resolved).as_posix()
+    except ValueError:
+        return False
+    return egress.write_target_withheld(vault_root, rel)
+
+
 def resolve_under_vault(
     vault_root: Path,
     path: str,
@@ -5687,6 +5698,7 @@ def resolve_under_vault(
     must_be_dir: bool = False,
     must_be_under_kb: bool = False,
     return_details: bool = False,
+    refuse_withheld: bool = False,
 ) -> tuple[Path, str] | VaultPathResolution:
     """Resolve a vault-relative path; guard against escape; normalize.
 
@@ -5700,6 +5712,10 @@ def resolve_under_vault(
     `Knowledge Base/` (checked on the resolved path, so `Knowledge Base/../x`
     can't sneak a write to a vault-root sibling of KB). Governed content writers
     (`create`/`append`) set it — exomem only ever authors under `Knowledge Base/`.
+
+    `refuse_withheld` is for write doors: with `must_exist`, an existing file
+    the caller may not see (`egress.write_target_withheld`) raises exactly the
+    NOT_FOUND an absent path raises.
 
     Raises VaultPathError with code in {INVALID_PATH, NOT_FOUND,
     NOT_A_FILE, NOT_A_DIR}.
@@ -5755,7 +5771,10 @@ def resolve_under_vault(
                 ),
             ) from None
 
-    if must_exist and not candidate.exists():
+    if must_exist and (
+        not candidate.exists()
+        or (refuse_withheld and _write_target_withheld(vault_root, resolved, vault_resolved))
+    ):
         raise VaultPathError(
             code="NOT_FOUND",
             reason=f"path does not exist: {rel}",
