@@ -1868,3 +1868,23 @@ def test_a_not_current_catalogue_falls_back_to_the_in_process_rung(tmp_path):
     hits = bm25.search(tmp_path, "東京", 5, scope="kb", repair=False)
 
     assert [path for path, _score in hits] == ["Knowledge Base/tower.md"]
+
+
+def test_the_in_process_rung_counts_no_query_term_twice(tmp_path, monkeypatch):
+    from exomem import bm25
+
+    _write_page(tmp_path, "Knowledge Base/accented.md", "Mättik owns the rollout")
+    _write_page(tmp_path, "Knowledge Base/plain.md", "Mattik owns the rollout")
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+    lexstore.reset_memo()
+    bm25.clear_cache()
+    try:
+        exact = bm25.search(tmp_path, "Mättik", 5, scope="kb")
+        folded = bm25.search(tmp_path, "mattik", 5, scope="kb")
+    finally:
+        bm25.clear_cache()
+    assert [path for path, _score in exact] == ["Knowledge Base/accented.md"]
+    assert {path for path, _score in folded} == {
+        "Knowledge Base/accented.md",
+        "Knowledge Base/plain.md",
+    }

@@ -253,6 +253,36 @@ def tokenize(text: str, *, query: bool = False) -> list[str]:
     return [stem for unit in _scan_units(text, query) for stem in unit.stems]
 
 
+def word_forms(word: str) -> tuple[str, ...]:
+    """Index-side stems of one word: its stem, plus the stem of its
+    accent-folded form when it is a Latin word with marks. An ASCII word is
+    stemmed whole, exactly as `stem_word` always stemmed it."""
+    if word.isascii():
+        return (stem_word(word),)
+    return _word_unit(unicodedata.normalize("NFKC", word).casefold(), False).stems
+
+
+def first_stem_span(text: str, stems) -> tuple[int, int] | None:
+    """`(start, length)` in `text` of the first word or run carrying one of
+    `stems` on its index side, or None. Offsets are into `text` as given; inside
+    an unspaced run the matching bigram itself is located when normalisation
+    kept the run's length."""
+    runs = _scanner()[0]
+    for match in runs.finditer(text):
+        word = match.group()
+        for unit in token_units(word):
+            hit = next((stem for stem in unit.stems if stem in stems), None)
+            if hit is None:
+                continue
+            if unit.run:
+                normalized = unicodedata.normalize("NFKC", word).casefold()
+                offset = normalized.find(hit)
+                if offset >= 0 and len(normalized) == len(word):
+                    return match.start() + offset, len(hit)
+            return match.start(), len(word)
+    return None
+
+
 def unit_present(unit: TokenUnit, stems) -> bool:
     """Does text holding `stems` contain this unit?
 
@@ -528,7 +558,7 @@ class BM25Index:
         bm25, paths = self._fresh_corpus(vault_root, scope, freshness)
         if bm25 is None or not paths:
             return []
-        tokens = _tokenize(query)
+        tokens = tokenize(query, query=True)
         if not tokens:
             return []
         scores = bm25.get_scores(tokens)

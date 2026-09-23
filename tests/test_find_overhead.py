@@ -149,6 +149,15 @@ def test_derived_text_invalidates_with_page(vault: Path) -> None:
     assert bm25.stem_word("alpha") not in page2.stem_set
 
 
+def test_stem_set_holds_cjk_bigrams_and_accent_folded_variants(vault: Path) -> None:
+    p = vault / "Knowledge Base" / "Notes" / "derived-multilingual-probe.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("# 東京タワー\n\nMättik prüft книги\n", encoding="utf-8")
+    page = find_module._CACHE.get(p, vault)
+    assert {"東京", "京タ", "タワ", "ワー"} <= page.stem_set
+    assert {"mättik", "mattik", "prüft", "pruft", "книг"} <= page.stem_set
+
+
 @pytest.mark.parametrize("prefer_compiled", [True, False])
 @pytest.mark.parametrize("prefer_active", [True, False])
 @pytest.mark.parametrize(

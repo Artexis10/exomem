@@ -81,33 +81,74 @@ def _function_word_stems() -> frozenset[str]:
     return _FUNCTION_WORD_STEMS
 
 
-def query_word_stem_groups(query: str) -> list[tuple[list[str], bool]]:
-    """Return BM25 subtoken stems and function-word status per query word."""
+def query_word_stem_groups(query: str) -> list[tuple[list[str], bool, int]]:
+    """Per query word: its distinct BM25 stems, whether it is a function word,
+    and how many of those stems must occur for the word to count as present.
+
+    A whitespace word needs every subtoken stem, so `alpha-beta-gamma` needs all
+    three parts. An unspaced run (Japanese, Chinese, Thai...) has no spaces to
+    split on, so each run is its own word, present when a strict majority of
+    its bigrams occur: all of them would demand the query's exact phrasing,
+    particles included. The spaced parts of a word that also holds a run stay
+    one compound word, as before.
+    """
 
     from . import bm25
 
     function_stems = _function_word_stems()
-    groups: list[tuple[list[str], bool]] = []
+    groups: list[tuple[list[str], bool, int]] = []
+
+    def add(stems: list[str], *, run: bool) -> None:
+        distinct = list(dict.fromkeys(stems))
+        required = len(distinct) // 2 + 1 if run else len(distinct)
+        is_function = not run and all(stem in function_stems for stem in distinct)
+        groups.append((distinct, is_function, required))
+
     for word in query.split():
-        subtoken_stems = bm25.tokenize(word)
-        if not subtoken_stems:
+        if word.isascii():
+            subtoken_stems = bm25.tokenize(word, query=True)
+            if subtoken_stems:
+                add(subtoken_stems, run=False)
             continue
-        groups.append(
-            (subtoken_stems, all(stem in function_stems for stem in subtoken_stems))
-        )
+        units = bm25.token_units(word, query=True)
+        spaced = [stem for unit in units if not unit.run for stem in unit.stems]
+        if spaced:
+            add(spaced, run=False)
+        for unit in units:
+            if unit.run:
+                add(list(unit.stems), run=True)
     return groups
+
+
+def query_word_count(query: str) -> int:
+    """Whitespace words, with each unspaced run inside a word counted as a word.
+
+    An ASCII query counts exactly its whitespace words, as it always did.
+    """
+
+    from . import bm25
+
+    count = 0
+    for word in (query or "").split():
+        if word.isascii():
+            count += 1
+            continue
+        units = bm25.token_units(word, query=True)
+        runs = sum(1 for unit in units if unit.run)
+        count += runs + (0 if units and runs == len(units) else 1)
+    return count
 
 
 def stem_word_coverage(
     text_stems: Set[str],
-    word_stem_groups: list[tuple[list[str], bool]],
+    word_stem_groups: list[tuple[list[str], bool, int]],
 ) -> tuple[int, int, int]:
     """Return present, total, and content-word coverage for stemmed text."""
 
     present = 0
     content_present = 0
-    for subtoken_stems, is_function in word_stem_groups:
-        if all(stem in text_stems for stem in subtoken_stems):
+    for stems, is_function, required in word_stem_groups:
+        if sum(1 for stem in stems if stem in text_stems) >= required:
             present += 1
             if not is_function:
                 content_present += 1
@@ -534,7 +575,7 @@ def should_rerank(
     hits: list[Hit], query: str, config: RankingConfig = DEFAULT_RANKING
 ) -> bool:
     """Heuristic: is this query worth the reranker's model-load cost?"""
-    if len((query or "").split()) >= 5:
+    if query_word_count(query) >= 5:
         return True
     vec = [
         h.path

@@ -251,3 +251,36 @@ def test_keyword_mode_retains_strict_substring_not_stem_semantics() -> None:
         for hit in index.search_keyword(authorization, "compound approve", k=1)
     ] == ["keyword"]
     assert index.search_keyword(authorization, "compounded", k=1) == ()
+
+
+def test_bm25_reads_cjk_bigrams_and_accent_folded_variants() -> None:
+    tower = _variant("tower-item", "d" * 64, level=6, text="東京タワーの高さは三百メートル")
+    name = _variant("name-item", "e" * 64, level=6, text="Mättik prüft die Lieferung")
+    plain = _variant("plain-item", "f" * 64, level=6, text="Mattik plans the rollout")
+    tower_item = _item("tower-item", "d" * 64, tower)
+    name_item = _item("name-item", "e" * 64, name)
+    plain_item = _item("plain-item", "f" * 64, plain)
+    index = projected_retrieval.ProjectedLexicalIndex(
+        _namespace(tower_item, name_item, plain_item)
+    )
+    authorization = projected_retrieval.AuthorizationProjectionMap(
+        _key(),
+        (
+            _selection(tower_item, tower),
+            _selection(name_item, name),
+            _selection(plain_item, plain),
+        ),
+    )
+
+    assert [hit.item_identity for hit in index.search_bm25(authorization, "東京タワー", k=2)] == [
+        "tower-item"
+    ]
+    assert {hit.item_identity for hit in index.search_bm25(authorization, "mattik", k=3)} == {
+        "name-item",
+        "plain-item",
+    }
+    # The query side emits the surface form only: an accented query matches
+    # the accented page exactly and never through a folded variant of its own.
+    assert [hit.item_identity for hit in index.search_bm25(authorization, "Mättik", k=3)] == [
+        "name-item"
+    ]

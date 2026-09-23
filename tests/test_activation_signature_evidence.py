@@ -269,3 +269,41 @@ def test_publication_between_evidence_and_compilation_cannot_mix_generations(
     assert packet["generation"]["lexical_evidence"] == "stale"
     assert packet["units"] == []
     assert working_set_runtime._PACKET_CACHE == {}
+
+
+@pytest.mark.parametrize(
+    ("turn", "corroborated"),
+    [
+        ("東京タワーの高さ", False),
+        ("東京タワー、会議の議事録", True),
+        ("Mättik", False),
+        ("Mättik rollout", True),
+        ("mattik rollout", True),
+    ],
+)
+def test_one_word_or_one_unspaced_run_is_one_unit_of_lexical_evidence(
+    signatures, monkeypatch, turn, corroborated
+):
+    """An accented word (surface plus folded variant) or a CJK run (many
+    bigrams) is one piece of evidence: it never earns `retrieval` alone."""
+    from test_latency_gate import _seed_freshness_live
+
+    vault, _ = signatures
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    _write(
+        vault / "Knowledge Base/Products/Tower Wagon.md",
+        "---\ntype: note\nstatus: active\n---\n# Tower Wagon\n\n"
+        "東京タワーの高さは三百メートル。会議の議事録を共有。Mättik plans the rollout.\n",
+    )
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild()
+    rows = [row for row in index.anchors() if row.title == "Tower Wagon"]
+    index.close()
+    assert rows
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
+
+    hits, status = working_set_runtime.lexical_evidence(vault, turn, rows, limit=5)
+
+    assert status == "available"
+    assert bool(hits) is corroborated
