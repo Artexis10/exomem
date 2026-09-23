@@ -348,3 +348,37 @@ def test_withheld_refusal_does_not_reveal_the_on_disk_spelling(
     assert withheld.status_code == missing.status_code
     assert withheld.content == missing.content
     assert WITHHELD.encode() not in withheld.content
+
+
+# ---------------------------------------------------------------------------
+# Malformed bearers are refused, never a server error
+# ---------------------------------------------------------------------------
+
+
+def _unraising_client() -> TestClient:
+    return TestClient(server.build_server(require_auth=False).http_app(), raise_server_exceptions=False)
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "v2." + "9" * 5000 + ".00." + "0" * 64,
+        "v1." + "9" * 5000 + "." + "0" * 64,
+    ],
+    ids=["bound-5000-digits", "v1-5000-digits"],
+)
+def test_unparseable_expiry_is_refused_on_both_transfer_routes(vault: Path, token: str) -> None:
+    client = _unraising_client()
+    # Raw header bytes: a non-ASCII bearer arrives latin-1 decoded, as on the wire.
+    auth = [(b"authorization", f"Bearer {token}".encode("latin-1"))]
+
+    download = client.get("/download", params={"path": RELEASED}, headers=auth)
+    upload = client.post(
+        "/upload",
+        files={"file": ("a.bin", b"x", "application/octet-stream")},
+        data={"scope": "S", "category": "C"},
+        headers=auth,
+    )
+
+    assert download.status_code == 401, download.text
+    assert upload.status_code == 401, upload.text

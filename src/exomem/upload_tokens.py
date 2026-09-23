@@ -30,6 +30,19 @@ import time
 PREFIX = "v1."
 DEFAULT_TTL = 900  # 15 minutes
 
+#: Longest expiry a token may spell. Twelve digits reach the year 33658; a
+#: longer run is not a timestamp, and past 4300 digits `int()` refuses it with
+#: a ValueError that would surface as a server error instead of a refusal.
+_MAX_EXP_DIGITS = 12
+
+
+def _parse_exp(exp_str: str) -> int | None:
+    # `isascii` first: `str.isdigit` admits superscripts and other scripts'
+    # digits, some of which `int()` then refuses.
+    if not (exp_str.isascii() and exp_str.isdigit() and len(exp_str) <= _MAX_EXP_DIGITS):
+        return None
+    return int(exp_str)
+
 
 def _sig(secret: str, scope: str, exp: int) -> str:
     # The scope is part of the signed message, so an `upload` token can't be
@@ -51,13 +64,14 @@ def verify(presented: str | None, secret: str, *, scope: str = "upload", now: in
     if len(parts) != 3:
         return False
     _, exp_str, sig = parts
-    if not exp_str.isdigit():
+    exp = _parse_exp(exp_str)
+    if exp is None:
         return False
-    exp = int(exp_str)
     now_i = int(now if now is not None else time.time())
     if now_i > exp:
         return False
-    return hmac.compare_digest(sig, _sig(secret, scope, exp))
+    # Bytes, not str: `compare_digest` raises on a non-ASCII str.
+    return hmac.compare_digest(sig.encode(), _sig(secret, scope, exp).encode())
 
 
 #: Prefix of a capability bound to the audience that minted it.
@@ -117,9 +131,9 @@ def bound_audience(
     if len(parts) != 4:
         return None
     _, exp_str, claim, sig = parts
-    if not (exp_str.isascii() and exp_str.isdigit()):
+    exp = _parse_exp(exp_str)
+    if exp is None:
         return None
-    exp = int(exp_str)
     if int(now if now is not None else time.time()) > exp:
         return None
     audience = _decode_audience(claim)

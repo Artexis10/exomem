@@ -185,3 +185,38 @@ def test_bound_malformed_fails() -> None:
 def test_mint_bound_requires_an_audience() -> None:
     with pytest.raises(ValueError):
         upload_tokens.mint_bound(SECRET, audience="")
+
+
+# ---------------- expiry parsing never raises ----------------
+
+HUGE_EXP = "9" * 5000
+
+
+@pytest.mark.parametrize(
+    "exp",
+    [HUGE_EXP, "9" * 13, "²", "1²", "١٢"],
+    ids=["5000-digits", "13-digits", "superscript", "digit-superscript", "arabic-indic"],
+)
+def test_verify_rejects_an_unparseable_expiry_without_raising(exp: str) -> None:
+    assert upload_tokens.verify(f"v1.{exp}.{'0' * 64}", SECRET, now=1000) is False
+    assert upload_tokens.lane_for_token(f"v1.{exp}.{'0' * 64}", SECRET, now=1000) is None
+
+
+@pytest.mark.parametrize(
+    "exp",
+    [HUGE_EXP, "9" * 13, "²", "١٢"],
+    ids=["5000-digits", "13-digits", "superscript", "arabic-indic"],
+)
+def test_bound_audience_rejects_an_unparseable_expiry_without_raising(exp: str) -> None:
+    assert upload_tokens.bound_audience(f"v2.{exp}.{b'owner'.hex()}.{'0' * 64}", SECRET) is None
+
+
+def test_twelve_digit_expiry_still_verifies() -> None:
+    far = 10**11  # twelve digits: comfortably past any real clock
+    assert upload_tokens.verify(upload_tokens.mint(SECRET, now=far - 900), SECRET, now=far) is True
+    t = upload_tokens.mint_bound(SECRET, audience="owner", now=far - 900)
+    assert upload_tokens.bound_audience(t, SECRET, now=far) == "owner"
+
+
+def test_non_ascii_signature_does_not_raise() -> None:
+    assert upload_tokens.verify("v1.1900.é" + "0" * 63, SECRET, now=1000) is False
