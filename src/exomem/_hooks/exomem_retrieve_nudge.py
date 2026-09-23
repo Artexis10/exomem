@@ -1344,12 +1344,27 @@ def _bounded_resolved_block(packet: dict, max_chars: int) -> str:
     ceiling: uncapped, recent lines left zero room for current state, units
     or pointers — the actual answer — on every packet with enough recent
     context to fill it.
+
+    The half is of the room the HEADER leaves, counted in the lines' own
+    cost: charged with the header too, the half was gone before the first
+    line at any ceiling of 600 or less, and a carried packet at 400 rendered
+    nothing at all. Two refinements keep that fair to both sides. The
+    answer's first line is reserved before recent context takes its half,
+    so the cap never pushes the answer out; and whatever room the answer
+    leaves unused goes back to recent context, so a ceiling too small for
+    any answer line still says what was recently worked on.
     """
     recent = _recent_lines(packet)
     rest = _packet_lines(packet)[len(recent) :]
-    recent_kept = _bounded_lines(recent, max_chars // 2)
+    header = len(_WORKING_SET_HEADER)
+    room = max(0, max_chars - header)
+    first_answer = 1 + len(rest[0]) if rest else 0
+    reserved = first_answer if first_answer <= room else 0
+    recent_kept = _bounded_lines(recent, header + min(room // 2, room - reserved))
     recent_cost = sum(1 + len(line) for line in recent_kept)
     rest_kept = _bounded_lines(rest, max_chars - recent_cost)
+    rest_cost = sum(1 + len(line) for line in rest_kept)
+    recent_kept = _bounded_lines(recent, max_chars - rest_cost)
     kept = [*recent_kept, *rest_kept]
     return "\n".join([_WORKING_SET_HEADER, *kept]) if kept else ""
 

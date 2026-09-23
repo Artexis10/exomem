@@ -620,3 +620,76 @@ def test_every_refused_ref_leaves_before_the_compile(
     assert str(refused.value) == commands.ACTIVATE_ANCHOR_REFUSAL
     assert compiled == [], "a refused ref must never reach the compile"
 
+
+# --------------------------------------------------------------------------- #
+# R-Q N3: the header is not charged to the recent half.
+# --------------------------------------------------------------------------- #
+
+
+def _carried_hook_packet(carried_by: str) -> dict:
+    """A carried or picked packet shaped like the reviewer's d_a5 ones: three
+    recent entries of about 73 characters and one unit line of about 212."""
+    page = "Knowledge Base/Notes/Research/quillon-vantry-window.md"
+    status = "retrieval_carried" if carried_by == "retrieval" else "resolved"
+    return {
+        "recent_context": [
+            {
+                "ref": f"Knowledge Base/Systems/{name}.md",
+                "path": f"Knowledge Base/Systems/{name}.md",
+                "title": name,
+                "kind": "page",
+                "why": "edited",
+                "as_of": "2026-09-22",
+            }
+            for name in ("Depot Ledger", "Depot Rosters", "Depot Tallies")
+        ],
+        "anchors": [
+            {
+                "ref": page,
+                "path": page,
+                "title": "Quillon vantry window",
+                "kind": "page",
+                "lifecycle": "active",
+                "status": status,
+                "evidence": ["retrieval"] if carried_by == "retrieval" else ["agent_choice"],
+            }
+        ],
+        "roles": [{"id": "decisions", "source": "anchor_default", "lane": "units"}],
+        "units": [
+            {
+                "ref": f"exomem://vault/{page}#q-decision",
+                "role": "decisions",
+                "text": "The quillon vantry window was set to nine minutes after the "
+                "trial showed the old window idle for most of the cycle.",
+                "lifecycle": "active",
+                "updated": "2026-09-10",
+                "provenance": {"path": page},
+            }
+        ],
+        "pointers": [],
+        "current_state": [],
+        "ambiguity": [],
+        "missing": [],
+        "budget": {"limit_chars": 4000, "used_chars": 0},
+        "generation": {"carried_by": carried_by},
+        "abstained": False,
+    }
+
+
+@pytest.mark.parametrize("carried_by", ["retrieval", "agent_choice"])
+def test_a_small_ceiling_still_renders_a_recent_line(carried_by: str) -> None:
+    """The reviewer's d_a5: the header was charged to the recent half, so at
+    600 or less no recent line fitted and a carried or picked packet at 400
+    rendered nothing at all. The recent line comes back, and at 600 the
+    answer keeps its place beside it."""
+    from exomem._hooks import exomem_retrieve_nudge as hook
+
+    packet = _carried_hook_packet(carried_by)
+
+    for ceiling in (400, 600):
+        block = hook._format_working_set_block(packet, ceiling)
+        kinds = [line[2:].split(":", 1)[0] for line in block.splitlines() if line.startswith("- ")]
+        assert len(block) <= ceiling, (ceiling, block)
+        assert "recent" in kinds, (ceiling, block)
+    wide = hook._format_working_set_block(packet, 600)
+    assert any(line.startswith("- unit:") for line in wide.splitlines()), wide
