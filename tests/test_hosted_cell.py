@@ -433,6 +433,33 @@ def test_a_planted_remote_owner_binding_never_reaches_a_hosted_cell(
     assert resolved.remote_owner is False
 
 
+def test_a_legacy_named_owner_binding_cannot_be_promoted_back_into_a_hosted_cell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`env_compat.promote_legacy()` copies `KB_MCP_X` to an unset `EXOMEM_X`, and
+    later startup code calls it again; clearing only the canonical name would let
+    the legacy spelling re-arm the binding."""
+    from exomem import env_compat
+
+    config = HostedCellConfig.from_env(_env(tmp_path), require_provisioned=False)
+    monkeypatch.setenv("KB_MCP_OWNER_OAUTH_SUBJECT", "github:4242")
+    monkeypatch.setenv("EXOMEM_OWNER_OAUTH_SUBJECT", "github:4242")
+    for name in ("EXOMEM_VAULT_PATH", "EXOMEM_HOSTED_STATE_ROOT", "EXOMEM_STATE_ROOT",
+                 "EXOMEM_WRITER_LEASE_STATE_DIR", "EXOMEM_LOG_DIR", "EXOMEM_UPLOAD_MAX_BYTES",
+                 "TMPDIR"):
+        monkeypatch.setenv(name, os.environ.get(name, ""))
+    config.apply_process_environment()
+    env_compat.promote_legacy()
+    # Compare names only, never the mapping: a failure must not print the
+    # process environment.
+    armed = [
+        name
+        for name in ("KB_MCP_OWNER_OAUTH_SUBJECT", "EXOMEM_OWNER_OAUTH_SUBJECT")
+        if name in os.environ
+    ]
+    assert armed == []
+
+
 def test_hosted_config_rejects_protocol_versions_not_implemented_by_this_release(
     tmp_path: Path,
 ) -> None:
