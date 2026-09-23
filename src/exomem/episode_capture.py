@@ -281,8 +281,9 @@ def prepare(
     frontmatter: dict[str, Any] = {"summary": line, "episode": key, "episode_digest": digest}
     if label is not None:
         frontmatter["client"] = label
-    if refs:
-        frontmatter["about"] = list(refs)
+    # `refs` stay off the page: the recorder's ledger holds them
+    # (`EpisodeInputOwner.bind_committed_input`), and they are digested above so
+    # a changed set is still a new revision.
     return Recap(
         key=key,
         subject=title,

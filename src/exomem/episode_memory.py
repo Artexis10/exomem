@@ -202,7 +202,7 @@ def record(
     revision: int | None
     try:
         bound = owner.bind_committed_input(
-            recap.key, path=source["path"], reference=source["ref"]
+            recap.key, path=source["path"], reference=source["ref"], about=recap.about
         )
     except (EpisodeError, curation.CurationError, OSError) as error:
         if getattr(error, "code", None) == "EPISODE_OWNER_UNRESOLVED":
@@ -241,9 +241,16 @@ def inspect(vault_root: Path, *, episode: Any) -> dict[str, Any]:
     if not isinstance(episode, str) or not episode_capture.EPISODE_KEY_RE.fullmatch(episode):
         raise EpisodeError("EPISODE_KEY_INVALID", "episode must be an ep- key of 32 lowercase hex")
     history = EpisodeInputOwner(Path(vault_root)).input_history(episode)
+    latest = history["latest_reference"]
+    # Released at bind time is not released now: a policy change since then
+    # withholds the ref rather than disclosing that the page exists.
+    if latest is not None and latest not in egress.visible_memory_refs(
+        Path(vault_root), [latest], principal=effective_principal()
+    ):
+        latest = None
     return {
         "episode": episode,
         "revisions": history["revisions"],
-        "latest_source_ref": history["latest_reference"],
+        "latest_source_ref": latest,
         "coverage_current": "unchecked",
     }

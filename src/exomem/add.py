@@ -79,14 +79,14 @@ def folder_descriptions(vault_root: Path) -> dict[str, str]:
 #: always a bounded, attributable record and never a free-form frontmatter
 #: channel. Semantic bounds (lengths, credential refusal) are the recording
 #: operation's (`episode_capture`); this module only keeps the shape closed.
+#: The refs a recap concerns are deliberately not here: every audience that may
+#: read the page would learn them, so they live in the recorder's own ledger.
 EPISODE_FRONTMATTER_FIELDS: tuple[tuple[str, bool], ...] = (
     ("summary", True),
     ("episode", True),
     ("episode_digest", True),
     ("client", False),
-    ("about", False),
 )
-_EPISODE_ABOUT_MAX = 3
 
 
 @dataclass
@@ -737,16 +737,6 @@ def _episode_frontmatter_lines(
     for name, _required in EPISODE_FRONTMATTER_FIELDS:
         value = fields.get(name)
         if value in (None, "", [], ()):
-            continue
-        if name == "about":
-            if not isinstance(value, (list, tuple)) or len(value) > _EPISODE_ABOUT_MAX:
-                raise AddError(
-                    code="INVALID_SOURCE",
-                    missing=["about"],
-                    reason=f"episode about must be a list of at most {_EPISODE_ABOUT_MAX} refs",
-                )
-            refs = [_line(item, "about") for item in value]
-            lines.append("about: [" + ", ".join(yaml_scalar(ref) for ref in refs) + "]")
             continue
         lines.append(f"{name}: {yaml_scalar(_line(value, name))}")
     return tuple(lines)

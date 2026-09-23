@@ -20,6 +20,7 @@ from exomem import (
     commands,
     curation,
     episode_capture,
+    episode_model,
     episode_recovery,
     memory_refs,
     server,
@@ -384,11 +385,11 @@ def test_a_ledger_failure_after_the_write_is_idempotent_on_retry(
     real = episode_recovery.EpisodeInputOwner.bind_committed_input
     calls = {"n": 0}
 
-    def failing_once(self, key, *, path, reference):
+    def failing_once(self, key, *, path, reference, about=()):
         calls["n"] += 1
         if calls["n"] == 1:
             raise EpisodeError("EPISODE_STORE_WRITE_FAILED", "episode history write was refused")
-        return real(self, key, path=path, reference=reference)
+        return real(self, key, path=path, reference=reference, about=about)
 
     monkeypatch.setattr(episode_recovery.EpisodeInputOwner, "bind_committed_input", failing_once)
     with request_scope(owner_principal(surface="mcp")):
@@ -473,10 +474,16 @@ def test_unknown_and_withheld_about_refs_are_indistinguishable(vault: Path) -> N
         missing = _record(vault, episode="ep-" + "d4" * 16, about=[unknown])
 
     assert kept["about_skipped"] == 0
-    assert _frontmatter(vault / kept["source"]["path"])["about"] == [visible]
+    for result in (kept, hidden, missing):
+        assert "about" not in _frontmatter(vault / result["source"]["path"])
     for result in (hidden, missing):
         assert result["about_skipped"] == 1
-        assert "about" not in _frontmatter(vault / result["source"]["path"])
+    with request_scope(_audience("client-a")):
+        ledger = episode_recovery.EpisodeInputOwner(vault)._store()
+        evidence = ledger.read(episode_model.episode_id("ep-" + "b2" * 16))["state"][
+            "input_revisions"
+        ][-1]["evidence"]
+    assert evidence["about"] == [visible]
     assert {key: hidden[key] for key in ("about_skipped", "ledger", "idempotent")} == {
         key: missing[key] for key in ("about_skipped", "ledger", "idempotent")
     }
@@ -504,6 +511,34 @@ def test_inspect_lists_revisions_and_the_latest_source(vault: Path) -> None:
         "latest_source_ref": second["source"]["ref"],
         "coverage_current": "unchecked",
     }
+
+
+def test_the_shared_page_never_names_what_the_recap_concerns(vault: Path) -> None:
+    """Another audience may read the recap page; it must not learn from it the
+    ref of a page withheld from it."""
+    withheld = _write_note(vault, "withheld-lamp-note", "22222222-2222-4222-8222-222222222222")
+    with request_scope(owner_principal(surface="mcp")):
+        recorded = _record(vault, about=[withheld])
+    _withhold_notes_from(vault, "client-b")
+
+    with request_scope(_audience("client-b")):
+        served = commands.op_read_memory(vault, path=recorded["source"]["ref"])
+
+    assert "22222222-2222" not in json.dumps(served, default=str)
+    assert "22222222-2222" not in (vault / recorded["source"]["path"]).read_text("utf-8")
+
+
+def test_inspect_withholds_a_latest_source_the_caller_can_no_longer_see(vault: Path) -> None:
+    schema = schema_module.load_source_schema(vault)
+    with request_scope(_audience("client-a")):
+        _record(vault)
+    _withhold_episodes_from(vault, "client-a")
+
+    with request_scope(_audience("client-a")):
+        inspected = commands.op_episode_memory(vault, schema, action="inspect", episode=KEY)
+
+    assert inspected["revisions"] == [{"revision": 1, "recovery": "available"}]
+    assert inspected["latest_source_ref"] is None
 
 
 def test_inspect_answers_unknown_and_other_audience_keys_identically(vault: Path) -> None:

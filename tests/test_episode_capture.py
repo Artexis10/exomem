@@ -194,7 +194,10 @@ def test_about_refs_must_be_canonical_memory_refs_and_are_deduplicated() -> None
     ref = "exomem://memory/69b2b4d3-d4c3-4361-8714-91b8f1b1c0b1"
     recap = _prepare(about=[ref, ref])
     assert recap.about == (ref,)
-    assert recap.frontmatter["about"] == [ref]
+    # Never on the shared page: the recorder's ledger holds them.
+    assert "about" not in recap.frontmatter
+    assert ref not in recap.body
+    assert recap.digest != _prepare().digest
     assert _code(about=["Knowledge Base/Notes/x.md"]) == "EPISODE_INVALID"
 
 

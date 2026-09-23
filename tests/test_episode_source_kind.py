@@ -77,8 +77,7 @@ def test_the_episode_kind_routes_to_its_own_sources_folder(
 def test_the_episode_fields_render_in_the_source_frontmatter(
     vault: Path, source_schema: schema_module.SourceSchema
 ) -> None:
-    about = ["exomem://memory/69b2b4d3-d4c3-4361-8714-91b8f1b1c0b1"]
-    result = _record(vault, source_schema, client="claude-code", about=about)
+    result = _record(vault, source_schema, client="claude-code")
 
     parsed = _frontmatter(vault / result.path)
     assert parsed["type"] == "source"
@@ -87,7 +86,6 @@ def test_the_episode_fields_render_in_the_source_frontmatter(
     assert parsed["episode"] == KEY
     assert parsed["episode_digest"] == DIGEST
     assert parsed["client"] == "claude-code"
-    assert parsed["about"] == about
     assert parsed["ingested_into"] == []
 
 
@@ -141,6 +139,9 @@ def test_episode_fields_are_refused_on_any_other_kind(
         {"summary": "two\nlines"},
         {"episode": ["not", "a", "string"]},
         {"about": "exomem://memory/69b2b4d3-d4c3-4361-8714-91b8f1b1c0b1"},
+        # The refs a recap concerns live in the recorder's own ledger, never on
+        # the shared page every audience may read.
+        {"about": ["exomem://memory/69b2b4d3-d4c3-4361-8714-91b8f1b1c0b1"]},
     ],
 )
 def test_the_episode_frontmatter_set_is_closed(

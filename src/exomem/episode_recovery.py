@@ -237,8 +237,14 @@ class EpisodeInputOwner:
             return {"digest": digest}
         return {"reference": canonical, "digest": digest}
 
-    def bind_committed_input(self, key: str, *, path: str, reference: str) -> dict[str, Any]:
+    def bind_committed_input(
+        self, key: str, *, path: str, reference: str, about: tuple[str, ...] = ()
+    ) -> dict[str, Any]:
         """Bind a just-committed page as the next input revision of episode `key`.
+
+        `about` is the refs the input concerns, already visibility-filtered for
+        this caller; they are retained here, in this audience's own ledger,
+        rather than on the page every audience may read.
 
         Creates the episode on first use and appends a revision after that. A
         byte-equivalent input (`EPISODE_REVISION_UNCHANGED`) is success, so a
@@ -251,7 +257,9 @@ class EpisodeInputOwner:
         canonical, unit_ref = self._reference(reference)
         if unit_ref is not None:
             raise _error("EPISODE_INPUT_INVALID", "a committed input is a whole page")
-        evidence = self._committed_evidence(canonical, path)
+        evidence: dict[str, Any] = self._committed_evidence(canonical, path)
+        if about:
+            evidence["about"] = list(about)
         identity = model.episode_id(key)
         for attempt in range(2):
             with store._guard():
