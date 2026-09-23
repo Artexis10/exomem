@@ -1,8 +1,8 @@
 """A Japanese-only vault for lexical recall acceptance
 (``recall-japanese-vault-v1``).
 
-About eighty invented Japanese pages -- twenty target notes and entities that
-the twenty queries in :data:`QUERIES` ask for, one Records collection, one
+About eighty invented Japanese pages -- twenty-one target notes and entities
+that the queries in :data:`QUERIES` ask for, one Records collection, one
 Planning item and generated office-routine notes that share the everyday
 vocabulary (particles, weekdays, rooms) a real Japanese vault repeats on every
 page. Nothing in it is English, so tokenizer v1 read none of it.
@@ -98,6 +98,8 @@ TARGET_NOTES: tuple[TargetNote, ...] = (
                "自転車の後輪がパンクしたので、駅前の自転車店で修理してもらいました。"),
     TargetNote("concert", "コンサートのチケット",
                "十一月の弦楽四重奏コンサートのチケットを二枚購入しました。"),
+    TargetNote("minutes", "定例会の記録",
+               "議事録は翌日までに共有します。決定事項は赤字で記載します。"),
 )
 
 TARGET_ENTITIES: tuple[TargetEntity, ...] = (
@@ -128,7 +130,14 @@ QUERIES: tuple[Query, ...] = (
     Query("弦楽四重奏のチケット", "concert"),
     Query("青木陽介の仕事", "friend-aoki"),
     Query("早瀬美月 料理教室", "teacher-hayase"),
+    # "X の Y" and question forms: the particles are not on the page.
+    Query("抹茶の用意", "tea-ceremony"),
+    Query("茶道教室で抹茶を用意するのは誰ですか", "tea-ceremony"),
+    Query("会議の議事録はいつ共有", "minutes"),
 )
+
+#: Questions made only of particles and function words: no page is about them.
+PARTICLE_QUERIES: tuple[str, ...] = ("についてですか", "はいつですか", "のためにします", "それはなんですか")
 
 #: Generated background: one routine per (room, task) pair.
 _ROOMS = ("会議室", "倉庫", "駐車場", "受付", "食堂", "図書室", "研修室", "屋上", "玄関", "休憩室")

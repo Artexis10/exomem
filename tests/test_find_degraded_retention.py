@@ -306,7 +306,9 @@ def test_cjk_page_passes_the_strict_veto_when_the_vector_lane_is_live(
 def test_query_word_groups_count_an_unspaced_run_as_one_word() -> None:
     from exomem import find_policy
 
-    groups = find_policy.query_word_stem_groups("the drift-index 東京タワー Python入門 Zölvarn")
+    groups = find_policy.query_word_stem_groups(
+        "the drift-index 東京タワー Python入門 Zölvarn 抹茶の用意 についてですか"
+    )
     assert [(sorted(stems), function, required) for stems, function, required in groups] == [
         (["the"], True, 1),
         (["drift", "index"], False, 2),
@@ -314,7 +316,12 @@ def test_query_word_groups_count_an_unspaced_run_as_one_word() -> None:
         (["python"], False, 1),
         (["入門"], False, 1),
         (["zölvarn"], False, 1),
+        # A run's content is its bigrams without hiragana...
+        (sorted(["抹茶", "用意"]), False, 2),
+        # ...unless every bigram holds hiragana.
+        (sorted(["につ", "つい", "いて", "てで", "です", "すか"]), False, 4),
     ]
+    groups = groups[:6]
     present, total, content = find_policy.stem_word_coverage(
         frozenset({"the", "東京", "京タ", "タワ", "python", "zolvarn"}), groups
     )
@@ -335,6 +342,11 @@ def test_stem_gates_read_cjk_and_folded_query_words(multilingual_vault: Path) ->
     assert find_results.stem_tokens_present(delivery, "zolvarn lieferung")
     assert find_module._any_stem_present(tower, "タワー")
     assert find_module._any_stem_present(delivery, "zolvarn")
+    minutes = find_module._CACHE.get(
+        multilingual_vault / kb_dirname() / "Notes/meeting-minutes.md", multilingual_vault
+    )
+    # 議事, 事録 and 共有 are all this query's content; its particles are not.
+    assert find_results.stem_tokens_present(minutes, "議事録はいつ共有")
 
     from types import SimpleNamespace
 
@@ -344,3 +356,15 @@ def test_stem_gates_read_cjk_and_folded_query_words(multilingual_vault: Path) ->
     folded_body = "x " * 200 + "Zölvarn prüft die Lieferung." + " y" * 200
     excerpt = find_results.stem_anchored_excerpt(SimpleNamespace(body=folded_body), "zolvarn")
     assert "Zölvarn prüft" in excerpt
+
+
+def test_a_japanese_x_no_y_query_retains_its_page(multilingual_vault: Path) -> None:
+    """議事録はいつ共有 shares every content bigram with the minutes page and
+    few particle bigrams: a majority of ALL bigrams would drop it."""
+    hits = find_module.find(multilingual_vault, query="議事録はいつ共有")
+    assert hits and hits[0].path.endswith("meeting-minutes.md")
+
+
+def test_a_japanese_particle_only_query_finds_nothing(multilingual_vault: Path) -> None:
+    for query in ("についてですか", "はいつですか", "それはなんですか"):
+        assert find_module.find(multilingual_vault, query=query) == [], query

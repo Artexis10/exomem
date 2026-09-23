@@ -102,6 +102,16 @@ def is_scriptio_continua(character: str) -> bool:
     return _within(ord(character), _CONTINUA_STARTS, _CONTINUA_ENDS)
 
 
+#: The Hiragana block. Japanese writes particles, inflections and okurigana
+#: in hiragana, so a bigram touching one mostly records grammar.
+HIRAGANA_BLOCK = (0x3040, 0x309F)
+
+
+def is_hiragana(character: str) -> bool:
+    """True when `character` is in the declared Hiragana block."""
+    return HIRAGANA_BLOCK[0] <= ord(character) <= HIRAGANA_BLOCK[1]
+
+
 def continua_character_class() -> str:
     """The declared unspaced blocks as the body of a regex character class."""
     return "".join(

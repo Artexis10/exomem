@@ -88,9 +88,9 @@ def query_word_stem_groups(query: str) -> list[tuple[list[str], bool, int]]:
     A whitespace word needs every subtoken stem, so `alpha-beta-gamma` needs all
     three parts. An unspaced run (Japanese, Chinese, Thai...) has no spaces to
     split on, so each run is its own word, present when a strict majority of
-    its bigrams occur: all of them would demand the query's exact phrasing,
-    particles included. The spaced parts of a word that also holds a run stay
-    one compound word, as before.
+    its content bigrams occur (`bm25.run_content_stems`: those without
+    hiragana, so Japanese particles are not required). The spaced parts of a
+    word that also holds a run stay one compound word, as before.
     """
 
     from . import bm25
@@ -116,7 +116,7 @@ def query_word_stem_groups(query: str) -> list[tuple[list[str], bool, int]]:
             add(spaced, run=False)
         for unit in units:
             if unit.run:
-                add(list(unit.stems), run=True)
+                add(list(bm25.run_content_stems(unit.stems)), run=True)
     return groups
 
 

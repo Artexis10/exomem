@@ -307,3 +307,30 @@ def test_one_word_or_one_unspaced_run_is_one_unit_of_lexical_evidence(
 
     assert status == "available"
     assert bool(hits) is corroborated
+
+
+@pytest.mark.parametrize("turn", ["明日は、散歩です", "昨日は、雨でした", "日曜日は、映画です"])
+def test_shared_particles_never_make_an_unrelated_anchor_retrieved(signatures, monkeypatch, turn):
+    """A Japanese turn and an anchor page that share only particle bigrams
+    (日は, です) are not about the same thing: no anchor earns `retrieval`."""
+    from test_latency_gate import _seed_freshness_live
+
+    vault, _ = signatures
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    _write(
+        vault / "Knowledge Base/Products/Weekend Wagon.md",
+        "---\ntype: note\nstatus: active\n---\n# Weekend Wagon\n\n"
+        "今日は晴れです。週末は家族と過ごします。\n",
+    )
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild()
+    rows = index.anchors()
+    index.close()
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
+
+    hits, status = working_set_runtime.lexical_evidence(vault, turn, rows, limit=8)
+    assert status == "available"
+    assert hits == []
+    packet = commands.op_activate_context(vault, turn=turn)
+    assert all("retrieval" not in anchor["evidence"] for anchor in packet["anchors"])

@@ -271,11 +271,11 @@ def test_tokenizer_v1_misses_what_v2_finds(arms):
 # ---------------------------------------------------------------- Japanese-only vault
 
 
-#: Measured 2026-09-23 on both lexical backends: recall@10 0.95, MRR 0.95 (the
-#: one miss asks for a venue the page names only as a hall). Floors are the
-#: measured value minus 0.08, never below the design bars (0.85 and 0.70).
-_JAPANESE_RECALL_FLOOR = 0.87
-_JAPANESE_MRR_FLOOR = 0.87
+#: Measured 2026-09-23 on both lexical backends over 23 queries: recall@10
+#: 1.00, MRR 1.00 (a run is present on most of its content bigrams). Floors are
+#: the measured value minus 0.08, never below the design bars (0.85 and 0.70).
+_JAPANESE_RECALL_FLOOR = 0.92
+_JAPANESE_MRR_FLOOR = 0.92
 
 
 @pytest.fixture(scope="module")
@@ -322,3 +322,34 @@ def test_a_japanese_substring_finds_its_page_in_keyword_mode(japanese_vault, mon
     lexstore.ensure_fresh(vault)
     hits = find_module.find(vault, query="弦楽四重奏", limit=10, mode="keyword")
     assert [hit.path for hit in hits] == [key_to_path["concert"]]
+
+
+@pytest.mark.parametrize("backend", ["fts5", "python"])
+def test_japanese_x_no_y_questions_find_their_page_and_particles_find_nothing(
+    japanese_vault, monkeypatch, backend
+):
+    """A run is present when most of its content bigrams are: "抹茶の用意" and a
+    whole question find the tea-ceremony note, and the design's own example
+    finds "議事録は翌日までに共有します". A query made only of particles has no
+    content and still finds nothing."""
+    vault, key_to_path = japanese_vault
+    if backend == "fts5" and not lexstore.fts5_available():
+        pytest.skip("this SQLite build lacks FTS5")
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", backend)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    _reset_lexical_state()
+    lexstore.ensure_fresh(vault)
+    rows = {
+        "抹茶の用意": "tea-ceremony",
+        "茶道教室で抹茶を用意するのは誰ですか": "tea-ceremony",
+        "会議の議事録はいつ共有": "minutes",
+    }
+    for query, gold in rows.items():
+        ranked = [hit.path for hit in find_module.find(
+            vault, query=query, limit=10, mode="hybrid", rerank=False
+        )]
+        assert ranked[:1] == [key_to_path[gold]], (query, ranked[:3])
+    from epistemic.corpora import recall_japanese_vault
+
+    for query in recall_japanese_vault.PARTICLE_QUERIES:
+        assert find_module.find(vault, query=query, limit=10, mode="hybrid", rerank=False) == [], query

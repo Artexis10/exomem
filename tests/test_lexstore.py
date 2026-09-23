@@ -1813,6 +1813,29 @@ def test_corroboration_counts_units_not_stems(tmp_path):
     assert corroborated("alpha beta") == ["Knowledge Base/tower.md"]
 
 
+def test_a_run_corroborates_only_through_most_of_its_content_bigrams(tmp_path):
+    """明日は and 散歩です share only the particle bigrams 日は and です with a
+    page about today's weather: neither run is on that page, so it is not
+    corroborated. Runs whose content bigrams are there still count."""
+    from test_latency_gate import _seed_freshness_live
+
+    _write_page(tmp_path, "Knowledge Base/weather.md", "今日はいい天気です。")
+    _write_page(tmp_path, "Knowledge Base/meeting.md", "昨日は定例会議でした。")
+    _seed_freshness_live(tmp_path)
+    lexstore.ensure_fresh(tmp_path)
+
+    def corroborated(query: str) -> list[str]:
+        result = lexstore.search_bm25_result(
+            tmp_path, query, 5, min_matched_terms=2, allow_delta=False
+        )
+        assert result.readiness.complete
+        return sorted(path for path, _score in result.value)
+
+    assert corroborated("明日は 散歩です") == []
+    assert corroborated("今日は 天気") == ["Knowledge Base/weather.md"]
+    assert corroborated("昨日は 会議") == ["Knowledge Base/meeting.md"]
+
+
 def _downgrade_to_v10(vault: Path) -> None:
     """Reshape a current catalogue into what tokenizer v1 left behind: schema 10
     and FTS tables declared with the default unicode61 tokenizer."""

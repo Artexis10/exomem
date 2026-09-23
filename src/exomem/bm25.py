@@ -343,18 +343,35 @@ def first_stem_span(text: str, stems) -> tuple[int, int] | None:
     return None
 
 
+def run_content_stems(stems) -> tuple[str, ...]:
+    """The distinct bigrams of an unspaced run that carry its content.
+
+    Japanese writes particles and inflections in hiragana, so a bigram that
+    touches hiragana mostly records grammar: "会議の議事録はいつ共有" shares
+    議事, 事録 and 共有 with "議事録は翌日までに共有します" and almost none of
+    its particle bigrams. The content is the bigrams without hiragana; a run
+    whose every bigram holds hiragana keeps them all. Runs in other scripts
+    have no hiragana and keep every bigram.
+    """
+    distinct = tuple(dict.fromkeys(stems))
+    content = tuple(
+        stem for stem in distinct if not any(text_scripts.is_hiragana(ch) for ch in stem)
+    )
+    return content or distinct
+
+
 def unit_present(unit: TokenUnit, stems) -> bool:
     """Does text holding `stems` contain this unit?
 
     A word is present when any of its forms is. An unspaced run is present
-    when a strict majority of its distinct bigrams are: requiring all of them
-    would demand the query's exact phrasing, particles included, while any one
-    of them would accept a page sharing a single particle bigram.
+    when a strict majority of its content bigrams are (`run_content_stems`):
+    requiring all of them would demand the query's exact phrasing, while any
+    one of them would accept a page sharing a single particle bigram.
     """
     if not unit.run:
         return any(stem in stems for stem in unit.stems)
-    distinct = set(unit.stems)
-    return 2 * sum(1 for stem in distinct if stem in stems) > len(distinct)
+    content = run_content_stems(unit.stems)
+    return 2 * sum(1 for stem in content if stem in stems) > len(content)
 
 
 # Back-compat alias for callers that still import _tokenize.

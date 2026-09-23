@@ -1755,13 +1755,33 @@ def _catalog_usable() -> bool:
     return backend() != "python"
 
 
-def _term_units(units) -> dict[str, int]:
-    """Each distinct stem mapped to the first query unit it came from."""
-    owner: dict[str, int] = {}
+def _term_units(units) -> list[list[object]]:
+    """`[stem, unit, needed]` rows for the corroboration filter.
+
+    Each distinct stem belongs to the first query unit it came from. A word
+    unit counts when any of its stems occurs. An unspaced run counts only when
+    a strict majority of its content bigrams (`bm25.run_content_stems`) occur,
+    so two runs sharing particle bigrams such as 日は and です with a page do
+    not corroborate it. On ASCII every unit is one stem, so the count is v1's
+    count of distinct stems.
+    """
+    from . import bm25 as bm25_module
+
+    owner: set[str] = set()
+    rows: list[list[object]] = []
     for index, unit in enumerate(units):
-        for stem in unit.stems:
-            owner.setdefault(stem, index)
-    return owner
+        stems = (
+            bm25_module.run_content_stems(unit.stems)
+            if unit.run
+            else tuple(dict.fromkeys(unit.stems))
+        )
+        own = [stem for stem in stems if stem not in owner]
+        if not own:
+            continue
+        owner.update(own)
+        needed = len(own) // 2 + 1 if unit.run else 1
+        rows.extend([stem, index, needed] for stem in own)
+    return rows
 
 
 def search_bm25(
@@ -5699,7 +5719,7 @@ class LexicalStore:
         allow_delta: bool = True,
         min_matched_terms: int = 1,
         recall_checkpoint: Any | None = None,
-        term_units: Mapping[str, int] | None = None,
+        term_units: list[list[object]] | None = None,
     ) -> CatalogQueryResult[list[tuple[str, float]]]:
         return self._serve_from_ready_catalog_result(
             scope,
@@ -5723,7 +5743,7 @@ class LexicalStore:
         allowed_paths: set[str] | None = None,
         *,
         min_matched_terms: int = 1,
-        term_units: Mapping[str, int] | None = None,
+        term_units: list[list[object]] | None = None,
     ) -> list[tuple[str, float]]:
         # Tokens are runs of letters, numbers and marks: no quote or other FTS5
         # syntax can hide in them, but quote anyway; OR mirrors get_scores()
@@ -5737,22 +5757,24 @@ class LexicalStore:
             params.append(json.dumps(sorted(allowed_paths), ensure_ascii=False))
         if min_matched_terms > 1:
             # Corroboration counts distinct UNITS, not repetitions of one word:
-            # each stem names the first word or unspaced run it came from, and a
-            # unit counts once however many of its stems (an accented word's
-            # folded variant, a run's bigrams) occur. Without units, every
-            # distinct stem is its own unit, which is the v1 rule. Filter before
-            # LIMIT so one-unit hits cannot crowd out valid pages.
+            # rows are `[stem, unit, needed]` (see `_term_units`), and a unit
+            # counts once it has `needed` of its stems on the page. Without
+            # units, every distinct stem is its own unit needing itself, which
+            # is the v1 rule. Filter before LIMIT so one-unit hits cannot crowd
+            # out valid pages.
             if term_units is None:
-                term_units = {stem: index for index, stem in enumerate(dict.fromkeys(tokens))}
+                term_units = [
+                    [stem, index, 1] for index, stem in enumerate(dict.fromkeys(tokens))
+                ]
             allowed_clause += (
-                " AND (SELECT COUNT(DISTINCT term.value) FROM json_each(?) AS term "
-                "WHERE instr(' ' || fts.stemmed || ' ', ' ' || term.key || ' ') > 0) >= ?"
+                " AND (SELECT COUNT(*) FROM ("
+                "SELECT json_extract(term.value, '$[1]') AS unit FROM json_each(?) AS term "
+                "WHERE instr(' ' || fts.stemmed || ' ', "
+                "' ' || json_extract(term.value, '$[0]') || ' ') > 0 "
+                "GROUP BY unit HAVING COUNT(*) >= MAX(json_extract(term.value, '$[2]')))) >= ?"
             )
             params.extend(
-                (
-                    json.dumps(dict(sorted(term_units.items())), ensure_ascii=False),
-                    min_matched_terms,
-                )
+                (json.dumps(term_units, ensure_ascii=False), min_matched_terms)
             )
         params.append(k)
         rows = conn.execute(

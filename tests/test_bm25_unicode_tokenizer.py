@@ -328,9 +328,28 @@ def test_a_word_is_present_when_any_form_occurs_and_a_run_when_most_bigrams_do()
     assert not bm25.unit_present(word, {"other"})
     run = bm25.token_units("会議の議事録", query=True)[0]
     assert run.run and len(set(run.stems)) == 5
-    # 会議 + 議事 + 事録 of 会議の議事録: three of five bigrams is a strict majority.
-    assert bm25.unit_present(run, {"会議", "議事", "事録"})
-    assert not bm25.unit_present(run, {"会議", "議事"})
+    # Of 会議の議事録's five bigrams, the three without hiragana carry the
+    # content: 会議, 議事, 事録. Two of those three is a strict majority.
+    assert bm25.run_content_stems(run.stems) == ("会議", "議事", "事録")
+    assert bm25.unit_present(run, {"会議", "議事"})
+    assert not bm25.unit_present(run, {"会議"})
+    assert not bm25.unit_present(run, {"議の", "の議", "会議"})
+
+
+def test_the_content_of_a_run_is_its_bigrams_without_hiragana() -> None:
+    """Hiragana writes Japanese particles and inflections. "会議の議事録はいつ
+    共有" shares 議事, 事録 and 共有 with "議事録は翌日までに共有します" but
+    almost none of its particle bigrams."""
+    query = bm25.token_units("会議の議事録はいつ共有", query=True)[0]
+    page = set(bm25.tokenize("議事録は翌日までに共有します"))
+    assert bm25.run_content_stems(query.stems) == ("会議", "議事", "事録", "共有")
+    assert bm25.unit_present(query, page)
+    # A run of hiragana only keeps every bigram, and still needs most of them.
+    particles = bm25.token_units("についてですか", query=True)[0]
+    assert bm25.run_content_stems(particles.stems) == tuple(dict.fromkeys(particles.stems))
+    assert not bm25.unit_present(particles, {"です", "すか"})
+    # Scripts without hiragana keep every bigram.
+    assert bm25.run_content_stems(("東京", "京タ", "タワ")) == ("東京", "京タ", "タワ")
 
 
 def test_no_token_ever_contains_a_quote_or_whitespace() -> None:
