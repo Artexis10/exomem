@@ -35,7 +35,15 @@ def resolve_entity_candidate(
     entity_family: str | None = None,
     limit: int = 8,
 ) -> dict[str, object]:
-    """Return an exact active title/alias match, no match, or bounded ambiguity."""
+    """Return an exact active title/alias match, no match, or bounded ambiguity.
+
+    For a caller other than the owner, each matched entity is decided before
+    the status and counts are computed, so an identity only a withheld entity
+    holds answers exactly as `no_match`. (A write that creates such an entity
+    then proceeds; reconciling the duplicate is the owner's work.)
+    """
+    from .governance import egress
+
     needle = identity_key(name)
     if not needle:
         return {"status": "no_match", "candidates": [], "omitted_candidate_count": 0}
@@ -58,6 +66,7 @@ def resolve_entity_candidate(
                 f"Active families: {list(registry.families)}"
             )
 
+    visible = egress.restricted_release_filter(vault_root)
     matches: list[dict[str, str]] = []
     entities_root = kb_root(vault_root) / "Entities"
     for definition in registry.active_definitions:
@@ -91,8 +100,11 @@ def resolve_entity_candidate(
             alias_matches = any(needle == identity_key(alias) for alias in _aliases(frontmatter.get("aliases")))
             if not title_matches and not alias_matches:
                 continue
+            rel_path = path.relative_to(vault_root).as_posix()
+            if visible is not None and not visible(rel_path):
+                continue
             candidate = {
-                "path": path.relative_to(vault_root).as_posix(),
+                "path": rel_path,
                 "title": title,
                 "entity_type": registered.id,
                 "entity_family": registry.family_of(registered.id) or registered.id,

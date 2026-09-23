@@ -612,3 +612,74 @@ def test_the_owner_writer_still_resolves_over_every_page(tmp_path: Path) -> None
     assert "Hidden Plan" not in written["body"]
     assert f"[[{WITHHELD_DIR}/project-zeta-plan]]" in written["body"]
     assert any(f"{WITHHELD_DIR}/beta" in warning for warning in written["warnings"])
+
+
+# ---------------------------------------------------------------------------
+# Entity identity is decided before it is reported
+# ---------------------------------------------------------------------------
+
+PEOPLE = f"{KB}/Entities/People"
+
+
+def _entities() -> tuple[dict[str, str], dict[str, str]]:
+    base = {
+        f"{PEOPLE}/other-person.md": _page(
+            "Other Person", "A visible person.", type="entity", entity_type="person",
+            status="active", title="Other Person",
+        ),
+        f"{NOTES}/meeting.md": _page("Meeting", "Met with Other Person.", type="insight"),
+    }
+    withheld = {
+        f"{PEOPLE}/private-dana-example.md": _page(
+            "Dana Example", "Withheld body text.", type="entity", entity_type="person",
+            status="active", title="Dana Example", aliases='["D. Example"]',
+        )
+    }
+    return base, withheld
+
+
+def _entity_view(answer: Any) -> Any:
+    if not isinstance(answer, dict) or "__error__" in answer:
+        return answer
+    return {key: answer.get(key) for key in ("status", "candidates", "omitted_candidate_count", "path", "code")}
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_entity_identity_reads_as_if_the_withheld_entity_were_absent(
+    tmp_path: Path, audience: str
+) -> None:
+    base, withheld = _entities()
+    vaults = {
+        variant: _materialize(
+            tmp_path / variant / "vault",
+            {**base, **(withheld if variant == "A" else {})},
+            audience,
+            scope="Entities/People/private-*",
+        )
+        for variant in ("B", "A")
+    }
+    principal = _principal(audience)
+
+    answers = {}
+    for variant, vault in vaults.items():
+        answers[variant] = {
+            name: _entity_view(
+                _call(vault, principal, "connect_memory", operation="resolve-entity", name=name)
+            )
+            for name in ("Dana Example", "DANA example", "D. Example", "Nobody Here")
+        }
+        answers[variant]["create"] = _entity_view(
+            _call(
+                vault,
+                principal,
+                "connect_memory",
+                operation="create-entity",
+                entity_type="person",
+                name="D. Example",
+                summary="A person met once.",
+            )
+        )
+
+    assert "Dana" not in _text(list(answers["A"].values()))
+    assert _text(answers["A"]) == _text(answers["B"])
+    assert answers["A"]["Dana Example"]["status"] == "no_match"
