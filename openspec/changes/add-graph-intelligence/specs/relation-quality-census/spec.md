@@ -3,9 +3,12 @@
 ### Requirement: Counts-only relation census over one published snapshot
 The system SHALL provide a relation-quality census computed from one published graph
 snapshot and the relation and entity-type registries. The census itself MUST NOT parse
-Markdown, run a model, build an index or write; the owner's release filter under a
-governed policy MAY read page bytes to decide release. It SHALL reduce edge rows as it
-reads them, holding memory proportional to pages rather than edges. It SHALL report integers and ratios
+Markdown, run a model, build an index or write. Under a governed policy the owner's
+release filter MAY read page bytes to decide release, and MAY open and write the
+governance receipt store in the vault's state directory (`.governance.sqlite`) to record
+those decisions, as every release-filtered walk does; the census writes nothing else. It
+SHALL reduce edge rows as it reads them, holding memory proportional to pages rather than
+edges. It SHALL report integers and ratios
 derived from them under fixed definitions: authored edges by status (`core_specific`,
 `core_generic`, `extension`, `alias`, `deprecated`, `unregistered`, `scope_violation`),
 generic share, typed and specific coverage, predicate utilisation, extension use,
@@ -71,6 +74,11 @@ per-predicate counts.
 #### Scenario: An unbound caller is not the owner
 - **WHEN** no principal is bound under a governed policy
 - **THEN** the census reports `audience_restricted`, and an owner-local caller that declares itself is served
+
+#### Scenario: A broken policy is reported to the owner alone
+- **WHEN** the governance policy does not compile
+- **THEN** the owner receives `policy_blocked` from the census, keys detail, the sample, `infer`'s census with and without a project scope, and `infer`'s snapshot counts
+- **AND** an external audience, a verified non-owner principal and an unbound caller each receive `audience_restricted` from all six, byte-identical to their answer when the policy compiles, because the audience is decided before the policy's health and nothing is read for them
 
 #### Scenario: A missing target is outside the view
 - **WHEN** a visible page names a target that does not exist

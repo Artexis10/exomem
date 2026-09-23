@@ -593,6 +593,114 @@ def test_a_governed_policy_serves_the_census_to_the_owner_only(
     )
 
 
+def _govern(vault: Path, *, compiles: bool) -> None:
+    """Withhold the Withheld folder from `external`; a broken rule fails to compile."""
+    _withhold(vault)
+    if not compiles:
+        rule = vault / "Knowledge Base" / "_Governance" / "rules" / "withheld-external.yaml"
+        rule.write_text(
+            rule.read_text(encoding="utf-8").replace(
+                f"ceiling: {egress.LEVEL_NONE}", 'ceiling: "not-a-level"'
+            ),
+            encoding="utf-8",
+        )
+
+
+def _every_census_surface(vault: Path) -> dict[str, object]:
+    return {
+        "census": commands.op_schema_memory(vault, operation="census", subject="relations"),
+        "keys": commands.op_schema_memory(
+            vault, operation="census", subject="relations", detail="keys"
+        ),
+        "infer": commands.op_schema_memory(vault, operation="infer", subject="relations")[
+            "census"
+        ],
+        "infer_project": commands.op_schema_memory(
+            vault, operation="infer", subject="relations", project="project-one"
+        )["census"],
+        "sample": relation_census.sample(vault, size=5),
+        "infer_counts": relation_census.infer_counts(
+            vault, page_type=None, start=None, end=None
+        ),
+    }
+
+
+_NON_OWNERS = {
+    "external": RequestPrincipal(audience_id="external", surface="mcp"),
+    "verified_principal": RequestPrincipal(audience_id="principal:" + "ab" * 32, surface="mcp"),
+    "unbound": None,
+}
+
+
+@pytest.mark.parametrize("who", sorted(_NON_OWNERS))
+def test_policy_blocked_is_the_owners_alone_and_decided_after_the_audience(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, who: str
+) -> None:
+    """A governed policy that does not compile is `policy_blocked` for the owner.
+    Every other caller is refused on its audience first, so its answer is the
+    same whether or not the policy compiles, and nothing is read for it."""
+    from exomem.governance import policy
+
+    vaults = {}
+    for name, compiles in (("compiles", True), ("broken", False)):
+        vault = _built(_seed_census_vault(tmp_path / name))
+        _govern(vault, compiles=compiles)
+        vaults[name] = vault
+
+    def reset() -> None:
+        _reset_governance_caches()
+        policy._LAST_GOOD.clear()
+
+    reset()
+    assert not policy.load(vaults["compiles"]).empty
+    assert not policy.load(vaults["compiles"]).blocked
+    assert policy.load(vaults["broken"]).blocked
+
+    snapshots: list[object] = []
+    original = epistemic_graph.EpistemicGraphIndex._open_read_snapshot
+
+    def counting(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        snapshots.append(self)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "_open_read_snapshot", counting)
+    principal = _NON_OWNERS[who]
+    views = {}
+    for name, vault in vaults.items():
+        reset()
+        if principal is None:
+            views[name] = _every_census_surface(vault)
+        else:
+            with request_scope(principal):
+                views[name] = _every_census_surface(vault)
+
+    assert json.dumps(views["compiles"], sort_keys=True) == json.dumps(
+        views["broken"], sort_keys=True
+    )
+    assert set(views["broken"]) == {
+        "census",
+        "keys",
+        "infer",
+        "infer_project",
+        "sample",
+        "infer_counts",
+    }
+    for surface, refused in views["broken"].items():
+        assert isinstance(refused, dict)
+        assert refused["available"] is False, surface
+        assert refused["reason"] == "audience_restricted", surface
+    assert snapshots == []
+
+    reset()
+    with request_scope(owner_principal(surface="mcp")):
+        owner = _every_census_surface(vaults["broken"])
+    for surface, blocked in owner.items():
+        assert isinstance(blocked, dict)
+        assert blocked["available"] is False, surface
+        assert blocked["reason"] == "policy_blocked", surface
+    assert "metrics" not in owner["census"]
+
+
 def test_an_unbound_caller_under_a_governed_policy_is_refused(tmp_path: Path) -> None:
     vault = _built(_seed_census_vault(tmp_path / "vault"))
     _withhold(vault)

@@ -13,7 +13,12 @@
       10^5 edges 6.6 s and 10^6 edges 13.1 s, peak RSS 73 MB for both; the snapshot's
       availability proof alone is about 6.7 s of that at this page count. The reduction
       alone, at 10^5 file nodes and 10^6 edges with the proof bypassed: 11.0 s, peak RSS
-      132 MB (it was 9.9 s and 702 MB before streaming).
+      132 MB (it was 9.9 s and 702 MB before streaming). The owner under a governed
+      policy pays the release filter per page: 4.1 s at 3,600 pages (0.18 s under an
+      empty policy; a refused audience 0.008 s), which extrapolates to about 75-110 s at
+      10^5 pages, past the 60 s MCP floor. A follow-up could give the owner's view the
+      tombstone set directly, since for the owner the filter excludes only tombstones;
+      not built here.
 - [x] 1.2 Red `tests/test_relation_census_sample.py`: the sample is seeded and stratified by
       family; a judged file folds with a Wilson interval; absent judgements report
       `unmeasured`. Green: `relation_census.sample`, `fold_judgments`, and the CLI

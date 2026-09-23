@@ -300,6 +300,8 @@ def _resolve_view(vault_root: Path, keep: Any) -> _View | str:
     if current.empty:
         return _View(keep=egress.release_walk_filter(root), whole=True)
     who = effective_principal()
+    # Order matters: the audience is decided before the policy's health, so a
+    # non-owner cannot learn whether the governance policy compiles.
     if not (who.resolved and who.audience_id == OWNER_AUDIENCE):
         return AUDIENCE_RESTRICTED
     if current.blocked:
