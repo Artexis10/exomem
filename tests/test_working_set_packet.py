@@ -1765,18 +1765,24 @@ def test_the_recent_statement_is_never_a_lifecycle_word(
 def _reference_recent_edits(
     mtimes: dict[str, int], *, limit: int, collections: frozenset[str]
 ) -> dict[str, str]:
-    """The edit source as R-P3 shipped it: every burst computed over the
-    whole registry, then a full newest-first sort cut at the latest burst."""
+    """The edit source by full sort: every burst computed over the whole
+    registry, the newest `limit` pages with a reason, less any edit at or
+    before the latest burst. For edits this is exactly what R-P3 shipped (it
+    stopped at the first entry not after the burst, and every entry after
+    it is newer than every entry before it); a captured session is never
+    cut (R-Q N5)."""
     burst = working_set._burst_paths(mtimes)
     after = max((int(mtimes[path]) for path in burst), default=0)
-    offered: dict[str, str] = {}
+    newest: dict[str, tuple[str, int]] = {}
     for rel in sorted(mtimes, key=lambda item: (-mtimes[item], item)):
-        if len(offered) >= limit or int(mtimes[rel]) <= after:
+        if len(newest) >= limit:
             break
         why = working_set._recent_reason_for(rel, collections=collections)
-        if why and rel not in offered:
-            offered[rel] = why
-    return offered
+        if why:
+            newest[rel] = (why, int(mtimes[rel]))
+    return {
+        rel: why for rel, (why, mtime) in newest.items() if why == "captured" or mtime > after
+    }
 
 
 def _random_registry(seed: int) -> dict[str, int]:
@@ -1837,3 +1843,28 @@ def test_the_recent_block_never_computes_every_burst(monkeypatch: pytest.MonkeyP
         f"Knowledge Base/Notes/note-{index}.md" for index in range(8)
     ]
 
+
+# --------------------------------------------------------------------------- #
+# R-Q N5: a captured session is not cut by the burst after it.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_captured_session_survives_the_burst_after_it() -> None:
+    """The reviewer's d_save3: an ordinary agent save wrote three pages a
+    second apart, sixty seconds after the session was captured. The capture
+    is the record of what was spoken about, not a batch edit, so the save
+    cuts the user's earlier edit but not the capture."""
+    session = "Knowledge Base/Sources/Sessions/2026-09-22-session.md"
+    edited = "Knowledge Base/Systems/Depot Ledger.md"
+    saved = [
+        "Knowledge Base/Notes/Research/sluice-gate-trial.md",
+        "Knowledge Base/Entities/People/Marit Solheim.md",
+        "Knowledge Base/Notes/Insights/northern-corridor-hub.md",
+    ]
+    stamp = 1_800_000_000_000_000_000
+    mtimes = {edited: stamp - 120 * 10**9, session: stamp - 60 * 10**9}
+    mtimes.update({page: stamp + index * 10**9 for index, page in enumerate(saved)})
+
+    offered = working_set._recent_edits(mtimes, limit=8)
+
+    assert offered == {session: "captured"}, offered

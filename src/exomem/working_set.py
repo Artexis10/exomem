@@ -2426,7 +2426,7 @@ def _recent_edits(
 ) -> dict[str, str]:
     """`{path: why}` for the newest `limit` pages that are working context
     (`edited`, or `captured` for a captured session), newest first, less any
-    edit at or before the latest write burst.
+    edit at or before the latest write burst. A captured session is never cut.
 
     That is the hot profile's own edit rule (`hot_profile`): a last edit
     inside a write burst is a batch nobody chose, and one older than the
@@ -2479,7 +2479,10 @@ def _recent_edits(
             if size >= HOT_PROFILE_BURST_PAGES:
                 after_burst = top
     cutoff = after_burst or 0
-    return {rel: why for mtime, rel, why in offers if mtime > cutoff}
+    # A captured session is exempt: it is the record of what was spoken
+    # about, not an edit a batch made, so a save written after it (three
+    # pages a second apart is a burst) must not cut it from the block.
+    return {rel: why for mtime, rel, why in offers if why == "captured" or mtime > cutoff}
 
 
 def _recent_mtimes(vault_root: Path) -> dict[str, int]:
