@@ -1,10 +1,11 @@
 # exomem — multi-stage container image.
 #
-# Four final targets share this one file:
+# Five final targets share this one file:
 #   lean (target `lean`, DEFAULT — base deps only, no torch, no model download)
 #   ml   (target `ml`   — the `embeddings` extra, CPU-only torch, no CUDA runtime)
 #   cuda (target `cuda` — the `embeddings` extra, CUDA-capable torch, CPU-default at idle)
 #   hosted (target `hosted` — fixed non-root identity and immutable release metadata)
+#   cloud (target `cloud` — Exomem Cloud cell runtime, derived from `hosted`)
 #
 # `lean` is intentionally the LAST stage in this file: `docker build .` / `docker
 # buildx build .` with no `--target` builds the final stage in the file, and lean
@@ -131,6 +132,25 @@ assert importlib.util.find_spec('torch') is None, 'torch reached the hosted imag
 print('offline load verified', MODEL_NAME, v.shape)"
 
 ########################################################################
+# restic-fetch — the static restic binary for the cloud image's backup and
+# restore Jobs (design D8). Fetched and verified in its own small stage, not
+# the final `cloud` image, so no curl/bzip2/apt residue ships in the runtime
+# layer that the image-pin admission policy trusts.
+########################################################################
+FROM debian:bookworm-slim AS restic-fetch
+ARG RESTIC_VERSION=0.19.1
+ARG RESTIC_SHA256=f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl bzip2 \
+ && rm -rf /var/lib/apt/lists/* \
+ && curl -fsSL -o /tmp/restic.bz2 \
+      "https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_linux_amd64.bz2" \
+ && echo "${RESTIC_SHA256}  /tmp/restic.bz2" | sha256sum -c - \
+ && bunzip2 /tmp/restic.bz2 \
+ && chmod 755 /tmp/restic \
+ && mv /tmp/restic /usr/local/bin/restic
+
+########################################################################
 # Final: ml (target `ml`). Fresh slim base — no build tooling, no uv, no
 # source tree — just the populated venv. HF_HOME pins the downloaded
 # embedding/CLIP model weights under the declared /data volume so they
@@ -233,6 +253,60 @@ USER 10001:10001
 EXPOSE 8765
 ENTRYPOINT ["exomem"]
 CMD ["--transport", "http", "--port", "8765"]
+
+########################################################################
+# Final: cloud (target `cloud`). Exomem Cloud cell runtime (design D1/D2/D8).
+#
+# Derived from `hosted`: the same offline ONNX model environment,
+# `EXOMEM_DISABLE_RANKING`, pre-baked embedding weights and read-only-root
+# compatibility carry over unchanged. Cloud mode (`EXOMEM_CLOUD_CELL=1`) is a
+# thin seam over the standalone runtime (D1), so this stage exists to add the
+# identity, backup tooling and command the cell pod needs — not a different
+# Python environment.
+#
+# UID/GID 10001 keeps `hosted`'s numeric identity but gets home `/data/host`
+# instead of `/nonexistent`: standalone custody resolves under
+# `<home>/.local/state/exomem/standalone-host-control-v1` with no code
+# override (`authorization_custody._standalone_host_control_root`, D2), so the
+# passwd home directory IS the custody root. The pod's `fsGroup: 10001` plus
+# this image's explicit UID/GID keep ownership consistent across first start,
+# pod replacement and restore.
+#
+# restic ships baked into the image (not fetched at runtime) because a cloud
+# cell's NetworkPolicy grants no runtime egress at all, and every Job that
+# touches the volume — init, backup, restore — runs this one digest-pinned
+# image under the ValidatingAdmissionPolicy (D4, D8).
+########################################################################
+FROM hosted AS cloud
+COPY --from=restic-fetch /usr/local/bin/restic /usr/local/bin/restic
+
+USER root
+RUN usermod --home /data/host exomem
+
+# EXOMEM_LOG_DIR: no runtime log ever lands on the tenant volume D8 backs up,
+# even without the manifest setting it (design D1.2 "Log directory"). D2's
+# writable `/tmp` emptyDir is where this actually lands at runtime.
+#
+# FASTMCP_CHECK_FOR_UPDATES / FASTMCP_SHOW_SERVER_BANNER: a cell's
+# NetworkPolicy grants no egress at all, not even DNS (D5), so FastMCP's
+# startup update check otherwise stalls every cold start on DNS (measured:
+# `/health` up after 24s against 4s with it off). Both names are read by the
+# installed `fastmcp.settings.Settings` (`env_prefix="FASTMCP_"`).
+ENV EXOMEM_CONTAINER_VARIANT=cloud \
+    EXOMEM_LOG_DIR=/tmp/exomem-logs \
+    FASTMCP_CHECK_FOR_UPDATES=off \
+    FASTMCP_SHOW_SERVER_BANNER=false
+
+LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.description="exomem — Exomem Cloud cell runtime (fixed UID/GID 10001, home /data/host, restic-equipped, standalone trust model)"
+
+# No HEALTHCHECK here by design (design.md D5) — see the `ml` stage's comment
+# above; cellctl reads readiness from the pod's own probes, not from Docker.
+USER 10001:10001
+EXPOSE 8765
+ENTRYPOINT ["exomem"]
+CMD ["--transport", "http", "--host", "0.0.0.0", "--port", "8765"]
 
 ########################################################################
 # Final: lean (target `lean`) — the DEFAULT stage (last in this file; see

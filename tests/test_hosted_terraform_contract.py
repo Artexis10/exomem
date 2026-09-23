@@ -101,9 +101,12 @@ def test_cloudflare_tunnel_has_exact_control_transfer_and_optional_gateway_ingre
     expected_traefik = "http://exomem-platform-traefik.exomem-platform.svc.cluster.local:80"
     assert cloudflare.count(expected_traefik) == 3
     assert "traefik.kube-system.svc.cluster.local" not in cloudflare
-    assert cloudflare.count("cloudflare_dns_record") == 3
+    # 3 CNAME records on the Tunnel (control, transfer, optional gateway)
+    # plus the control database's own DNS-only A record (D12).
+    assert cloudflare.count("cloudflare_dns_record") == 4
     assert 'type    = "CNAME"' in cloudflare
     assert "proxied = true" in cloudflare
+    assert "proxied = false" in cloudflare
     assert 'var.gateway_hostname == "" ? [] : [' in cloudflare
     assert 'var.gateway_hostname == "" ? 0 : 1' in cloudflare
     assert "http_host_header = var.gateway_hostname" in cloudflare
@@ -219,6 +222,68 @@ def test_etcd_snapshots_use_an_unlocked_bucket_and_a_write_only_key() -> None:
         assert re.search(r"sensitive\s*=\s*true", block)
 
     assert "database_backup_delete_application_key" not in outputs
+
+
+def test_control_db_pgbackrest_has_its_own_unlocked_bucket_and_scoped_key() -> None:
+    """The control database's pgBackRest repository is its own bucket, not a
+    prefix inside database_backup, which serves only the older provisioner's
+    pg_dump-based backup -- a different tool, different database. Like
+    etcd_snapshot it forgoes Object Lock: pgBackRest actively deletes files it
+    expires under its own retention policy, which a governance-retention
+    bucket would refuse until the lock expired.
+    """
+    storage = (DURABILITY / "storage.tf").read_text(encoding="utf-8")
+    outputs = (DURABILITY / "outputs.tf").read_text(encoding="utf-8")
+
+    assert 'resource "b2_bucket" "control_db_pgbackrest"' in storage
+    bucket = storage.split('resource "b2_bucket" "control_db_pgbackrest"', 1)[1].split(
+        "\nresource ", 1
+    )[0]
+    assert "file_lock_configuration" not in bucket
+    assert 'mode      = "SSE-B2"' in bucket
+    assert "prevent_destroy = true" in bucket
+    # The ask: hidden versions (what pgBackRest's own expire produces) are
+    # purged after 1 day rather than lingering.
+    assert "days_from_hiding_to_deleting  = 1" in bucket
+
+    assert 'resource "b2_application_key" "control_db_pgbackrest"' in storage
+    key = storage.split('resource "b2_application_key" "control_db_pgbackrest"', 1)[1].split(
+        "\nresource ", 1
+    )[0]
+    assert "bucket_ids   = [b2_bucket.control_db_pgbackrest.bucket_id]" in key
+    assert "b2_bucket.database_backup" not in key
+    # pgBackRest needs to list, read, write and delete (to expire old
+    # backups) -- nothing else. No retention capabilities: this bucket has
+    # no Object Lock to need them.
+    assert (
+        'capabilities = ["listBuckets", "listFiles", "readFiles", "writeFiles", "deleteFiles"]'
+        in key
+    )
+    assert "readFileRetentions" not in key
+    assert "writeFileRetentions" not in key
+    assert 'name_prefix  = "control-db/"' in key
+
+    assert 'output "control_db_pgbackrest_bucket_name"' in outputs
+    bucket_name_output = outputs.split('output "control_db_pgbackrest_bucket_name"', 1)[1].split(
+        "}", 1
+    )[0]
+    assert "sensitive" not in bucket_name_output
+
+    for secret_output in (
+        "control_db_pgbackrest_application_key_id",
+        "control_db_pgbackrest_application_key",
+    ):
+        assert f'output "{secret_output}"' in outputs
+        block = outputs.split(f'output "{secret_output}"', 1)[1].split("}", 1)[0]
+        assert re.search(r"sensitive\s*=\s*true", block)
+
+    # Not part of the Kubernetes platform's durability-storage ConfigMap
+    # contract -- this bucket is consumed by the Ansible postgres role
+    # directly, the same as etcd_snapshot is consumed by k3s directly.
+    contract = json.loads(
+        (ROOT / "infra/contracts/durability-storage-v1.json").read_text(encoding="utf-8")
+    )
+    assert "control_db_pgbackrest_bucket_name" not in contract["bindings"]
 
 
 def test_durability_bucket_outputs_have_one_exact_platform_configmap_contract() -> None:
@@ -413,6 +478,54 @@ def test_hcp_provider_lock_covers_amd64_and_arm64() -> None:
 
     assert "h1:G1hH2nmuFT7rXMxBhz+s32Xv0BSUNblRqr30FXQIpQc=" in lock
     assert "h1:qAb6Iv9bMxtRev5gv3EPgyybQvNQcx1pVNc6fIFDmSE=" in lock
+
+
+def test_control_database_server_reuses_the_existing_network_with_its_own_firewall() -> None:
+    compute = (FOUNDATION / "compute.tf").read_text(encoding="utf-8")
+    firewall = (FOUNDATION / "firewall.tf").read_text(encoding="utf-8")
+    variables = (FOUNDATION / "variables.tf").read_text(encoding="utf-8")
+    outputs = (FOUNDATION / "outputs.tf").read_text(encoding="utf-8")
+    cloudflare = (FOUNDATION / "cloudflare.tf").read_text(encoding="utf-8")
+
+    assert 'resource "hcloud_server" "control"' in compute
+    control_server = compute.split('resource "hcloud_server" "control"', 1)[1]
+    # It attaches to the alpha network/subnet Terraform already owns rather
+    # than creating a second one.
+    assert "subnet_id = hcloud_network_subnet.alpha.id" in control_server
+    assert compute.count('resource "hcloud_network"') == 1
+    assert compute.count('resource "hcloud_network_subnet"') == 1
+    assert re.search(r"firewall_ids\s*=\s*\[hcloud_firewall\.control\.id\]", control_server)
+    assert re.search(r"delete_protection\s*=\s*true", control_server)
+    assert re.search(r"rebuild_protection\s*=\s*true", control_server)
+    assert re.search(r"ipv6_enabled\s*=\s*false", control_server)
+
+    assert 'resource "hcloud_firewall" "control"' in firewall
+    control_firewall = firewall.split('resource "hcloud_firewall" "control"', 1)[1]
+    assert 'port        = "22"' in control_firewall
+    assert "source_ips  = var.admin_ssh_cidrs" in control_firewall
+    assert "port        = tostring(var.pgbouncer_public_port)" in control_firewall
+    assert 'source_ips  = ["0.0.0.0/0", "::/0"]' in control_firewall
+    for other_port in ("80", "443", "6443", "5432"):
+        assert f'"{other_port}"' not in control_firewall
+
+    assert 'variable "database_hostname"' in variables
+    database_hostname_block = variables.split('variable "database_hostname"', 1)[1].split(
+        "variable ", 1
+    )[0]
+    assert "var.database_hostname != var.control_hostname" in database_hostname_block
+    assert "var.database_hostname != var.transfer_hostname" in database_hostname_block
+
+    assert 'output "control_db_server_ipv4"' in outputs
+    assert 'output "control_db_private_ip"' in outputs
+    assert 'output "database_hostname"' in outputs
+
+    assert 'resource "cloudflare_dns_record" "database"' in cloudflare
+    database_record = cloudflare.split('resource "cloudflare_dns_record" "database"', 1)[1].split(
+        "resource ", 1
+    )[0]
+    assert "proxied = false" in database_record
+    assert 'type    = "A"' in database_record
+    assert "hcloud_primary_ip.control_db.ip_address" in database_record
 
 
 def test_terraform_roots_format_and_validate_offline() -> None:

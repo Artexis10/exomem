@@ -97,6 +97,7 @@ def test_auth_sessions_json_is_secret_free_and_marks_generation_revoked(
                 "github_user_id": 1234,
                 "issued_at": 1_700_000_000.0,
                 "status": "active",
+                "owner_equivalent": False,
             },
             {
                 "session_id": "qrstuvwxyzABCDEF",
@@ -106,6 +107,7 @@ def test_auth_sessions_json_is_secret_free_and_marks_generation_revoked(
                 "github_user_id": 1234,
                 "issued_at": 1_700_000_000.0,
                 "status": "generation_revoked",
+                "owner_equivalent": False,
             },
         ]
     }
@@ -113,6 +115,43 @@ def test_auth_sessions_json_is_secret_free_and_marks_generation_revoked(
     assert "token_digest" not in rendered
     assert '"generation":' not in rendered
     assert "new-secret-generation" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("binding", "expected"),
+    [
+        (None, [False, False]),
+        ("github:1234", [True, False]),
+        ("github:5678", [False, False]),
+        ("github:01234", [False, False]),
+    ],
+)
+def test_auth_sessions_marks_sessions_that_act_as_the_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    binding: str | None,
+    expected: list[bool],
+) -> None:
+    records = [
+        _record(),
+        replace(_record(), session_id="qrstuvwxyzABCDEF", github_user_id=5678),
+    ]
+    _install_authority(monkeypatch, FakeAuthority(records))
+    monkeypatch.setenv("EXOMEM_GITHUB_USER_ID", "1234")
+    if binding is None:
+        monkeypatch.delenv("EXOMEM_OWNER_OAUTH_SUBJECT", raising=False)
+    else:
+        monkeypatch.setenv("EXOMEM_OWNER_OAUTH_SUBJECT", binding)
+
+    assert main(["auth", "sessions", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [row["owner_equivalent"] for row in payload["sessions"]] == expected
+
+    assert main(["auth", "sessions"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert [line.split()[2] for line in lines] == [
+        "owner" if flag else "-" for flag in expected
+    ]
 
 
 def test_auth_revoke_one_uses_tombstone_and_custom_reason(

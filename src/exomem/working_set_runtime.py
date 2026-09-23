@@ -38,14 +38,16 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
+import time
 from collections import OrderedDict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from . import context_roles, sidecar_store, working_set, working_set_index
+from . import context_roles, sidecar_store, working_set, working_set_index, working_set_resolve
 
 log = logging.getLogger(__name__)
 
@@ -128,6 +130,7 @@ def cache_key(
     retrieval_paths: frozenset[str] | set[str] | None = None,
     continuity: str | None = None,
     anchor: str | None = None,
+    continuity_refs: frozenset[str] | set[str] = frozenset(),
 ) -> tuple:
     """The packet identity.
 
@@ -142,6 +145,9 @@ def cache_key(
     request carrying either must never be handed a packet compiled without it,
     and two different overrides of one turn must not collide. The token enters as
     a digest rather than whole, so a long-lived session cannot grow the key.
+    `continuity_refs` are the token's refs THIS audience may see
+    (`visible_continuity_refs`), for the reason `retrieval_paths` is here: one
+    token read by two audiences is two packets.
 
     `purpose` is deliberately not a parameter: it may widen or narrow what an
     audience sees, so a purpose-keyed cache would be a second, weaker copy of
@@ -155,6 +161,7 @@ def cache_key(
         int(max_chars),
         retrieval_digest(retrieval_paths),
         continuity_digest(continuity),
+        tuple(sorted(str(ref) for ref in continuity_refs)),
         str(anchor or ""),
         bool(os.environ.get("EXOMEM_DISABLE_EMBEDDINGS")),
     )
@@ -230,12 +237,20 @@ def encode_continuity(
     generation: int,
     refs: Iterable[str],
     roles: Iterable[str],
+    minted_ns: int | None = None,
 ) -> str:
     """Base64 of the compact JSON payload. No secret, and no signature.
 
     There is nothing to sign: every field is re-checked against the serving
     state, and a forged token can at most name refs the current turn already
-    reached by a contact kind.
+    reached by a contact kind — or, on a turn that only points back, refs the
+    vault still holds as anchors, which is what the turn asked for.
+
+    `minted_ns` is when the packet was served, wall clock. It is what lets a
+    later referential turn tell a token that is still the latest thing that
+    happened from one the user has since moved on from (`working_set.
+    hot_profile`). Omitted, the token reads as it did before the field
+    existed, and its refs lead the profile unconditionally.
     """
     payload = {
         "v": CONTINUITY_VERSION,
@@ -251,6 +266,8 @@ def encode_continuity(
         # deliberately kept, not dead weight to be tidied away.
         "roles": [str(role) for role in roles if str(role)],
     }
+    if minted_ns is not None:
+        payload["minted_ns"] = int(minted_ns)
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
     # `surrogatepass`, symmetrically with `decode_continuity`. A vault path reaches
     # Python through filesystem decoding, so a filename with invalid UTF-8 arrives
@@ -309,13 +326,30 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
         generation = int(payload.get("generation") or 0)
     except (TypeError, ValueError, ArithmeticError):
         return None
+    # Optional, and never a reason to refuse: a token minted before the field
+    # existed has none, and a malformed one is read as absent, which is the
+    # older token's behaviour rather than a stale token's.
+    minted = payload.get("minted_ns")
+    minted_ns = minted if isinstance(minted, int) and not isinstance(minted, bool) and minted > 0 else None
     return {
         "identity": identity,
         "roles_hash": roles_hash,
         "generation": generation,
         "refs": [ref for ref in refs if isinstance(ref, str) and ref],
         "roles": [role for role in roles if isinstance(role, str) and role],
+        "minted_ns": minted_ns,
     }
+
+
+def continuity_minted_ns(token: str | None) -> int | None:
+    """When the packet behind `token` was served, or `None` when the token
+    does not say (minted before the field existed) or cannot be read. Never
+    raises: the argument is a caller's string."""
+    try:
+        payload = decode_continuity(token)
+    except Exception:  # noqa: BLE001 - a caller's string must not fail the request
+        return None
+    return payload.get("minted_ns") if payload else None
 
 
 def read_continuity(
@@ -350,6 +384,10 @@ def read_continuity(
     return frozenset(payload["refs"]), CONTINUITY_APPLIED
 
 
+#: The anchor statuses a token carries forward: what the packet served.
+_MINTED_STATUSES = frozenset({"resolved", working_set_resolve.RETRIEVAL_CARRIED_STATUS})
+
+
 def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
     """The token for a packet AS SERVED, or `""` when there is nothing to carry.
 
@@ -364,13 +402,19 @@ def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
     its ref forward would let a later turn's `continuity` qualifier alone
     promote a candidate no turn ever resolved -- exactly the widening the
     resolver's soundness rule exists to stop.
+
+    A carried page (`retrieval_carried`) is minted too: it is the one page
+    the packet served, not a listed candidate, and "continue" after it can
+    only resume it if the token names it. Its ref is its path, which is what
+    `working_set.continuity_page` resumes; a later turn's `continuity` still
+    only qualifies an anchor that turn reached.
     """
     if not identity or packet.get("abstained"):
         return ""
     anchors = [
         item
         for item in packet.get("anchors") or ()
-        if isinstance(item, Mapping) and item.get("status") == "resolved"
+        if isinstance(item, Mapping) and item.get("status") in _MINTED_STATUSES
     ]
     refs = [str(item.get("ref") or "") for item in anchors]
     refs = [ref for ref in refs if ref]
@@ -392,10 +436,60 @@ def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
             generation=int(generation.get("index_generation") or 0),
             refs=refs,
             roles=[role for role in roles if role],
+            minted_ns=time.time_ns(),
         )
     except Exception:  # noqa: BLE001 - a token is an optimisation, never a promise
         log.debug("continuity token could not be minted; serving without", exc_info=True)
         return ""
+
+
+def visible_continuity_refs(
+    vault_root: Path,
+    rows: Sequence[Any],
+    refs: frozenset[str],
+    *,
+    purpose: str | None = None,
+) -> frozenset[str]:
+    """The refs of a valid token that name something the CURRENT principal
+    may see: an index row, by its reported ref or its path, or an eligible
+    compiled page (`working_set._eligible_agent_page`), whose page the
+    release plane releases to this audience (`egress.quick_page_visible`).
+
+    Every other ref is dropped here — one naming nothing, one naming raw
+    material or a retired page, and one naming a page this audience may not
+    see — before the cache key and the compile are derived from them, so a
+    withheld ref and a missing one reach everything downstream as the same
+    nothing. Decided before the compile rather than inside it because the
+    packet cache is not keyed on the principal: a visibility decision made
+    inside a compiled packet would be served to the next audience that
+    passes the same token. The token itself is still passed, and still
+    leads the hot profile when every ref went (`continuity_passed`), exactly
+    as a token naming nothing does.
+
+    Bounded by the token's own refs (at most `CONTINUITY_MAX_REFS`), each
+    checked against the rows the request already holds and, failing that,
+    one cached page read; the release decision is the one the guard reuses.
+    """
+    if not refs:
+        return frozenset()
+    from .governance import egress
+
+    kept: set[str] = set()
+    for ref in refs:
+        named = frozenset({ref})
+        paths = [
+            str(row.path)
+            for row in rows
+            if getattr(row, "path", "") and working_set_resolve.names_row(named, row)
+        ]
+        if not paths:
+            page = working_set._eligible_agent_page(vault_root, ref)
+            paths = [page] if page is not None else []
+        if paths and all(
+            egress.quick_page_visible(vault_root, path, purpose=purpose) for path in paths
+        ):
+            kept.add(ref)
+    return frozenset(kept)
 
 
 def reset_caches_for_tests() -> None:
@@ -511,6 +605,320 @@ def lexical_evidence(
         return [], "unavailable"
 
 
+#: The floor on how many scored hits the carry recall asks for. The real
+#: number is `working_set.carry_fetch_size(pages)`, which grows with the
+#: corpus so the window stays wider than the rarity gate can admit; this
+#: name is the default for a caller that has no page count in hand.
+RETRIEVAL_CARRY_LIMIT = working_set.RETRIEVAL_CARRY_FETCH
+#: Knowledge-base folders holding raw captured material rather than compiled
+#: conclusions. Read off `working_set_index` rather than restated here: that
+#: module already refuses to make an anchor of anything inside them, for the
+#: same reason this refuses to carry one, and two spellings of "raw material"
+#: would be one spelling too many.
+CARRY_EXCLUDED_FOLDERS: frozenset[str] = working_set_index._RAW_MATERIAL_FOLDERS
+
+
+def _is_raw_material(path: str) -> bool:
+    """Is `path` a captured source or a preserved piece of evidence?
+
+    A carried packet serves compiled conclusions. A source is what a
+    conclusion was drawn FROM and evidence is what one is checked AGAINST;
+    serving either as though it were durable memory is exactly the step the
+    compile stage exists to stand between.
+
+    Matched the SAME way `working_set_index` matches it — the first segment
+    under the knowledge-base folder — so an ordinary note folder someone
+    happened to name `Sources` is not caught by it and the two modules cannot
+    disagree about what raw material is. Backslashes are folded first, so a
+    row written on Windows is recognised too.
+    """
+    from .kbdir import kb_prefix
+
+    inside = str(path).replace("\\", "/").removeprefix(kb_prefix())
+    return inside.split("/", 1)[0] in CARRY_EXCLUDED_FOLDERS
+
+
+def _is_navigation_page(path: str) -> bool:
+    """Is `path` an `index.md` or `log.md`, at any directory level?
+
+    The same predicate the recent-context block and the find corpus use
+    (`find_corpus.NAVIGATION_BASENAMES`), so the modules cannot disagree
+    about what navigation is. A navigation page lists the titles of the
+    pages it navigates to, so it matches any turn that names one of them by
+    its title — it is never itself the page a turn named.
+    """
+    from . import find_corpus
+
+    name = str(path).replace("\\", "/").rsplit("/", 1)[-1]
+    return name.casefold() in find_corpus.NAVIGATION_BASENAMES
+
+
+def content_words(turn: str) -> str:
+    """The turn's own content WORDS, unstemmed, stopwords dropped.
+
+    What the ranking query is given. `search_bm25_result` tokenises and
+    stems whatever it receives, so it must receive words: handing it stems
+    stems them a SECOND time, and Snowball does not settle in one pass —
+    237 of 6,225 words in this repository change again ("collapse" ->
+    "collaps" -> "collap"), and the MATCH is then issued for terms no page
+    contains.
+    """
+    return " ".join(
+        token
+        for token in working_set_index.tokens_of(working_set_index.normalize(turn))
+        if token not in working_set_index.STOPWORDS
+    )
+
+
+def content_stems(turn: str) -> tuple[str, ...]:
+    """The turn's own content stems, in order, deduplicated.
+
+    The SAME normalisation, stopword filter and stemmer the catalogue
+    indexed its pages with, so a frequency measured here and a page ranked
+    there are talking about the same word. Used for the rarity lookup and
+    the corroboration list, which compare against the catalogue's STORED
+    stems directly; never for the ranking query, which stems what it is
+    given (see `content_words`).
+    """
+    from . import bm25 as bm25_module
+
+    return tuple(dict.fromkeys(bm25_module.tokenize(content_words(turn))))
+
+
+#: What ends a proximity window. Sentence-ending punctuation and a line
+#: break; a comma deliberately does not, being punctuation inside a phrase
+#: rather than between two of them.
+_SENTENCE_BREAK = re.compile(r"[.!?;\n\r]+")
+
+
+def adjacent_rare_pairs(
+    turn: str,
+    rare_terms: Sequence[str],
+    *,
+    window: int | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """Pairs of distinctive stems the turn said close enough together to be
+    reading as one name, measured on the turn's OWN token positions.
+
+    Distance is counted over the raw normalised tokens — stopwords included
+    — because that is the distance a reader sees: "the lisbon harbour
+    window" is a phrase and "flying to lisbon ... around the harbour" is
+    not, and dropping the function words in between would make them look
+    alike.
+
+    A SENTENCE BOUNDARY ends the window however few tokens straddle it.
+    "I am flying out to lisbon next week. The harbour was shut" puts the
+    two words three tokens apart and they are still two sentences about two
+    things; measured, that pairing carried a harbour ledger at 18.78. A
+    comma is not a boundary — "the girvan, slot question" is one phrase
+    with punctuation in it. The window measures token distance within a
+    sentence; it does not measure intent, and nothing here reads meaning.
+
+    One raw token may carry several stems ("girvan-slot", "o'brien"), and
+    all of them are placed at that token's position: a compound is the
+    phrase said as tightly as a phrase can be said.
+
+    Each pair is returned once, sorted, so the caller's query sees a stable
+    set.
+    """
+    from . import bm25 as bm25_module
+
+    span = working_set.RETRIEVAL_CARRY_RARE_WINDOW if window is None else int(window)
+    wanted = {str(term) for term in rare_terms}
+    if len(wanted) < 2:
+        return ()
+    pairs: set[tuple[str, str]] = set()
+    # Split the RAW text: `normalize` folds case and width but keeps the
+    # punctuation, and splitting per sentence is what keeps a window from
+    # reaching across one.
+    for sentence in _SENTENCE_BREAK.split(str(turn)):
+        placed: list[tuple[int, str]] = []
+        for index, token in enumerate(
+            working_set_index.tokens_of(working_set_index.normalize(sentence))
+        ):
+            for stem in bm25_module.tokenize(token):
+                if stem in wanted:
+                    placed.append((index, stem))
+        for position, (left_at, left) in enumerate(placed):
+            for right_at, right in placed[position + 1 :]:
+                if right_at - left_at > span:
+                    break
+                if left != right:
+                    first, second = sorted((left, right))
+                    pairs.add((first, second))
+    return tuple(sorted(pairs))
+
+
+def rare_turn_terms(
+    vault_root: Path,
+    stems: Sequence[str],
+    *,
+    freshness=None,
+    recall_checkpoint=None,
+) -> tuple[tuple[str, ...], int, str]:
+    """`(distinctive stems, indexed pages, readiness status)` for `stems`.
+
+    One document-frequency lookup per stem over the maintained catalogue,
+    bounded by the turn's own content words and measured on the same
+    `fts`/`pages` join the ranking uses. Measured at 34.8 ms for a four-stem
+    turn and 41.6 ms for a twenty-seven-stem turn against a 1,539-page
+    knowledge base, with the request's own recall checkpoint supplied — the
+    per-term cost is small and nearly all of it is the one readiness proof.
+    """
+    from . import lexstore
+
+    # Navigation pages are not counted: an index or a log repeats the titles
+    # it lists, so a folder-level one beside the vault's own pushed a title
+    # word past the cap and the page named by its title was never carried.
+    # Raw material is not counted either, nor counted as a page: four
+    # captured sessions that discussed a page did the same to its title.
+    result = lexstore.term_document_frequencies(
+        vault_root,
+        stems,
+        scope="kb",
+        freshness=freshness,
+        allow_delta=False,
+        recall_checkpoint=recall_checkpoint,
+        exclude_navigation=True,
+        exclude_raw_material=True,
+    )
+    if not result.readiness.complete:
+        return (), 0, result.readiness.status
+    frequencies, corpus_pages = result.value or ({}, 0)
+    cap = working_set.rare_document_cap(corpus_pages)
+    rare = tuple(stem for stem in stems if int(frequencies.get(stem, 0)) <= cap)
+    return rare, int(corpus_pages), "available"
+
+
+def carry_candidates(
+    vault_root: Path,
+    turn: str,
+    *,
+    limit: int | None = None,
+    freshness=None,
+    recall_checkpoint=None,
+) -> tuple[tuple[tuple[str, float], ...], str]:
+    """Pages this turn NAMED, for a turn that resolved no anchor at all.
+    Returns `(hits, readiness status)`.
+
+    Three deliberate differences from `lexical_evidence`, which is otherwise
+    the same sqlite query:
+
+    * **No `allowed_paths`.** Anchor-restricted recall is what makes a
+      decision living in an ordinary research note unreachable — it is not an
+      anchor, so it is not in the catalogue the query is confined to, so the
+      turn abstains however plainly its own words name the page.
+    * **Corroboration is counted over DISTINCTIVE stems only, and where
+      they sit matters.** Counting it over all of them asks "did several of
+      the turn's words occur here", which is co-occurrence: a two-line stub
+      titled "Meeting notes" sharing "meeting", "pending" and "decision"
+      with an ordinary turn passed that test and was served as durable
+      memory. Narrowing to the stems that are rare in THIS corpus is most
+      of the answer, but not all of it — two genuinely distinctive words
+      nine tokens apart are still two things a speaker mentioned, not a
+      name. A page qualifies on a PHRASE and on nothing else: both stems
+      of some pair the turn said within `RETRIEVAL_CARRY_RARE_WINDOW`
+      tokens. The ranking still sees the whole turn; only the gate narrows.
+    * **The score is kept.** `lexical_evidence` discards it because evidence
+      there is categorical. Carrying needs to compare two survivors, which a
+      rank cannot express.
+
+    Fewer than `RETRIEVAL_CARRY_MIN_RARE_TERMS` distinctive stems means no
+    hit could qualify, so the ranking query is not made at all — the
+    cheapest refusal is the one that never asks. A corpus smaller than
+    `RETRIEVAL_CARRY_MIN_PAGES` refuses for the same reason one step back:
+    rarity measured against a vault that holds no ordinary prose says only
+    that the vault is small.
+
+    What comes back IS the set of pages this turn named, which is why the
+    caller can decide on the COUNT rather than on a score. Raw-material
+    hits and retired pages are dropped before the caller ever sees them: a
+    captured source or a preserved piece of evidence is not a candidate,
+    and a superseded note answers to the same phrase as the note that
+    superseded it, so leaving it in would read as two named pages.
+
+    Everything else is the existing bounded contract: the maintained
+    catalogue only, no foreground delta (`allow_delta=False`), no corpus
+    walk, no directory enumeration, and an incomplete catalogue reported
+    rather than repaired.
+    """
+    from . import lexstore
+
+    try:
+        stems = content_stems(turn)
+        if len(stems) < working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS:
+            return (), "available"
+        rare, corpus_pages, state = rare_turn_terms(
+            vault_root,
+            stems,
+            freshness=freshness,
+            recall_checkpoint=recall_checkpoint,
+        )
+        if state != "available":
+            return (), state
+        if corpus_pages < working_set.RETRIEVAL_CARRY_MIN_PAGES:
+            # Rarity needs a corpus. The page count came back with the
+            # frequencies, so this costs nothing beyond the lookup already
+            # made, and it refuses before the ranking query.
+            return (), "available"
+        if len(rare) < working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS:
+            return (), "available"
+        # Rarity says a word is name-shaped; proximity says the turn used it
+        # to NAME something. Two distinctive words said together are a
+        # phrase; the same two nine tokens apart are two things the speaker
+        # mentioned. No phrase, no candidate — a page that enumerates many
+        # things contains any few of them, so scattering is what tells a
+        # list from a name.
+        pairs = adjacent_rare_pairs(turn, rare)
+        if not pairs:
+            return (), "available"
+        result = lexstore.search_bm25_result(
+            vault_root,
+            # The turn's WORDS, not its stems: this query stems what it is
+            # given, and stemming a stem is not a no-op.
+            content_words(turn),
+            # Wider than the rarity gate can admit, which grows with the
+            # corpus: a window a run of retired rows can fill is a window
+            # that decides "one named page or two" by where it ends.
+            working_set.carry_fetch_size(corpus_pages) if limit is None else limit,
+            scope="kb",
+            freshness=freshness,
+            allow_delta=False,
+            corroboration_tokens=list(rare),
+            corroboration_groups=[list(pair) for pair in pairs],
+            recall_checkpoint=recall_checkpoint,
+            # Inside the query, so the LIMIT counts only rows that can be
+            # candidates: twelve captures that repeat the turn filled the
+            # window on their own when they were cut after it.
+            exclude_navigation=True,
+            exclude_raw_material=True,
+        )
+        if not result.readiness.complete:
+            return (), result.readiness.status
+        # Raw material, navigation pages and retired pages are dropped
+        # BEFORE the caller counts what the turn named. The query already
+        # left the first two out; the check stays here too, where the path
+        # is read the way the index reads it (backslashes folded). A superseded note
+        # and the note that superseded it answer to the same phrase, so
+        # leaving it in would read as two named pages and refuse every
+        # revised page in the vault; an index or a log repeats every title
+        # in the vault, so leaving one in did exactly that to every turn that
+        # named a page by its title.
+        return (
+            tuple(
+                (str(path), float(score))
+                for path, score in (result.value or ())
+                if not _is_raw_material(path)
+                and not _is_navigation_page(path)
+                and working_set._is_current_page(vault_root, str(path))
+            ),
+            "available",
+        )
+    except Exception:  # noqa: BLE001 - the carry is additive; it abstains, never raises
+        log.debug("activation carry recall unavailable", exc_info=True)
+        return (), "unavailable"
+
+
 def refresh_index(index: working_set_index.WorkingSetIndex, *, freshness_stamp: str = "") -> bool:
     """Bring a stale index up to the current vault state; False when it could not.
 
@@ -590,8 +998,14 @@ def serve(
     lexical_state: str = "not_requested",
     evidence_token: tuple[int, int, int] | None = None,
     freshness_snapshot: Any = None,
+    lexical_seconds: float = 0.0,
 ) -> dict[str, Any]:
-    """Compile (or reuse) one unguarded packet. Never raises: it abstains instead."""
+    """Compile (or reuse) one unguarded packet. Never raises: it abstains instead.
+
+    `lexical_seconds` is what this request's own lexical pass measured,
+    passed through to the carry so it can ask the budget for a reserve its
+    stage can actually be paid for out of.
+    """
     root = Path(vault_root)
     limit = working_set.clamp_budget(max_chars)
     registry = context_roles.load_roles(root)
@@ -645,6 +1059,14 @@ def serve(
     except Exception:  # noqa: BLE001 - the whole operation is additive and abstains
         log.warning("continuity evaluation failed; ignoring the token", exc_info=True)
         continuity_refs, continuity_state = frozenset(), CONTINUITY_STALE
+    continuity_passed = continuity_state == CONTINUITY_APPLIED
+    try:
+        continuity_refs = visible_continuity_refs(
+            root, index.anchors(), continuity_refs, purpose=purpose
+        )
+    except Exception:  # noqa: BLE001 - a ref that cannot be decided is not disclosed
+        log.warning("continuity visibility check failed; dropping the refs", exc_info=True)
+        continuity_refs = frozenset()
     key = cache_key(
         freshness_key=freshness_key,
         index_generation=index.generation(),
@@ -654,6 +1076,7 @@ def serve(
         retrieval_paths=retrieval_paths,
         continuity=continuity,
         anchor=anchor,
+        continuity_refs=continuity_refs,
     )
     cache_identity = (str(root.absolute()), key, lexical_state, index.token())
     with _CACHE_LOCK:
@@ -689,7 +1112,10 @@ def serve(
             freshness_key=_key_text(freshness_key),
             freshness_snapshot=freshness_snapshot,
             continuity_refs=continuity_refs,
+            continuity_minted_ns=continuity_minted_ns(continuity) if continuity_passed else None,
+            continuity_passed=continuity_passed,
             anchor=anchor,
+            lexical_seconds=lexical_seconds,
         )
     except working_set.BudgetExhausted as exc:
         # A deliberate budget skip, not a bug: `log.info`, no traceback. The
@@ -708,6 +1134,11 @@ def serve(
     except Exception:  # noqa: BLE001 - the whole operation is additive and abstains
         log.warning("activation compilation failed; abstaining", exc_info=True)
         return _abstain_unavailable()
+    # `compile_packet` reports whether a visible ref of a valid token qualified
+    # anything; a token that qualified nothing contributed nothing, and
+    # `applied` would claim it had.
+    if continuity_state == CONTINUITY_APPLIED:
+        continuity_state = packet["generation"].get("continuity") or CONTINUITY_STALE
     packet["generation"]["continuity"] = continuity_state
     packet["generation"]["lexical_evidence"] = lexical_state
     changed = evidence_changed()

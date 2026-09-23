@@ -1878,9 +1878,28 @@ def search_bm25_result(
     allowed_paths: set[str] | None = None,
     allow_delta: bool = True,
     min_matched_terms: int = 1,
+    corroboration_tokens: list[str] | None = None,
+    corroboration_groups: list[list[str]] | None = None,
     recall_checkpoint: Any | None = None,
+    exclude_navigation: bool = False,
+    exclude_raw_material: bool = False,
 ) -> CatalogQueryResult[list[tuple[str, float]]]:
-    """Non-walking maintained-catalog BM25 query with explicit readiness."""
+    """Non-walking maintained-catalog BM25 query with explicit readiness.
+
+    `corroboration_tokens` separates WHAT MATCHES from WHAT COUNTS as
+    corroboration. `min_matched_terms` is normally counted over the query's
+    own stems, which answers "did several of the turn's words occur here".
+    A caller that already knows some of those stems are worthless — every
+    page in the corpus has them — can pass the subset worth counting, and
+    the predicate then answers the sharper question "did several of the
+    turn's DISTINCTIVE words occur here" while the ranking still sees the
+    whole query. `None` keeps the existing behaviour exactly.
+
+    `exclude_navigation` and `exclude_raw_material` leave those rows out
+    inside the query (see `_excluded_rows_clause`), so `k` counts only rows a
+    caller could keep: filtered after the LIMIT, a run of them at the head
+    empties the window.
+    """
     if not _usable():
         return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
     if not query.strip():
@@ -1891,6 +1910,10 @@ def search_bm25_result(
     tokens = [stem for unit in units for stem in unit.stems]
     if not tokens:
         return CatalogQueryResult([], CatalogReadiness("available", True, backend()))
+    groups = [
+        sorted({str(term) for term in group if str(term).strip()})
+        for group in (corroboration_groups or [])
+    ]
     return get_store(vault_root).search_bm25_result(
         tokens,
         k,
@@ -1899,9 +1922,106 @@ def search_bm25_result(
         allowed_paths,
         allow_delta=allow_delta,
         min_matched_terms=min_matched_terms,
+        corroboration_tokens=corroboration_tokens,
+        corroboration_groups=[group for group in groups if group],
         recall_checkpoint=recall_checkpoint,
         term_units=_term_units(units),
+        exclude_navigation=exclude_navigation,
+        exclude_raw_material=exclude_raw_material,
     )
+
+
+def term_document_frequencies(
+    vault_root: Path,
+    terms: Iterable[str],
+    *,
+    scope: str = "kb",
+    freshness: tuple | None = None,
+    allow_delta: bool = True,
+    recall_checkpoint: Any | None = None,
+    exclude_navigation: bool = False,
+    exclude_raw_material: bool = False,
+) -> CatalogQueryResult[tuple[dict[str, int], int]]:
+    """How many indexed pages each stem occurs on, and how many there are.
+
+    Returns `({stem: document frequency}, pages in scope)` — the two numbers
+    a caller needs to decide whether a word is DISTINCTIVE in this corpus
+    rather than merely present in the query. Nothing here decides what
+    "rare" means: that is the caller's policy, and it differs between a
+    twelve-page vault and a twelve-thousand-page one.
+
+    Measured over the SAME `fts`/`pages` join and the same scope column the
+    BM25 query uses, so a term's frequency and its ranking cannot be taken
+    from two different corpora. One indexed FTS lookup per term, bounded by
+    the caller's own term list; no vocabulary table is materialised, because
+    `fts5vocab` counts documents vault-wide and would answer for a corpus
+    the query never searched.
+
+    `exclude_navigation` leaves navigation pages (`index.md`, `log.md` at any
+    level, `find_corpus.NAVIGATION_BASENAMES`) out of each stem's count. They
+    repeat the titles of the pages they list, so every index or log that
+    lists a title adds one to its words' frequency without making them any
+    less distinctive. The page total is unchanged.
+
+    `exclude_raw_material` leaves captured sources and preserved evidence
+    (the `Sources/` and `Evidence/` folders under the knowledge base) out of
+    each stem's count AND out of the page total. Every captured session that
+    discussed a page repeats its words; they are what a conclusion was drawn
+    from, not pages of the corpus a caller measures rarity against.
+    """
+    if not _usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    wanted = [str(term) for term in terms if str(term).strip()]
+    if not wanted:
+        return CatalogQueryResult(({}, 0), CatalogReadiness("available", True, backend()))
+    return get_store(vault_root).term_document_frequencies(
+        wanted,
+        scope,
+        freshness,
+        allow_delta=allow_delta,
+        recall_checkpoint=recall_checkpoint,
+        exclude_navigation=exclude_navigation,
+        exclude_raw_material=exclude_raw_material,
+    )
+
+
+def _excluded_rows_clause(
+    *, navigation: bool, raw_material: bool
+) -> tuple[str, list[object]]:
+    """A `WHERE` fragment over the `pages p` alias that leaves navigation
+    pages and/or raw material out, with its parameters in placeholder order.
+
+    Navigation is `find_corpus.NAVIGATION_BASENAMES` as a basename at the
+    root or after a separator; LIKE is case-insensitive for ASCII, matching
+    the casefolded names. Raw material is a first folder under the knowledge
+    base in `working_set_index._RAW_MATERIAL_FOLDERS`, compared exactly, as
+    `working_set_runtime._is_raw_material` compares it — so the query and the
+    Python filter cannot disagree about what either is.
+    """
+    clause = ""
+    params: list[object] = []
+    if navigation:
+        from . import find_corpus
+
+        names = sorted(find_corpus.NAVIGATION_BASENAMES)
+        clause += " AND NOT (" + " OR ".join(
+            "p.path LIKE ? OR p.path LIKE ?" for _name in names
+        ) + ")"
+        for name in names:
+            params.extend((name, f"%/{name}"))
+    if raw_material:
+        from . import working_set_index
+
+        prefixes = sorted(
+            f"{kb_dirname()}/{folder}/"
+            for folder in working_set_index._RAW_MATERIAL_FOLDERS
+        )
+        clause += " AND NOT (" + " OR ".join(
+            "substr(p.path, 1, ?) = ?" for _prefix in prefixes
+        ) + ")"
+        for prefix in prefixes:
+            params.extend((len(prefix), prefix))
+    return clause, params
 
 
 def search_substring(
@@ -5861,8 +5981,12 @@ class LexicalStore:
         *,
         allow_delta: bool = True,
         min_matched_terms: int = 1,
+        corroboration_tokens: list[str] | None = None,
+        corroboration_groups: list[list[str]] | None = None,
         recall_checkpoint: Any | None = None,
         term_units: list[list[object]] | None = None,
+        exclude_navigation: bool = False,
+        exclude_raw_material: bool = False,
     ) -> CatalogQueryResult[list[tuple[str, float]]]:
         return self._serve_from_ready_catalog_result(
             scope,
@@ -5871,11 +5995,77 @@ class LexicalStore:
                 conn, stemmed_tokens, k, scope, allowed_paths,
                 min_matched_terms=min_matched_terms,
                 term_units=term_units,
+                corroboration_tokens=corroboration_tokens,
+                corroboration_groups=corroboration_groups,
+                exclude_navigation=exclude_navigation,
+                exclude_raw_material=exclude_raw_material,
             ),
             "lexical sidecar BM25 query failed (%s)",
             allow_delta=allow_delta,
             recall_checkpoint=recall_checkpoint,
         )
+
+    def term_document_frequencies(
+        self,
+        stemmed_tokens: list[str],
+        scope: str,
+        freshness: tuple | None,
+        *,
+        allow_delta: bool = True,
+        recall_checkpoint: Any | None = None,
+        exclude_navigation: bool = False,
+        exclude_raw_material: bool = False,
+    ) -> CatalogQueryResult[tuple[dict[str, int], int]]:
+        return self._serve_from_ready_catalog_result(
+            scope,
+            freshness,
+            lambda conn: self._document_frequency_query(
+                conn,
+                stemmed_tokens,
+                scope,
+                exclude_navigation=exclude_navigation,
+                exclude_raw_material=exclude_raw_material,
+            ),
+            "lexical sidecar document-frequency query failed (%s)",
+            allow_delta=allow_delta,
+            recall_checkpoint=recall_checkpoint,
+        )
+
+    def _document_frequency_query(
+        self,
+        conn: sqlite3.Connection,
+        tokens: list[str],
+        scope: str,
+        *,
+        exclude_navigation: bool = False,
+        exclude_raw_material: bool = False,
+    ) -> tuple[dict[str, int], int]:
+        """`({stem: pages carrying it}, pages in scope)` — one indexed lookup
+        per DISTINCT stem, over the same join `_bm25_query` ranks with."""
+        col = "in_vault" if scope == "vault" else "in_kb"
+        # Raw material leaves the page total as well as each stem's count: a
+        # capture is not a page of the corpus rarity is measured against.
+        raw_clause, raw_params = _excluded_rows_clause(
+            navigation=False, raw_material=exclude_raw_material
+        )
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM pages p WHERE p.{col} = 1" + raw_clause,
+            raw_params,
+        ).fetchone()
+        excluded_clause, excluded_params = _excluded_rows_clause(
+            navigation=exclude_navigation, raw_material=exclude_raw_material
+        )
+        frequencies: dict[str, int] = {}
+        for token in dict.fromkeys(tokens):
+            # Tokens are runs of letters, numbers and marks — no FTS5 syntax
+            # can hide in them, but quote anyway, exactly as `_bm25_query` does.
+            row = conn.execute(
+                "SELECT COUNT(*) FROM fts JOIN pages p ON p.rowid = fts.rowid "
+                f"WHERE fts MATCH ? AND p.{col} = 1" + excluded_clause,
+                (f'"{token}"', *excluded_params),
+            ).fetchone()
+            frequencies[token] = int(row[0]) if row else 0
+        return frequencies, int(total[0]) if total else 0
 
     def _bm25_query(
         self,
@@ -5887,6 +6077,10 @@ class LexicalStore:
         *,
         min_matched_terms: int = 1,
         term_units: list[list[object]] | None = None,
+        corroboration_tokens: list[str] | None = None,
+        corroboration_groups: list[list[str]] | None = None,
+        exclude_navigation: bool = False,
+        exclude_raw_material: bool = False,
     ) -> list[tuple[str, float]]:
         # Tokens are runs of letters, numbers and marks: no quote or other FTS5
         # syntax can hide in them, but quote anyway; OR mirrors get_scores()
@@ -5898,27 +6092,63 @@ class LexicalStore:
         if allowed_paths is not None:
             allowed_clause = " AND p.path IN (SELECT value FROM json_each(?))"
             params.append(json.dumps(sorted(allowed_paths), ensure_ascii=False))
-        if min_matched_terms > 1:
-            # Corroboration counts distinct UNITS, not repetitions of one word:
-            # rows are `[stem, unit, needed]` (see `_term_units`), and a unit
-            # counts once it has `needed` of its stems on the page. Without
-            # units, every distinct stem is its own unit needing itself, which
-            # is the v1 rule. Filter before LIMIT so one-unit hits cannot crowd
-            # out valid pages.
-            if term_units is None:
-                term_units = [
-                    [stem, index, 1] for index, stem in enumerate(dict.fromkeys(tokens))
-                ]
-            allowed_clause += (
-                " AND (SELECT COUNT(*) FROM ("
-                "SELECT json_extract(term.value, '$[1]') AS unit FROM json_each(?) AS term "
-                "WHERE instr(' ' || fts.stemmed || ' ', "
-                "' ' || json_extract(term.value, '$[0]') || ' ') > 0 "
-                "GROUP BY unit HAVING COUNT(*) >= MAX(json_extract(term.value, '$[2]')))) >= ?"
-            )
-            params.extend(
-                (json.dumps(term_units, ensure_ascii=False), min_matched_terms)
-            )
+        groups = [group for group in (corroboration_groups or []) if group]
+        if min_matched_terms > 1 or groups:
+            # Filter before LIMIT so one-unit hits cannot crowd out valid pages.
+            clauses: list[str] = []
+            if min_matched_terms > 1 and corroboration_tokens is None:
+                # Corroboration counts distinct UNITS, not repetitions of one
+                # word: rows are `[stem, unit, needed]` (see `_term_units`), and
+                # a unit counts once it has `needed` of its stems on the page.
+                # Without units, every distinct stem is its own unit needing
+                # itself, which is the v1 rule.
+                if term_units is None:
+                    term_units = [
+                        [stem, index, 1] for index, stem in enumerate(dict.fromkeys(tokens))
+                    ]
+                clauses.append(
+                    "(SELECT COUNT(*) FROM ("
+                    "SELECT json_extract(term.value, '$[1]') AS unit FROM json_each(?) AS term "
+                    "WHERE instr(' ' || fts.stemmed || ' ', "
+                    "' ' || json_extract(term.value, '$[0]') || ' ') > 0 "
+                    "GROUP BY unit HAVING COUNT(*) >= MAX(json_extract(term.value, '$[2]')))) >= ?"
+                )
+                params.extend((json.dumps(term_units, ensure_ascii=False), min_matched_terms))
+            elif min_matched_terms > 1:
+                # A caller narrowing the counted stems (`corroboration_tokens`)
+                # says which stems are worth counting, never which pages may
+                # rank: the MATCH above is unchanged. Distinct stems count.
+                clauses.append(
+                    "(SELECT COUNT(*) FROM json_each(?) AS term "
+                    "WHERE instr(' ' || fts.stemmed || ' ', ' ' || term.value || ' ') > 0) >= ?"
+                )
+                params.extend(
+                    (
+                        json.dumps(sorted(set(corroboration_tokens)), ensure_ascii=False),
+                        min_matched_terms,
+                    )
+                )
+            if groups:
+                # Every term of some group is present. "NOT EXISTS a term of
+                # this group that is missing" is the all-of test.
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM json_each(?) AS grp WHERE NOT EXISTS ("
+                    "SELECT 1 FROM json_each(grp.value) AS gt WHERE "
+                    "instr(' ' || fts.stemmed || ' ', ' ' || gt.value || ' ') = 0))"
+                )
+                params.append(
+                    json.dumps([sorted(set(group)) for group in groups], ensure_ascii=False)
+                )
+            # Either alone, or both as alternatives: a caller that supplies
+            # only groups gets the all-of test and no flat count, which is
+            # how "this page qualifies on a phrase or not at all" is said.
+            allowed_clause += " AND (" + " OR ".join(clauses) + ")"
+        # Excluded before LIMIT, for the same reason as corroboration.
+        excluded_clause, excluded_params = _excluded_rows_clause(
+            navigation=exclude_navigation, raw_material=exclude_raw_material
+        )
+        allowed_clause += excluded_clause
+        params.extend(excluded_params)
         params.append(k)
         rows = conn.execute(
             "SELECT p.path, -bm25(fts) AS score "
