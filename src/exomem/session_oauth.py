@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import secrets
 import time
-from typing import Any
+from typing import Any, ClassVar
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -40,6 +40,17 @@ logger = logging.getLogger(__name__)
 
 OAUTH_AUTHORIZATION_SCOPES = ("offline_access", "exomem:read", "exomem:write")
 OAUTH_RESOURCE_SCOPES = ("exomem:read", "exomem:write")
+
+
+class ExomemSessionAccessToken(AccessToken):
+    """An access token this install's durable session authority validated.
+
+    The marker is the token's provenance: only `load_access_token` below
+    returns this type, so principal resolution can tell a verified session
+    from a raw bearer header, another verifier, or copied claims.
+    """
+
+    EXOMEM_SESSION_PROVENANCE: ClassVar[bool] = True
 
 
 class SessionStoreUnavailableMiddleware:
@@ -147,7 +158,7 @@ class ExomemSessionOAuthProxy(OAuthProxy):
         )
 
     @override
-    async def load_access_token(self, token: str) -> AccessToken | None:
+    async def load_access_token(self, token: str) -> ExomemSessionAccessToken | None:
         # This is the only place a presented credential reaches validation, so
         # its absence from the log is what distinguishes "the client sent a
         # token we rejected" from "the client sent no token at all". Both
@@ -161,7 +172,7 @@ class ExomemSessionOAuthProxy(OAuthProxy):
             logger.info("event=credential_presented outcome=rejected")
             return None
         logger.debug("event=credential_presented outcome=accepted")
-        return AccessToken(
+        return ExomemSessionAccessToken(
             token=token,
             client_id=record.client_id,
             scopes=list(record.scopes),

@@ -329,10 +329,19 @@ def _build_auth_session_authority():
     return build_session_authority(base_url=base_url)
 
 
-def _session_metadata(record, *, current_generation: str) -> dict[str, object]:
+def _session_metadata(
+    record, *, current_generation: str, binding: object | None = None
+) -> dict[str, object]:
     effective_status = record.status
     if effective_status == "active" and record.generation != current_generation:
         effective_status = "generation_revoked"
+    # Whether this session's identity is the one the host bound as the owner
+    # (EXOMEM_OWNER_OAUTH_SUBJECT): its requests then act as the owner.
+    owner_equivalent = (
+        binding is not None
+        and record.github_user_id == getattr(binding, "user_id", None)
+        and record.issuer == getattr(binding, "issuer", None)
+    )
     return {
         "session_id": record.session_id,
         "client_id": record.client_id,
@@ -341,6 +350,7 @@ def _session_metadata(record, *, current_generation: str) -> dict[str, object]:
         "github_user_id": record.github_user_id,
         "issued_at": record.issued_at,
         "status": effective_status,
+        "owner_equivalent": owner_equivalent,
     }
 
 
@@ -382,11 +392,18 @@ def _auth_main(argv: list[str]) -> int:
 
     async def run() -> dict[str, object]:
         if args.command == "sessions":
+            from .governance.principal import remote_owner_binding
+
             records = await authority.list_sessions()
             current_generation = await authority.current_generation()
+            binding = remote_owner_binding()
             return {
                 "sessions": [
-                    _session_metadata(record, current_generation=current_generation)
+                    _session_metadata(
+                        record,
+                        current_generation=current_generation,
+                        binding=binding,
+                    )
                     for record in records
                 ]
             }
@@ -416,8 +433,9 @@ def _auth_main(argv: list[str]) -> int:
             print("No durable MCP sessions.")
         else:
             for row in rows:
+                owner = "owner" if row["owner_equivalent"] else "-"
                 print(
-                    f"{row['session_id']}  {row['status']}  {row['client_id']}  "
+                    f"{row['session_id']}  {row['status']}  {owner}  {row['client_id']}  "
                     f"{row['github_login']}  {row['issued_at']}"
                 )
     elif result.get("revoked_all"):

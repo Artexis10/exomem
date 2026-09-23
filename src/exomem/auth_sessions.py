@@ -701,9 +701,14 @@ class SessionAuthority:
         validation_cache: SessionValidationCache | None = None,
         stale_grace_seconds: float = 0.0,
         session_store_telemetry: SessionStoreTelemetry | None = None,
+        allowed_github_user_id: int | None = None,
     ):
         if not issuer or not audience:
             raise ValueError("session issuer and audience are required")
+        if allowed_github_user_id is not None and (
+            isinstance(allowed_github_user_id, bool) or allowed_github_user_id <= 0
+        ):
+            raise ValueError("the allowed GitHub user ID must be a positive integer")
         if not math.isfinite(stale_grace_seconds) or stale_grace_seconds < 0:
             raise ValueError("session stale grace must be a non-negative finite number")
         keys = derive_session_keys(signing_root)
@@ -731,6 +736,20 @@ class SessionAuthority:
         self._session_store_telemetry = (
             session_store_telemetry or _default_session_store_telemetry
         )
+        # The account currently allowed to sign in. A session or refresh family
+        # of any other account is suspended: it is refused while that account is
+        # not allowed and validates again if it is re-allowed, so a mistaken edit
+        # of EXOMEM_GITHUB_USER_ID never forces every client to re-authorize.
+        # Ending a former account's sessions for good is `exomem auth revoke
+        # --all` (a generation bump). None (no configured account) keeps
+        # validating exactly as before.
+        self.allowed_github_user_id = allowed_github_user_id
+
+    def _identity_allowed(self, github_user_id: int) -> bool:
+        return (
+            self.allowed_github_user_id is None
+            or github_user_id == self.allowed_github_user_id
+        )
 
     @classmethod
     def local(
@@ -741,6 +760,7 @@ class SessionAuthority:
         issuer: str,
         audience: str,
         clock: Callable[[], float] = time.time,
+        allowed_github_user_id: int | None = None,
     ) -> SessionAuthority:
         return cls(
             storage=_LocalFileBackend(directory),
@@ -748,6 +768,7 @@ class SessionAuthority:
             issuer=issuer,
             audience=audience,
             clock=clock,
+            allowed_github_user_id=allowed_github_user_id,
         )
 
     @classmethod
@@ -766,6 +787,7 @@ class SessionAuthority:
         validation_cache: SessionValidationCache | None = None,
         stale_grace_seconds: float = 0.0,
         session_store_telemetry: SessionStoreTelemetry | None = None,
+        allowed_github_user_id: int | None = None,
     ) -> SessionAuthority:
         if not storage_token or not storage_token.strip():
             raise ValueError("a non-empty OAuth storage token is required for HA sessions")
@@ -786,6 +808,7 @@ class SessionAuthority:
             validation_cache=validation_cache,
             stale_grace_seconds=stale_grace_seconds,
             session_store_telemetry=session_store_telemetry,
+            allowed_github_user_id=allowed_github_user_id,
         )
 
     def _new_generation(self) -> GenerationRecord:
@@ -906,6 +929,7 @@ class SessionAuthority:
             family.status == "active"
             and family.issuer == self.issuer
             and family.audience == self.audience
+            and self._identity_allowed(family.github_user_id)
             and family.generation == await self.current_generation()
         )
 
@@ -1181,6 +1205,9 @@ class SessionAuthority:
         if record.issuer != self.issuer or record.audience != self.audience:
             logger.info("event=session_rejected reason=issuer_or_audience_mismatch")
             return None
+        if not self._identity_allowed(record.github_user_id):
+            logger.info("event=session_rejected reason=identity_not_allowed")
+            return None
         if record.generation != await self.current_generation():
             logger.info("event=session_rejected reason=generation_mismatch")
             return None
@@ -1232,6 +1259,7 @@ class SessionAuthority:
             record.status != "active"
             or record.issuer != self.issuer
             or record.audience != self.audience
+            or not self._identity_allowed(record.github_user_id)
         ):
             return False
         codec: SessionTokenCodec = self.codec

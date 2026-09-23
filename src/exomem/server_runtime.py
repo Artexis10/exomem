@@ -38,7 +38,7 @@ from .hosted_runtime import (
     HostedCellLifecycle,
     hosted_mode_enabled,
 )
-from .vault import resolve_vault
+from .vault import _is_vault, resolve_vault
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +61,63 @@ class ServerRuntime:
     hosted_lifecycle: HostedCellLifecycle | None = None
     hosted_security_authority: Any | None = None
     hosted_lifetime_lock: AbstractContextManager[None] | None = None
+
+
+_VAULT_PATH_ENV = ("EXOMEM_VAULT_PATH", "KB_MCP_VAULT_PATH")
+
+
+def _working_directory_dotenv() -> Path | None:
+    """`<cwd>/.env`, or None when it would come from inside a vault.
+
+    Vault content is writable by remote principals through the file tools and
+    arrives through sync, so a `.env` found there must never become service
+    configuration (owner binding, signing key, REST key). Both the working
+    directory and the directory the `.env` resolves into (a symlink may point
+    into the vault) are checked. "Inside a vault" is the configured vault
+    (process environment, or the vault that `.env` would itself configure) or
+    any enclosing directory that is structurally a vault.
+
+    A wrong refusal is not free: when the refused file held required settings
+    (the vault path, OAuth or signing keys), startup then stops on the missing
+    setting. The log line says so and names the remedy; the ancestor walk is
+    kept because the file it guards can carry service secrets.
+    """
+    cwd = Path.cwd().resolve()
+    candidate = cwd / ".env"
+    configured = [os.environ.get(name, "") for name in _VAULT_PATH_ENV]
+    if candidate.is_file():
+        try:
+            from dotenv import dotenv_values
+
+            declared = dotenv_values(candidate)
+            configured += [str(declared.get(name) or "") for name in _VAULT_PATH_ENV]
+        except (OSError, UnicodeDecodeError):
+            pass
+    roots: list[Path] = []
+    for raw in configured:
+        if raw.strip():
+            try:
+                roots.append(Path(raw.strip()).expanduser().resolve())
+            except (OSError, RuntimeError):
+                continue
+    try:
+        resolved_parent = candidate.resolve().parent
+    except (OSError, RuntimeError):
+        resolved_parent = cwd
+
+    def _inside(directory: Path) -> bool:
+        return any(directory == root or root in directory.parents for root in roots) or any(
+            _is_vault(ancestor) for ancestor in (directory, *directory.parents)
+        )
+
+    if _inside(cwd) or _inside(resolved_parent):
+        log.warning(
+            "event=dotenv_refused reason=inside_vault path=%s remedy=move the .env out "
+            "of the vault, or put the settings in service.env",
+            candidate,
+        )
+        return None
+    return candidate
 
 
 def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRuntime:
@@ -91,8 +148,11 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
         # An installed package lives under site-packages, so python-dotenv's
         # implicit caller-relative search misses the service working
         # directory. The documented repo-root .env is explicitly cwd-relative
-        # for both checkout and wheel installs.
-        load_dotenv_func(dotenv_path=Path.cwd() / ".env", override=True)
+        # for both checkout and wheel installs. It is never read from inside a
+        # vault, whose files remote writers can plant.
+        dotenv_path = _working_directory_dotenv()
+        if dotenv_path is not None:
+            load_dotenv_func(dotenv_path=dotenv_path, override=True)
     env_compat.promote_legacy()
 
     vault_root = resolve_vault()
