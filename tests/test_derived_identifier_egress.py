@@ -544,3 +544,71 @@ def test_restricted_evolution_reads_as_if_the_withheld_page_were_absent(
         assert _text(answers["C"][label]) == _text(answers["B"][label]), label
     owner = _call(vaults["A"], None, "review_memory", mode="evolution", query="beta rollout")
     assert f"{WITHHELD_DIR}/newer.md" in _text(owner["timelines"]), owner
+
+
+# ---------------------------------------------------------------------------
+# A restricted writer's links resolve over the pages it may see
+# ---------------------------------------------------------------------------
+
+_GUESSES = (
+    "Probe page. Guesses: [[beta]] [[project-zeta-plan]] [[Hidden Plan]] "
+    f"[[{WITHHELD_DIR}/project-zeta-plan]] [[nonexistent-guess]] [[other]].\n\n"
+    "## Observations\n\n- [operating constraint] Keep retries bounded #reliability\n"
+)
+
+
+def _writer_fixture() -> tuple[dict[str, str], dict[str, str]]:
+    base = {
+        f"{NOTES}/beta.md": _page("Beta", "Beta background.", type="insight"),
+        f"{NOTES}/other.md": _page("Other", "Other background.", type="insight"),
+    }
+    withheld = {
+        f"{WITHHELD_DIR}/beta.md": _page("Hidden Draft", "Withheld body text.", type="insight"),
+        f"{WITHHELD_DIR}/project-zeta-plan.md": _page(
+            "Hidden Plan", "Withheld body text.", type="insight", title="Hidden Plan"
+        ),
+    }
+    return base, withheld
+
+
+def _written(vault: Path, principal: RequestPrincipal | None) -> dict[str, Any]:
+    from exomem import capture_sweep
+
+    capture_sweep.reset_state()
+    answer = _call(vault, principal, "remember", content=_GUESSES, title="Probe Page", note_type="insight")
+    assert "__error__" not in answer, answer
+    body = (vault / answer["path"]).read_text(encoding="utf-8").split("\n---\n", 1)[1]
+    sweep = answer.get("capture_sweep") or {}
+    return {
+        "path": answer["path"],
+        "warnings": answer.get("warnings"),
+        "unpaged_mentions": sweep.get("unpaged_mentions"),
+        "body": body,
+    }
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_writer_resolves_links_as_if_the_withheld_page_were_absent(
+    tmp_path: Path, audience: str
+) -> None:
+    base, withheld = _writer_fixture()
+    vaults = _twins(tmp_path, base, withheld, audience)
+
+    written = {variant: _written(vault, _principal(audience)) for variant, vault in vaults.items()}
+
+    # The writer's own guesses stay as it wrote them; none is rewritten onto a
+    # withheld page, and the warnings and unpaged mentions match the twin.
+    assert _text(written["A"]) == _text(written["B"])
+    assert _text(written["C"]) == _text(written["B"])
+    assert "[[Knowledge Base/Notes/beta]]" in written["B"]["body"]
+
+
+def test_the_owner_writer_still_resolves_over_every_page(tmp_path: Path) -> None:
+    base, withheld = _writer_fixture()
+    vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")
+
+    written = _written(vault, None)
+
+    assert "Hidden Plan" not in written["body"]
+    assert f"[[{WITHHELD_DIR}/project-zeta-plan]]" in written["body"]
+    assert any(f"{WITHHELD_DIR}/beta" in warning for warning in written["warnings"])

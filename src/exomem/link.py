@@ -40,6 +40,7 @@ from .vault import (
     render_wikilink_target,
     resolve_filename_slug,
     rotate_log_if_needed,
+    writer_link_visibility,
     yaml_scalar,
 )
 
@@ -511,6 +512,7 @@ def _normalize_connections(
     """
     if not connections:
         return [], []
+    visible = writer_link_visibility(vault_root)
     out: list[str] = []
     seen: set[str] = set()
     warnings: list[str] = []
@@ -519,7 +521,7 @@ def _normalize_connections(
         if not c:
             continue
         canonical, warning = normalize_wikilink(
-            c, vault_root, resolver=resolver, strict=False
+            c, vault_root, resolver=resolver, strict=False, visible=visible
         )
         if warning:
             warnings.append(warning)

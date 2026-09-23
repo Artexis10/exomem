@@ -12,7 +12,7 @@ import stat
 import threading
 import time
 from collections import Counter
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
@@ -1518,8 +1518,17 @@ def current_writer_resolver_entries(
 def _resolve_reference_wikilink_from_context(
     context: SemanticCorpusContext,
     raw_target: str,
+    visible: Callable[[str], bool] | None = None,
 ) -> ReferenceWikilinkResolution:
-    """Resolve against immutable context maps, preserving union ambiguity."""
+    """Resolve against immutable context maps, preserving union ambiguity.
+
+    `visible` restricts every match to the pages it admits (a writer's own
+    view, see `vault.writer_link_visibility`); `None` matches every page.
+    """
+
+    def _seen(no_ext: str) -> bool:
+        return visible is None or visible(f"{no_ext}.md")
+
     cleaned = str(raw_target or "").strip()
     if cleaned.startswith("[[") and cleaned[-2:] == "]]":
         cleaned = cleaned[2:-2].strip()
@@ -1531,9 +1540,9 @@ def _resolve_reference_wikilink_from_context(
     if "/" in cleaned:
         candidates = (cleaned, f"{vault.kb_prefix()}{cleaned}")
         for candidate in candidates:
-            if candidate in context.resolver_full_paths:
+            if candidate in context.resolver_full_paths and _seen(candidate):
                 return ReferenceWikilinkResolution("resolved", f"{candidate}.md")
-        if cleaned in context.resolver_kb_stripped:
+        if cleaned in context.resolver_kb_stripped and _seen(f"{vault.kb_prefix()}{cleaned}"):
             return ReferenceWikilinkResolution(
                 "resolved",
                 f"{vault.kb_prefix()}{cleaned}.md",
@@ -1542,6 +1551,8 @@ def _resolve_reference_wikilink_from_context(
 
     matches = set(context.resolver_stems.get(cleaned, ()))
     matches.update(context.resolver_titles.get(cleaned.lower(), ()))
+    if visible is not None:
+        matches = {match for match in matches if _seen(match)}
     if len(matches) > 1:
         return ReferenceWikilinkResolution("ambiguous")
     if not matches:

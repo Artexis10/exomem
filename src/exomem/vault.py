@@ -6698,12 +6698,27 @@ def render_wikilinks_for_vault(text: str, vault_root: Path) -> str:
     return new_text
 
 
+def writer_link_visibility(vault_root: Path) -> Callable[[str], bool] | None:
+    """The pages a writer's own links may resolve to, or `None` for every page.
+
+    `None` for the owner and on an ungoverned vault, so their writes resolve
+    exactly as before. For any other writer under a policy, a link resolves
+    only over the pages that writer may see: a stem, title or path that
+    matches only withheld pages resolves as it would if those pages were
+    absent, and an ambiguity names only visible pages.
+    """
+    from .governance import egress
+
+    return egress.visible_page_filter(vault_root)
+
+
 def normalize_wikilink(
     target: str,
     vault_root: Path,
     *,
     resolver: WikilinkResolver | None = None,
     strict: bool = False,
+    visible: Callable[[str], bool] | None = None,
 ) -> tuple[str, str | None]:
     """Canonicalize a wikilink target to full vault-rooted form (no `.md`).
 
@@ -6719,9 +6734,20 @@ def normalize_wikilink(
     - `strict=False`: returns the cleaned input + a warning string. The
       caller can choose to surface the warning and leave the link as a
       forward reference, or to abort.
+
+    `visible` (see `writer_link_visibility`) restricts every match to the
+    pages it admits; `None` matches over every page.
     """
     if resolver is None:
         resolver = WikilinkResolver(vault_root)
+
+    def _seen(no_ext: str) -> bool:
+        return visible is None or visible(f"{no_ext}.md")
+
+    def _matches(values: list[str] | None) -> list[str] | None:
+        if values is None or visible is None:
+            return values
+        return [value for value in values if _seen(value)] or None
 
     cleaned = _strip_wikilink_brackets(target)
     if "|" in cleaned:
@@ -6745,20 +6771,20 @@ def normalize_wikilink(
         return canonical + anchor, None
 
     # 1. Full vault-rooted (with or without explicit Knowledge Base/ prefix).
-    if cleaned in resolver.full_paths:
+    if cleaned in resolver.full_paths and _seen(cleaned):
         return cleaned + anchor, None
     if not cleaned.startswith(kb_prefix()):
         candidate = kb_prefix() + cleaned
-        if candidate in resolver.full_paths:
+        if candidate in resolver.full_paths and _seen(candidate):
             return candidate + anchor, None
 
     # 2. KB-stripped match (target looks like KB-relative).
-    if cleaned in resolver.kb_stripped:
+    if cleaned in resolver.kb_stripped and _seen(kb_prefix() + cleaned):
         return kb_prefix() + cleaned + anchor, None
 
     # 3. Bare name (no `/`): stem match first, then frontmatter title.
     if "/" not in cleaned:
-        stem_matches = resolver.stems.get(cleaned)
+        stem_matches = _matches(resolver.stems.get(cleaned))
         if stem_matches:
             if len(stem_matches) == 1:
                 return stem_matches[0] + anchor, None
@@ -6771,7 +6797,7 @@ def normalize_wikilink(
                 f"bare wikilink {target!r} matches {len(stem_matches)} files "
                 f"by stem; left unchanged. Files: {stem_matches}"
             )
-        title_matches = resolver.titles.get(cleaned.lower())
+        title_matches = _matches(resolver.titles.get(cleaned.lower()))
         if title_matches:
             if len(title_matches) == 1:
                 return title_matches[0] + anchor, None
@@ -6864,10 +6890,12 @@ def normalize_body_wikilinks(
     emitted Markdown is KB-relative when ``Knowledge Base/.obsidian`` marks the
     managed directory as the Obsidian vault root. Returns `(new_body, warnings)`.
     Unresolvable links are left as-is with a warning — forward references are
-    intentional.
+    intentional. The writer's links resolve over the pages it may see
+    (`writer_link_visibility`).
     """
     if resolver is None:
         resolver = WikilinkResolver(vault_root)
+    visible = writer_link_visibility(vault_root)
     warnings: list[str] = []
     matches = find_body_wikilinks(body)
     new_body = body
@@ -6886,7 +6914,7 @@ def normalize_body_wikilinks(
         else:
             target_only = inner.strip()
         canonical, warning = normalize_wikilink(
-            target_only, vault_root, resolver=resolver, strict=False
+            target_only, vault_root, resolver=resolver, strict=False, visible=visible
         )
         if warning:
             warnings.append(warning)

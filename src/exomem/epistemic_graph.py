@@ -10295,11 +10295,16 @@ def _draft_wikilink_candidates(
     vault_root: Path, body: str, *, draft_title: str | None
 ) -> list[dict[str, Any]]:
     pseudo = f"draft:{draft_title or 'untitled'}"
+    # A draft is the caller's own text: its links resolve over the pages the
+    # caller may see, as the write that follows would resolve them.
+    visible = vault_module.writer_link_visibility(vault_root)
     candidates: list[dict[str, Any]] = []
     for match in vault_module.find_body_wikilinks(body):
         target = match.group(1).strip()
         try:
-            canonical, warning = vault_module.normalize_wikilink(target, vault_root, strict=False)
+            canonical, warning = vault_module.normalize_wikilink(
+                target, vault_root, strict=False, visible=visible
+            )
         except Exception:  # noqa: BLE001 - malformed links are ignored
             continue
         if warning:
