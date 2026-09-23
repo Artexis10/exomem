@@ -2,46 +2,60 @@
 
 The census answers "how good are this vault's edges?" with integers and the
 ratios derived from them. It reads one `_open_read_snapshot()` plus the relation
-and entity-type registries: it parses no Markdown, runs no model, builds no
-index and writes nothing. When the snapshot is unavailable (disabled, warming,
-catching up) it says so and never reports a zero.
+and entity-type registries. The census itself parses no Markdown, runs no
+model, builds no index and writes nothing; under a governed policy the owner's
+release filter reads each page's bytes to decide its release. When the snapshot
+is unavailable (disabled, warming, catching up) it says so and never reports a
+zero.
 
-Egress (N1c). Every number is a reduction over the caller's admitted subgraph.
-A node is admitted when its page passes the caller's `keep` predicate (from
-`release_walk_filter`) and structural exclusion; an edge is admitted only when
-both endpoints are admitted indexed nodes and the page that authored it is
-admitted. A placeholder for a missing target is never admitted: a bare-title
-link resolves into a withheld folder when its page exists and to a placeholder
-elsewhere when it does not, so admitting placeholders would tell a restricted
-caller that a withheld page exists. Filtering happens inside the walk, so a
-withheld page cannot change any count, and the graph generation (a vault-wide
-write counter) is reported only to an unrestricted caller. Counts mode names no
-path, title, label or vault extension key.
+It streams: edge rows are reduced as they are read, and the two checks that
+compare an edge with its reverse run as SQL aggregates, so memory follows the
+page count, not the edge count.
+
+Egress (D15). Links resolve against the whole vault, so a withheld page can
+change how a visible page's bare link resolves: a shared stem makes it
+ambiguous, a matching stem or title wins it. The snapshot keeps only the
+result, so no filter applied to it can undo that. The census is therefore
+served whole: under an empty governance policy to every caller, and under a
+governed policy to the owner only. Every other audience receives
+`audience_restricted` before anything is read.
+
+Within the view it serves, a node is admitted when its page passes the release
+filter and structural exclusion, and an edge only when both endpoints are
+admitted indexed nodes and the page that authored it is admitted. A placeholder
+for a missing target is never admitted: rows whose target is outside the view
+count as `unresolved_target_edges`. Counts mode names no path, title, label or
+vault extension key.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import heapq
 import json
 import math
 import os
-import random
+import sqlite3
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import __version__, audit, entity_types, relation_registry
 from .kbdir import kb_prefix
 
 CENSUS_VERSION = 1
+AUDIENCE_RESTRICTED = "audience_restricted"
+POLICY_BLOCKED = "policy_blocked"
 
 _AUTHORED_ORIGINS = frozenset({"semantic_relation", "markdown_relation"})
 # The indexer mints a `derived_from` edge from every unit or block to its own
 # page. That is structure, not an authored relation, and it never connects a
 # page to anything else.
-_STRUCTURAL_ORIGINS = frozenset({"semantic_unit", "semantic_block"})
+_STRUCTURAL_ORIGINS = ("semantic_unit", "semantic_block")
 _BODY_LINK_ORIGINS = frozenset({"wikilink", "markdown_relation", "semantic_relation"})
 _GENERIC = "relates_to"
 _LINK = "links_to"
@@ -55,7 +69,7 @@ _STATUS_KEYS = (
     "scope_violation",
 )
 _EVIDENTIAL_KINDS = frozenset({"evidence", "result", "metric", "finding", "experiment"})
-_QUESTION_KINDS = frozenset({"question", "open_question"})
+_QUESTION_KINDS = ("question", "open_question")
 _EPISTEMIC_FAMILIES = frozenset({"support", "contradiction", "supersession", "duplication"})
 _EVIDENCE_FOLDERS = ("Sources/", "Evidence/")
 _GOVERNANCE_SEGMENT = "/_Governance/"
@@ -68,111 +82,146 @@ DEFAULT_SAMPLE_SIZE = 40
 _WILSON_Z = 1.959964
 
 Keep = Callable[[str], bool] | None
+#: Default for `keep`: decide the view from the bound principal and policy.
+#: Every product surface uses it. An explicit predicate (or None, the whole
+#: graph) is a trusted in-process caller's own admission rule: it narrows what
+#: is counted but cannot undo whole-vault link resolution, so it must never
+#: stand in for a restricted audience.
+CALLER: Any = object()
+
+
+class ServiceKeyRefused(Exception):
+    """The managed service answered, and refused the REST key."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__(f"the managed service refused the REST key (HTTP {status})")
+        self.status = status
 
 
 def census(
     vault_root: Path,
     *,
-    keep: Keep = None,
+    keep: Any = CALLER,
     detail: str = "counts",
     date_from: str | None = None,
     date_to: str | None = None,
 ) -> dict[str, Any]:
-    """Return the relation-quality census of the caller's admitted graph."""
+    """Return the relation-quality census of the caller's view of the graph."""
     detail = _validate_detail(detail)
     start, end = _date_bounds(date_from, date_to)
-    snapshot = _load(vault_root, keep=keep)
-    if snapshot is None:
-        return _unavailable(detail)
-    return _census_payload(
-        vault_root,
-        snapshot,
-        keep=keep,
-        detail=detail,
-        start=start,
-        end=end,
-        date_from=date_from,
-        date_to=date_to,
-    )
+    view = _resolve_view(vault_root, keep)
+    if isinstance(view, str):
+        return _refused(view, detail)
+    with _reader(vault_root, view.keep) as reader:
+        if reader is None:
+            return _unavailable(detail)
+        return _census_payload(
+            vault_root,
+            reader,
+            whole=view.whole,
+            detail=detail,
+            start=start,
+            end=end,
+            date_from=date_from,
+            date_to=date_to,
+        )
+
+
+def refusal(vault_root: Path) -> dict[str, Any] | None:
+    """`infer`'s census field for a caller the census refuses, else None."""
+    view = _resolve_view(vault_root, CALLER)
+    return {"available": False, "reason": view} if isinstance(view, str) else None
 
 
 def infer_counts(
     vault_root: Path,
     *,
-    keep: Keep,
+    keep: Any = CALLER,
     page_type: str | None,
     start: dt.date | None,
     end: dt.date | None,
 ) -> dict[str, Any] | None:
-    """`infer`'s legacy census keys, computed from the snapshot, or None.
+    """`infer`'s census keys, computed from the snapshot; None if unavailable.
 
     The cohort stays infer's: every indexed Knowledge Base page matching the
     page-type scope, date-scoped by origin date exactly as the Markdown count
-    did. None means the snapshot is unavailable and the caller keeps its own
-    count.
+    did. An authored row counts whether or not its target resolves to a page
+    in view, so `relation_counts` and `zero_authored_relation_rows` keep the
+    Markdown values. `zero_body_connections` counts pages with no wikilink or
+    relation row that resolves to another page in view.
     """
-    snapshot = _load(vault_root, keep=keep)
-    if snapshot is None:
-        return None
-    denominators = {"sampled": 0, "included": 0, "undated": 0, "excluded": 0}
-    included: set[str] = set()
-    prefix = kb_prefix()
-    for page in snapshot.pages.values():
-        if not page.admitted or not page.path.startswith(prefix):
-            continue
-        if page_type and page.page_type != page_type:
-            continue
-        denominators["sampled"] += 1
-        origin = _origin_date(page.origin_date)
-        if origin is None:
-            denominators["undated"] += 1
-            if start is None and end is None:
-                included.add(page.path)
-            continue
-        if (start and origin < start) or (end and origin > end):
-            denominators["excluded"] += 1
-            continue
-        denominators["included"] += 1
-        included.add(page.path)
-    relation_counts = {"core": 0, "extension": 0, "deprecated": 0, "generic": 0, "unregistered": 0}
-    authored: set[str] = set()
-    body_linked: set[str] = set()
-    for edge in snapshot.edges:
-        if edge.source_path not in included:
-            continue
-        if edge.origin in _BODY_LINK_ORIGINS and edge.touches_other:
-            body_linked.add(edge.source_path)
-        if edge.origin not in _AUTHORED_ORIGINS:
-            continue
-        authored.add(edge.source_path)
-        status = edge.status
-        if status == "deprecated":
-            relation_counts["deprecated"] += 1
-        elif status == "unregistered":
-            relation_counts["unregistered"] += 1
-        elif edge.relation == _GENERIC:
-            relation_counts["generic"] += 1
-        elif status == "core":
-            relation_counts["core"] += 1
-        elif status in {"extension", "alias"}:
-            relation_counts["extension"] += 1
-    return {
-        "relation_counts": relation_counts,
-        "page_counts": {
-            "zero_authored_relation_rows": sum(path not in authored for path in included),
-            "zero_body_connections": sum(path not in body_linked for path in included),
-        },
-        "denominators": denominators,
-    }
+    view = _resolve_view(vault_root, keep)
+    if isinstance(view, str):
+        return {"available": False, "reason": view}
+    with _reader(vault_root, view.keep) as reader:
+        if reader is None:
+            return None
+        denominators = {"sampled": 0, "included": 0, "undated": 0, "excluded": 0}
+        included: set[str] = set()
+        prefix = kb_prefix()
+        for page in reader.pages.values():
+            if not page.admitted or not page.path.startswith(prefix):
+                continue
+            if page_type and page.page_type != page_type:
+                continue
+            denominators["sampled"] += 1
+            origin = _origin_date(page.origin_date)
+            if origin is None:
+                denominators["undated"] += 1
+                if start is None and end is None:
+                    included.add(page.path)
+                continue
+            if (start and origin < start) or (end and origin > end):
+                denominators["excluded"] += 1
+                continue
+            denominators["included"] += 1
+            included.add(page.path)
+        relation_counts = {
+            "core": 0,
+            "extension": 0,
+            "deprecated": 0,
+            "generic": 0,
+            "unregistered": 0,
+        }
+        authored: set[str] = set()
+        body_linked: set[str] = set()
+        for row in reader.rows():
+            if row.source_path not in included:
+                continue
+            if row.in_view and row.origin in _BODY_LINK_ORIGINS and row.touches_other:
+                body_linked.add(row.source_path)
+            if row.origin not in _AUTHORED_ORIGINS:
+                continue
+            authored.add(row.source_path)
+            status = row.status
+            if status == "deprecated":
+                relation_counts["deprecated"] += 1
+            elif status == "unregistered":
+                relation_counts["unregistered"] += 1
+            elif row.relation == _GENERIC:
+                relation_counts["generic"] += 1
+            elif status == "core":
+                relation_counts["core"] += 1
+            elif status in {"extension", "alias"}:
+                relation_counts["extension"] += 1
+        return {
+            "relation_counts": relation_counts,
+            "page_counts": {
+                "zero_authored_relation_rows": sum(path not in authored for path in included),
+                "zero_body_connections": sum(path not in body_linked for path in included),
+            },
+            "denominators": denominators,
+        }
 
 
 def service_census(detail: str) -> dict[str, Any] | None:
     """Ask the running managed service for its census, or return None.
 
     The CLI prefers the service so it reads the live published snapshot. This
-    is a read over REST, never out-of-process index work. Any failure (no
-    managed install, no REST key, no answer, an older service) returns None
-    and the caller opens the sidecar read-only instead.
+    is a read over REST, never out-of-process index work. A refused key raises
+    `ServiceKeyRefused` so the caller can say so; any other failure (no managed
+    install, no REST key, no answer, an older service) returns None and the
+    caller opens the sidecar read-only instead.
     """
     api_key = os.environ.get("EXOMEM_REST_API_KEY", "").strip()
     if not api_key:
@@ -192,9 +241,13 @@ def service_census(detail: str) -> dict[str, Any] | None:
             timeout=30.0,
             follow_redirects=False,
         )
+        if response.status_code in (401, 403):
+            raise ServiceKeyRefused(response.status_code)
         if response.status_code != 200:
             return None
         payload = response.json()
+    except ServiceKeyRefused:
+        raise
     except Exception:  # noqa: BLE001 - the local snapshot is the fallback
         return None
     data = payload.get("data") if isinstance(payload, dict) else None
@@ -208,6 +261,10 @@ def service_census(detail: str) -> dict[str, Any] | None:
 def summary_line(result: Mapping[str, Any]) -> str:
     """One human line for doctor and the CLI."""
     if not result.get("available"):
+        if result.get("reason") == AUDIENCE_RESTRICTED:
+            return "Relation census withheld: it is served to the vault owner only."
+        if result.get("reason") == POLICY_BLOCKED:
+            return "Relation census unavailable: the governance policy does not compile."
         return "Relation census unavailable: the graph snapshot is not current."
     metrics = result["metrics"]
     eligible = result["cohort"]["eligible_pages"]
@@ -220,8 +277,34 @@ def summary_line(result: Mapping[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Snapshot loading and admission
+# Views, snapshot reading and admission
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _View:
+    keep: Keep
+    whole: bool  # the caller may see vault-wide facts such as the generation
+
+
+def _resolve_view(vault_root: Path, keep: Any) -> _View | str:
+    """The view to count, or the reason the bound caller gets no census."""
+    if keep is not CALLER:
+        return _View(keep=keep, whole=keep is None)
+    from .governance import egress
+    from .governance import policy as policy_module
+    from .governance.principal import OWNER_AUDIENCE, effective_principal
+
+    root = Path(vault_root)
+    current = policy_module.load(root)
+    if current.empty:
+        return _View(keep=egress.release_walk_filter(root), whole=True)
+    who = effective_principal()
+    if not (who.resolved and who.audience_id == OWNER_AUDIENCE):
+        return AUDIENCE_RESTRICTED
+    if current.blocked:
+        return POLICY_BLOCKED
+    return _View(keep=egress.release_walk_filter(root, principal=who), whole=True)
 
 
 @dataclass(slots=True)
@@ -235,12 +318,8 @@ class _Page:
     admitted: bool
 
 
-@dataclass(slots=True)
-class _Edge:
-    src_page: str
-    dst_page: str
-    dst_kind: str  # "file" or the unit kind
-    dst_anchor: str | None
+class _Row(NamedTuple):
+    edge_key: str
     relation: str | None
     raw_relation: str
     status: str
@@ -250,88 +329,107 @@ class _Edge:
     source_kind: str | None
     target_kind: str | None
     line: Any
+    in_view: bool
+    src_page: str | None
+    dst_page: str | None
+    dst_kind: str | None  # "file" or the unit kind
+    dst_anchor: str | None
 
     @property
     def touches_other(self) -> bool:
         return self.src_page != self.source_path or self.dst_page != self.source_path
 
 
-@dataclass(slots=True)
-class _Snapshot:
-    generation: int | None
-    pages: dict[str, _Page]
-    units_by_page: dict[str, set[str]]
-    edges: list[_Edge] = field(default_factory=list)
-    # Authoring page of each authored row whose other end is outside the
-    # caller's view: a missing target and a withheld one count alike.
-    outside_view: list[str] = field(default_factory=list)
+_ROWS_SQL = (
+    "SELECT edge_key, src_key, dst_key, relation_type, raw_relation, registry_status, "
+    "origin, source_path, source_anchor, resolver_source_kind, resolver_target_kind, "
+    "CASE WHEN registry_status = 'unregistered' "
+    "THEN json_extract(metadata, '$.line') END "
+    "FROM graph_edges WHERE origin NOT IN (?, ?)"
+)
+
+# Typed edges between two admitted pages, authored on an eligible page: the
+# population the edge-and-its-reverse checks run over, grouped in SQL.
+_POPULATION_SQL = (
+    "FROM graph_edges AS e {join}"
+    "JOIN graph_nodes AS s ON s.node_key = e.src_key "
+    "JOIN graph_nodes AS d ON d.node_key = e.dst_key "
+    "WHERE e.origin NOT IN ('semantic_unit', 'semantic_block', 'wikilink') "
+    "AND e.registry_status != 'unregistered' AND e.relation_type IS NOT NULL "
+    "AND e.relation_type != 'links_to' AND s.path != d.path "
+    "AND exomem_census_eligible(e.source_path) "
+    "AND exomem_census_admitted(s.path) AND exomem_census_admitted(d.path)"
+)
 
 
-def _load(vault_root: Path, *, keep: Keep) -> _Snapshot | None:
-    from .epistemic_graph import EpistemicGraphIndex
+class _Reader:
+    """One open snapshot: pages in memory, edge rows streamed."""
 
-    connection = EpistemicGraphIndex(vault_root)._open_read_snapshot()
-    if connection is None:
-        return None
-    verdicts: dict[str, bool] = {}
-
-    def path_ok(path: str) -> bool:
-        cached = verdicts.get(path)
-        if cached is None:
-            cached = _GOVERNANCE_SEGMENT not in f"/{path}" and (keep is None or bool(keep(path)))
-            verdicts[path] = cached
-        return cached
-
-    try:
-        generation_row = connection.execute(
-            "SELECT value FROM graph_meta WHERE key = 'generation'"
-        ).fetchone()
-        pages: dict[str, _Page] = {}
-        file_keys: dict[str, str] = {}
-        for key, path, page_type, status, tags_json, origin_date, tier, entity, scope in (
+    def __init__(self, connection: sqlite3.Connection, keep: Keep) -> None:
+        self.connection = connection
+        self._keep = keep
+        self._verdicts: dict[str, bool] = {}
+        row = connection.execute("SELECT value FROM graph_meta WHERE key = 'generation'").fetchone()
+        self.generation = _int_or_none(row[0] if row else None)
+        self.pages: dict[str, _Page] = {}
+        for path, page_type, status, tags_json, origin_date, tier, entity, scope in (
             connection.execute(
-                "SELECT node_key, path, page_type, lifecycle_status, tags_json, origin_date, "
+                "SELECT path, page_type, lifecycle_status, tags_json, origin_date, "
                 "access_tier, json_extract(metadata, '$.entity_type'), "
                 "json_extract(metadata, '$.scope') FROM graph_nodes WHERE kind = 'file'"
             )
         ):
-            pages[path] = _Page(
+            self.pages[path] = _Page(
                 path=path,
                 page_type=page_type,
                 status=status,
                 tags=_tags(tags_json),
                 origin_date=origin_date,
                 entity_type=(entity or scope) if page_type == "entity" else None,
-                admitted=tier != "excluded" and path_ok(path),
+                admitted=tier != "excluded" and self._path_ok(path),
             )
-            file_keys[key] = path
-        units: dict[str, tuple[str, str, str | None]] = {}
-        units_by_page: dict[str, set[str]] = {}
+        # Unit and block nodes, keyed for endpoint lookups: (page, kind, anchor).
+        # File nodes need no entry, since their key is `file:` plus the path.
+        self._units: dict[str, tuple[str, str, str | None]] = {}
+        self.question_pages: set[str] = set()
         for key, kind, path, anchor in connection.execute(
             "SELECT node_key, kind, path, anchor FROM graph_nodes WHERE kind != 'file'"
         ):
-            units[key] = (kind, path, anchor)
-            units_by_page.setdefault(path, set()).add(kind)
+            self._units[key] = (path, kind, anchor)
+            if kind in _QUESTION_KINDS:
+                self.question_pages.add(path)
 
-        def endpoint(key: str) -> tuple[str, str, str | None] | None:
-            """(page path, kind, anchor) of an admitted indexed endpoint, else None."""
-            path = file_keys.get(key)
-            if path is not None:
-                return (path, "file", None) if pages[path].admitted else None
-            unit = units.get(key)
-            if unit is not None:
-                kind, page_path, anchor = unit
-                page = pages.get(page_path)
-                if page is not None and page.admitted:
-                    return page_path, kind, anchor
-            return None
+    def _path_ok(self, path: str) -> bool:
+        cached = self._verdicts.get(path)
+        if cached is None:
+            cached = _GOVERNANCE_SEGMENT not in f"/{path}" and (
+                self._keep is None or bool(self._keep(path))
+            )
+            self._verdicts[path] = cached
+        return cached
 
-        snapshot = _Snapshot(
-            generation=_int_or_none(generation_row[0] if generation_row else None),
-            pages=pages,
-            units_by_page=units_by_page,
-        )
+    def admitted(self, path: str | None) -> bool:
+        page = self.pages.get(path) if path is not None else None
+        return page is not None and page.admitted
+
+    def author_ok(self, source_path: str) -> bool:
+        author = self.pages.get(source_path)
+        return author.admitted if author is not None else self._path_ok(source_path)
+
+    def _endpoint(self, key: str) -> tuple[str, str, str | None] | None:
+        """(page, kind, anchor) of an admitted indexed node, else None."""
+        if key.startswith("file:"):
+            page = self.pages.get(key[5:])
+            return (page.path, "file", None) if page is not None and page.admitted else None
+        unit = self._units.get(key)
+        if unit is not None and self.admitted(unit[0]):
+            return unit
+        return None
+
+    def rows(self) -> Iterator[_Row]:
+        """Every non-structural edge authored on an admitted page, streamed."""
         for (
+            edge_key,
             src_key,
             dst_key,
             relation,
@@ -343,43 +441,132 @@ def _load(vault_root: Path, *, keep: Keep) -> _Snapshot | None:
             source_kind,
             target_kind,
             line,
-        ) in connection.execute(
-            "SELECT src_key, dst_key, relation_type, raw_relation, registry_status, origin, "
-            "source_path, source_anchor, resolver_source_kind, resolver_target_kind, "
-            "CASE WHEN registry_status = 'unregistered' "
-            "THEN json_extract(metadata, '$.line') END FROM graph_edges"
-        ):
-            if origin in _STRUCTURAL_ORIGINS:
+        ) in self.connection.execute(_ROWS_SQL, _STRUCTURAL_ORIGINS):
+            if not self.author_ok(source_path):
                 continue
-            author = pages.get(source_path)
-            if not (author.admitted if author is not None else path_ok(source_path)):
-                continue
-            source_end = endpoint(src_key)
-            target_end = endpoint(dst_key)
-            if source_end is None or target_end is None:
-                if origin in _AUTHORED_ORIGINS:
-                    snapshot.outside_view.append(source_path)
-                continue
-            snapshot.edges.append(
-                _Edge(
-                    src_page=source_end[0],
-                    dst_page=target_end[0],
-                    dst_kind=target_end[1],
-                    dst_anchor=target_end[2],
-                    relation=relation,
-                    raw_relation=raw_relation,
-                    status=status,
-                    origin=origin,
-                    source_path=source_path,
-                    source_anchor=source_anchor,
-                    source_kind=source_kind,
-                    target_kind=target_kind,
-                    line=line,
-                )
+            source_end = self._endpoint(src_key)
+            target_end = self._endpoint(dst_key) if source_end is not None else None
+            in_view = target_end is not None
+            src_path = source_end[0] if in_view else None
+            dst_path, dst_kind, dst_anchor = target_end if in_view else (None, None, None)
+            yield _Row(
+                edge_key,
+                relation,
+                raw_relation,
+                status,
+                origin,
+                source_path,
+                source_anchor,
+                source_kind,
+                target_kind,
+                line,
+                in_view,
+                src_path,
+                dst_path,
+                dst_kind,
+                dst_anchor,
             )
+
+    def pair_checks(
+        self, eligible: set[str], registry: relation_registry.RelationRegistry
+    ) -> tuple[dict[str, int], dict[str, int]]:
+        """`directed_both_ways` and `inverse_duplicates`, aggregated in SQL."""
+        self.connection.create_function(
+            "exomem_census_eligible", 1, lambda path: path in eligible, deterministic=True
+        )
+        self.connection.create_function(
+            "exomem_census_admitted", 1, self.admitted, deterministic=True
+        )
+        definitions = {**registry.core, **registry.extensions}
+        directed = sorted(
+            key for key, item in definitions.items() if item.direction == "directed"
+        )
+        both = self.connection.execute(
+            "SELECT COALESCE(SUM(n), 0), "
+            "COALESCE(SUM(CASE WHEN forward > 0 AND backward > 0 THEN n ELSE 0 END), 0) "
+            "FROM (SELECT COUNT(*) AS n, SUM(s.path < d.path) AS forward, "
+            "SUM(s.path > d.path) AS backward "
+            f"{_POPULATION_SQL.format(join='')} "
+            "AND e.relation_type IN (SELECT value FROM json_each(?)) "
+            "GROUP BY min(s.path, d.path), max(s.path, d.path), e.relation_type)",
+            (json.dumps(directed),),
+        ).fetchone()
+        # Each inverse-bearing relation maps to (class, representative?, counted?):
+        # an edge typed by the non-representative member is the same fact as the
+        # representative in reverse, so both land in one oriented group.
+        inverses: dict[str, list[Any]] = {}
+        for key, item in sorted(definitions.items()):
+            if not item.inverse:
+                continue
+            group = min(key, item.inverse)
+            inverses[key] = [group, int(key == group), 1, int(key == item.inverse)]
+            inverses.setdefault(
+                item.inverse, [group, int(item.inverse == group), 0, int(key == item.inverse)]
+            )
+        pairs = self.connection.execute(
+            "WITH inv AS (SELECT key AS r, json_extract(value, '$[0]') AS grp, "
+            "json_extract(value, '$[1]') AS rep, json_extract(value, '$[2]') AS counted, "
+            "json_extract(value, '$[3]') AS self_inverse FROM json_each(?)), "
+            "oriented AS (SELECT inv.grp AS grp, inv.counted AS counted, "
+            "CASE WHEN inv.self_inverse THEN s.path < d.path ELSE inv.rep END AS rep, "
+            "s.path AS a, d.path AS b "
+            f"{_POPULATION_SQL.format(join='JOIN inv ON inv.r = e.relation_type ')}) "
+            "SELECT COALESCE(SUM(n), 0), "
+            "COALESCE(SUM(CASE WHEN reps > 0 AND others > 0 THEN 1 ELSE 0 END), 0) "
+            "FROM (SELECT SUM(counted) AS n, SUM(rep) AS reps, SUM(1 - rep) AS others "
+            "FROM oriented GROUP BY CASE WHEN rep THEN a ELSE b END, "
+            "CASE WHEN rep THEN b ELSE a END, grp)",
+            (json.dumps(inverses),),
+        ).fetchone()
+        return (
+            {"applicable": int(both[0]), "violations": int(both[1])},
+            {"applicable": int(pairs[0]), "pairs": int(pairs[1])},
+        )
+
+    def sources_pages(self) -> set[str]:
+        """Pages with an admitted frontmatter `sources:` edge."""
+        found: set[str] = set()
+        for source_path, dst_path in self.connection.execute(
+            "SELECT e.source_path, d.path FROM graph_edges AS e "
+            "JOIN graph_nodes AS d ON d.node_key = e.dst_key "
+            "WHERE e.relation_type = 'derived_from' AND e.origin = 'frontmatter' "
+            "AND e.source_anchor = 'sources'"
+        ):
+            if self.admitted(source_path) and self.admitted(dst_path):
+                found.add(source_path)
+        return found
+
+    def supersession_chains(self) -> _UnionFind:
+        chain = _UnionFind()
+        for src_path, dst_path, source_path in self.connection.execute(
+            "SELECT s.path, d.path, e.source_path FROM graph_edges AS e "
+            "JOIN graph_nodes AS s ON s.node_key = e.src_key "
+            "JOIN graph_nodes AS d ON d.node_key = e.dst_key "
+            "WHERE e.relation_type = 'supersedes' AND e.registry_status != 'unregistered' "
+            "AND e.origin != 'wikilink'"
+        ):
+            if (
+                src_path != dst_path
+                and self.admitted(src_path)
+                and self.admitted(dst_path)
+                and self.author_ok(source_path)
+            ):
+                chain.union(src_path, dst_path)
+        return chain
+
+
+@contextmanager
+def _reader(vault_root: Path, keep: Keep) -> Iterator[_Reader | None]:
+    from .epistemic_graph import EpistemicGraphIndex
+
+    connection = EpistemicGraphIndex(vault_root)._open_read_snapshot()
+    if connection is None:
+        yield None
+        return
+    try:
+        yield _Reader(connection, keep)
     finally:
         connection.close()
-    return snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -389,9 +576,9 @@ def _load(vault_root: Path, *, keep: Keep) -> _Snapshot | None:
 
 def _census_payload(
     vault_root: Path,
-    snapshot: _Snapshot,
+    reader: _Reader,
     *,
-    keep: Keep,
+    whole: bool,
     detail: str,
     start: dt.date | None,
     end: dt.date | None,
@@ -402,10 +589,10 @@ def _census_payload(
 
     registry = relation_registry.load_registry(vault_root)
     types = entity_types.load_entity_types(vault_root)
-    eligible, undated, outside = _eligible_cohort(vault_root, snapshot, start=start, end=end)
+    eligible, undated, outside = _eligible_cohort(vault_root, reader, start=start, end=end)
 
     def entity_family(path: str) -> str | None:
-        page = snapshot.pages.get(path)
+        page = reader.pages.get(path)
         if page is None or not page.admitted or page.page_type != "entity":
             return None
         if not page.entity_type or types.resolve(page.entity_type) is None:
@@ -413,9 +600,12 @@ def _census_payload(
         return types.family_of(page.entity_type)
 
     entity_pages = {path for path in eligible if entity_family(path) is not None}
+    pages_with_sources = reader.sources_pages()
+    chain = reader.supersession_chains()
 
     by_status = dict.fromkeys(_STATUS_KEYS, 0)
     authored_edges = 0
+    unresolved_target_edges = 0
     predicate_edges: Counter[str] = Counter()
     aliases_in_use: set[str] = set()
     unregistered_pages: dict[str, set[str]] = {}
@@ -423,67 +613,84 @@ def _census_payload(
     inbound: set[str] = set()
     typed_pages: set[str] = set()
     specific_pages: set[str] = set()
-    pages_with_sources: set[str] = set()
-    population: list[_Edge] = []
-    supersession: list[_Edge] = []
     entity_edges = dict.fromkeys(_STATUS_KEYS, 0)
     entity_specific: set[str] = set()
     entity_generic_only: dict[str, bool] = {}
     affiliated: set[str] = set()
+    checks = {
+        name: {"applicable": 0, "violations": 0}
+        for name in (
+            "signature_mismatch",
+            "supersedes_backwards",
+            "evidence_target_not_evidential",
+            "answers_without_question",
+            "same_page_epistemic",
+            "contradicts_within_chain",
+        )
+    }
 
-    for edge in snapshot.edges:
-        source = edge.source_path
-        for page in (edge.src_page, edge.dst_page):
+    def record(name: str, violated: bool) -> None:
+        checks[name]["applicable"] += 1
+        checks[name]["violations"] += int(violated)
+
+    for row in reader.rows():
+        source = row.source_path
+        if not row.in_view:
+            if source in eligible and row.origin in _AUTHORED_ORIGINS:
+                unresolved_target_edges += 1
+            continue
+        for page in (row.src_page, row.dst_page):
             if page != source:
                 inbound.add(page)
-        if (
-            edge.origin == "frontmatter"
-            and edge.relation == "derived_from"
-            and edge.source_anchor == "sources"
-        ):
-            pages_with_sources.add(source)
-        typed = (
-            edge.relation is not None
-            and edge.status != "unregistered"
-            and edge.relation != _LINK
-            and edge.origin != "wikilink"
-        )
-        if typed and edge.relation == "supersedes":
-            supersession.append(edge)
         if source not in eligible:
             continue
-        if edge.touches_other:
+        typed = (
+            row.relation is not None
+            and row.status != "unregistered"
+            and row.relation != _LINK
+            and row.origin != "wikilink"
+        )
+        if row.touches_other:
             connected.add(source)
             if typed:
                 typed_pages.add(source)
-                if edge.relation != _GENERIC:
+                if row.relation != _GENERIC:
                     specific_pages.add(source)
         if typed:
-            population.append(edge)
-            definition = registry.definition(edge.relation or "")
+            definition = registry.definition(row.relation or "")
             if definition is not None and definition.family == "affiliation":
                 affiliated.add(source)
-        if edge.origin in _AUTHORED_ORIGINS:
+            _check_row(
+                row,
+                definition,
+                record,
+                reader=reader,
+                chain=chain,
+                pages_with_sources=pages_with_sources,
+            )
+        if row.origin in _AUTHORED_ORIGINS:
             authored_edges += 1
-            bucket = _bucket(edge)
+            bucket = _bucket(row)
             by_status[bucket] += 1
             if bucket == "unregistered":
-                label = _normalize_indexed_relation(edge.raw_relation, edge.line)
+                label = _normalize_indexed_relation(row.raw_relation, row.line)
                 unregistered_pages.setdefault(label, set()).add(source)
             else:
-                predicate_edges[edge.relation or ""] += 1
+                predicate_edges[row.relation or ""] += 1
                 if bucket == "alias":
-                    aliases_in_use.add(relation_registry.normalize_relation(edge.raw_relation))
-        if source in entity_pages and edge.origin != "wikilink" and edge.touches_other:
-            other = edge.dst_page if edge.src_page == source else edge.src_page
-            if other != source and entity_family(other) is not None:
-                bucket = _bucket(edge)
+                    aliases_in_use.add(relation_registry.normalize_relation(row.raw_relation))
+        if source in entity_pages and row.origin != "wikilink" and row.touches_other:
+            other = row.dst_page if row.src_page == source else row.src_page
+            if other != source and other is not None and entity_family(other) is not None:
+                bucket = _bucket(row)
                 entity_edges[bucket] += 1
-                generic = edge.relation == _GENERIC and bucket == "core_generic"
+                generic = row.relation == _GENERIC and bucket == "core_generic"
                 entity_generic_only[source] = entity_generic_only.get(source, True) and generic
-                if typed and edge.relation != _GENERIC:
+                if typed and row.relation != _GENERIC:
                     entity_specific.add(source)
 
+    directed_both_ways, inverse_duplicates = reader.pair_checks(eligible, registry)
+    checks["directed_both_ways"] = {**directed_both_ways, "inspection_only": True}
     eligible_count = len(eligible)
     registered_edges = authored_edges - by_status["unregistered"]
     top3 = sum(count for _key, count in _ranked(predicate_edges)[:3])
@@ -494,7 +701,7 @@ def _census_payload(
 
     metrics: dict[str, Any] = {
         "authored_edges": authored_edges,
-        "unresolved_target_edges": sum(path in eligible for path in snapshot.outside_view),
+        "unresolved_target_edges": unresolved_target_edges,
         "by_status": by_status,
         "generic_share": _ratio(by_status["core_generic"], registered_edges),
         "typed_coverage": {
@@ -546,25 +753,18 @@ def _census_payload(
                 len(pages) >= 3 for pages in unregistered_pages.values()
             ),
         },
-        "inverse_duplicates": _inverse_duplicates(population, registry),
+        "inverse_duplicates": inverse_duplicates,
         # Near-duplicate groups need the vocabulary detector (S2-S7).
         "near_duplicate_groups": _UNMEASURED,
         "false_precision_judged": _UNMEASURED,
     }
-    checks = _structural_checks(
-        snapshot,
-        population,
-        supersession,
-        registry=registry,
-        pages_with_sources=pages_with_sources,
-    )
     payload: dict[str, Any] = {
         "census_version": CENSUS_VERSION,
         "exomem_version": __version__,
         "available": True,
         "detail": detail,
-        # A write counter over the whole vault: withheld writes move it too.
-        "graph_generation": snapshot.generation if keep is None else None,
+        # A write counter over the whole vault, withheld writes included.
+        "graph_generation": reader.generation if whole else None,
         "registry": {
             "core_version": registry.core_version,
             "extension_hash": registry.extension_hash,
@@ -578,7 +778,18 @@ def _census_payload(
             "outside_scope": outside,
         },
         "metrics": metrics,
-        "checks": checks,
+        "checks": {
+            name: checks[name]
+            for name in (
+                "signature_mismatch",
+                "supersedes_backwards",
+                "evidence_target_not_evidential",
+                "answers_without_question",
+                "same_page_epistemic",
+                "directed_both_ways",
+                "contradicts_within_chain",
+            )
+        },
         "sample": None,
     }
     if detail == "keys":
@@ -589,9 +800,61 @@ def _census_payload(
     return payload
 
 
+def _check_row(
+    row: _Row,
+    definition: relation_registry.RelationDefinition | None,
+    record: Callable[[str, bool], None],
+    *,
+    reader: _Reader,
+    chain: _UnionFind,
+    pages_with_sources: set[str],
+) -> None:
+    """The structure-only rules that one typed edge can satisfy or break."""
+    if row.status == "scope_violation" or (
+        definition is not None and (definition.source_kinds or definition.target_kinds)
+    ):
+        outside = definition is not None and (
+            (
+                definition.source_kinds
+                and row.source_kind is not None
+                and row.source_kind not in definition.source_kinds
+            )
+            or (
+                definition.target_kinds
+                and row.target_kind is not None
+                and row.target_kind not in definition.target_kinds
+            )
+        )
+        record("signature_mismatch", row.status == "scope_violation" or bool(outside))
+    src_page, dst_page = row.src_page or "", row.dst_page or ""
+    same_page = src_page == dst_page
+    if row.relation == "supersedes" and not same_page:
+        newer = _origin_date(reader.pages[src_page].origin_date)
+        older = _origin_date(reader.pages[dst_page].origin_date)
+        if newer is not None and older is not None:
+            record("supersedes_backwards", newer < older)
+    if row.relation == "evidenced_by":
+        if row.dst_kind == "file":
+            relative = dst_page.removeprefix(kb_prefix())
+            evidential = relative.startswith(_EVIDENCE_FOLDERS) or dst_page in pages_with_sources
+        else:
+            evidential = row.dst_kind in _EVIDENTIAL_KINDS
+        record("evidence_target_not_evidential", not evidential)
+    if row.relation == "answers":
+        if row.dst_kind == "file":
+            answered = dst_page in reader.question_pages
+        else:
+            answered = row.dst_kind in _QUESTION_KINDS
+        record("answers_without_question", not answered)
+    if definition is not None and definition.family in _EPISTEMIC_FAMILIES:
+        record("same_page_epistemic", same_page)
+    if row.relation == "contradicts" and not same_page:
+        record("contradicts_within_chain", chain.find(src_page) == chain.find(dst_page))
+
+
 def _eligible_cohort(
     vault_root: Path,
-    snapshot: _Snapshot,
+    reader: _Reader,
     *,
     start: dt.date | None = None,
     end: dt.date | None = None,
@@ -600,7 +863,7 @@ def _eligible_cohort(
     prefix = kb_prefix()
     eligible: set[str] = set()
     undated = outside = 0
-    for page in snapshot.pages.values():
+    for page in reader.pages.values():
         if not page.admitted or not page.path.startswith(prefix):
             continue
         if not audit.relation_debt_eligible(
@@ -623,113 +886,6 @@ def _eligible_cohort(
     return eligible, undated, outside
 
 
-def _structural_checks(
-    snapshot: _Snapshot,
-    population: list[_Edge],
-    supersession: list[_Edge],
-    *,
-    registry: relation_registry.RelationRegistry,
-    pages_with_sources: set[str],
-) -> dict[str, dict[str, Any]]:
-    """Seven structure-only rules, each over the edges it can apply to."""
-    counts = {
-        name: {"applicable": 0, "violations": 0}
-        for name in (
-            "signature_mismatch",
-            "supersedes_backwards",
-            "evidence_target_not_evidential",
-            "answers_without_question",
-            "same_page_epistemic",
-            "directed_both_ways",
-            "contradicts_within_chain",
-        )
-    }
-
-    def record(name: str, violated: bool) -> None:
-        counts[name]["applicable"] += 1
-        counts[name]["violations"] += int(violated)
-
-    chain = _UnionFind()
-    for edge in supersession:
-        if edge.src_page != edge.dst_page:
-            chain.union(edge.src_page, edge.dst_page)
-    directed = {(edge.src_page, edge.dst_page, edge.relation) for edge in population}
-
-    for edge in population:
-        definition = registry.definition(edge.relation or "")
-        if edge.status == "scope_violation" or (
-            definition is not None and (definition.source_kinds or definition.target_kinds)
-        ):
-            outside = definition is not None and (
-                (
-                    definition.source_kinds
-                    and edge.source_kind is not None
-                    and edge.source_kind not in definition.source_kinds
-                )
-                or (
-                    definition.target_kinds
-                    and edge.target_kind is not None
-                    and edge.target_kind not in definition.target_kinds
-                )
-            )
-            record("signature_mismatch", edge.status == "scope_violation" or bool(outside))
-        same_page = edge.src_page == edge.dst_page
-        if edge.relation == "supersedes" and not same_page:
-            newer = _origin_date(_page_origin(snapshot, edge.src_page))
-            older = _origin_date(_page_origin(snapshot, edge.dst_page))
-            if newer is not None and older is not None:
-                record("supersedes_backwards", newer < older)
-        if edge.relation == "evidenced_by":
-            if edge.dst_kind == "file":
-                relative = edge.dst_page.removeprefix(kb_prefix())
-                evidential = relative.startswith(_EVIDENCE_FOLDERS) or (
-                    edge.dst_page in pages_with_sources
-                )
-            else:
-                evidential = edge.dst_kind in _EVIDENTIAL_KINDS
-            record("evidence_target_not_evidential", not evidential)
-        if edge.relation == "answers":
-            if edge.dst_kind == "file":
-                answered = bool(snapshot.units_by_page.get(edge.dst_page, set()) & _QUESTION_KINDS)
-            else:
-                answered = edge.dst_kind in _QUESTION_KINDS
-            record("answers_without_question", not answered)
-        if definition is not None and definition.family in _EPISTEMIC_FAMILIES:
-            record("same_page_epistemic", same_page)
-        if definition is not None and definition.direction == "directed" and not same_page:
-            record(
-                "directed_both_ways",
-                (edge.dst_page, edge.src_page, edge.relation) in directed,
-            )
-        if edge.relation == "contradicts" and not same_page:
-            record(
-                "contradicts_within_chain",
-                chain.find(edge.src_page) == chain.find(edge.dst_page),
-            )
-    counts["directed_both_ways"]["inspection_only"] = True
-    return counts
-
-
-def _inverse_duplicates(
-    population: Iterable[_Edge], registry: relation_registry.RelationRegistry
-) -> dict[str, int]:
-    """Pairs where a->b is typed P and b->a is typed P's registered inverse."""
-    edges = [edge for edge in population if edge.src_page != edge.dst_page]
-    present = {(edge.src_page, edge.dst_page, edge.relation) for edge in edges}
-    applicable = 0
-    pairs: set[tuple[tuple[str, str, str], tuple[str, str, str]]] = set()
-    for edge in edges:
-        definition = registry.definition(edge.relation or "")
-        if definition is None or not definition.inverse:
-            continue
-        applicable += 1
-        forward = (edge.src_page, edge.dst_page, edge.relation or "")
-        reverse = (edge.dst_page, edge.src_page, definition.inverse)
-        if reverse in present:
-            pairs.add((min(forward, reverse), max(forward, reverse)))
-    return {"applicable": applicable, "pairs": len(pairs)}
-
-
 # ---------------------------------------------------------------------------
 # Judged sample (optional): refs only, seeded, stratified by family
 # ---------------------------------------------------------------------------
@@ -738,7 +894,7 @@ def _inverse_duplicates(
 def sample(
     vault_root: Path,
     *,
-    keep: Keep = None,
+    keep: Any = CALLER,
     size: int = DEFAULT_SAMPLE_SIZE,
     seed: int = 0,
 ) -> dict[str, Any]:
@@ -747,63 +903,84 @@ def sample(
     Items are refs only (page path and anchor at each end) so the owner's agent
     can read and judge them locally; the file never leaves the machine, and
     nothing but the folded counts re-enters the census. Specific means an
-    authored, registered edge that is neither `relates_to` nor `links_to`.
+    authored, registered edge between pages in view that is neither
+    `relates_to` nor `links_to`. Each family keeps the edges with the smallest
+    seeded hash of their identity, so one pass draws a uniform, reproducible
+    sample while holding at most `size` candidates per family.
     """
     if type(size) is not int or size < 1:
         raise ValueError("INVALID_RELATION_ARGUMENT: sample size must be a positive integer")
-    snapshot = _load(vault_root, keep=keep)
-    if snapshot is None:
-        return _unavailable("counts")
-    registry = relation_registry.load_registry(vault_root)
-    eligible, _undated, _outside = _eligible_cohort(vault_root, snapshot)
-    strata: dict[str, list[_Edge]] = {}
-    for edge in snapshot.edges:
-        if (
-            edge.source_path not in eligible
-            or edge.origin not in _AUTHORED_ORIGINS
-            or edge.relation in (None, _GENERIC, _LINK)
-            or edge.status == "unregistered"
-        ):
-            continue
-        definition = registry.definition(edge.relation or "")
-        family = definition.family if definition is not None else "unknown"
-        strata.setdefault(family, []).append(edge)
-    for edges in strata.values():
-        edges.sort(key=_edge_order)
-    quotas = _allocate(size, {family: len(edges) for family, edges in strata.items()})
-    rng = random.Random(seed)
-    items: list[dict[str, Any]] = []
-    for family in sorted(strata):
-        chosen = sorted(
-            rng.sample(range(len(strata[family])), quotas.get(family, 0))
-        )
-        for index in chosen:
-            edge = strata[family][index]
-            items.append(
-                {
-                    "id": f"s{len(items) + 1:03d}",
-                    "family": family,
-                    "relation": edge.relation,
-                    "source": {"path": edge.source_path, "anchor": edge.source_anchor},
-                    "target": {"path": edge.dst_page, "anchor": edge.dst_anchor},
-                    "verdict": None,
-                }
+    view = _resolve_view(vault_root, keep)
+    if isinstance(view, str):
+        return _refused(view, "counts")
+    with _reader(vault_root, view.keep) as reader:
+        if reader is None:
+            return _unavailable("counts")
+        registry = relation_registry.load_registry(vault_root)
+        eligible, _undated, _outside = _eligible_cohort(vault_root, reader)
+        strata: Counter[str] = Counter()
+        # Per family, a max-heap (by negated hash) of the `size` smallest hashes.
+        kept: dict[str, list[tuple[int, tuple[str, ...], dict[str, Any]]]] = {}
+        for row in reader.rows():
+            if (
+                not row.in_view
+                or row.source_path not in eligible
+                or row.origin not in _AUTHORED_ORIGINS
+                or row.relation in (None, _GENERIC, _LINK)
+                or row.status == "unregistered"
+            ):
+                continue
+            definition = registry.definition(row.relation or "")
+            family = definition.family if definition is not None else "unknown"
+            strata[family] += 1
+            rank = int.from_bytes(
+                hashlib.sha256(f"{seed}\0{row.edge_key}".encode()).digest()[:8], "big"
             )
-    return {
-        "kind": "relation_census_sample",
-        "census_version": CENSUS_VERSION,
-        "graph_generation": snapshot.generation if keep is None else None,
-        "registry": {
-            "core_version": registry.core_version,
-            "extension_hash": registry.extension_hash,
-        },
-        "seed": seed,
-        "requested": size,
-        "drawn": len(items),
-        "strata": {family: len(strata[family]) for family in sorted(strata)},
-        "verdicts": list(VERDICTS),
-        "items": items,
-    }
+            heap = kept.setdefault(family, [])
+            entry = (
+                -rank,
+                (
+                    row.source_path,
+                    row.source_anchor or "",
+                    row.relation or "",
+                    row.dst_page or "",
+                    row.dst_anchor or "",
+                ),
+                {
+                    "family": family,
+                    "relation": row.relation,
+                    "source": {"path": row.source_path, "anchor": row.source_anchor},
+                    "target": {"path": row.dst_page, "anchor": row.dst_anchor},
+                    "verdict": None,
+                },
+            )
+            if len(heap) < size:
+                heapq.heappush(heap, entry)
+            elif entry[:2] > heap[0][:2]:
+                heapq.heapreplace(heap, entry)
+        quotas = _allocate(size, strata)
+        items: list[dict[str, Any]] = []
+        for family in sorted(strata):
+            smallest = sorted(kept[family], key=lambda entry: (-entry[0], entry[1]))
+            for _rank, _order, item in sorted(
+                smallest[: quotas.get(family, 0)], key=lambda entry: entry[1]
+            ):
+                items.append({"id": f"s{len(items) + 1:03d}", **item})
+        return {
+            "kind": "relation_census_sample",
+            "census_version": CENSUS_VERSION,
+            "graph_generation": reader.generation if view.whole else None,
+            "registry": {
+                "core_version": registry.core_version,
+                "extension_hash": registry.extension_hash,
+            },
+            "seed": seed,
+            "requested": size,
+            "drawn": len(items),
+            "strata": {family: strata[family] for family in sorted(strata)},
+            "verdicts": list(VERDICTS),
+            "items": items,
+        }
 
 
 def fold_judgments(judged: Mapping[str, Any]) -> dict[str, Any] | str:
@@ -870,16 +1047,6 @@ def _allocate(size: int, counts: Mapping[str, int]) -> dict[str, int]:
     return quotas
 
 
-def _edge_order(edge: _Edge) -> tuple[str, str, str, str, str]:
-    return (
-        edge.source_path,
-        edge.source_anchor or "",
-        edge.relation or "",
-        edge.dst_page,
-        edge.dst_anchor or "",
-    )
-
-
 def _wilson(successes: int, total: int) -> list[float]:
     z2 = _WILSON_Z * _WILSON_Z
     proportion = successes / total
@@ -916,11 +1083,11 @@ class _UnionFind:
             self._parent[max(root_left, root_right)] = min(root_left, root_right)
 
 
-def _bucket(edge: _Edge) -> str:
-    status = edge.status
+def _bucket(row: _Row) -> str:
+    status = row.status
     if status in {"unregistered", "scope_violation", "deprecated"}:
         return status
-    if edge.relation == _GENERIC:
+    if row.relation == _GENERIC:
         return "core_generic"
     if status == "core":
         return "core_specific"
@@ -939,11 +1106,6 @@ def _ratio(numerator: int, denominator: int) -> float | None:
 
 def _percent(value: float | None) -> str:
     return "n/a" if value is None else f"{value * 100:.1f}%"
-
-
-def _page_origin(snapshot: _Snapshot, path: str) -> str | None:
-    page = snapshot.pages.get(path)
-    return page.origin_date if page is not None else None
 
 
 def _origin_date(value: str | None) -> dt.date | None:
@@ -992,10 +1154,14 @@ def _date_bounds(
 
 
 def _unavailable(detail: str) -> dict[str, Any]:
+    return _refused("graph_unavailable", detail)
+
+
+def _refused(reason: str, detail: str) -> dict[str, Any]:
     return {
         "census_version": CENSUS_VERSION,
         "exomem_version": __version__,
         "available": False,
-        "reason": "graph_unavailable",
+        "reason": reason,
         "detail": detail,
     }

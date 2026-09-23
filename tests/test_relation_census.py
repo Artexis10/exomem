@@ -18,7 +18,12 @@ from exomem import (
 )
 from exomem.__main__ import main
 from exomem.governance import egress
-from exomem.governance.principal import RequestPrincipal, request_scope
+from exomem.governance.principal import (
+    RequestPrincipal,
+    library_scope,
+    owner_principal,
+    request_scope,
+)
 
 NOTES = "Knowledge Base/Notes"
 PEOPLE = "Knowledge Base/Entities/People"
@@ -490,20 +495,117 @@ def test_counts_follow_the_callers_walk_filter(tmp_path: Path) -> None:
     assert owner["metrics"]["authored_edges"] > restricted["metrics"]["authored_edges"]
     assert owner["cohort"]["eligible_pages"] == restricted["cohort"]["eligible_pages"] + 1
 
-    # The tool applies the caller's own release filter, inside the walk.
-    for vault in (visible_only, with_secret):
+
+_EXTERNAL = RequestPrincipal(audience_id="external", surface="mcp")
+
+
+def _resolution_base(vault: Path) -> None:
+    _write(vault, f"{NOTES}/alpha.md", _page("insight", "Alpha", "See [[beta]].\n\n- supports [[beta]]"))
+    _write(vault, f"{NOTES}/beta.md", _page("insight", "Beta", "Plain."))
+    _write(
+        vault,
+        f"{NOTES}/gamma-page.md",
+        _page("insight", "Gamma", "Plain.", extra="title: Gamma Topic\n"),
+    )
+    _write(
+        vault,
+        f"{NOTES}/delta.md",
+        _page("insight", "Delta", "See [[Gamma Topic]].\n\n- supports [[Gamma Topic]]"),
+    )
+    _write(
+        vault,
+        f"{NOTES}/epsilon.md",
+        _page("insight", "Epsilon", "Plain.", extra="title: Epsilon Topic\n"),
+    )
+    _write(
+        vault,
+        f"{NOTES}/zeta.md",
+        _page("insight", "Zeta", "See [[Epsilon Topic]].\n\n- supports [[Epsilon Topic]]"),
+    )
+    _write(vault, f"{NOTES}/lonely.md", _page("insight", "Lonely", "No links."))
+
+
+#: A withheld page that changes how a visible page's bare link resolves: a
+#: shared stem makes the link ambiguous, a stem equal to a visible title wins
+#: over the title, and a shared title splits the title match.
+_RESOLUTION_CHANNELS = {
+    "stem_collision": (f"{NOTES}/Withheld/beta.md", _page("insight", "Hidden", "x")),
+    "stem_beats_title": (f"{NOTES}/Withheld/Gamma Topic.md", _page("insight", "Hidden", "x")),
+    "title_collision": (
+        f"{NOTES}/Withheld/other.md",
+        _page("insight", "Hidden", "x", extra="title: Epsilon Topic\n"),
+    ),
+}
+
+
+@pytest.mark.parametrize("channel", sorted(_RESOLUTION_CHANNELS))
+def test_a_governed_policy_serves_the_census_to_the_owner_only(
+    tmp_path: Path, channel: str
+) -> None:
+    """Link resolution runs over the whole vault, so a withheld page can move a
+    restricted census through how a visible link resolves. The census cannot
+    re-resolve from the snapshot, so under a governed policy only the owner is
+    served, and every other audience gets `audience_restricted`."""
+    rel, body = _RESOLUTION_CHANNELS[channel]
+    vaults = {}
+    for name, collide in (("absent", False), ("collide", True)):
+        vault = tmp_path / name
+        _resolution_base(vault)
+        if collide:
+            _write(vault, rel, body)
+        _built(vault)
         _withhold(vault)
-    _reset_governance_caches()
-    external = RequestPrincipal(audience_id="external", surface="mcp")
-    views = []
-    for vault in (visible_only, with_secret):
-        with request_scope(external):
-            views.append(
-                commands.op_schema_memory(vault, operation="census", subject="relations")
-            )
+        vaults[name] = vault
+
+    restricted = {}
+    owner = {}
+    for name, vault in vaults.items():
         _reset_governance_caches()
-    assert json.dumps(views[0]) == json.dumps(views[1])
-    assert views[1]["metrics"] == restricted["metrics"]
+        with request_scope(_EXTERNAL):
+            restricted[name] = [
+                commands.op_schema_memory(vault, operation="census", subject="relations"),
+                commands.op_schema_memory(
+                    vault, operation="census", subject="relations", detail="keys"
+                ),
+                relation_census.sample(vault, size=5),
+                commands.op_schema_memory(vault, operation="infer", subject="relations")[
+                    "census"
+                ],
+            ]
+        _reset_governance_caches()
+        with request_scope(owner_principal(surface="mcp")):
+            owner[name] = commands.op_schema_memory(vault, operation="census", subject="relations")
+
+    assert json.dumps(restricted["absent"]) == json.dumps(restricted["collide"])
+    for census_view, keys_view, sample_view, infer_view in (restricted["collide"],):
+        for refused in (census_view, keys_view, sample_view):
+            assert refused["available"] is False
+            assert refused["reason"] == "audience_restricted"
+            assert "metrics" not in refused and "items" not in refused
+        assert infer_view == {"available": False, "reason": "audience_restricted"}
+
+    # The owner is served true counts, generation included, under the policy.
+    assert owner["collide"]["available"] is True
+    assert isinstance(owner["collide"]["graph_generation"], int)
+    assert (
+        owner["collide"]["cohort"]["eligible_pages"]
+        == owner["absent"]["cohort"]["eligible_pages"] + 1
+    )
+
+
+def test_an_unbound_caller_under_a_governed_policy_is_refused(tmp_path: Path) -> None:
+    vault = _built(_seed_census_vault(tmp_path / "vault"))
+    _withhold(vault)
+    _reset_governance_caches()
+
+    refused = relation_census.census(vault)
+
+    assert refused["available"] is False
+    assert refused["reason"] == "audience_restricted"
+    with library_scope():
+        served = relation_census.census(vault)
+    assert served["available"] is True
+    assert isinstance(served["graph_generation"], int)
 
 
 def test_a_withheld_target_reads_exactly_like_a_missing_one(tmp_path: Path) -> None:
@@ -574,6 +676,10 @@ def test_census_operation_accepts_only_detail_and_date_scope(census_vault: Path)
         commands.op_schema_memory(
             census_vault, operation="infer", subject="relations", detail="keys"
         )
+    with pytest.raises(ValueError, match="INVALID_RELATION_ARGUMENT"):
+        commands.op_schema_memory(
+            census_vault, operation="census", subject="relations", limit=5
+        )
 
 
 def test_cli_census_reads_the_local_snapshot_without_a_service(
@@ -587,6 +693,44 @@ def test_cli_census_reads_the_local_snapshot_without_a_service(
     assert exit_code == 0
     assert payload["served_by"] == "local-snapshot"
     assert payload["metrics"]["authored_edges"] == 10
+
+
+def test_cli_local_census_binds_the_owner_on_a_governed_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _visible_only, with_secret = _governed_twins(tmp_path)
+    _withhold(with_secret)
+    _reset_governance_caches()
+    monkeypatch.delenv("EXOMEM_REST_API_KEY", raising=False)
+    with library_scope():
+        expected = relation_census.census(with_secret)
+
+    exit_code = main(["relations", "census", "--json", "--vault", str(with_secret)])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["available"] is True
+    assert payload["metrics"] == expected["metrics"]
+    assert payload["cohort"]["eligible_pages"] == expected["cohort"]["eligible_pages"]
+    assert isinstance(payload["graph_generation"], int)
+
+
+def test_cli_notes_a_refused_rest_key_before_reading_locally(
+    census_vault: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def refused(_detail: str) -> dict:
+        raise relation_census.ServiceKeyRefused(401)
+
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(census_vault))
+    monkeypatch.setattr(relation_census, "service_census", refused)
+
+    exit_code = main(["relations", "census", "--json"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert json.loads(captured.out)["served_by"] == "local-snapshot"
+    [note] = [line for line in captured.err.splitlines() if line.strip()]
+    assert "refused the REST key" in note
 
 
 def test_cli_census_asks_a_running_managed_service_first(
@@ -659,6 +803,11 @@ def test_service_census_falls_back_on_any_service_failure(
         "http://127.0.0.1:9/api/schema_memory",
         {"subject": "relations", "operation": "census", "detail": "keys"},
     )
+    # A refused key is not a silent fallback: the caller is told.
+    answers = iter([Response(401, {"success": False}), Response(403, {"success": False})])
+    for _status in (401, 403):
+        with pytest.raises(relation_census.ServiceKeyRefused):
+            relation_census.service_census("counts")
 
 
 def test_doctor_reports_one_census_line(census_vault: Path) -> None:
@@ -677,3 +826,79 @@ def test_doctor_census_line_reports_an_unavailable_graph(tmp_path: Path) -> None
     assert check.id == "relations.census"
     assert check.status == "warn"
     assert "unavailable" in check.message
+
+
+def test_census_streams_edges_instead_of_holding_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reduction aggregates while it reads: Python memory stays flat as the
+    edge count grows, instead of holding one object per edge."""
+    import sqlite3
+    import tracemalloc
+
+    vault = tmp_path / "vault"
+    for index in range(40):
+        _write(
+            vault,
+            f"{NOTES}/page-{index:02d}.md",
+            _page("insight", f"Page {index}", f"- supports [[{NOTES}/page-{(index + 1) % 40:02d}]]"),
+        )
+    _built(vault)
+    sidecar = epistemic_graph.sidecar_path(vault)
+    connection = sqlite3.connect(sidecar)
+    columns = [row[1] for row in connection.execute("PRAGMA table_info(graph_edges)")]
+    template = dict(
+        zip(
+            columns,
+            connection.execute(
+                "SELECT * FROM graph_edges WHERE origin = 'semantic_relation' LIMIT 1"
+            ).fetchone(),
+            strict=True,
+        )
+    )
+    relations = ("supports", "relates_to", "depends_on", "refines", "links_to")
+    rows = []
+    for number in range(120_000):
+        source, target = number % 40, (number * 7 + 3) % 40
+        relation = relations[number % len(relations)]
+        row = dict(template)
+        row.update(
+            edge_key=f"edge:synthetic-{number}",
+            src_key=f"file:{NOTES}/page-{source:02d}.md",
+            dst_key=f"file:{NOTES}/page-{target:02d}.md",
+            relation_type=relation,
+            raw_relation=relation,
+            origin="wikilink" if relation == "links_to" else "semantic_relation",
+            source_path=f"{NOTES}/page-{source:02d}.md",
+            source_anchor=f"line-{number}",
+            metadata="{}",
+        )
+        rows.append(tuple(row[column] for column in columns))
+    connection.executemany(
+        f"INSERT INTO graph_edges({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+        rows,
+    )
+    connection.commit()
+    connection.close()
+    del rows
+    # The synthetic rows are not backed by page bytes, so read the sidecar
+    # directly rather than through the availability proof.
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "_open_read_snapshot",
+        lambda _self, **_kwargs: sqlite3.connect(f"file:{sidecar}?mode=ro", uri=True),
+    )
+
+    tracemalloc.start()
+    try:
+        result = relation_census.census(vault)
+        sampled = relation_census.sample(vault, size=40)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert result["metrics"]["authored_edges"] > 90_000
+    assert sampled["drawn"] == 40
+    # Holding one object per edge costs several hundred bytes each (tens of
+    # MB here); streaming keeps the census to a few MB.
+    assert peak < 12 * 1024 * 1024, peak

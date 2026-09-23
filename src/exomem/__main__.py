@@ -1093,9 +1093,12 @@ def _relations_main(argv: list[str]) -> int:
     )
     census_parser.add_argument(
         "--sample-out",
-        default="relation-census-sample.json",
+        default=None,
         metavar="FILE",
-        help="where --sample writes its refs (default: ./relation-census-sample.json)",
+        help=(
+            "where --sample writes its refs (default: relation-census/sample.json in "
+            "the vault's machine-local state directory, never the current directory)"
+        ),
     )
     census_parser.add_argument(
         "--seed", type=int, default=0, help="sample seed (default: 0)"
@@ -1109,6 +1112,7 @@ def _relations_main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     from . import relation_census
+    from .governance.principal import library_scope
 
     try:
         judged = None
@@ -1119,9 +1123,18 @@ def _relations_main(argv: list[str]) -> int:
         detail = "keys" if args.keys else "counts"
         # The sample names refs, which only a local read can hand back.
         local_only = args.vault is not None or args.sample is not None
-        result = None if local_only else relation_census.service_census(detail)
+        result = None
+        if not local_only:
+            try:
+                result = relation_census.service_census(detail)
+            except relation_census.ServiceKeyRefused as refused:
+                print(
+                    f"note: {refused}; reading the local snapshot instead",
+                    file=sys.stderr,
+                )
         served_by = "service"
         sample = None
+        sample_out: Path | None = None
         if result is None:
             vault = args.vault or os.environ.get("EXOMEM_VAULT_PATH")
             if not vault:
@@ -1129,17 +1142,29 @@ def _relations_main(argv: list[str]) -> int:
                     "VAULT_REQUIRED: no managed service answered; pass --vault or set "
                     "EXOMEM_VAULT_PATH"
                 )
-            from .governance import egress
-
             vault_root = Path(vault).expanduser()
-            keep = egress.release_walk_filter(vault_root)
-            result = relation_census.census(vault_root, keep=keep, detail=detail)
             served_by = "local-snapshot"
-            if args.sample is not None and result.get("available"):
-                sample = relation_census.sample(
-                    vault_root, keep=keep, size=args.sample, seed=args.seed
-                )
-                Path(args.sample_out).expanduser().write_text(
+            # A terminal on the owner's machine reading its own sidecar is the
+            # owner-local caller, the one audience a governed vault serves.
+            with library_scope():
+                result = relation_census.census(vault_root, detail=detail)
+                if args.sample is not None and result.get("available"):
+                    sample = relation_census.sample(
+                        vault_root, size=args.sample, seed=args.seed
+                    )
+            if sample is not None:
+                if args.sample_out is not None:
+                    sample_out = Path(args.sample_out).expanduser()
+                else:
+                    from . import state_paths
+
+                    sample_out = (
+                        state_paths.ensure_vault_state_dir(vault_root)
+                        / "relation-census"
+                        / "sample.json"
+                    )
+                    sample_out.parent.mkdir(mode=0o700, exist_ok=True)
+                sample_out.write_text(
                     json.dumps(sample, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
                 )
     except (OSError, ValueError) as error:
@@ -1157,13 +1182,16 @@ def _relations_main(argv: list[str]) -> int:
                 "drawn": sample["drawn"],
                 "strata": sample["strata"],
             }
+    if sample_out is not None and result.get("sample"):
+        print(
+            f"sample: {result['sample']['drawn']} refs written to {sample_out}",
+            file=sys.stderr,
+        )
     if args.json:
         print(json.dumps(result, ensure_ascii=False))
     else:
         print(relation_census.summary_line(result))
         print(f"  served by: {served_by}")
-        if result.get("sample"):
-            print(f"  sample: {result['sample']['drawn']} refs written to {args.sample_out}")
     return 0
 
 

@@ -996,7 +996,7 @@ def _check_relation_census(vault_root: Path | None) -> DoctorCheck:
     Informational: edge quality is never a setup failure, so an available
     census passes and an unavailable one only warns (`graph_sync.state` owns
     the graph's health). Doctor is a read-only local preflight run by the
-    owner, so it counts the whole cohort and records no release receipts.
+    owner, so it declares the owner-local caller the census serves.
     """
     if vault_root is None:
         return _check(
@@ -1005,9 +1005,11 @@ def _check_relation_census(vault_root: Path | None) -> DoctorCheck:
             "No vault configured; the relation census was not read.",
         )
     from . import relation_census
+    from .governance.principal import library_scope
 
     try:
-        result = relation_census.census(vault_root)
+        with library_scope():
+            result = relation_census.census(vault_root)
     except Exception as error:  # noqa: BLE001 - diagnostics must not crash doctor
         return _check(
             "relations.census",

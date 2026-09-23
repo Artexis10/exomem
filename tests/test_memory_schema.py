@@ -725,6 +725,114 @@ extensions:
     }
 
 
+def test_infer_census_counts_rows_whose_target_is_outside_the_view(tmp_path: Path) -> None:
+    """Rows naming a missing target still count as authored relation rows, so
+    the snapshot census keeps the Markdown values. `zero_body_connections` now
+    counts pages with no link or relation that resolves to another page."""
+    vault = tmp_path / "vault"
+    notes = "Knowledge Base/Notes"
+    pages = {
+        "resolved.md": f"- supports [[{notes}/target]]\nSee [[{notes}/target]].",
+        "missing-row.md": f"- supports [[{notes}/does-not-exist]]",
+        "missing-generic.md": "- relates_to [[nowhere-page]]",
+        "missing-unregistered.md": f"- zebra.label: [[{notes}/does-not-exist]]",
+        "body-missing-only.md": "Body link to [[Never Written Page]] only.",
+        "ambiguous-row.md": "- supports [[dup]]\nand [[dup]]",
+        "sub1/dup.md": "x",
+        "sub2/dup.md": "x",
+        "target.md": "Plain target.",
+        "reference-row.md": "- supports [[Reference/some-ref]]",
+    }
+    for rel, body in pages.items():
+        path = vault / notes / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\ntype: insight\ncreated: 2026-01-10\n---\n# T\n\n{body}\n", encoding="utf-8"
+        )
+    reference = vault / "Reference" / "some-ref.md"
+    reference.parent.mkdir(parents=True)
+    reference.write_text("---\ntype: reference\n---\n# R\n\nx\n", encoding="utf-8")
+    markdown = commands.op_schema_memory(vault, operation="infer", subject="relations")["census"]
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+
+    graph = commands.op_schema_memory(vault, operation="infer", subject="relations")["census"]
+
+    assert graph["relation_counts"] == markdown["relation_counts"] == {
+        "core": 4,
+        "extension": 0,
+        "deprecated": 0,
+        "generic": 1,
+        "unregistered": 1,
+    }
+    assert graph["denominators"] == markdown["denominators"]
+    assert (
+        graph["page_counts"]["zero_authored_relation_rows"]
+        == markdown["page_counts"]["zero_authored_relation_rows"]
+        == 4
+    )
+    # Only resolved.md reaches another page; every other row or link names a
+    # page that is missing, ambiguous or outside the Knowledge Base.
+    assert graph["page_counts"]["zero_body_connections"] == 9
+
+
+def test_infer_census_is_refused_to_a_restricted_caller_on_every_path(
+    tmp_path: Path,
+) -> None:
+    from exomem import find as find_module
+    from exomem.governance import egress, membership, policy
+    from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+
+    vault = tmp_path / "vault"
+    pages = _seed_pages(vault)
+    secret = vault / "Knowledge Base" / "Notes" / "Withheld" / "secret.md"
+    secret.parent.mkdir(parents=True)
+    secret.write_text(
+        pages[0].read_text(encoding="utf-8") + "\n- zebra.label: [[Knowledge Base/Notes/future]]\n",
+        encoding="utf-8",
+    )
+    governance = vault / "Knowledge Base" / "_Governance"
+    (governance / "scopes").mkdir(parents=True)
+    (governance / "rules").mkdir(parents=True)
+    (governance / "scopes" / "withheld.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\nname: Withheld\n"
+        'paths: ["Notes/Withheld/**"]\n',
+        encoding="utf-8",
+    )
+    (governance / "rules" / "withheld-external.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\n'
+        f"audience: external\nceiling: {egress.LEVEL_NONE}\n",
+        encoding="utf-8",
+    )
+
+    def reset() -> None:
+        policy._CACHE.clear()
+        membership.clear_memo()
+        egress.clear_decision_memo()
+        find_module.clear_cache()
+
+    external = RequestPrincipal(audience_id="external", surface="mcp")
+    for built in (False, True):
+        if built:
+            epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+        for scope in ({}, {"project": "atlas"}):
+            reset()
+            with request_scope(external):
+                census = commands.op_schema_memory(
+                    vault, operation="infer", subject="relations", **scope
+                )["census"]
+            assert census == {"available": False, "reason": "audience_restricted"}, (
+                built,
+                scope,
+            )
+            reset()
+            with request_scope(owner_principal(surface="mcp")):
+                owner = commands.op_schema_memory(
+                    vault, operation="infer", subject="relations", **scope
+                )["census"]
+            assert owner["relation_counts"]["unregistered"] == 1, (built, scope)
+
+
 def test_relation_inference_reserves_canonical_keys_across_distinct_aliases(
     tmp_path: Path,
 ) -> None:

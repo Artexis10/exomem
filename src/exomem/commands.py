@@ -9640,16 +9640,16 @@ def op_schema_memory(
                 or strict
                 or name is not None
                 or context is not None
+                or limit != 20
             ):
                 raise ValueError(
                     "INVALID_RELATION_ARGUMENT: census accepts only detail, date_from, "
                     "and date_to"
                 )
-            # Counts are reductions over a walk, so the caller's release filter
-            # applies inside it (N1c): no withheld page moves a number.
+            # The census decides the view from the bound principal: served whole
+            # under an empty policy, to the owner only under a governed one.
             return relation_census_module.census(
                 vault_root,
-                keep=egress_module.release_walk_filter(vault_root),
                 detail=detail or "counts",
                 date_from=date_from,
                 date_to=date_to,
@@ -9864,7 +9864,9 @@ def op_schema_memory(
                 # use, so it protects only observed labels that resolve to a
                 # currently registered extension: its key, and the alias when
                 # the label was one. Core and unregistered labels, in any case,
-                # are nothing a registry save can delete.
+                # are nothing a registry save can delete. The registry's own
+                # meaning-continuity check already refuses dropping a used key or
+                # alias, so this guard is defence in depth.
                 current = relation_registry_module.load_registry(vault_root)
                 observed: set[str] = set()
                 for item in memory_schema_module.relation_observations(

@@ -174,3 +174,25 @@ def test_absent_judgments_report_unmeasured(
     assert payload["metrics"]["false_precision_judged"] == "unmeasured"
     assert "Knowledge Base" not in json.dumps(payload)
     assert all(item["verdict"] is None for item in written["items"])
+
+
+def test_sample_out_defaults_to_the_vault_state_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from exomem import state_paths
+
+    vault = _sample_vault(tmp_path / "vault")
+    working = tmp_path / "working-directory"
+    working.mkdir()
+    monkeypatch.chdir(working)
+    monkeypatch.delenv("EXOMEM_REST_API_KEY", raising=False)
+
+    exit_code = main(["relations", "census", "--json", "--vault", str(vault), "--sample", "4"])
+
+    captured = capsys.readouterr()
+    written = state_paths.vault_state_dir(vault) / "relation-census" / "sample.json"
+    assert exit_code == 0
+    assert list(working.iterdir()) == []
+    assert json.loads(written.read_text(encoding="utf-8"))["drawn"] == 4
+    assert str(written) in captured.err
+    assert json.loads(captured.out)["sample"]["drawn"] == 4
