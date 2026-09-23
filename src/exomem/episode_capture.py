@@ -134,6 +134,10 @@ def _line(value: Any, name: str, maximum: int) -> str:
         unicodedata.category(char) == "Cc" or char in _REFUSED_FORMAT_CHARS for char in text
     ):
         raise _error("EPISODE_INVALID", f"{name} must be one line without control characters")
+    # After the refusals, which see the raw text: no-break, narrow and runs of
+    # spaces collapse to one, so every line accepted here is one the Source
+    # writer's one-line rule accepts too.
+    text = " ".join(text.split())
     if len(text) > maximum:
         raise _error("EPISODE_TOO_LARGE", f"{name} exceeds {maximum} characters")
     return text
@@ -193,8 +197,9 @@ def prepare(
     control character), `EPISODE_TOO_LARGE` (any cap, the body's included),
     `EPISODE_EMPTY` (nothing worked on, decided or left open) and
     `EPISODE_CREDENTIAL` (a credential-shaped value anywhere the agent wrote
-    prose). An invalid `client` label is dropped rather than refused:
-    attribution is optional and never costs the record.
+    prose, or as the `client` label). An otherwise invalid `client` label is
+    dropped rather than refused: attribution is optional and never costs the
+    record.
     """
     if episode is None:
         key = mint_key()
@@ -212,6 +217,9 @@ def prepare(
     }
     statements = _lines(said, "said", count=MAX_SAID, maximum=MAX_SAID_CHARS)
     refs = _about(about)
+    # Scrubbed whatever its shape: a valid-looking label is written to the page.
+    if isinstance(client, str) and scrubber.scrub_text(client)[1]:
+        raise _error("EPISODE_CREDENTIAL", "a recap may not carry credential-shaped text")
     label = client if isinstance(client, str) and CLIENT_LABEL_RE.fullmatch(client) else None
 
     if not any(sections.values()):

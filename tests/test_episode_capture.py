@@ -198,3 +198,33 @@ def test_an_invalid_client_label_is_dropped_not_refused() -> None:
 def test_the_subject_slug_falls_back_when_nothing_ascii_survives() -> None:
     recap = _prepare(subject="!!! ...")
     assert recap.slug.startswith("episode-ep")
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        # Spelled in pieces so no scanner mistakes the fixture for a live token.
+        "sk-" + "abcdefghijklmnopqrstuvw",
+        "sk-proj-" + "Ab3dE" * 10,
+    ],
+)
+def test_a_credential_shaped_client_label_is_refused(label: str) -> None:
+    """The label is written to the page too, so it is scrubbed like prose;
+    one that fits the label pattern is otherwise a valid-looking label."""
+    assert _code(client=label) == "EPISODE_CREDENTIAL"
+
+
+def test_unicode_spaces_collapse_so_every_accepted_line_is_one_the_writer_takes() -> None:
+    nbsp, narrow = chr(0xA0), chr(0x202F)
+    recap = _prepare(
+        subject=f"Harbor{narrow}Lamp  purchase",
+        summary=f"Chose{nbsp}the brass  lamp;{narrow}delivery still open.",
+        worked_on=[f"Compared{nbsp}two   lamps"],
+        said=[f"I want{nbsp}{nbsp}the brass one."],
+    )
+
+    assert recap.subject == "Harbor Lamp purchase"
+    assert recap.summary == "Chose the brass lamp; delivery still open."
+    assert recap.frontmatter["summary"] == recap.summary
+    assert "- Compared two lamps" in recap.body
+    assert "> I want the brass one." in recap.body

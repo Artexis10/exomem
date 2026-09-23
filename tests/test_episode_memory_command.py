@@ -270,6 +270,16 @@ def test_no_ledger_failure_answers_a_committed_recap_with_an_error(
     ]
 
 
+def test_a_summary_with_unicode_spaces_is_recorded(vault: Path) -> None:
+    """Every line the recap accepts is one the Source writer accepts."""
+    with request_scope(owner_principal(surface="mcp")):
+        result = _record(vault, summary="Chose" + chr(0xA0) + "the brass  lamp.")
+
+    [page] = _episodes(vault)
+    assert _frontmatter(page)["summary"] == "Chose the brass lamp."
+    assert result["ledger"] == "bound"
+
+
 def test_an_unresolved_principal_fails_before_anything_is_written(vault: Path) -> None:
     with pytest.raises(ValueError, match="EPISODE_OWNER_UNRESOLVED"):
         _record(vault)
