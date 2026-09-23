@@ -16,13 +16,14 @@ suite-wide conftest disables by default.
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 import pytest
 
-from exomem import embeddings
+from exomem import embeddings, find_corpus, index_paths
 from exomem import find as find_module
-from exomem import index_paths
 
 # A probe whose BODY + TITLE share NO stem with the query below, so the ONLY way
 # it can surface is the semantic (vector) lane — never BM25/keyword/auto-widen.
@@ -282,3 +283,148 @@ def test_audit_drift_lockstep_follows_index_scope(
         f"vault-scope drift must flag the never-embedded out-of-KB probe; "
         f"got {vault_flagged}"
     )
+
+
+
+# ============================================================================
+# One-path membership: the answer the walk would give, without the walk
+# ============================================================================
+#
+# The write advisory needs the walk's verdict for the handful of sidecar paths
+# that reach a draft's top-k, and used to walk the whole corpus per write to
+# build a set it then probed a few times (~0.5 s of an advisory at ~3,000
+# pages). `walk_md_admits` / `index_markdown_admitter` answer for one path. They
+# are only worth having if they agree with the walk on every path, so these
+# pin agreement over a tree built to hit every rule the walk applies.
+
+
+def _adversarial_kb(root: Path) -> tuple[Path, list[Path]]:
+    """A KB tree exercising each walk rule. Returns (kb, candidate paths)."""
+    kb = root / "Knowledge Base"
+
+    def put(relative: str, text: str = "# Page\n\nBody.\n") -> Path:
+        path = kb / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    candidates = [
+        put("Notes/plain.md"),
+        put("Notes/Deep/Deeper/nested.md"),
+        put("Notes/SHOUTING.MD"),
+        put("Notes/not-markdown.txt"),
+        put("Notes/copy.sync-conflict-20260101-000000.md"),
+        put("_trash/trashed.md"),
+        put("Notes/_archive/archived.md"),
+        put(".exomem-batch-1234/staged.md"),
+        put("_Consolidation/reserved.md"),
+        put("Notes/trailing./aliased.md"),
+    ]
+    first = put("Notes/hard-one.md")
+    second = kb / "Notes" / "hard-two.md"
+    try:
+        os.link(first, second)
+        candidates += [first, second]
+    except OSError:
+        candidates.append(first)
+    try:
+        (kb / "Notes" / "linked-dir").symlink_to(kb / "Notes" / "Deep", target_is_directory=True)
+        (kb / "Notes" / "linked.md").symlink_to(kb / "Notes" / "plain.md")
+        candidates += [
+            kb / "Notes" / "linked-dir" / "Deeper" / "nested.md",
+            kb / "Notes" / "linked.md",
+        ]
+    except OSError:
+        pass
+    candidates += [
+        kb / "Notes" / "missing.md",
+        kb / "Notes" / "PLAIN.md",  # a different spelling of a real page
+        kb / "Notes" / ".." / "Notes" / "plain.md",
+        root / "outside.md",
+    ]
+    return kb, candidates
+
+
+def test_walk_md_admits_agrees_with_walk_md_on_every_rule(tmp_path: Path) -> None:
+    kb, candidates = _adversarial_kb(tmp_path)
+    walked = set(find_corpus.walk_md(kb))
+    assert kb / "Notes" / "plain.md" in walked  # the tree is not vacuous
+    shared: dict = {}
+
+    for path in candidates:
+        expected = path in walked
+        assert find_corpus.walk_md_admits(kb, path, {}) is expected, path
+        assert find_corpus.walk_md_admits(kb, path, shared) is expected, path
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="directory permission bits do not bind here",
+)
+def test_walk_md_admits_refuses_what_the_walk_cannot_list(tmp_path: Path) -> None:
+    kb = tmp_path / "Knowledge Base"
+    hidden = kb / "Notes" / "Locked" / "inside.md"
+    hidden.parent.mkdir(parents=True)
+    hidden.write_text("# Inside\n", encoding="utf-8")
+    locked = hidden.parent
+    locked.chmod(0o100)  # traversable, not listable: lstat works, the walk cannot enumerate
+    try:
+        assert hidden not in set(find_corpus.walk_md(kb))
+        assert find_corpus.walk_md_admits(kb, hidden, {}) is False
+    finally:
+        locked.chmod(0o755)
+
+
+def test_walk_md_admits_never_lists_a_reserved_tree(tmp_path: Path, monkeypatch) -> None:
+    kb = tmp_path / "Knowledge Base"
+    private = kb / "_Consolidation" / "private.md"
+    private.parent.mkdir(parents=True)
+    private.write_text("# Private\n", encoding="utf-8")
+    real_listdir = os.listdir
+
+    def guarded(path="."):
+        if Path(path) == private.parent:
+            pytest.fail("reserved tree reached child enumeration")
+        return real_listdir(path)
+
+    monkeypatch.setattr(os, "listdir", guarded)
+
+    assert find_corpus.walk_md_admits(kb, private, {}) is False
+
+
+def test_index_markdown_admitter_agrees_with_the_index_walk(vault: Path, monkeypatch) -> None:
+    monkeypatch.delenv("EXOMEM_INDEX_SCOPE", raising=False)
+    _write_out_of_kb(vault)
+    _kb, _candidates = _adversarial_kb(vault)
+    records = vault / "Knowledge Base" / "Records" / "Health" / "items"
+    records.mkdir(parents=True)
+    (records / "raw.md").write_text("raw record", encoding="utf-8")
+    walked = {
+        index_paths.rel_to_vault(vault, path)
+        for path in index_paths.iter_index_markdown(vault)
+    }
+    every_markdown = {
+        index_paths.rel_to_vault(vault, Path(directory) / name)
+        for directory, _dirs, names in os.walk(vault)
+        for name in names
+        if name.lower().endswith(".md")
+    }
+    probes = every_markdown | {
+        "Knowledge Base/Notes/missing.md",
+        "Knowledge Base//Notes/plain.md",
+        "Knowledge Base/Notes/../Notes/plain.md",
+        "/Knowledge Base/Notes/plain.md",
+        "Knowledge Base\\Notes\\plain.md",
+    }
+    admits = index_paths.index_markdown_admitter(vault)
+    assert admits is not None
+    assert "Knowledge Base/Notes/plain.md" in walked
+
+    disagreements = sorted(probe for probe in probes if admits(probe) != (probe in walked))
+
+    assert disagreements == []
+
+
+def test_index_markdown_admitter_defers_to_the_walk_in_vault_scope(vault, monkeypatch) -> None:
+    monkeypatch.setenv("EXOMEM_INDEX_SCOPE", "vault")
+    assert index_paths.index_markdown_admitter(vault) is None

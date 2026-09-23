@@ -674,10 +674,12 @@ def test_exact_ties_may_pick_a_different_equally_scoring_row(tmp_path):
 #
 # The post-commit advisory ran one `search` per draft chunk: one full read of
 # the matrix, one eligibility lookup and one chunk-text hydration per chunk, of
-# which it used only the file path and the score. On a CPU-capped cell that was
-# ~90 ms per chunk. `search_many` must answer each query exactly as `search`
-# does (same rows, same order, scores within the sgemv/sgemm kernel wobble
-# measured above), without the text it never needed.
+# which it used only the file path and the score, behind a walk of the whole
+# corpus to build `allowed_paths`. On a CPU-capped cell that was ~90 ms per
+# chunk plus ~0.5 s of walk. `search_many` must answer each query exactly as
+# `search` does under the same eligibility (same rows, same order, scores within
+# the sgemv/sgemm kernel wobble measured above), without the text it never
+# needed, and asking eligibility only of files that compete for a top-k.
 
 
 def _batch(rng: np.random.Generator, count: int) -> np.ndarray:
@@ -709,7 +711,7 @@ def test_search_many_answers_each_query_as_search_does(tmp_path, scope, k):
     }[scope]
     queries = _batch(rng, 25)
 
-    batched = index.search_many(queries, k, allowed_paths=allowed)
+    batched = index.search_many(queries, k, admits=allowed.__contains__)
 
     assert len(batched) == len(queries)
     for query, hits in zip(queries, batched, strict=True):
@@ -740,7 +742,7 @@ def test_search_many_never_returns_an_ineligible_row_under_pathological_queries(
     )
 
     for k in (1, 3, 6, 20):
-        for hits in index.search_many(queries, k, allowed_paths=allowed):
+        for hits in index.search_many(queries, k, admits=allowed.__contains__):
             assert all(fp in allowed for fp, _ci, _score in hits)
             assert len(hits) <= 6
             assert not any(np.isinf(score) for *_rest, score in hits)
@@ -750,10 +752,10 @@ def test_search_many_with_no_queries_or_no_rows_answers_empty(tmp_path):
     rng = np.random.default_rng(1922)
     vault = _fresh_vault(tmp_path)
     empty = embeddings.EmbeddingIndex(vault)
-    assert empty.search_many(_batch(rng, 2), 5, allowed_paths={"a.md"}) == [[], []]
+    assert empty.search_many(_batch(rng, 2), 5, admits=lambda _path: True) == [[], []]
     index, paths = _populated(vault, rng, files=3, per_file=1)
     no_queries = np.zeros((0, embeddings.VECTOR_DIM), dtype=np.float32)
-    assert index.search_many(no_queries, 5, allowed_paths=set(paths)) == []
+    assert index.search_many(no_queries, 5, admits=set(paths).__contains__) == []
 
 
 def test_search_many_reads_the_matrix_once_and_hydrates_no_text(tmp_path, monkeypatch):
@@ -774,6 +776,45 @@ def test_search_many_reads_the_matrix_once_and_hydrates_no_text(tmp_path, monkey
     monkeypatch.setattr(index, "all_vectors", counted_all_vectors)
     monkeypatch.setattr(index, "_texts_for", no_text)
 
-    index.search_many(_batch(rng, 8), 5, allowed_paths=set(paths))
+    index.search_many(_batch(rng, 8), 5, admits=set(paths).__contains__)
 
     assert calls == {"all_vectors": 1, "texts": 0}
+
+
+def test_search_many_asks_eligibility_only_of_files_that_compete(tmp_path):
+    """Each file once, and only files whose rows reach a query's candidate window."""
+    rng = np.random.default_rng(1924)
+    vault = _fresh_vault(tmp_path)
+    index, paths = _populated(vault, rng, files=400, per_file=2)
+    asked: list[str] = []
+
+    def admits(path: str) -> bool:
+        asked.append(path)
+        return True
+
+    index.search_many(_batch(rng, 3), 5, admits=admits)
+
+    assert len(asked) == len(set(asked))
+    assert len(asked) <= 3 * 64  # three windows' worth, not the 400-file corpus
+
+
+def test_search_many_widens_past_a_window_of_ineligible_rows(tmp_path):
+    """When the best rows all belong to refused files, it keeps going until `k`."""
+    vault = _fresh_vault(tmp_path)
+    index = embeddings.EmbeddingIndex(vault)
+    rng = np.random.default_rng(1925)
+    query = _unit_query(rng)
+    # 200 refused files hold near-copies of the query; the admitted ones do not.
+    for n in range(200):
+        near = query + 0.01 * _unit_query(rng)
+        near = (near / np.linalg.norm(near)).reshape(1, -1)
+        index.upsert_file(f"refused-{n:03d}.md", ["r"], near, 1.0)
+    admitted = {f"kept-{n}.md" for n in range(3)}
+    for name in sorted(admitted):
+        index.upsert_file(name, ["k"], _unit_rows(rng, 1), 1.0)
+
+    [hits] = index.search_many(query.reshape(1, -1), 5, admits=admitted.__contains__)
+    single = index.search(query, 5, allowed_paths=admitted)
+
+    assert {fp for fp, _ci, _score in hits} == admitted
+    assert [(fp, ci) for fp, ci, _s in hits] == [(fp, ci) for fp, ci, _t, _s in single]

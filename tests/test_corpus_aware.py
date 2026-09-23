@@ -581,3 +581,50 @@ def test_sweep_scores_every_draft_chunk_in_one_pass_over_the_matrix(
 
     assert scores, "the sweep found nothing, so the pass count proves nothing"
     assert calls == {"all_vectors": 1, "texts": 0}
+
+
+def test_sweep_does_not_walk_the_corpus(
+    vault: Path, counting_encoder: list[str], monkeypatch
+) -> None:
+    """Eligibility is decided for the pages that reach a chunk's top-k, not the vault.
+
+    The sweep built its allowed-path set by walking every indexed page on every
+    write (~0.5 s at ~3,000 pages, growing with the vault) and then consulted it
+    for a few dozen candidates.
+    """
+    from exomem import index_paths
+
+    embeddings.get_embedding_index(vault).rebuild_all()
+
+    def no_walk(_root):
+        raise AssertionError("the advisory sweep walked the whole corpus")
+
+    monkeypatch.setattr(index_paths, "iter_index_markdown", no_walk)
+
+    scores = corpus_aware._best_cosine_per_file(
+        vault, title="No walk probe", body="\n\n".join(_REUSE_PARAGRAPHS)
+    )
+
+    assert scores
+
+
+def test_sweep_never_scores_a_page_the_index_walk_excludes(
+    vault: Path, counting_encoder: list[str]
+) -> None:
+    """Stray sidecar rows -- a trashed copy, a deleted page -- never reach the sweep."""
+    body = "\n\n".join(_REUSE_PARAGRAPHS)
+    live = _seed_md(vault, "Notes/Insights/stray-live.md", type_="insight", body=body)
+    trashed = _seed_md(vault, "_trash/stray-trashed.md", type_="insight", body=body)
+    gone = _seed_md(vault, "Notes/Insights/stray-gone.md", type_="insight", body=body)
+    embeddings.get_embedding_index(vault).rebuild_all()
+    index = embeddings.get_embedding_index(vault)
+    for stray in (trashed, gone):
+        page_chunks = embeddings.chunk_text(stray, body)
+        index.upsert_file(stray, page_chunks, embeddings.embed_texts(page_chunks), 1.0)
+    (vault / gone).unlink()
+
+    scores = corpus_aware._best_cosine_per_file(vault, title="Stray probe", body=body)
+
+    assert live in scores
+    assert trashed not in scores
+    assert gone not in scores

@@ -734,7 +734,7 @@ def _best_cosine_per_file(
     if readiness.should_defer("embeddings"):
         return {}
     try:
-        from . import embeddings, index_paths
+        from . import embeddings
 
         # The advisory sweep runs inline on every governed edit and is where
         # the encode it pays actually lives, so it is timed here rather than at
@@ -773,18 +773,13 @@ def _best_cosine_per_file(
                     fresh = embeddings.embed_texts(missing, is_query=False)
                     lookup.update(zip(missing, fresh, strict=True))
                 vecs = [lookup[chunk] for chunk in chunks]
-            allowed_paths = {
-                rel
-                for rel in (
-                    index_paths.rel_to_vault(vault_root, path)
-                    for path in index_paths.iter_index_markdown(vault_root)
-                )
-                if rel is not None
-            }
             best_per_file: dict[str, float] = {}
-            # Every chunk in one pass over the matrix: a `search` per chunk
-            # re-read the whole matrix and hydrated chunk text this discards.
-            for hits in idx.search_many(vecs, k, allowed_paths=allowed_paths):
+            # Every chunk in one pass over the matrix, asking eligibility only of
+            # the pages that reach a chunk's top-k: a `search` per chunk re-read
+            # the matrix and hydrated text this discards, and the allowed-path
+            # set was a walk of the whole corpus on every write.
+            admits = _index_admitter(vault_root)
+            for hits in idx.search_many(vecs, k, admits=admits):
                 for fp, _cidx, score in hits:
                     if fp not in best_per_file or score > best_per_file[fp]:
                         best_per_file[fp] = score
@@ -795,6 +790,31 @@ def _best_cosine_per_file(
     except Exception as e:  # noqa: BLE001 — best-effort
         log.debug("_best_cosine_per_file failed: %s", e)
         return {}
+
+
+def _index_admitter(vault_root: Path):
+    """Which sidecar pages the advisory may score: exactly those the index walk yields.
+
+    Stray rows -- a page moved to `_trash/`, one deleted before its rows were
+    purged, a Records item -- must never reach a warning (observed 2026-07-04:
+    dup warnings flagging trash entries). The KB scope answers per page from
+    that page's own ancestry; the vault scope has no per-page twin and still
+    walks, once per sweep.
+    """
+    from . import index_paths
+
+    admits = index_paths.index_markdown_admitter(vault_root)
+    if admits is not None:
+        return admits
+    allowed = frozenset(
+        rel
+        for rel in (
+            index_paths.rel_to_vault(vault_root, path)
+            for path in index_paths.iter_index_markdown(vault_root)
+        )
+        if rel is not None
+    )
+    return allowed.__contains__
 
 
 def pairwise_best_cosine_from_sidecar(
@@ -889,7 +909,7 @@ def best_cosine_per_file_for_vectors(
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return {}
     try:
-        from . import embeddings, index_paths
+        from . import embeddings
 
         # The same span name as the encoding path, deliberately: both are "the
         # advisory's cosine sweep", and a diagnosis wants to compare them. What
@@ -903,19 +923,12 @@ def best_cosine_per_file_for_vectors(
             if not rows:
                 return {}
             idx = embeddings.get_embedding_index(vault_root)
-            allowed_paths = {
-                rel
-                for rel in (
-                    index_paths.rel_to_vault(vault_root, path)
-                    for path in index_paths.iter_index_markdown(vault_root)
-                )
-                if rel is not None
-            }
             self_canon = _canon(self_path) if self_path else None
             best_per_file: dict[str, float] = {}
-            # The same one-pass scoring as the inline sweep, so a deferred
-            # advisory ranks exactly what the synchronous one would have.
-            for hits in idx.search_many(rows, k, allowed_paths=allowed_paths):
+            # The same scoring and eligibility as the inline sweep, so a
+            # deferred advisory ranks exactly what the synchronous one would.
+            admits = _index_admitter(vault_root)
+            for hits in idx.search_many(rows, k, admits=admits):
                 for fp, _cidx, score in hits:
                     if self_canon and _canon(fp) == self_canon:
                         continue

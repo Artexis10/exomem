@@ -12,6 +12,7 @@ import logging
 import sqlite3
 import sys
 import threading
+from collections.abc import Callable
 from collections.abc import Set as AbstractSet
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -220,35 +221,6 @@ class SemanticUnitVectorRow(NamedTuple):
 #: Rows per batch in the corpus-level unit-vector read. Bounds the result set a
 #: single SELECT materialises; it is not a limit on what the read returns.
 SEMANTIC_UNIT_READ_BATCH = 2_000
-
-
-def _top_rows(
-    scores: np.ndarray, mask: np.ndarray | None, k_eff: int
-) -> tuple[np.ndarray, np.ndarray]:
-    """The top `k_eff` eligible rows of one query's `scores`, best first.
-
-    Returns `(row_indices, masked_scores)`. `k_eff` must already be clamped to
-    the eligible row count (see `search`), so `argpartition` cannot reach a
-    masked row through `-inf` padding.
-    """
-    if mask is not None:
-        scores = np.where(mask, scores, -np.inf)
-    # argpartition is O(N), then sort the top-k slice.
-    top_idx = np.argpartition(-scores, k_eff - 1)[:k_eff]
-    if mask is not None and not bool(mask[top_idx].all()):
-        # An ineligible row won a slot, which masking alone cannot prevent:
-        # `-(-inf)` is `+inf`, and numpy orders NaN ABOVE `+inf`, so when the
-        # query embeds to NaN (a zero-norm or broken vector) every eligible
-        # score is NaN and the masked rows partition first. Reachable only
-        # with non-finite scores, but eligibility is a governance boundary
-        # rather than a ranking preference, so it must not depend on
-        # arithmetic holding. Fall back to selecting among the eligible rows
-        # only — the pre-#951 computation exactly, on the rows it would have
-        # had — which restores both the row and its true score.
-        eligible_idx = np.flatnonzero(mask)
-        sub = scores[eligible_idx]
-        top_idx = eligible_idx[np.argpartition(-sub, k_eff - 1)[:k_eff]]
-    return top_idx[np.argsort(-scores[top_idx])], scores
 
 
 class EmbeddingIndex:
@@ -968,7 +940,24 @@ class EmbeddingIndex:
             return []
         # query_vec is (768,) normalized; matrix is (N, 768) normalized.
         scores = matrix @ query_vec.astype(np.float32, copy=False)
-        top_idx, scores = _top_rows(scores, mask, k_eff)
+        if mask is not None:
+            scores = np.where(mask, scores, -np.inf)
+        # argpartition is O(N), then sort the top-k slice.
+        top_idx = np.argpartition(-scores, k_eff - 1)[:k_eff]
+        if mask is not None and not bool(mask[top_idx].all()):
+            # An ineligible row won a slot, which masking alone cannot prevent:
+            # `-(-inf)` is `+inf`, and numpy orders NaN ABOVE `+inf`, so when the
+            # query embeds to NaN (a zero-norm or broken vector) every eligible
+            # score is NaN and the masked rows partition first. Reachable only
+            # with non-finite scores, but eligibility is a governance boundary
+            # rather than a ranking preference, so it must not depend on
+            # arithmetic holding. Fall back to selecting among the eligible rows
+            # only — the pre-#951 computation exactly, on the rows it would have
+            # had — which restores both the row and its true score.
+            eligible_idx = np.flatnonzero(mask)
+            sub = scores[eligible_idx]
+            top_idx = eligible_idx[np.argpartition(-sub, k_eff - 1)[:k_eff]]
+        top_idx = top_idx[np.argsort(-scores[top_idx])]
         top = [(metadata[i][0], metadata[i][1], float(scores[i])) for i in top_idx]
         # numpy-lite: hydrate only the winners' texts (PK point-lookups).
         try:
@@ -983,35 +972,64 @@ class EmbeddingIndex:
         query_vecs: np.ndarray,
         k: int,
         *,
-        allowed_paths: AbstractSet[str],
+        admits: Callable[[str], bool],
     ) -> list[list[tuple[str, int, float]]]:
-        """`search`'s filtered numpy rung for many queries: one list of
-        `(file_path, chunk_idx, score)` per query row, in query order.
+        """Top-k eligible chunk rows for each query row: `(file_path, chunk_idx, score)`.
 
-        Each list is the answer `search(query, k, allowed_paths=...)` gives for
-        that row -- the same eligibility mask, `k` clamp and non-finite guard --
-        but the matrix is read once and scored in one product for every query,
-        and no chunk text is hydrated. The write advisory scores every chunk of
-        a draft and uses only the file and the score; issuing one `search` per
-        chunk read the ~200 MB matrix, and paid two sidecar round trips, per
-        chunk. Scores match `search` to the BLAS kernel wobble the #951 note
-        measured (a product over many queries picks sgemm over sgemv).
+        Each list is what `search(query, k, allowed_paths=A)` returns for that
+        row, where `admits(file_path)` is membership in `A`: the `k` best rows
+        whose file is admitted, best first, fewer only when fewer are admitted.
+        Two things make it cheaper for a caller holding many queries, which is
+        the write advisory scoring every chunk of a draft. The matrix is read
+        once, in one product for every query, rather than once per query, and
+        no chunk text is hydrated. And eligibility is asked only of files whose
+        rows reach a query's candidate window, each file once, so the caller
+        need not enumerate its whole eligible set to probe a few dozen of them.
+
+        Exact, not approximate: a query's window holds its highest-scoring rows,
+        so the first `k` admitted rows in window order are its top `k` admitted
+        rows overall; the window widens until `k` are found or every row has
+        been considered. Scores agree with `search` to the BLAS kernel wobble
+        the #951 note measured, and a non-finite score sorts last exactly as
+        `search`'s guarded selection leaves it.
         """
         queries = np.asarray(query_vecs, dtype=np.float32).reshape(-1, VECTOR_DIM)
         if not len(queries):
             return []
         metadata, matrix = self.all_vectors()
-        if not metadata:
+        if not metadata or k <= 0:
             return [[] for _ in range(len(queries))]
-        mask, k_ceiling = self._eligibility_mask(metadata, allowed_paths)
-        k_eff = min(k, k_ceiling)
-        if k_eff <= 0:
-            return [[] for _ in range(len(queries))]
+        verdicts: dict[str, bool] = {}
+
+        def admitted(row: int) -> bool:
+            file_path = metadata[row][0]
+            verdict = verdicts.get(file_path)
+            if verdict is None:
+                verdict = verdicts[file_path] = bool(admits(file_path))
+            return verdict
+
         answers: list[list[tuple[str, int, float]]] = []
+        total = len(metadata)
         for scores in queries @ matrix.T:
-            top_idx, scores = _top_rows(scores, mask, k_eff)
+            order = -scores
+            window = min(total, max(4 * k, 64))
+            while True:
+                if window >= total:
+                    ranked = np.argsort(order, kind="stable")
+                else:
+                    candidates = np.argpartition(order, window - 1)[:window]
+                    ranked = candidates[np.argsort(order[candidates], kind="stable")]
+                picked: list[int] = []
+                for row in ranked.tolist():
+                    if admitted(row):
+                        picked.append(row)
+                        if len(picked) == k:
+                            break
+                if len(picked) == k or window >= total:
+                    break
+                window = min(total, window * 4)
             answers.append(
-                [(metadata[i][0], metadata[i][1], float(scores[i])) for i in top_idx]
+                [(metadata[row][0], metadata[row][1], float(scores[row])) for row in picked]
             )
         return answers
 
