@@ -24,7 +24,7 @@
 
 ## 5. Allowed-account recheck
 
-- [ ] 5.1 Reject sessions and refresh families whose GitHub user id is not the currently allowed sign-in account.
+- [ ] 5.1 Suspend sessions and refresh families whose GitHub user id is not the currently allowed sign-in account, resume them when it is re-allowed, and keep `revoke --all` in the takeover runbook.
 
 ## 6. Delivery verification
 

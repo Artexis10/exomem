@@ -806,11 +806,13 @@ def _allowing(store: AtomicMemoryStore, allowed: int | None) -> SessionAuthority
 
 
 @pytest.mark.anyio
-async def test_sessions_of_an_account_no_longer_allowed_stop_validating(
+async def test_changing_the_allowed_account_suspends_but_does_not_end_sessions(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Changing the allowed sign-in account ends every session of the former
-    one in the same step, with no separate `revoke --all`."""
+    """The documented contract: moving the allowed account from A to B refuses
+    A's sessions and refresh families while B is allowed; moving back to A
+    resumes them (nothing was revoked); only `revoke --all`, a generation
+    bump, ends them for good. The takeover runbook relies on exactly this."""
     store = AtomicMemoryStore()
     issuing = _allowing(store, 123456)
     legacy, legacy_record = await issuing.issue(
@@ -824,6 +826,7 @@ async def test_sessions_of_an_account_no_longer_allowed_stop_validating(
     assert await issuing.validate(legacy) == legacy_record
     assert await issuing.validate(access) == access_record
 
+    # Suspended while another account is allowed.
     rotated = _allowing(store, 654321)
     with caplog.at_level("INFO", logger="exomem.auth_sessions"):
         assert await rotated.validate(legacy) is None
@@ -837,10 +840,21 @@ async def test_sessions_of_an_account_no_longer_allowed_stop_validating(
     assert rejections and all("reason=identity_not_allowed" in m for m in rejections)
     assert not any("123456" in m or "654321" in m for m in caplog.messages)
 
-    # Rotating back restores them: nothing was revoked, only refused.
+    # Resumed when the former account is allowed again: a suspension, not an end.
     restored = _allowing(store, 123456)
     assert await restored.validate(legacy) == legacy_record
     assert await restored.validate_refresh(refresh, client_id="chatgpt") is not None
+    resumed_access, _, next_refresh = await restored.rotate_refresh(
+        refresh, client_id="chatgpt", scopes=("offline_access", "exomem:read")
+    )
+    assert await restored.validate(resumed_access) is not None
+
+    # Only the generation bump (`exomem auth revoke --all`) ends them for good,
+    # even when the account stays allowed.
+    await restored.replace_generation()
+    for bearer in (legacy, resumed_access):
+        assert await restored.validate(bearer) is None
+    assert await restored.validate_refresh(next_refresh, client_id="chatgpt") is None
 
 
 @pytest.mark.anyio

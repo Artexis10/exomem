@@ -73,11 +73,13 @@ server becomes claims `{"sub": X, "iss": "bearer"}`, so any owner rule that look
   variable, and the provenance marker independently excludes hosted and Cloud tokens.
 - **D10. Rejected: trust on first use.** On this host the first sign-in can only be the
   allowed id, so it is just auto-enable, which D1 forbids.
-- **Session validation rechecks the allowed account.** A session or refresh family whose
-  GitHub user id is not the currently allowed id stops validating, so a provider-account
-  rotation is a one-step configuration change. Not needed for this change's safety (owner
-  status already drops on the next request after rebinding), but it closes the two-step
-  rotation residual of T2.
+- **Session validation rechecks the allowed account; it suspends, never revokes.** A
+  session or refresh family whose GitHub user id is not the currently allowed id stops
+  validating while that account is not allowed, and validates again if it is re-allowed.
+  Suspension rather than tombstoning is deliberate: a mistaken edit of
+  `EXOMEM_GITHUB_USER_ID` must not force every connector to re-authorize. Ending a
+  taken-over account's sessions for good is still `exomem auth revoke --all`, which the
+  takeover runbook always includes.
 - **Doctor previews the former-audience count.** While the binding is unset, doctor
   reports (as a pass) how many rules and grants name the remote audience, so the owner
   can read it before enabling; once active it is a warning.
@@ -104,8 +106,11 @@ server becomes claims `{"sub": X, "iss": "bearer"}`, so any owner rule that look
   `exomem auth revoke <id>` or `--all`, or unset the binding and restart to cut owner
   status only. Acceptable: equal to the REST key, with better hygiene.
 - **T2. GitHub account takeover.** A fresh sign-in as the bound id is owner-equivalent;
-  today it is already `principal:X`. Rebind or unset. Because validation now rechecks the
-  allowed id, changing `EXOMEM_GITHUB_USER_ID` also ends the former account's sessions.
+  today it is already `principal:X`. Rebind or unset, and always run
+  `exomem auth revoke --all`. Validation rechecks the allowed id, so changing
+  `EXOMEM_GITHUB_USER_ID` suspends the former account's sessions at once, but a suspended
+  session comes back (with owner power, if the binding names that account again) the
+  moment the account is re-allowed; only the generation bump ends it.
   GitHub 2FA guards owner power, as it already guards all content.
 - **T3. Misconfigured subject.** A typo means the binding never fires and doctor reports a
   mismatch or malformed value. Fail-safe.

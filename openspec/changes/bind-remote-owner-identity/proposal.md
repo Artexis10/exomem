@@ -21,8 +21,9 @@ remote sign-in by his own account "needs to be treated as me".
   audience; `exomem auth sessions` marks owner-equivalent sessions; the remote setup
   wizard asks once and writes the value.
 - The legacy hosted runtime clears the variable.
-- Session validation rejects sessions whose GitHub user id is no longer the allowed
-  sign-in account, so an account rotation is a one-step configuration change.
+- Session validation suspends sessions whose GitHub user id is not the allowed sign-in
+  account; they resume if that account is allowed again, and `exomem auth revoke --all`
+  still ends them for good.
 
 ## Capabilities
 

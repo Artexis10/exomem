@@ -138,15 +138,26 @@ under a requirement of its own change.
 - **WHEN** a hosted cell starts with the binding in its environment
 - **THEN** the binding is cleared, and every principal resolves as before
 
-### Requirement: Sessions of an account no longer allowed to sign in stop validating
+### Requirement: Sessions of an account not currently allowed to sign in are suspended
 
 Session validation SHALL reject a durable session or refresh family whose GitHub user id
-is not the account currently allowed to sign in, so changing the allowed account ends
-every session of the former one without a separate revocation step. An install that has
-no configured allowed account SHALL keep validating as before.
+is not the account currently allowed to sign in. The rejection SHALL suspend those
+sessions, not revoke them: they SHALL validate again if that account is allowed again,
+so a mistaken edit of the allowed account never forces every connector to re-authorize.
+Ending a former account's sessions permanently SHALL remain an explicit revocation
+(`exomem auth revoke --all`, a generation bump), and the account-takeover runbook SHALL
+always include it. An install that has no configured allowed account SHALL keep
+validating as before.
 
-#### Scenario: Changing the allowed account ends the former account's sessions
+#### Scenario: Changing the allowed account suspends the former account's sessions
 
 - **WHEN** a session was issued to one GitHub account and the host changes the allowed
   sign-in account to another and restarts
 - **THEN** the former account's session and its refresh family no longer validate
+
+#### Scenario: Re-allowing the former account resumes its sessions
+
+- **WHEN** sessions of a formerly allowed account are suspended and the host allows that
+  account again and restarts
+- **THEN** those sessions and their refresh family validate again, and only a revocation
+  or generation bump ends them for good

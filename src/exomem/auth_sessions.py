@@ -737,9 +737,12 @@ class SessionAuthority:
             session_store_telemetry or _default_session_store_telemetry
         )
         # The account currently allowed to sign in. A session or refresh family
-        # of any other account stops validating, so changing the allowed account
-        # ends the former one's sessions without a separate revocation step.
-        # None (no configured account) keeps validating exactly as before.
+        # of any other account is suspended: it is refused while that account is
+        # not allowed and validates again if it is re-allowed, so a mistaken edit
+        # of EXOMEM_GITHUB_USER_ID never forces every client to re-authorize.
+        # Ending a former account's sessions for good is `exomem auth revoke
+        # --all` (a generation bump). None (no configured account) keeps
+        # validating exactly as before.
         self.allowed_github_user_id = allowed_github_user_id
 
     def _identity_allowed(self, github_user_id: int) -> bool:

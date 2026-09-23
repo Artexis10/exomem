@@ -981,7 +981,7 @@ with the replica that answers.
 | Situation | Action |
 |---|---|
 | A remote token may be stolen | `exomem auth revoke <session-id>` for one session (`exomem auth sessions` lists them, marking the owner-equivalent ones), or `exomem auth revoke --all`. To drop owner power only, without signing anyone out, remove `EXOMEM_OWNER_OAUTH_SUBJECT` and restart; this works even while an HA coordinator is down. |
-| The GitHub account is taken over, or you move to another account | Set `EXOMEM_GITHUB_USER_ID` and `EXOMEM_GITHUB_USERNAME` to the new account, and set `EXOMEM_OWNER_OAUTH_SUBJECT` to its id (or remove it), then restart. Session validation checks the allowed account, so every session of the former account stops working in the same step. |
+| The GitHub account is taken over, or you move to another account | Set `EXOMEM_GITHUB_USER_ID` and `EXOMEM_GITHUB_USERNAME` to the new account, and set `EXOMEM_OWNER_OAUTH_SUBJECT` to its id (or remove it), restart, and **always** run `exomem auth revoke --all`. Changing the allowed account only suspends the former account's sessions: they would come back, with owner power if the binding names that account again, the moment it is re-allowed. `revoke --all` ends them for good; every client then signs in once more. |
 
 ## Deploying a new version
 
