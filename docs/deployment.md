@@ -957,6 +957,32 @@ Pick the strongest option that fits the situation:
 | Want to stop the service but leave the public URL configured | Stop the service (e.g. elevated `Start-Process -Verb RunAs -Wait sc.exe -ArgumentList 'stop','exomem'`). The tunnel stays up but proxies to nothing. |
 | Want a clean uninstall | Stop + remove service, turn off the tunnel/Funnel, delete the connector in claude.ai, delete the GitHub OAuth App. |
 
+### The remote owner binding
+
+`EXOMEM_OWNER_OAUTH_SUBJECT=github:<numeric id>` in the service environment
+makes remote sign-ins by that GitHub account act as the owner, labelled remote
+(`principal_kind: owner-oauth` in the call ledger, with the remote caller hash).
+Unset, the remote sign-in is a separate non-owner principal, as before. The
+value must equal `EXOMEM_GITHUB_USER_ID`: `github:` then ASCII digits, no
+leading zero. Anything else is treated as unset, and
+`exomem doctor --profile remote` reports it as `malformed` or `mismatch`. It is
+read only from the process environment (`service.env`, or the working
+directory's `.env`), never from the vault, and a hosted cell clears it.
+
+Enable it with one line and a restart. Before enabling, read doctor's
+`governance.remote_owner_former_audience`: policy rules and grants that name the
+remote connector's former `principal:` audience stop applying to it. Nothing is
+migrated; removing the line and restarting restores the former audience and its
+state.
+
+On an HA pair, set the same line on every replica; otherwise the audience flips
+with the replica that answers.
+
+| Situation | Action |
+|---|---|
+| A remote token may be stolen | `exomem auth revoke <session-id>` for one session (`exomem auth sessions` lists them, marking the owner-equivalent ones), or `exomem auth revoke --all`. To drop owner power only, without signing anyone out, remove `EXOMEM_OWNER_OAUTH_SUBJECT` and restart; this works even while an HA coordinator is down. |
+| The GitHub account is taken over, or you move to another account | Set `EXOMEM_GITHUB_USER_ID` and `EXOMEM_GITHUB_USERNAME` to the new account, and set `EXOMEM_OWNER_OAUTH_SUBJECT` to its id (or remove it), then restart. Session validation checks the allowed account, so every session of the former account stops working in the same step. |
+
 ## Deploying a new version
 
 For an opt-in managed Linux/WSL service, `bash scripts/upgrade.sh` stages a new
