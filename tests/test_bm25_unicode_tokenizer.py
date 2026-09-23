@@ -73,12 +73,27 @@ def test_ascii_units_are_single_legacy_stems_in_both_modes() -> None:
             assert not any(unit.run for unit in units)
 
 
+def _separator_code_points() -> list[str]:
+    """Every assigned code point that is not a letter, number or mark: all
+    punctuation (P*), symbols (S*), separators (Z*), controls and formats
+    (Cc, Cf), and the Basic Multilingual Plane's private use (Co)."""
+    found = []
+    for code_point in range(0x80, sys.maxunicode + 1):
+        character = chr(code_point)
+        category = unicodedata.category(character)
+        if category[0] in "PSZ" or category in ("Cc", "Cf") or (
+            category == "Co" and code_point < 0x10000
+        ):
+            found.append(character)
+    return found
+
+
 def test_ascii_with_one_non_ascii_separator_takes_the_scanner_and_stays_identical() -> None:
     """The fast-path/scanner boundary: one non-ASCII character sends the whole
     text through the Unicode scanner, which must reproduce the ASCII tokens."""
     rng = random.Random(11)
-    separators = ("—", "…", "→", "·", " ", "’", "─", "﻿")
-    for _ in range(3_000):
+    separators = _separator_code_points()
+    for _ in range(30_000):
         text = _random_ascii(rng)
         at = rng.randint(0, len(text))
         mixed = text[:at] + rng.choice(separators) + text[at:]
@@ -86,6 +101,50 @@ def test_ascii_with_one_non_ascii_separator_takes_the_scanner_and_stays_identica
         expected = _legacy_tokenize(mixed)
         assert bm25.tokenize(mixed) == expected, mixed
         assert bm25.tokenize(mixed, query=True) == expected, mixed
+
+
+def test_every_separator_code_point_glued_between_ascii_words_separates_as_before() -> None:
+    """Punctuation, symbols, spaces and format characters separate exactly as
+    `[a-z0-9]+` did, including the ones NFKC would turn into letters (™, ℃, №,
+    ₨), into a space plus a combining mark (‾, ‗) or into digits (⒈)."""
+    changed = []
+    for character in _separator_code_points():
+        text = f"alpha{character}beta 10{character}20 {character}gamma"
+        expected = _legacy_tokenize(text)
+        if bm25.tokenize(text) != expected or bm25.tokenize(text, query=True) != expected:
+            changed.append(f"U+{ord(character):04X}")
+    assert changed == []
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("launch plan \u2714\ufe0f done", ["launch", "plan", "done"]),
+        ("great work \u2764\ufe0f team", ["great", "work", "team"]),
+        ("\u26a0\ufe0f warning: disk", ["warn", "disk"]),
+        ("1\ufe0f\u20e3 first step", ["1", "first", "step"]),
+        ("it\u00b4s fine, don\u00b4t", ["it", "s", "fine", "don", "t"]),
+        ("alpha\u203ebeta", ["alpha", "beta"]),
+        ("\u0301abc", ["abc"]),
+        ("Zorblex\u2122 roadmap", ["zorblex", "roadmap"]),
+        ("20\u2103 room, \u2116 5, Help\u2120", ["20", "room", "5", "help"]),
+        ("\u24d0\u24d1 note", ["note"]),
+        ("\U0001F468\u200d\U0001F469 family \U0001F44D\U0001F3FD", ["famili"]),
+    ],
+)
+def test_symbols_variation_selectors_and_baseless_marks_never_join_a_word(text, expected) -> None:
+    assert bm25.tokenize(text) == expected
+    assert bm25.tokenize(text, query=True) == expected
+    assert _legacy_tokenize(text) == expected
+
+
+def test_numbers_that_nfkc_turns_into_digits_join_the_adjacent_word_by_design() -> None:
+    """Superscripts, fractions and other No/Nl numbers are numbers, not
+    separators: NFKC makes them digits and they stay in the word they touch.
+    This is the one intended change for text a v1 reader would call English."""
+    assert bm25.tokenize("area 50 m\u00b2") == ["area", "50", "m2"]
+    assert bm25.tokenize("1\u00bd cups") == ["11", "2", "cup"]
+    assert bm25.tokenize("Chapter \u2163") == ["chapter", "iv"]
 
 
 def test_every_golden_fixture_page_tokenizes_exactly_as_before() -> None:
@@ -315,12 +374,12 @@ def test_the_token_character_class_is_letters_numbers_and_marks_on_this_interpre
     unicode61 is declared with those categories, and a character one side treats
     as a separator and the other as a letter would split a token."""
     word = re.compile(r"[^\W_]")
-    marks_outside_scanned_planes = []
+    marks_outside_scanned_planes = []  # marks and symbols the tables would miss
     for code_point in range(sys.maxunicode + 1):
         character = chr(code_point)
         category = unicodedata.category(character)
         assert bool(word.match(character)) == (category[0] in "LN"), hex(code_point)
-        if category[0] == "M" and not bm25._in_mark_planes(code_point):
+        if category[0] in "MS" and not bm25._in_mark_planes(code_point):
             marks_outside_scanned_planes.append(hex(code_point))
     assert marks_outside_scanned_planes == []
     for code_point in (0x0301, 0x093F, 0x0E34, 0x3099, 0xFE0F, 0xE0100):

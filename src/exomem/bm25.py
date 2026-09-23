@@ -59,10 +59,15 @@ _STEMMER_LOCAL = threading.local()
 #: Snowball stemmer for a word whose letters are all in one of these scripts.
 _SCRIPT_STEMMERS = {"cyrillic": "russian", "greek": "greek", "armenian": "armenian"}
 
-#: Unicode planes searched for combining marks when the token class is built.
-#: Every mark in Unicode sits in the Basic or Supplementary Multilingual Plane
-#: or among the variation-selector supplement in plane 14.
+#: Unicode planes searched when the character tables are built. Every
+#: combining mark, symbol and variation selector in Unicode sits in the Basic
+#: or Supplementary Multilingual Plane or in plane 14.
 _MARK_PLANES = ((0x0000, 0x1FFFF), (0xE0000, 0xEFFFF))
+
+#: Variation selectors choose a glyph (text or emoji presentation, an
+#: ideographic variant); they carry no letter, so they are dropped before
+#: tokenizing rather than kept as marks that would glue a keycap to its digit.
+_VARIATION_SELECTORS = ((0x180B, 0x180D), (0x180F, 0x180F), (0xFE00, 0xFE0F), (0xE0100, 0xE01EF))
 
 # Above this fraction of the retained corpus, bounded per-path repair gives way
 # to the existing full walk. The measurement supporting the value lives in the
@@ -131,40 +136,65 @@ def _in_mark_planes(code_point: int) -> bool:
 
 
 @lru_cache(maxsize=1)
-def _mark_class() -> str:
-    """Regex class body of every combining mark (Unicode M*), built once."""
+def _character_tables() -> tuple[str, dict[int, str | None]]:
+    """(regex class body of every combining mark, raw-text translation table).
+
+    The table runs before NFKC on non-ASCII text. It maps every non-ASCII
+    symbol (S*) and enclosing mark (Me) to a space, so NFKC can never turn one
+    into letters that join the word beside it ("Zorblex™" would otherwise
+    become `zorblextm`, "20℃" `20c`), and it deletes variation selectors.
+    Built once, from the running interpreter's Unicode data.
+    """
     ranges: list[list[int]] = []
+    table: dict[int, str | None] = {}
     for start, end in _MARK_PLANES:
         for code_point in range(start, end + 1):
-            if unicodedata.category(chr(code_point))[0] != "M":
-                continue
-            if ranges and ranges[-1][1] == code_point - 1:
-                ranges[-1][1] = code_point
-            else:
-                ranges.append([code_point, code_point])
-    return "".join(f"\\U{low:08x}-\\U{high:08x}" for low, high in ranges)
+            category = unicodedata.category(chr(code_point))
+            if category[0] == "M":
+                if ranges and ranges[-1][1] == code_point - 1:
+                    ranges[-1][1] = code_point
+                else:
+                    ranges.append([code_point, code_point])
+                if category == "Me":
+                    table[code_point] = " "
+            elif category[0] == "S" and code_point > 0x7F:
+                table[code_point] = " "
+    for low, high in _VARIATION_SELECTORS:
+        for code_point in range(low, high + 1):
+            table[code_point] = None
+    marks = "".join(f"\\U{low:08x}-\\U{high:08x}" for low, high in ranges)
+    return marks, table
+
+
+def _mark_class() -> str:
+    """Regex class body of every combining mark (Unicode M*)."""
+    return _character_tables()[0]
 
 
 @lru_cache(maxsize=1)
 def _scanner() -> tuple[re.Pattern[str], re.Pattern[str], re.Pattern[str]]:
     """(token runs, script parts of a run, characters of an unspaced part).
 
-    A token character is a letter, number or mark: `[^\\W_]` is exactly
-    Unicode L* and N*, and marks are added explicitly. Underscore and every
-    punctuation mark separate, as `[a-z0-9]+` always did.
+    A token starts with a letter or number (`[^\\W_]` is exactly Unicode L*
+    and N*) and continues with letters, numbers and combining marks. A mark
+    never starts a token: without a base it is a stray diacritic ("it´s",
+    "‾" after NFKC), exactly as `working_set_index` rules. Underscore and
+    every punctuation mark separate, as `[a-z0-9]+` always did.
     """
     marks = _mark_class()
     continua = text_scripts.continua_character_class()
-    runs = re.compile(f"(?:[^\\W_]|[{marks}])+")
+    runs = re.compile(f"[^\\W_](?:[^\\W_]|[{marks}])*")
     parts = re.compile(
-        f"(?P<run>[{continua}](?:[{continua}]|[{marks}])*)|(?P<word>[^{continua}]+)"
+        f"(?P<run>(?![{marks}])[{continua}](?:[{continua}]|[{marks}])*)"
+        f"|(?P<word>(?:[^{continua}]|[{marks}])+)"
     )
     characters = re.compile(f"[^{marks}][{marks}]*|[{marks}]+")
     return runs, parts, characters
 
 
 def _is_token_character(character: str) -> bool:
-    return _scanner()[0].fullmatch(character) is not None
+    """Can `character` appear inside a token (after a letter)?"""
+    return _scanner()[0].fullmatch("a" + character) is not None
 
 
 def _latin_fold(word: str) -> str | None:
@@ -204,31 +234,61 @@ def _run_unit(run: str, characters: re.Pattern[str]) -> TokenUnit:
     return TokenUnit(tuple(left + right for left, right in zip(parts, parts[1:], strict=False)), True)
 
 
-#: Stretches of normalised text between ASCII separators. An all-ASCII stretch
-#: is exactly one v1 word; only a stretch holding a non-ASCII character needs
-#: the Unicode scanner. English prose with one typographic dash therefore
-#: tokenizes at nearly the fast path's speed.
-_STRETCH_RE = re.compile("[a-z0-9\u0080-\U0010ffff]+")
+#: Stretches of raw text between ASCII separators. An all-ASCII stretch is
+#: exactly one v1 word; only a stretch holding a non-ASCII character is
+#: normalised and scanned, so English prose with a typographic dash pays the
+#: scanner only around the dash.
+_STRETCH_RE = re.compile("[A-Za-z0-9\u0080-\U0010ffff]+")
+
+
+def _normalized_tokens(stretch: str) -> list[str]:
+    """Letter/number tokens of one non-ASCII stretch, after the raw-text
+    table, NFKC and casefolding."""
+    table = _character_tables()[1]
+    normalized = unicodedata.normalize("NFKC", stretch.translate(table)).casefold()
+    return _scanner()[0].findall(normalized)
+
+
+def _nonascii_units(token: str, query: bool) -> list[TokenUnit]:
+    """Units of one normalised token that holds a non-ASCII character."""
+    _runs, parts, characters = _scanner()
+    return [
+        _run_unit(part.group(), characters)
+        if part.lastgroup == "run"
+        else _word_unit(part.group(), query)
+        for part in parts.finditer(token)
+    ]
 
 
 def _scan_units(text: str, query: bool) -> list[TokenUnit]:
     """Units of non-ASCII `text`."""
-    runs, parts, characters = _scanner()
     units: list[TokenUnit] = []
-    for stretch in _STRETCH_RE.findall(unicodedata.normalize("NFKC", text).casefold()):
+    for stretch in _STRETCH_RE.findall(text):
         if stretch.isascii():
-            units.append(TokenUnit((stem_word(stretch),), False))
+            units.append(TokenUnit((stem_word(stretch.lower()),), False))
             continue
-        for token in runs.findall(stretch):
+        for token in _normalized_tokens(stretch):
             if token.isascii():
                 units.append(TokenUnit((stem_word(token),), False))
-                continue
-            for part in parts.finditer(token):
-                if part.lastgroup == "run":
-                    units.append(_run_unit(part.group(), characters))
-                else:
-                    units.append(_word_unit(part.group(), query))
+            else:
+                units.extend(_nonascii_units(token, query))
     return units
+
+
+def _scan_stems(text: str, query: bool) -> list[str]:
+    """`_scan_units` flattened, without building a unit per ASCII word."""
+    stems: list[str] = []
+    for stretch in _STRETCH_RE.findall(text):
+        if stretch.isascii():
+            stems.append(stem_word(stretch.lower()))
+            continue
+        for token in _normalized_tokens(stretch):
+            if token.isascii():
+                stems.append(stem_word(token))
+            else:
+                for unit in _nonascii_units(token, query):
+                    stems.extend(unit.stems)
+    return stems
 
 
 def token_units(text: str, *, query: bool = False) -> list[TokenUnit]:
@@ -250,7 +310,7 @@ def tokenize(text: str, *, query: bool = False) -> list[str]:
     """
     if text.isascii():
         return [stem_word(w) for w in _TOKEN_RE.findall(text.lower())]
-    return [stem for unit in _scan_units(text, query) for stem in unit.stems]
+    return _scan_stems(text, query)
 
 
 def word_forms(word: str) -> tuple[str, ...]:
