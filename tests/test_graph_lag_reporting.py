@@ -143,7 +143,7 @@ def test_graph_lag_is_cheap_to_read(vault: Path, monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(vault_module, "walk_vault_md", forbid("walk_vault_md"))
     monkeypatch.setattr(find_module, "_walk_md", forbid("_walk_md"))
-    monkeypatch.setattr(epistemic_graph, "_disk_vault_entries", forbid("_disk_vault_entries"))
+    monkeypatch.setattr(epistemic_graph, "_disk_vault_freshness", forbid("_disk_vault_freshness"))
 
     lag = epistemic_graph.graph_lag(vault)
 

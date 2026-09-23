@@ -455,7 +455,20 @@ def _run(vault_root: Path) -> None:
         held_since = None
         processed = _work_once(vault_root)
         if not _pending(vault_root):
-            log.info("graph drain: graph settled (%d unit(s) of work cleared)", processed)
+            from . import epistemic_graph
+
+            try:
+                lag = epistemic_graph.graph_lag(vault_root)
+            except Exception:  # noqa: BLE001 - a log line never stops the drain
+                lag = {}
+            log.info(
+                "graph drain: graph settled (%d unit(s) of work cleared) "
+                "generations_behind=%s queued_paths=%s quarantined_paths=%s",
+                processed,
+                lag.get("generations_behind"),
+                lag.get("queued_paths"),
+                lag.get("quarantined_paths"),
+            )
             backoff = 0.0
             not_before = 0.0
             interval = IDLE_POLL_SECONDS

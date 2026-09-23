@@ -1109,18 +1109,51 @@ def _drain_graph_work(
         return processed
 
     for receipt in stalled:
+        path = vault_root / receipt.rel_path
         try:
-            single = index.drain_paths([vault_root / receipt.rel_path])
+            single = index.drain_paths([path])
         except Exception:  # noqa: BLE001 - one poison page must not pin the queue
             log.warning(
                 "deferred graph receipt failed; work remains queued", exc_info=True
             )
-            deferred_index.rotate_graph_receipts(vault_root, [receipt])
-            continue
+            single = {"failed": 1}
         if receipt.rel_path in set(single.get("indexed", ())):
             processed += deferred_index.clear_graph_receipts(vault_root, [receipt])
-        else:
+            continue
+        if single.get("moved") or single.get("requires_rebuild") or single.get("disabled"):
+            # A race or a vault not ready: the page is not the problem, and
+            # counting it would quarantine a page for being written to.
+            deferred_index.rotate_graph_receipts(vault_root, [receipt])
+            continue
+        if not single.get("failed") and index._derives_no_rows(receipt.rel_path):
+            # Deleted, or no longer recall Markdown: the pass removed its rows,
+            # which is the whole repair, so the receipt retires with them
+            # rather than rotating behind the queue forever.
+            processed += deferred_index.clear_graph_receipts(vault_root, [receipt])
+            continue
+        if deferred_index.note_graph_failure(vault_root, receipt.rel_path) < (
+            epistemic_graph.GRAPH_POISON_ATTEMPTS
+        ):
             log.warning("deferred graph receipt incomplete; work remains queued")
+            deferred_index.rotate_graph_receipts(vault_root, [receipt])
+            continue
+        # Bounded: the page has failed every isolated attempt. Its rows go --
+        # a whole-vault pass derives none for a page it cannot read -- and its
+        # receipt is set aside, so it no longer keeps the queue from emptying.
+        # A later write to it queues it as ordinary work again.
+        try:
+            index.delete_paths([receipt.rel_path])
+        except Exception:  # noqa: BLE001 - the receipt stays queued and rotates
+            log.warning("deferred graph quarantine failed; work remains queued", exc_info=True)
+            deferred_index.rotate_graph_receipts(vault_root, [receipt])
+            continue
+        if deferred_index.quarantine_graph_receipt(vault_root, receipt):
+            log.warning(
+                "deferred graph receipt quarantined after %d failed attempts",
+                epistemic_graph.GRAPH_POISON_ATTEMPTS,
+            )
+            processed += 1
+        else:
             deferred_index.rotate_graph_receipts(vault_root, [receipt])
     if not deferred_index.snapshot_graph(vault_root, limit=1):
         # This tick cleared the last receipt, so the same stranding applies to

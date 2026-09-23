@@ -535,6 +535,17 @@ def _connect_created_owned(
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS graph_failures (
+            rel_path TEXT PRIMARY KEY,
+            attempts INTEGER NOT NULL,
+            first_failed_at REAL NOT NULL,
+            last_failed_at REAL NOT NULL,
+            quarantined INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
     for event in ("INSERT", "UPDATE", "DELETE"):
         conn.execute(
             f"CREATE TRIGGER IF NOT EXISTS graph_upserts_generation_{event.lower()} "
@@ -1584,7 +1595,106 @@ def list_graph_paths(vault_root: Path, *, limit: int | None = None) -> list[str]
 
 
 def clear_graph_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:
-    return _clear_plain_receipts(vault_root, receipts, table="graph_upserts")
+    """CAS-clear graph receipts; a path derived at last forgets its failures."""
+    cleared = _clear_plain_receipts(vault_root, receipts, table="graph_upserts")
+    if receipts:
+        _forget_graph_failures(vault_root, {receipt.rel_path for receipt in receipts})
+    return cleared
+
+
+def note_graph_failure(vault_root: Path, rel_path: str) -> int:
+    """Count one failed isolated attempt to derive `rel_path`; return the total.
+
+    Counted per path, not per receipt revision: a page that cannot be read
+    fails the same way whatever revision queued it.
+    """
+    now = time.time()
+    conn = _connect(vault_root, create=True)
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO graph_failures(rel_path, attempts, first_failed_at, last_failed_at) "
+                "VALUES (?, 1, ?, ?) ON CONFLICT(rel_path) DO UPDATE SET "
+                "attempts = attempts + 1, last_failed_at = excluded.last_failed_at",
+                (rel_path, now, now),
+            )
+            row = conn.execute(
+                "SELECT attempts FROM graph_failures WHERE rel_path = ?", (rel_path,)
+            ).fetchone()
+        return int(row[0]) if row is not None else 1
+    finally:
+        conn.close()
+
+
+def quarantine_graph_receipt(vault_root: Path, receipt: DeferredReceipt) -> bool:
+    """Set a receipt no drain can derive aside, by exact revision.
+
+    Its row leaves the queue, so the marker invariant no longer waits on it,
+    and the path is recorded as quarantined for the lag and the doctor. A
+    newer revision -- a write that landed since -- stays queued as ordinary
+    work.
+    """
+    conn = _connect(vault_root, create=True)
+    try:
+        with conn:
+            removed = conn.execute(
+                "DELETE FROM graph_upserts WHERE rel_path = ? AND revision = ?",
+                (receipt.rel_path, receipt.revision),
+            ).rowcount
+            if removed:
+                now = time.time()
+                conn.execute(
+                    "INSERT INTO graph_failures(rel_path, attempts, first_failed_at, "
+                    "last_failed_at, quarantined) VALUES (?, 1, ?, ?, 1) "
+                    "ON CONFLICT(rel_path) DO UPDATE SET quarantined = 1",
+                    (receipt.rel_path, now, now),
+                )
+        return bool(removed)
+    finally:
+        conn.close()
+
+
+def graph_quarantined_count(vault_root: Path) -> int:
+    """How many paths are quarantined as underivable. An unreadable store reads 0."""
+    if not store_path(vault_root).exists():
+        return 0
+    try:
+        conn = _connect_readonly(vault_root)
+        try:
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'graph_failures'"
+            ).fetchone():
+                return 0
+            row = conn.execute(
+                "SELECT count(*) FROM graph_failures WHERE quarantined = 1"
+            ).fetchone()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return 0
+    return int(row[0] or 0)
+
+
+def _forget_graph_failures(vault_root: Path, rel_paths: set[str]) -> None:
+    """Drop the failure record of paths that derived; best effort, one read first."""
+    if not rel_paths or not store_path(vault_root).exists():
+        return
+    try:
+        conn = _connect(vault_root, create=True)
+        try:
+            with conn:
+                if not conn.execute("SELECT 1 FROM graph_failures LIMIT 1").fetchone():
+                    return
+                conn.executemany(
+                    "DELETE FROM graph_failures WHERE rel_path = ?",
+                    [(rel,) for rel in sorted(rel_paths)],
+                )
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        # The record only feeds the quarantine count; a stale one costs a
+        # quarantine a little sooner, never a lost repair.
+        return
 
 
 def clear_graph(vault_root: Path, rel_paths: list[str] | None = None) -> int:
@@ -1604,6 +1714,35 @@ def clear_graph(vault_root: Path, rel_paths: list[str] | None = None) -> int:
 
 def rotate_graph_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:
     return rotate_receipts(vault_root, receipts, queue="graph")
+
+
+def graph_queue_age(vault_root: Path) -> tuple[int, float | None]:
+    """How many graph receipts are queued, and how long ago the oldest was.
+
+    One indexed read on one connection, for lag reporting. The age runs from
+    a row's first enqueue: a requeue keeps it, so repair that keeps losing its
+    compare-and-swap still reads as old. An unreadable store reads as empty.
+    """
+    if not store_path(vault_root).exists():
+        return 0, None
+    try:
+        conn = _connect_readonly(vault_root)
+        try:
+            columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(graph_upserts)")
+            }
+            if not columns:
+                return 0, None
+            count, oldest = conn.execute(
+                "SELECT count(*), min(created_at) FROM graph_upserts"
+            ).fetchone()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return 0, None
+    if not count or oldest is None:
+        return int(count or 0), None
+    return int(count), max(0.0, time.time() - float(oldest))
 
 
 def graph_status(vault_root: Path | None) -> dict[str, Any]:

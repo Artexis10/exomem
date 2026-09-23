@@ -86,6 +86,11 @@ REBUILD_PUBLICATION_ATTEMPTS = REBUILD_STABILIZATION_ATTEMPTS * 2
 # single pass — while a supersession that survives it is not transient, so
 # re-running the rebuild cannot be what fixes it.
 REBUILD_SUPERSESSION_RETRIES = 1
+#: Isolated drain attempts a queued path may fail before its receipt is
+#: quarantined. A page whose bytes cannot be read derives nothing and leaves
+#: its receipt queued; rotated forever, it keeps the queue from ever emptying
+#: and the page keeps the rows of its last readable version.
+GRAPH_POISON_ATTEMPTS = 3
 # The epoch kinds a *per-path* repair may run against. `recoverable` is excluded
 # on purpose: it means the checkpoint is behind its floor, so the lineage does
 # not yet say what the paths should be repaired to. See
@@ -3809,6 +3814,43 @@ class EpistemicGraphIndex:
             finally:
                 conn.close()
 
+    def _derives_no_rows(self, rel: str) -> bool:
+        """Whether `rel` has no graph rows to derive, read at commit time.
+
+        What `_index_path` deletes rather than indexes: an absent path, one
+        that is not recall Markdown, or bytes that are not UTF-8. A receipt for
+        such a path is repaired by the deletion, so it clears with the indexed
+        ones instead of rotating behind the queue forever.
+        """
+        path = self.vault_root / rel
+        if not rel.lower().endswith(".md") or vault_module.in_excluded_scan_dir(rel):
+            return True
+        if not path.exists() or not recall_policy.is_recall_candidate(self.vault_root, path):
+            return True
+        try:
+            vault_module.read_bytes_without_pinning(path).decode("utf-8")
+        except UnicodeDecodeError:
+            return True
+        except OSError:
+            return False
+        return False
+
+    def _read_barrier_value(self) -> str | None:
+        """The persisted read barrier's value, or None. An unreadable sidecar reads None."""
+        if not self.path.exists():
+            return None
+        try:
+            conn = self._connect_existing(readonly=True)
+            try:
+                row = conn.execute(
+                    "SELECT value FROM graph_meta WHERE key = ?", (_READ_BARRIER_KEY,)
+                ).fetchone()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return None
+        return None if row is None else str(row[0])
+
     def reads_suspended(self) -> bool:
         """Whether a persisted read barrier requires repair or publication."""
         if not self.path.exists():
@@ -7091,6 +7133,66 @@ def _matches_entity_families(
     return family is not None and family in families
 
 
+def graph_lag(vault_root: Path) -> dict[str, Any]:
+    """How far the published graph trails the canonical checkpoint.
+
+    O(1) reads plus one indexed queue read -- the canonical checkpoint and
+    floor, the sidecar's acknowledgement and barrier, the debt records for the
+    gap, the queue's depth and oldest age -- and never a vault walk, because
+    readers and the doctor call it on the refusal path.
+
+    `catching_up` is the state a write deferred to the queue or a drain behind a steady writer
+    leaves: the sidecar exists, it is behind or has work queued, every skipped
+    generation is receipt-covered, and neither a full-rebuild marker nor a
+    recovery barrier stands. A deferral's own withdrawal (the `unavailable`
+    barrier a refresh leaves when it hands its paths to the queue) is not a
+    recovery barrier: the queue is the repair. Readers still refuse in it; this
+    only says the refusal is convergence in progress rather than a fault.
+    """
+    epoch = graph_sync.classify_epoch(vault_root)
+    committed = int(epoch.checkpoint.generation) if epoch.checkpoint is not None else 0
+    acknowledged = (
+        int(epoch.acknowledgement.generation) if epoch.acknowledgement is not None else 0
+    )
+    behind = max(0, committed - acknowledged)
+    queued, oldest = deferred_index.graph_queue_age(vault_root)
+    quarantined = deferred_index.graph_quarantined_count(vault_root)
+    full_rebuild_pending = deferred_index.graph_full_rebuild_pending(vault_root) is not None
+    covered = behind == 0
+    if behind and not freshness.external_pending_unscoped(vault_root):
+        gap = range(acknowledged + 1, committed + 1)
+        try:
+            known, unknown, recorded, has_record = deferred_index.graph_gap_coverage(
+                vault_root, gap
+            )
+        except Exception:  # noqa: BLE001 - an unreadable queue covers nothing
+            known, unknown, recorded, has_record = frozenset(), True, frozenset(), False
+        if has_record:
+            known = known | recorded
+        covered = not unknown and all(generation in known for generation in gap)
+    index = EpistemicGraphIndex(vault_root)
+    exists = index.path.exists()
+    barrier = exists and index._read_barrier_value() not in (None, "unavailable")
+    return {
+        "acknowledged_generation": acknowledged,
+        "committed_generation": committed,
+        "generations_behind": behind,
+        "queued_paths": queued,
+        "oldest_queued_age_seconds": None if oldest is None else round(oldest, 3),
+        "gap_receipt_covered": covered,
+        "full_rebuild_pending": full_rebuild_pending,
+        "quarantined_paths": quarantined,
+        "catching_up": bool(
+            exists
+            and epoch.kind == "coherent"
+            and (behind or queued)
+            and covered
+            and not full_rebuild_pending
+            and not barrier
+        ),
+    }
+
+
 def graph_context(
     vault_root: Path,
     *,
@@ -7138,6 +7240,16 @@ def graph_context(
             "edges": [],
             "truncation": [],
         }
+        try:
+            lag = graph_lag(vault_root)
+        except Exception:  # noqa: BLE001 - the refusal must not fail on its explanation
+            log.debug("graph lag unreadable", exc_info=True)
+            lag = None
+        if lag is not None and lag["catching_up"]:
+            # Still a refusal: the rows behind the queue are stale. The reason
+            # says it is convergence in progress, and the lag says how far.
+            unavailable["reason"] = "graph catching up"
+            unavailable["lag"] = lag
         if unit_ref is not None:
             unavailable["unit_status"] = "stale"
             unavailable["warnings"] = [_drift_warning({"graph_sidecar_unavailable": 1})]
