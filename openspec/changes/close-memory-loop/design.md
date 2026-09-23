@@ -142,7 +142,7 @@ Advisory overlap can reduce repeat work but cannot guarantee exclusive action. I
 
 Task-conditioned roles, anchor resolution, bounded typed expansion and current-state qualification produce provenance-bearing packets. Partial or ambiguous anchor resolution cannot masquerade as a complete current context. Evaluate rare anchors, unfamiliar vocabulary, multilingual names, cross-kind relationships, supersession, Records state, distractor padding, negative twins and unavailable publication. Keep existing budgets and false-positive thresholds; embeddings-on smoke is required in addition to deterministic lexical fixtures.
 
-Working continuity must reconnect an interrupted topic with its relevant recent changes, unresolved episode work and older dependencies without requiring the user to identify the earlier conversation. Reuse the existing continuity, `recent_change`, `current_state`, active Planning and pending-episode carriers. This requirement does not depend on the later cross-client live-activity feed, and does not infer a commitment from conversation alone.
+Working continuity must reconnect an interrupted topic with its relevant recent changes, unresolved episode work and older dependencies without requiring the user to identify the earlier conversation. Reuse the existing continuity, `recent_change`, `current_state`, active Planning and pending-episode carriers. The carrier for that reconnection is the always-on `recent_context` packet block: bounded, provenance-bearing, first in the packet and present whether the turn resolved an anchor or abstained, so a turn that names nothing still arrives with what was recently worked on. The block reads the hot profile's signals the way the profile does (§8): an edit inside a write burst, or older than the latest burst, is not offered as recent work (a captured session is, since it records what was spoken about rather than an edit), and only the latest burst is looked for, newest first, so no turn sorts the whole registry; a page offered for its reads is ranked by its reads rather than its last edit, and the most-read one keeps a slot the way the newest open Planning item does; and a retired or superseded page is never offered, checked against the offered pages only through the request's page cache. An entry's statement is the page's authored `summary` before its `status`, and never a lifecycle word: "status: active" says where a page is in its life, not what it says. This requirement does not depend on the later cross-client live-activity feed, and does not infer a commitment from conversation alone.
 
 Preserve the distinction between an event's occurrence time, when its evidence became known, and the interval or status for which the claim holds, where the canonical source supplies them. Missing time or validity remains unknown. A recent capture or edit of an old event must not turn it into a new event; a recently repeated superseded claim must not displace its supported correction. Recency is bounded relevance evidence, never a substitute for referent resolution, provenance or current-state checks. An older unresolved dependency may matter more than unrelated fresh activity.
 
@@ -154,7 +154,7 @@ The primary integration observation is an ordinary later response using the righ
 
 User corrections and observed misses create bounded review candidates tied to evidence. The active agent can propose revisions to registered context roles, cues, aliases or vault conventions; application follows each family's applicable authority, with versions and reversible history. The current `context-roles` owner-authored override gate remains in force: agent proposals do not independently grant role-edit authority. A fresh session must consume the accepted result. Do not encode one user's equipment, suppliers or language into product source. Hard identity, provenance, authority and abstention invariants remain stable.
 
-The hot profile is a compact, derived, provenance-bearing projection with invalidation for correction, expiry, deletion and access changes. Priors affect bounded candidate ordering only; they cannot invent facts, resolve ambiguity, resurrect superseded state or override explicit task anchors. Test stale-profile and popularity-trap negatives alongside latency and usefulness.
+The hot profile is a compact, derived, provenance-bearing projection with invalidation for correction, expiry, deletion and access changes. Priors affect bounded candidate ordering only, with one narrow exception, for recency alone: a recency prior may carry the always-on `recent_context` block, and it may supply the REFERENT for a turn that names nothing — a referential turn, one that speaks a declared referential cue ("continue", "where were we", "what's next"), matched on whole tokens, and says nothing else — once the cue, function words and one closed, declared set of filler words that refer to the work without naming it ("let's", "work", "pending", "yesterday") are removed, nothing may remain. Every cue word has an ordinary sense: "update my resume", "check the status of my flight" and "continue the story" each resolved the hottest anchor when a cue alone sufficed, and served its material as an answer. Being short is not a signal either, because a novel turn is short too, and a prior that answered "what's a good name for a houseplant?" with the most recently edited hub would be serving wrong material. A turn that is not referential is served by the always-on `recent_context` block and, when it names a compiled page, by the retrieval carry; the server does not guess its referent. When a packet's referent came from recency alone, the rendered block says so. That exception exists because the rule without it is what made a fresh session's "continue" resolve to nothing: §7 already requires working continuity to reconnect an interrupted topic without the user identifying the earlier conversation, and a turn whose whole content is the reference cannot be served by a rule that only ever qualifies an anchor the turn's own words already reached. The exception is bounded in every other direction. A named anchor always wins: where any candidate carries worded contact, recency is a qualifier and decides nothing. Recency never breaks a tie between named candidates, never completes the two-kinds rule for another kind, never invents facts and never resurrects superseded state — a retired anchor is not in the profile. Two or more equally hot anchors of one kind that nothing structural relates are reported as ambiguous for the agent to choose between, never guessed between by the server; equally hot anchors of different kinds are complementary and resolve together, as any two such anchors do. A previous packet's continuity references are the profile's first tier, taken whole, so on such a turn the token may supply the referent it never supplied before; on any other turn it still only qualifies an anchor the turn reached — an agent-picked page's own ref among them, since it is `resolved` and therefore continuity-eligible exactly as an index anchor is (D3 amendment below); a retrieval-carried page still never mints one, so it is never among them. A referential turn names nothing, so the retrieval carry is never run for it. Test stale-profile and popularity-trap negatives alongside latency and usefulness.
 
 The dreamer is bounded deterministic consolidation over changed material and indexed evidence, scheduled off the interactive path. It proposes alias/anchor, category/convention, link, hydration and profile work for the active agent. It never writes canonical knowledge autonomously. Default-off background execution, pause/quiet controls, time/memory/work budgets, checkpointed continuation, deduplication and source-version invalidation are required. Quiet optional advice cannot hide integrity failures. Online recall and capture remain usable with the dreamer disabled or failed.
 
@@ -208,6 +208,198 @@ covers rare-term/vector corroboration, competing same-kind anchors, vector-only
 negatives, current policy on cached packets, model contention and forbidden
 full-corpus/CLIP acquisition. End-to-end timings include semantic evidence;
 compiler-only timing is insufficient acceptance.
+
+D3, retrieval-carried packets. Restricting lexical evidence to anchor paths is
+what makes a decision living in an ordinary research note unreachable: no note
+is an anchor, so it is not in the catalogue the query is confined to, and the
+turn abstains however plainly its own words name the page. Resolution keeps that
+restriction, and this amends decision 1 of `make-anchor-resolution-sound` with
+the only retrieval-alone case there is — one that sits outside the soundness rule
+rather than inside it, because it only ever reaches a turn that rule has already
+abstained on. When resolution reached NO anchor, a second scored recall runs over
+the compiled knowledge base with no anchor restriction and the knowledge
+base's raw-material folders (captured sources, preserved evidence) excluded,
+navigation pages (`index.md` and `log.md` at any level, which repeat every
+title and so matched every turn naming a page by its title) excluded too,
+under its own `working_set.carry` timing span and the same request budget, and it
+is skipped outright when the lexical catalogue is anything but `available`. Dominance is a
+NAMED-CONTACT test. A hit is a candidate only when at least two of the turn's
+stems that it matches are DISTINCTIVE in this corpus — document frequency at
+or below `max(3, ceil(0.5% of the indexed knowledge-base pages))`, measured
+over the same catalogue join the ranking uses, so a frequency and a rank can
+never come from two different corpora. Navigation pages are not counted
+toward a stem's frequency, and raw material is counted neither toward a
+stem's frequency nor among the pages: every index that lists a title and
+every captured session that discussed a page repeats its words, and four
+captured sessions put a title word on five pages against a cap of three. The
+same two exclusions sit inside the ranking query, before its row limit, so
+the window counts only rows that can be candidates. Counting corroboration over ALL the
+turn's stems asks whether several of its words occurred on a page, which is
+co-occurrence: a two-line stub titled "Meeting notes" whose one unit read
+"Decision pending" passed that test for an ordinary turn about a meeting and
+a pending decision, and was served as durable memory. A turn with fewer than
+two distinctive stems cannot carry anything, so the ranking query is not run
+at all.
+
+Rarity says a word is name-shaped; it cannot say the turn used it to NAME
+this page. A page qualifies on a PHRASE and on nothing else: two of its
+distinctive stems sitting within `RETRIEVAL_CARRY_RARE_WINDOW` (4) tokens of
+each other in the turn. Measured on a 235-page corpus whose prose uses every
+everyday word of the turn: "I am flying to lisbon next week and wanted to
+walk around the harbour if there is time" shares `lisbon` and `harbour` with
+a page about a harbour ledger and a lisbon freight window, both genuinely
+distinctive, and carried it at 18.51; nine tokens apart in an ordinary
+sentence they are two things the speaker mentioned.
+
+A second path was tried and removed: three distinctive stems sitting
+anywhere, on the reasoning that a turn does not land on three of one page's
+words by accident. Measured, it does — a long travel sentence naming three
+places about forty tokens apart carried a freight rota that lists all three,
+at 26.19 and alone. A page that enumerates many things contains any few of
+them, and scattering is exactly what tells a list from a name. A third rare
+stem may raise the score; it never admits.
+
+The window measures token distance WITHIN A SENTENCE, not intent. Distance
+is counted over the raw tokens, function words included, so "the lisbon
+harbour window" is a phrase and "flying to lisbon ... around the harbour" is
+not; and a full stop, exclamation mark, question mark, semicolon or line
+break ends the window however few tokens straddle it, since "flying out to
+lisbon next week. The harbour was shut" is two sentences about two things
+and measured 18.78 as a pair. A comma does not: it is punctuation inside a
+phrase rather than between two of them. One raw token may carry several
+stems ("girvan-slot", "o'brien"), and all of them sit at that token's
+position — a compound is a phrase said as tightly as a phrase can be. What survives the gate IS the set of pages the turn named,
+so the decision is a COUNT and not a comparison: exactly one named page is
+a packet, two or more abstain. An abstention that said nothing left the
+client with an empty packet and no way to know a question would help, so
+the named pages are listed in `anchors[]` at a status of their own,
+`retrieval_named`, with `kind: "page"` and `retrieval` as their only
+evidence. That is neither `retrieval_carried`, which says a page carries
+the packet, nor `ambiguity`, which says two anchors RESOLVED and the agent
+must choose a sense: nothing resolved and nothing was carried, and these
+are simply the pages the turn's own words reached. They cross the egress
+guard as ordinary anchors, so one the audience may not see is removed from
+the list. The shipped hook renders them in the menu it already shows for an
+`unresolved` turn, by an explicit branch on that status rather than by
+treating `retrieval` as a worded evidence kind. A score gap between two named pages says
+nothing about which one was meant — measured, one turn naming two pages
+scored them 19.60 against 19.16, and another differing only in wording
+scored 31.07 against 17.40 — so serving the higher would be a guess
+presented as a resolution, which is the failure this whole gate exists to
+close. The separation constant is therefore gone: it guarded a candidate
+list that contained unnamed neighbours, and that list no longer exists.
+
+Lifecycle is decided BEFORE the count. A page the author retired is never
+a candidate, because a note and the note that superseded it answer to the
+same phrase: counting both would refuse every revised page in the vault,
+and serving the loser would hand back the stale figure. Retirement is the
+tree's own inactive vocabulary (`activation._INACTIVE_STATUSES`: archived,
+dropped, superseded) plus a `superseded_by` pointing at a replacement, less
+`draft` and `planned` — both of those mean authored and not yet active,
+which is a page a turn naming it wants rather than one the vault has
+stopped standing behind. Deriving the set rather than writing it out is
+deliberate: a hand-written list was wrong in both directions, inventing two
+statuses that name nothing in this tree and missing `dropped`, so a page
+the author had dropped was carried and its unit served as current memory.
+The facts are the ones the unit lane already reads for supersession, taken
+from the request path's own cached single-page read for the rows in hand —
+no walk. That read is per row, and the number of rows grows with the corpus:
+the fetch window is `rare_document_cap(pages) + 1`, which is 1001 rows at
+200,000 pages, and reads were measured 1:1 with rows. A warm request is
+bounded at 1200 filesystem calls and already spends about 644 of them, so a
+worst-case carried turn could approach that ceiling somewhere near 110,000
+pages. That is a known limit rather than a defect: no personal vault in this
+work comes near it, no fixture reaches it and nothing tests it, and the lever
+if one ever does is the same one named below — merging the rarity and ranking
+passes into one transaction. The absolute score floor this
+replaced is gone: `-bm25()` is not comparable between corpora, so the same
+page for the same turn measured 13.16 with no bulk, 6.81 with 200 pages
+added (refused by a floor fitted to the first number) and was outranked by an
+unrelated filler note at 2000. One sanity bound remains — a row the ranking
+placed at zero is not a page a turn named.
+
+Rarity is only as sharp as the corpus it is measured against, and below
+`RETRIEVAL_CARRY_MIN_PAGES` (100) there is no corpus to measure against, so
+the carry does not run at all and the turn abstains exactly as it did
+before. On a thirty-page vault where "meeting" appears on one page,
+"meeting" IS rare by measurement — and so is every other ordinary English
+word, because the vault holds no ordinary prose for them to be ordinary in:
+measured, a two-line note titled "Meeting notes" whose one unit read
+"Decision pending" was carried at 12.02 for an ordinary turn about a meeting
+and a pending decision, and the same stub is refused the moment the corpus
+contains ordinary notes. The floor is on the CORPUS rather than on the turn
+deliberately: "a turn all of whose words are rare tells you nothing" would
+close the same case and would also reject a short turn made entirely of real
+names, which is the turn this feature exists to serve. Above the line the
+dominant page carries the packet: that page's units through the existing units
+lanes, one anchor entry of kind `page` at status `retrieval_carried` whose only
+evidence is `retrieval`, `generation.carried_by = "retrieval"`, and a continuity
+token naming the carried page's path, so that "continue" after a carried answer
+resumes that page (as it resumes a page the agent picked) rather than the anchor
+held before it; the token still only qualifies anchors a later turn reached, and
+`generation.continuity` reports `applied` only when a ref names an index row or
+an eligible page. Retrieval
+still never resolves an anchor: no evidence kind is added and no status clause
+changes. A named anchor always wins — the carry never runs when resolution
+resolved anything, when the turn is ambiguous, or when the agent named a sense —
+and a near tie is noise, so the turn abstains exactly as it did. The carried page
+crosses `guard_working_set` like any other reference; it is the packet's only
+anchor, so an audience that may not see it gets the abstention the existing
+every-anchor-withheld rule already produces, never the runner-up. Cost falls only
+on turns that would have returned an empty packet.
+
+The agent may also name that same page itself: `anchor` no longer requires a
+row of the activation index. Where the ref names no such row, activation
+tests it against this SAME eligibility — not raw material, not navigation,
+current — and reuses `_carried_packet` unchanged, but at `status: "resolved"`
+and `evidence: ["agent_choice"]` rather than `retrieval_carried`/`retrieval`:
+`agent_choice` already decides an anchor alone in the soundness rule
+(decision 1 of `make-anchor-resolution-sound`), and an agent-picked page gets
+the identical outcome a resolved index anchor gets, never a third status
+invented for it. Like a retrieval-carried page, it mints a continuity token
+naming its path, so a later referential turn ("continue") resumes it through
+`continuity_page`, which serves that one page at `resolved` on `continuity`
+and `recency`. A token ref the current audience may not see is dropped before
+anything is derived from it, so it answers exactly as a ref naming nothing.
+A ref naming
+neither an index row nor an eligible page, or one this audience may not see,
+is refused with the identical `INVALID_ANCHOR` error an unknown or withheld
+anchor already share — canonicalised first (no leading `./`, no doubled
+separator, no backslash, no absolute path, nothing `posixpath.normpath` would
+spell differently) and checked against the lexical catalogue's own row before
+any file is read, so a non-canonical spelling of an ineligible page cannot
+reach the compile it used to reach and cost several times an unknown ref's
+latency on its way to the identical refusal — never a distinguishable answer,
+and never a second existence oracle opened where the first one was closed.
+
+One limit is worth stating because it is invisible from the rule: a turn
+whose content words fall outside the lexical catalogue's `[a-z0-9]`
+tokeniser — a turn written in CJK, say — yields no stems at all, so it has
+no distinctive pair and never carries. That is a property of the catalogue
+this work did not change, and it is a different thing from the `rare_term`
+length floor, which DOES cover a CJK name: that floor governs anchor
+resolution over the activation index's own terms, where such a name is
+present and reachable. The rarity pass and the
+ranking pass are two catalogue round trips, measured against the request's
+first lexical pass at zero, two hundred and two thousand added pages: 0.9x,
+1.1x and 1.9x on a quiet machine, and 2.0x, 2.3x and 1.5x for the same tip
+under load. The budget reserve is sized to the dearest of those rather than
+the typical one, because the outcomes are not symmetric — a carry that runs
+past its reserve returns `unavailable`, which renders nothing, where
+refusing returns the same empty packet honestly and sooner. Merging the two
+passes into one readiness proof and one transaction is the next lever if
+that proves dear.
+
+The reserve has an accepted consequence worth stating plainly. It asks for
+`max(1.0, 2.5 x L)` seconds where `L` is what the first lexical pass took,
+against roughly `6.0 - L` remaining of the door budget, so the carry stops
+running once `L` passes about 1.7 seconds — and the long, token-rich turns
+measured live take three to four seconds in that stage. On exactly those
+turns the carry will not run, and the turn abstains as it did before. That
+is the right trade while the stage costs what it costs: a turn that
+overshoots the door budget comes back `unavailable`, which renders nothing
+and reads as a fault, where abstaining returns the same empty packet
+honestly and half a second sooner.
 
 A resolved project anchor was previously pathless AND linkless: built with no
 page and no neighbours, so a project-naming turn resolved the anchor and
@@ -289,7 +481,28 @@ side. **C3**: `STOPWORDS` was missing almost every preposition and
 subordinating conjunction, so a turn sharing only one such function word
 with an anchor's title (e.g. "... before the trip" against a plan titled
 "Before Launch Review") still earned `rare_term`; the missing closed-class
-English function words were added.
+English function words were added. **A minimum term length**: `rare_term` is
+never earned on a shared name term shorter than three characters, because
+rarity among anchor names cannot tell a genuinely short name ("hob", "van")
+from an everyday two-letter word a title happens to contain — an ordinary
+"so should I go with the cheaper one?" reached a page titled "... Go ..." on
+that one word. The floor is applied only to a term written entirely in
+ASCII letters, since two characters is an ordinary-length word in CJK and
+counting code points there would turn a real name into a non-name; a short
+ASCII term carrying a digit ("v2", "b2") is exempt for the same reason, no
+ordinary English word containing one. So is a two-letter ACRONYM both sides spell as
+one: the turn writes it as exactly two capitals inside a turn of ordinary
+case ("my AI usage limits") and the anchor's own title writes it in capitals
+too ("AI Subscriptions"). Without the exception a benchmark case whose only
+shared name word was "AI" stopped resolving its gold collection. The turn's
+casing alone is not enough, because capitals in prose are also a grade ("I got
+a C on my chemistry exam" reached "Building C"), emphasis ("should I GO with
+the cheaper build machines?" reached "Go Toolchain") or a dotted abbreviation
+("U.S."), and each served an unrelated anchor when it sufficed. A single
+capital never qualifies, a one-letter name is reached by its own spelling, and
+a turn with no lower-case letter at all carries no casing signal and is read as
+lower case. Aliases are stored casefolded, so the title is the one authored
+casing compared.
 
 The final guard unwraps a packet reference to its vault path before deciding
 it, rather than deciding the reference text itself. A unit's own `ref` is the

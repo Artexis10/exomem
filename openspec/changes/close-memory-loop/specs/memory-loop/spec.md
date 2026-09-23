@@ -20,12 +20,33 @@ Activation and episode recovery SHALL reconnect a resumed topic with relevant re
 
 Where evidence supplies them, event occurrence, knowledge acquisition and claim validity SHALL remain distinguishable. Missing times or validity SHALL remain unknown. Capture time, file modification time, repetition and recent retrieval SHALL NOT independently establish event recency, continuing validity or task relevance. Corrections and supersession SHALL qualify current claims, while an older relevant dependency SHALL remain eligible beside recent developments.
 
+The recent-context block SHALL judge recent work by the hot profile's own rules: a last edit inside a write burst, or older than the latest such burst, SHALL NOT make a page recent work, except a captured session, which records what was spoken about rather than an edit and SHALL keep its place; a page offered for its reads SHALL be ranked by its reads and not by its last edit, and the most-read such page SHALL keep a place in the block however many pages were edited more recently; and a retired or superseded page SHALL NOT be offered. An entry's one-line statement SHALL be the page's authored summary where it has one, and SHALL NOT be a lifecycle status such as `active` or `draft`.
+
 #### Scenario: A topic resumes after an intervening development
 
 - **WHEN** a supported session resumes an interrupted topic after a relevant development and an unrelated newer event
 - **THEN** activation supplies the relevant development, older dependency and supported unfinished state without the user identifying their earlier conversations
 - **AND** unrelated freshness cannot crowd out that context or manufacture a new user commitment
 - **AND** acceptance observes the later agent response using those connections, separately from scripted tool calls
+
+#### Scenario: A turn that resolves nothing still carries recent context
+
+- **WHEN** a supported session sends a turn that names no anchor and resolves none, such as "continue" or "where were we"
+- **THEN** activation still returns the bounded recent-context block, first in the packet, naming what was recently worked on with its provenance and the reason each item is recent
+- **AND** no other block claims an anchor was resolved, and every item in the block crosses the same release plane a served unit does
+- **AND** the block's contact times describe the edit, read or capture, not the events the pages record
+
+#### Scenario: A batch, stale edits and retired pages do not fill the recent-context block
+
+- **WHEN** a maintenance batch rewrote several pages after the user's last edit,
+  the vault holds a retired and a superseded page edited more recently than
+  anything else, and pages the user reads often were last edited long ago
+- **THEN** the block offers neither the batch, nor any edit older than it, nor
+  the retired or superseded page, and offers an edit made after the batch
+- **AND** the most-read page appears in the block although many pages were
+  edited more recently
+- **AND** a session captured before a batch smaller than the block still
+  appears; a batch that fills the block can push it out
 
 #### Scenario: Old information is saved again after a correction
 
@@ -257,10 +278,11 @@ all candidates, including competitors of an exact match. Vector evidence alone
 SHALL NOT resolve an anchor.
 
 Lean activation SHALL retain bounded own-page lexical retrieval evidence from
-the maintained full-page FTS catalogue restricted to anchor paths. The lexical
-query SHALL preserve governed overfetch and per-audience release before its
-paths become evidence, SHALL NOT rebuild or apply a foreground delta, and SHALL
-NOT fall back to an in-process corpus scan. Its readiness result SHALL be
+the maintained full-page FTS catalogue restricted to anchor paths. Anchor
+RESOLUTION SHALL see no lexical evidence from outside that restriction. The
+lexical query SHALL preserve governed overfetch and per-audience release before
+its paths become evidence, SHALL NOT rebuild or apply a foreground delta, and
+SHALL NOT fall back to an in-process corpus scan. Its readiness result SHALL be
 reported as `generation.lexical_evidence`; incomplete publication SHALL remain
 non-cacheable. Title/alias overlap alone SHALL NOT be relabelled as retrieval.
 Lexical corroboration SHALL match at least two distinct content stems from the
@@ -277,7 +299,16 @@ the same let an ordinary word that happens to name few anchors resolve an
 unnamed anchor. A single shared authored term MAY still grant the separate,
 weaker rare-term evidence when it is independently rare; an unavailable
 rarity table SHALL NOT be read as proof of rarity, and rare-term evidence
-alone or with only a qualifier SHALL NOT resolve an anchor.
+alone or with only a qualifier SHALL NOT resolve an anchor. A shared term
+written entirely in ASCII letters and shorter than three characters SHALL NOT
+grant rare-term evidence, because rarity among anchor names cannot tell a
+genuinely short name from an everyday two-letter word a title happens to
+contain; a term carrying any other character is exempt. The one exception SHALL
+be a two-letter acronym both sides spell as one: the turn writes it as exactly
+two capital letters and the anchor's own authored title writes it in capitals
+too. A single capital, a dotted abbreviation, capitals in a turn with no
+lower-case letter, and capitals the anchor's title does not share SHALL NOT
+qualify; a one-letter name SHALL remain reachable through its own spelling.
 Independently resolved items sharing a nonempty canonical page or collection
 SHALL be treated as complementary rather than competing senses. Empty paths
 SHALL NOT establish that relationship. Disconnected same-kind groups SHALL
@@ -360,6 +391,16 @@ fast abstention or compiler-only timing.
 - **AND** the same anchor with its own page in retrieval instead resolves,
   via rare-term evidence, never lexical-overlap
 
+#### Scenario: Capitals alone never make a short word a lead
+
+- **WHEN** a turn writes a one- or two-letter word in capitals — a grade ("I
+  got a C"), emphasis ("should I GO with the cheaper one?") or a dotted
+  abbreviation ("U.S.") — and an anchor's title shares that word without
+  writing it in the same capitals
+- **THEN** the anchor earns no rare-term evidence from it
+- **AND** a turn writing "AI" still earns rare-term evidence for an anchor
+  titled "AI Subscriptions"
+
 #### Scenario: A collection contains complementary Planning items
 
 - **WHEN** an outcome and an action resolve to the same canonical collection
@@ -372,6 +413,356 @@ fast abstention or compiler-only timing.
 - **THEN** the release plane decides the real vault page that reference names, not the literal reference text
 - **AND** a policy scoped to an unrelated page leaves the unit served, and a policy scoped to only the unit's own page withholds that unit without withholding an unrelated one
 - **AND** a reference that does not unwrap to a path inside the vault stays undecidable and withheld exactly as before
+
+### Requirement: A turn that resolves no anchor MAY be carried by one dominant recall hit
+
+Retrieval evidence alone SHALL NOT resolve an anchor. Where a turn resolves no
+anchor at all, activation MAY instead CARRY a packet from a single compiled
+knowledge-base page, and this SHALL be the only case in which retrieval alone
+produces served material.
+
+The carry SHALL run only when anchor resolution returned no resolved anchor and
+the request named no explicit anchor choice; an ambiguous turn, a turn that
+resolved any anchor and a referential turn SHALL be untouched. A hit SHALL be a candidate only where at least two
+of the turn's stems that it matches are DISTINCTIVE in the indexed corpus,
+measured as a document frequency at or below `max(3, ceil(0.5% of the indexed
+pages in scope))` over the same catalogue the ranking uses, navigation pages not
+counted toward a stem's frequency, and raw-material pages counted neither toward
+a stem's frequency nor among the indexed pages. A hit SHALL additionally satisfy a proximity
+condition: two of its matched distinctive stems occur within a declared token
+window of each other, within one sentence of the turn. Distance SHALL be
+measured over the turn's own tokens, function words included; sentence-ending
+punctuation and line breaks SHALL end a window and a comma SHALL NOT. A
+number of distinctive stems occurring anywhere in the turn SHALL NOT by
+itself admit a page. A turn carrying fewer than two distinctive
+stems SHALL carry nothing and SHALL NOT run the ranking query. Where the indexed corpus holds fewer than a declared minimum
+number of pages, the carry SHALL NOT run at all: rarity is only as sharp as
+the corpus it is measured against, and below that size there is no corpus to
+measure against. An absolute score threshold SHALL NOT be used to decide contact:
+the ranking score is comparable only between hits drawn from one corpus. The
+query SHALL run once against the maintained full-page catalogue over the
+knowledge-base scope, without the anchor path restriction, applying the same
+no-foreground-delta and no-corpus-scan rules, and reporting rather than
+repairing an incomplete catalogue. Pages in the knowledge base's raw-material
+folders — captured sources and preserved evidence, the same folders the anchor
+catalogue already refuses to build an anchor from — SHALL NOT be candidates, and
+neither SHALL navigation pages, identified by the same navigation-page rule the
+recall corpus uses, since they repeat the titles of the pages they list. The
+query SHALL run within the request deadline
+under its own timing span and SHALL be skipped when that deadline can no longer
+afford a stage.
+
+Retired pages SHALL NOT be candidates, and lifecycle SHALL be decided before
+candidates are counted. Retirement SHALL be the system's own inactive page
+vocabulary less the statuses meaning pre-active rather than retired, together
+with a declared supersession; a draft or planned page SHALL remain a
+candidate. The number of ranked rows read before filtering SHALL exceed the
+number of pages the rarity gate can admit at the current corpus size. Candidates SHALL be excluded before they are counted, not after the ranked
+result is limited, and raw-material and navigation pages SHALL be excluded
+inside the ranking query, before its row limit applies, so that the limit
+counts only rows that can be candidates. A page SHALL be carried only when it is the ONLY surviving
+candidate; where two or more survive, the turn SHALL abstain `unresolved`,
+SHALL NOT select between them by ranking score, and SHALL report them under
+`anchors[]` at a distinct status meaning "named, not carried" — never the
+carried status and never as resolution ambiguity. Those entries SHALL cross
+the release plane as anchors do. A candidate
+the ranking scored at or below a declared sanity bound SHALL NOT be carried.
+
+A carried packet SHALL report that page as its one anchor entry, of kind `page`,
+at status `retrieval_carried`, with `retrieval` as its only evidence, and SHALL
+mark itself `generation.carried_by = "retrieval"`. Its material SHALL come from
+that page through the existing bounded unit lanes. The continuity token minted
+from a carried packet SHALL name the carried page's path, so that a following
+referential turn can resume it; continuity SHALL still qualify only an anchor a
+later turn reached. The carried page SHALL cross the same release plane
+guard as any other packet reference, and a carried page the current audience may
+not see SHALL abstain `withheld` rather than substitute another candidate.
+
+#### Scenario: A decision living in a research note is reachable
+
+- **WHEN** a turn names no anchor of the catalogue but repeats one compiled
+  research note's own words, and recall places that note clearly ahead of every
+  other candidate
+- **THEN** the packet serves that note's units under one anchor entry of kind
+  `page` at status `retrieval_carried`, marked as carried by retrieval
+- **AND** no anchor is resolved, and the continuity token minted from it names
+  the carried page's path, which a following "continue" resumes
+
+#### Scenario: A corpus too small to measure rarity carries nothing
+
+- **WHEN** a turn that resolves no anchor reaches a page in a knowledge base
+  holding fewer than the declared minimum number of indexed pages
+- **THEN** the carry does not run and the turn abstains `unresolved`
+- **AND** the same turn against the same page IS judged on rarity once the
+  corpus is large enough to measure it
+
+#### Scenario: Two distinctive words far apart are a coincidence
+
+- **WHEN** a turn that resolves no anchor shares exactly two distinctive
+  stems with a page and says them further apart than the declared window
+- **THEN** that page is not a candidate and the turn abstains `unresolved`
+- **AND** the same two stems said as a phrase DO make it a candidate, as do
+  three of that page's distinctive stems sitting anywhere in the turn
+
+#### Scenario: A stub sharing only ordinary words is not named
+
+- **WHEN** a turn that resolves no anchor shares two or more stems with a page,
+  and none of those stems is distinctive in the indexed corpus
+- **THEN** that page is not a candidate and the turn abstains `unresolved`
+- **AND** the same page IS a candidate for a turn that shares two distinctive
+  stems with it, at any corpus size
+
+#### Scenario: A turn that names two pages carries neither
+
+- **WHEN** a turn that resolves no anchor names two compiled pages, at any
+  ranking scores whatever
+- **THEN** the packet abstains `unresolved` with no units, exactly as it did
+  before the carry existed
+- **AND** the higher-scoring page is not served in preference to the other
+- **AND** both pages are listed as named-but-not-carried so the caller can ask
+  for one, with any the current audience may not see removed from that list
+
+#### Scenario: A superseded page does not block the page that replaced it
+
+- **WHEN** a turn names a page whose predecessor it superseded, and both
+  answer to the same distinctive words
+- **THEN** only the current page is a candidate and it is carried
+- **AND** an archived page is likewise never carried
+
+#### Scenario: A navigation page is never a named page
+
+- **WHEN** a turn names one compiled page by its title's distinctive words,
+  and the vault's index and log pages list that title among others
+- **THEN** the named page is carried, and no navigation page is counted as a
+  second named page or listed under `anchors[]`
+
+#### Scenario: Captured sessions do not make a page's title ordinary
+
+- **WHEN** a turn names one compiled page by its distinctive words, and three
+  or more captured sessions in a raw-material folder repeat those words
+- **THEN** the words remain distinctive and the named page is carried
+- **AND** captures and navigation pages that the ranking scores above the page
+  do not consume the rows read before filtering
+
+#### Scenario: A named anchor and raw material are both refused as carriers
+
+- **WHEN** a turn both names an anchor and matches a compiled page, or its
+  strongest match is a page in a raw-material folder
+- **THEN** the named anchor's own packet is served and is not marked as carried,
+  and the raw-material page is never a candidate for carrying
+
+#### Scenario: A carried page the audience may not see abstains
+
+- **WHEN** the release plane withholds the dominant page from the current
+  audience and the turn also reached a weaker candidate
+- **THEN** the packet abstains `withheld` with no anchors and no units
+- **AND** the weaker candidate is not carried in its place
+
+### Requirement: An agent's own `anchor` choice MAY name an ordinary compiled page
+
+The `anchor` override SHALL NOT be limited to a row of the activation index. Where
+the chosen ref names no such row, activation SHALL instead test it against the
+SAME eligibility the retrieval carry already applies to a page it carries on
+recall alone: not a raw-material page, not a navigation page, and current —
+existing, Markdown, and not retired. An eligible page SHALL be served exactly
+as a retrieval-carried page is, through the existing bounded unit lanes, but
+marked as the AGENT's own choice rather than recall's: its one anchor entry
+SHALL be of kind `page`, at status `resolved`, with `agent_choice` as its only
+evidence, and the packet SHALL mark itself `generation.carried_by =
+"agent_choice"`. `anchor` naming a row of the activation index SHALL be
+unaffected by this fallback and SHALL continue to resolve exactly as before.
+
+A ref that names neither an activation-index row nor an eligible page, or one
+the current audience may not see, SHALL be refused with the SAME error an
+unknown or withheld anchor already shares; the refusal SHALL NOT distinguish
+between an unknown ref, a withheld one, raw material, a navigation page, and a
+retired page. `recent_context` SHALL remain the first block of a packet served
+this way, exactly as it is for any other packet.
+
+#### Scenario: An agent picks a page a packet already listed
+
+- **WHEN** the agent calls again with `anchor` set to the ref of an ordinary
+  compiled page a previous packet listed — under `recent_context`, as a
+  `retrieval_named` page, or as an unresolved turn's own candidate — and that
+  page is not a row of the activation index
+- **THEN** the packet serves that page's units under one anchor entry of kind
+  `page`, at status `resolved`, with `agent_choice` as its only evidence
+- **AND** the packet marks itself `generation.carried_by = "agent_choice"`
+- **AND** `recent_context` remains the packet's first block
+
+#### Scenario: An override naming an activation-index row is unaffected
+
+- **WHEN** `anchor` names a row of the activation index
+- **THEN** it resolves exactly as it did before this fallback existed, at
+  status `resolved` with `agent_choice` as its evidence, and the packet does
+  not mark itself as carried
+
+#### Scenario: A withheld page and an unknown ref refuse identically
+
+- **WHEN** `anchor` names an eligible page the current audience may not see,
+  or a ref this index does not recognize at all
+- **THEN** both are refused with the identical error, naming neither the ref
+  nor which rule excluded it
+
+#### Scenario: Raw material, a navigation page and a retired page are refused like an unknown ref
+
+- **WHEN** `anchor` names a page in a raw-material folder, a navigation page,
+  or a page the vault has retired
+- **THEN** each is refused with the identical error an unknown ref receives,
+  and no packet is built
+
+### Requirement: A turn that names nothing MAY resolve to the hottest recent anchor
+
+A recency prior SHALL NOT resolve an anchor, except for a REFERENTIAL turn — one
+whose own words are the reference and name nothing. This is the only case in
+which a file modification time, a read count or a previous packet's own answer
+may establish task relevance, and it SHALL be bounded by every condition below.
+
+A turn SHALL be referential only when it speaks one of the declared referential
+cues, matched on whole tokens rather than as a substring of a longer word, AND
+says nothing else: once the matched cue words, function words and one closed,
+declared set of filler words that refer to the work without naming it are
+removed, no word SHALL remain. A turn that speaks a cue word in its ordinary
+sense or names anything besides it ("update my resume", "check the status of my
+flight", "what's next for <a page>") SHALL NOT be referential, and a turn SHALL
+NOT be referential merely because it is short. Recency evidence SHALL
+be a distinct evidence kind of its own class: it SHALL NOT be a worded contact
+kind, SHALL NOT be a retrieved
+contact kind, SHALL NOT count toward the two-kinds rule for any other kind, and
+SHALL NOT be a tie-break between candidates the turn named. It SHALL be reported
+in a resolved anchor's evidence so a reader can see why that anchor was served.
+
+The hot profile SHALL be a bounded, deterministic projection over the anchor rows
+the request already holds — a previous packet's continuity references, the
+freshness registry's own last-edit times, and the maintained usage activation
+snapshot — ranked in a single declared order, ties broken by a stable identity.
+A previous packet's continuity references SHALL rank first and SHALL form one
+tier taken whole: that packet already resolved them together — but only while
+no anchor outside them has a last edit, not in a write burst, later than the
+time that packet was served. While that tier leads, the profile SHALL NOT fall
+through to the edit or read tiers: where the references name a compiled page
+that is not an anchor — one the agent picked or recall carried — that single
+page SHALL be resumed from its own units, reported `resolved` on `continuity`
+and `recency` and marked `generation.carried_by = "continuity"`; where they
+name nothing that can be served, the turn SHALL abstain with its
+recent-context block. A reference naming a page or an anchor the current
+audience may not see SHALL be treated exactly as one naming nothing, before
+anything is derived from it: the response — its status, its abstention
+reason and its `generation` block — SHALL be identical to the one a reference
+naming a page that does not exist receives, so that continuity cannot be used
+to learn whether a withheld page exists. A last-edit time
+that fell in a write burst — a chain of a declared number of pages or more,
+navigation pages not counted, each edited within a declared interval of the
+next, so that one stall inside a batch does not split it —
+SHALL carry no edit signal, because a batch rewrites pages nobody chose, and
+neither SHALL a last-edit time older than the latest such burst, because the
+batch may have rewritten the page the user was working on; such an anchor
+SHALL be ordered by its reads alone, and with no reads either the profile
+SHALL be empty rather than a menu or the freshest survivor. The profile SHALL
+be computed only for a referential turn. It SHALL NOT enumerate directories or
+raise any declared request-path ceiling, and SHALL read no page except, from the
+request's own page cache, the bounded few at its top, to exclude one that another
+page supersedes. A retired anchor SHALL NOT be in it. Recency evidence SHALL be
+earned by the anchors at the TOP of that ranking only, and the number of anchors
+that may tie at the top SHALL be bounded.
+
+Recency SHALL resolve an anchor only where the turn is referential AND no
+candidate anywhere in the same resolution carries a worded contact kind. Where
+any candidate does, the named anchor SHALL be served and recency SHALL decide
+nothing. Where two or more anchors of one kind that nothing structural relates
+tie at the top of the profile, the turn SHALL report them as ambiguity for the
+agent to choose between and SHALL NOT select one by recency; tied anchors of
+different kinds, or of one kind that are structurally related, are
+complementary and SHALL resolve together, as any two such anchors do. A
+recency referent SHALL NOT be lost to a candidate or anchor bound: where recency
+may resolve, the hot candidates and the resolved anchors SHALL be kept ahead of
+partial candidates when those bounds are applied, and the prior SHALL NOT
+change the order of candidates the turn reached by its own words. Where the profile is empty the turn SHALL
+abstain exactly as before, still carrying its recent-context block.
+
+A referential turn names nothing, so the retrieval carry SHALL NOT run for it;
+a turn that names a page is not referential and is decided by the carry
+exactly as a turn that resolved no anchor. Where every anchor a packet resolved
+stood on recency alone, the rendered block SHALL say that its referent came
+from recent work and not from the turn's own words.
+
+#### Scenario: A referential turn resolves to the hottest recent anchor
+
+- **WHEN** a session sends a turn that names nothing, such as "continue" or
+  "where were we", and one anchor is hottest in the bounded recency profile
+- **THEN** that anchor resolves, its evidence names the recency prior, and its
+  role lanes serve its material like any other resolved anchor
+- **AND** the same turn against an empty profile still abstains and still
+  carries the recent-context block
+
+#### Scenario: A referential turn with two equally hot anchors is ambiguous, never guessed
+
+- **WHEN** two anchors of one kind tie at the top of the recency profile on a
+  referential turn and nothing structural relates them
+- **THEN** the turn reports both as ambiguity for the agent to choose between
+- **AND** the server does not pick the one it happened to rank first
+
+#### Scenario: A named anchor wins over recency
+
+- **WHEN** a turn both names an anchor by its own words and the vault holds a
+  hotter anchor the turn never mentioned
+- **THEN** the named anchor resolves and carries the packet
+- **AND** the hot anchor neither resolves nor completes any other candidate's
+  evidence, on this or on any turn that is not referential
+
+#### Scenario: A short turn with no referential cue is not answered by recency
+
+- **WHEN** a turn speaks no referential cue, however few words it has, names no
+  anchor, and one anchor is hottest in the recency profile
+- **THEN** that anchor does not resolve and its material is not served
+- **AND** the turn abstains `unresolved` still carrying its recent-context block,
+  unless it names a compiled page the retrieval carry serves
+
+#### Scenario: A cue word in its ordinary sense is not answered by recency
+
+- **WHEN** a turn speaks a referential cue word but also says what it is about,
+  such as "update my resume" or "what's next for <a compiled page>", and one
+  anchor is hottest in the profile
+- **THEN** the turn is not referential and the hot anchor is not served
+- **AND** a turn that names a compiled page is decided by the retrieval carry,
+  and abstains `unresolved` when the carry cannot run, never falling back to
+  the hot anchor
+
+#### Scenario: Continuing after a carried answer resumes the carried page
+
+- **WHEN** a turn was answered by a retrieval-carried page, and the next
+  referential turn passes the token of that packet
+- **THEN** the token names the carried page, and that page resolves on
+  `continuity` and `recency` with its units served, not the anchor the
+  conversation held before the carried answer
+
+#### Scenario: Continuing after the agent picked a page resumes that page
+
+- **WHEN** the agent picked a compiled page that is not an anchor, and the next
+  referential turn passes the token of that packet
+- **THEN** that page resolves on `continuity` and `recency` and its units are
+  served, and the vault's freshest anchor is not
+- **AND** a page the audience may not see and a page that no longer exists
+  both abstain `unresolved` with identical responses, neither falling through
+  to another anchor
+
+#### Scenario: A maintenance batch does not pick the referent
+
+- **WHEN** the user last edited one anchor and a maintenance pass then rewrote
+  many pages, anchors among them and possibly the user's own page, within a
+  few seconds
+- **THEN** a referential turn resolves neither the page the batch wrote last
+  nor the freshest page the batch left alone, however old
+- **AND** it resolves the anchor the usage snapshot shows was read, or
+  abstains `unresolved` when nothing was read, its recent-context block
+  offering neither the batch nor the edits before it
+
+#### Scenario: A previous packet's answer is resumed whole
+
+- **WHEN** a referential turn that names nothing passes the continuity token of a
+  packet that resolved two anchors together
+- **THEN** both anchors resolve on recency and continuity, whichever was edited
+  last
 
 ### Requirement: Interactive activation does bounded work under a deadline on every door
 

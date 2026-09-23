@@ -9,3 +9,14 @@
   roles:
     - base
     - k3s
+
+- name: Harden and provision the Exomem control database server
+  hosts: control_nodes
+  become: true
+  gather_facts: true
+  serial: 1
+  any_errors_fatal: true
+
+  roles:
+    - base
+    - postgres

@@ -1604,6 +1604,19 @@ class _BatchWorkspace:
                 or not _same_identity(workspace_identity, workspace_info)
             ):
                 raise PathGuardError("PATH_GUARD_UNSAFE", "batch workspace is unsafe")
+            if os.name != "nt" and hasattr(os, "fchmod"):
+                # Setgid inheritance from the parent can leave a freshly
+                # created directory at 02700 even though it was created with
+                # mode 0o700 -- the kernel ORs in the parent's setgid bit
+                # regardless of the requested mode. Clear it, then re-derive
+                # the identity from a fresh post-chmod stat so the object is
+                # constructed with its actual, settled mode -- not a
+                # transient pre-chmod one that `refresh_identity()` would
+                # then see as drift and refuse (a real fsGroup-owned
+                # Kubernetes volume hits this on every write).
+                os.fchmod(workspace_descriptor, 0o700)
+                workspace_info = os.fstat(workspace_descriptor)
+                workspace_identity = _identity(name, workspace_info)
             workspace = cls(
                 absolute_parent,
                 name,
@@ -1613,8 +1626,6 @@ class _BatchWorkspace:
                 workspace_identity,
                 {},
             )
-            if os.name != "nt" and hasattr(os, "fchmod"):
-                os.fchmod(workspace_descriptor, 0o700)
             workspace.refresh_identity()
             return workspace
         except BaseException as init_error:
@@ -1711,6 +1722,17 @@ class _BatchWorkspace:
                 raise PathGuardError(
                     "PATH_GUARD_UNSAFE", "held workspace descriptors are unavailable"
                 )
+            if os.name != "nt" and hasattr(os, "fchmod"):
+                # Setgid inheritance from the parent can leave a freshly
+                # created directory at 02700 even though `held_fs` requested
+                # mode 0o700 -- the kernel ORs in the parent's setgid bit
+                # regardless of the requested mode. Clear it BEFORE any
+                # identity is captured below, so the object is constructed
+                # with its actual, settled mode -- not a transient
+                # pre-chmod one that `refresh_identity()` would then see as
+                # drift and refuse (a real fsGroup-owned Kubernetes volume
+                # hits this on every write).
+                os.fchmod(workspace_descriptor, 0o700)
             parent_info = os.fstat(parent_descriptor)
             workspace_info = os.fstat(workspace_descriptor)
             workspace = cls(
@@ -1726,8 +1748,6 @@ class _BatchWorkspace:
                 held_directory,
                 workspace_relative,
             )
-            if os.name != "nt" and hasattr(os, "fchmod"):
-                os.fchmod(workspace_descriptor, 0o700)
             workspace.refresh_identity()
             return workspace
         except BaseException:

@@ -749,6 +749,27 @@ def test_the_returned_token_is_accepted_and_reported_applied(
     assert "continuity" in evidence
 
 
+@pytest.mark.parametrize("turn", [TURN, "continue"])
+def test_a_valid_token_naming_nothing_is_reported_stale(
+    activation_vault: Path, turn: str
+) -> None:
+    """R-P2: `applied` means a token ref matched an index row or an eligible
+    page. A token this index issued whose every ref names nothing it can
+    match was reported `applied` while contributing nothing."""
+    payload = _decoded(commands.op_activate_context(activation_vault, turn=TURN)["continuity"])
+    nowhere = runtime_module.encode_continuity(
+        identity=payload["identity"],
+        roles_hash=payload["roles_hash"],
+        generation=payload["generation"],
+        refs=["Knowledge Base/Notes/nowhere.md"],
+        roles=payload["roles"],
+    )
+
+    packet = commands.op_activate_context(activation_vault, turn=turn, continuity=nowhere)
+
+    assert packet["generation"]["continuity"] == runtime_module.CONTINUITY_STALE
+
+
 def test_a_listed_partial_candidate_is_not_promoted_on_the_next_turn(
     activation_vault: Path,
 ) -> None:
@@ -1062,3 +1083,620 @@ def test_the_short_cli_alias_passes_both_arguments_through(
 
     assert "--continuity" in help_text
     assert "--anchor" in help_text
+
+
+# --------------------------------------------------------------------------- #
+# A referential turn through the door (close-memory-loop D2). The catalogue is
+# made fresh first, as the live service keeps it, so the lexical stage of the
+# request is the real one and not its degraded fallback.
+# --------------------------------------------------------------------------- #
+
+
+def _live_cell(vault: Path) -> None:
+    """Seed the freshness registry the way the running service does."""
+    from exomem import file_watcher
+
+    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+
+
+def _age_everything(vault: Path, *, newest: Path) -> None:
+    import os
+    import time
+
+    now = time.time()
+    for index, page in enumerate(sorted((vault / "Knowledge Base").rglob("*.md"))):
+        os.utime(page, (now - 10_000 - index, now - 10_000 - index))
+    os.utime(newest, (now, now))
+    _live_cell(vault)
+
+
+def test_a_referential_turn_with_a_token_resolves_the_previous_anchor(
+    activation_vault: Path,
+) -> None:
+    """"continue" names nothing; the token says what this conversation was
+    last answered with, and that is its referent — served through the lanes
+    like any resolved anchor, and saying why."""
+    from exomem import lexstore
+
+    lexstore.ensure_fresh(activation_vault)
+    served = commands.op_activate_context(activation_vault, turn=TURN)
+    previous = _resolved_refs(served)
+    assert "Knowledge Base/Products/Cargo Sled.md" in previous
+
+    packet = commands.op_activate_context(
+        activation_vault, turn="continue", continuity=served["continuity"]
+    )
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    resolved = [item for item in packet["anchors"] if item["status"] == "resolved"]
+    assert "Knowledge Base/Products/Cargo Sled.md" in {item["ref"] for item in resolved}
+    assert {item["ref"] for item in resolved} <= set(previous)
+    assert all({"recency", "continuity"} <= set(item["evidence"]) for item in resolved)
+    assert packet["units"], "a recency-resolved anchor runs its lanes like any other"
+    # And the answer carries forward: this packet mints its own token.
+    assert packet["continuity"]
+
+
+def test_a_referential_turn_without_a_token_resolves_the_freshest_edit(
+    activation_vault: Path,
+) -> None:
+    """A fresh session has no token. The freshest edit is then the account of
+    what was being worked on."""
+    from exomem import lexstore
+
+    _age_everything(
+        activation_vault,
+        newest=activation_vault / "Knowledge Base" / "Products" / "Cargo Sled.md",
+    )
+    lexstore.ensure_fresh(activation_vault)
+
+    packet = commands.op_activate_context(activation_vault, turn="continue")
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    resolved = [item for item in packet["anchors"] if item["status"] == "resolved"]
+    assert [item["ref"] for item in resolved] == ["Knowledge Base/Products/Cargo Sled.md"]
+    assert resolved[0]["evidence"] == ["recency"]
+    assert packet["units"]
+    assert packet["recent_context"][0]["path"] == "Knowledge Base/Products/Cargo Sled.md"
+
+
+# R-G through the door: the reviewer's p3/p15 misfires and p11 keep-phrases.
+from test_working_set_resolve import (  # noqa: E402
+    CUE_WORD_BUT_NOT_POINTING_BACK_TURNS,
+    POINTING_BACK_TURNS,
+)
+
+
+@pytest.fixture
+def hot_sled_vault(activation_vault: Path) -> Path:
+    from exomem import lexstore
+
+    _age_everything(
+        activation_vault,
+        newest=activation_vault / "Knowledge Base" / "Products" / "Cargo Sled.md",
+    )
+    lexstore.ensure_fresh(activation_vault)
+    runtime_module.reset_caches_for_tests()
+    return activation_vault
+
+
+@pytest.mark.parametrize("turn", POINTING_BACK_TURNS)
+def test_a_turn_that_only_points_back_resolves_the_hottest_anchor(
+    hot_sled_vault: Path, turn: str
+) -> None:
+    packet = commands.op_activate_context(hot_sled_vault, turn=turn)
+
+    assert packet["abstained"] is False, (turn, packet.get("abstention"), packet["anchors"])
+    resolved = {
+        item["ref"]: item["evidence"] for item in packet["anchors"] if item["status"] == "resolved"
+    }
+    assert "recency" in resolved.get("Knowledge Base/Products/Cargo Sled.md", ()), resolved
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        *CUE_WORD_BUT_NOT_POINTING_BACK_TURNS[:9],
+        *CUE_WORD_BUT_NOT_POINTING_BACK_TURNS[11:20],
+    ],
+)
+def test_a_cue_word_in_its_ordinary_sense_is_not_answered_by_recency(
+    hot_sled_vault: Path, turn: str
+) -> None:
+    """The reviewer's misfires: each resolved the hottest anchor and served
+    its units. None names anything in this vault, so each abstains, still
+    carrying what was recently worked on."""
+    packet = commands.op_activate_context(hot_sled_vault, turn=turn)
+
+    assert packet["abstained"] is True, (turn, packet["anchors"])
+    assert packet["abstention"] == {"reason": "unresolved"}
+    assert all("recency" not in item["evidence"] for item in packet["anchors"])
+    assert packet["units"] == []
+    assert packet["recent_context"]
+
+
+def test_a_referential_turn_keeps_its_referent_past_recall_partials(
+    activation_vault: Path,
+) -> None:
+    """The reviewer's p2: "let's continue the work, what's pending?" reached
+    seven pages whose text says "pending work" by recall, each a partial that
+    sorted ahead of the hot anchor, and the referent was cut before
+    resolution. Bare "continue" resolved; this did not."""
+    from exomem import lexstore
+
+    for name in ("Anvil Crate", "Bolt Tray", "Brace Kit", "Buoy Rack", "Awl Case", "Axle Bin", "Bale Hook"):
+        (activation_vault / "Knowledge Base" / "Products" / f"{name}.md").write_text(
+            f"---\ntype: note\nstatus: active\n---\n\n# {name}\n\n## Summary\n\n"
+            "Pending work: the pending work on this item is still pending.\n",
+            encoding="utf-8",
+        )
+    working_set_index.WorkingSetIndex(activation_vault).rebuild()
+    _age_everything(
+        activation_vault,
+        newest=activation_vault / "Knowledge Base" / "Products" / "Cargo Sled.md",
+    )
+    lexstore.ensure_fresh(activation_vault)
+    runtime_module.reset_caches_for_tests()
+
+    packet = commands.op_activate_context(
+        activation_vault, turn="let's continue the work, what's pending?"
+    )
+
+    assert packet["abstained"] is False, (packet.get("abstention"), packet["anchors"])
+    resolved = [item for item in packet["anchors"] if item["status"] == "resolved"]
+    assert [item["ref"] for item in resolved] == ["Knowledge Base/Products/Cargo Sled.md"]
+    assert "recency" in resolved[0]["evidence"]
+    assert packet["units"]
+
+
+# R-J: a write burst is a batch, not the user's work.
+
+
+SLED = "Knowledge Base/Products/Cargo Sled.md"
+MARIT = "Knowledge Base/Entities/People/Marit Solheim.md"
+_SLED_ID = "0b7c9e2a-4f1d-4c3a-9e8b-5a6d7c8e9f01"
+_MARIT_ID = "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f"
+
+
+def _give_id(vault: Path, rel: str, exomem_id: str) -> None:
+    page = vault / rel
+    page.write_text(
+        page.read_text(encoding="utf-8").replace("---\n", f"---\nexomem_id: {exomem_id}\n", 1),
+        encoding="utf-8",
+    )
+
+
+def _batch_after(
+    vault: Path, *, edits: dict[str, float], monkeypatch: pytest.MonkeyPatch, read: str | None
+) -> tuple[dict, dict]:
+    """Every page old, `edits` = {page: seconds ago}, then `backfill-ids` runs.
+    Returns the "continue" packets before and after the batch; `read` is the
+    one page the usage snapshot says was read, if any.
+
+    The pages the batch rewrote are then re-stamped with explicit times, so
+    the test does not depend on how fast this machine writes (R-O1): a batch
+    on a loaded machine stalled up to 2.9 s between pages. The explicit
+    batch stalls the same way at its end — gaps of 0.2, 2.9 and 0.3 s — and
+    the two pages after the stall are anchors, the tail that escaped a
+    one-second window and became the referent.
+    """
+    import os
+    import time
+
+    from exomem import file_watcher, lexstore
+
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    now = time.time()
+    for index, page in enumerate(sorted((vault / "Knowledge Base").rglob("*.md"))):
+        os.utime(page, (now - 10 * 86400 - index, now - 10 * 86400 - index))
+    for rel, ago in edits.items():
+        os.utime(vault / rel, (now - ago, now - ago))
+
+    def settle() -> None:
+        file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+        lexstore.ensure_fresh(vault)
+        working_set_index.WorkingSetIndex(vault).rebuild()
+        runtime_module.reset_caches_for_tests()
+
+    snapshot = {read: 2.5} if read else {}
+    monkeypatch.setattr(working_set, "_activation_snapshot", lambda: snapshot)
+    settle()
+    before = commands.op_activate_context(vault, turn="continue")
+    commands.op_maintain_memory(vault, mode="backfill-ids", dry_run=False)
+    anchors = {row.path for row in working_set_index.WorkingSetIndex(vault).anchors()}
+    rewritten = {
+        str(page.relative_to(vault))
+        for page in (vault / "Knowledge Base").rglob("*.md")
+        if page.stat().st_mtime > now - 1
+    }
+    assert len(rewritten & anchors) >= 3, "the batch must rewrite anchors, or this proves nothing"
+    _restamp_batch(vault, rewritten, anchors=anchors, start=now)
+    settle()
+    return before, commands.op_activate_context(vault, turn="continue")
+
+
+#: The explicit batch's last three gaps: a stall between two ordinary ones.
+STALLED_TAIL_GAPS_S = (0.2, 2.9, 0.3)
+
+
+def _restamp_batch(vault: Path, rewritten: set[str], *, anchors: set[str], start: float) -> None:
+    """Give the batch's pages deterministic times: 0.1 s apart, ending in
+    `STALLED_TAIL_GAPS_S`, with anchors other than the user's page last."""
+    import os
+
+    from exomem import find_corpus
+
+    pages = [
+        rel
+        for rel in rewritten
+        if rel.rsplit("/", 1)[-1].casefold() not in find_corpus.NAVIGATION_BASENAMES
+    ]
+    tail = sorted(rel for rel in pages if rel in anchors and rel != SLED)
+    head = sorted(rel for rel in pages if rel not in tail)
+    ordered = [*head, *tail]
+    gaps = [0.1] * (len(ordered) - 1 - len(STALLED_TAIL_GAPS_S)) + list(STALLED_TAIL_GAPS_S)
+    stamp = int(start * 1e9)
+    for index, rel in enumerate(ordered):
+        if index:
+            stamp += int(gaps[index - 1] * 1e9)
+        os.utime(vault / rel, ns=(stamp, stamp))
+
+
+def _resolved_paths(packet: dict) -> list[str]:
+    return [item["path"] for item in packet["anchors"] if item["status"] == "resolved"]
+
+
+@pytest.mark.parametrize("read", [None, SLED], ids=["nothing-read", "sled-read"])
+def test_a_maintenance_batch_does_not_pick_the_referent(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch, read: str | None
+) -> None:
+    """The reviewer's p4: the user last edited Cargo Sled; a maintenance pass
+    then rewrote thirty pages. "continue" used to resolve whichever of those
+    the batch wrote last. After a batch, no edit that came before it carries
+    a signal: what was read decides, and with nothing read the turn
+    abstains rather than guess."""
+    _give_id(activation_vault, SLED, _SLED_ID)
+
+    before, after = _batch_after(
+        activation_vault, edits={SLED: 5}, monkeypatch=monkeypatch, read=read
+    )
+
+    assert _resolved_paths(before) == [SLED]
+    assert (activation_vault / SLED).stat().st_mtime < time_now() - 4, "the batch left it alone"
+    if read:
+        assert _resolved_paths(after) == [SLED], after["anchors"]
+    else:
+        assert after["abstention"] == {"reason": "unresolved"}, after["anchors"]
+        # The block agrees with the empty profile (R-P3): neither the batch
+        # nor the edit before it is offered as recent work.
+        assert "recent_context" in after
+        assert not [e for e in after["recent_context"] if e["why"] == "edited"], after[
+            "recent_context"
+        ]
+
+
+@pytest.mark.parametrize("read", [None, SLED], ids=["nothing-read", "sled-read"])
+def test_a_batch_that_rewrote_the_users_page_never_promotes_an_old_edit(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch, read: str | None
+) -> None:
+    """The reviewer's r2 shape [e]: the user's last work, Cargo Sled an hour
+    ago, had no identifier, so the batch rewrote it and its edit signal went
+    with the batch. Marit Solheim, edited once two days ago, then became the
+    referent because it was the freshest page outside the batch — however
+    old. Only an edit NEWER than the latest batch counts."""
+    _give_id(activation_vault, MARIT, _MARIT_ID)
+
+    before, after = _batch_after(
+        activation_vault,
+        edits={MARIT: 2 * 86400, SLED: 3600},
+        monkeypatch=monkeypatch,
+        read=read,
+    )
+
+    assert _resolved_paths(before) == [SLED]
+    assert (activation_vault / SLED).stat().st_mtime > time_now() - 60, "the batch rewrote it"
+    assert MARIT not in _resolved_paths(after), after["anchors"]
+    if read:
+        assert _resolved_paths(after) == [SLED], after["anchors"]
+    else:
+        assert after["abstention"] == {"reason": "unresolved"}, after["anchors"]
+
+
+def time_now() -> float:
+    import time
+
+    return time.time()
+
+
+def _one_batch(vault: Path, *, count: int) -> list[Path]:
+    """The whole vault written in one batch, `count` new person pages with it."""
+    import os
+    import time
+
+    from exomem import file_watcher
+
+    people = vault / "Knowledge Base" / "Entities" / "People"
+    pages = []
+    for index in range(count):
+        page = people / f"Batch Person {index:02d}.md"
+        page.write_text(
+            f"---\ntype: entity\nentity_type: person\nstatus: active\n---\n\n"
+            f"# Batch Person {index:02d}\n\n## Summary\n\nImported in bulk.\n",
+            encoding="utf-8",
+        )
+        pages.append(page)
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    stamp = time.time_ns()
+    for page in (vault / "Knowledge Base").rglob("*.md"):
+        os.utime(page, ns=(stamp, stamp))
+    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+    runtime_module.reset_caches_for_tests()
+    return pages
+
+
+def test_a_vault_written_in_one_batch_is_never_a_menu_of_its_pages(
+    activation_vault: Path,
+) -> None:
+    """The reviewer's p14: synthetic people written in one kernel tick tied on
+    every component and "continue" was answered with a five-way menu of
+    them. A batch carries no edit signal, so with no reads either the profile
+    falls through to nothing and the turn abstains."""
+    _one_batch(activation_vault, count=8)
+    rows = working_set_resolve_rows(activation_vault)
+
+    assert working_set.hot_profile(activation_vault, rows=rows) == frozenset()
+    packet = commands.op_activate_context(activation_vault, turn="continue")
+
+    assert packet["abstention"] == {"reason": "unresolved"}, packet["anchors"]
+    assert packet["ambiguity"] == []
+
+
+def test_a_batch_falls_through_to_what_was_read(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pages = _one_batch(activation_vault, count=8)
+    read = str(pages[3].relative_to(activation_vault))
+    monkeypatch.setattr(working_set, "_activation_snapshot", lambda: {read: 2.5})
+    rows = working_set_resolve_rows(activation_vault)
+
+    assert working_set.hot_profile(activation_vault, rows=rows) == frozenset({read})
+
+
+def working_set_resolve_rows(vault: Path):
+    return resolve_module.facts_from_rows(working_set_index.WorkingSetIndex(vault).anchors())
+
+
+# R-M: the continuity tier leads only while it is the latest thing that happened.
+
+
+def test_a_token_says_when_it_was_minted(activation_vault: Path) -> None:
+    import time
+
+    before = time.time_ns()
+    served = commands.op_activate_context(activation_vault, turn=TURN)
+    after = time.time_ns()
+
+    minted = runtime_module.continuity_minted_ns(served["continuity"])
+
+    assert minted is not None and before <= minted <= after
+    assert runtime_module.decode_continuity(served["continuity"])["minted_ns"] == minted
+
+
+def test_a_token_minted_before_the_field_existed_still_reads() -> None:
+    token = _token()
+
+    assert runtime_module.decode_continuity(token)["minted_ns"] is None
+    assert runtime_module.continuity_minted_ns(token) is None
+    assert runtime_module.continuity_minted_ns("!!! not a token !!!") is None
+
+
+def _heat_after(vault: Path, *, minted_offset_s: float | None) -> frozenset[str]:
+    """Marit carried by a token; Cargo Sled edited once, alone, at `now`; the
+    token minted `minted_offset_s` seconds relative to that edit."""
+    import os
+    import time
+
+    rows = working_set_resolve_rows(vault)
+    now = time.time()
+    for index, page in enumerate(sorted((vault / "Knowledge Base").rglob("*.md"))):
+        os.utime(page, (now - 10_000 - index, now - 10_000 - index))
+    os.utime(vault / "Knowledge Base" / "Products" / "Cargo Sled.md", (now, now))
+    from exomem import file_watcher
+
+    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+    marit = next(row for row in rows if row.path.endswith("Marit Solheim.md"))
+    minted = None if minted_offset_s is None else int((now + minted_offset_s) * 1e9)
+    return working_set.hot_profile(
+        vault,
+        rows=rows,
+        continuity_refs=frozenset({resolve_module.anchor_ref(marit)}),
+        continuity_minted_ns=minted,
+    )
+
+
+def test_an_edit_after_the_token_unseats_the_continuity_tier(activation_vault: Path) -> None:
+    """The user moved on after that packet: its refs no longer lead."""
+    assert _heat_after(activation_vault, minted_offset_s=-60) == frozenset(
+        {"Knowledge Base/Products/Cargo Sled.md"}
+    )
+
+
+def test_an_edit_before_the_token_leaves_the_continuity_tier_leading(
+    activation_vault: Path,
+) -> None:
+    assert _heat_after(activation_vault, minted_offset_s=60) == frozenset(
+        {"Knowledge Base/Entities/People/Marit Solheim.md"}
+    )
+
+
+def test_a_token_that_does_not_say_when_it_was_minted_leads(activation_vault: Path) -> None:
+    assert _heat_after(activation_vault, minted_offset_s=None) == frozenset(
+        {"Knowledge Base/Entities/People/Marit Solheim.md"}
+    )
+
+
+def test_continue_after_moving_on_follows_the_new_work_not_the_old_token(
+    activation_vault: Path,
+) -> None:
+    """The reviewer's sticky-token question, through the door: the hook keeps
+    the last token for the session, so "continue" after the user went and
+    edited something else must follow the edit."""
+    import os
+    import time
+
+    from exomem import file_watcher, lexstore
+
+    now = time.time()
+    for index, page in enumerate(sorted((activation_vault / "Knowledge Base").rglob("*.md"))):
+        os.utime(page, (now - 10_000 - index, now - 10_000 - index))
+    file_watcher.FileWatcher(activation_vault)._reconcile_once(seed=True)
+    lexstore.ensure_fresh(activation_vault)
+    runtime_module.reset_caches_for_tests()
+    served = commands.op_activate_context(activation_vault, turn=TURN)
+    assert "Knowledge Base/Systems/Depot Ledger.md" not in _resolved_refs(served)
+    later = time.time() + 5
+    ledger = activation_vault / "Knowledge Base" / "Systems" / "Depot Ledger.md"
+    os.utime(ledger, (later, later))
+    file_watcher.FileWatcher(activation_vault)._reconcile_once(seed=True)
+    lexstore.ensure_fresh(activation_vault)
+    runtime_module.reset_caches_for_tests()
+
+    packet = commands.op_activate_context(
+        activation_vault, turn="continue", continuity=served["continuity"]
+    )
+
+    resolved = [item["path"] for item in packet["anchors"] if item["status"] == "resolved"]
+    assert resolved == ["Knowledge Base/Systems/Depot Ledger.md"], packet["anchors"]
+
+
+# R-N1 through the door: the reviewer's r2 acronym probe.
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        "I got a C on my chemistry exam",
+        "I got a c on my chemistry exam",
+        "should I GO with the cheaper build machines?",
+        "should I go with the cheaper build machines?",
+    ],
+)
+def test_capitals_in_ordinary_prose_never_serve_an_unrelated_anchor(
+    activation_vault: Path, turn: str
+) -> None:
+    from exomem import file_watcher, lexstore
+
+    pages = {
+        "Building C": "The chemistry building, where every exam hall is.",
+        "Go Toolchain": "Notes on the cheaper build machines for the toolchain.",
+    }
+    for title, body in pages.items():
+        (activation_vault / "Knowledge Base" / "Products" / f"{title}.md").write_text(
+            f"---\ntype: note\nstatus: active\n---\n\n# {title}\n\n## Summary\n\n{body}\n",
+            encoding="utf-8",
+        )
+    working_set_index.WorkingSetIndex(activation_vault).rebuild()
+    file_watcher.FileWatcher(activation_vault)._reconcile_once(seed=True)
+    lexstore.ensure_fresh(activation_vault)
+    runtime_module.reset_caches_for_tests()
+
+    packet = commands.op_activate_context(activation_vault, turn=turn)
+
+    assert not [item for item in packet["anchors"] if item["status"] == "resolved"], (
+        packet["anchors"]
+    )
+    assert packet["units"] == []
+
+
+# R-N5: a token minted before an anchor gained its identifier still names it.
+
+
+def test_a_token_from_before_a_backfill_still_leads_by_path(activation_vault: Path) -> None:
+    """The reviewer's r2 refcheck: the packet was served while Cargo Sled
+    had no identifier, so its token names the page by path. `backfill-ids`
+    then gives the page an identifier, its ref changes, and the token's tier
+    matched nothing; "continue" resolved an old collection instead."""
+    import time
+
+    from exomem import file_watcher, lexstore
+
+    file_watcher.FileWatcher(activation_vault)._reconcile_once(seed=True)
+    lexstore.ensure_fresh(activation_vault)
+    runtime_module.reset_caches_for_tests()
+    served = commands.op_activate_context(activation_vault, turn=TURN)
+    sled = "Knowledge Base/Products/Cargo Sled.md"
+    assert sled in runtime_module.decode_continuity(served["continuity"])["refs"]
+    time.sleep(1.2)
+    commands.op_maintain_memory(activation_vault, mode="backfill-ids", dry_run=False)
+    file_watcher.FileWatcher(activation_vault)._reconcile_once(seed=True)
+    lexstore.ensure_fresh(activation_vault)
+    working_set_index.WorkingSetIndex(activation_vault).rebuild()
+    runtime_module.reset_caches_for_tests()
+    rows = working_set_resolve_rows(activation_vault)
+    assert [resolve_module.anchor_ref(row) for row in rows if row.path == sled] != [sled], (
+        "the backfill must have changed the page's ref, or this proves nothing"
+    )
+
+    packet = commands.op_activate_context(
+        activation_vault, turn="continue", continuity=served["continuity"]
+    )
+
+    resolved = {
+        item["path"]: item["evidence"] for item in packet["anchors"] if item["status"] == "resolved"
+    }
+    # The previous answer, whole — Cargo Sled included, now named by path.
+    served_paths = {item["path"] for item in served["anchors"] if item["status"] == "resolved"}
+    assert set(resolved) == served_paths, packet["anchors"]
+    assert {"continuity", "recency"} <= set(resolved[sled])
+
+
+def test_continuity_qualifies_an_anchor_named_by_its_path() -> None:
+    candidate = resolve_module.CandidateFacts(
+        anchor_id="a",
+        path="Products/Page.md",
+        ref="exomem://memory/0b7c9e2a-4f1d-4c3a-9e8b-5a6d7c8e9f01",
+        title="Page",
+        kind="resource",
+        lifecycle="active",
+        categories=(),
+        neighbourhood=frozenset(),
+        evidence=frozenset({"retrieval"}),
+    )
+
+    (qualified,) = resolve_module.apply_continuity((candidate,), frozenset({"Products/Page.md"}))
+
+    assert "continuity" in qualified.evidence
+
+
+
+# R-O1: a burst is a chain of edits, so one stall does not split a batch.
+
+
+def test_a_stalled_batch_is_one_burst() -> None:
+    """The reviewer's r4 gaps: a loaded machine stalled 2.9 s inside a batch,
+    and the two pages after the stall fell outside a one-second window."""
+    second = 1_000_000_000
+    start = 1_790_000_000 * second
+    edited = {
+        "Knowledge Base/Notes/a.md": start,
+        "Knowledge Base/Notes/b.md": start + int(0.2 * second),
+        "Knowledge Base/Notes/c.md": start + int(3.1 * second),
+        "Knowledge Base/Notes/d.md": start + int(3.4 * second),
+        "Knowledge Base/Products/user-page.md": start - 60 * second,
+    }
+
+    burst = working_set._burst_paths(edited)
+
+    assert burst == frozenset(path for path in edited if not path.endswith("user-page.md"))
+
+
+def test_two_edits_seconds_apart_are_not_a_burst() -> None:
+    second = 1_000_000_000
+    start = 1_790_000_000 * second
+    edited = {
+        "Knowledge Base/Notes/a.md": start,
+        "Knowledge Base/Notes/b.md": start + 2 * second,
+        "Knowledge Base/Notes/c.md": start + 60 * second,
+    }
+
+    assert working_set._burst_paths(edited) == frozenset()

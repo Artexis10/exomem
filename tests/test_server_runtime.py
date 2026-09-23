@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,6 +40,38 @@ def test_initialize_runtime_loads_dotenv_from_service_working_directory(
 
     assert calls == [(tmp_path / ".env", True)]
     assert runtime.vault_root == vault
+
+
+def test_initialize_runtime_disables_usage_boost_and_relevance_check_in_cloud_mode(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design D1.2: usage boost and the relevance check both read the query
+    journals that `query_log` now turns off under content-private logging --
+    without also disabling the features that read them, each would find its
+    journals silently empty forever instead of being told why (hosted parity
+    with `hosted_runtime.HostedProcessSettings.apply_process_environment`,
+    which sets the same two variables for the same reason)."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    initialize_vault_state_offline(vault, source="server runtime cloud fixture")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.delenv("EXOMEM_DISABLE_USAGE_BOOST", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_RELEVANCE_CHECK", raising=False)
+    monkeypatch.setattr(server_runtime, "resolve_vault", lambda: vault)
+    monkeypatch.setattr(
+        server_runtime.schema,
+        "load_source_schema",
+        lambda _vault: SimpleNamespace(source_types=("session",)),
+    )
+    monkeypatch.setattr(server_runtime.project_keys, "keys_hint", lambda _vault: "")
+    monkeypatch.setattr(server_runtime, "_start_compute_runtime", lambda _vault: None)
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _vault: None)
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _vault: None)
+
+    server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
+
+    assert os.environ["EXOMEM_DISABLE_USAGE_BOOST"] == "1"
+    assert os.environ["EXOMEM_DISABLE_RELEVANCE_CHECK"] == "1"
 
 
 def test_initialize_runtime_does_not_start_workers_before_transport(

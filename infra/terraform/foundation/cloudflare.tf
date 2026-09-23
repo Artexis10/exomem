@@ -82,6 +82,19 @@ resource "cloudflare_dns_record" "gateway" {
   comment = "Exomem canonical OAuth MCP gateway origin"
 }
 
+resource "cloudflare_dns_record" "database" {
+  # DNS-only (not proxied): PgBouncer needs a raw TLS TCP listener, which
+  # Cloudflare's HTTP(S)/Tunnel proxy path cannot carry, and clients verify
+  # the server's own certificate (verify-full) rather than Cloudflare's.
+  zone_id = var.cloudflare_zone_id
+  name    = var.database_hostname
+  type    = "A"
+  content = hcloud_primary_ip.control_db.ip_address
+  proxied = false
+  ttl     = 300
+  comment = "Exomem control database PgBouncer TLS listener"
+}
+
 resource "cloudflare_zero_trust_access_service_token" "substrate" {
   account_id = var.cloudflare_account_id
   name       = "exomem-substrate-control"
