@@ -47,7 +47,9 @@ server becomes claims `{"sub": X, "iss": "bearer"}`, so any owner rule that look
 - **D4. Malformed or unarmed means unset; startup never fails on it.** Failing closed on
   privilege and staying up on availability are both correct: refusing to start would take
   the connector down over an optional feature. Doctor and one content-free startup log
-  line say why.
+  line say why. A well-formed binding that names an account other than
+  `EXOMEM_GITHUB_USER_ID` is unarmed too (doctor: `mismatch`), so a still-valid session
+  of a formerly allowed account can never become the owner.
 - **D5. A match requires verified provenance, this install's issuer and a typed id, on
   every request.** The token must be an `ExomemSessionAccessToken`, a marker subclass
   returned only by `ExomemSessionOAuthProxy.load_access_token`; `claims["iss"]` must equal
@@ -76,6 +78,9 @@ server becomes claims `{"sub": X, "iss": "bearer"}`, so any owner rule that look
   rotation is a one-step configuration change. Not needed for this change's safety (owner
   status already drops on the next request after rebinding), but it closes the two-step
   rotation residual of T2.
+- **Doctor previews the former-audience count.** While the binding is unset, doctor
+  reports (as a pass) how many rules and grants name the remote audience, so the owner
+  can read it before enabling; once active it is a warning.
 
 ## Controls
 
