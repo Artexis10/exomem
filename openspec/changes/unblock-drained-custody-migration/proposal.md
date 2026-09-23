@@ -1,3 +1,5 @@
+> **Superseded (2026-09-23)** by `adopt-exomem-cloud-plain-cells`. Not to be implemented further; removed with its code in that change's retirement phase.
+
 ## Why
 
 A first provision mints the cell's authorization window when its storage initializes, and that window lasts at most one attestation lifetime. Only the generation's own running replica can renew it, and a generation that has reached the governance migration is fenced and has no replica. Every phase before enrollment then refused the closed window, so any provision whose recovery outlived one attestation lifetime was stranded permanently: its cell, volume, reservation and invite stayed allocated and no supported recovery could finish them.

@@ -1,0 +1,71 @@
+## Managed by Ansible (role: postgres).
+##
+## PgBouncer serves only substrate_app and substrate_owner (D12 NEW-1):
+## exomem_gateway and exomem_cellctl connect directly to Postgres on the
+## private network instead, so they never appear in auth_hba_file and are
+## refused here if they ever tried. exomem_control is the transaction-pooled
+## alias both Substrate roles use; exomem_control_session is the
+## session-mode alias that admits only substrate_owner, so a migration's
+## session advisory lock (scripts/migrate.ts) never leaks across pooled
+## connections.
+[databases]
+{{ postgres_database_name }} = host=127.0.0.1 port=5432 dbname={{ postgres_database_name }} pool_mode=transaction
+{{ postgres_database_name }}_session = host=127.0.0.1 port=5432 dbname={{ postgres_database_name }} pool_mode=session
+## Exists only so auth_dbname below can send the auth_query connection over
+## the unix socket, where pg_hba.conf's peer+pg_ident map admits it, instead
+## of the TCP/hostssl path the four roles' own pooled connections use.
+pgbouncer_auth_db = host=/var/run/postgresql port=5432 dbname={{ postgres_database_name }}
+
+[pgbouncer]
+listen_addr = *
+listen_port = {{ postgres_public_port }}
+unix_socket_dir = /var/run/postgresql
+## auth_type must be `hba`, not `scram-sha-256`: PgBouncer only consults
+## auth_hba_file when auth_type selects it. Each matched line's method
+## column ("scram-sha-256") then governs that specific (db, user, address)
+## triple; anything that matches no line is refused, same as Postgres's own
+## pg_hba.conf. Setting auth_type to a concrete method here would make the
+## HBA file purely decorative and admit every role from everywhere.
+auth_type = hba
+auth_user = pgbouncer_auth
+auth_query = SELECT usename, passwd FROM pgbouncer.get_auth($1)
+auth_hba_file = {{ postgres_config_dir }}/pgbouncer_hba.conf
+## Runs auth_query over pgbouncer_auth_db's connection (the unix socket)
+## instead of whichever database's own host= the client requested, so the
+## lookup itself never has to be a TCP/hostssl connection at all.
+auth_dbname = pgbouncer_auth_db
+
+## Grants SHOW CONFIG/admin access on the "pgbouncer" database to the OS
+## user PgBouncer itself runs as, admitted only over the unix socket by the
+## `local pgbouncer postgres ... peer` line in pgbouncer_hba.conf.j2 above --
+## `peer`, not `trust`, because this socket directory is mode 777 and any
+## local OS user could otherwise open it and claim to be postgres. Never
+## reachable over TCP, from any source. auth_hba_file alone does not grant
+## admin rights; PgBouncer checks admin_users separately.
+admin_users = postgres
+
+client_tls_sslmode = require
+client_tls_cert_file = {{ postgres_tls_dir }}/fullchain.pem
+client_tls_key_file = {{ postgres_tls_dir }}/privkey.pem
+client_tls_protocols = secure
+
+## Every server-side line in pg_hba.conf for these roles is `hostssl` (no
+## plain `host` fallback), so PgBouncer's own backend connections -- the
+## auth_query lookup and every pooled client connection -- must encrypt too,
+## even over loopback, or Postgres refuses them outright.
+server_tls_sslmode = require
+
+pool_mode = transaction
+## Per-role cap, not per-source-IP: PgBouncer has no native per-client-IP
+## connection cap (that's nftables' job, at the network layer, on the raw
+## TCP port below). max_user_connections bounds each authenticated PgBouncer
+## user -- substrate_app and substrate_owner, the only two roles this
+## listener ever admits -- to this many backend connections regardless of
+## how many source IPs they arrive from.
+max_user_connections = {{ postgres_pgbouncer_max_user_connections }}
+max_client_conn = {{ postgres_pgbouncer_max_client_conn }}
+client_login_timeout = {{ postgres_pgbouncer_client_login_timeout }}
+default_pool_size = 20
+
+logfile = /var/log/postgresql/pgbouncer.log
+pidfile = /var/run/postgresql/pgbouncer.pid
