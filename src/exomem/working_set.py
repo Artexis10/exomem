@@ -2236,7 +2236,9 @@ def _recent_context(
 
     Ranked most recent first, deduped by path — a page that was both edited and
     read appears once, under the reason that offered it first — and capped at
-    `limit`. `as_of` dates the CONTACT, never the event the page describes: a
+    `limit`. A page offered for its reads has no recent edit to rank by, so
+    it ranks after the timed entries, by its reads. The edit, read and
+    retirement rules are the hot profile's own (`hot_profile`). `as_of` dates the CONTACT, never the event the page describes: a
     note edited today about a decision taken in March is recent work on an old
     decision, and `why` is what says which.
 
@@ -2255,20 +2257,50 @@ def _recent_context(
     # deriving the collection directories from the map alone left the exclusion
     # inert on exactly the cold path where those sources are all there is.
     collections = _recent_collection_dirs((*by_path, *mtimes))
+    # The hot profile's own edit rule (`hot_profile`): a last edit inside a
+    # write burst is a batch nobody chose, and one older than the latest
+    # burst may have lost the user's own page to it, so neither is offered
+    # as recent work. An edit after the burst is work again.
+    burst = _burst_paths(mtimes)
+    after_burst = max((int(mtimes[path]) for path in burst), default=0)
     offered: dict[str, str] = {}
     for rel in sorted(mtimes, key=lambda item: (-mtimes[item], item)):
-        if len(offered) >= limit:
+        # Newest first, and every burst page is at or before `after_burst`,
+        # so the first edit that is not later than it ends the source.
+        if len(offered) >= limit or int(mtimes[rel]) <= after_burst:
             break
         why = _recent_reason_for(rel, collections=collections)
         if why and rel not in offered:
             offered[rel] = why
-    for rel in _recently_activated(by_path, mtimes, limit=limit, collections=collections):
+    # Read pages rank by how much they were read, not by their last edit:
+    # an edit time says nothing about a read, and ranking by it let any
+    # eight fresher edits cut every read page from the block.
+    activated = {
+        rel: order
+        for order, rel in enumerate(
+            _recently_activated(by_path, mtimes, limit=limit, collections=collections)
+        )
+    }
+    for rel in activated:
         offered.setdefault(rel, "activated")
     for rel in _recent_planning(by_path, mtimes, limit=limit, collections=collections):
         offered.setdefault(rel, "planning")
+    # Retired state is never offered, as the hot profile never offers it: a
+    # retired status or a `superseded_by` pointer, read from the request's
+    # own page cache for the offered pages only (at most three sources of
+    # `limit` each), which the statement below reads next anyway. A captured
+    # session is raw material and has no lifecycle to read.
+    offered = {
+        rel: why
+        for rel, why in offered.items()
+        if why == "captured" or _is_current_page(root, rel)
+    }
 
-    def _rank(item: tuple[str, str]) -> tuple[int, int, str]:
-        return (-mtimes.get(item[0], 0), RECENT_CONTEXT_REASONS.index(item[1]), item[0])
+    def _rank(item: tuple[str, str]) -> tuple[int, int, int, str]:
+        path, why = item
+        if why == "activated":
+            return (0, RECENT_CONTEXT_REASONS.index(why), activated.get(path, 0), path)
+        return (-mtimes.get(path, 0), RECENT_CONTEXT_REASONS.index(why), 0, path)
 
     # One slot is RESERVED for the newest open Planning item. Ranking the
     # whole block by recency buried it every time: an open commitment nobody
@@ -2278,22 +2310,25 @@ def _recent_context(
     # thing guaranteed missing. It is a reservation, not a takeover — the
     # remaining slots stay recency-ranked, and the entry keeps its place in
     # that order rather than being pinned to the front.
-    planning_offers = sorted(
-        ((path, why) for path, why in offered.items() if why == "planning"), key=_rank
-    )
-    others = sorted(
-        ((path, why) for path, why in offered.items() if why != "planning"), key=_rank
-    )
-    if planning_offers:
-        # Reserve the slot, then backfill from EVERYTHING left, the plans that
-        # did not get the slot included. Reserving without backfilling left the
-        # block short on the vault it exists for — two recent edits and five
-        # open plans filled three of eight slots, and four open commitments
-        # were never offered at all.
-        rest = sorted([*others, *planning_offers[1:]], key=_rank)
-        ranked = sorted([*rest[: limit - 1], planning_offers[0]], key=_rank)
-    else:
-        ranked = others[:limit]
+    #
+    # The most-read page is reserved a slot on the same terms, for the same
+    # reason: a read page has no fresh edit by definition (a fresh edit would
+    # have offered it as `edited`), so eight fresh edits cut it every time.
+    reserved = [
+        min(group, key=_rank)
+        for group in (
+            [(path, why) for path, why in offered.items() if why == reason]
+            for reason in ("planning", "activated")
+        )
+        if group
+    ]
+    # Reserve the slots, then backfill from EVERYTHING left, the offers that
+    # did not get a slot included. Reserving without backfilling left the
+    # block short on the vault it exists for — two recent edits and five open
+    # plans filled three of eight slots, and four open commitments were never
+    # offered at all.
+    rest = sorted((item for item in offered.items() if item not in reserved), key=_rank)
+    ranked = sorted([*rest[: max(0, limit - len(reserved))], *reserved], key=_rank)
 
     entries: list[dict[str, Any]] = []
     for path, why in ranked:

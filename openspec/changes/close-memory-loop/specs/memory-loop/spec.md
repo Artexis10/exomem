@@ -20,6 +20,8 @@ Activation and episode recovery SHALL reconnect a resumed topic with relevant re
 
 Where evidence supplies them, event occurrence, knowledge acquisition and claim validity SHALL remain distinguishable. Missing times or validity SHALL remain unknown. Capture time, file modification time, repetition and recent retrieval SHALL NOT independently establish event recency, continuing validity or task relevance. Corrections and supersession SHALL qualify current claims, while an older relevant dependency SHALL remain eligible beside recent developments.
 
+The recent-context block SHALL judge recent work by the hot profile's own rules: a last edit inside a write burst, or older than the latest such burst, SHALL NOT make a page recent work; a page offered for its reads SHALL be ranked by its reads and not by its last edit, and the most-read such page SHALL keep a place in the block however many pages were edited more recently; and a retired or superseded page SHALL NOT be offered.
+
 #### Scenario: A topic resumes after an intervening development
 
 - **WHEN** a supported session resumes an interrupted topic after a relevant development and an unrelated newer event
@@ -33,6 +35,16 @@ Where evidence supplies them, event occurrence, knowledge acquisition and claim 
 - **THEN** activation still returns the bounded recent-context block, first in the packet, naming what was recently worked on with its provenance and the reason each item is recent
 - **AND** no other block claims an anchor was resolved, and every item in the block crosses the same release plane a served unit does
 - **AND** the block's contact times describe the edit, read or capture, not the events the pages record
+
+#### Scenario: A batch, stale edits and retired pages do not fill the recent-context block
+
+- **WHEN** a maintenance batch rewrote several pages after the user's last edit,
+  the vault holds a retired and a superseded page edited more recently than
+  anything else, and pages the user reads often were last edited long ago
+- **THEN** the block offers neither the batch, nor any edit older than it, nor
+  the retired or superseded page, and offers an edit made after the batch
+- **AND** the most-read page appears in the block although many pages were
+  edited more recently
 
 #### Scenario: Old information is saved again after a correction
 
