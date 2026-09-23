@@ -611,7 +611,14 @@ snapshot — ranked in a single declared order, ties broken by a stable identity
 A previous packet's continuity references SHALL rank first and SHALL form one
 tier taken whole: that packet already resolved them together — but only while
 no anchor outside them has a last edit, not in a write burst, later than the
-time that packet was served. A last-edit time
+time that packet was served. While that tier leads, the profile SHALL NOT fall
+through to the edit or read tiers: where the references name a compiled page
+that is not an anchor — one the agent picked — that single page SHALL be
+resumed from its own units, reported `resolved` on `continuity` and `recency`
+and marked `generation.carried_by = "continuity"`, crossing the release guard
+like any unit, so a page the audience may not see abstains `withheld`; where
+they name nothing that can be served, the turn SHALL abstain with its
+recent-context block. A last-edit time
 that fell in a write burst — a chain of a declared number of pages or more,
 navigation pages not counted, each edited within a declared interval of the
 next, so that one stall inside a batch does not split it —
@@ -688,6 +695,16 @@ from recent work and not from the turn's own words.
 - **AND** a turn that names a compiled page is decided by the retrieval carry,
   and abstains `unresolved` when the carry cannot run, never falling back to
   the hot anchor
+
+#### Scenario: Continuing after the agent picked a page resumes that page
+
+- **WHEN** the agent picked a compiled page that is not an anchor, and the next
+  referential turn passes the token of that packet
+- **THEN** that page resolves on `continuity` and `recency` and its units are
+  served, and the vault's freshest anchor is not
+- **AND** a page the audience may not see abstains `withheld`, and a page that
+  no longer exists abstains `unresolved`, neither falling through to another
+  anchor
 
 #### Scenario: A maintenance batch does not pick the referent
 

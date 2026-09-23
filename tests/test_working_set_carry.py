@@ -2111,3 +2111,92 @@ def test_folder_navigation_pages_cannot_push_a_title_past_the_rarity_cap(
         "Knowledge Base/Notes/Research/kelvane-throughput.md"
     ]
     assert packet["generation"].get("carried_by") == "retrieval", packet.get("abstention")
+
+
+# --------------------------------------------------------------------------- #
+# R-O2: "continue" after the agent picked a page resumes that page.
+# --------------------------------------------------------------------------- #
+
+
+def _picked_page_token(vault: Path) -> tuple[str, str]:
+    """The agent picks the first page a named-pages abstention listed; the
+    served packet's token names that page. Cargo Sled stays the vault's
+    freshest edit throughout, so a fall-through to the edit tier would show."""
+    from exomem import commands
+
+    _make_cargo_sled_the_freshest_edit(vault)
+    named = commands.op_activate_context(vault, turn=TIE_TURN)
+    pages = [item["ref"] for item in named["anchors"] if item["status"] == "retrieval_named"]
+    assert pages, named["anchors"]
+    picked = commands.op_activate_context(vault, turn=TIE_TURN, anchor=pages[0])
+    assert [item["evidence"] for item in picked["anchors"]] == [["agent_choice"]]
+    token = picked["continuity"]
+    assert working_set_runtime.decode_continuity(token)["refs"] == [pages[0]]
+    return pages[0], token
+
+
+def test_continue_after_an_agent_pick_resumes_the_picked_page(carry_vault: Path) -> None:
+    """The reviewer's r4 pick-continue: the token named the picked research
+    note, which is not an index row, so the continuity tier matched nothing
+    and "continue" answered with the freshest anchor while reporting the
+    token `applied`."""
+    from exomem import commands
+
+    page, token = _picked_page_token(carry_vault)
+
+    packet = commands.op_activate_context(carry_vault, turn="continue", continuity=token)
+
+    assert packet["abstained"] is False, (packet.get("abstention"), packet["anchors"])
+    assert [(item["path"], item["status"], item["evidence"]) for item in packet["anchors"]] == [
+        (page, "resolved", ["continuity", "recency"])
+    ]
+    assert packet["generation"]["carried_by"] == "continuity"
+    assert packet["generation"]["continuity"] == "applied"
+    assert packet["units"]
+    assert {unit["provenance"]["path"] for unit in packet["units"]} == {page}
+    # And the answer carries forward, naming the same page.
+    assert working_set_runtime.decode_continuity(packet["continuity"])["refs"] == [page]
+
+
+def test_continue_after_a_pick_the_audience_may_not_see_abstains(carry_vault: Path) -> None:
+    """Withheld is withheld: the resumed page crosses the guard like any
+    unit, and the turn never falls through to the freshest anchor instead."""
+    from test_governance_egress import _external, _reset_caches, write_rule, write_scope
+
+    from exomem import commands
+    from exomem.governance.principal import request_scope
+
+    _page, token = _picked_page_token(carry_vault)
+    write_scope(carry_vault, paths="Knowledge Base/Notes/Research/*", name="Research")
+    write_rule(carry_vault, ceiling=0)
+    _reset_caches()
+    working_set_runtime.reset_caches_for_tests()
+
+    with request_scope(_external()):
+        packet = commands.op_activate_context(carry_vault, turn="continue", continuity=token)
+
+    assert packet["abstained"] is True
+    assert packet["abstention"] == {"reason": "withheld"}
+    assert packet["units"] == []
+    assert not [item for item in packet.get("anchors") or () if item.get("status") == "resolved"]
+
+
+def test_continue_with_a_fresh_token_naming_nothing_eligible_abstains(
+    carry_vault: Path,
+) -> None:
+    """The picked page is gone. The token still leads — nothing has been
+    edited since it was served — so the turn abstains with its recent
+    context rather than fall through to the edit tier."""
+    from exomem import commands
+
+    page, token = _picked_page_token(carry_vault)
+    (carry_vault / page).unlink()
+    lexstore.ensure_fresh(carry_vault)
+    working_set_runtime.reset_caches_for_tests()
+
+    packet = commands.op_activate_context(carry_vault, turn="continue", continuity=token)
+
+    assert packet["abstained"] is True
+    assert packet["abstention"] == {"reason": "unresolved"}
+    assert not [item for item in packet["anchors"] if item["status"] == "resolved"]
+    assert packet["recent_context"]

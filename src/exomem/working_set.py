@@ -1696,6 +1696,45 @@ def compile_packet(
     # A referential turn never reaches it either (close-memory-loop D2): it
     # says nothing besides its cue and filler words, so it names no page for
     # the carry to find, and the carry is not asked.
+    # A referential turn whose leading continuity token names a page the
+    # agent picked rather than an anchor row (U7): the hot profile ranked
+    # nothing, deliberately, and the page is resumed here through the same
+    # builder the pick used, at the recency outcome the profile would have
+    # given an anchor: resolved on `continuity` and `recency`.
+    if (
+        not anchor
+        and analysis.referential
+        and resolution.status == "unresolved"
+        and continuity_refs
+    ):
+        page = continuity_page(
+            root,
+            rows=rows,
+            continuity_refs=continuity_refs,
+            continuity_minted_ns=continuity_minted_ns,
+            mtimes=mtimes,
+        )
+        if page is not None:
+            packet = _carried_packet(
+                root,
+                page=(page, 0.0),
+                analysis=analysis,
+                registry=registry,
+                limit=limit,
+                purpose=purpose,
+                timings=timings,
+                generation=generation,
+                index_token=index_token,
+                freshness_snapshot=freshness_snapshot,
+                index=index,
+                recent_context=recent,
+                status="resolved",
+                evidence=("continuity", "recency"),
+                carried_by="continuity",
+            )
+            if packet is not None:
+                return packet
+
     if not anchor and resolution.status == "unresolved" and not analysis.referential:
         named = _carry_by_retrieval(
             root,
@@ -1982,30 +2021,22 @@ def hot_profile(
     root = Path(vault_root)
     times = _recent_mtimes(root) if mtimes is None else mtimes
     activations = _activation_snapshot()
-    collections = _recent_collection_dirs(
-        (*(str(getattr(row, "path", "") or "") for row in rows), *times)
-    )
     from . import usage
 
     nothing = (0, 0, 0.0)
-    eligible: list[Any] = []
-    for row in rows:
-        path = str(getattr(row, "path", "") or "")
-        if not path:
-            continue
-        if str(getattr(row, "lifecycle", "active") or "active") in RETIRED_PAGE_STATUSES:
-            continue
-        if not _recent_reason_for(path, collections=collections):
-            continue
-        eligible.append(row)
+    eligible = _hot_eligible_rows(rows, times)
     burst = _burst_paths(times)
     after_burst = max((int(times[path]) for path in burst), default=0)
-    leads = continuity_minted_ns is None or not any(
-        not working_set_resolve.names_row(continuity_refs, row)
-        and str(row.path) not in burst
-        and int(times.get(str(row.path), 0)) > continuity_minted_ns
-        for row in eligible
+    leads = bool(continuity_refs) and _continuity_leads(
+        eligible, times, burst, continuity_refs, continuity_minted_ns
     )
+    if leads and not any(working_set_resolve.names_row(continuity_refs, row) for row in eligible):
+        # A fresh token leads and names no anchor row this profile can offer
+        # — a page the agent picked, say, or one retired since. The token is
+        # still the account of what this conversation was doing, so the
+        # edit and read tiers below are NOT asked instead: the caller resumes
+        # the token's page (`continuity_page`) or the turn abstains.
+        return frozenset()
     heat: dict[str, tuple[int, int, float]] = {}
     for row in eligible:
         path = str(row.path)
@@ -2025,6 +2056,9 @@ def hot_profile(
     ):
         if key == nothing or (top is not None and key != top) or len(hot) >= limit:
             break
+        if leads and key[0] == 0:
+            # Past the token's tier: a leading token never falls through.
+            break
         if reads >= limit:
             break
         reads += 1
@@ -2033,6 +2067,84 @@ def hot_profile(
         top = key
         hot.append(path)
     return frozenset(hot)
+
+
+def _hot_eligible_rows(rows: Sequence[Any], times: Mapping[str, int]) -> list[Any]:
+    """The anchor rows the hot profile may offer: a path, not retired by its
+    indexed lifecycle, and working context by the recent-context block's own
+    rule (so a collection's stored item is never one)."""
+    collections = _recent_collection_dirs(
+        (*(str(getattr(row, "path", "") or "") for row in rows), *times)
+    )
+    eligible: list[Any] = []
+    for row in rows:
+        path = str(getattr(row, "path", "") or "")
+        if not path:
+            continue
+        if str(getattr(row, "lifecycle", "active") or "active") in RETIRED_PAGE_STATUSES:
+            continue
+        if not _recent_reason_for(path, collections=collections):
+            continue
+        eligible.append(row)
+    return eligible
+
+
+def _continuity_leads(
+    eligible: Sequence[Any],
+    times: Mapping[str, int],
+    burst: frozenset[str],
+    refs: frozenset[str],
+    minted_ns: int | None,
+) -> bool:
+    """Is the previous packet still the latest thing that happened? True
+    unless an anchor it did not name has an edit, outside every burst, later
+    than the token was served. A token that does not say when it was served
+    leads, as tokens always did."""
+    return minted_ns is None or not any(
+        not working_set_resolve.names_row(refs, row)
+        and str(row.path) not in burst
+        and int(times.get(str(row.path), 0)) > minted_ns
+        for row in eligible
+    )
+
+
+def continuity_page(
+    vault_root: Path,
+    *,
+    rows: Sequence[Any],
+    continuity_refs: frozenset[str],
+    continuity_minted_ns: int | None = None,
+    mtimes: Mapping[str, int] | None = None,
+) -> str | None:
+    """The one compiled page a leading token names that is not an index row,
+    or `None`.
+
+    A token names a page, not an anchor, when the agent picked that page with
+    `anchor=` (`_eligible_agent_page`): the packet resolved it on the agent's
+    choice and minted its path. The hot profile only ranks anchor rows, so
+    "continue" with that token needs this to resume the page at all. The same
+    eligibility test the pick itself passed decides it here — not raw
+    material, not navigation, current — and the page crosses the release
+    guard like any unit when it is served. `None` when the token no longer
+    leads, names an index row (the profile resumes that), names no eligible
+    page, or names several: resuming one of two would be a guess.
+    """
+    if not continuity_refs:
+        return None
+    root = Path(vault_root)
+    times = _recent_mtimes(root) if mtimes is None else mtimes
+    eligible = _hot_eligible_rows(rows, times)
+    burst = _burst_paths(times)
+    if not _continuity_leads(eligible, times, burst, continuity_refs, continuity_minted_ns):
+        return None
+    if any(working_set_resolve.names_row(continuity_refs, row) for row in rows):
+        return None
+    pages = [
+        page
+        for ref in sorted(continuity_refs)
+        if (page := _eligible_agent_page(root, ref)) is not None
+    ]
+    return pages[0] if len(pages) == 1 else None
 
 
 def _burst_paths(edited: Mapping[str, int]) -> frozenset[str]:
