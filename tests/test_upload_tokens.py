@@ -85,9 +85,102 @@ def test_scope_isolation() -> None:
 
 
 def test_mint_for_endpoint_download() -> None:
-    out = upload_tokens.mint_for_endpoint(SECRET, "https://kb.example.io", scope="download")
+    out = upload_tokens.mint_for_endpoint(
+        SECRET, "https://kb.example.io", scope="download", audience=AUDIENCE
+    )
     assert out["download_url"] == "https://kb.example.io/download"
     assert out["ttl_seconds"] == upload_tokens.DEFAULT_TTL
-    assert upload_tokens.verify(out["token"], SECRET, scope="download") is True
+    assert upload_tokens.bound_audience(out["token"], SECRET) == AUDIENCE
     with pytest.raises(ValueError, match="DOWNLOAD_DISABLED"):
         upload_tokens.mint_for_endpoint(None, "https://kb.example.io", scope="download")
+
+
+# ---------------- download capabilities carry their minting audience ----------------
+
+AUDIENCE = "principal:" + "ab" * 32
+FLOOR = "\x00unresolved"
+
+
+def test_mint_for_endpoint_download_without_an_audience_binds_the_floor() -> None:
+    out = upload_tokens.mint_for_endpoint(SECRET, "https://kb.example.io", scope="download")
+    assert upload_tokens.bound_audience(out["token"], SECRET) == FLOOR
+
+
+def test_mint_for_endpoint_upload_ignores_the_audience() -> None:
+    out = upload_tokens.mint_for_endpoint(SECRET, "https://kb.example.io", audience=AUDIENCE)
+    assert upload_tokens.verify(out["token"], SECRET) is True
+    assert upload_tokens.bound_audience(out["token"], SECRET, scope="upload") is None
+
+
+def test_bound_roundtrip_and_expiry() -> None:
+    t = upload_tokens.mint_bound(SECRET, audience=AUDIENCE, ttl=900, now=1000)
+    assert upload_tokens.bound_audience(t, SECRET, now=1000) == AUDIENCE
+    assert upload_tokens.bound_audience(t, SECRET, now=1900) == AUDIENCE
+    assert upload_tokens.bound_audience(t, SECRET, now=1901) is None
+
+
+@pytest.mark.parametrize("audience", ["owner", AUDIENCE, FLOOR, "a.b:c/d"])
+def test_bound_audience_survives_any_spelling(audience: str) -> None:
+    t = upload_tokens.mint_bound(SECRET, audience=audience, now=1000)
+    assert upload_tokens.bound_audience(t, SECRET, now=1000) == audience
+
+
+def test_bound_audience_cannot_be_swapped() -> None:
+    t = upload_tokens.mint_bound(SECRET, audience=AUDIENCE, now=1000)
+    prefix, exp, _claim, sig = t.split(".")
+    owner_claim = upload_tokens.mint_bound(SECRET, audience="owner", now=1000).split(".")[2]
+    assert upload_tokens.bound_audience(f"{prefix}.{exp}.{owner_claim}.{sig}", SECRET, now=1000) is None
+
+
+def test_bound_expiry_cannot_be_extended() -> None:
+    t = upload_tokens.mint_bound(SECRET, audience=AUDIENCE, ttl=900, now=1000)
+    prefix, exp, claim, sig = t.split(".")
+    forged = f"{prefix}.{int(exp) + 100000}.{claim}.{sig}"
+    assert upload_tokens.bound_audience(forged, SECRET, now=1000) is None
+
+
+def test_bound_wrong_secret_or_scope_fails() -> None:
+    t = upload_tokens.mint_bound(SECRET, audience=AUDIENCE, now=1000)
+    assert upload_tokens.bound_audience(t, "other-secret", now=1000) is None
+    assert upload_tokens.bound_audience(t, SECRET, scope="upload", now=1000) is None
+
+
+def test_bound_token_is_not_an_upload_or_legacy_token() -> None:
+    t = upload_tokens.mint_bound(SECRET, audience=AUDIENCE, now=1000)
+    assert upload_tokens.verify(t, SECRET, scope="upload", now=1000) is False
+    assert upload_tokens.verify(t, SECRET, scope="download", now=1000) is False
+    assert upload_tokens.lane_for_token(t, SECRET, now=1000) is None
+
+
+def test_legacy_download_token_names_no_audience() -> None:
+    legacy = upload_tokens.mint(SECRET, scope="download", now=1000)
+    assert upload_tokens.bound_audience(legacy, SECRET, now=1000) is None
+
+
+def test_bound_claim_has_one_spelling() -> None:
+    t = upload_tokens.mint_bound(SECRET, audience="owner", now=1000)
+    prefix, exp, claim, sig = t.split(".")
+    assert upload_tokens.bound_audience(f"{prefix}.{exp}.{claim}=.{sig}", SECRET, now=1000) is None
+
+
+def test_bound_malformed_fails() -> None:
+    good = upload_tokens.mint_bound(SECRET, audience=AUDIENCE, now=1000)
+    _, exp, claim, sig = good.split(".")
+    for bad in (
+        None,
+        "",
+        "v2",
+        f"v2.{exp}.{claim}",
+        f"v2.{exp}.{claim}.{sig}.extra",
+        f"v2.notanumber.{claim}.{sig}",
+        f"v2.{exp}.!!!.{sig}",
+        f"v2.{exp}..{sig}",
+        f"v2.{exp}.{claim}.{sig[:-1]}é",
+        f"v1.{exp}.{sig}",
+    ):
+        assert upload_tokens.bound_audience(bad, SECRET, now=1000) is None, bad
+
+
+def test_mint_bound_requires_an_audience() -> None:
+    with pytest.raises(ValueError):
+        upload_tokens.mint_bound(SECRET, audience="")

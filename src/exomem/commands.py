@@ -7180,12 +7180,18 @@ def op_transfer_artifact(
     secret = os.environ.get("EXOMEM_UPLOAD_TOKEN", "").strip() or None
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     large_base_url = os.environ.get("EXOMEM_LARGE_UPLOAD_BASE_URL", "").strip().rstrip("/") or None
+    # `/download` decides every path under the audience the token carries, so
+    # it carries the caller's: the secret that signs it is the owner's, the
+    # caller need not be. An unresolved caller binds the fail-closed floor.
+    who = principal_module.effective_principal()
+    audience = who.audience_id if who.resolved else principal_module.MOST_RESTRICTIVE_AUDIENCE
     handoff = upload_tokens.mint_for_endpoint(
         secret,
         base_url,
         scope=operation,
         large_base_url=large_base_url if operation == "upload" else None,
         lane=lane if operation == "upload" else None,
+        audience=audience if operation == "download" else None,
     )
     if operation == "upload":
         handoff.update(handoff_status="handoff_prepared", committed=False)

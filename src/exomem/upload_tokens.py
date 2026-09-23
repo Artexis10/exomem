@@ -13,10 +13,17 @@ granted Evidence writes anyway. The long-lived secret never leaves the desk.
 Format: `v1.<exp_unix>.<hmac_sha256_hex>`  (distinguishable from the 64-hex
 long-lived token by the `v1.` prefix). Stateless — no server-side store; validity
 is just "signature matches AND not past exp".
+
+A download capability also names WHO minted it:
+`v2.<exp_unix>.<audience_base64url>.<hmac_sha256_hex>`, the audience signed with
+the expiry. `/download` decides every requested path under that audience, so a
+caller cannot download more than it could read — the owner's secret signs the
+token, but only the owner's own mint carries the owner's audience.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import time
@@ -54,6 +61,73 @@ def verify(presented: str | None, secret: str, *, scope: str = "upload", now: in
     return hmac.compare_digest(sig, _sig(secret, scope, exp))
 
 
+#: Prefix of a capability bound to the audience that minted it.
+BOUND_PREFIX = "v2."
+
+
+def _encode_audience(audience: str) -> str:
+    return base64.urlsafe_b64encode(audience.encode("utf-8")).rstrip(b"=").decode("ascii")
+
+
+def _decode_audience(claim: str) -> str | None:
+    try:
+        raw = base64.b64decode(claim + "=" * (-len(claim) % 4), altchars=b"-_", validate=True)
+        audience = raw.decode("utf-8")
+    except ValueError:  # binascii.Error and UnicodeDecodeError are both ValueErrors
+        return None
+    # One spelling per audience: a claim that does not re-encode to itself was
+    # not written by `mint_bound`.
+    if not audience or _encode_audience(audience) != claim:
+        return None
+    return audience
+
+
+def _bound_sig(secret: str, scope: str, exp: int, audience: str) -> str:
+    # Version-tagged and NUL-separated: no bound message can equal a `v1`
+    # `scope:exp` message, and the audience cannot bleed into scope or expiry.
+    message = f"v2\0{scope}\0{exp}\0{audience}".encode()
+    return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
+
+
+def mint_bound(
+    secret: str,
+    *,
+    audience: str,
+    scope: str = "download",
+    ttl: int = DEFAULT_TTL,
+    now: int | None = None,
+) -> str:
+    """Return a short-lived token for `scope` that carries `audience`, signed with `secret`."""
+    if not audience:
+        raise ValueError("a bound token requires an audience")
+    exp = int(now if now is not None else time.time()) + ttl
+    return f"{BOUND_PREFIX}{exp}.{_encode_audience(audience)}.{_bound_sig(secret, scope, exp, audience)}"
+
+
+def bound_audience(
+    presented: str | None, secret: str, *, scope: str = "download", now: int | None = None
+) -> str | None:
+    """The audience a well-formed, unexpired bound token for `scope` carries, else None."""
+    if not presented or not presented.startswith(BOUND_PREFIX):
+        return None
+    parts = presented.split(".")
+    if len(parts) != 4:
+        return None
+    _, exp_str, claim, sig = parts
+    if not (exp_str.isascii() and exp_str.isdigit()):
+        return None
+    exp = int(exp_str)
+    if int(now if now is not None else time.time()) > exp:
+        return None
+    audience = _decode_audience(claim)
+    if audience is None:
+        return None
+    expected = _bound_sig(secret, scope, exp, audience)
+    if not hmac.compare_digest(sig.encode(), expected.encode()):
+        return None
+    return audience
+
+
 #: Destination lanes an upload capability may be minted for. `evidence` signs the
 #: bare `upload` scope so every token issued before lanes existed keeps verifying.
 UPLOAD_LANES = ("evidence", "source")
@@ -88,6 +162,7 @@ def mint_for_endpoint(
     scope: str = "upload",
     large_base_url: str | None = None,
     lane: str | None = None,
+    audience: str | None = None,
 ) -> dict:
     """Response payload for the `mint_<scope>_token` MCP tools (or raise if off).
 
@@ -99,14 +174,27 @@ def mint_for_endpoint(
     an alternate endpoint (e.g. a Tailscale Funnel) NOT behind the ~100 MB
     Cloudflare edge cap, for uploads larger than that. The same minted token
     authenticates on both.
+
+    A download token carries `audience`, the canonical audience of the caller
+    minting it. Omitted, it carries the fail-closed floor, never the owner: a
+    caller that forgot to say who is asking must not be handed the owner's view.
     """
     if secret is None:
         raise ValueError(f"{scope.upper()}_DISABLED: server has no EXOMEM_UPLOAD_TOKEN configured")
     # The lane is signed into the scope but never into the URL: both lanes post
     # to the same endpoint, and the server reads the destination off the token.
     signed_scope = upload_scope(lane) if lane is not None and scope == "upload" else scope
+    if scope == "download":
+        from .governance.principal import MOST_RESTRICTIVE_AUDIENCE
+
+        token = mint_bound(
+            secret,
+            audience=audience if audience is not None else MOST_RESTRICTIVE_AUDIENCE,
+        )
+    else:
+        token = mint(secret, scope=signed_scope)
     out = {
-        "token": mint(secret, scope=signed_scope),
+        "token": token,
         "ttl_seconds": DEFAULT_TTL,
         f"{scope}_url": f"{base_url}/{scope}",
     }
