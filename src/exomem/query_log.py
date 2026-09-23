@@ -65,6 +65,8 @@ ACTIVATIONS_PATH = _LOG_DIR / "activations.jsonl"
 CLIENT_LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 SESSION_MAX_CHARS = 256
 _ACTIVATION_ANCHORS_MAX = 8
+#: The most of the activation log `hook_activation_seen` reads: its tail only.
+_ACTIVATION_TAIL_BYTES = 256 * 1024
 
 _DEFAULT_JSONL_MAX_MB = 64.0
 # In-memory running size estimate per path, updated cheaply on every append;
@@ -302,6 +304,23 @@ def declared_client(value: object) -> str | None:
     return value if isinstance(value, str) and CLIENT_LABEL_RE.fullmatch(value) else "invalid"
 
 
+def _vault_identity(vault_root: Path) -> str:
+    """The vault's activation-sidecar identity, or its resolved path."""
+    from . import working_set_runtime
+
+    try:
+        identity = working_set_runtime.identity_for(Path(vault_root))
+    except Exception:  # noqa: BLE001 - attribution never fails the call
+        identity = ""
+    return identity or str(Path(vault_root).resolve())
+
+
+def _vault_hash(vault_root: Path) -> str:
+    """Which vault a row belongs to, without naming it."""
+    material = f"exomem-activation-vault-v1\0{_vault_identity(vault_root)}"
+    return hashlib.sha256(material.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
 def _session_hash(vault_root: Path, session: object) -> str | None:
     """Stable per vault, unlinkable across vaults, and never the raw value.
 
@@ -313,14 +332,46 @@ def _session_hash(vault_root: Path, session: object) -> str | None:
         return None
     if not isinstance(session, str) or len(session) > SESSION_MAX_CHARS:
         return "invalid"
-    from . import working_set_runtime
-
-    try:
-        identity = working_set_runtime.identity_for(Path(vault_root))
-    except Exception:  # noqa: BLE001 - attribution never fails the call
-        identity = ""
-    identity = identity or str(Path(vault_root).resolve())
+    identity = _vault_identity(vault_root)
     return hashlib.sha256(f"{identity}\0{session}".encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def hook_activation_seen(vault_root: Path, client: str, *, within_seconds: float) -> bool:
+    """Whether this vault served `client`'s hook within the last `within_seconds`.
+
+    A hook activation is a row with no MCP transport (the REST or CLI door
+    the retrieve hook uses) that declares `client`. Bounded: one read of at
+    most the log's last `_ACTIVATION_TAIL_BYTES`, newest row first, stopping
+    at the first row older than the window. A rotated-away or unreadable log
+    answers False, which costs at most a second ask. Never raises.
+    """
+    try:
+        path = _target(ACTIVATIONS_PATH, "activations.jsonl")
+        with path.open("rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, size - _ACTIVATION_TAIL_BYTES))
+            tail = handle.read().decode("utf-8", "replace")
+        if size > _ACTIVATION_TAIL_BYTES:
+            tail = tail.partition("\n")[2]  # drop the partial first line
+        cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=within_seconds)
+        vault = _vault_hash(vault_root)
+        for line in reversed(tail.splitlines()):
+            try:
+                row = json.loads(line)
+                stamp = dt.datetime.fromisoformat(str(row["ts_utc"]))
+            except (ValueError, KeyError, TypeError):
+                continue
+            if stamp < cutoff:
+                return False
+            if (
+                row.get("transport") is None
+                and row.get("client_declared") == client
+                and row.get("vault_hash") == vault
+            ):
+                return True
+    except Exception as e:  # noqa: BLE001 - an unreadable log is no evidence
+        log.debug("hook_activation_seen failed: %s", e)
+    return False
 
 
 def log_activation_call(
@@ -374,6 +425,7 @@ def log_activation_call(
             "client_declared": declared,
             "transport": observed.get("transport"),
             "session_hash": _session_hash(vault_root, session),
+            "vault_hash": _vault_hash(vault_root),
             "principal_hash": (
                 "owner"
                 if audience == OWNER_AUDIENCE

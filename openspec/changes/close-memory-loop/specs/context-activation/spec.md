@@ -15,14 +15,16 @@ other than the retrieval scorers ordinary recall already runs.
 Each call SHALL append one row to a host-local activation log beside the existing query
 logs, outside the vault. The row SHALL carry the client label the transport observed or,
 failing that, a declared `client` matching a short software-label pattern, a stable
-per-vault hash of `session` rather than its value, the transport, the outcome and
+per-vault hash of `session` rather than its value, a hash identifying the vault, the transport, the outcome and
 packet-derived counts. It SHALL NOT carry the turn text, and SHALL omit anchor
 identifiers when the packet is content-private. An invalid `client` or an oversize
 `session` SHALL be recorded as invalid and never refused or echoed. `client` and
 `session` SHALL NOT change any part of the packet. On the MCP door only, while
 proactive capture is permitted, the packet MAY carry a one-sentence `episode_due`
 advisory after repeated activations from one caller without an episode record, at most
-once per bounded interval; it SHALL NOT appear on the CLI or REST doors.
+once per bounded interval; it SHALL NOT appear on the CLI or REST doors, nor for a
+Claude Code or Codex MCP client whose hook this vault's activation log shows served it
+within that interval.
 
 #### Scenario: Same packet on every door
 - **WHEN** the same turn is submitted through MCP, the CLI and the REST facade against

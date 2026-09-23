@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import capture_sweep, command_surface, envelope, episode_nudge, server
+from exomem import capture_sweep, command_surface, envelope, episode_nudge, query_log, server
 
 KEY = ("principal:abc", "chatgpt", "/vault")
 
@@ -112,17 +112,68 @@ def test_it_is_silent_for_a_caller_with_no_stable_key(
     assert _activations(vault, 20) == [None] * 20
 
 
-@pytest.mark.parametrize(
-    "client_name", ["claude-code", "Claude Code", "codex-mcp-client", "codex"]
-)
-def test_a_hook_client_gets_only_its_stop_hook_ask(
-    vault: Path, monkeypatch: pytest.MonkeyPatch, client_name: str
+@pytest.fixture
+def activation_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The host-local activation log, switched on in its own directory."""
+    log_dir = tmp_path / "logs"
+    monkeypatch.setenv("EXOMEM_LOG_DIR", str(log_dir))
+    monkeypatch.setattr(query_log, "_disabled", lambda: False)
+    return log_dir / "activations.jsonl"
+
+
+def _hook_activation(vault: Path, client: str) -> None:
+    """What the retrieve hook's REST rung leaves: an activation attributed to
+    its client, on a door with no MCP transport."""
+    query_log.log_activation_call(vault, packet={}, client=client, session="ep-" + "c3" * 16)
+
+
+HOOK_CLIENTS = [
+    ("claude-code", "claude-code"),
+    ("Claude Code", "claude-code"),
+    ("codex-mcp-client", "codex"),
+    ("codex", "codex"),
+]
+
+
+@pytest.mark.parametrize("client_name, label", HOOK_CLIENTS)
+def test_a_hook_client_with_live_hooks_gets_only_its_stop_hook_ask(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, activation_log: Path, client_name: str, label: str
 ) -> None:
-    """Claude Code and Codex are asked by their Stop hook; the advisory would
-    ask them twice."""
+    """This vault recently served that client's hook, so its Stop hook asks;
+    the advisory would ask twice."""
+    _hook_activation(vault, label)
     _as_mcp_caller(monkeypatch, transport="stdio", client_name=client_name)
+
     assert _activations(vault, 20) == [None] * 20
-    assert episode_nudge.tracked_keys() == 0
+
+
+@pytest.mark.parametrize("client_name, label", HOOK_CLIENTS)
+def test_a_hook_client_without_hooks_is_still_asked(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    activation_log: Path,
+    tmp_path: Path,
+    client_name: str,
+    label: str,
+) -> None:
+    """Claude Code or Codex with only the MCP server has no Stop hook, so the
+    advisory is its only ask. Hook evidence that is stale, from another vault,
+    or from the other hook client does not count."""
+    other_vault = tmp_path / "other-vault"
+    (other_vault / "Knowledge Base").mkdir(parents=True)
+    _hook_activation(other_vault, label)
+    _hook_activation(vault, "codex" if label == "claude-code" else "claude-code")
+    _hook_activation(vault, label)
+    rows = activation_log.read_text(encoding="utf-8").splitlines()
+    stale = json.loads(rows[-1])
+    stale["ts_utc"] = "2020-01-01T00:00:00.000+00:00"
+    activation_log.write_text("\n".join([*rows[:-1], json.dumps(stale)]) + "\n", encoding="utf-8")
+    _as_mcp_caller(monkeypatch, transport="stdio", client_name=client_name)
+
+    results = _activations(vault, episode_nudge.EPISODE_NUDGE_ACTIVATIONS)
+
+    assert results[:-1] == [None] * (episode_nudge.EPISODE_NUDGE_ACTIVATIONS - 1)
+    assert results[-1] is not None
 
 
 def test_the_proactive_gate_is_the_delegation_envelope(
