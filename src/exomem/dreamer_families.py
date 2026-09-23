@@ -307,8 +307,298 @@ LINK = Family(
 )
 
 
+# ----------------------------------------------------------------------
+# hydration: `upkeep_hydration`
+# ----------------------------------------------------------------------
+
+HYDRATION_FAMILY = "upkeep_hydration"
+HYDRATION_KIND = "curation.hydrate"
+
+#: Independent origins a hydration proposal needs.
+HYDRATION_MIN_ORIGINS = 2
+
+#: Entities examined per changed page, and contributing rows per entity.
+_HYDRATION_ENTITIES_PER_PAGE = 8
+_HYDRATION_ROW_LIMIT = 64
+
+#: Contributing pages named in the route (the entity is the eighth path).
+_HYDRATION_ROUTE_PAGES = 7
+
+#: Unit refs folded into the signal per contributing page.
+_HYDRATION_UNITS_PER_PAGE = 8
+
+#: Compiled page types whose units count as facts about an entity. Sources and
+#: Evidence are compile material, not hydration.
+_HYDRATION_TYPES = (
+    "research-note",
+    "insight",
+    "pattern",
+    "failure",
+    "experiment",
+    "production-log",
+)
+
+_ENTITY_TARGETS_SQL = (
+    "SELECT DISTINCT d.path FROM graph_edges e JOIN graph_nodes d "
+    "ON d.node_key = e.dst_key AND d.kind = 'file' "
+    "WHERE e.source_path = ? AND d.page_type = 'entity' AND d.path <> ? "
+    "AND COALESCE(e.relation_type, '') <> 'derived_from' "
+    "ORDER BY d.path LIMIT ?"
+)
+
+_CONTRIBUTORS_SQL = (
+    "SELECT DISTINCT e.source_path, e.src_key, f.updated_date, f.origin_date, f.exomem_id "
+    "FROM graph_edges e JOIN graph_nodes f "
+    "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
+    "WHERE e.dst_key = ? AND e.source_path <> ? "
+    "AND COALESCE(e.relation_type, '') <> 'derived_from' "
+    f"AND f.page_type IN ({','.join('?' for _ in _HYDRATION_TYPES)}) "
+    f"AND COALESCE(f.lifecycle_status, '') NOT IN "
+    f"({','.join('?' for _ in _INACTIVE_STATUSES)}) "
+    "AND NOT EXISTS (SELECT 1 FROM graph_edges b WHERE b.source_path = ? "
+    "AND b.dst_key = ('file:' || e.source_path)) "
+    "ORDER BY e.source_path, e.src_key LIMIT ?"
+)
+
+
+def _read_snapshot(ctx: Context) -> Any:
+    from . import epistemic_graph
+
+    conn = epistemic_graph.EpistemicGraphIndex(ctx.vault_root)._open_read_snapshot()
+    if conn is None:
+        raise Deferred("graph unavailable")
+    return conn
+
+
+def _memory_or_path_ref(rel_path: str, exomem_id: str | None) -> str:
+    from . import memory_refs, relation_queue
+
+    if exomem_id:
+        try:
+            return memory_refs.memory_ref(exomem_id)
+        except ValueError:
+            pass
+    return relation_queue._fallback_ref(rel_path)
+
+
+def _date(updated: Any, origin: Any) -> str:
+    value = updated or origin
+    return str(value)[:10] if value else ""
+
+
+def _hydration_entities(ctx: Context, rel_path: str) -> list[str]:
+    """The entity pages this page is about: itself, and what it links (at most 8)."""
+    graph = _read_snapshot(ctx)
+    try:
+        own = graph.execute(
+            "SELECT page_type FROM graph_nodes WHERE node_key = ? AND kind = 'file'",
+            (f"file:{rel_path}",),
+        ).fetchone()
+        linked = [
+            str(row[0])
+            for row in graph.execute(
+                _ENTITY_TARGETS_SQL, (rel_path, rel_path, _HYDRATION_ENTITIES_PER_PAGE)
+            )
+        ]
+    finally:
+        graph.close()
+    entities = [rel_path] if own is not None and own[0] == "entity" else []
+    return [*entities, *(path for path in linked if path not in entities)]
+
+
+def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
+    """The hydration proposal for one entity, from the graph snapshot alone.
+
+    Newer facts about the entity live on compiled pages that link it, and the
+    entity's own page does not link or cite those pages back. Reads no
+    Markdown: every input is a row of the published graph sidecar.
+    """
+    from . import provenance
+
+    graph = _read_snapshot(ctx)
+    try:
+        node = graph.execute(
+            "SELECT page_type, lifecycle_status, updated_date, origin_date, exomem_id "
+            "FROM graph_nodes WHERE node_key = ? AND kind = 'file'",
+            (f"file:{entity}",),
+        ).fetchone()
+        if node is None or node[0] != "entity":
+            return None
+        if str(node[1] or "").strip().casefold() in _INACTIVE_STATUSES:
+            return None
+        entity_date = _date(node[2], node[3])
+        rows = graph.execute(
+            _CONTRIBUTORS_SQL,
+            (
+                f"file:{entity}",
+                entity,
+                *_HYDRATION_TYPES,
+                *sorted(_INACTIVE_STATUSES),
+                entity,
+                _HYDRATION_ROW_LIMIT,
+            ),
+        ).fetchall()
+        contributors: dict[str, dict[str, Any]] = {}
+        for path, src_key, updated, origin, exomem_id in rows:
+            path = str(path)
+            fact_date = _date(updated, origin)
+            if not fact_date or fact_date <= entity_date:
+                continue
+            entry = contributors.setdefault(
+                path, {"exomem_id": exomem_id, "units": set(), "page_level": False}
+            )
+            if str(src_key) == f"file:{path}":
+                entry["page_level"] = True
+            else:
+                unit = graph.execute(
+                    "SELECT unit_ref FROM graph_nodes WHERE node_key = ? "
+                    "AND unit_ref IS NOT NULL",
+                    (str(src_key),),
+                ).fetchone()
+                if unit is not None:
+                    entry["units"].add(str(unit[0]))
+        sources: dict[str, set[str]] = {}
+        for path, entry in list(contributors.items()):
+            if entry["page_level"]:
+                entry["units"].update(
+                    str(row[0])
+                    for row in graph.execute(
+                        "SELECT unit_ref FROM graph_nodes WHERE path = ? "
+                        "AND unit_ref IS NOT NULL ORDER BY unit_ref LIMIT ?",
+                        (path, _HYDRATION_UNITS_PER_PAGE),
+                    )
+                )
+            if not entry["units"]:
+                contributors.pop(path)
+                continue
+            sources[path] = {
+                str(row[0])
+                for row in graph.execute(
+                    "SELECT dst_key FROM graph_edges WHERE src_key = ? "
+                    "AND origin = 'frontmatter' AND source_anchor = 'sources' "
+                    "AND relation_type = 'derived_from'",
+                    (f"file:{path}",),
+                )
+            }
+    finally:
+        graph.close()
+    if not contributors:
+        return None
+    origins = provenance.origin_keys(sources)
+    if len(set(origins.values())) < HYDRATION_MIN_ORIGINS:
+        return None
+    pairs = sorted(
+        (origins[path], unit)
+        for path, entry in contributors.items()
+        for unit in sorted(entry["units"])[:_HYDRATION_UNITS_PER_PAGE]
+    )
+    return {
+        "entity_ref": _memory_or_path_ref(entity, node[4]),
+        "contributors": contributors,
+        "origins": origins,
+        "signal_version": review_state_digest(pairs),
+    }
+
+
+def review_state_digest(value: Any) -> str:
+    import hashlib
+    import json
+
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+
+def _hydration_refresh(ctx: Context, entity: str) -> None:
+    """Recompute one entity's proposal and write or resolve it."""
+    from . import dreamer_store as store_module
+
+    cid = store_module.candidate_id(HYDRATION_KIND, entity, "")
+    proposal = _hydration_detect(ctx, entity) if _sig(ctx, entity) else None
+    if proposal is None:
+        ctx.store.resolve(ctx.conn, cid, producer=PRODUCER, now=ctx.now)
+        return
+    contributors = proposal["contributors"]
+    origins = proposal["origins"]
+    ordered = sorted(contributors, key=lambda path: (origins[path], path))
+    evidence = [
+        {
+            "path": path,
+            "ref": _memory_or_path_ref(path, contributors[path]["exomem_id"]),
+            "sig": _sig(ctx, path),
+            "role": "contributor",
+            "origin": origins[path],
+        }
+        for path in ordered[: dreamer_store.EVIDENCE_CAP]
+    ]
+    ctx.store.upsert_proposal(
+        ctx.conn,
+        family=HYDRATION_FAMILY,
+        kind=HYDRATION_KIND,
+        subject_path=entity,
+        subject_ref=proposal["entity_ref"],
+        proposal_key="",
+        evidence=[
+            {
+                "path": entity,
+                "ref": proposal["entity_ref"],
+                "sig": _sig(ctx, entity),
+                "role": "subject",
+                "origin": "",
+            },
+            *evidence,
+        ],
+        evidence_count=len(contributors) + 1,
+        route={
+            "tool": "maintain_memory",
+            "args": {
+                "mode": "curation",
+                "curation_action": "work-item",
+                "paths": [entity, *ordered[:_HYDRATION_ROUTE_PAGES]],
+            },
+        },
+        reason_code="newer_linked_facts",
+        producer=PRODUCER,
+        signal_version=proposal["signal_version"],
+        now=ctx.now,
+        measures={
+            "origins": len(set(origins.values())),
+            "contributors": len(contributors),
+            "units": sum(len(entry["units"]) for entry in contributors.values()),
+        },
+    )
+
+
+def _hydration_on_page(ctx: Context, rel_path: str) -> None:
+    for entity in _hydration_entities(ctx, rel_path):
+        _hydration_refresh(ctx, entity)
+
+
+def _hydration_on_delete(ctx: Context, rel_path: str) -> None:
+    from . import dreamer_store as store_module
+
+    ctx.store.resolve(
+        ctx.conn,
+        store_module.candidate_id(HYDRATION_KIND, rel_path, ""),
+        producer=PRODUCER,
+        now=ctx.now,
+    )
+
+
+def _hydration_revalidate(ctx: Context, row: dict[str, Any]) -> None:
+    _hydration_refresh(ctx, str(row.get("subject_path") or ""))
+
+
+HYDRATION = Family(
+    name=HYDRATION_FAMILY,
+    kinds=(HYDRATION_KIND,),
+    on_page=_hydration_on_page,
+    on_delete=_hydration_on_delete,
+    revalidate=_hydration_revalidate,
+)
+
+
 #: The families this build implements, in registry order.
-REGISTRY: list[Family] = [LINK]
+REGISTRY: list[Family] = [LINK, HYDRATION]
 
 
 def family_names() -> tuple[str, ...]:

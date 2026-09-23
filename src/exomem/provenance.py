@@ -13,7 +13,10 @@ bodies, the same cheap pass `audit` and keyword-`find` already do (<1s for
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -122,3 +125,54 @@ def scan_provenance(
         findings.extend(_scan_body(page.rel_path, page.body, key_f, value_f))
     findings.sort(key=lambda f: (f.path, f.line_number))
     return findings
+
+
+def origin_keys(
+    sources_by_path: Mapping[str, Iterable[str]],
+    *,
+    fallback: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """One independent-origin key per page. Overlapping Sources collapse.
+
+    Pages that declare an overlapping Source belong to one derivative
+    component (a union-find over shared Sources), so a single Source fanned
+    out into many notes counts once and copies add nothing. A page with no
+    declared Source is its own origin: `fallback[path]` when given (a session
+    key, say), else `page:<path>`.
+    """
+    paths = list(sources_by_path)
+    parent = list(range(len(paths)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[max(left_root, right_root)] = min(left_root, right_root)
+
+    sources = [frozenset(sources_by_path[path]) for path in paths]
+    first_by_source: dict[str, int] = {}
+    for index, declared in enumerate(sources):
+        for source in sorted(declared):
+            union(index, first_by_source.setdefault(source, index))
+    component: dict[int, set[str]] = {}
+    for index, declared in enumerate(sources):
+        if declared:
+            component.setdefault(find(index), set()).update(declared)
+    out: dict[str, str] = {}
+    for index, path in enumerate(paths):
+        if sources[index]:
+            encoded = json.dumps(
+                sorted(component[find(index)]),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            out[path] = "source:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        else:
+            out[path] = (fallback or {}).get(path) or f"page:{path}"
+    return out
