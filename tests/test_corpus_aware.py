@@ -665,3 +665,24 @@ def test_sweep_span_counts_the_unique_texts_it_actually_encoded(
         "chars": len(fresh_chunk),
         "reused": len(_REUSE_PARAGRAPHS),
     }
+
+# ---------------- suggest_relations reads a stored page's vectors back ----------------
+
+
+def test_suggest_relations_reads_a_stored_page_s_vectors_back(
+    vault: Path, counting_encoder: list[str]
+) -> None:
+    from exomem import epistemic_graph
+
+    body = "\n\n".join(_REUSE_PARAGRAPHS)
+    page = _seed_md(vault, "Notes/Insights/relations-reuse.md", type_="insight", body=body)
+    twin = _seed_md(vault, "Notes/Insights/relations-twin.md", type_="insight", body=body)
+    embeddings.get_embedding_index(vault).rebuild_all()
+    find_module.clear_cache()
+    counting_encoder.clear()
+
+    result = epistemic_graph.suggest_relations(vault, path=page, limit=50)
+
+    assert counting_encoder == [], "suggest_relations re-encoded a page whose rows are current"
+    proximity = [c for c in result["candidates"] if c["method"] == "embedding_proximity"]
+    assert any(c["to"] == twin for c in proximity), result["candidates"]
