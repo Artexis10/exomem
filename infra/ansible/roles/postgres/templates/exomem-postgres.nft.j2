@@ -1,0 +1,46 @@
+#!/usr/sbin/nft -f
+## Managed by Ansible (role: postgres).
+##
+## Deliberately its own table with no `flush ruleset`: this host may also run
+## ufw (base role), which manages its own nftables tables through the
+## iptables-nft compat layer. Flushing here would erase ufw's rules; adding
+## a separate table lets both coexist, since a DROP in either table's input
+## hook still drops the packet. This table only ever adds a per-source
+## new-connection rate limit and concurrent-connection ceiling on the public
+## PgBouncer port -- it never has to ACCEPT anything, because ufw (or the
+## Hetzner firewall alone, in the disposable test) already decides what is
+## allowed through. Syntax checked with `nft -c -f` (nftables 1.0.6).
+##
+## Controls must justify themselves (prevented / cost / payer):
+## - Prevented: an actual connection flood against the public listener, not
+##   ordinary bursts -- these thresholds are flood-only. Vercel production
+##   shares egress IPs across many customers' functions and opens pooled
+##   connections per function instance, so a single source IP can
+##   legitimately open a large number of connections in a short window.
+## - Cost when it fires wrongly: refusing our own Substrate traffic, from a
+##   shared IP that a burst of unrelated legitimate use pushed over a tight
+##   limit.
+## - Payer: every Substrate user routed through that IP, for as long as new
+##   connections keep tripping the meter.
+## The pgbouncer fail2ban jail that used to sit alongside this was removed
+## for the same reason, stated the other way around: what it prevented
+## (online SCRAM brute force) is already infeasible against high-entropy
+## generated passwords and already blunted by the limits below, but what it
+## cost when it fired wrongly -- a 1-hour, all-ports ban of a shared Vercel
+## egress IP after 5 failures in 10 minutes -- was a production outage for
+## every Substrate user behind that IP. The prevented harm never
+## materialized in practice; the wrong-firing cost did, and outsized it.
+##
+## ip6 saddr mirrors the ip saddr rules below even though the server keeps
+## ipv6_enabled = false: if IPv6 is ever enabled here without also revisiting
+## this file, the limit still holds rather than silently covering only v4.
+table inet exomem_postgres {
+    chain input {
+        type filter hook input priority 0; policy accept;
+
+        tcp dport {{ postgres_public_port }} ct state new meter pgbouncer_new_conn_rate_v4 { ip saddr limit rate over {{ postgres_nft_new_conn_rate_per_minute }}/minute burst 100 packets } drop
+        tcp dport {{ postgres_public_port }} ct state new meter pgbouncer_conn_limit_v4 { ip saddr ct count over {{ postgres_nft_conn_limit_per_source }} } drop
+        tcp dport {{ postgres_public_port }} ct state new meter pgbouncer_new_conn_rate_v6 { ip6 saddr limit rate over {{ postgres_nft_new_conn_rate_per_minute }}/minute burst 100 packets } drop
+        tcp dport {{ postgres_public_port }} ct state new meter pgbouncer_conn_limit_v6 { ip6 saddr ct count over {{ postgres_nft_conn_limit_per_source }} } drop
+    }
+}
