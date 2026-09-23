@@ -1,0 +1,479 @@
+---
+- name: Validate control database inputs
+  ansible.builtin.assert:
+    that:
+      - postgres_database_hostname | length > 0
+      - postgres_private_ip | length > 0
+      - postgres_role_passwords.substrate_owner | length > 0
+      - postgres_role_passwords.substrate_app | length > 0
+      - postgres_role_passwords.exomem_gateway | length > 0
+      - postgres_role_passwords.exomem_cellctl | length > 0
+      - postgres_pgbackrest_s3_endpoint | length > 0
+      - postgres_pgbackrest_s3_region | length > 0
+      - postgres_pgbackrest_s3_bucket | length > 0
+      - postgres_pgbackrest_s3_key | length > 0
+      - postgres_pgbackrest_s3_key_secret | length > 0
+      - postgres_pgbackrest_repo_cipher_pass | length > 0
+    fail_msg: >-
+      The four role passwords, the public hostname, the private IP,
+      complete pgBackRest object-storage credentials, and the pgBackRest
+      repository encryption passphrase are required.
+  no_log: true
+
+- name: Validate certificate source inputs
+  ansible.builtin.assert:
+    that: >-
+      (postgres_acme_enabled and postgres_acme_email | length > 0 and
+       postgres_cloudflare_dns_token | length > 0) or
+      (not postgres_acme_enabled and postgres_tls_source_fullchain | length > 0 and
+       postgres_tls_source_privkey | length > 0)
+    fail_msg: >-
+      With postgres_acme_enabled, an ACME email and Cloudflare DNS token are
+      required; otherwise a pre-provisioned certificate pair is required.
+  no_log: true
+
+- name: Validate service-management mode
+  ansible.builtin.assert:
+    that:
+      - postgres_manage_services is boolean
+      - postgres_manage_services or (postgres_unmanaged_services_test_mode | bool)
+      # round 8 (NC-B was bypassable): postgres_manage_services defaulting
+      # to true and staying a real boolean says nothing about whether
+      # --skip-tags services was passed on the CLI -- that flag skips every
+      # services-tagged enable/start/restart task directly, with no
+      # dependency on this variable at all. ansible_skip_tags is Ansible's
+      # own magic var reflecting --skip-tags, always available with no
+      # fact-gathering dependency.
+      - "'services' not in ansible_skip_tags or (postgres_unmanaged_services_test_mode | bool)"
+    fail_msg: >-
+      postgres_manage_services must be a real boolean -- pass it via a
+      JSON-style -e (e.g. -e '{"postgres_manage_services": false}'), not a
+      bare -e key=value, which Ansible stores as the string "false" (a
+      non-empty string, which is truthy everywhere else this role checks
+      it). Disabling it, or running with --skip-tags services, is permitted
+      only with postgres_unmanaged_services_test_mode: true also set --
+      production must never silently skip enabling/starting/restarting its
+      own units, by either path.
+  # tags: always (round 8): this assert must run under every --tags/
+  # --skip-tags combination, not only the default untagged case, or a
+  # differently-scoped invocation could bypass it the same way
+  # --skip-tags services itself did before this check existed.
+  tags: always
+
+- name: Add the PostgreSQL Global Development Group apt key
+  ansible.builtin.get_url:
+    url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+    dest: /etc/apt/keyrings/postgresql.asc
+    owner: root
+    group: root
+    mode: "0644"
+    force: false
+
+- name: Add the PGDG apt repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/etc/apt/keyrings/postgresql.asc]
+      https://apt.postgresql.org/pub/repos/apt {{ ansible_distribution_release }}-pgdg main
+    filename: pgdg
+    state: present
+
+- name: Install the control database package set
+  ansible.builtin.apt:
+    name:
+      - "postgresql-{{ postgres_major_version }}"
+      - "postgresql-client-{{ postgres_major_version }}"
+      - postgresql-contrib
+      - python3-psycopg2
+      - pgbouncer
+      - pgbackrest
+      - nftables
+      - certbot
+      - python3-certbot-dns-cloudflare
+    state: present
+    update_cache: true
+
+- name: Create the shared TLS material group
+  ansible.builtin.group:
+    name: exomem-tls
+    system: true
+    state: present
+
+- name: Add the PostgreSQL service account to the TLS group
+  ansible.builtin.user:
+    name: postgres
+    groups: exomem-tls
+    append: true
+  # PgBouncer runs as postgres too (Debian's/PGDG's pgbouncer.service
+  # hardcodes User=postgres; there is no separate "pgbouncer" OS account --
+  # see pg_ident.conf.j2). Looping this task over ["postgres", "pgbouncer"]
+  # would create a "pgbouncer" system user just because ansible.builtin.user
+  # defaults to state=present, which is a dedicated OS user this role has no
+  # use for and OM-1 asks to drop.
+
+- name: Create the TLS material directory
+  ansible.builtin.file:
+    path: "{{ postgres_tls_dir }}"
+    state: directory
+    owner: root
+    group: exomem-tls
+    mode: "0750"
+
+- name: Provision the ACME DNS-01 certificate
+  when: postgres_acme_enabled
+  no_log: true
+  block:
+    - name: Install the Cloudflare DNS-edit credentials file
+      ansible.builtin.template:
+        src: cloudflare-dns.ini.j2
+        dest: /etc/exomem/cloudflare-dns.ini
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Create the certbot deploy-hook directory
+      ansible.builtin.file:
+        path: /etc/letsencrypt/renewal-hooks/deploy
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install the certificate deploy-hook that reloads PostgreSQL and PgBouncer
+      ansible.builtin.template:
+        src: exomem-cert-deploy-hook.sh.j2
+        dest: /etc/letsencrypt/renewal-hooks/deploy/exomem-reload.sh
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Issue the initial certificate through ACME DNS-01
+      ansible.builtin.command:
+        cmd: >-
+          certbot certonly --non-interactive --agree-tos -m {{ postgres_acme_email }}
+          --preferred-challenges dns-01 --dns-cloudflare
+          --dns-cloudflare-credentials /etc/exomem/cloudflare-dns.ini
+          --dns-cloudflare-propagation-seconds 30
+          --cert-name exomem-control-db -d {{ postgres_database_hostname }}
+        creates: /etc/letsencrypt/live/exomem-control-db/fullchain.pem
+
+    - name: Deploy the freshly issued certificate for the first start
+      ansible.builtin.command:
+        cmd: /etc/letsencrypt/renewal-hooks/deploy/exomem-reload.sh
+        creates: "{{ postgres_tls_dir }}/fullchain.pem"
+      environment:
+        RENEWED_LINEAGE: /etc/letsencrypt/live/exomem-control-db
+
+    - name: Enable the certbot renewal timer
+      ansible.builtin.systemd_service:
+        name: certbot.timer
+        enabled: true
+        state: started
+      tags: services
+
+- name: Install a pre-provisioned certificate for the disposable role test
+  when: not postgres_acme_enabled
+  block:
+    - name: Copy the test certificate chain
+      ansible.builtin.copy:
+        src: "{{ postgres_tls_source_fullchain }}"
+        dest: "{{ postgres_tls_dir }}/fullchain.pem"
+        owner: root
+        group: exomem-tls
+        mode: "0644"
+        remote_src: "{{ postgres_tls_source_remote | default(false) }}"
+      notify:
+        - Restart PostgreSQL
+        - Restart PgBouncer
+
+    - name: Copy the test private key
+      ansible.builtin.copy:
+        src: "{{ postgres_tls_source_privkey }}"
+        dest: "{{ postgres_tls_dir }}/privkey.pem"
+        owner: root
+        group: exomem-tls
+        mode: "0640"
+        remote_src: "{{ postgres_tls_source_remote | default(false) }}"
+      no_log: true
+      notify:
+        - Restart PostgreSQL
+        - Restart PgBouncer
+
+- name: Ensure the PostgreSQL configuration include directory exists
+  ansible.builtin.file:
+    path: "{{ postgres_config_dir }}/conf.d"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0750"
+
+- name: Install the Exomem PostgreSQL configuration overlay
+  ansible.builtin.template:
+    src: exomem-postgres.conf.j2
+    dest: "{{ postgres_config_dir }}/conf.d/99-exomem.conf"
+    owner: postgres
+    group: postgres
+    mode: "0640"
+  notify: Restart PostgreSQL
+
+- name: Install pg_hba.conf
+  ansible.builtin.template:
+    src: pg_hba.conf.j2
+    dest: "{{ postgres_config_dir }}/pg_hba.conf"
+    owner: postgres
+    group: postgres
+    mode: "0640"
+  notify: Restart PostgreSQL
+
+- name: Install pg_ident.conf
+  ansible.builtin.template:
+    src: pg_ident.conf.j2
+    dest: "{{ postgres_config_dir }}/pg_ident.conf"
+    owner: postgres
+    group: postgres
+    mode: "0640"
+  notify: Restart PostgreSQL
+
+- name: Apply configuration handlers before first PostgreSQL start
+  ansible.builtin.meta: flush_handlers
+  tags: services
+
+- name: Enable and start PostgreSQL
+  ansible.builtin.systemd_service:
+    name: "postgresql@{{ postgres_major_version }}-main"
+    enabled: true
+    state: started
+  tags: services
+
+- name: Create the four Substrate database roles
+  become: true
+  become_user: postgres
+  community.postgresql.postgresql_user:
+    name: "{{ item.key }}"
+    password: "{{ item.value }}"
+    encrypted: true
+    role_attr_flags: LOGIN,NOSUPERUSER,NOCREATEDB,NOCREATEROLE
+    state: present
+  loop: "{{ postgres_role_passwords | dict2items }}"
+  no_log: true
+
+- name: Create the control database owned by substrate_owner
+  become: true
+  become_user: postgres
+  community.postgresql.postgresql_db:
+    name: "{{ postgres_database_name }}"
+    owner: substrate_owner
+    encoding: UTF-8
+    state: present
+
+- name: Copy the PgBouncer auth-query plumbing script to the target
+  # community.postgresql.postgresql_script's `path` is documented as "a SQL
+  # script on the TARGET machine" -- unlike ansible.builtin.template/copy,
+  # it does not resolve or transfer a controller-side role files/ path on
+  # its own. Discovered live, running the real role end to end for the
+  # first time (previous rounds hand-rendered configs and ran psql -f
+  # manually instead of the real task): a bare `path:` naming this file only
+  # ever worked by coincidence of controller/target sharing a filesystem,
+  # and would fail against a real remote Hetzner host. Named
+  # pgbouncer_auth.sql (NC-C), not grants.sql: this file creates only the
+  # PgBouncer auth-query plumbing role -- it has never touched the C1 tables
+  # or their privileges, which is Substrate's own
+  # scripts/exomem-cloud-grants.sql (task 4.4), a different script entirely.
+  ansible.builtin.copy:
+    src: pgbouncer_auth.sql
+    dest: /tmp/exomem-postgres-pgbouncer-auth.sql
+    owner: postgres
+    group: postgres
+    mode: "0600"
+
+- name: Apply the PgBouncer auth-query plumbing
+  become: true
+  become_user: postgres
+  community.postgresql.postgresql_script:
+    db: "{{ postgres_database_name }}"
+    path: /tmp/exomem-postgres-pgbouncer-auth.sql
+
+- name: Remove the auth-query plumbing script from the target
+  ansible.builtin.file:
+    path: /tmp/exomem-postgres-pgbouncer-auth.sql
+    state: absent
+
+- name: Allow the public PgBouncer TLS listener through the host firewall
+  community.general.ufw:
+    rule: allow
+    port: "{{ postgres_public_port | string }}"
+    proto: tcp
+    comment: Exomem public PgBouncer TLS listener
+
+- name: Install the PgBouncer configuration
+  ansible.builtin.template:
+    src: pgbouncer.ini.j2
+    dest: /etc/pgbouncer/pgbouncer.ini
+    owner: postgres
+    group: postgres
+    mode: "0640"
+  notify: Restart PgBouncer
+
+- name: Install the PgBouncer admission-control HBA file
+  ansible.builtin.template:
+    src: pgbouncer_hba.conf.j2
+    dest: "{{ postgres_config_dir }}/pgbouncer_hba.conf"
+    owner: postgres
+    group: postgres
+    mode: "0640"
+  notify: Restart PgBouncer
+
+# /var/log/postgresql is left exactly as the postgresql-common package
+# creates it (OM-1): PgBouncer runs as postgres, which already owns that
+# directory, so there is nothing for this role to manage here.
+
+- name: Apply configuration handlers before first PgBouncer start
+  ansible.builtin.meta: flush_handlers
+  tags: services
+
+- name: Enable and start PgBouncer
+  ansible.builtin.systemd_service:
+    name: pgbouncer
+    enabled: true
+    state: started
+  tags: services
+
+- name: Allow direct PostgreSQL access from the private network through UFW
+  community.general.ufw:
+    rule: allow
+    port: "5432"
+    proto: tcp
+    src: "{{ postgres_private_network_cidr }}"
+    comment: Exomem cellctl direct LISTEN connection
+
+- name: Install the PgBouncer connection-limit nftables ruleset
+  ansible.builtin.file:
+    path: /etc/nftables.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Template the PgBouncer connection-limit nftables ruleset
+  ansible.builtin.template:
+    src: exomem-postgres.nft.j2
+    dest: /etc/nftables.d/exomem-postgres.nft
+    owner: root
+    group: root
+    mode: "0640"
+  notify: Restart the PgBouncer connection-limit table
+
+- name: Install the nftables connection-limit systemd unit
+  ansible.builtin.template:
+    src: exomem-postgres-nftables.service.j2
+    dest: /etc/systemd/system/exomem-postgres-nftables.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart the PgBouncer connection-limit table
+
+- name: Apply nftables handlers before enabling the unit
+  ansible.builtin.meta: flush_handlers
+  tags: services
+
+- name: Enable and start the PgBouncer connection-limit table
+  ansible.builtin.systemd_service:
+    name: exomem-postgres-nftables
+    enabled: true
+    state: started
+  tags: services
+
+- name: Ensure the pgBackRest configuration directory exists
+  ansible.builtin.file:
+    path: /etc/pgbackrest
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0750"
+
+- name: Install the pgBackRest configuration
+  ansible.builtin.template:
+    src: pgbackrest.conf.j2
+    dest: /etc/pgbackrest/pgbackrest.conf
+    owner: postgres
+    group: postgres
+    mode: "0640"
+  no_log: true
+
+- name: Ensure the pgBackRest log directory exists
+  ansible.builtin.file:
+    path: /var/log/pgbackrest
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0750"
+
+- name: Create the pgBackRest stanza
+  become: true
+  become_user: postgres
+  ansible.builtin.command:
+    cmd: "pgbackrest --stanza={{ postgres_pgbackrest_stanza }} stanza-create"
+  register: postgres_stanza_create
+  changed_when: "'already exists' not in (postgres_stanza_create.stderr | default(''))"
+  failed_when: >-
+    postgres_stanza_create.rc != 0 and
+    'already exists' not in (postgres_stanza_create.stderr | default(''))
+
+- name: Install the nightly full-backup unit
+  ansible.builtin.template:
+    src: exomem-pgbackrest-full.service.j2
+    dest: /etc/systemd/system/exomem-pgbackrest-full.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Install the nightly full-backup timer
+  ansible.builtin.template:
+    src: exomem-pgbackrest-full.timer.j2
+    dest: /etc/systemd/system/exomem-pgbackrest-full.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Install the weekly restore-verification script
+  ansible.builtin.template:
+    src: exomem-pgbackrest-restore-verify.sh.j2
+    dest: /usr/local/bin/exomem-pgbackrest-restore-verify.sh
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Install the weekly restore-verification unit
+  ansible.builtin.template:
+    src: exomem-pgbackrest-restore-verify.service.j2
+    dest: /etc/systemd/system/exomem-pgbackrest-restore-verify.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Install the weekly restore-verification timer
+  ansible.builtin.template:
+    src: exomem-pgbackrest-restore-verify.timer.j2
+    dest: /etc/systemd/system/exomem-pgbackrest-restore-verify.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Apply backup-unit handlers before enabling the timers
+  ansible.builtin.meta: flush_handlers
+  tags: services
+
+- name: Enable the pgBackRest backup and restore-verification timers
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop:
+    - exomem-pgbackrest-full.timer
+    - exomem-pgbackrest-restore-verify.timer
+  tags: services

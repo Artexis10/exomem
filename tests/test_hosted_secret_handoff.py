@@ -1086,3 +1086,78 @@ def test_matrix_never_routes_a_file_shaped_secret_to_vercel(tmp_path: Path) -> N
     poisoned.write_text(json.dumps(matrix), encoding="utf-8")
     with pytest.raises(module.HandoffError, match="outside a Kubernetes Secret"):
         module.load_matrix(poisoned)
+
+
+@pytest.mark.parametrize("marker", ["{{", "{%", "{#"])
+def test_ansible_vars_destination_rejects_jinja_delimiters_in_secret(
+    marker: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sops_ansible_vars value must reach Ansible as a literal string.
+
+    Ansible Jinja2-templates every string it loads from a host_vars/
+    group_vars file. A generated password that happens to contain `{{`,
+    `{%` or `{#` (or one an operator pasted in) would not reach the
+    postgres role as the literal value secret_handoff sealed -- Ansible
+    would re-interpret it, so Postgres would end up holding a different
+    password than the one Substrate actually has. round 8, item 3.
+    """
+    module = _load_module()
+    tainted = f"pw-prefix-{marker}-suffix".encode()
+    monkeypatch.setenv("SOPS_AGE_RECIPIENTS", "age1testrecipient")
+    monkeypatch.setattr(module, "_read_secret", lambda **_kwargs: tainted)
+
+    def _unexpected_sops_write(*_args, **_kwargs):
+        raise AssertionError("sops must never be invoked for a rejected secret value")
+
+    monkeypatch.setattr(module.subprocess, "run", _unexpected_sops_write)
+
+    with pytest.raises(module.HandoffError, match="Jinja delimiter"):
+        module.execute_handoff(
+            matrix_path=MATRIX,
+            repository_root=tmp_path,
+            secret_name="control_db_substrate_owner_password",
+            version="v1",
+            destination_ids=("ansible.control-node.control-db-substrate-owner-password.active",),
+            source_kind="stdin",
+            terraform_bin="terraform",
+            sops_bin="sops",
+            vercel_bin="vercel",
+            vercel_project=None,
+            dry_run=False,
+        )
+    target = tmp_path / "infra/secrets/ansible/control-db-substrate-owner-password.v1.sops.json"
+    assert not target.exists()
+
+
+def test_ansible_vars_destination_accepts_a_plain_value_without_jinja_delimiters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The new check in _seal_named_document must not reject ordinary secrets."""
+    module = _load_module()
+    plain = b"pw-prefix-suffix-no-markers-here"
+    monkeypatch.setenv("SOPS_AGE_RECIPIENTS", "age1testrecipient")
+    monkeypatch.setattr(module, "_read_secret", lambda **_kwargs: plain)
+
+    plaintext_by_path: dict[Path, dict[str, object]] = {}
+
+    def _runner(command, **kwargs):
+        result = _run_fake_sops(list(command), kwargs, plaintext_by_path)
+        assert result is not None
+        return result
+
+    monkeypatch.setattr(module.subprocess, "run", _runner)
+    module.execute_handoff(
+        matrix_path=MATRIX,
+        repository_root=tmp_path,
+        secret_name="control_db_substrate_owner_password",
+        version="v1",
+        destination_ids=("ansible.control-node.control-db-substrate-owner-password.active",),
+        source_kind="stdin",
+        terraform_bin="terraform",
+        sops_bin="sops",
+        vercel_bin="vercel",
+        vercel_project=None,
+        dry_run=False,
+    )
+    target = tmp_path / "infra/secrets/ansible/control-db-substrate-owner-password.v1.sops.json"
+    assert target.is_file()

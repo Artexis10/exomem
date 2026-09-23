@@ -123,3 +123,17 @@ output "etcd_snapshot_restore_application_key" {
   value     = b2_application_key.etcd_snapshot_restore.application_key
   sensitive = true
 }
+
+output "control_db_pgbackrest_bucket_name" {
+  value = b2_bucket.control_db_pgbackrest.bucket_name
+}
+
+output "control_db_pgbackrest_application_key_id" {
+  value     = b2_application_key.control_db_pgbackrest.application_key_id
+  sensitive = true
+}
+
+output "control_db_pgbackrest_application_key" {
+  value     = b2_application_key.control_db_pgbackrest.application_key
+  sensitive = true
+}

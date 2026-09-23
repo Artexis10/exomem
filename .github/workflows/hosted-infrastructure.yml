@@ -205,6 +205,8 @@ jobs:
           require_python_distribution checkov "$CHECKOV_VERSION"
           require_output_version ansible-galaxy "$COMMUNITY_GENERAL_VERSION" collection list community.general
           require_output_version ansible-galaxy "$COMMUNITY_LIBRARY_INVENTORY_FILTERING_VERSION" collection list community.library_inventory_filtering_v1
+          require_output_version ansible-galaxy "$COMMUNITY_POSTGRESQL_VERSION" collection list community.postgresql
+          require_output_version ansible-galaxy "$COMMUNITY_DOCKER_VERSION" collection list community.docker
           require_output_version trivy "$TRIVY_VERSION" --version
           require_output_version shellcheck "$SHELLCHECK_VERSION" --version
           require_output_version oras "$ORAS_VERSION" version

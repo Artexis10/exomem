@@ -110,21 +110,48 @@
 
 ## 4. Control database server (lane D)
 
-- [ ] 4.1 Terraform: `hcloud_server.control` attached to the existing `hcloud_network.alpha`, firewall rules for SSH and the PgBouncer TLS port, and DNS-only records
-- [ ] 4.2 Ansible `postgres` role:
+- [x] 4.1 Terraform: `hcloud_server.control` attached to the existing `hcloud_network.alpha`, firewall rules for SSH and the PgBouncer TLS port, and DNS-only records
+- [x] 4.2 Ansible `postgres` role:
   - PostgreSQL 17 and PgBouncer in transaction mode, plus a session-mode alias for `substrate_owner` migrations;
   - the public certificate issued and renewed on the server through ACME DNS-01, with a reload timer;
   - a public TLS certificate for verify-full;
   - roles `substrate_owner`, `substrate_app`, `exomem_gateway` and `exomem_cellctl`;
-  - the public listener admitting only the Substrate roles with SCRAM, and gateway and cellctl only on the private network;
-  - nftables connection limits and fail2ban;
+  - the public listener admitting only the Substrate roles with SCRAM, and gateway and cellctl direct to Postgres on the private network, never through PgBouncer;
+  - PgBouncer per-role and global connection limits (`max_user_connections`, `max_client_conn`, `client_login_timeout`);
+  - nftables connection limits (explicit burst);
   - pgBackRest to B2 with WAL archiving, a nightly full and a weekly restore verification.
-- [ ] 4.3 Disposable-VM or container test of the role:
+- [x] 4.3 Disposable-VM or container test of the role, all live in
+  `tests/test_hosted_control_db_role_live.py`
+  (`RUN_CONTROL_DB_ROLE_TEST=1 ANSIBLE_PLAYBOOK_BIN=$PWD/.venv-hosted-ci/bin/ansible-playbook uv run python -m pytest -q tests/test_hosted_control_db_role_live.py`,
+  with the pinned toolchain -- `.venv-hosted-ci` built from `ansible-core==$ANSIBLE_CORE_VERSION`
+  plus the collections in `infra/ansible/collections/requirements.yml`, matching CI's own
+  `hosted-infrastructure.yml` -- 16 passed):
   - a verify-full TLS connection for each role;
-  - public refusal of the gateway and cellctl roles;
+  - public refusal of the gateway and cellctl roles, asserting each side's actual refusal
+    wording (PgBouncer's own `no authentication method is found` through the public listener;
+    Postgres's own `permission denied for`/`Connection refused` elsewhere -- confirmed live that
+    PgBouncer does not reuse Postgres's wording for an HBA miss);
   - refused cross-role writes;
-  - a pgBackRest backup and restore round trip.
-- [ ] 4.4 The role creates the four roles only. Table privileges come from Substrate's `scripts/exomem-cloud-grants.sql`, the single implementation of the C1 privilege table (Substrate D7 and task 3.2). The role test applies that script to the migrated schema and asserts the table
+  - the PgBouncer admin console's unix-socket admission is `peer`, not `trust` (a mode-777
+    socket directory means any local OS user could otherwise reach it): a non-postgres OS user
+    is refused with PgBouncer's own `unix socket login rejected`, postgres itself is admitted;
+  - a pgBackRest backup and restore round trip (OM-6, round 6): a full
+    backup to the same MinIO the rig stands up, then the role's own real
+    weekly restore-verify script, unmodified, restoring and round-tripping a
+    marker row written before the backup, with its throwaway instance's own
+    postmaster confirmed to hold no TCP-listening socket at all
+    (`listen_addresses=''` held, checked against that specific process, not
+    just the rendered config).
+- [x] 4.4 The role creates the four roles plus the passwordless, peer-only `pgbouncer_auth` lookup role only. Table privileges come from Substrate's `scripts/exomem-cloud-grants.sql`, the single implementation of the C1 privilege table (Substrate D7 and task 3.2). The role test applies that script to the migrated schema and asserts the table:
+  applied live in `tests/test_hosted_control_db_role_live.py` against
+  `infra/cellctl/tests/fixtures/exomem_cloud_schema.sql` (Substrate migrations
+  0056+0057, byte-for-byte) and `exomem_cloud_grants.sql` (Substrate's real
+  script, byte-for-byte) -- cellctl updates C1 observed columns only, never
+  desired or C1b; the gateway selects only `cell_id`, `tenant_id`,
+  `desired_state` and writes nothing on C1-C1d; `substrate_app` updates
+  `cancellation_notice_sent_at`; a second grants run changes nothing
+  (`pg_class.relacl`/`pg_attribute.attacl` snapshot equality, not just a
+  clean exit code).
 
 ## 5. Local rehearsal (P3)
 
@@ -148,6 +175,8 @@
 ## 6. Node deployment and owner acceptance (P4)
 
 - [ ] 6.1 Apply the control server and run the database cutover under the Substrate runbook, which sets Neon read-only, lists every consumer, restores with `--no-owner --no-acl`, and runs the grants script. Then verify Endstate and Exomem.
+  - Role apply on the control server starts every unit; `systemctl is-active` for postgresql, pgbouncer, the certbot and pgbackrest timers.
+  - A pgbackrest full backup to B2 completes and the restore-verify timer's script passes against B2 before the Neon cutover.
 - [ ] 6.2 Deploy cellctl and the gateway beside the old platform, set `cell_image`, and scale the old provisioner and workers to zero
 - [ ] 6.3 Owner acceptance on the real node:
   1. invite and connect the claude.ai custom connector;
