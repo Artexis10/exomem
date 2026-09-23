@@ -433,3 +433,50 @@ def test_an_escaping_path_is_refused_without_echoing_server_paths(
     assert response.json() == INVALID_PATH_BODY
     for server_path in (str(vault), str(outside), str(tmp_path)):
         assert server_path not in response.text
+
+
+NON_ASCII_BEARERS = [b"Bearer \xe9abc", b"Bearer v1.\xb2." + b"0" * 64]
+NON_ASCII_IDS = ["latin-1-letter", "v1-superscript-expiry"]
+
+
+@pytest.mark.parametrize("header", NON_ASCII_BEARERS, ids=NON_ASCII_IDS)
+def test_non_ascii_bearer_is_refused_on_download_and_upload(vault: Path, header: bytes) -> None:
+    client = _unraising_client()
+    auth = [(b"authorization", header)]
+
+    download = client.get("/download", params={"path": RELEASED}, headers=auth)
+    upload = client.post(
+        "/upload",
+        files={"file": ("a.bin", b"x", "application/octet-stream")},
+        data={"scope": "S", "category": "C"},
+        headers=auth,
+    )
+
+    assert download.status_code == 401, download.text
+    assert upload.status_code == 401, upload.text
+
+
+@pytest.mark.parametrize("header", NON_ASCII_BEARERS, ids=NON_ASCII_IDS)
+def test_non_ascii_bearer_resolves_to_no_principal(header: bytes) -> None:
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/download", "headers": [(b"authorization", header)]}
+    )
+
+    resolved = server_transfer.download_principal(request, _transfer_config())
+
+    assert resolved.audience_id == principal_module.MOST_RESTRICTIVE_AUDIENCE
+    assert resolved.resolved is False
+
+
+@pytest.mark.parametrize("header", NON_ASCII_BEARERS, ids=NON_ASCII_IDS)
+def test_non_ascii_bearer_is_refused_on_rest(vault: Path, monkeypatch: pytest.MonkeyPatch, header: bytes) -> None:
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "synthetic-rest-key-0123456789")
+    client = _unraising_client()
+
+    response = client.post(
+        "/api/read_memory",
+        json={"path": RELEASED},
+        headers=[(b"authorization", header), (b"content-type", b"application/json")],
+    )
+
+    assert response.status_code == 401, response.text

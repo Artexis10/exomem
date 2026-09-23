@@ -164,7 +164,9 @@ def download_principal(
         header = request.headers.get("authorization", "")
         if header.startswith("Bearer "):
             presented = header[len("Bearer ") :].strip()
-            if secrets.compare_digest(presented, config.upload_token):
+            # Bytes, not str: `compare_digest` raises on a non-ASCII str, and a
+            # header is whatever bytes the caller sent.
+            if secrets.compare_digest(presented.encode(), config.upload_token.encode()):
                 return principal_module.owner_principal(surface="transfer")
             audience = upload_tokens.bound_audience(presented, config.upload_token)
             if audience == principal_module.OWNER_AUDIENCE:
@@ -221,7 +223,7 @@ def register_transfer_routes(
             header = request.headers.get("authorization", "")
             if header.startswith("Bearer "):
                 presented = header[len("Bearer ") :].strip()
-                if not secrets.compare_digest(presented, config.upload_token):
+                if not secrets.compare_digest(presented.encode(), config.upload_token.encode()):
                     lane = upload_tokens.lane_for_token(presented, config.upload_token)
                     if lane is not None:
                         return lane
@@ -232,7 +234,7 @@ def register_transfer_routes(
             header = request.headers.get("authorization", "")
             if header.startswith("Bearer "):
                 presented = header[len("Bearer ") :].strip()
-                if secrets.compare_digest(presented, config.upload_token):
+                if secrets.compare_digest(presented.encode(), config.upload_token.encode()):
                     return True
                 if scope == "download":
                     # Only a capability naming its minting principal opens
