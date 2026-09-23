@@ -6319,7 +6319,7 @@
       "additionalProperties": false,
       "properties": {
         "operation": {
-          "description": "For `relations`, `propose-relation` returns a reviewed delta without writing and `save-relations` commits that delta with expected_hash and why. For `entity-types`, `resolve-entity-type` reads matching definitions using query and optional requested_type; `save-entity-types` saves a reviewed proposal with why and expected_hash when updating. The current entity registry is included in bootstrap. For `workflow-contracts`, exactly one of: inventory (no workflow fields); inspect (name); validate (exactly one of name or proposal); resolve (context plus at most one of name or proposal); preview (proposal, optional name); save (proposal and why, optional name plus expected_hash for updates); or refresh (name, expected_hash, and why). Other subjects retain their existing operations.",
+          "description": "For `relations`, `propose-relation` returns a reviewed delta without writing and `save-relations` commits that delta with expected_hash and why. For `entity-types`, `resolve-entity-type` reads matching definitions using query and optional requested_type; `save-entity-types` saves a reviewed proposal with why and expected_hash when updating. The current entity registry is included in bootstrap. For `relations`, `census` returns counts-only relation quality from the published graph (optional detail, date_from, date_to) and never writes. For `workflow-contracts`, exactly one of: inventory (no workflow fields); inspect (name); validate (exactly one of name or proposal); resolve (context plus at most one of name or proposal); preview (proposal, optional name); save (proposal and why, optional name plus expected_hash for updates); or refresh (name, expected_hash, and why). Other subjects retain their existing operations.",
           "type": "string"
         },
         "name": {
@@ -6561,6 +6561,22 @@
           ],
           "default": null,
           "description": "Exact reviewed vocabulary fingerprint; grants no write permission."
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "enum": [
+                "counts",
+                "keys"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Relation census detail: `counts` (default) or `keys`, which adds predicate keys and counts."
         },
         "response_detail": {
           "default": "compact",
