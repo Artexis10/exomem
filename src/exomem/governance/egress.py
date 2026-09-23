@@ -4989,33 +4989,40 @@ def unit_parent_withheld(
     """True when a page a unit reference names is not released to the caller.
 
     Whether a unit reference resolves, and the drift reported while resolving
-    it, are facts about its parent page, so a graph seed is decided by the page
-    before the graph is asked. The candidates are every page the reference's
-    memory id names in the reference index AND every page the graph's own rows
-    resolve it to, so a stale index cannot hide a withheld parent. Decided at
-    `RELEASE_FLOOR`, the level below which the graph guard already withholds a
-    seed; a resolution that ran out of work cannot prove the parent visible.
+    it, are facts about the pages the resolver consults, so a graph seed is
+    decided by those pages before the graph is asked. The candidates are every
+    path the graph's own rows can consult for the reference (current or not;
+    `epistemic_graph.unit_ref_indexed_paths`), every page the reference's
+    memory id names in the reference index, and the page an
+    `exomem://vault/` or `exomem://source/` parent names by path. Each is
+    decided at `RELEASE_FLOOR`, the level below which the graph guard already
+    withholds a seed; a path that cannot be decided counts as withheld, and a
+    walk with more rows than the resolver examines cannot prove every page
+    visible.
     """
     vault_root = Path(vault_root)
     policy = policy_module.load(vault_root)
     if policy.empty and not lifecycle.tombstoned_paths(vault_root):
         return False
+    who = principal if principal is not None else effective_principal()
     parent_ref, separator, _fragment = str(unit_ref or "").rpartition("#")
-    memory_id = memory_refs.parse_memory_ref(parent_ref) if separator else None
-    if memory_id is None:
+    if not separator or not parent_ref:
         return False
     from .. import epistemic_graph
 
-    indexed, work_exhausted = epistemic_graph.indexed_unit_parent_path_resolution(
-        vault_root, unit_ref
-    )
+    indexed, work_exhausted = epistemic_graph.unit_ref_indexed_paths(vault_root, unit_ref)
     if work_exhausted:
         return True
-    candidates = set(indexed) | set(
-        memory_refs.paths_for_ids_read_only(vault_root, (memory_id,)).get(memory_id, ())
-    )
+    candidates = set(indexed)
+    memory_id = memory_refs.parse_memory_ref(parent_ref)
+    if memory_id is not None:
+        candidates.update(
+            memory_refs.paths_for_ids_read_only(vault_root, (memory_id,)).get(memory_id, ())
+        )
+    elif parent_ref.lower().startswith(("exomem://vault/", "exomem://source/")):
+        candidates.add(memory_refs.resolve_identifier_read_only(vault_root, parent_ref))
     for rel_path in sorted(candidates):
-        level = release_level_for(vault_root, rel_path, principal=principal, purpose=purpose)
+        level = release_level_for(vault_root, rel_path, principal=who, purpose=purpose)
         if level is None or level < RELEASE_FLOOR:
             return True
     return False

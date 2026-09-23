@@ -9,8 +9,11 @@ caller must answer exactly as an absent page does.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 from starlette.testclient import TestClient
@@ -21,7 +24,7 @@ from test_semantic_unit_graph import (
     _unit_context_fixture,
 )
 
-from exomem import commands, server
+from exomem import commands, semantic_index, server
 from exomem.governance import egress, membership, policy
 from exomem.governance import principal as principal_module
 
@@ -193,3 +196,98 @@ def test_graph_context_owner_still_seeds_from_the_unit(vault: Path) -> None:
 
     assert context["unit_status"] == "found"
     assert context["seeds"]
+
+
+# ---------------------------------------------------------------------------
+# Refs that name their page by path: exomem://vault/ and exomem://source/
+# ---------------------------------------------------------------------------
+
+NOID = "Knowledge Base/Notes/Insights/noid-page.md"
+NOID_TEXT = (
+    "---\ntype: insight\ntitle: No id\n---\n# No id\n\n"
+    "## Observations\n- [configuration] Idless sentinel IDLESS-3 ^q-1\n"
+)
+
+
+def _idless_seeds(vault: Path) -> list[str]:
+    _unit_context_fixture(vault)
+    (vault / NOID).write_text(NOID_TEXT, encoding="utf-8")
+    _rebuild_with_live_checkpoint(vault)
+    _reset_caches()
+    state = semantic_index.current_parent_index_state(vault, NOID)
+    real = [unit.unit_ref for unit in state.document.units if unit.unit_ref]
+    assert real and real[0].startswith("exomem://vault/"), real
+    return [
+        *real,
+        f"exomem://vault/{quote(NOID)}#nope",
+        f"exomem://source/{quote(NOID[:-3])}#q-1",
+        f"exomem://vault/{quote(_SOURCE)}#compact-1",
+    ]
+
+
+def _remove_idless(vault: Path) -> None:
+    (vault / NOID).unlink()
+    _rebuild_with_live_checkpoint(vault)
+    _reset_caches()
+
+
+def test_rest_path_named_unit_seeds_of_a_withheld_page_answer_like_an_absent_page(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seeds = _idless_seeds(vault)
+    _withhold_insights(vault)
+    client = _rest_client(monkeypatch)
+    requests = [
+        {"operation": operation, "unit_ref": seed}
+        for seed in seeds
+        for operation in ("context", "graph-context")
+    ]
+
+    def run() -> list:
+        return [
+            client.post("/api/connect_memory", json=body, headers=CF_HEADERS).content
+            for body in requests
+        ]
+
+    withheld = run()
+    _remove_idless(vault)
+    (vault / _SOURCE).unlink()
+    _rebuild_with_live_checkpoint(vault)
+    _reset_caches()
+    absent = run()
+
+    assert withheld == absent
+    assert not any(b"IDLESS" in body for body in withheld)
+
+
+def test_mcp_path_named_unit_seeds_of_a_withheld_page_answer_like_an_absent_page(
+    vault: Path,
+) -> None:
+    seeds = _idless_seeds(vault)
+    _withhold_insights(vault)
+    mcp = server.build_server(require_auth=False)
+    who = principal_module.RequestPrincipal(audience_id=CF_AUDIENCE, surface="mcp")
+
+    def run() -> list[str]:
+        out = []
+        for seed in seeds:
+            with principal_module.request_scope(who):
+                result = asyncio.run(
+                    mcp.call_tool(
+                        "connect_memory",
+                        {"operation": "context", "unit_ref": seed},
+                        run_middleware=False,
+                    )
+                )
+            out.append(json.dumps(result.structured_content, sort_keys=True))
+        return out
+
+    withheld = run()
+    _remove_idless(vault)
+    (vault / _SOURCE).unlink()
+    _rebuild_with_live_checkpoint(vault)
+    _reset_caches()
+    absent = run()
+
+    assert withheld == absent
+    assert not any("IDLESS" in text for text in withheld)
