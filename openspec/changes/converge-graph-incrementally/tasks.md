@@ -332,8 +332,8 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   marker is current (and queues its page when a late registry update left it stale), and a
   receipt whose page's own bytes fail -- not UTF-8, or an `OSError` older than
   `GRAPH_POISON_MIN_AGE_SECONDS` -- is quarantined after `GRAPH_POISON_ATTEMPTS` rather
-  than rotated forever, keeping the page's rows and retried on a stat change or after
-  `GRAPH_QUARANTINE_RETRY_SECONDS`; a busy boundary, a locked store or a brief lock never
+  than rotated forever, keeping the page's rows and retried on a stat change (after a
+  backoff that doubles per failed attempt) or after `GRAPH_QUARANTINE_RETRY_SECONDS`; a busy boundary, a locked store or a brief lock never
   counts (`tests/test_graph_deferred_queue.py`). The marker invariant is parked
   with 7.2.
 - [x] 7.7 Cool the event registry only on evidence it is behind the disk: classify a

@@ -1663,21 +1663,27 @@ def quarantine_graph_receipt(
         conn.close()
 
 
-def quarantined_graph_paths(vault_root: Path) -> list[tuple[str, str | None, float]]:
-    """Each quarantined path, the stat signature it failed at, and when it last failed.
+def quarantined_graph_paths(
+    vault_root: Path,
+) -> list[tuple[str, str | None, float, int]]:
+    """Each quarantined path, the stat signature it failed at, when it last failed,
+    and how many attempts have failed.
 
     An absent or unreadable store reads as none.
     """
     rows = _graph_failure_rows(vault_root, "WHERE quarantined = 1")
-    return [(str(rel), None if sig is None else str(sig), float(at)) for rel, sig, at in rows]
+    return [
+        (str(rel), None if sig is None else str(sig), float(at), int(attempts))
+        for rel, sig, at, attempts in rows
+    ]
 
 
 def graph_failure_paths(vault_root: Path) -> list[str]:
     """Every path with a recorded failure, quarantined or not. Absent store: none."""
-    return [str(rel) for rel, _sig, _at in _graph_failure_rows(vault_root, "")]
+    return [str(row[0]) for row in _graph_failure_rows(vault_root, "")]
 
 
-def _graph_failure_rows(vault_root: Path, where: str) -> list[tuple[Any, Any, Any]]:
+def _graph_failure_rows(vault_root: Path, where: str) -> list[tuple[Any, ...]]:
     if not store_path(vault_root).exists():
         return []
     try:
@@ -1688,7 +1694,7 @@ def _graph_failure_rows(vault_root: Path, where: str) -> list[tuple[Any, Any, An
             ).fetchone():
                 return []
             return conn.execute(
-                "SELECT rel_path, signature, last_failed_at FROM graph_failures "
+                "SELECT rel_path, signature, last_failed_at, attempts FROM graph_failures "
                 f"{where} ORDER BY rel_path"
             ).fetchall()
         finally:

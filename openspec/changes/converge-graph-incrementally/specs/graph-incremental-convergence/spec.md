@@ -452,8 +452,9 @@ a page that reads and decodes when checked rotate their receipt, however long th
 A queued path that derived to no rows -- deleted, or no longer recall Markdown -- SHALL
 retire its receipt with the deletion.
 
-A quarantined path SHALL be queued again when its stat signature changes, and otherwise
-on a slow periodic retry. Any pass that derives the page, including a whole-vault
+A quarantined path SHALL be queued again when its stat signature changes, no sooner than
+a backoff after its last failure that grows with each failed attempt, and otherwise on a
+slow periodic retry. Any pass that derives the page, including a whole-vault
 rebuild, SHALL clear its failure record. The residual lag and the doctor SHALL report
 quarantined paths.
 

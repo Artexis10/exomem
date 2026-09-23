@@ -99,9 +99,13 @@ GRAPH_POISON_ATTEMPTS = 3
 #: or a sync tool holding a page for a moment is not poison.
 GRAPH_POISON_MIN_AGE_SECONDS = 600.0
 #: How long a quarantined page waits, from its last failure, before one more
-#: attempt with no change to it. A change to its stat signature retries it at
-#: the drain's next wake instead.
+#: attempt with no change to it.
 GRAPH_QUARANTINE_RETRY_SECONDS = 3600.0
+#: How long a quarantined page whose stat signature changed waits, from its last
+#: failure, before it is retried. Doubles with each failed attempt past
+#: `GRAPH_POISON_ATTEMPTS`, up to `GRAPH_QUARANTINE_RETRY_SECONDS`: a page a
+#: sync tool keeps rewriting would otherwise be retried on every drain wake.
+GRAPH_QUARANTINE_CHANGE_BACKOFF_SECONDS = 5.0
 # The epoch kinds a *per-path* repair may run against. `recoverable` is excluded
 # on purpose: it means the checkpoint is behind its floor, so the lineage does
 # not yet say what the paths should be repaired to. See

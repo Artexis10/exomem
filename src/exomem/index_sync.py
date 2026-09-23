@@ -1187,11 +1187,13 @@ def _graph_stat_token(path: Path) -> str:
 def requeue_quarantined_graph_paths(vault_root: Path) -> int:
     """Give quarantined pages one more attempt; return how many were queued.
 
-    A page is retried when its stat signature has changed since it was set
-    aside -- edited, replaced, deleted -- and otherwise once
-    `GRAPH_QUARANTINE_RETRY_SECONDS` have passed since its last failure. One
-    readonly read when nothing is quarantined, so the drain can call it on
-    every wake.
+    A page is retried once `GRAPH_QUARANTINE_RETRY_SECONDS` have passed since
+    its last failure, and sooner when its stat signature has changed since it
+    was set aside -- edited, replaced, deleted -- but no sooner than its change
+    backoff. The backoff matters because a release signals the drain and the
+    drain calls this on every wake: without it, a page a sync tool keeps
+    rewriting was retried every couple of seconds. One readonly read when
+    nothing is quarantined.
     """
     from . import epistemic_graph
 
@@ -1199,13 +1201,26 @@ def requeue_quarantined_graph_paths(vault_root: Path) -> int:
     if not quarantined:
         return 0
     now = time.time()
-    due = [
-        rel
-        for rel, signature, last_failed_at in quarantined
-        if _graph_stat_token(vault_root / rel) != signature
-        or now - last_failed_at >= epistemic_graph.GRAPH_QUARANTINE_RETRY_SECONDS
-    ]
+    due = []
+    for rel, signature, last_failed_at, attempts in quarantined:
+        waited = now - last_failed_at
+        if waited >= epistemic_graph.GRAPH_QUARANTINE_RETRY_SECONDS or (
+            waited >= _quarantine_change_backoff(attempts)
+            and _graph_stat_token(vault_root / rel) != signature
+        ):
+            due.append(rel)
     return deferred_index.release_graph_quarantine(vault_root, due)
+
+
+def _quarantine_change_backoff(attempts: int) -> float:
+    """Seconds after its last failure before a changed quarantined page is retried."""
+    from . import epistemic_graph
+
+    excess = max(0, attempts - epistemic_graph.GRAPH_POISON_ATTEMPTS)
+    return min(
+        epistemic_graph.GRAPH_QUARANTINE_RETRY_SECONDS,
+        epistemic_graph.GRAPH_QUARANTINE_CHANGE_BACKOFF_SECONDS * 2**excess,
+    )
 
 
 def _republish_graph_availability(index) -> None:
