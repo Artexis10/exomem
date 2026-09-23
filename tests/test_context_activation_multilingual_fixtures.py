@@ -56,6 +56,7 @@ DESIGN_ROWS = {
     "M6-de",
     "M7-de", "M7-et",
     "M8-de",
+    "M9-ja", "N9-ja",
 }
 
 
@@ -206,7 +207,7 @@ def test_menu_cases_sit_in_the_pool_below_the_recency_menu() -> None:
     assert len(POOL_ORDER) == RECENT_POOL_SIZE == 24
     assert RECENT_MENU_SIZE == working_set.RECENT_CONTEXT_MAX_ENTRIES
     menu_cases = [case for case in CASES if case.menu == "gold_first"]
-    assert {case.case_id for case in menu_cases} == {"M2-en", "M2-de", "M2-ru", "M2-ja", "M4-ru"}
+    assert {case.case_id for case in menu_cases} == {"M2-en", "M2-de", "M2-ru", "M2-ja", "M4-ru", "M9-ja"}
     for case in menu_cases:
         for key in (*case.gold, *case.poison):
             rank = POOL_ORDER.index(key)
@@ -222,12 +223,26 @@ def test_menu_cases_sit_in_the_pool_below_the_recency_menu() -> None:
 
 def test_menu_twins_poison_their_cases_gold() -> None:
     for case in CASES:
-        if case.kind != "cross_language_menu":
+        if case.kind not in ("cross_language_menu", "lone_script_menu"):
             continue
         twin = next(item for item in CASES if item.pairs_with == case.case_id)
         assert twin.gold == ()
         assert set(case.gold) <= set(twin.poison)
         assert twin.expected_status_on == twin.expected_status_off == "unresolved"
+
+
+def test_the_lone_script_case_golds_the_only_page_of_its_script_in_the_pool() -> None:
+    """A native-script page alone among the pooled candidates: the case a
+    per-script centroid taken over the pool alone maps to the zero vector."""
+    case, twin = case_by_id("M9-ja"), case_by_id("N9-ja")
+    assert (case.kind, twin.kind) == ("lone_script_menu", "lone_script_menu_twin")
+    (gold,) = case.gold
+    assert [key for key in POOL_ORDER if KEY_LANGUAGES[key] == KEY_LANGUAGES[gold]] == [gold]
+    assert KEY_LANGUAGES[gold] == case.language == twin.language
+    # The positive's poison is its twin-topic neighbour, pooled so it can be promoted.
+    assert case.poison and all(key in POOL_ORDER for key in case.poison)
+    # The twin's poison is the lone page itself, in the twin's own language.
+    assert twin.poison == case.gold
 
 
 def test_top_of_the_pool_is_unrelated_to_every_case() -> None:

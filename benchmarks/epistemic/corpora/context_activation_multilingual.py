@@ -27,6 +27,11 @@ same-language negative twin (``N<n>-<lang>``):
   turn on another subject.
 * ``M7`` carry fragment: one accented word that the ASCII catalogue splits.
 * ``M8`` minority function word: a residual row, reported rather than scored.
+* ``M9``/``N9`` lone script: the menu gold is the ONLY page of its script in
+  the pool (the Japanese note among twenty-three others); the twin keeps the
+  sentence frame, changes the topic, and must not promote that same-language
+  page. A per-script centroid taken over the pool alone maps such a page to
+  the zero vector, so it could never be promoted.
 
 Gold, poison and ``never_resolved`` name LOGICAL KEYS, never vault paths:
 :func:`build_corpus` renders the corpus and returns the key -> path map, and
@@ -97,13 +102,19 @@ KINDS: tuple[str, ...] = (
     "continuity_switch",
     "carry_fragment",
     "minority_function_word",
+    "lone_script_menu",
+    "lone_script_menu_twin",
 )
-POSITIVE_KINDS: frozenset[str] = frozenset({"named_rare", "cross_language_menu", "cjk_named"})
+POSITIVE_KINDS: frozenset[str] = frozenset({"named_rare", "cross_language_menu", "cjk_named", "lone_script_menu"})
 TWIN_OF: dict[str, str] = {
     "named_rare_twin": "named_rare",
     "cross_language_menu_twin": "cross_language_menu",
     "cjk_compound_twin": "cjk_named",
+    "lone_script_menu_twin": "lone_script_menu",
 }
+#: Twins guarding their case's gold as poison (menu kinds) rather than as
+#: `never_resolved` (named kinds).
+_MENU_TWIN_KINDS = frozenset({"cross_language_menu_twin", "lone_script_menu_twin"})
 
 #: What the `recent_context` block must do for the case with semantic evidence
 #: on: ``gold_first`` -- the gold leads the block; ``recency`` -- the block is
@@ -358,6 +369,23 @@ CASES: tuple[MultilingualCase, ...] = (
         risk=8,
         rare_name="zur Lieferung",
         scored=False,
+    ),
+    # -- M9 / N9: the menu gold is the only page of its script in the pool ---
+    _case(
+        "M9-ja",
+        "lone_script_menu",
+        "地震に備えて、非常用の袋に何を詰めておくんだったっけ？",
+        gold=("n_ja_emergency_bag",),
+        poison=("f_travel_adapters",),
+        menu="gold_first",
+    ),
+    _case(
+        "N9-ja",
+        "lone_script_menu_twin",
+        "旅行に備えて、スーツケースに何を詰めておくんだったっけ？",
+        pairs_with="M9-ja",
+        poison=("n_ja_emergency_bag",),
+        risk=2,
     ),
 )
 
@@ -750,7 +778,7 @@ def assert_manifest_consistent(cases: tuple[MultilingualCase, ...] = CASES) -> N
             raise FixtureError(f"{case.case_id}: a twin must share its case's language")
         if not set(case.gold).isdisjoint(positive.gold):
             raise FixtureError(f"{case.case_id}: a twin's gold overlaps its case's gold")
-        guarded = case.poison if case.kind == "cross_language_menu_twin" else case.never_resolved
+        guarded = case.poison if case.kind in _MENU_TWIN_KINDS else case.never_resolved
         if not set(positive.gold) <= set(guarded):
             raise FixtureError(f"{case.case_id}: a twin must guard its case's gold")
     for case in cases:
