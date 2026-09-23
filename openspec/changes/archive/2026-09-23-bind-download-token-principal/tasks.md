@@ -15,7 +15,13 @@
 - [x] 2.4 Compare every presented bearer as bytes on the transfer routes, the REST facade and the lease coordinator.
 - [x] 2.5 Decide release by path before a direct page read reports undecodable or unparseable bytes, and report them with a fixed reason.
 
-## 3. Verification
+## 3. Unit reads and graph seeds
 
-- [x] 3.1 Move the tests that minted claimless download tokens onto owner-bound capabilities, without weakening an assertion.
-- [x] 3.2 Scoped suites green for transfer, upload tokens, the transfer routes, egress and principal resolution, plus ruff, the privacy gate, OpenSpec strict, capabilities, the hosted check and the harness module list.
+- [x] 3.1 Take the page release decision before an exact unit read resolves any reference, serve a unit only from a page released in full, and build its citation from the released frontmatter.
+- [x] 3.2 Resolve a graph-context unit seed whose parent is withheld as a unit of an absent page, on `connect_memory` context and the `graph_context` leaf, and answer a withheld context page seed as an absent page.
+- [x] 3.3 Record the withheld receipt for a withheld undecodable read, as a decodable read does.
+
+## 4. Verification
+
+- [x] 4.1 Move the tests that minted claimless download tokens onto owner-bound capabilities, without weakening an assertion.
+- [x] 4.2 Scoped suites green for transfer, upload tokens, the transfer routes, egress and principal resolution, plus ruff, the privacy gate, OpenSpec strict, capabilities, the hosted check and the harness module list.

@@ -1041,3 +1041,24 @@ A path withheld from the resolved audience, a folder, and a path that does not e
 
 - **WHEN** a requested path traverses out of the vault or through a symlink whose target lies outside it
 - **THEN** the refusal carries a fixed reason and neither the absolute server path nor the link target
+
+### Requirement: Exact unit reads and graph seeds follow the page release decision
+
+An exact semantic-unit read SHALL take the page release decision a page read takes before it resolves any unit reference, because a unit, its parent citation and its surrounding Markdown are the page's own contents and whether a reference resolves is a fact about the page. A page withheld from the caller SHALL answer an exact unit read byte-identically to an absent page, for every unit reference. A unit SHALL be served only from a page released to the caller in full, with its parent context cut from the released body and its parent citation built from the released frontmatter; below full release it SHALL answer as an absent page.
+
+A graph-context seed SHALL be decided the same way. A unit reference whose parent page is released to the caller below the level at which the graph withholds a seed SHALL resolve, validate and report drift as a unit of an absent page, while the response still echoes the caller's own reference. A context seeded from a page withheld from the caller SHALL answer as for an absent page.
+
+#### Scenario: Exact unit read of a withheld page
+
+- **WHEN** a caller the page is withheld from reads it with a real unit reference, with an unknown anchor on the same page, or with an unrelated reference
+- **THEN** every answer is byte-identical to the answer for the same request against an absent page, on every surface
+
+#### Scenario: Exact unit read below full release
+
+- **WHEN** the page is released to the caller at notice, abstract or excerpt level
+- **THEN** no unit is served and the answer is the absent page's
+
+#### Scenario: Graph seed of a withheld page
+
+- **WHEN** a context or graph-context request is seeded with a unit reference, or with a page path, whose page is withheld from the caller
+- **THEN** the answer is the one the same request receives when the page is absent, with no resolution status or drift that exists only because the page does

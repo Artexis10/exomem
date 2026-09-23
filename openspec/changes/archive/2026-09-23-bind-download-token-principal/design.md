@@ -58,9 +58,27 @@ Every `NOT_FOUND` from the download route (missing, withheld, reserved leaf) is 
 - **No server paths in refusals.** `/download` answers every other path refusal with a fixed `INVALID_PATH` reason. The resolver's own reason names the absolute path a traversal reached, or an escaping symlink's target.
 - **Release before decoding.** A direct page read (`read_memory`, `get`, `fetch`, exact unit reads, and the page and frontmatter helpers beneath them) used to report bytes that failed to decode or parse as `UNREADABLE`, with the codec's message, before the release decision ran. That disclosed existence, one content byte and its offset. An unreadable result is now reported only where a path-only release decision releases the item to the caller, and with a fixed reason. Everywhere else it is the absent refusal, byte-identical to a missing file's. The full decision needs the frontmatter the bytes failed to yield, so a scope that needs frontmatter to classify the path withholds it.
 
+### Exact unit reads and graph seeds
+
+An exact unit read (`read_memory` with `unit_ref`) used to resolve the unit before any page decision, and graph-context seeds did the same through the graph index. The page decision is now taken first, on every door that resolves a caller-supplied unit reference.
+
+- **Unit reads require full release.** The working-set guard's unit handling is not a reusable per-unit decision. It keeps a unit whenever its page reaches `RELEASE_FLOOR`, and scrubs the unit's references inside a walk shaped for working-memory packets. An exact read also returns parent context whose offsets are defined over the raw body. Below L6 the released body is a projection (a notice, an abstract, or a whitespace-collapsed excerpt taken from the start of the page), and no window of it is the unit's span. So a unit is served only when the page decision releases the page in full: the released body equals the raw body and the content hash matches. `episode_recovery` already required the same before resolving a unit. Anything less answers as an absent page, spelled as `op_get` spells it. The parent citation is built from the released frontmatter, so provenance the release plane stripped does not return through it.
+- **Graph seeds are decided by their parent.** `egress.unit_parent_withheld` takes every page the reference's memory id names, in the reference index and in the graph's own rows. It decides each at `RELEASE_FLOOR`, the level below which the graph guard already withholds a seed. A withheld parent resolves as `UNRESOLVABLE_UNIT_REF`, so resolution, parent validation and drift accounting take the absent-page branch, and the response still echoes the caller's own reference. Resolution that runs out of work cannot prove the parent visible, and counts as withheld. A page seed on `connect_memory` context takes `op_get`'s page decision.
+- **Doors that resolve a caller-supplied unit reference:**
+  - `read_memory` with `unit_ref`, over MCP, REST, hosted and the CLI: gated here.
+  - `connect_memory` context and graph-context: gated here.
+  - The `graph_context` leaf: gated here.
+  - `episode_recovery`: already required full release before resolving.
+  - `fetch` accepts no unit reference, and its identifier resolution already drops invisible candidates.
+  - `observe_memory` resolves a unit reference only while mutating a page it edits. Mutation authority is outside the release plane, so that door is listed under the risks below.
+  - `artifact_role_state` resolves only a page's own units during derivation, never a caller-supplied reference.
+- **Receipts.** A withheld undecodable read now records the same withheld outcome a withheld decodable read records.
+
 ## Risks / Trade-offs
 
 - A capability minted by a principal with session-scoped grants downloads less than that session could read inline. That is deliberate: it fails closed, and the minter can still read inline.
 - A leaked capability still discloses anything its minter may read in full, for up to fifteen minutes. The same was true before, with the owner's ceiling in place of the minter's.
 - Timing still separates a withheld file from a missing one. A missing path stops at the existence check, while a withheld one runs the release decision first, and the review measured roughly 10 ms against 1.6 ms on `/download`. Every direct read shows the same gap, `read_memory` included, so it is a systemic property of the read path and is not fixed here.
+- A page released at notice, abstract or excerpt level answers an exact unit read as an absent page, although a page read renders it at that level. A unit read has no projection below full release, and refusing is the conservative answer.
+- Write doors resolve unit references and page paths without consulting the release plane, so a mutation still behaves differently for an existing page than for an absent one. Mutation authority is a separate plane and is out of scope here.
 - A symlink that escapes the vault answers `INVALID_PATH`, while a missing path answers `NOT_FOUND`, so the existence of such a link inside a withheld scope is still observable. The refusal names no server path.
