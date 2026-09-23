@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+import posixpath
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -1121,22 +1122,79 @@ def _is_current_page(vault_root: Path, rel_path: str) -> bool:
     return status not in RETIRED_PAGE_STATUSES
 
 
+def _canonical_agent_page_ref(vault_root: Path, ref: str) -> str | None:
+    """`ref`, unchanged, if it is ALREADY the catalogue's own canonical
+    spelling of a page it knows — else `None`.
+
+    Checked before anything reads a file, in this order, cheapest first:
+
+    1. Not empty, no backslash anywhere (a POSIX path separator is `/` only;
+       a backslash is an ordinary filename character to `Path`, and folding
+       it — the way `working_set_runtime._is_raw_material`/
+       `_is_navigation_page` fold it for their OWN string comparisons — was
+       never applied to the read that follows, so a backslashed spelling of
+       an ordinary page reached the file it named anyway).
+    2. Not absolute (`posixpath.isabs`) and not a spelling
+       `posixpath.normpath` would write differently — one rule that covers a
+       leading `./`, a doubled slash, a trailing slash, and a literal `.`/
+       `..` segment together, rather than one pattern for each.
+    3. Under the knowledge-base folder (`kbdir.kb_prefix()`).
+    4. A row the LEXICAL catalogue already holds under this EXACT string —
+       one indexed lookup (`lexstore.page_content_hashes`), never a search
+       and never a directory read.
+
+    Every other spelling of an eligible page — `./Knowledge Base/...`, a
+    doubled slash, a backslashed separator, an absolute path, a `..` that
+    lands back inside the knowledge base — used to reach `_is_current_page`
+    (which reads the file) and, for a page that turned out eligible, all the
+    way to `_carried_packet`'s full unit lane: several times an unknown
+    ref's cost, measured, and a timing side channel that told an audience
+    apart from a page's own canonical name without ever naming it back.
+    Refused here instead, at the same cost as an unknown ref, before any
+    read — never a distinguishable answer from the ordinary unknown-ref
+    refusal `_eligible_agent_page` already gives.
+
+    A catalogue that cannot answer (unbuilt, mid-repair, FTS5 unavailable)
+    answers `None` for every ref, exactly as the retrieval carry itself
+    already declines its OWN candidates when the SAME catalogue cannot prove
+    itself current — no separate failure mode, no separate policy.
+    """
+    text = str(ref or "").strip()
+    if not text or "\\" in text or posixpath.isabs(text):
+        return None
+    if posixpath.normpath(text) != text:
+        return None
+    from .kbdir import kb_prefix
+
+    if not text.startswith(kb_prefix()):
+        return None
+    from . import lexstore
+
+    hashes = lexstore.page_content_hashes(vault_root, [text])
+    if hashes.get(text) is None:
+        return None
+    return text
+
+
 def _eligible_agent_page(vault_root: Path, ref: str) -> str | None:
     """The vault-relative page `ref` names, if `anchor` may carry a packet from
     it, else `None`.
 
     An anchor override tries the activation index's own rows first
     (`override_candidates`); this is the fallback for a ref that named no row
-    there. It reuses the retrieval carry's OWN eligibility test rather than a
-    second opinion about what a servable page is — the same three refusals a
-    turn that merely NAMED a page already gets: not raw material
+    there. `_canonical_agent_page_ref` runs FIRST and reads nothing: only a
+    ref already spelled the way the catalogue stores it, and already proven
+    a row that catalogue holds, reaches the checks below at all. Those reuse
+    the retrieval carry's OWN eligibility test rather than a second opinion
+    about what a servable page is — the same three refusals a turn that
+    merely NAMED a page already gets: not raw material
     (`working_set_runtime._is_raw_material`, `Sources/`/`Evidence/`), not
     navigation (`working_set_runtime._is_navigation_page`,
     `find_corpus.NAVIGATION_BASENAMES`), and current — existing, Markdown,
     not retired (`_is_current_page`, above).
     """
-    path = str(ref or "").strip()
-    if not path:
+    path = _canonical_agent_page_ref(vault_root, ref)
+    if path is None:
         return None
     from . import working_set_runtime
 

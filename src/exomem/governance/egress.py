@@ -2422,6 +2422,69 @@ def guard_referents(
     return guarded
 
 
+def quick_page_visible(
+    vault_root: Path,
+    rel_path: str,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> bool:
+    """Is `rel_path` visible to the CURRENT principal, decided on the release
+    plane alone — no packet, no compile.
+
+    For an activation `anchor` naming a page rather than an index row
+    (design close-memory-loop, agent-picked page), the expensive part —
+    `_carried_packet`'s full unit lane, current-state lookup and budget
+    assembly — buys NOTHING when the answer was always going to be the
+    refusal a withheld page gets: measured at 80 ms against 15 ms for an
+    unknown ref, because the compile ran to completion before the release
+    plane was ever consulted. This is that consultation, moved first.
+
+    Reuses `_decide_path` — the SAME per-path decision `guard_working_set`
+    makes after compiling, memoized per request identity AND page identity —
+    so calling it again from `guard_working_set` for the identical path is
+    the memo hit, never a second stat or a second parse.
+
+    Errs towards compiling on anything this function does not itself fully
+    resolve: an ungoverned vault (`policy.empty`) is visible outright, and a
+    principal or policy state this function cannot decide returns `True` and
+    leaves the actual call to `guard_working_set`, which already owns it and
+    runs regardless. This can only ever produce an EARLY refusal matching
+    what the guard would decide anyway, or a no-op that falls through to the
+    unchanged compile-then-guard path — never a decision the guard would not
+    also have made.
+    """
+    if lifecycle.is_tombstoned(vault_root, rel_path):
+        return False
+    policy, _release_gate_active = gate_state(vault_root)
+    if policy.empty:
+        return True
+    if policy.blocked:
+        return False
+    who = principal if principal is not None else effective_principal()
+    if not who.resolved:
+        return False
+    grants_hash = _grants_hash(policy)
+    declared_purpose = _declared_purpose(vault_root, who, purpose)
+    decision = _decide_path(
+        vault_root,
+        rel_path,
+        policy=policy,
+        audience=who.audience_id,
+        purpose=declared_purpose,
+        grants_hash=grants_hash,
+        authorization_session=who.authorization_session_id,
+        authorization_context=who.verified_authorization_session,
+    )
+    if decision is None:
+        # Undecidable is not admissible: `guard_working_set` withholds an
+        # existing-but-undecided path the same way. The caller has already
+        # proven the path exists (`_eligible_agent_page`), so `None` here
+        # means genuinely undecidable, never merely absent.
+        return False
+    return decision.level >= RELEASE_FLOOR
+
+
 def guard_working_set(
     vault_root: Path,
     packet: dict[str, Any],

@@ -6007,7 +6007,11 @@ def op_activate_context(
     Returns: {recent_context, anchors, roles, units, pointers, current_state,
              missing, ambiguity, budget, generation, abstained, abstention?,
              continuity?}. `recent_context` is first and is present on an
-             abstained packet too; every other block is empty on one.
+             abstained packet too. An abstained packet always empties
+             `roles`, `units`, `pointers` and `current_state` — no material
+             about an anchor that did not resolve — but `anchors` (a
+             `partial`, `retrieval_named` or competing `ambiguity` candidate),
+             `ambiguity` and `missing` may still be populated.
              `generation.continuity` reports whether a token you passed was
              `applied`, `stale` or `absent`.
     """
@@ -6327,6 +6331,38 @@ def _op_activate_context_body(
     except Exception:  # noqa: BLE001 - the release plane failing means abstain, not serve
         log.warning("activation release plane unavailable; abstaining", exc_info=True)
         return _abstain("unavailable")
+    # An `anchor` naming no row of THIS index but an eligible agent-picked
+    # page (design close-memory-loop, U7) is decided on the release plane
+    # HERE, before the compile that page would otherwise buy nothing for: a
+    # withheld page refuses identically whether or not it was ever compiled,
+    # and running the compile first is the entire cost difference measured
+    # between a withheld ref (80 ms) and an unknown one (15 ms). An `anchor`
+    # that DOES match a row of the index is untouched — that path's own
+    # timing is not this fix's scope — and any failure here only skips the
+    # optimization: the unmodified compile-then-guard sequence below still
+    # decides every ref exactly as it always has.
+    if anchor:
+        try:
+            named_rows = {
+                spelling
+                for row in anchor_rows
+                for spelling in (
+                    str(getattr(row, "ref", None) or ""),
+                    str(getattr(row, "path", "") or ""),
+                    str(getattr(row, "anchor_id", "") or ""),
+                )
+                if spelling
+            }
+            if anchor not in named_rows:
+                agent_page = working_set_module._eligible_agent_page(vault_root, anchor)
+                if agent_page is not None and not egress_module.quick_page_visible(
+                    vault_root, agent_page, purpose=purpose
+                ):
+                    raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
+        except ValueError:
+            raise
+        except Exception:  # noqa: BLE001 - an optimization that fails just does not apply
+            log.debug("agent-picked-page early visibility check unavailable", exc_info=True)
     packet = working_set_runtime_module.serve(
         vault_root,
         turn=turn,
