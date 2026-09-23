@@ -1015,6 +1015,55 @@ def test_a_late_refresh_whose_generation_a_drain_acknowledged_leaves_the_graph_r
     assert not EpistemicGraphIndex(vault).reads_suspended()
 
 
+def test_a_late_refresh_behind_a_late_registry_update_repairs_per_path(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The no-op is only for a refresh that finds the marker current.
+
+    Here the drain acknowledges the write's generation against the registry
+    as it stood, then the write's registry update lands, which leaves the
+    marker describing an older projection. The late refresh then finds its
+    generation acknowledged. Returning without work there left nothing queued
+    and nothing able to republish the marker, so the drain daemon paid a
+    whole-vault rebuild for one page (probe L2: 3.6 s, one whole-vault pass,
+    against 0.9 s and none on main). It must queue the page, as main does, so
+    one per-path drain makes the graph readable again.
+    """
+    passes: list[int] = []
+    real_pass = EpistemicGraphIndex._rebuild_all_pass
+
+    def counted(self: Any, *args: Any, **kwargs: Any) -> Any:
+        passes.append(1)
+        return real_pass(self, *args, **kwargs)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_rebuild_all_pass", counted)
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(vault / PAGE_A, _page("A", "A is revised against [[queue-b]]."))],
+        vault_root=vault,
+        post_commit_fanout=False,
+    )
+    checkpoint = graph_sync.read_checkpoint(vault)
+    assert checkpoint is not None
+    index_sync.drain_graph_work(vault)
+    assert _acknowledged(vault) == int(checkpoint.generation)
+    assert EpistemicGraphIndex(vault).available()
+    # The write's registry update lands after the drain acknowledged.
+    freshness.on_files_changed(vault, changed=[vault / PAGE_A])
+    assert not EpistemicGraphIndex(vault).available()
+
+    report = EpistemicGraphIndex(vault).refresh_paths(
+        [vault / PAGE_A], graph_checkpoint=checkpoint
+    )
+
+    assert report.get("queued"), report
+    assert deferred_index.list_graph_paths(vault) == [PAGE_A]
+    index_sync.drain_graph_work(vault)
+    assert EpistemicGraphIndex(vault).available()
+    assert passes == [], "a whole-vault pass repaired one late page"
+    monkeypatch.setattr(EpistemicGraphIndex, "_rebuild_all_pass", real_pass)
+    assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
+
+
 # --- Quarantine stops hot retries and nothing else ------------------------------
 
 
