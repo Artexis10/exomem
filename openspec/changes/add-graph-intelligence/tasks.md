@@ -8,7 +8,8 @@
       policy); unavailable is not zero. Green: `src/exomem/relation_census.py`, the
       `schema_memory` `census` operation with `detail`, the CLI `exomem relations census`
       (managed service over REST first, else a read-only local snapshot), and the
-      `relations.census` doctor line.
+      `relations.census` doctor line. Measured: 0.19 s at 3,600 pages and 20,291 edges,
+      5.25 s at 10^6 edges.
 - [x] 1.2 Red `tests/test_relation_census_sample.py`: the sample is seeded and stratified by
       family; a judged file folds with a Wilson interval; absent judgements report
       `unmeasured`. Green: `relation_census.sample`, `fold_judgments`, and the CLI

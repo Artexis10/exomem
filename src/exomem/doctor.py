@@ -3265,12 +3265,12 @@ def doctor(
         _check_lexical(vault_root),
         _check_deferred_index_backlog(vault_root),
         _check_graph_sync_state(vault_root),
-        _check_relation_census(vault_root),
         _check_state_placement(vault_root),
         _check_rebuild_temp_orphans(vault_root),
         _check_write_path_env_flags(vault_root),
         _check_frozen_verifier(),
         check_graph_recovery_age(vault_root),
+        _check_relation_census(vault_root),
     ]
     runtime_processes = _check_runtime_processes()
     if runtime_processes is not None:

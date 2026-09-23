@@ -113,6 +113,8 @@ are nothing a registry save can delete, so they no longer block. The delta route
 
 ## Measurement
 
-The census is one pass over the snapshot's nodes and edges with in-memory reductions; the
-design estimate is under 2 s on the 3,600-page relation-review scale fixture and 5-10 s at
-10^6 edges. Group 1 records the measured figure in the tasks.
+The census is one pass over the snapshot's nodes and edges with in-memory reductions.
+Measured on a synthetic vault (embeddings off, one WSL2 desktop): 0.19 s for 3,600 pages
+and 20,291 edges, and 5.25 s after inflating the same snapshot to 10^6 edges, with a
+process peak of 621 MB that includes building the graph. Both sit inside the design's
+estimates (under 2 s, and 5-10 s).
