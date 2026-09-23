@@ -1,8 +1,8 @@
 ## 1. Specification and supersession (S)
 
-- [ ] 1.1 Get an independent critic review of this change and the companion Substrate change, and resolve every blocking finding in design.md
-- [ ] 1.2 Add a one-line superseded banner to the proposal of every change listed as superseded in design.md; do not change their tasks or specs
-- [ ] 1.3 Close the superseded hosted PRs with a one-line reason, and keep their branches
+- [x] 1.1 Get an independent critic review of this change and the companion Substrate change, and resolve every blocking finding in design.md
+- [x] 1.2 Add a one-line superseded banner to the proposal of every change listed as superseded in design.md; do not change their tasks or specs
+- [x] 1.3 Close the superseded hosted PRs with a one-line reason, and keep their branches
 
 ## 2. Cloud cell mode and image (lane A)
 
