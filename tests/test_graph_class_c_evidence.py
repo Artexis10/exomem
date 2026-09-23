@@ -273,3 +273,38 @@ def test_an_incomplete_registry_history_is_class_b_not_c(
     assert epistemic_graph.is_publication_failure(raised.value) is True
     assert freshness.external_pending(vault) is False
     assert freshness.external_pending_epoch(vault) is None
+
+
+def test_a_page_with_a_decomposed_name_does_not_block_a_whole_vault_rebuild(
+    tmp_path: Path,
+) -> None:
+    """A page synced from macOS keeps its NFD name on a byte-exact file system.
+
+    The freshness identity and the graph's membership name it by the spelling
+    the walk found. The recall resolver read it through the governed reader,
+    which opened the NFKC spelling of that path -- a different, absent name on
+    ext4 or NTFS -- so the resolver never held the page, and every whole-vault
+    pass raised Class C "the supplied freshness identity did not name the
+    resolver bytes" until its budget ran out. One such page kept the graph
+    from ever publishing.
+    """
+    import unicodedata
+
+    from exomem import find_corpus
+
+    root = tmp_path / "vault"
+    (root / "Knowledge Base/Notes/Insights").mkdir(parents=True)
+    decomposed = unicodedata.normalize("NFD", "Knowledge Base/Notes/Insights/cafe-é.md")
+    (root / PAGE_A).write_text(_page("A", "A cites [[class-c-b]]."), encoding="utf-8")
+    (root / PAGE_B).write_text(_page("B", "B is a plain claim."), encoding="utf-8")
+    (root / decomposed).write_text(_page("Cafe", "Cafe cites [[class-c-a]]."), encoding="utf-8")
+    _seed_live_freshness(root)
+
+    assert find_corpus._read_page_bytes(root / decomposed, root) is not None, (
+        "the resolver's reader could not open the page the walk found"
+    )
+    EpistemicGraphIndex(root).rebuild_all()
+
+    assert EpistemicGraphIndex(root).available()
+    assert epistemic_graph.graph_drift(root) == []
+    assert not freshness.external_pending(root)
