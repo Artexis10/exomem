@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from exomem import command_surface, commands, query_log, usage
+from exomem.governance.principal import OWNER_AUDIENCE, RequestPrincipal, request_scope
 
 TURN = "Where did we leave the Harbor Lamp order for Project Alpha?"
 SESSION = "ep-" + "b2" * 16
@@ -55,6 +56,35 @@ def test_one_row_per_call_and_the_turn_is_never_in_it(vault: Path, activation_lo
     assert row["outcome"] in {"served", "abstained"}
     assert "duration_ms" in row
     assert isinstance(row["recent"], dict)
+
+
+@pytest.mark.parametrize(
+    "principal, kind, principal_hash",
+    [
+        (RequestPrincipal(audience_id=OWNER_AUDIENCE, surface="mcp"), "owner", "owner"),
+        (
+            RequestPrincipal(audience_id=OWNER_AUDIENCE, surface="mcp", remote_owner=True),
+            "owner-oauth",
+            "owner",
+        ),
+        (RequestPrincipal(audience_id="client-a", surface="mcp"), "principal", None),
+    ],
+    ids=["owner", "remote-owner", "principal"],
+)
+def test_the_row_says_which_kind_of_principal_activated(
+    vault: Path, activation_log: Path, principal, kind: str, principal_hash: str | None
+) -> None:
+    """The remote-owner hand-over: an owner reached through the host's remote
+    binding shares the owner's hash, so only the kind tells the two apart."""
+    with request_scope(principal):
+        query_log.log_activation_call(vault, packet={}, client="chatgpt")
+
+    [row] = _rows(activation_log)
+    assert row["principal_kind"] == kind
+    if principal_hash is not None:
+        assert row["principal_hash"] == principal_hash
+    else:
+        assert row["principal_hash"] not in (None, "owner")
 
 
 def test_abstentions_are_logged_with_their_reason(vault: Path, activation_log: Path) -> None:

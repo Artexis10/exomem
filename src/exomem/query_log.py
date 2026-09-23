@@ -394,8 +394,9 @@ def log_activation_call(
     """Append one host-local row for an activate_context call. Best-effort.
 
     Recorded: the door, the observed MCP client (which wins for any use) and
-    the declared label, the transport, a vault-keyed session hash, a principal
-    hash, the outcome and abstention reason, how the packet was carried, the
+    the declared label, the transport, a vault-keyed session hash, a vault
+    hash, a principal hash and the principal's kind (`owner`, `owner-oauth`,
+    `principal` or `unresolved`), the outcome and abstention reason, how the packet was carried, the
     resolved anchor refs (omitted in content-private hosted mode), the recent
     entries counted per reason, continuity, and whether `episode_due` rode
     along. Never recorded: the turn or any hash of it, unit, statement or
@@ -438,6 +439,7 @@ def log_activation_call(
                 if audience == OWNER_AUDIENCE
                 else hashlib.sha256(audience.encode("utf-8", "surrogatepass")).hexdigest()[:16]
             ),
+            "principal_kind": principal.principal_kind,
             "abstention_reason": abstention.get("reason") if body.get("abstained") else None,
             "carried_by": generation.get("carried_by"),
             "recent": recent,
