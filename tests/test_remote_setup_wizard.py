@@ -12,6 +12,7 @@ performs. See the module docstring and docs/remote-quickstart.md.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -650,3 +651,51 @@ def test_setup_remote_owner_flags_are_exclusive() -> None:
     with pytest.raises(SystemExit) as e:
         main([*_OWNER_FLAG_BASE, "--remote-owner", "--no-remote-owner"])
     assert e.value.code == 2
+
+
+def test_parse_env_reads_export_prefixed_lines_like_dotenv() -> None:
+    parsed = rsw.parse_env("export A=1\n  export   B=2\nexporter=3\n# export C=4\n")
+    assert parsed == {"A": "1", "B": "2", "exporter": "3"}
+
+
+def test_patch_env_replaces_and_removes_export_prefixed_lines() -> None:
+    text = "KEEP=1\nexport EXOMEM_OWNER_OAUTH_SUBJECT=github:1234\nexport OTHER=x\n"
+    assert rsw.patch_env(text, {OWNER_KEY: None}) == "KEEP=1\nexport OTHER=x\n"
+    assert rsw.patch_env(text, {OWNER_KEY: "github:5678"}) == (
+        "KEEP=1\nexport EXOMEM_OWNER_OAUTH_SUBJECT=github:5678\nexport OTHER=x\n"
+    )
+
+
+def test_no_remote_owner_removes_an_export_prefixed_binding(tmp_path: Path) -> None:
+    """Removal must hold for python-dotenv too, which reads `export KEY=`."""
+    from dotenv import dotenv_values
+
+    env_path = tmp_path / ".env"
+    env_path.write_text(f"KEEP=1\nexport {OWNER_KEY}=github:1234\n", encoding="utf-8")
+    code, _, _ = _run(env_path, remote_owner=False)
+    assert code == 0
+    assert OWNER_KEY not in env_path.read_text(encoding="utf-8")
+    assert OWNER_KEY not in dotenv_values(env_path)
+    assert dotenv_values(env_path)["KEEP"] == "1"
+
+
+def test_the_doctor_gate_does_not_see_a_removed_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A binding inherited from the shell or service must not outlive its
+    removal from the file when the wizard's own doctor gate runs."""
+    from exomem.governance.principal import remote_owner_binding_state
+
+    env_path = tmp_path / ".env"
+    env_path.write_text(f"{OWNER_KEY}=github:1234\n", encoding="utf-8")
+    monkeypatch.setenv(OWNER_KEY, "github:1234")
+    seen: dict[str, str] = {}
+
+    def doctor(**_kwargs):
+        seen["state"] = remote_owner_binding_state()
+        return SimpleNamespace(success=True, profile="remote", checks=[])
+
+    code, _, _ = _run(env_path, remote_owner=False, doctor_fn=doctor, load_env_fn=rsw._load_env)
+    assert code == 0
+    assert seen["state"] == "unset"
+    assert OWNER_KEY not in os.environ

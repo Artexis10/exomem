@@ -137,19 +137,37 @@ def callback_url(base_url: str) -> str:
     return f"{base_url}/auth/callback"
 
 
+def _env_line_key(line: str) -> tuple[str | None, str]:
+    """`(KEY, prefix)` for an assignment line, else `(None, "")`.
+
+    A leading `export ` is part of the line's syntax, not of the key, exactly
+    as python-dotenv (which the service uses to load the file) reads it.
+    """
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        return None, ""
+    prefix = ""
+    head, separator, rest = stripped.partition(" ")
+    if head == "export" and separator:
+        prefix = "export "
+        stripped = rest.lstrip()
+    key = stripped.partition("=")[0].strip()
+    return (key or None), prefix
+
+
 def parse_env(text: str) -> dict[str, str]:
     """Parse `.env` text into a {KEY: value} dict (last write wins).
 
-    Ignores blank lines, comments, and lines without `=`. Values are taken
-    verbatim after the first `=` (no quote stripping — the wizard never quotes).
+    Ignores blank lines, comments, and lines without `=`. A leading `export `
+    is accepted, as python-dotenv accepts it. Values are taken verbatim after
+    the first `=` (no quote stripping — the wizard never quotes).
     """
     out: dict[str, str] = {}
     for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
+        key, _prefix = _env_line_key(line)
+        if key is None:
             continue
-        key, _, value = stripped.partition("=")
-        out[key.strip()] = value.strip()
+        out[key] = line.partition("=")[2].strip()
     return out
 
 
@@ -158,7 +176,8 @@ def patch_env(existing: str, updates: dict[str, str | None]) -> str:
 
     An existing `KEY=` line is replaced IN PLACE (position, and any surrounding
     comments/blank lines, preserved); a new key is appended. A `None` value
-    removes every `KEY=` line instead. Comments and keys the wizard doesn't own
+    removes every `KEY=` line instead. `export KEY=` lines count as `KEY` and
+    keep their prefix when replaced. Comments and keys the wizard doesn't own
     are never touched. Always returns text ending in a single newline (empty
     input with no updates returns "").
     """
@@ -166,16 +185,11 @@ def patch_env(existing: str, updates: dict[str, str | None]) -> str:
     removed = {key for key, value in updates.items() if value is None}
     out: list[str] = []
     for line in existing.splitlines():
-        stripped = line.strip()
-        key = (
-            stripped.partition("=")[0].strip()
-            if stripped and not stripped.startswith("#") and "=" in stripped
-            else None
-        )
+        key, prefix = _env_line_key(line)
         if key is not None and key in removed:
             continue
         if key is not None and key in remaining:
-            out.append(f"{key}={remaining.pop(key)}")
+            out.append(f"{prefix}{key}={remaining.pop(key)}")
         else:
             out.append(line)
     # Append any keys not already present, in the caller's insertion order.
@@ -520,7 +534,11 @@ def run_remote_setup(
         pass
     report("env", f"[done] wrote {env_path}")
 
-    # 7. Reload the freshly-written .env, then run doctor as a HARD gate.
+    # 7. Reload the freshly-written .env, then run doctor as a HARD gate. A key
+    # this run removed must not survive in the process environment (inherited
+    # from the shell or service), or the gate would judge the old value.
+    for removed_key in [key for key, value in updates.items() if value is None]:
+        os.environ.pop(removed_key, None)
     load_env_fn(env_path)
     dr = doctor_fn(vault=vault_path, profile="remote", probe=probe)
     if dr.success:
