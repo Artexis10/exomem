@@ -480,3 +480,150 @@ def test_non_ascii_bearer_is_refused_on_rest(vault: Path, monkeypatch: pytest.Mo
     )
 
     assert response.status_code == 401, response.text
+
+
+# ---------------------------------------------------------------------------
+# Direct page reads decide release before they decode
+# ---------------------------------------------------------------------------
+
+UNDECODABLE = "Knowledge Base/Notes/Patterns/undecodable-note.md"
+PAGE_BYTES = b"---\ntype: pattern\n---\nwithheld body\n"
+NON_UTF8_BYTES = b"AB\xfeCD"
+
+
+def _cf_rest_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "synthetic-rest-key-0123456789")
+    monkeypatch.setenv("EXOMEM_CF_ACCESS_TEAM_DOMAIN", "team.cloudflareaccess.example")
+    monkeypatch.setenv("EXOMEM_CF_ACCESS_AUD", "synthetic-aud")
+    monkeypatch.setattr("exomem.cf_access.make_jwks_client", lambda _team: object())
+    monkeypatch.setattr(
+        "exomem.cf_access.verified_claims",
+        lambda token, **_kw: {"iss": CF_ISSUER, "sub": CF_SUBJECT} if token == "cf-jwt" else None,
+    )
+    return _client()
+
+
+def _three_states(vault: Path, read) -> list:
+    """The same requested path, withheld as a page, withheld as undecodable
+    bytes, and absent."""
+    target = vault / UNDECODABLE
+    answers = []
+    for data in (PAGE_BYTES, NON_UTF8_BYTES, None):
+        if data is None:
+            target.unlink()
+        else:
+            target.write_bytes(data)
+        _reset_caches()
+        answers.append(read())
+    return answers
+
+
+def test_rest_read_memory_refuses_a_withheld_undecodable_file_like_a_missing_one(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _withhold(vault, audience=CF_AUDIENCE)
+    client = _cf_rest_client(monkeypatch)
+
+    def read():
+        response = client.post(
+            "/api/read_memory",
+            json={"path": UNDECODABLE},
+            headers={"Cf-Access-Jwt-Assertion": "cf-jwt"},
+        )
+        return response.status_code, response.content
+
+    page, undecodable, missing = _three_states(vault, read)
+
+    assert missing[0] == 404
+    assert page == undecodable == missing
+    assert b"0xfe" not in undecodable[1]
+
+
+def _refusal(call) -> str:
+    try:
+        call()
+    except ValueError as exc:
+        return str(exc)
+    raise AssertionError("the read returned instead of refusing")
+
+
+@pytest.mark.parametrize("door", ["read_memory", "get", "fetch"])
+def test_every_direct_read_door_refuses_withheld_undecodable_like_missing(
+    vault: Path, door: str
+) -> None:
+    _withhold(vault, audience=CF_AUDIENCE)
+    leaf = {
+        "read_memory": lambda: commands.op_read_memory(vault, path=UNDECODABLE),
+        "get": lambda: commands.op_get(vault, path=UNDECODABLE),
+        "fetch": lambda: commands.op_fetch(vault, id=UNDECODABLE),
+    }[door]
+
+    def read():
+        with principal_module.request_scope(_cf_access_principal()):
+            return _refusal(leaf)
+
+    page, undecodable, missing = _three_states(vault, read)
+
+    assert missing.startswith("NOT_FOUND:")
+    assert page == undecodable == missing
+
+
+def test_exact_unit_read_refuses_withheld_undecodable_like_missing(vault: Path) -> None:
+    _withhold(vault, audience=CF_AUDIENCE)
+    target = vault / UNDECODABLE
+
+    def read():
+        with principal_module.request_scope(_cf_access_principal()):
+            return _refusal(
+                lambda: commands.op_read_memory(vault, path=UNDECODABLE, unit_ref="unit:any")
+            )
+
+    target.write_bytes(NON_UTF8_BYTES)
+    undecodable = read()
+    target.unlink()
+    missing = read()
+
+    assert undecodable == missing
+
+
+@pytest.mark.parametrize("helper", ["get_page", "get_frontmatter"])
+def test_page_helpers_refuse_withheld_undecodable_like_missing(vault: Path, helper: str) -> None:
+    from exomem import get_frontmatter, get_page
+
+    _withhold(vault, audience=CF_AUDIENCE)
+    call = {
+        "get_page": lambda: get_page.get_page(vault, path=UNDECODABLE),
+        "get_frontmatter": lambda: get_frontmatter.get_frontmatter(vault, path=UNDECODABLE),
+    }[helper]
+    target = vault / UNDECODABLE
+
+    def read():
+        with principal_module.request_scope(_cf_access_principal()):
+            try:
+                call()
+            except (get_page.GetError, get_frontmatter.GetFrontmatterError) as exc:
+                return exc.code, exc.reason
+        raise AssertionError("the helper returned instead of refusing")
+
+    target.write_bytes(NON_UTF8_BYTES)
+    undecodable = read()
+    target.unlink()
+    _reset_caches()
+    missing = read()
+
+    assert missing[0] == "NOT_FOUND"
+    assert undecodable == missing
+
+
+def test_a_released_undecodable_file_is_unreadable_without_echoing_its_bytes(vault: Path) -> None:
+    """Released to the caller, the file is still reported unreadable — but the
+    reason names no byte value or offset."""
+    target = vault / UNDECODABLE
+    target.write_bytes(NON_UTF8_BYTES)
+
+    with principal_module.request_scope(principal_module.owner_principal(surface="rest")):
+        refusal = _refusal(lambda: commands.op_read_memory(vault, path=UNDECODABLE))
+
+    assert refusal.startswith("UNREADABLE:")
+    assert "0xfe" not in refusal
+    assert "position" not in refusal
