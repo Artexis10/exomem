@@ -866,12 +866,68 @@ def rerank_pairs(query: str, passages: list[str]) -> np.ndarray:
     return scores.astype(np.float32, copy=False)
 
 
+#: Character cap for a paragraph written mostly without spaces between words
+#: (Han, kana, Hangul, Thai, ...). The whitespace-word cap cannot see inside such
+#: text, so it is capped by characters instead: about 350-500 subword tokens of a
+#: multilingual tokenizer, under the 512-token encoder limit.
+MAX_UNSPACED_CHARS_PER_CHUNK = 500
+_SENTENCE_END_MARKS = frozenset("。！？.!?")
+
+
+def _is_mostly_unspaced(paragraph: str) -> bool:
+    """True when most token characters (letters, digits, marks) are scriptio continua."""
+    import unicodedata
+
+    from . import text_scripts
+
+    token_chars = 0
+    unspaced = 0
+    for character in paragraph:
+        if unicodedata.category(character)[0] in "LNM":
+            token_chars += 1
+            unspaced += text_scripts.is_scriptio_continua(character)
+    return unspaced * 2 > token_chars
+
+
+def _split_unspaced(paragraph: str) -> list[str]:
+    """Pack sentences into pieces of at most `MAX_UNSPACED_CHARS_PER_CHUNK` characters.
+
+    A sentence ends after one of `。！？.!?`. A sentence longer than the cap is cut
+    hard at the cap. Pieces are stripped of surrounding whitespace.
+    """
+    limit = MAX_UNSPACED_CHARS_PER_CHUNK
+    sentences: list[str] = []
+    start = 0
+    for at, character in enumerate(paragraph):
+        if character in _SENTENCE_END_MARKS:
+            sentences.append(paragraph[start : at + 1])
+            start = at + 1
+    if start < len(paragraph):
+        sentences.append(paragraph[start:])
+    pieces: list[str] = []
+    current = ""
+    for sentence in sentences:
+        if len(current) + len(sentence) > limit and current:
+            pieces.append(current)
+            current = ""
+        while len(sentence) > limit:
+            pieces.append(sentence[:limit])
+            sentence = sentence[limit:]
+        current += sentence
+    if current:
+        pieces.append(current)
+    return [piece.strip() for piece in pieces if piece.strip()]
+
+
 def chunk_text(title: str, body: str) -> list[str]:
     """Paragraph-split body with title prepended for retrieval context.
 
     - Split on blank-line paragraph boundaries.
     - Drop empty/whitespace-only chunks.
     - Truncate overlong chunks at word boundary so the tokenizer doesn't lop.
+    - A paragraph written mostly without spaces between words is split instead,
+      into pieces of at most `MAX_UNSPACED_CHARS_PER_CHUNK` characters at sentence
+      ends, because the word cap cannot see inside it.
     - Always prepend the title and a blank line so embeddings of orphan paragraphs still
       carry the document's topic.
     """
@@ -882,6 +938,9 @@ def chunk_text(title: str, body: str) -> list[str]:
     paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
     out: list[str] = []
     for p in paragraphs:
+        if len(p) > MAX_UNSPACED_CHARS_PER_CHUNK and _is_mostly_unspaced(p):
+            out.extend(f"{title}\n\n{piece}" if title else piece for piece in _split_unspaced(p))
+            continue
         words = p.split()
         if len(words) > MAX_WORDS_PER_CHUNK:
             p = " ".join(words[:MAX_WORDS_PER_CHUNK])
