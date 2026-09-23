@@ -261,3 +261,98 @@ def test_stale_age_threshold_is_shared_with_vault_module(tmp_path: Path) -> None
     assert just_fresh.exists()
     assert just_stale in removed
     assert not just_stale.exists()
+
+
+def _sqlite_temp(path: Path) -> Path:
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("CREATE TABLE t(x)")
+    conn.execute("INSERT INTO t VALUES (1)")
+    conn.commit()
+    conn.close()
+    for suffix in ("-wal", "-shm"):
+        companion = path.with_name(path.name + suffix)
+        if not companion.exists():
+            companion.write_bytes(b"")
+    return path
+
+
+def test_rebuild_start_sweeps_orphan_temps_older_than_ten_minutes(tmp_path: Path) -> None:
+    """A killed rebuild leaves a whole catalogue behind as a temp. The next
+    rebuild removes temps (and their WAL/SHM) untouched for ten minutes and
+    not open, and keeps a fresh temp and one another connection still holds."""
+    import sqlite3
+
+    note = tmp_path / "Knowledge Base" / "note.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# Note\n\nalpha body\n", encoding="utf-8")
+    assert lexstore.search_bm25(tmp_path, "alpha", k=3, scope="kb") is not None
+
+    orphan = _sqlite_temp(_lexical_temp(tmp_path))
+    fresh = _sqlite_temp(_lexical_temp(tmp_path))
+    held = _sqlite_temp(_lexical_temp(tmp_path))
+    walless_base = _lexical_temp(tmp_path)
+    walless = walless_base.with_name(walless_base.name + "-wal")
+    walless.write_bytes(b"")
+    for base in (orphan, held):
+        for member in (base, base.with_name(base.name + "-wal"), base.with_name(base.name + "-shm")):
+            _age_file(member, minutes_ago=11)
+    _age_file(walless, minutes_ago=11)
+    holder = sqlite3.connect(held)
+    holder.execute("PRAGMA journal_mode=WAL")
+    holder.execute("SELECT count(*) FROM t").fetchone()
+    try:
+        assert lexstore.get_store(tmp_path).rebuild_atomic()
+    finally:
+        holder.close()
+
+    assert not orphan.exists()
+    assert not orphan.with_name(orphan.name + "-wal").exists()
+    assert not orphan.with_name(orphan.name + "-shm").exists()
+    assert not walless.exists()
+    assert fresh.exists()
+    assert held.exists()
+
+
+def test_the_sweep_never_removes_a_temp_its_builder_still_holds(tmp_path: Path, monkeypatch) -> None:
+    """The builder closes its connection after the WAL fold and then re-walks
+    the source; a stall there (or a clock jump) can make its temp look old and
+    unopened. The builder's advisory lock on the temp, held for the whole
+    build, keeps the sweep off it."""
+    import threading
+
+    note = tmp_path / "Knowledge Base" / "note.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# Note\n\nalpha body\n", encoding="utf-8")
+    assert lexstore.search_bm25(tmp_path, "alpha", k=3, scope="kb") is not None
+    store = lexstore.get_store(tmp_path)
+    original = type(store)._walk_entries
+    stalled, resume = threading.Event(), threading.Event()
+    calls = {"n": 0}
+
+    def walk_then_stall(self, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            stalled.set()
+            resume.wait(30)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(store), "_walk_entries", walk_then_stall)
+    outcome = {}
+    builder = threading.Thread(target=lambda: outcome.setdefault("published", store.rebuild_atomic()))
+    builder.start()
+    try:
+        assert stalled.wait(30), "the build never reached its post-fold re-walk"
+        live = lexstore.lexical_path(tmp_path)
+        temps = sorted(live.parent.glob(f"{live.name}.rebuild-*.tmp*"))
+        assert temps
+        for member in temps:
+            _age_file(member, minutes_ago=11)
+        assert store._sweep_orphan_rebuild_temps() == []
+        assert all(member.exists() for member in temps)
+    finally:
+        resume.set()
+        builder.join(60)
+    assert outcome.get("published") is True

@@ -220,3 +220,167 @@ def test_content_word_majority_retains_against_paragraph(degraded_vault: Path) -
     )
     assert hits
     assert hits[0].path.endswith("greenhouse-controller.md")
+
+
+# ---------------------------------------------------------------- tokenizer v2
+
+
+_MULTILINGUAL_PAGES: dict[str, tuple[str, str]] = {
+    "Notes/tower-height.md": (
+        "展望台の記録",
+        "東京タワーの高さは三百三十三メートルです。展望台は二つあります。",
+    ),
+    "Notes/meeting-minutes.md": (
+        "議事録",
+        "会議の議事録を共有しました。次回は来週の水曜日です。",
+    ),
+    "Notes/delivery-check.md": (
+        "Lieferung",
+        "Zölvarn prüft die Lieferung am Montag.",
+    ),
+    "Notes/budget.md": (
+        "Budget",
+        "Travel and hardware spend stayed within plan.",
+    ),
+}
+
+
+@pytest.fixture
+def multilingual_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    root = tmp_path / "vault"
+    for rel, (title, body) in _MULTILINGUAL_PAGES.items():
+        page_path = root / kb_dirname() / rel
+        page_path.parent.mkdir(parents=True, exist_ok=True)
+        page_path.write_text(
+            f"---\ntype: note\ntitle: {title}\nupdated: 2026-09-01\n---\n\n# {title}\n\n{body}\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(root))
+    find_module.clear_cache()
+    embeddings_module.clear_embedding_indexes()
+    return root
+
+
+def test_japanese_question_retains_its_page_by_a_bigram_majority(multilingual_vault: Path) -> None:
+    """An unspaced run is one query word, present when most of its bigrams are:
+    the particles and question words of a Japanese question need not appear."""
+    hits = find_module.find(multilingual_vault, query="東京タワーの高さは何メートル")
+    assert hits
+    assert hits[0].path.endswith("tower-height.md")
+    assert "東京タワー" in hits[0].excerpt
+
+
+def test_japanese_query_sharing_one_bigram_is_vetoed(multilingual_vault: Path) -> None:
+    """東京 alone of 東京の天気予報 is one bigram of six: BM25 nominates the
+    tower page, and the majority rule drops it."""
+    assert find_module.find(multilingual_vault, query="東京の天気予報") == []
+
+
+def test_accent_free_query_retains_the_accented_page(multilingual_vault: Path) -> None:
+    hits = find_module.find(multilingual_vault, query="zolvarn lieferung")
+    assert hits
+    assert hits[0].path.endswith("delivery-check.md")
+    assert "Zölvarn" in hits[0].excerpt
+
+
+def test_cjk_page_passes_the_strict_veto_when_the_vector_lane_is_live(
+    multilingual_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = find_module.find_candidates.collect_candidates
+    other_rel = f"{kb_dirname()}/Notes/budget.md"
+
+    def _with_active_vector_lane(vault_root, **kwargs):
+        bundle = real(vault_root, **kwargs)
+        bundle.vector_ranking = [other_rel]
+        return bundle
+
+    monkeypatch.setattr(
+        find_module.find_candidates, "collect_candidates", _with_active_vector_lane
+    )
+    hits = find_module.find(multilingual_vault, query="議事録 共有")
+    assert any(hit.path.endswith("meeting-minutes.md") for hit in hits)
+    vetoed = find_module.find(multilingual_vault, query="議事録 天気予報")
+    assert not any(hit.path.endswith("meeting-minutes.md") for hit in vetoed)
+
+
+def test_query_word_groups_count_an_unspaced_run_as_one_word() -> None:
+    from exomem import find_policy
+
+    groups = find_policy.query_word_stem_groups(
+        "the drift-index 東京タワー Python入門 Zölvarn 抹茶の用意 についてですか"
+    )
+    assert [(sorted(stems), function, required) for stems, function, required in groups] == [
+        (["the"], True, 1),
+        (["drift", "index"], False, 2),
+        (sorted(["東京", "京タ", "タワ", "ワー"]), False, 3),
+        (["python"], False, 1),
+        (["入門"], False, 1),
+        (["zölvarn"], False, 1),
+        # A run's content is its bigrams without hiragana...
+        (sorted(["抹茶", "用意"]), False, 2),
+        # ...unless every bigram holds hiragana.
+        (sorted(["につ", "つい", "いて", "てで", "です", "すか"]), False, 4),
+    ]
+    groups = groups[:6]
+    present, total, content = find_policy.stem_word_coverage(
+        frozenset({"the", "東京", "京タ", "タワ", "python", "zolvarn"}), groups
+    )
+    assert (present, total, content) == (3, 6, 2)
+
+
+def test_stem_gates_read_cjk_and_folded_query_words(multilingual_vault: Path) -> None:
+    from exomem import find_results
+
+    tower = find_module._CACHE.get(
+        multilingual_vault / kb_dirname() / "Notes/tower-height.md", multilingual_vault
+    )
+    delivery = find_module._CACHE.get(
+        multilingual_vault / kb_dirname() / "Notes/delivery-check.md", multilingual_vault
+    )
+    assert find_results.stem_tokens_present(tower, "東京タワーの高さ")
+    assert not find_results.stem_tokens_present(tower, "東京の天気予報")
+    assert find_results.stem_tokens_present(delivery, "zolvarn lieferung")
+    assert find_module._any_stem_present(tower, "タワー")
+    assert find_module._any_stem_present(delivery, "zolvarn")
+    minutes = find_module._CACHE.get(
+        multilingual_vault / kb_dirname() / "Notes/meeting-minutes.md", multilingual_vault
+    )
+    # 議事, 事録 and 共有 are all this query's content; its particles are not.
+    assert find_results.stem_tokens_present(minutes, "議事録はいつ共有")
+
+    from types import SimpleNamespace
+
+    long_body = "静かな記録。" * 60 + "東京タワーの高さは三百メートル。" + "別の話題。" * 60
+    excerpt = find_results.stem_anchored_excerpt(SimpleNamespace(body=long_body), "高さ")
+    assert "東京タワーの高さ" in excerpt
+    folded_body = "x " * 200 + "Zölvarn prüft die Lieferung." + " y" * 200
+    excerpt = find_results.stem_anchored_excerpt(SimpleNamespace(body=folded_body), "zolvarn")
+    assert "Zölvarn prüft" in excerpt
+
+
+def test_a_japanese_x_no_y_query_retains_its_page(multilingual_vault: Path) -> None:
+    """議事録はいつ共有 shares every content bigram with the minutes page and
+    few particle bigrams: a majority of ALL bigrams would drop it."""
+    hits = find_module.find(multilingual_vault, query="議事録はいつ共有")
+    assert hits and hits[0].path.endswith("meeting-minutes.md")
+
+
+def test_a_japanese_particle_only_query_finds_nothing(multilingual_vault: Path) -> None:
+    for query in ("についてですか", "はいつですか", "それはなんですか"):
+        assert find_module.find(multilingual_vault, query=query) == [], query
+
+
+def test_typographic_english_query_words_pass_the_stem_gate() -> None:
+    """Intended change: under v1 a query word with a curly apostrophe or an em
+    dash was stemmed whole and never matched; v2 splits it at the punctuation
+    exactly as an ASCII apostrophe or hyphen always split."""
+    from types import SimpleNamespace
+
+    from exomem import bm25, find_results
+
+    page = SimpleNamespace(
+        stem_set=frozenset(bm25.tokenize("What's on the harbor crane schedule? Don't wait."))
+    )
+    for word in ("what\u2019s", "don\u2019t", "harbor\u2014crane"):
+        assert find_results.stem_tokens_present(page, word), word
+    assert not find_results.stem_tokens_present(page, "harbor\u2014dredger")

@@ -2267,3 +2267,60 @@ def test_a_row_token_the_turn_never_reaches_is_stale(carry_vault: Path) -> None:
     )
 
     assert packet["generation"]["continuity"] == "stale"
+
+
+# --------------------------------------------------------------------------- #
+# Units: one word or one unspaced run is one piece of a phrase
+# --------------------------------------------------------------------------- #
+
+
+def test_rarity_is_read_on_the_surface_form() -> None:
+    """The turn's stems are its query-side stems: an accented word is its
+    surface only, never also its folded index variant."""
+    assert working_set_runtime.content_stems("Jätka plaan") == ("jätka", "plaan")
+
+
+def test_an_accented_word_never_pairs_with_itself() -> None:
+    """A word and its folded variant are one word. Paired, "Jätka." would be
+    a one-word phrase naming whatever page says jätka (step-4 T4)."""
+    assert working_set_runtime.adjacent_rare_pairs("Jätka.", ("jätka", "jatka")) == ()
+
+
+def test_one_unspaced_run_never_pairs_with_itself() -> None:
+    """Every bigram of 東京タワーの高さ sits in one run: one unit, no phrase."""
+    run = "東京タワーの高さ"
+    bigrams = tuple(working_set_runtime.content_stems(run))
+    assert len(bigrams) > 2
+    assert working_set_runtime.adjacent_rare_pairs(run, bigrams) == ()
+
+
+def test_the_parts_of_a_joined_accented_compound_still_pair() -> None:
+    assert working_set_runtime.adjacent_rare_pairs(
+        "what about the jätka-plaan window", ("jätka", "plaan")
+    ) == (("jätka", "plaan"),)
+
+
+@pytest.mark.parametrize(
+    ("turn", "page_line"),
+    [
+        ("Jätka.", "Otsus: jätka projekti uue eelarvega."),
+        (
+            "東京タワーの高さ",
+            "東京タワーの高さは三百メートルです。",
+        ),
+    ],
+)
+def test_a_single_word_or_run_never_carries_a_page(vault: Path, turn: str, page_line: str) -> None:
+    """End to end: a lone accented word or one Japanese run that appears on
+    exactly one page of a measurable corpus is not a phrase naming it."""
+    _write(
+        vault / "Knowledge Base" / "Notes" / "Research" / "lone-word-page.md",
+        "---\ntype: research-note\nstatus: active\nupdated: 2026-09-10\n---\n\n"
+        f"# Lone word page\n\n## Summary\n\n- [decision] {page_line} ^lw-1\n",
+    )
+    _seed_proximity_corpus(vault)
+
+    hits, state = working_set_runtime.carry_candidates(vault, turn)
+
+    assert state == "available"
+    assert hits == (), hits
