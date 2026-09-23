@@ -976,3 +976,40 @@ def test_a_drain_under_recorded_movement_still_lands_the_rows_it_proved(
 
     assert deferred_index.list_graph_paths(vault) == []
     assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
+
+
+def test_a_late_refresh_whose_generation_a_drain_acknowledged_leaves_the_graph_readable(
+    vault: Path,
+) -> None:
+    """A write's own refresh can arrive after a drain already converged its batch.
+
+    The drain proved the batch's paths and acknowledged its generation, so the
+    refresh finds the acknowledgement at its own generation rather than the one
+    before it. That is not a lineage gap: nothing is owed. Falling back there
+    withdrew the marker behind a barrier with nothing queued, and the drain
+    daemon paid a whole-vault recovery for a graph that was current (probe B
+    at five writers).
+    """
+    # The batch commits without its post-commit dispatch, which is the refresh
+    # this test runs late; the registry learns of it the way the fan-out would.
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(vault / PAGE_A, _page("A", "A is revised against [[queue-b]]."))],
+        vault_root=vault,
+        post_commit_fanout=False,
+    )
+    _seed_live_freshness(vault)
+    checkpoint = graph_sync.read_checkpoint(vault)
+    assert checkpoint is not None
+    index_sync.drain_graph_work(vault)
+    assert _acknowledged(vault) == int(checkpoint.generation)
+    assert EpistemicGraphIndex(vault).available()
+
+    report = EpistemicGraphIndex(vault).refresh_paths(
+        [vault / PAGE_A], graph_checkpoint=checkpoint
+    )
+
+    assert not report.get("deferred"), report
+    assert EpistemicGraphIndex(vault).available(), (
+        "a refresh for an already-acknowledged generation withdrew the marker"
+    )
+    assert not EpistemicGraphIndex(vault).reads_suspended()
