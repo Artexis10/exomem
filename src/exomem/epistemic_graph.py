@@ -5287,7 +5287,9 @@ class EpistemicGraphIndex:
         Publication is allowed to fail. The indexing is already durable in the
         sidecar, so a refused marker costs a later republish, not the work; and
         a write that landed mid-drain has enqueued its own receipt at a new
-        revision, which this drain's compare-and-swap clear cannot retire.
+        revision, which this drain's compare-and-swap clear cannot retire. Only
+        a page this pass indexed moving under it rolls the pass back; movement
+        elsewhere keeps the proven rows and withholds the publication.
         """
         report: dict[str, Any] = {
             "indexed_files": 0,
@@ -5352,12 +5354,20 @@ class EpistemicGraphIndex:
                 # `GRAPH_SYNC_LINEAGE_CONFLICT`, raised at the *next* write
                 # rather than here.
                 nonlocal published
+                if not self._source_versions_current(indexed_versions):
+                    # A page this pass indexed moved under it: those rows are
+                    # stale, so nothing here may land.
+                    raise _DrainPublicationMoved
                 if not (
                     _incremental_projection_identity(self.vault_root) == before
-                    and self._source_versions_current(indexed_versions)
                     and freshness.recall_checkpoint(self.vault_root, "vault") == checkpoint
                 ):
-                    raise _DrainPublicationMoved
+                    # The vault moved elsewhere under the pass. Every row it
+                    # wrote is proven against its own bytes, so the rows land
+                    # and their receipts retire; the movement queued its own.
+                    # The marker, lineage and acknowledgement describe the whole
+                    # projection, and wait for a drain it holds still for.
+                    return
                 self._publish_available_marker_in_transaction(
                     conn,
                     before,
