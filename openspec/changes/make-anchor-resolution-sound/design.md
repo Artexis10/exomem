@@ -71,6 +71,22 @@ RESOLVE an anchor, and this is not one: it decides whether a turn that resolved 
 served a named page's own material or nothing at all, which is a choice between serving and
 abstaining rather than between two senses.
 
+*Further amended by `close-memory-loop` U7, agent-picked pages.* The agent may
+also name that same page itself: `anchor` accepts an eligible ref — this same
+test, not raw material, not navigation, current — even when it names no row
+of the activation index. This is not a fourth resolved case above it:
+`agent_choice` is already one of the two kinds this rule lets decide alone
+(with `exact_alias`), so an agent-picked page gets exactly the SAME
+`resolved`/`agent_choice` outcome a resolved index anchor already gets —
+never `retrieval_carried`, never a status invented for it. Unlike a
+retrieval-carried page it DOES mint a continuity token, since minting keys on
+`resolved` status alone and this status is `resolved`. A ref naming neither
+an index row nor an eligible page, or one this audience may not see, is
+refused identically to an unknown or withheld one, canonicalised and checked
+against the lexical catalogue's own row before any file is read, so a
+non-canonical spelling of an ineligible page cannot reach the compile at
+several times an unknown ref's cost on its way to the identical refusal.
+
 ### 2. `retrieval` is about the anchor's own page
 The neighbourhood clause is removed. It was written so that a hub whose members are
 recall hits would be reached; on a dense vault it reaches every hub for every turn. A hub
