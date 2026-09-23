@@ -746,3 +746,38 @@ def test_a_repeated_edit_encodes_only_the_paragraphs_it_changed(
         "the second edit re-encoded paragraphs the first edit had already encoded: "
         f"{[text for text in counting_encoder if not text.endswith(second)]}"
     )
+
+
+def test_sweep_reused_counts_only_published_rows_and_recalled_the_hand_off(
+    vault: Path, counting_encoder: list[str]
+) -> None:
+    """The advisory span means by `reused` what the embedding span means: page rows."""
+    from exomem import call_spans
+
+    embeddings.get_embedding_index(vault).rebuild_all()
+    body = "\n\n".join(_REUSE_PARAGRAPHS)
+    written = note_module.note(
+        vault, content=body, note_type="insight", title="Reused probe", status="draft"
+    ).as_dict()
+    draft = "\n\n".join([*_REUSE_PARAGRAPHS, "A paragraph the commit never saw."])
+    corpus_aware._best_cosine_per_file(
+        vault, title="Reused probe", body=draft, published_path=written["path"]
+    )
+    counting_encoder.clear()
+
+    handle = call_spans.MCP_CALL_TOKEN.set("u5d-sweep-reused")
+    try:
+        corpus_aware._best_cosine_per_file(
+            vault, title="Reused probe", body=draft, published_path=written["path"]
+        )
+        spans = {span["name"]: span for span in call_spans.pop_call_spans("u5d-sweep-reused")}
+    finally:
+        call_spans.MCP_CALL_TOKEN.reset(handle)
+
+    assert counting_encoder == []
+    assert spans["advisory.best_cosine"]["fields"] == {
+        "texts": 0,
+        "chars": 0,
+        "reused": len(_REUSE_PARAGRAPHS),
+        "recalled": 1,
+    }

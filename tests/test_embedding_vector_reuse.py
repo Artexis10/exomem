@@ -470,3 +470,19 @@ def test_a_remembered_long_text_does_not_pin_its_own_bytes(live) -> None:
     assert held < 1_000_000, f"16 remembered 1 MB texts still hold {held / 2**20:.1f} MiB"
     probe = "07" + "y" * 1_000_000
     assert set(embeddings.recall_passage_vectors([probe], stamp=stamp)) == {probe}
+
+
+def test_reused_counts_only_the_page_s_own_rows_on_both_spans(live) -> None:
+    """`reused` is a page-row count on every span; the hand-off is `recalled`, disjoint."""
+    _vault, _target, encoder = live
+    stamp = embeddings.passage_memo_stamp()
+    embeddings.remember_passage_vectors(["beta"], encoder(["beta"]), stamp=stamp)
+    stored = {"alpha": encoder(["alpha"])[0]}
+    handle = call_spans.MCP_CALL_TOKEN.set("u5d-reused-meaning")
+    try:
+        embeddings._embed_live_chunks_reusing(["alpha", "beta", "gamma"], stored)
+        spans = {span["name"]: span for span in call_spans.pop_call_spans("u5d-reused-meaning")}
+    finally:
+        call_spans.MCP_CALL_TOKEN.reset(handle)
+
+    assert spans["index.embeddings.reuse"]["fields"] == {"texts": 3, "reused": 1, "recalled": 1}

@@ -1633,12 +1633,13 @@ def _embed_live_chunks_reusing(
         (text for text in dict.fromkeys(texts) if text not in stored),
         stamp=passage_memo_stamp(),
     )
-    if recalled:
-        stored = {**stored, **recalled}
-    missing = [text for text in dict.fromkeys(texts) if text not in stored]
+    # `reused` counts the page's own rows only, as on `advisory.best_cosine`;
+    # the hand-off is `recalled`, and the two never overlap.
     fields = {"texts": len(texts), "reused": sum(1 for text in texts if text in stored)}
     if recalled:
         fields["recalled"] = sum(1 for text in texts if text in recalled)
+        stored = {**stored, **recalled}
+    missing = [text for text in dict.fromkeys(texts) if text not in stored]
     with call_spans.span("index.embeddings.reuse", fields):
         if len(missing) == len(texts):
             return _embed_live_chunks(texts)
