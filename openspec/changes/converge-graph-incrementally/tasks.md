@@ -320,8 +320,11 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   (`test_original_index_publication_seam_rechecks_freshness_before_replace`). Retiring the
   window exposed a lock-order inversion that main also has once whole-vault work runs
   inside a burst; its fix landed (7.8).
-- [ ] 7.5 Confirm the pinned surface digests did not move: this change alters a response
-  contract, not a tool schema. Confirm rather than assume.
+- [x] 7.5 Confirm the pinned surface digests did not move: this change alters a response
+  contract, not a tool schema. Confirm rather than assume. Confirmed:
+  `tests/test_mcp_schema_fidelity.py`, `tests/test_tool_surface_contract.py` and
+  `tests/test_tool_surface_fingerprint.py` pass unchanged (27 passed), and
+  `docs/capabilities.md` is current.
 - [x] 7.6 Keep the queue converging under a steady writer. A drain records the resolver
   topology it derived under (else the next topology-changing write fell back on
   `stored_topology_fingerprint_mismatch`), keeps the rows it proved when the vault moves
