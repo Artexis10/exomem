@@ -619,6 +619,112 @@ extensions:
     }
 
 
+def test_infer_census_keys_are_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a current graph, infer's census is read from the snapshot.
+
+    The keys, and on resolved targets the values, are the ones the Markdown
+    count produced; without a snapshot infer keeps counting Markdown.
+    """
+    vault = tmp_path / "vault"
+    notes = vault / "Knowledge Base" / "Notes"
+    schema = vault / "Knowledge Base" / "_Schema"
+    notes.mkdir(parents=True)
+    schema.mkdir()
+    (schema / "relation-registry.yaml").write_text(
+        """\
+schema_version: 1
+extensions:
+  vault.applies_to:
+    parent: relates_to
+    description: A synthetic applicability relation.
+    direction: directed
+    aliases: [applies_to]
+  vault.legacy_applies:
+    parent: relates_to
+    description: A retired synthetic applicability relation.
+    direction: directed
+    status: deprecated
+    replaced_by: vault.applies_to
+""",
+        encoding="utf-8",
+    )
+    target = "[[Knowledge Base/Notes/target]]"
+    pages = {
+        "target.md": "---\ncreated: 2020-01-01\ntype: insight\n---\nPlain target.\n",
+        "old-core.md": f"---\ncreated: 2020-01-10\ntype: insight\n---\n- supports {target}\n",
+        "old-canonical-extension.md": (
+            f"---\ncreated: 2020-02-01\ntype: procedure\n---\n- vault.applies_to {target}\n"
+        ),
+        "old-extension.md": (
+            f"---\ncaptured: 2020-02-10\ntype: procedure\n---\n- applies_to {target}\n"
+        ),
+        "old-deprecated.md": (
+            f"---\ncreated: 2020-03-10\ntype: insight\n---\n- vault.legacy_applies {target}\n"
+        ),
+        "old-generic.md": f"---\ncreated: 2020-04-10\ntype: insight\n---\n- relates_to {target}\n",
+        "current-unregistered.md": (
+            f"---\ncreated: 2026-01-10\ntype: insight\n---\n- unregistered.label: {target}\n"
+        ),
+        "current-body-only.md": (
+            f"---\ncreated: 2026-02-10\ntype: insight\n---\nA body-only {target} link.\n"
+        ),
+        "undated.md": (
+            "---\nupdated: 1999-01-01\ntype: insight\n---\n"
+            "Synthetic disconnected page.\n\n"
+            "```text\n[[Ignored fenced target]]\n```\n"
+        ),
+    }
+    for name, body in pages.items():
+        (notes / name).write_text(body, encoding="utf-8")
+    scopes = (
+        {},
+        {"page_type": "insight", "date_from": "2026-01-01", "date_to": "2026-12-31"},
+    )
+    markdown = [
+        commands.op_schema_memory(vault, operation="infer", subject="relations", **scope)[
+            "census"
+        ]
+        for scope in scopes
+    ]
+    assert not epistemic_graph.sidecar_path(vault).exists()
+
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+
+    def refuse(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("a current snapshot answers infer's census")
+
+    monkeypatch.setattr(memory_schema, "_relation_census", refuse)
+    graph = [
+        commands.op_schema_memory(vault, operation="infer", subject="relations", **scope)[
+            "census"
+        ]
+        for scope in scopes
+    ]
+    assert graph == markdown
+    assert set(graph[0]) == {"relation_counts", "page_counts", "denominators"}
+    assert set(graph[0]["relation_counts"]) == {
+        "core",
+        "extension",
+        "deprecated",
+        "generic",
+        "unregistered",
+    }
+    assert set(graph[0]["page_counts"]) == {
+        "zero_authored_relation_rows",
+        "zero_body_connections",
+    }
+    assert set(graph[0]["denominators"]) == {"sampled", "included", "undated", "excluded"}
+    assert graph[0]["relation_counts"] == {
+        "core": 1,
+        "extension": 2,
+        "deprecated": 1,
+        "generic": 1,
+        "unregistered": 1,
+    }
+
+
 def test_relation_inference_reserves_canonical_keys_across_distinct_aliases(
     tmp_path: Path,
 ) -> None:
