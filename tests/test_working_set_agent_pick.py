@@ -569,3 +569,54 @@ def test_a_resolved_packet_still_shows_its_answer_at_a_small_hook_ceiling() -> N
     ), block
     recent_cost = sum(len(line) + 1 for line in lines if line.startswith("- recent:"))
     assert recent_cost <= 900 // 2 + len(hook._WORKING_SET_HEADER), block
+
+
+# --------------------------------------------------------------------------- #
+# R-Q MINOR 7: every refused ref leaves at the same point, before the compile.
+# --------------------------------------------------------------------------- #
+
+_RETIRED_PICK = "Knowledge Base/Notes/Research/quillon-vantry-window-old.md"
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        pytest.param("Knowledge Base/Nowhere/absent.md", id="unknown"),
+        pytest.param(CARRY_SOURCE, id="raw_material"),
+        pytest.param("Knowledge Base/index.md", id="navigation"),
+        pytest.param(_RETIRED_PICK, id="retired"),
+        pytest.param(CARRY_PAGE, id="withheld"),
+    ],
+)
+def test_every_refused_ref_leaves_before_the_compile(
+    carry_vault: Path, monkeypatch: pytest.MonkeyPatch, ref: str
+) -> None:
+    """The withheld ref was refused before the compile and every other class
+    after it, so a withheld ref answered about 3 ms FASTER than an unknown one
+    (medians 17.9 and 21.2 ms): the refusal was one, the exit was not."""
+    _write(
+        carry_vault / _RETIRED_PICK,
+        "---\ntype: research-note\nstatus: archived\n---\n\n# Old window\n\n"
+        "- [decision] Six minutes. ^q-old\n",
+    )
+    if ref == CARRY_PAGE:
+        write_scope(carry_vault, paths="Knowledge Base/Notes/Research/*", name="Research")
+        write_rule(carry_vault, ceiling=0)
+        _reset_caches()
+    working_set_runtime.reset_caches_for_tests()
+    compiled: list[object] = []
+    real = commands.working_set_runtime_module.serve
+
+    def spy(*args, **kwargs):
+        compiled.append(kwargs.get("anchor"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(commands.working_set_runtime_module, "serve", spy)
+
+    with pytest.raises(ValueError) as refused:
+        with request_scope(_external()):
+            commands.op_activate_context(carry_vault, turn=NONSENSE_TURN, anchor=ref)
+
+    assert str(refused.value) == commands.ACTIVATE_ANCHOR_REFUSAL
+    assert compiled == [], "a refused ref must never reach the compile"
+

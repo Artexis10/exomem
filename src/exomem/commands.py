@@ -6337,11 +6337,13 @@ def _op_activate_context_body(
     # HERE, before the compile that page would otherwise buy nothing for: a
     # withheld page refuses identically whether or not it was ever compiled,
     # and running the compile first is the entire cost difference measured
-    # between a withheld ref (80 ms) and an unknown one (15 ms). An `anchor`
-    # that DOES match a row of the index is untouched — that path's own
-    # timing is not this fix's scope — and any failure here only skips the
-    # optimization: the unmodified compile-then-guard sequence below still
-    # decides every ref exactly as it always has.
+    # between a withheld ref (80 ms) and an unknown one (15 ms). A ref naming
+    # no eligible page is refused at the same point, so every refused class
+    # leaves in one place. An `anchor` that DOES match a row of the index is
+    # untouched — that path's own timing is not this fix's scope — and any
+    # failure here only skips the early exit: the unmodified
+    # compile-then-guard sequence below still decides every ref exactly as
+    # it always has.
     if anchor:
         try:
             named_rows = {
@@ -6355,8 +6357,13 @@ def _op_activate_context_body(
                 if spelling
             }
             if anchor not in named_rows:
+                # Every refused class leaves HERE, at one point: a ref naming
+                # no eligible page (unknown, raw material, navigation, retired,
+                # non-canonical) exactly as a withheld one. Refused after the
+                # compile instead, the unknown classes took about 3 ms longer
+                # than a withheld page, which is its own answer.
                 agent_page = working_set_module._eligible_agent_page(vault_root, anchor)
-                if agent_page is not None and not egress_module.quick_page_visible(
+                if agent_page is None or not egress_module.quick_page_visible(
                     vault_root, agent_page, purpose=purpose
                 ):
                     raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
