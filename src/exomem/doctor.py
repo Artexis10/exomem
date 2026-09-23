@@ -990,6 +990,50 @@ def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
     )
 
 
+def _check_relation_census(vault_root: Path | None) -> DoctorCheck:
+    """One line of relation quality from the published graph snapshot.
+
+    Informational: edge quality is never a setup failure, so an available
+    census passes and an unavailable one only warns (`graph_sync.state` owns
+    the graph's health). Doctor is a read-only local preflight run by the
+    owner, so it declares the owner-local caller the census serves.
+    """
+    if vault_root is None:
+        return _check(
+            "relations.census",
+            "pass",
+            "No vault configured; the relation census was not read.",
+        )
+    from . import relation_census
+    from .governance.principal import library_scope
+
+    try:
+        with library_scope():
+            result = relation_census.census(vault_root)
+    except Exception as error:  # noqa: BLE001 - diagnostics must not crash doctor
+        return _check(
+            "relations.census",
+            "warn",
+            f"Relation census unavailable: {type(error).__name__}.",
+        )
+    if not result.get("available"):
+        return _check(
+            "relations.census",
+            "warn",
+            relation_census.summary_line(result),
+            "Run `exomem relations census` once the graph is current.",
+        )
+    return _check(
+        "relations.census",
+        "pass",
+        relation_census.summary_line(result),
+        details={
+            "graph_generation": result.get("graph_generation"),
+            "eligible_pages": result["cohort"]["eligible_pages"],
+        },
+    )
+
+
 def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
     """Machine-local state placement: external root, marker, in-vault leftovers.
 
@@ -3328,6 +3372,7 @@ def doctor(
         _check_write_path_env_flags(vault_root),
         _check_frozen_verifier(),
         check_graph_recovery_age(vault_root),
+        _check_relation_census(vault_root),
     ]
     runtime_processes = _check_runtime_processes()
     if runtime_processes is not None:
