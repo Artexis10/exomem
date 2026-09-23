@@ -320,3 +320,68 @@ def test_existing_kinds_render_byte_identically() -> None:
         "tags: []\ningested_into: []\n---\n\n# Scope session\n\n## Capture\n\n"
         "Pasted conversation.\n"
     )
+
+
+# --------------------------------------------------------------------------- #
+# The episode folder is reserved on the move doors too
+# --------------------------------------------------------------------------- #
+EPISODES = "Knowledge Base/Sources/Episodes"
+
+
+def _move(vault: Path, door: str, old_path: str, new_path: str, **extra: object) -> dict:
+    from exomem import commands
+
+    if door == "move_file":
+        return commands.op_move_file(vault, old_path=old_path, new_path=new_path, **extra)
+    return commands.op_manage_memory_file(
+        vault, operation="move", old_path=old_path, new_path=new_path, confirm=True, **extra
+    )
+
+
+def _tree(vault: Path) -> dict[str, bytes]:
+    root = vault / "Knowledge Base"
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in root.rglob("*.md")
+        if "Sources" in path.parts or "Evidence" in path.parts
+    }
+
+
+@pytest.mark.parametrize("door", ["move_file", "manage_memory_file"])
+@pytest.mark.parametrize(
+    "case",
+    ["in", "out-to-articles", "into-subfolder", "rename-inside", "promote-to-evidence"],
+)
+def test_no_move_enters_or_leaves_the_episode_folder(
+    vault: Path, source_schema: schema_module.SourceSchema, door: str, case: str
+) -> None:
+    """A recap's revisions are found by one listing of that one folder, so a
+    move in either direction -- or a rename that strips the group token --
+    makes the next record leave two live revisions."""
+    recap = _record(vault, source_schema)
+    other = add_module.add(
+        vault,
+        source_schema,
+        content="Body text for a captured report.",
+        title="Lamp report",
+        source_type="research-report",
+        today=TODAY,
+    )
+    name = recap.path.rsplit("/", 1)[-1]
+    old_path, new_path, extra = {
+        "in": (other.path, f"{EPISODES}/moved-in.md", {}),
+        "out-to-articles": (recap.path, "Knowledge Base/Sources/Articles/moved-out.md", {}),
+        "into-subfolder": (recap.path, f"{EPISODES}/Sub/{name}", {}),
+        "rename-inside": (recap.path, f"{EPISODES}/renamed.md", {}),
+        "promote-to-evidence": (
+            recap.path,
+            f"Knowledge Base/Evidence/Lamp dispute/{name}",
+            {"promotion_reason": "proof of the lamp order"},
+        ),
+    }[case]
+    before = _tree(vault)
+
+    with pytest.raises(ValueError, match="EPISODE_KIND_RESERVED"):
+        _move(vault, door, old_path, new_path, **extra)
+
+    assert _tree(vault) == before
