@@ -628,3 +628,40 @@ def test_sweep_never_scores_a_page_the_index_walk_excludes(
     assert live in scores
     assert trashed not in scores
     assert gone not in scores
+
+
+def test_sweep_span_counts_the_unique_texts_it_actually_encoded(
+    vault: Path, counting_encoder: list[str]
+) -> None:
+    """`texts`/`chars` say what the encoder was handed, not how many chunks missed.
+
+    On partial reuse only the unique missing texts are encoded, so a repeated
+    new paragraph is one text, not two.
+    """
+    from exomem import call_spans
+
+    embeddings.get_embedding_index(vault).rebuild_all()
+    body = "\n\n".join(_REUSE_PARAGRAPHS)
+    written = note_module.note(
+        vault, content=body, note_type="insight", title="Span probe", status="draft"
+    ).as_dict()
+    fresh = "A fresh paragraph the commit never saw."
+    draft = "\n\n".join([*_REUSE_PARAGRAPHS, fresh, fresh])
+    counting_encoder.clear()
+
+    handle = call_spans.MCP_CALL_TOKEN.set("u5c-span-count")
+    try:
+        corpus_aware._best_cosine_per_file(
+            vault, title="Span probe", body=draft, published_path=written["path"]
+        )
+        spans = {span["name"]: span for span in call_spans.pop_call_spans("u5c-span-count")}
+    finally:
+        call_spans.MCP_CALL_TOKEN.reset(handle)
+
+    fresh_chunk = f"Span probe\n\n{fresh}"
+    assert counting_encoder == [fresh_chunk]
+    assert spans["advisory.best_cosine"]["fields"] == {
+        "texts": 1,
+        "chars": len(fresh_chunk),
+        "reused": len(_REUSE_PARAGRAPHS),
+    }

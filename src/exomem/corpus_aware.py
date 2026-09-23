@@ -722,7 +722,8 @@ def _best_cosine_per_file(
     same economy the write's own embedding pass applies. On a CPU-only cell the
     second encode of a just-written note was most of a 9-13 s sweep. Only the
     texts the page's rows lack are encoded, so a missing or stale row costs
-    what it always did and never changes a score.
+    what it always did, and reuse never changes a score while the sidecar's
+    one-model invariant holds.
     """
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return {}
@@ -757,21 +758,24 @@ def _best_cosine_per_file(
                 else {}
             )
             encoded = [chunk for chunk in chunks if chunk not in stored]
+            # With nothing to reuse the whole draft is encoded as it always was;
+            # otherwise only the unique texts the stored rows lack.
+            full_encode = len(encoded) == len(chunks)
+            to_encode = chunks if full_encode else list(dict.fromkeys(encoded))
             if measured is not None:
-                # `texts`/`chars` count what was NOT served from stored rows,
-                # so on this surface they still say what the sweep encoded.
-                measured["texts"] = len(encoded)
-                measured["chars"] = sum(len(chunk) for chunk in encoded)
+                # `texts`/`chars` are what the encoder was handed, so on this
+                # surface they still say what the sweep encoded.
+                measured["texts"] = len(to_encode)
+                measured["chars"] = sum(len(chunk) for chunk in to_encode)
                 if published_path:
                     measured["reused"] = len(chunks) - len(encoded)
-            if len(encoded) == len(chunks):
+            if full_encode:
                 vecs = embeddings.embed_texts(chunks, is_query=False)
             else:
                 lookup = {chunk: stored[chunk] for chunk in chunks if chunk in stored}
-                missing = list(dict.fromkeys(encoded))
-                if missing:
-                    fresh = embeddings.embed_texts(missing, is_query=False)
-                    lookup.update(zip(missing, fresh, strict=True))
+                if to_encode:
+                    fresh = embeddings.embed_texts(to_encode, is_query=False)
+                    lookup.update(zip(to_encode, fresh, strict=True))
                 vecs = [lookup[chunk] for chunk in chunks]
             best_per_file: dict[str, float] = {}
             # Every chunk in one pass over the matrix, asking eligibility only of
