@@ -1013,3 +1013,58 @@ def test_a_late_refresh_whose_generation_a_drain_acknowledged_leaves_the_graph_r
         "a refresh for an already-acknowledged generation withdrew the marker"
     )
     assert not EpistemicGraphIndex(vault).reads_suspended()
+
+
+def test_an_unreadable_page_is_quarantined_rather_than_rotated_forever(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A receipt the drain can never derive is bounded, reported and set aside.
+
+    A page whose bytes cannot be read derives nothing and leaves its receipt
+    queued. Rotated forever, it keeps the queue from ever emptying -- so the
+    drain never settles and the lag never clears -- and the page keeps the
+    rows of its last readable version, which a whole-vault pass would drop.
+    After `GRAPH_POISON_ATTEMPTS` failed isolated attempts the receipt is
+    quarantined: its rows go, and the lag and the doctor report it.
+    """
+    from exomem import doctor
+
+    committed = _write_without_graph_repair(
+        vault,
+        monkeypatch,
+        {
+            PAGE_A: _page("A", "A is revised against [[queue-b]]."),
+            PAGE_C: _page("C", "C is new and cites nothing."),
+        },
+    )
+    real_read = vault_module.read_bytes_without_pinning
+    unreadable = (vault / PAGE_C).resolve()
+
+    def refuse(path: Path, *args: Any, **kwargs: Any) -> Any:
+        if Path(path).resolve() == unreadable:
+            raise PermissionError("the page cannot be read")
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(vault_module, "read_bytes_without_pinning", refuse)
+
+    for _ in range(getattr(epistemic_graph, "GRAPH_POISON_ATTEMPTS", 3) + 1):
+        index_sync.drain_graph_work(vault)
+
+    assert deferred_index.list_graph_paths(vault) == []
+    lag = epistemic_graph.graph_lag(vault)
+    assert lag["quarantined_paths"] == 1
+    assert _acknowledged(vault) == committed
+    assert EpistemicGraphIndex(vault).available()
+    check = doctor._check_graph_sync_state(vault)
+    assert check.status == "warn", check.message
+    assert check.details is not None and check.details["quarantined_paths"] == 1
+
+    # Readable again and written: the path is ordinary work once more.
+    monkeypatch.setattr(vault_module, "read_bytes_without_pinning", real_read)
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(vault / PAGE_C, _page("C", "C is readable again."))],
+        vault_root=vault,
+    )
+    index_sync.drain_graph_work(vault)
+    assert epistemic_graph.graph_lag(vault)["quarantined_paths"] == 0
+    assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
