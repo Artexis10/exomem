@@ -1,0 +1,51 @@
+# Multilingual recall golden set (recall-multilingual-v1).
+#
+# The pages live in benchmarks/epistemic/corpora/recall_multilingual.py and are
+# rendered beside the English golden fixture (tests/fixtures). Golds and
+# poisons name LOGICAL KEYS: `<lang>:<name>` for a multilingual page, or
+# `fixture:<vault path>` for an English golden-fixture page.
+#
+# kind:
+#   same_language       shares words with a native page
+#   cross_language      the gold is an English page (dense recall; lexical is reported only)
+#   morphology          an inflected form other than the page's (ru stems; et relies on dense)
+#   without_diacritics  typed without accents (de, et; ru ё/е is reported, not required)
+#   language_bias       about an English topic; a same-language unrelated page is the poison
+#
+# Every name and place is invented.
+
+- {language: de, kind: same_language, query: "Wann liefert Zölvarn die Ersatzteile", gold: ["de:lieferplan"]}
+- {language: de, kind: same_language, query: "Risse im Geländer der Fußgängerbrücke", gold: ["de:bruecke"]}
+- {language: de, kind: same_language, query: "Schlüsselübergabe im Büro am ersten Arbeitstag", gold: ["de:schluessel"]}
+- {language: de, kind: without_diacritics, query: "Zolvarn Ersatzteile", gold: ["de:lieferplan"]}
+- {language: de, kind: without_diacritics, query: "Kuhlanlage Wartung", gold: ["de:kuehlanlage"]}
+- {language: de, kind: without_diacritics, query: "Grossenordnung der Umbaukosten", gold: ["de:umbaukosten"]}
+- {language: de, kind: without_diacritics, query: "Prufbericht Fussgangerbrucke", gold: ["de:bruecke"]}
+- {language: de, kind: cross_language, query: "Leistungsschalter für ausfallende nachgelagerte Dienste", gold: ["fixture:Knowledge Base/Notes/Patterns/circuit-breaker-for-downstream-failures.md"]}
+- {language: de, kind: language_bias, query: "Wiederholungsversuche mit exponentiellem Backoff", gold: ["fixture:Knowledge Base/Notes/Patterns/retry-with-full-jitter-backoff.md"], poison: ["de:wiederholungspruefung"]}
+
+- {language: ru, kind: same_language, query: "Когда поставщик привозит детали", gold: ["ru:postavka"]}
+- {language: ru, kind: same_language, query: "Ремонт крыши гаража", gold: ["ru:krysha"]}
+- {language: ru, kind: same_language, query: "График отпусков сотрудников", gold: ["ru:otpusk"]}
+- {language: ru, kind: morphology, query: "о книгах в библиотеке", gold: ["ru:biblioteka"]}
+- {language: ru, kind: morphology, query: "расходом топлива водителей", gold: ["ru:toplivo"]}
+- {language: ru, kind: without_diacritics, query: "елку для зала", gold: ["ru:yolka"]}
+- {language: ru, kind: cross_language, query: "автоматический выключатель для отказывающих сервисов", gold: ["fixture:Knowledge Base/Notes/Patterns/circuit-breaker-for-downstream-failures.md"]}
+- {language: ru, kind: language_bias, query: "повторные попытки с экспоненциальной задержкой", gold: ["fixture:Knowledge Base/Notes/Patterns/retry-with-full-jitter-backoff.md"], poison: ["ru:povtornaya"]}
+
+- {language: ja, kind: same_language, query: "青葉タワーの高さは何メートル", gold: ["ja:tower"]}
+- {language: ja, kind: same_language, query: "会議の議事録はいつ共有", gold: ["ja:minutes"]}
+- {language: ja, kind: same_language, query: "倉庫 在庫 確認", gold: ["ja:inventory"]}
+- {language: ja, kind: same_language, query: "サーバーのバックアップ手順", gold: ["ja:backup"]}
+- {language: ja, kind: cross_language, query: "サーキットブレーカーで障害のあるサービスを遮断", gold: ["fixture:Knowledge Base/Notes/Patterns/circuit-breaker-for-downstream-failures.md"]}
+- {language: ja, kind: language_bias, query: "リトライの指数バックオフ", gold: ["fixture:Knowledge Base/Notes/Patterns/retry-with-full-jitter-backoff.md"], poison: ["ja:retest"]}
+
+- {language: et, kind: same_language, query: "Õppepäev algab kell üheksa", gold: ["et:oppepaev"]}
+- {language: et, kind: same_language, query: "Projekti jätkamine sõltub rahastusest", gold: ["et:jatkamine"]}
+- {language: et, kind: without_diacritics, query: "soidukite ulevaatus", gold: ["et:ulevaatus"]}
+- {language: et, kind: without_diacritics, query: "votmete uleandmine", gold: ["et:votmed"]}
+- {language: et, kind: without_diacritics, query: "sookla nadalamenuu", gold: ["et:sookla"]}
+- {language: et, kind: without_diacritics, query: "projekti jatkamine", gold: ["et:jatkamine"]}
+- {language: et, kind: morphology, query: "sõidukitele ülevaatusel", gold: ["et:ulevaatus"]}
+- {language: et, kind: cross_language, query: "kaitselüliti rikkis teenuste jaoks", gold: ["fixture:Knowledge Base/Notes/Patterns/circuit-breaker-for-downstream-failures.md"]}
+- {language: et, kind: language_bias, query: "korduskatsed eksponentsiaalse viivitusega", gold: ["fixture:Knowledge Base/Notes/Patterns/retry-with-full-jitter-backoff.md"], poison: ["et:korduseksam"]}
