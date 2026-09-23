@@ -223,6 +223,49 @@ class SemanticUnitVectorRow(NamedTuple):
 SEMANTIC_UNIT_READ_BATCH = 2_000
 
 
+#: Query rows `EmbeddingIndex.search_many` scores per matrix product. Scoring a
+#: whole draft at once holds `queries x rows` float32 scores: 293 MiB for a
+#: 1,000-chunk note against 76,000 rows, where one `search` per chunk peaked at
+#: a single row. A block of 64 bounds that at one block (~19 MiB at 76,000 rows)
+#: and keeps most of the batched speed: for 1,000 chunks against 58,000 rows under
+#: a 2-CPU quota, 5.5 s at 17 MiB peak, against 4.5 s at 225 MiB for one product
+#: and 100 s for one `search` per chunk.
+SEARCH_MANY_BLOCK = 64
+
+
+def _top_admitted(
+    scores: np.ndarray,
+    k: int,
+    total: int,
+    admitted: Callable[[int], bool],
+    metadata: list[tuple[str, int]],
+) -> list[tuple[str, int, float]]:
+    """One query's `k` best admitted rows from its full score row, best first.
+
+    The candidate window holds the query's highest-scoring rows, so the first
+    `k` admitted rows in window order are its top `k` admitted rows overall; the
+    window widens until `k` are found or every row has been considered.
+    """
+    order = -scores
+    window = min(total, max(4 * k, 64))
+    while True:
+        if window >= total:
+            ranked = np.argsort(order, kind="stable")
+        else:
+            candidates = np.argpartition(order, window - 1)[:window]
+            ranked = candidates[np.argsort(order[candidates], kind="stable")]
+        picked: list[int] = []
+        for row in ranked.tolist():
+            if admitted(row):
+                picked.append(row)
+                if len(picked) == k:
+                    break
+        if len(picked) == k or window >= total:
+            break
+        window = min(total, window * 4)
+    return [(metadata[row][0], metadata[row][1], float(scores[row])) for row in picked]
+
+
 class EmbeddingIndex:
     """Per-vault sqlite sidecar holding chunk-level vectors.
 
@@ -977,14 +1020,16 @@ class EmbeddingIndex:
         """Top-k eligible chunk rows for each query row: `(file_path, chunk_idx, score)`.
 
         Each list is what `search(query, k, allowed_paths=A)` returns for that
-        row, where `admits(file_path)` is membership in `A`: the `k` best rows
-        whose file is admitted, best first, fewer only when fewer are admitted.
-        Two things make it cheaper for a caller holding many queries, which is
-        the write advisory scoring every chunk of a draft. The matrix is read
-        once, in one product for every query, rather than once per query, and
-        no chunk text is hydrated. And eligibility is asked only of files whose
-        rows reach a query's candidate window, each file once, so the caller
-        need not enumerate its whole eligible set to probe a few dozen of them.
+        row, up to the choice and order among exactly tied scores, where
+        `admits(file_path)` is membership in `A`: the `k` best rows whose file
+        is admitted, best first, fewer only when fewer are admitted. Two things
+        make it cheaper for a caller holding many queries, which is the write
+        advisory scoring every chunk of a draft. The matrix is read once per
+        block of `SEARCH_MANY_BLOCK` queries, in one product for the block,
+        rather than once per query, and no chunk text is hydrated. And
+        eligibility is asked only of files whose rows reach a query's candidate
+        window, each file once, so the caller need not enumerate its whole
+        eligible set to probe a few dozen of them.
 
         Exact, not approximate: a query's window holds its highest-scoring rows,
         so the first `k` admitted rows in window order are its top `k` admitted
@@ -1010,27 +1055,15 @@ class EmbeddingIndex:
 
         answers: list[list[tuple[str, int, float]]] = []
         total = len(metadata)
-        for scores in queries @ matrix.T:
-            order = -scores
-            window = min(total, max(4 * k, 64))
-            while True:
-                if window >= total:
-                    ranked = np.argsort(order, kind="stable")
-                else:
-                    candidates = np.argpartition(order, window - 1)[:window]
-                    ranked = candidates[np.argsort(order[candidates], kind="stable")]
-                picked: list[int] = []
-                for row in ranked.tolist():
-                    if admitted(row):
-                        picked.append(row)
-                        if len(picked) == k:
-                            break
-                if len(picked) == k or window >= total:
-                    break
-                window = min(total, window * 4)
-            answers.append(
-                [(metadata[row][0], metadata[row][1], float(scores[row])) for row in picked]
-            )
+        for start in range(0, len(queries), SEARCH_MANY_BLOCK):
+            # `matrix @ q.T`, not `q @ matrix.T`: the same scores, but with the
+            # tall matrix leading OpenBLAS ran a 64-query block ~1.8x faster
+            # (measured at 58k rows under a 2-CPU quota). Rows of the transposed
+            # view are strided; `_top_admitted` reads each one once.
+            block = (matrix @ queries[start : start + SEARCH_MANY_BLOCK].T).T
+            answers.extend(_top_admitted(row, k, total, admitted, metadata) for row in block)
+            # Released before the next product, so two blocks are never alive at once.
+            del block
         return answers
 
     def _eligibility_mask(

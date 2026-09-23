@@ -16,6 +16,7 @@ under conftest's injected `EXOMEM_STATE_ROOT` on its own tmpdir vault.
 
 from __future__ import annotations
 
+import tracemalloc
 from pathlib import Path
 
 import numpy as np
@@ -676,10 +677,11 @@ def test_exact_ties_may_pick_a_different_equally_scoring_row(tmp_path):
 # the matrix, one eligibility lookup and one chunk-text hydration per chunk, of
 # which it used only the file path and the score, behind a walk of the whole
 # corpus to build `allowed_paths`. On a CPU-capped cell that was ~90 ms per
-# chunk plus ~0.5 s of walk. `search_many` must answer each query exactly as
-# `search` does under the same eligibility (same rows, same order, scores within
-# the sgemv/sgemm kernel wobble measured above), without the text it never
-# needed, and asking eligibility only of files that compete for a top-k.
+# chunk plus ~0.5 s of walk. `search_many` must answer each query as `search`
+# does under the same eligibility, up to the choice and order among exactly tied
+# scores (same rows, same order, scores within the sgemv/sgemm kernel wobble
+# measured above), without the text it never needed, and asking eligibility only
+# of files that compete for a top-k.
 
 
 def _batch(rng: np.random.Generator, count: int) -> np.ndarray:
@@ -818,3 +820,63 @@ def test_search_many_widens_past_a_window_of_ineligible_rows(tmp_path):
 
     assert {fp for fp, _ci, _score in hits} == admitted
     assert [(fp, ci) for fp, ci, _s in hits] == [(fp, ci) for fp, ci, _t, _s in single]
+
+
+def _synthetic_index(tmp_path: Path, monkeypatch, rng, rows: int):
+    """An index serving a `rows`-row matrix without paying `rows` upserts."""
+    index = embeddings.EmbeddingIndex(_fresh_vault(tmp_path))
+    matrix = _unit_rows(rng, rows)
+    metadata = [(f"note-{n:05d}.md", 0) for n in range(rows)]
+    monkeypatch.setattr(index, "all_vectors", lambda: (metadata, matrix))
+    return index
+
+
+def test_search_many_scores_a_large_draft_in_bounded_blocks(tmp_path, monkeypatch):
+    """A long draft must not hold every chunk's score row at once.
+
+    Scoring all queries in one product costs `queries x rows x 4` bytes: 293 MiB
+    for a 1,000-chunk draft against a 76,000-row matrix, where one `search` per
+    chunk peaked at a single 0.3 MiB row. Here 1,000 queries against 4,096 rows
+    would be 16 MiB in one product; scored in fixed blocks it stays near one block.
+    """
+    rng = np.random.default_rng(1926)
+    rows = 4096
+    index = _synthetic_index(tmp_path, monkeypatch, rng, rows)
+    queries = np.ascontiguousarray(_unit_rows(rng, 1000))
+    one_product = len(queries) * rows * np.dtype(np.float32).itemsize
+
+    tracemalloc.start()
+    try:
+        answers = index.search_many(queries, 15, admits=lambda _path: True)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert len(answers) == len(queries)
+    assert peak < one_product / 4, (
+        f"peak {peak / 2**20:.1f} MiB: the whole draft was scored in one product "
+        f"({one_product / 2**20:.1f} MiB)"
+    )
+
+
+def test_search_many_answers_across_block_boundaries_as_search_does(tmp_path, monkeypatch):
+    """Blocking changes only when rows are scored, never which rows win."""
+    rng = np.random.default_rng(1927)
+    index = _synthetic_index(tmp_path, monkeypatch, rng, 2000)
+    queries = np.ascontiguousarray(_unit_rows(rng, 150))  # three blocks, the last partial
+    allowed = {f"note-{n:05d}.md" for n in range(0, 2000, 3)}
+
+    batched = index.search_many(queries, 10, admits=allowed.__contains__)
+
+    assert len(batched) == len(queries)
+    for query, hits in zip(queries, batched, strict=True):
+        single = index.search(query, 10, allowed_paths=allowed)
+        assert [(fp, ci) for fp, ci, _score in hits] == [
+            (fp, ci) for fp, ci, _text, _score in single
+        ]
+        assert np.allclose(
+            [score for *_rest, score in hits],
+            [score for *_rest, score in single],
+            rtol=0.0,
+            atol=SCORE_TOLERANCE,
+        )
