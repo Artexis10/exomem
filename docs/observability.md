@@ -162,8 +162,9 @@ it with `exomem logs verify`.
 
 `schema_version`, `sequence`, `prev_hash`, `row_hash`, `ts_utc`, `request_id`,
 `session_id`, `client_name`, `client_version`, `transport`,
-`caller_principal_hash`, `tool`, `arg_names`, `args`, `target_paths`, `outcome`,
-`error_code`, `duration_ms`, `total_ms`, `request_bytes`, `truncated`.
+`caller_principal_hash`, `principal_kind`, `tool`, `arg_names`, `args`,
+`target_paths`, `outcome`, `error_code`, `duration_ms`, `total_ms`,
+`request_bytes`, `truncated`.
 
 - **Latency, on every call — read, write, success, refusal.** `duration_ms` is
   the tool leaf, the number the prose trace and `exomem_tool_duration_ms` have
@@ -193,6 +194,11 @@ it with `exomem logs verify`.
   is client-declared, so treat it as a diagnostic hint, not an authorization
   input. `caller_principal_hash` is the separate, hashed, authenticated
   identity.
+- **`principal_kind`** says which kind of caller that is: `owner` (stdio, the
+  CLI or the REST key), `owner-oauth` (a remote sign-in the host bound as the
+  owner with `EXOMEM_OWNER_OAUTH_SUBJECT`), `principal`, or `unresolved`. An
+  `owner-oauth` row keeps the remote identity's `caller_principal_hash`, so an
+  owner action taken from a remote connector stays traceable to that door.
 - **`args`** is `{name: {len, sha256}}` and **never a value**. Note bodies,
   query text, and credentials are reduced to a length and a hash by
   construction, not by a downstream filter — `privacy_log`'s process-wide

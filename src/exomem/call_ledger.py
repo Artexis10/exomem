@@ -60,6 +60,9 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 
+#: The closed set `principal_kind` may record; anything else is written as null.
+_PRINCIPAL_KINDS = frozenset({"owner", "owner-oauth", "principal", "unresolved"})
+
 #: The `prev_hash` of the very first row of a fresh ledger.
 GENESIS_HASH = "0" * 64
 
@@ -264,6 +267,7 @@ def build_row(
     error_code: str | None = None,
     arguments: dict[str, Any] | None = None,
     caller_principal_hash: str | None = None,
+    principal_kind: str | None = None,
     client_name: str | None = None,
     client_version: str | None = None,
     transport: str | None = None,
@@ -289,6 +293,13 @@ def build_row(
         "transport": _clip(transport) if transport else None,
         "caller_principal_hash": _clip(caller_principal_hash)
         if caller_principal_hash
+        else None,
+        # Which kind of caller that hash is: `owner`, `owner-oauth` (a remote
+        # session the host bound as the owner), `principal` or `unresolved`.
+        # The hash stays the remote identity's, so a bound remote owner's
+        # action is still traceable to the remote door.
+        "principal_kind": principal_kind
+        if principal_kind in _PRINCIPAL_KINDS
         else None,
         "tool": _clip(tool),
         "arg_names": arg_names,
@@ -528,6 +539,7 @@ def record_call(
     error_code: str | None = None,
     arguments: dict[str, Any] | None = None,
     caller_principal_hash: str | None = None,
+    principal_kind: str | None = None,
     client_name: str | None = None,
     client_version: str | None = None,
     transport: str | None = None,
@@ -566,6 +578,7 @@ def record_call(
                 error_code=error_code,
                 arguments=arguments,
                 caller_principal_hash=caller_principal_hash,
+                principal_kind=principal_kind,
                 client_name=client_name,
                 client_version=client_version,
                 transport=transport,

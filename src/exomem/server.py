@@ -369,8 +369,13 @@ def _record_ledger_row(
     try:
         from . import call_ledger, request_budget
         from .command_surface import mcp_caller_identity, mcp_retry_scope
+        from .governance.principal import resolve_mcp_principal
 
         identity = mcp_caller_identity()
+        try:
+            principal_kind: str | None = resolve_mcp_principal().principal_kind
+        except Exception:  # noqa: BLE001 - a missing label must not lose the row
+            principal_kind = None
         # Read here, at the one point every exit passes through, and while the
         # request context is still open: the budget object is the same one the
         # stages mutated, so this is the outcome as the caller experienced it.
@@ -384,6 +389,7 @@ def _record_ledger_row(
             error_code=error_code,
             arguments=arguments,
             caller_principal_hash=mcp_retry_scope(),
+            principal_kind=principal_kind,
             client_name=identity.get("client_name"),
             client_version=identity.get("client_version"),
             transport=identity.get("transport"),

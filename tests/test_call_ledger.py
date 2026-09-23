@@ -891,3 +891,83 @@ def test_an_artifact_write_records_what_landed_and_no_handle(
     for handle_field in ("download_url", "file_id"):
         assert handle_field not in written
     assert "artifact bytes" not in written
+
+
+# ------------------------------------------------------------- principal kind
+
+_REMOTE_BASE = "https://memory.example.test"
+_REMOTE_ID = 4242
+
+
+def _remote_session(monkeypatch, *, bound: bool) -> str:
+    """Present a synthetic durable-session token; return its remote scope."""
+    import hashlib
+
+    import fastmcp.server.dependencies as dependencies
+
+    from exomem.session_oauth import ExomemSessionAccessToken
+
+    monkeypatch.setenv("EXOMEM_BASE_URL", _REMOTE_BASE)
+    monkeypatch.setenv("EXOMEM_GITHUB_USER_ID", str(_REMOTE_ID))
+    if bound:
+        monkeypatch.setenv("EXOMEM_OWNER_OAUTH_SUBJECT", f"github:{_REMOTE_ID}")
+    else:
+        monkeypatch.delenv("EXOMEM_OWNER_OAUTH_SUBJECT", raising=False)
+    token = ExomemSessionAccessToken(
+        token="synthetic-session-token",
+        client_id="synthetic-client",
+        scopes=["exomem:read"],
+        claims={
+            "sub": str(_REMOTE_ID),
+            "github_user_id": _REMOTE_ID,
+            "github_login": "example-owner",
+            "iss": _REMOTE_BASE,
+            "aud": f"{_REMOTE_BASE}/mcp",
+        },
+    )
+    monkeypatch.setattr(dependencies, "get_access_token", lambda: token)
+    digest = hashlib.sha256(f"{_REMOTE_BASE}\0{_REMOTE_ID}".encode()).hexdigest()
+    return f"principal:{digest}"
+
+
+def test_a_local_owner_call_is_labelled_owner(ledger_dir: Path) -> None:
+    _drive("browse_memory", {}, _ok)
+    assert _rows(ledger_dir)[0]["principal_kind"] == "owner"
+
+
+def test_a_bound_remote_owner_call_is_labelled_owner_oauth_with_the_remote_hash(
+    ledger_dir: Path, monkeypatch
+) -> None:
+    remote_scope = _remote_session(monkeypatch, bound=True)
+    _drive("browse_memory", {}, _ok)
+    row = _rows(ledger_dir)[0]
+    assert row["principal_kind"] == "owner-oauth"
+    # Labelled remote: the caller hash is the remote identity's, never "owner".
+    assert row["caller_principal_hash"] == remote_scope
+    assert "example-owner" not in (ledger_dir / "ledger.jsonl").read_text(encoding="utf-8")
+
+
+def test_an_unbound_remote_call_is_labelled_principal(ledger_dir: Path, monkeypatch) -> None:
+    remote_scope = _remote_session(monkeypatch, bound=False)
+    _drive("browse_memory", {}, _ok)
+    row = _rows(ledger_dir)[0]
+    assert row["principal_kind"] == "principal"
+    assert row["caller_principal_hash"] == remote_scope
+
+
+def test_an_unresolved_remote_call_is_labelled_unresolved(ledger_dir: Path, monkeypatch) -> None:
+    import fastmcp.server.dependencies as dependencies
+
+    monkeypatch.setattr(dependencies, "get_access_token", lambda: None)
+    monkeypatch.setattr(dependencies, "get_http_headers", lambda **_kw: {"host": "memory"})
+    _drive("browse_memory", {}, _ok)
+    assert _rows(ledger_dir)[0]["principal_kind"] == "unresolved"
+
+
+def test_principal_kind_is_part_of_the_hashed_row(ledger_dir: Path, monkeypatch) -> None:
+    _remote_session(monkeypatch, bound=True)
+    _drive("browse_memory", {}, _ok)
+    assert call_ledger.verify(ledger_dir / "ledger.jsonl") == []
+    row = _rows(ledger_dir)[0]
+    tampered = dict(row, principal_kind="owner")
+    assert call_ledger.row_hash(tampered) != row["row_hash"]
