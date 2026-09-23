@@ -157,3 +157,57 @@ variable "private_node_ip" {
   type        = string
   default     = "10.50.1.10"
 }
+
+variable "database_hostname" {
+  description = "DNS-only public hostname for the control database's PgBouncer TLS listener."
+  type        = string
+
+  validation {
+    condition = (
+      can(regex("^[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$", var.database_hostname)) &&
+      var.database_hostname != var.control_hostname &&
+      var.database_hostname != var.transfer_hostname &&
+      var.database_hostname != var.gateway_hostname
+    )
+    error_message = "database_hostname must be a distinct lowercase ASCII DNS name."
+  }
+}
+
+variable "control_db_server_name" {
+  description = "Opaque host name for the dedicated control-database server."
+  type        = string
+  default     = "exomem-control-db-01"
+}
+
+variable "control_db_server_type" {
+  # cpx11 (shared-x86, 2 vCPU / 2 GiB) is Hetzner's smallest currently placeable
+  # x86 type; the cx line the fleet node uses is retired for new placement (see
+  # server_type above). The control database is metadata-sized (cell rows,
+  # capacity, rollout state), not vault data, so this is sized to the
+  # workload rather than padded for headroom that would never be used.
+  description = "Small x86 Hetzner instance type for the control database server."
+  type        = string
+  default     = "cpx11"
+
+  validation {
+    condition     = contains(["cpx11", "cpx21"], var.control_db_server_type)
+    error_message = "The control database server must use an approved small x86 type."
+  }
+}
+
+variable "control_db_private_ip" {
+  description = "Stable private-network address for the control database server."
+  type        = string
+  default     = "10.50.1.20"
+}
+
+variable "pgbouncer_public_port" {
+  description = "Public TLS port the control database's PgBouncer listener binds."
+  type        = number
+  default     = 6432
+
+  validation {
+    condition     = var.pgbouncer_public_port > 1024 && var.pgbouncer_public_port < 65536
+    error_message = "pgbouncer_public_port must be an unprivileged TCP port."
+  }
+}

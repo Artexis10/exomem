@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+## Managed by Ansible (role: postgres).
+##
+## Runs after certbot renews or issues the certificate (RENEWED_LINEAGE is
+## set by certbot's renewal-hooks/deploy convention). Copies the new pair
+## where PostgreSQL and PgBouncer can read it, then reloads both -- this is
+## the "timer that reloads PgBouncer and Postgres" from D12; certbot's own
+## certbot.timer is the timer, this script is the reload.
+set -euo pipefail
+
+install -d -m 0755 "{{ postgres_tls_dir }}"
+install -m 0644 "${RENEWED_LINEAGE}/fullchain.pem" "{{ postgres_tls_dir }}/fullchain.pem"
+install -m 0640 -o root -g exomem-tls "${RENEWED_LINEAGE}/privkey.pem" "{{ postgres_tls_dir }}/privkey.pem"
+
+systemctl reload-or-restart postgresql@{{ postgres_major_version }}-main.service
+systemctl reload-or-restart pgbouncer.service
