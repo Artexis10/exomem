@@ -89,15 +89,18 @@ def server_icons() -> list[mcp.types.Icon]:
     ]
 
 
-def register_asset_routes(
+def register_health_routes(
     mcp_app: FastMCP,
     *,
     traffic_monitor=None,
     on_liveness: Callable[[], None] | None = None,
-    vault_root: Path | None = None,
 ) -> None:
-    """Serve inert public assets outside MCP auth; vault data stays behind REST."""
-    asset_dir = Path(__file__).parent
+    """Register the unauthenticated `/health` and `/health/ready` routes only.
+
+    Shared by the standalone asset-route bundle below and by Exomem Cloud
+    cells (design D1.5), which register nothing else from this module: an
+    Exomem Cloud cell registers only MCP, `/health` and `/health/ready`.
+    """
     if traffic_monitor is None:
         traffic_monitor = runtime_readiness_module.get_silent_traffic_monitor()
 
@@ -171,6 +174,18 @@ def register_asset_routes(
             status_code=status_code,
             headers={"Cache-Control": "no-store"},
         )
+
+
+def register_asset_routes(
+    mcp_app: FastMCP,
+    *,
+    traffic_monitor=None,
+    on_liveness: Callable[[], None] | None = None,
+    vault_root: Path | None = None,
+) -> None:
+    """Serve inert public assets outside MCP auth; vault data stays behind REST."""
+    asset_dir = Path(__file__).parent
+    register_health_routes(mcp_app, traffic_monitor=traffic_monitor, on_liveness=on_liveness)
 
     if vault_root is not None:
 

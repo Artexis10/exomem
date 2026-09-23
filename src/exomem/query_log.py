@@ -16,7 +16,11 @@ the bloat trap.
 
 Everything here is best-effort: any failure is swallowed so logging can NEVER
 break a tool call. No-op when `EXOMEM_DISABLE_EMBEDDINGS` (so the test suite stays
-clean) or `EXOMEM_DISABLE_QUERY_LOG` (an explicit ops opt-out) is set.
+clean), `EXOMEM_DISABLE_QUERY_LOG` (an explicit ops opt-out) is set, or
+`privacy_log.content_private_logging_enabled()` is true (hosted or cloud
+cell mode, design D1.2) -- checked here, in code, so a hosted or cloud cell
+never journals query text or note paths even if the manifest forgets to set
+the disable env vars.
 
 Additive correlation fields (`request_id`, `ts_utc`, `outcome`, `error_code`,
 `duration_ms`) ride alongside the original fields on every record — `ts`
@@ -83,9 +87,12 @@ def _target(default_path: Path, filename: str) -> Path:
 
 
 def _disabled() -> bool:
+    from .privacy_log import content_private_logging_enabled
+
     return bool(
         os.environ.get("EXOMEM_DISABLE_EMBEDDINGS")
         or os.environ.get("EXOMEM_DISABLE_QUERY_LOG")
+        or content_private_logging_enabled()
     )
 
 

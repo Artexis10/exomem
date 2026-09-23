@@ -21,7 +21,7 @@ The infrastructure-as-code and the runtime were not the problem. That means Terr
 Facts verified against the code, including by the independent critic review of 2026-09-23:
 
 - **Custody root.** Standalone custody is rooted at a fixed, deliberately non-configurable path, `<passwd home>/.local/state/exomem/standalone-host-control-v1` (`authorization_custody.py`, `_standalone_host_control_root`). It requires owner-only file modes (around line 1785). Writer-lease idempotency state does too (`writer_lease.py:2419-2432`).
-- **Governance schema.** A new governance store is schema v3. v4, which authorization sessions need, is reached only through the offline `exomem governance-schema plan-migration`, `stage-migration` and `commit-migration` sequence (`governance/store.py`, `__main__.py:_governance_schema_main`).
+- **Governance schema.** A fresh desktop vault serves governed writes and recall with no governance sidecar and no schema migration. Schema v4 with standalone custody attachment is the non-public foundation for vault consolidation. Its forward migration verifies external custody, and a fresh vault has none. Measured on 2026-09-23 against the cloud image: a vault taken to v4 either refuses every write (`GOVERNANCE_CATALOG_PUBLICATION_BLOCKED`) or, with the hosted custody variables set, refuses every recall (`governed projected retrieval is unavailable`). A vault that skips v4 serves writes, lexical recall and paraphrased recall in cloud mode.
 - **Vault layout.** `resolve_vault` refuses a directory that is not a vault. State migrations run offline through `exomem maintain --migrate-state --offline` before a server starts (`scripts/upgrade.sh`). A migrated state refuses an older image (`state_migration.py:384-385`).
 - **Principal.** `resolve_mcp_principal` needs a `sub` claim (`governance/principal.py:182-187`). Owner-only governance operations require the owner audience (`governance/tool.py:154-158`). A remote OAuth principal is a non-owner, as on the desktop (`session_oauth.py:172-178`).
 - **Health.** `/health` is liveness and always answers. `/health/ready` is readiness (`server_assets.py:111-173`).
@@ -62,6 +62,7 @@ Facts verified against the code, including by the independent critic review of 2
 
 1. **Authentication.**
    - `auth` is `CloudCellTokenVerifier`. It accepts a bearer equal to `EXOMEM_CLOUD_CELL_TOKEN`, or, during a rotation, to `EXOMEM_CLOUD_CELL_TOKEN_PREVIOUS`. The comparison is constant-time.
+   - A configured token shorter than 32 characters, current or previous, fails startup with `CLOUD_CELL_CONFIG_INVALID`, without echoing the value. A C4 bearer is always 43 characters, so this fires only on a mis-rendered Secret.
    - There is no GitHub OAuth proxy and no OAuth storage.
    - The verifier emits fixed claims `{sub: <cell_id>, iss: "exomem-cloud-cell"}` and the cell-service scope. The claims are never derived from the bearer or from a key version.
    - The resulting principal is a resolved **non-owner**, exactly as a remote OAuth principal is on the desktop.
@@ -70,13 +71,17 @@ Facts verified against the code, including by the independent critic review of 2
 2. **Logging.**
    - `privacy_log.content_private_logging_enabled` also returns true in cloud mode, and the redaction hook is installed.
    - The call-trace middleware runs in its content-free form (as `hosted=True` does), so no `query=` is logged.
+   - **Journals.** The query, read and write journals (`query_log`) are off whenever content-private logging is enabled. The check lives in `query_log` itself, not in the manifest or in a test-only variable, so it fails closed. Cloud mode also sets `EXOMEM_DISABLE_USAGE_BOOST` and `EXOMEM_DISABLE_RELEVANCE_CHECK`, as the hosted runtime does, because those features read the journals.
+   - **Call ledger.** Under content-private logging, a ledger row keeps no target paths, no hashes of argument values and no caller-chosen argument names. It keeps the command, the argument count, value lengths, duration and error code. A hash of a short value is an offline confirmation oracle for a guessed query.
+   - **Log directory.** The image defaults `EXOMEM_LOG_DIR` to `/tmp/exomem-logs`, so no runtime log ever lands on the tenant volume that D8 backs up, even without the manifest's setting.
 3. **Tool surface.**
    - The members of `CLOUD_SURFACE_EXCLUSIONS` are removed from the MCP server after registration.
    - Each entry uses the `HostedSurfaceExclusion` shape: `command`; `reason`, stating what is technically broken; and `lifted_when`.
    - The initial members are `transfer_artifact`, `adopt_vault`, `process_media` and `read_media`.
+   - Legacy MCP aliases (`EXOMEM_MCP_LEGACY_COMPAT`) are never registered in cloud mode. A cell has no legacy clients, and aliases would re-expose the leaves of excluded commands.
 4. **Read-only mode.** With `EXOMEM_CLOUD_READ_ONLY=1` the cell refuses every mutating command with `CLOUD_CELL_READ_ONLY`, before vault access. Mutation is classified from the command registry, not from a copied list. Reads keep working.
 5. **Routes.** Only MCP (`/mcp`), `/health` and `/health/ready` are registered. REST (`/api/*`), `/upload` and `/download` are not, because FastMCP custom routes do not inherit MCP authentication.
-6. **Configuration.** No `.env` file is loaded; configuration comes only from the pod environment.
+6. **Configuration.** No `.env` file is loaded; configuration comes only from the pod environment. That covers every loader, including the runtime-resource dotenv policy, not only the server's.
 
 The tool list is UX, not a security boundary. The boundary is the container, its volume and its network policy.
 
@@ -86,6 +91,7 @@ The `cloud` Dockerfile target derives from the `hosted` runtime stage:
 
 - It keeps the hosted stage's offline ONNX model environment and `EXOMEM_DISABLE_RANKING`.
 - It creates UID/GID 10001 with home directory `/data/host`.
+- It sets `FASTMCP_CHECK_FOR_UPDATES=off` and `FASTMCP_SHOW_SERVER_BANNER=false`. A cell has no egress, and the update check otherwise stalls every cold start on DNS (measured: `/health` up after 24 s against 4 s).
 
 The tenant PVC is mounted at `/data`. The vault is `/data/vault` (`EXOMEM_VAULT_PATH`), and standalone custody resolves to `/data/host/.local/state/exomem/standalone-host-control-v1` with no code override.
 
@@ -101,18 +107,17 @@ A writable `emptyDir` is mounted at `/tmp`. The pod sets `TMPDIR=/tmp`, `EXOMEM_
 
 The StatefulSet has one init container, `cell-init`, using the same image as the runtime. It runs non-root with the volume mounted and the server not yet started. The volume is ReadWriteOnce and the replica count is 1, so this is genuinely offline. The container is idempotent:
 
-1. If `/data/vault` is not a vault, it runs `exomem init` for `/data/vault`.
-2. It runs `exomem maintain --vault /data/vault --migrate-state --offline --json`.
-3. If `exomem governance-schema status --vault /data/vault --json` reports schema v3, it runs the standalone v3-to-v4 migration: `plan-migration`, then `stage-migration --expected-plan-digest <plan digest> --yes`, then `commit-migration --expected-plan-digest <plan digest> --yes`. Each step reads its predecessor's JSON.
+1. It creates `/data/vault` and `/data/host` if absent, and sets both to mode `0700`.
+2. If `/data/vault` is not a vault, it initializes one **atomically**. It builds the vault in a staging directory on the same volume (`/data/.vault-init-*`), then renames the staging directory onto `/data/vault`, which must be absent or empty. Stale staging directories from an earlier crash are removed first. A non-empty `/data/vault` that is not a vault fails with `CELL_INIT_VAULT_UNRECOGNIZED` and is never overlaid: an interrupted init cannot produce it, so it means something else wrote there.
+3. It runs `exomem maintain --vault /data/vault --migrate-state --offline --json`.
 
-On the desktop, copying a digest by hand is a review step that protects an existing vault from an unreviewed irreversible cutover. On a cell, the plan is produced and committed by the same pinned image against the vault it just initialized, or against a vault it has migrated before. There is nothing for a human to add, and a wrong firing would only delay first start. Automation therefore replaces the copy.
+That is the desktop's own first-run path, so the cell keeps the one rule. There is no governance schema migration and no custody environment. A cell runs standalone governance defaults, like a fresh desktop install. Schema v4 arrives only with a later change that needs multi-audience authorization inside a cell.
 
-**Re-entry.** Every run starts from `status`:
+**Re-entry.** `init` is skipped once the volume holds a vault, and state migration is idempotent. A run interrupted at any point is completed by the next run. Lane A tests a fresh volume, a second run that changes nothing, a run interrupted after `init`, and runs interrupted **during** `init` at several points of the scaffold copy. Each interrupted run must be followed by a successful run that leaves a complete vault.
 
-- At v3, `cell-init` re-runs the whole plan, stage and commit sequence. A namespace staged by an earlier crashed run is content-addressed and inert until commit, so a fresh plan either reuses it or leaves it unreferenced.
-- A status that is neither exact v3 nor v4, such as an interrupted commit, fails the step with the status error code. No automatic downmigration runs.
+**Output.** `cell-init` installs the redaction hook, as the server does. A failure prints one JSON line with the step and a stable error code, and exits non-zero; it never prints a traceback, which would carry absolute paths.
 
-Lane A tests a crash between stage and commit, and a crash during commit.
+**Setgid volume root.** fsGroup leaves the volume root setgid (`2770`). `init` and every later directory creation must succeed under it, and owner-only custody modes must still hold. The container test mimics it by `chmod 2770` on the volume root.
 
 **Failure.** If any step fails, the init container fails, the pod stays not-ready, and cellctl reports `provisioning` until the init deadline. After that it reports `failed` with the step's error code. During an upgrade attempt, D6 owns the deadline instead.
 
@@ -269,7 +274,7 @@ cellctl drives backups; there is no CronJob.
 - **Why stopped.** Stopping makes the copy crash-consistent across WAL-mode SQLite and the receipts journal, which a live file-by-file copy is not (`governance/store.py:716-746`).
 - **Placement.** Once there is more than one node, backup and restore Jobs carry node affinity to the volume's node.
 
-**Restore** runs a restore Job as UID 10001, with `restic restore --delete`, into a new or quiesced volume. The operator export runbook uses the same Job to restore into a scratch namespace and hand the tenant an archive of their vault. It is exercised in the local rehearsal: a scratch-namespace restore must answer recall, pass `governance-schema status` at v4, and accept a governed write.
+**Restore** runs a restore Job as UID 10001, with `restic restore --delete`, into a new or quiesced volume. The operator export runbook uses the same Job to restore into a scratch namespace and hand the tenant an archive of their vault. It is exercised in the local rehearsal: a scratch-namespace restore must answer recall and accept a governed write.
 
 ### D9. Capacity is observed, not reserved
 

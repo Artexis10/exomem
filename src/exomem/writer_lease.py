@@ -5618,6 +5618,16 @@ def invoke_command(
         selector_error = error
         read_only = False
 
+    if not read_only:
+        from . import cloud_cell
+
+        if cloud_cell.cloud_read_only_enabled():
+            raise OpError(
+                "CLOUD_CELL_READ_ONLY",
+                "this Exomem Cloud cell is serving read-only",
+                "wait for the cell to leave read-only mode, or read instead of write",
+            )
+
     active_surface = capabilities_module.current_active_surface()
     if (
         command.name == "maintain_memory"

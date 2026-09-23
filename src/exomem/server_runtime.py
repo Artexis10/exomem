@@ -73,10 +73,26 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
     if hosted_mode_enabled():
         return _initialize_hosted_runtime()
 
-    # An installed package lives under site-packages, so python-dotenv's implicit
-    # caller-relative search misses the service working directory. The documented
-    # repo-root .env is explicitly cwd-relative for both checkout and wheel installs.
-    load_dotenv_func(dotenv_path=Path.cwd() / ".env", override=True)
+    from . import cloud_cell
+
+    if cloud_cell.cloud_mode_enabled():
+        # A cloud cell reads no `.env` file: configuration comes only from the
+        # pod environment (design D1.6). Everything else below this branch is
+        # the standalone path, unmodified.
+        privacy_log.install_hosted_log_redaction()
+        # query_log itself fails closed on content-private logging (D1.2), but
+        # usage boost and the relevance check both read those journals -- with
+        # them off, both features would otherwise loop forever finding nothing.
+        # Hosted parity: hosted_runtime.HostedProcessSettings.apply_process_environment
+        # sets the same two variables for the same reason.
+        os.environ["EXOMEM_DISABLE_USAGE_BOOST"] = "1"
+        os.environ["EXOMEM_DISABLE_RELEVANCE_CHECK"] = "1"
+    else:
+        # An installed package lives under site-packages, so python-dotenv's
+        # implicit caller-relative search misses the service working
+        # directory. The documented repo-root .env is explicitly cwd-relative
+        # for both checkout and wheel installs.
+        load_dotenv_func(dotenv_path=Path.cwd() / ".env", override=True)
     env_compat.promote_legacy()
 
     vault_root = resolve_vault()
