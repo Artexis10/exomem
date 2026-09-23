@@ -9860,10 +9860,23 @@ def op_schema_memory(
                     raise ValueError(
                         "INCOMPLETE_RELATION_PROPOSAL: save requires a reviewed proposal"
                     )
-                observed = {
-                    item["raw_relation"]
-                    for item in memory_schema_module.relation_observations(vault_root)
-                }
+                # The guard exists to stop a save deleting vocabulary that is in
+                # use, so it protects only observed labels that resolve to a
+                # currently registered extension: its key, and the alias when
+                # the label was one. Core and unregistered labels, in any case,
+                # are nothing a registry save can delete.
+                current = relation_registry_module.load_registry(vault_root)
+                observed: set[str] = set()
+                for item in memory_schema_module.relation_observations(
+                    vault_root, registry=current
+                ):
+                    canonical = item.get("canonical")
+                    if canonical not in current.extensions:
+                        continue
+                    observed.add(canonical)
+                    label = relation_registry_module.normalize_relation(item["raw_relation"])
+                    if current.aliases.get(label) == canonical:
+                        observed.add(label)
                 result["saved"] = relation_registry_module.save_registry(
                     vault_root,
                     proposal,

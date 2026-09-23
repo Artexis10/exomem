@@ -414,14 +414,18 @@ def test_relation_inference_is_evidence_backed_and_proposal_first(tmp_path: Path
 
     with pytest.raises(ValueError, match="INCOMPLETE_RELATION_PROPOSAL"):
         commands.op_schema_memory(vault, operation="infer", subject="relations", save=True)
-    with pytest.raises(ValueError, match="OBSERVED_RELATION_DELETION"):
-        commands.op_schema_memory(
-            vault,
-            operation="infer",
-            subject="relations",
-            save=True,
-            proposal=inferred["proposal"],
-        )
+    # Unregistered observations are not vocabulary a save can delete, so they
+    # no longer block the reviewed proposal; promotion stays an explicit step.
+    saved = commands.op_schema_memory(
+        vault,
+        operation="infer",
+        subject="relations",
+        save=True,
+        proposal=inferred["proposal"],
+    )["saved"]
+    assert saved["created"] is True
+    assert relation_registry.load_registry(vault).extensions == {}
+    assert {page: page.read_bytes() for page in pages} == before
 
 
 def test_relation_inference_preserves_raw_census_and_aggregates_promotions(
@@ -738,6 +742,79 @@ def test_reviewed_relation_proposal_saves_and_observed_deletion_is_refused(tmp_p
             expected_hash=saved["content_hash"],
             proposal={"schema_version": 1, "extensions": {}},
         )
+
+
+_APPLIES_REGISTRY = {
+    "schema_version": 1,
+    "extensions": {
+        "vault.applies_to": {
+            "parent": "relates_to",
+            "description": "A synthetic applicability relation.",
+            "direction": "directed",
+            "aliases": ["applies_to"],
+        }
+    },
+}
+
+
+def _save_applies_registry(vault: Path) -> str:
+    return relation_registry.save_registry(vault, _APPLIES_REGISTRY)["content_hash"]
+
+
+def test_infer_save_ignores_unregistered_and_capitalised_observed_labels(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    pages = _seed_pages(vault)
+    content_hash = _save_applies_registry(vault)
+    for page, line in zip(
+        pages,
+        (
+            "- Supports: [[Knowledge Base/Notes/future]]",
+            "- zebra.label: [[Knowledge Base/Notes/future]]",
+            "- applies_to: [[Knowledge Base/Notes/future]]",
+        ),
+        strict=False,
+    ):
+        page.write_text(page.read_text(encoding="utf-8") + f"\n{line}\n", encoding="utf-8")
+    inferred = commands.op_schema_memory(vault, operation="infer", subject="relations")
+    assert "vault.applies_to" in inferred["proposal"]["extensions"]
+
+    saved = commands.op_schema_memory(
+        vault,
+        operation="infer",
+        subject="relations",
+        save=True,
+        expected_hash=content_hash,
+        proposal=inferred["proposal"],
+    )["saved"]
+
+    assert saved["previous_hash"] == content_hash
+    assert set(relation_registry.load_registry(vault).extensions) == {"vault.applies_to"}
+
+
+def test_infer_save_still_refuses_dropping_a_used_extension(tmp_path: Path) -> None:
+    for label in ("vault.applies_to", "applies_to"):
+        vault = tmp_path / label
+        pages = _seed_pages(vault)
+        content_hash = _save_applies_registry(vault)
+        pages[0].write_text(
+            pages[0].read_text(encoding="utf-8")
+            + f"\n- {label}: [[Knowledge Base/Notes/future]]\n",
+            encoding="utf-8",
+        )
+        before = relation_registry.extension_registry_path(vault).read_bytes()
+
+        with pytest.raises(ValueError, match="OBSERVED_RELATION_DELETION"):
+            commands.op_schema_memory(
+                vault,
+                operation="infer",
+                subject="relations",
+                save=True,
+                expected_hash=content_hash,
+                proposal={"schema_version": 1, "extensions": {}},
+            )
+        assert relation_registry.extension_registry_path(vault).read_bytes() == before
 
 
 def test_traversal_profile_governance_validates_diffs_and_saves(tmp_path: Path) -> None:
