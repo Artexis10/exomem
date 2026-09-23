@@ -1492,6 +1492,24 @@ def _reap_unowned_temporaries(live: Path, *, vault_root: Path, keep: int) -> lis
     return removed
 
 
+def _disk_vault_entries(vault_root: Path) -> dict[str, freshness.FileSignature]:
+    """Direct-disk stat map of the ordinary-recall projection, one walk.
+
+    The same walk and admission `_disk_vault_freshness` digests, kept as a map
+    so a pass-end proof can say *which* paths the registry disagrees with, not
+    only that the digest moved.
+    """
+    entries: dict[str, freshness.FileSignature] = {}
+    for path in recall_policy.iter_recall_markdown(
+        vault_root, vault_module.walk_vault_md(vault_root)
+    ):
+        try:
+            entries[str(path)] = freshness.stat_signature(path)
+        except OSError:
+            continue
+    return entries
+
+
 def _disk_vault_freshness(vault_root: Path) -> tuple[int, int, str]:
     """Direct-disk freshness of the ordinary-recall projection only.
 
@@ -3476,6 +3494,32 @@ class EpistemicGraphIndex:
         # cause belonging to the branch it takes.
         moved_cause = "no stabilization attempt completed"
         publication_cause = "no stabilization attempt completed"
+        # What the Class C mark may name. A proof that enumerated its
+        # unexplained paths marks exactly those; any attempt whose evidence
+        # could not name them makes the mark unscoped, as every mark was before.
+        unexplained_paths: set[str] = set()
+        unexplained_unscoped = False
+
+        def classify(cause: str) -> None:
+            """Class C only on positive evidence the registry is behind the disk.
+
+            Movement the registry recorded -- a governed write this service
+            committed -- is not evidence: an attempt it defeats is a
+            publication failure (Class B), and re-targets as before.
+            """
+            nonlocal projection_moved, moved_cause, publication_cause, unexplained_unscoped
+            kind, paths = self._classify_movement(before, after_identity)
+            if kind == "recorded":
+                publication_cause = f"{cause}, and the registry recorded every change"
+            elif kind == "unclassifiable":
+                publication_cause = f"{cause}, and the registry could not account for it"
+            else:
+                projection_moved = True
+                moved_cause = cause
+                if paths is None:
+                    unexplained_unscoped = True
+                else:
+                    unexplained_paths.update(paths)
         # #576. Whether the *last* attempt was invalidated by a moving
         # projection, which is the only condition worth re-targeting: the
         # newer baseline is sampled fresh at the top of every attempt, so an
@@ -3508,6 +3552,7 @@ class EpistemicGraphIndex:
                     # admitted cause.
                     self._mark_unavailable()
                     projection_moved = True
+                    unexplained_unscoped = True
                     retarget = True
                     moved_cause = "the supplied freshness identity did not name the resolver bytes"
                     # The *recall* resolver stays. Every read of it revalidates
@@ -3569,10 +3614,10 @@ class EpistemicGraphIndex:
                             stable = True
                             return report
                         # The projection moved between writing the availability
-                        # marker and confirming it: Class C, second cause.
-                        projection_moved = True
+                        # marker and confirming it: Class C, second cause --
+                        # unless the registry recorded that movement.
                         retarget = True
-                        moved_cause = (
+                        classify(
                             "the recall projection moved after the availability "
                             "marker was written"
                         )
@@ -3613,15 +3658,14 @@ class EpistemicGraphIndex:
                 else:
                     # `_recall_projection_identity`, `_recall_membership` or the
                     # resolver source versions changed across the pass: Class C,
-                    # second admitted cause.
-                    projection_moved = True
+                    # second admitted cause -- unless the registry recorded it.
                     retarget = True
                     if after_identity != before:
-                        moved_cause = "the recall projection identity moved across the pass"
+                        classify("the recall projection identity moved across the pass")
                     elif after_membership != resolver_membership:
-                        moved_cause = "the recall membership moved across the pass"
+                        classify("the recall membership moved across the pass")
                     else:
-                        moved_cause = "the resolver source versions moved across the pass"
+                        classify("the resolver source versions moved across the pass")
             exhausted = (
                 "epistemic graph rebuild did not stabilize after "
                 f"{attempts} attempts in {time.monotonic() - started:.1f}s"
@@ -3661,7 +3705,145 @@ class EpistemicGraphIndex:
                 # replaced it. Withdraw admission out of band without modifying
                 # the old live sidecar bytes. Marked exactly once per proof, so
                 # a repeating Class B refusal can never allocate an epoch here.
-                freshness.mark_external_pending(self.vault_root)
+                # Scoped to the paths the proof could name: an unscoped mark
+                # makes every later lineage gap uncoverable, and fences far more
+                # than the evidence covers.
+                if unexplained_unscoped or not unexplained_paths:
+                    freshness.mark_external_pending(self.vault_root)
+                else:
+                    freshness.mark_external_pending(
+                        self.vault_root,
+                        paths=[self.vault_root / rel for rel in sorted(unexplained_paths)],
+                    )
+
+    def _relative_signatures(
+        self, entries: dict[str, freshness.FileSignature]
+    ) -> dict[str, freshness.FileSignature]:
+        """Key a registry or walk stat map by vault-relative path.
+
+        Registry keys are canonicalised event paths and walk keys are
+        `walk_vault_md` paths; the two spell a file the same way when both are
+        under the literal vault root, and `_vault_rel` settles every other
+        spelling, so a recorded write can never read as unexplained (nor an
+        unrecorded one as recorded) because of how a path was written down.
+        """
+        relative: dict[str, freshness.FileSignature] = {}
+        for key, signature in entries.items():
+            try:
+                rel: str | None = Path(key).relative_to(self.vault_root).as_posix()
+            except ValueError:
+                rel = _vault_rel(self.vault_root, key)
+            if rel is not None:
+                relative[rel] = signature
+        return relative
+
+    def _recorded_since(
+        self, lineage: freshness.RecallFreshnessCheckpoint
+    ) -> set[str] | None:
+        """Paths the registry accounts for since `lineage`, or None if it cannot say.
+
+        Its complete history from the checkpoint, plus every standing
+        path-scoped watcher mark: an event observed before its debounce is
+        recorded, just not yet published.
+        """
+        delta = freshness.recall_delta_since(self.vault_root, "vault", lineage)
+        if not delta.complete:
+            return None
+        recorded = {
+            rel
+            for raw in (*delta.changed, *delta.deleted)
+            if (rel := _vault_rel(self.vault_root, raw)) is not None
+        }
+        recorded.update(
+            rel
+            for raw in freshness.external_pending_paths(self.vault_root)
+            if (rel := _vault_rel(self.vault_root, raw)) is not None
+        )
+        return recorded
+
+    def _unexplained_differences(
+        self,
+    ) -> (
+        tuple[
+            freshness.RecallFreshnessCheckpoint,
+            dict[str, freshness.FileSignature],
+            set[str],
+            set[str],
+        ]
+        | None
+    ):
+        """The registry-vs-disk comparison, or None when the registry cannot answer.
+
+        Returns the registry checkpoint `c1` the comparison was taken against,
+        the disk stat map keyed by relative path, the paths on which registry
+        and disk differ, and those of them the registry's complete history from
+        `c1` (plus standing path-scoped watcher marks) does not explain.
+        """
+        try:
+            lineage, registry = freshness.recall_projection_snapshot(
+                self.vault_root, "vault", allow_fallback=False
+            )
+        except freshness.RecallProjectionUnavailable:
+            return None
+        disk = self._relative_signatures(_disk_vault_entries(self.vault_root))
+        recorded_map = self._relative_signatures(registry)
+        differing = {
+            rel
+            for rel in recorded_map.keys() | disk.keys()
+            if recorded_map.get(rel) != disk.get(rel)
+        }
+        unexplained: set[str] = set()
+        if differing:
+            explained = self._recorded_since(lineage)
+            if explained is None:
+                return None
+            unexplained = differing - explained
+            if unexplained:
+                with _sampling_boundary(self._canonical_mutation_coordinator()):
+                    pass
+                explained = self._recorded_since(lineage)
+                if explained is None:
+                    return None
+                unexplained -= explained
+        return lineage, disk, differing, unexplained
+
+    def _classify_movement(
+        self,
+        before: tuple[tuple[int, int, str], str, str],
+        after_identity: tuple[tuple[int, int, str], str, str],
+    ) -> tuple[str, frozenset[str] | None]:
+        """Decide whether movement across a whole-vault pass is evidence.
+
+        Returns `("recorded", None)` when the registry's own history explains
+        every registry-vs-disk difference, `("unrecorded", paths)` for positive
+        evidence the registry is behind the disk (`paths` None when the proof
+        cannot name them: a policy change), or `("unclassifiable", None)` when
+        the registry cannot answer, which proves nothing either way.
+
+        The comparison is a map difference explained by history, not a
+        stillness test: a stillness test fails under load for the same reason
+        the pass did, because the walk takes seconds and writes land inside it.
+        `X = {p : registry[p] != disk[p]}` is taken against the registry's own
+        checkpoint and is recorded when the registry's complete delta from it
+        (or a standing path-scoped watcher mark) names every path in it.
+        """
+        if before[1:] != after_identity[1:]:
+            return "unrecorded", None
+        sample = self._unexplained_differences()
+        if sample is None:
+            return "unclassifiable", None
+        lineage, _disk, differing, unexplained = sample
+        if (lineage.policy_version, lineage.access_policy_fingerprint) != before[1:]:
+            return "unclassifiable", None
+        log.info(
+            "graph rebuild movement classified class=%s differing=%d unexplained=%d",
+            "unrecorded" if unexplained else "recorded",
+            len(differing),
+            len(unexplained),
+        )
+        if unexplained:
+            return "unrecorded", frozenset(unexplained)
+        return "recorded", None
 
     def _rebuild_all_pass(
         self,
