@@ -8,12 +8,12 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Product commands: 31
-- Tier 1 commands: 27
+- Product commands: 32
+- Tier 1 commands: 28
 - Tier 2 commands: 4
-- Registry-generated MCP commands: 31
-- REST commands: 30
-- CLI commands: 30
+- Registry-generated MCP commands: 32
+- REST commands: 31
+- CLI commands: 31
 - Hand-registered MCP tools: none
 
 ## Hosted Cell Capability Boundary
@@ -41,7 +41,7 @@ See [hosted-operations.md](hosted-operations.md) and the
 | coordination_status | 1 | MCP, REST, CLI | read | no | - | coordination_status | - | Report this replica's writer-lease role and coordinator health. |
 | bootstrap | 1 | MCP, REST, CLI | read | no | - | bootstrap | profile, workflow, skill_contract | Return Exomem's versioned operating contract and live session state. |
 | ask_memory | 1 | MCP, REST, CLI | read | no | query | search, find | query, types, projects, tags, speakers, file_types, exclude_file_types, categories, kinds, source_kinds, domains, relations, relation_of, relation_direction, filters, result_level, limit, continuation, scope, mode, detail, deep, graph, rerank, rerank_max_candidates, prefer_compiled, prefer_active, prefer_used, widen_outside_kb, graph_enrich, include_timings, explain, purpose | Recall durable knowledge from Exomem with product defaults. |
-| activate_context | 1 | MCP, REST, CLI | read | no | turn | activate_context | turn, max_chars, purpose, continuity, anchor, include_timings | Compile durable context for a raw conversational turn, without a query. |
+| activate_context | 1 | MCP, REST, CLI | read | no | turn | activate_context | turn, max_chars, purpose, continuity, anchor, include_timings, client, session | Compile durable context for a raw conversational turn, without a query. |
 | read_memory | 1 | MCP, REST, CLI | read | no | path | fetch, get | path*, frontmatter_only, include_history, links, include_raw, unit_ref, purpose | Read one memory page or one exact semantic unit by reference. |
 | browse_memory | 1 | MCP, REST, CLI | read | no | path | overview, list_directory | path, mode, max_depth, include_hidden, samples, recursive | Browse vault structure without reading many files. |
 | remember | 1 | MCP, REST, CLI | write | no | - | note | content*, title*, slug, note_type, project, projects, sources, tags, status, severity, pattern_type, domain, started, duration, hypothesis, n, concluded, medium, recorded, published, host, editor, bridge_of, bridge_scope, bridge_review, suggestions, project_category, validate_only, draft_id, draft_hash, draft_token, relation_disposition, relation_review_hash, relation_review_reason, vocabulary_decision, response_detail | Remember a durable conclusion as compiled governed knowledge. |
@@ -49,6 +49,7 @@ See [hosted-operations.md](hosted-operations.md) and the
 | observe_memory | 1 | MCP, REST, CLI | write | yes | path | observe_memory | path*, operation, category, content, kind, tags, context, relations, verdict, check_by, id, unit_ref, expected_fingerprint, expected_hash, transition_token, relation_disposition, relation_review_hash, relation_review_reason, response_detail | Validate or mutate one semantic unit on a compiled memory page. |
 | replace_memory | 1 | MCP, REST, CLI | write | yes | old_path | replace | old_path*, content*, title*, slug, note_type, reason, project, projects, sources, tags, status, severity, pattern_type, domain, started, duration, hypothesis, n, concluded, medium, recorded, published, host, editor, bridge_of, bridge_scope, bridge_review, project_category, validate_only, draft_id, draft_hash, draft_token, relation_disposition, relation_review_hash, relation_review_reason, vocabulary_decision, response_detail | Supersede an existing compiled memory with a new version. |
 | capture_source | 1 | MCP, REST, CLI | write | no | - | add, propose_compilation | title*, content, slug, source_type, url, tags, why_captured, compile_guidance, suggested_title, source_kind, domain, projects, files, adoption, response_detail | Capture raw source material and optionally return compile guidance. |
+| episode_memory | 1 | MCP, REST, CLI | write | no | - | episode_memory | action*, episode, subject, summary, worked_on, decided, open, said, about, client, response_detail | Record what a conversation worked on, decided and left open, for the next session on any client. |
 | compile_source | 1 | MCP, REST, CLI | read | no | - | propose_compilation | sources*, suggested_title | Plan a compiled note from one or more raw sources. |
 | preserve_evidence | 1 | MCP, REST, CLI | write | no | - | preserve | scope*, category*, filename*, content*, description, response_detail | Preserve text evidence as append-only proof material. |
 | preserve_artifacts | 1 | MCP, REST, CLI | write | no | - | preserve | scope*, category*, files*, adoption, response_detail | Preserve client-provided binary file handles as append-only Evidence. |
