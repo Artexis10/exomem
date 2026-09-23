@@ -5956,8 +5956,9 @@ def op_activate_context(
     its single `anchors[]` entry has `kind: "page"` and `status:
     "retrieval_carried"`, and `generation.carried_by` is `"retrieval"`. Read that
     as "nothing was named; recall alone put this here" — no anchor was resolved,
-    the packet carries no continuity token, and a turn with nothing distinctive
-    in it abstains `unresolved` rather than guessing between pages. Naming that
+    yet the packet's continuity token names that page, so a following
+    "continue" resumes it; a turn with nothing distinctive in it abstains
+    `unresolved` rather than guessing between pages. Naming that
     SAME page yourself with `anchor` instead resolves it outright, at `status:
     "resolved"` and `generation.carried_by: "agent_choice"` — your choice, not
     recall's guess.
@@ -5985,8 +5986,8 @@ def op_activate_context(
             enters the packet cache key.
         continuity: The opaque `continuity` token a previous packet of this
             conversation returned. On a turn that names nothing ("continue",
-            "where were we") its anchors are the first thing the turn is taken
-            to refer to, and may resolve on that alone. On any other turn it
+            "where were we") the anchors or page it names are the first thing
+            the turn is taken to refer to, and may resolve on that alone. On any other turn it
             only strengthens anchors the turn already reaches on its own
             evidence: it never reaches one by itself there, and never turns an
             `unresolved` turn into a resolved one. It is ignored and reported as
