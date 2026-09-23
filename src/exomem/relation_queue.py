@@ -457,9 +457,10 @@ def _page_candidates(
     from .governance import egress
 
     visible = egress.visible_page_filter(vault_root)
+    decided: dict[str, Any] = {} if visible is None else {"keep": visible}
     generated = [
         *epistemic_graph_module._structural_candidates(
-            vault_root, page.rel_path, keep=visible
+            vault_root, page.rel_path, **decided
         )[:method_cap],
         *_body_wikilink_candidates(vault_root, page, limit=method_cap),
         *epistemic_graph_module._frontmatter_source_candidates(page)[:method_cap],
@@ -653,12 +654,15 @@ def build_queue(
     from .governance import egress
 
     vault_root = Path(vault_root)
+    visible = egress.visible_page_filter(vault_root)
+    # The owner's batch is requested exactly as before.
+    decided: dict[str, Any] = {} if visible is None else {"keep": visible}
     batch = epistemic_graph_module.EpistemicGraphIndex(
         vault_root
     ).relation_review_batch(
         limit_pages=limit_pages,
         limit_per_page=limit_per_page,
-        keep=egress.visible_page_filter(vault_root),
+        **decided,
     )
     status = str(batch.get("status") or "warming")
     if status != "available":

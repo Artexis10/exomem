@@ -7610,11 +7610,13 @@ def suggest_relations(
             # take at most nine of ten slots; the existing four keep their
             # relative order among themselves. Pinned in both directions by the
             # suggestion-order test.
-            candidates.extend(_structural_candidates(vault_root, rel, keep=visible))
+            # The owner's generators are called exactly as before.
+            decided: dict[str, Any] = {} if visible is None else {"keep": visible}
+            candidates.extend(_structural_candidates(vault_root, rel, **decided))
             candidates.extend(_wikilink_candidates(vault_root, page.body, rel))
             candidates.extend(_frontmatter_source_candidates(page))
-            candidates.extend(_shared_source_candidates(vault_root, rel, keep=visible))
-            candidates.extend(_embedding_proximity_candidates(vault_root, page, keep=visible))
+            candidates.extend(_shared_source_candidates(vault_root, rel, **decided))
+            candidates.extend(_embedding_proximity_candidates(vault_root, page, **decided))
     elif draft_body:
         candidates.extend(
             _draft_wikilink_candidates(vault_root, draft_body, draft_title=draft_title)
