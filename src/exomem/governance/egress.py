@@ -5472,6 +5472,39 @@ def restricted_release_filter(
     return release_walk_filter(vault_root, principal=who, purpose=purpose)
 
 
+def visible_page_filter(
+    vault_root: Path,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> Callable[[str], bool] | None:
+    """`restricted_release_filter` for references that may name no page.
+
+    A derived candidate can point at a target that does not exist (an
+    unresolved link, a placeholder). That is not a page, so nothing can be
+    withheld and the reference is kept, exactly as in a vault without the
+    withheld pages. A reference to an existing or erased page is decided.
+    """
+    keep = restricted_release_filter(vault_root, principal=principal, purpose=purpose)
+    if keep is None:
+        return None
+    root = Path(vault_root)
+
+    def visible(rel_path: str) -> bool:
+        rel = str(rel_path or "").strip()
+        if not rel:
+            return True
+        if not lifecycle.is_tombstoned(root, rel):
+            try:
+                if not (root / rel).is_file():
+                    return True
+            except OSError:
+                return False
+        return keep(rel)
+
+    return visible
+
+
 def release_allows_download(
     vault_root: Path,
     rel_path: str,

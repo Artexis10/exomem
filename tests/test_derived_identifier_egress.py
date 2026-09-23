@@ -387,3 +387,99 @@ def test_restricted_context_reads_as_if_the_withheld_page_were_absent(
     # The owner still receives the withheld page as a neighbour of beta.
     owner = _call(vaults["A"], None, "connect_memory", operation="context", path=f"{NOTES}/beta.md")
     assert f"{WITHHELD_DIR}/linker.md" in _text(owner)
+
+
+# ---------------------------------------------------------------------------
+# Relation proposals decide each target before emitting it
+# ---------------------------------------------------------------------------
+
+_SOURCE = f"{KB}/Sources/source-one"
+
+
+def _shared_source() -> tuple[dict[str, str], dict[str, str]]:
+    """A withheld page cites the same source as a visible page."""
+    base = {
+        **_filler(),
+        f"{_SOURCE}.md": _page("Source One", "Raw source text.", type="source"),
+        f"{NOTES}/alpha.md": _page(
+            "Alpha", "Alpha conclusions.", type="insight", sources=f'["[[{_SOURCE}]]"]'
+        ),
+        f"{NOTES}/beta.md": _page("Beta", "Beta background.", type="insight"),
+    }
+    withheld = {
+        f"{WITHHELD_DIR}/merger-memo.md": _page(
+            "Hidden Draft", "Withheld body text.", type="insight", sources=f'["[[{_SOURCE}]]"]'
+        )
+    }
+    return base, withheld
+
+
+_QUEUE_FIELDS = ("groups", "shown", "pages_shown", "filtered", "items_truncated", "status")
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_relation_proposals_read_as_if_the_withheld_page_were_absent(
+    tmp_path: Path, audience: str
+) -> None:
+    base, withheld = _shared_source()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    principal = _principal(audience)
+
+    answers = {}
+    for variant, vault in vaults.items():
+        queue = _call(vault, principal, "review_memory", mode="relation-queue")
+        answers[variant] = {
+            "suggest": _call(
+                vault,
+                principal,
+                "connect_memory",
+                operation="suggest-relations",
+                path=f"{NOTES}/alpha.md",
+            ),
+            "queue": {field: queue.get(field) for field in _QUEUE_FIELDS},
+        }
+
+    assert not _names_withheld(answers["A"])
+    assert _text(answers["A"]) == _text(answers["B"])
+    assert _text(answers["C"]) == _text(answers["B"])
+    owner = _call(
+        vaults["A"], None, "connect_memory", operation="suggest-relations", path=f"{NOTES}/alpha.md"
+    )
+    assert f"{WITHHELD_DIR}/merger-memo.md" in _text(owner)
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_guessed_relation_ref_to_a_withheld_page_reads_as_absent(
+    tmp_path: Path, audience: str
+) -> None:
+    from exomem import relation_queue, review_state
+
+    base, withheld = _shared_source()
+    vaults = {
+        "B": _materialize(tmp_path / "B" / "vault", dict(base), audience),
+        "A": _materialize(tmp_path / "A" / "vault", {**base, **withheld}, audience),
+    }
+    guess = "|".join(
+        (
+            f"{NOTES}/alpha.md",
+            f"{WITHHELD_DIR}/merger-memo.md",
+            "relates_to",
+            "shared_sources",
+        )
+    )
+    ref = relation_queue.relation_review_ref(review_state.item_id(f"relation:{guess}"))
+
+    answers = {
+        variant: _call(
+            vault,
+            _principal(audience),
+            "triage_memory",
+            ref=ref,
+            action="dismiss",
+            source_path=f"{NOTES}/alpha.md",
+        )
+        for variant, vault in vaults.items()
+    }
+
+    assert _text(answers["A"]) == _text(answers["B"])
+    assert answers["B"]["message"].startswith("REVIEW_REFRESH_REQUIRED")

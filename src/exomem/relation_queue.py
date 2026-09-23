@@ -454,14 +454,25 @@ def _page_candidates(
         _MAX_GENERATED_PER_METHOD,
         max(1, budget * _CLASSIFICATION_HEADROOM),
     )
+    from .governance import egress
+
+    visible = egress.visible_page_filter(vault_root)
     generated = [
         *epistemic_graph_module._structural_candidates(
-            vault_root, page.rel_path
+            vault_root, page.rel_path, keep=visible
         )[:method_cap],
         *_body_wikilink_candidates(vault_root, page, limit=method_cap),
         *epistemic_graph_module._frontmatter_source_candidates(page)[:method_cap],
         *_shared_source_candidates(vault_root, page.rel_path, limit=method_cap),
     ]
+    if visible is not None:
+        # A caller other than the owner can resolve, triage or accept only a
+        # candidate it could have been shown.
+        generated = [
+            candidate
+            for candidate in generated
+            if epistemic_graph_module.candidate_is_visible(candidate, visible)
+        ]
     return epistemic_graph_module._dedupe_candidates(generated)
 
 
@@ -639,12 +650,15 @@ def build_queue(
     today=None,
 ) -> dict[str, Any]:
     """Assemble one bounded graph-native relation-acceptance queue."""
+    from .governance import egress
+
     vault_root = Path(vault_root)
     batch = epistemic_graph_module.EpistemicGraphIndex(
         vault_root
     ).relation_review_batch(
         limit_pages=limit_pages,
         limit_per_page=limit_per_page,
+        keep=egress.visible_page_filter(vault_root),
     )
     status = str(batch.get("status") or "warming")
     if status != "available":
