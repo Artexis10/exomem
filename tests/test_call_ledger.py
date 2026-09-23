@@ -344,6 +344,42 @@ def test_no_argument_value_ever_reaches_the_ledger(ledger_dir: Path) -> None:
     assert row["target_paths"] == ["Notes/x.md"]
 
 
+def test_content_private_logging_redacts_names_paths_and_hashes(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under content-private logging (design D1.2), a target path and a
+    caller-chosen argument name are both content, and a sha256 of a short
+    guessed value is an offline confirmation oracle for it -- a hosted or
+    cloud row keeps none of the three, only positional names and lengths."""
+    import hashlib
+
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    sentinel = "blue-port-bookkeeping-record"
+
+    _drive(
+        "remember",
+        {"title": "T", "content": sentinel, "path": "Notes/x.md"},
+        _ok,
+    )
+
+    written = "\n".join(
+        p.read_text(encoding="utf-8") for p in ledger_dir.rglob("*") if p.is_file()
+    )
+    assert sentinel not in written
+
+    row = _rows(ledger_dir)[0]
+    assert row["target_paths"] == []
+    assert sorted(row["arg_names"]) == ["arg0", "arg1", "arg2"]
+    for name in row["arg_names"]:
+        assert "sha256" not in row["args"][name]
+        assert row["args"][name]["len"] > 0
+    # Not merely that the sentinel is absent -- an offline hash of a *guessed*
+    # value would otherwise confirm it, which is exactly what a bare "the
+    # value itself is redacted" check would miss.
+    guessed = hashlib.sha256(call_ledger.canonical_json({"v": sentinel})).hexdigest()
+    assert guessed not in written
+
+
 def test_a_credential_in_an_argument_never_reaches_the_ledger(ledger_dir: Path) -> None:
     """Secrets arrive as ordinary argument values -- a token pasted into a note,
     a connection string in an edit. Hashing every value by construction is what

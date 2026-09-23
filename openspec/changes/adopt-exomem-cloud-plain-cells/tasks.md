@@ -6,40 +6,43 @@
 
 ## 2. Cloud cell mode and image (lane A)
 
-- [ ] 2.1 Write red-first tests. With `EXOMEM_CLOUD_CELL=1`:
+- [x] 2.1 Write red-first tests. With `EXOMEM_CLOUD_CELL=1`:
   - the server authenticates only the current or previous configured bearer, in constant time;
   - the authenticated principal is the fixed non-owner `{sub: cell_id, iss: "exomem-cloud-cell"}`;
   - `/api/*`, `/upload` and `/download` are absent;
   - `/health` and `/health/ready` answer without content;
   - no `.env` file is read.
-- [ ] 2.2 Add `CloudCellTokenVerifier` to `server_auth.py`, and add the cloud branch of `build_server` in `server.py` on the standalone path (D1)
-- [ ] 2.3 Add `CLOUD_SURFACE_EXCLUSIONS` (`transfer_artifact`, `adopt_vault`, `process_media`, `read_media`, each with a reason and a lifting condition) and remove its members from the served surface. Test the listed surface.
-- [ ] 2.4 Content-free logging in cloud mode:
+- [x] 2.2 Add `CloudCellTokenVerifier` to `server_auth.py`, and add the cloud branch of `build_server` in `server.py` on the standalone path (D1)
+- [x] 2.3 Add `CLOUD_SURFACE_EXCLUSIONS` (`transfer_artifact`, `adopt_vault`, `process_media`, `read_media`, each with a reason and a lifting condition) and remove its members from the served surface. Test the listed surface.
+- [x] 2.4 Content-free logging in cloud mode:
   - extend `content_private_logging_enabled` to cloud mode and install the redaction hook;
   - use the content-free call trace;
-  - test that a distinctive query phrase never reaches runtime or access logs.
-- [ ] 2.5 Read-only mode: `EXOMEM_CLOUD_READ_ONLY=1` refuses every mutating command with `CLOUD_CELL_READ_ONLY`, classified from the command registry, while reads keep working. Test one read and one write per command class.
-- [ ] 2.6 Add a `cloud` Dockerfile target derived from the `hosted` runtime stage. It carries:
+  - turn the query, read and write journals off under content-private logging, in `query_log` itself, and disable usage boost and the relevance check (D1);
+  - keep call-ledger rows content-free under content-private logging (D1);
+  - test, with `EXOMEM_DISABLE_EMBEDDINGS` removed from the environment, that neither a distinctive query phrase nor a distinctive note-path phrase reaches runtime logs, access logs or any journal file.
+- [x] 2.5 Read-only mode: `EXOMEM_CLOUD_READ_ONLY=1` refuses every mutating command with `CLOUD_CELL_READ_ONLY`, classified from the command registry, while reads keep working. Test one read and one write per command class.
+- [x] 2.6 Add a `cloud` Dockerfile target derived from the `hosted` runtime stage. It carries:
   - the offline ONNX model environment and `EXOMEM_DISABLE_RANKING`;
   - UID/GID 10001 with home `/data/host`;
   - `restic` 0.17 or later, for the backup and restore Jobs;
   - the command `exomem --transport http --host 0.0.0.0 --port 8765`.
   Prove standalone custody resolves under `/data/host` in the built image.
-- [ ] 2.7 Add the `cell-init` entrypoint (D3). It runs, idempotently:
-  1. vault init when absent;
-  2. `maintain --migrate-state --offline`;
-  3. the governance-schema v3-to-v4 plan, stage and commit sequence, using each step's JSON digest.
-  Test a fresh volume, a second run with no changes, a crash between stage and commit (re-entry re-plans and completes), and a crash during commit (the step fails with the status code).
-- [ ] 2.8 Container test on the built image with `--read-only`, an `/tmp` tmpfs and UID 10001:
+- [x] 2.7 Add the `cell-init` entrypoint (D3). It runs, idempotently:
+  1. `/data/vault` and `/data/host` at mode `0700`;
+  2. atomic vault init, through a staging directory and a rename, when absent;
+  3. `maintain --migrate-state --offline`.
+  It runs no governance schema migration and sets no custody environment. It installs the redaction hook and reports failure as one JSON line with a stable error code. Test a fresh volume, a fresh volume under a setgid root, a second run with no changes, a run interrupted after init, and runs interrupted during init.
+- [x] 2.8 A committed container test, gated on Docker and an opt-in variable, on the built image with `--read-only`, an `/tmp` tmpfs, UID 10001 and the volume root at `2770` as fsGroup leaves it:
   1. init;
-  2. first start;
+  2. first start with only the D1 environment;
   3. a governed write;
   4. container replacement on the same volume;
   5. owner-only modes still intact;
-  6. recall of the write;
+  6. exact and paraphrased recall of the write;
   7. a further governed write;
-  8. governance status at v4.
-- [ ] 2.9 Add a CI job that publishes the `cloud` image to GHCR by digest on release tags, and records tag and digest in the release notes
+  8. `/health/ready` not ready until retrieval is admitted;
+  9. no container log line, and no log or journal file (the log directory, or any `*.log` or `*.jsonl` outside `/data/vault`), contains the distinctive query or note-path phrase.
+- [x] 2.9 Add a CI job that publishes the `cloud` image to GHCR by digest on release tags, and records tag and digest in the release notes
 
 ## 3. cellctl, manifests and ingress (lane B)
 

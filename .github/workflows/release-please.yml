@@ -507,6 +507,56 @@ jobs:
             echo "Candidate attestation bundle asset: ${CANDIDATE_BUNDLE}"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Build and push Exomem Cloud cell image (linux/amd64)
+        id: cloud-build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: cloud
+          platforms: linux/amd64
+          build-args: |
+            EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}
+          push: true
+          tags: |
+            ghcr.io/artexis10/exomem:cloud
+            ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-cloud
+            ghcr.io/artexis10/exomem:${{ steps.meta.outputs.source_commit }}-cloud
+          labels: |
+            org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Attest the exact Exomem Cloud cell image
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-name: ghcr.io/artexis10/exomem
+          subject-digest: ${{ steps.cloud-build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Record the cloud image tag and digest in the release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          CLOUD_DIGEST: ${{ steps.cloud-build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cloud_image="ghcr.io/artexis10/exomem@${CLOUD_DIGEST}"
+          cloud_tag="ghcr.io/artexis10/exomem:${VERSION}-cloud"
+          existing_body=$(gh release view "$TAG" --json body -q .body)
+          {
+            printf '%s\n\n' "$existing_body"
+            echo "## Exomem Cloud cell image"
+            echo "- Tag: \`${cloud_tag}\`"
+            echo "- Digest: \`${cloud_image}\`"
+          } | gh release edit "$TAG" --notes-file -
+          {
+            echo "Cloud cell image tag: ${cloud_tag}"
+            echo "Cloud cell image digest: ${cloud_image}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   publish-existing-image:
     if: ${{ github.event_name == 'workflow_dispatch' && vars.GHCR_PUBLISH_ENABLED == 'true' }}
     runs-on: ubuntu-latest

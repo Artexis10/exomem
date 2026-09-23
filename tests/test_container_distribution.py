@@ -47,6 +47,20 @@ def test_dockerfile_has_a_fixed_nonroot_immutable_hosted_target() -> None:
     assert "VOLUME" not in hosted
 
 
+def test_dockerfile_cloud_target_sets_pod_local_log_dir_and_disables_fastmcp_egress() -> None:
+    """D1.2 "Log directory" and D2: the cloud stage's own defaults, not just the
+    manifest, must keep runtime logs off the tenant volume and avoid FastMCP's
+    startup update check stalling every cold start on a no-egress NetworkPolicy."""
+    text = _read("Dockerfile")
+    cloud = text.split("FROM hosted AS cloud", 1)[1].split(
+        "FROM python:3.12-slim AS lean", 1
+    )[0]
+
+    assert "EXOMEM_LOG_DIR=/tmp/exomem-logs" in cloud
+    assert "FASTMCP_CHECK_FOR_UPDATES=off" in cloud
+    assert "FASTMCP_SHOW_SERVER_BANNER=false" in cloud
+
+
 def test_release_workflow_publishes_cuda_tags() -> None:
     text = _read(".github/workflows/release-please.yml")
 
@@ -60,7 +74,8 @@ def test_release_workflow_publishes_hosted_image_with_immutable_build_time() -> 
     text = _read(".github/workflows/release-please.yml")
 
     assert text.count("target: hosted") == 2
-    assert text.count("EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}") == 2
+    # Two hosted builds (release and manual republish) plus the release's cloud build.
+    assert text.count("EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}") == 3
     assert text.count(
         "ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-hosted"
     ) == 2
@@ -73,7 +88,7 @@ def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> 
     automatic = _workflow_job(text, "publish-image", "publish-existing-image")
     manual = _workflow_job(text, "publish-existing-image", "publish-existing-pypi")
 
-    for job in (automatic, manual):
+    for job, image_attestations in ((automatic, 3), (manual, 2)):
         proof_step = job.split(
             "\n      - name: Verify the hosted runtime image and signed candidate\n", 1
         )[1].split("\n      - name:", 1)[0]
@@ -88,12 +103,13 @@ def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> 
             in job
         )
         assert "org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}" in job
-        assert job.count(ATTEST_ACTION) == 2
+        # The hosted image and its candidate bundle, plus the cloud image on release.
+        assert job.count(ATTEST_ACTION) == image_attestations
         assert "subject-name: ghcr.io/artexis10/exomem" in job
         assert "subject-digest: ${{ steps.hosted-build.outputs.digest }}" in job
         assert "subject-path: ${{ steps.runtime-candidate.outputs.candidate }}" in job
         assert "push-to-registry: true" in job
-        assert job.count("create-storage-record: false") == 2
+        assert job.count("create-storage-record: false") == image_attestations
         assert "infra/scripts/hosted_image_candidate.py record" in job
         assert "infra/scripts/hosted_image_candidate.py verify" in job
         assert "GH_TOKEN: ${{ github.token }}" in proof_step
@@ -119,6 +135,21 @@ def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> 
         assert "--clobber" not in job
         assert "exomem-hosted-release-v1.json" not in job
         assert "substrate-gateway-contract-selection" not in job
+
+
+def test_release_workflow_publishes_attested_cloud_image_by_digest() -> None:
+    text = _read(".github/workflows/release-please.yml")
+    automatic = _workflow_job(text, "publish-image", "publish-existing-image")
+    cloud = automatic.split("\n      - name: Build and push Exomem Cloud cell image", 1)[1]
+
+    assert text.count("target: cloud") == 1
+    assert "id: cloud-build" in cloud
+    assert "EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}" in cloud
+    assert "ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-cloud" in cloud
+    assert "ghcr.io/artexis10/exomem:${{ steps.meta.outputs.source_commit }}-cloud" in cloud
+    assert "subject-digest: ${{ steps.cloud-build.outputs.digest }}" in cloud
+    assert 'cloud_image="ghcr.io/artexis10/exomem@${CLOUD_DIGEST}"' in cloud
+    assert "gh release edit" in cloud
 
 
 def test_manual_release_can_sign_an_explicit_records_rollback_runtime_target() -> None:

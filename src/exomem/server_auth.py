@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import math
 import os
@@ -85,6 +86,57 @@ class HostedCellTokenVerifier(TokenVerifier):
             client_id=self._config.cell_id,
             scopes=["hosted:cell"],
             claims=claims,
+        )
+
+
+class CloudCellTokenVerifier(TokenVerifier):
+    """FastMCP bearer verifier for one Exomem Cloud cell's per-cell bearer (D1).
+
+    Accepts a bearer equal to the current token, or, during rotation, the
+    previous one, each compared in constant time (fixed-length digest
+    comparison via `hmac.compare_digest`, mirroring
+    `HostedCellConfig.matches_service_credential`). The resulting principal
+    carries fixed claims that are never derived from the bearer or a key
+    version, and always resolve to a non-owner -- exactly like a remote OAuth
+    principal on the desktop.
+    """
+
+    def __init__(
+        self,
+        *,
+        cell_id: str,
+        token: str,
+        previous_token: str | None = None,
+    ) -> None:
+        super().__init__(required_scopes=["cloud:cell"])
+        if not cell_id.strip():
+            raise ValueError("cell_id is required")
+        if not token:
+            raise ValueError("token is required")
+        self._cell_id = cell_id
+        self._expected = hashlib.sha256(token.encode("utf-8")).digest()
+        self._previous = (
+            hashlib.sha256(previous_token.encode("utf-8")).digest()
+            if previous_token
+            else None
+        )
+
+    def _matches(self, presented: str) -> bool:
+        candidate = hashlib.sha256(presented.encode("utf-8")).digest()
+        matched_current = hmac.compare_digest(self._expected, candidate)
+        matched_previous = self._previous is not None and hmac.compare_digest(
+            self._previous, candidate
+        )
+        return matched_current or matched_previous
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if not token or not self._matches(token):
+            return None
+        return AccessToken(
+            token="exomem-cloud-cell",
+            client_id=self._cell_id,
+            scopes=["cloud:cell"],
+            claims={"sub": self._cell_id, "iss": "exomem-cloud-cell"},
         )
 
 
