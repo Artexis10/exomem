@@ -445,8 +445,9 @@ def _acronyms_of(text: str) -> frozenset[str]:
     """The casefolded two-capital words `text` spells, or nothing when the
     whole text is in capitals (caps lock says nothing about any one word).
 
-    Used on a turn and on an anchor's title alike. Function words are left
-    out: "OK" or "SO" written in capitals name nothing.
+    Used on a turn and on an anchor's title alike. Function words and the
+    referential filler are left out: "SO" or "OK" in capitals name nothing,
+    and "OK continue" must not reach an anchor titled "OK Go" by its "OK".
     """
     raw = unicodedata.normalize("NFKC", str(text or ""))
     if not any(character.islower() for character in raw):
@@ -454,7 +455,7 @@ def _acronyms_of(text: str) -> frozenset[str]:
     return frozenset(
         folded
         for word in _ACRONYM_RE.findall(raw)
-        if (folded := word.casefold()) not in _STOPWORDS
+        if (folded := word.casefold()) not in _STOPWORDS and folded not in REFERENTIAL_FILLER
     )
 
 
