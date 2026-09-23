@@ -1710,6 +1710,39 @@ def delta_since(
         )
 
 
+def generation(vault_root: Path, scope: str) -> int | None:
+    """The scope's event generation when live, else None. One integer read.
+
+    Unlike `consumer_checkpoint`, this never derives the triple, which rehashes
+    the whole map after every change: a background gate polls this to learn
+    whether anything moved, and must stay O(1).
+    """
+    if not event_indexes_enabled():
+        return None
+    key = _key(vault_root, scope)
+    with _lock:
+        if key not in _live:
+            return None
+        return _generations.get(key, 0)
+
+
+def live_signature(
+    vault_root: Path, scope: str, path: Path | str
+) -> FileSignature | None:
+    """One live path's current signature, or None when absent or not live.
+
+    A point lookup under the lock, with no map copy: `path` must be spelled the
+    way the map keys it, the vault root joined with the vault-relative path.
+    """
+    if not event_indexes_enabled():
+        return None
+    key = _key(vault_root, scope)
+    with _lock:
+        if key not in _live:
+            return None
+        return _maps.get(key, {}).get(str(path))
+
+
 def live_entries(vault_root: Path, scope: str) -> dict[str, FileSignature] | None:
     """The live `{abs_path_str: signature}` map for a scope, or None when not live.
 
