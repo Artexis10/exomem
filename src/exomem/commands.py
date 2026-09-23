@@ -104,6 +104,7 @@ from . import reconcile as reconcile_module
 from . import record_memory as record_memory_module
 from . import recover_from_trash as recover_from_trash_module
 from . import referent_runtime as referent_runtime_module
+from . import relation_census as relation_census_module
 from . import relation_queue as relation_queue_module
 from . import relation_registry as relation_registry_module
 from . import relation_vocabulary as relation_vocabulary_module
@@ -9393,6 +9394,7 @@ def op_schema_memory(
     requested_type: _OptionalRelationText = None,
     vocabulary_ref: str | None = None,
     vocabulary_fingerprint: str | None = None,
+    detail: Literal["counts", "keys"] | None = None,
 ) -> dict:
     """Infer, validate, diff, or save governed memory schemas and workflow contracts.
 
@@ -9407,7 +9409,9 @@ def op_schema_memory(
             and why. For `entity-types`, `resolve-entity-type` reads matching
             definitions using query and optional requested_type; `save-entity-types`
             saves a reviewed proposal with why and expected_hash when updating.
-            The current entity registry is included in bootstrap.
+            The current entity registry is included in bootstrap. For `relations`,
+            `census` returns counts-only relation quality from the published graph
+            (optional detail, date_from, date_to) and never writes.
             For `workflow-contracts`, exactly one of: inventory (no workflow
             fields); inspect (name); validate (exactly one of name or proposal);
             resolve (context plus at most one of name or proposal); preview (proposal,
@@ -9448,12 +9452,18 @@ def op_schema_memory(
         requested_type: Entity-type label to resolve for resolve-entity-type.
         vocabulary_ref: Optional vocabulary decision correlated with a registry save.
         vocabulary_fingerprint: Exact reviewed vocabulary fingerprint; grants no write permission.
+        detail: Relation census detail: `counts` (default) or `keys`, which adds
+            predicate keys and counts.
 
     Returns:
         A structured profile/proposal, validation report, contract diff, or workflow result.
     """
     operation = operation.strip().lower()
     subject = subject.strip().lower()
+    if detail is not None and not (subject == "relations" and operation == "census"):
+        raise ValueError(
+            "INVALID_SCHEMA_ARGUMENT: detail is only supported by the relations census"
+        )
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
         supported=operation == "save-entity-types"
@@ -9616,6 +9626,34 @@ def op_schema_memory(
             return result
         raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
     if subject == "relations":
+        if operation == "census":
+            if (
+                save
+                or why is not None
+                or expected_hash is not None
+                or proposal is not None
+                or project is not None
+                or page_type is not None
+                or continuation is not None
+                or include_model_suggestions
+                or compare_to is not None
+                or strict
+                or name is not None
+                or context is not None
+            ):
+                raise ValueError(
+                    "INVALID_RELATION_ARGUMENT: census accepts only detail, date_from, "
+                    "and date_to"
+                )
+            # Counts are reductions over a walk, so the caller's release filter
+            # applies inside it (N1c): no withheld page moves a number.
+            return relation_census_module.census(
+                vault_root,
+                keep=egress_module.release_walk_filter(vault_root),
+                detail=detail or "counts",
+                date_from=date_from,
+                date_to=date_to,
+            )
         if operation == "propose-relation":
             relation_vocabulary_module.validate_candidate_limit(limit)
             if proposal is None or not isinstance(proposal, dict):

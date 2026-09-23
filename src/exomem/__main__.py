@@ -112,6 +112,7 @@ _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
         "logs",
         "lease",
         "governance-schema",
+        "relations",
     }
 )
 
@@ -275,6 +276,8 @@ def _dispatch_main(raw: list[str]) -> int:
         return _lease_main(raw[1:])
     if raw and raw[0] == "governance-schema":
         return _governance_schema_main(raw[1:])
+    if raw and raw[0] == "relations":
+        return _relations_main(raw[1:])
     # `exomem activate "<turn>"` — the spelled-out contract for the context
     # compiler. A thin alias over the registry command so there is exactly one
     # leaf; the long form `exomem activate_context` keeps working.
@@ -1047,6 +1050,67 @@ def _doctor_main(argv: list[str]) -> int:
             "inspect with exomem status --resources --json."
         )
     return 0 if report.success else 1
+
+
+def _relations_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem relations",
+        description="Relation-quality tools over the published graph snapshot.",
+    )
+    sub = parser.add_subparsers(dest="action", required=True)
+    census_parser = sub.add_parser(
+        "census",
+        help="counts-only relation-quality census",
+        description=(
+            "Counts-only relation-quality census. Asks the running managed service "
+            "first, so it reads the live published snapshot; otherwise opens the "
+            "local graph sidecar read-only. Reports unavailable, never zero."
+        ),
+    )
+    census_parser.add_argument(
+        "--vault",
+        default=None,
+        help=(
+            f"vault root containing '{kb_prefix()}'; reads its snapshot locally "
+            "instead of asking the service (default: the service, else $EXOMEM_VAULT_PATH)"
+        ),
+    )
+    census_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+    census_parser.add_argument(
+        "--keys",
+        action="store_true",
+        help="also name predicate keys, including vault extension keys",
+    )
+    args = parser.parse_args(argv)
+
+    from . import relation_census
+
+    detail = "keys" if args.keys else "counts"
+    result = relation_census.service_census(detail) if args.vault is None else None
+    served_by = "service"
+    if result is None:
+        vault = args.vault or os.environ.get("EXOMEM_VAULT_PATH")
+        if not vault:
+            print(
+                "Error [VAULT_REQUIRED]: no managed service answered; pass --vault "
+                "or set EXOMEM_VAULT_PATH",
+                file=sys.stderr,
+            )
+            return 2
+        from .governance import egress
+
+        vault_root = Path(vault).expanduser()
+        result = relation_census.census(
+            vault_root, keep=egress.release_walk_filter(vault_root), detail=detail
+        )
+        served_by = "local-snapshot"
+    result = {**result, "served_by": served_by}
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(relation_census.summary_line(result))
+        print(f"  served by: {served_by}")
+    return 0
 
 
 def _warm_main(argv: list[str]) -> int:
