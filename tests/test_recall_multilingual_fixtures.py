@@ -16,7 +16,7 @@ from epistemic.corpora import recall_japanese_vault, recall_multilingual
 from exomem import bm25
 
 _MULTILINGUAL_DIGEST = "2c5a7c868d3bb1e7af6b3f00ba03b6d3a7deaa437691a18260128737eddab8a6"
-_JAPANESE_DIGEST = "f6e2aec6e3241b4947beb748aa8734b9c2da01437bfe3a25e4187e1afcdb6a08"
+_JAPANESE_DIGEST = "90e7d50c4fc6f683c4c9a294f53e459260fc1ac46f7da2c682bf9d39f44231e2"
 _ASCII_LETTER = re.compile(r"[A-Za-z]")
 
 
@@ -65,7 +65,7 @@ def test_japanese_queries_name_targets_and_yield_tokens() -> None:
         entity.key for entity in recall_japanese_vault.TARGET_ENTITIES
     }
     queries = recall_japanese_vault.QUERIES
-    assert len(queries) == 23
+    assert len(queries) == 27
     assert {query.gold for query in queries} <= targets
     for query in queries:
         assert not _ASCII_LETTER.search(query.query), query.query

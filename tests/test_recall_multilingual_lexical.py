@@ -275,7 +275,7 @@ def test_tokenizer_v1_misses_what_v2_finds(arms):
 # ---------------------------------------------------------------- Japanese-only vault
 
 
-#: Measured 2026-09-23 on both lexical backends over 23 queries: recall@10
+#: Measured 2026-09-23 on both lexical backends over 27 queries: recall@10
 #: 1.00, MRR 1.00 (a run is present on most of its content bigrams). Floors are
 #: the measured value minus 0.08, never below the design bars (0.85 and 0.70).
 _JAPANESE_RECALL_FLOOR = 0.92
@@ -347,6 +347,10 @@ def test_japanese_x_no_y_questions_find_their_page_and_particles_find_nothing(
         "抹茶の用意": "tea-ceremony",
         "茶道教室で抹茶を用意するのは誰ですか": "tea-ceremony",
         "会議の議事録はいつ共有": "minutes",
+        "パンは何度で焼きますか": "bread",
+        "山は何時間かかりましたか": "hiking",
+        "自動車保険は何月に更新しますか": "car-insurance",
+        "茶道教室は何曜日ですか": "tea-ceremony",
     }
     for query, gold in rows.items():
         ranked = [hit.path for hit in find_module.find(

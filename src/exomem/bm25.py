@@ -56,6 +56,9 @@ _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 _STEMMER_LOCAL = threading.local()
 
+#: The kanji that turns a counter into a question word (何度, 何時, 何月).
+_QUESTION_KANJI = "\u4f55"
+
 #: Snowball stemmer for a word whose letters are all in one of these scripts.
 _SCRIPT_STEMMERS = {"cyrillic": "russian", "greek": "greek", "armenian": "armenian"}
 
@@ -316,10 +319,15 @@ def tokenize(text: str, *, query: bool = False) -> list[str]:
 def word_forms(word: str) -> tuple[str, ...]:
     """Index-side stems of one word: its stem, plus the stem of its
     accent-folded form when it is a Latin word with marks. An ASCII word is
-    stemmed whole, exactly as `stem_word` always stemmed it."""
+    stemmed whole, exactly as `stem_word` always stemmed it. Symbols separate
+    before NFKC, as in `tokenize`, so "Zorblex™" is `zorblex`."""
     if word.isascii():
         return (stem_word(word),)
-    return _word_unit(unicodedata.normalize("NFKC", word).casefold(), False).stems
+    table = _character_tables()[1]
+    parts = unicodedata.normalize("NFKC", word.translate(table)).casefold().split()
+    return tuple(
+        dict.fromkeys(stem for part in parts for stem in _word_unit(part, False).stems)
+    )
 
 
 def first_stem_span(text: str, stems) -> tuple[int, int] | None:
@@ -349,15 +357,19 @@ def run_content_stems(stems) -> tuple[str, ...]:
     Japanese writes particles and inflections in hiragana, so a bigram that
     touches hiragana mostly records grammar: "会議の議事録はいつ共有" shares
     議事, 事録 and 共有 with "議事録は翌日までに共有します" and almost none of
-    its particle bigrams. The content is the bigrams without hiragana; a run
-    whose every bigram holds hiragana keeps them all. Runs in other scripts
-    have no hiragana and keep every bigram.
+    its particle bigrams. The content is the bigrams without hiragana and
+    without the question kanji 何; a run with no such bigram keeps its
+    hiragana-free ones, and a run whose every bigram holds hiragana keeps them
+    all. Runs in other scripts have no hiragana and keep every bigram.
     """
     distinct = tuple(dict.fromkeys(stems))
     content = tuple(
         stem for stem in distinct if not any(text_scripts.is_hiragana(ch) for ch in stem)
     )
-    return content or distinct
+    # 何 (what) builds question words with a counter (何度, 何時, 何月): like a
+    # particle it asks rather than names, so "パンは何度で焼きますか" is about パン.
+    named = tuple(stem for stem in content if _QUESTION_KANJI not in stem)
+    return named or content or distinct
 
 
 def unit_present(unit: TokenUnit, stems) -> bool:

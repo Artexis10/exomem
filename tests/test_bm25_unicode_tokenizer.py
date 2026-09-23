@@ -352,6 +352,22 @@ def test_the_content_of_a_run_is_its_bigrams_without_hiragana() -> None:
     assert bm25.run_content_stems(("東京", "京タ", "タワ")) == ("東京", "京タ", "タワ")
 
 
+def test_a_question_kanji_is_not_content() -> None:
+    """何 (what) makes question words with a counter: 何度, 何時, 何月. Like a
+    particle it asks rather than names, so "パンは何度で焼きますか" is about パン."""
+    query = bm25.token_units("パンは何度で焼きますか", query=True)[0]
+    assert bm25.run_content_stems(query.stems) == ("パン",)
+    hours = bm25.token_units("山は何時間かかりましたか", query=True)[0]
+    assert bm25.run_content_stems(hours.stems) == ("時間",)
+    # A run whose only hiragana-free bigrams hold 何 keeps them.
+    assert bm25.run_content_stems(("何度", "度で")) == ("何度",)
+
+
+def test_word_forms_keep_symbols_out_of_the_word() -> None:
+    assert bm25.word_forms("Zorblex\u2122") == ("zorblex",)
+    assert bm25.word_forms("Z\u00f6lvarn\u00ae") == ("z\u00f6lvarn", "zolvarn")
+
+
 def test_no_token_ever_contains_a_quote_or_whitespace() -> None:
     rng = random.Random(5)
     for _ in range(2_000):

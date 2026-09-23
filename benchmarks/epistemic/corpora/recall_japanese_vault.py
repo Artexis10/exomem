@@ -134,6 +134,11 @@ QUERIES: tuple[Query, ...] = (
     Query("抹茶の用意", "tea-ceremony"),
     Query("茶道教室で抹茶を用意するのは誰ですか", "tea-ceremony"),
     Query("会議の議事録はいつ共有", "minutes"),
+    # Question words built on 何 ask rather than name.
+    Query("パンは何度で焼きますか", "bread"),
+    Query("山は何時間かかりましたか", "hiking"),
+    Query("自動車保険は何月に更新しますか", "car-insurance"),
+    Query("茶道教室は何曜日ですか", "tea-ceremony"),
 )
 
 #: Questions made only of particles and function words: no page is about them.
