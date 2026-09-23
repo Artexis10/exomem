@@ -19,6 +19,7 @@ argument into an existence oracle.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -308,3 +309,263 @@ def test_the_deployed_hook_mirror_stays_byte_identical() -> None:
     deployed = root / "plugins" / "claude-code" / "hooks" / "exomem_retrieve_nudge.py"
 
     assert deployed.read_bytes() == packaged.read_bytes()
+
+
+# --------------------------------------------------------------------------- #
+# Follow-up round (batch review REQUEST_CHANGES, findings 5-10): a
+# non-canonical spelling must not reach the expensive path or the file it
+# names, a withheld page must refuse before the compile, the hook must route
+# a unit/state/session ref to `read_memory`, and a resolved packet must still
+# show its answer at a small hook ceiling.
+# --------------------------------------------------------------------------- #
+
+
+def _dot_dot_into_same_dir(ref: str) -> str:
+    """`ref`, with its own last directory re-entered through a `..` —
+    `posixpath.normpath` cancels it back to `ref` exactly, so this is a
+    genuinely DIFFERENT spelling of the SAME canonical page, not a
+    traversal to anywhere else."""
+    directory, name = ref.rsplit("/", 1)
+    parent_name = directory.rsplit("/", 1)[-1]
+    return f"{directory}/../{parent_name}/{name}"
+
+
+NON_CANONICAL_SPELLINGS = [
+    pytest.param(lambda ref: "./" + ref, id="dot_prefix"),
+    pytest.param(lambda ref: ref.replace("/", "//", 1), id="doubled_slash"),
+    pytest.param(lambda ref: ref.replace("/", "\\"), id="backslash"),
+    pytest.param(_dot_dot_into_same_dir, id="dot_dot_into_same_dir"),
+]
+
+
+@pytest.mark.parametrize("spell", NON_CANONICAL_SPELLINGS)
+def test_a_non_canonical_spelling_of_an_eligible_page_is_refused_like_unknown(
+    carry_vault: Path, spell
+) -> None:
+    """P1 (finding 5): every non-canonical spelling of CARRY_PAGE — a leading
+    `./`, a doubled slash, a backslash, a `..` that lands back on the same
+    page — refuses with the identical error an unknown ref gets, never the
+    distinguishable, several-times-slower answer a spelling that reached
+    `_carried_packet` used to give."""
+    ref = spell(CARRY_PAGE)
+
+    with pytest.raises(ValueError) as spelled:
+        commands.op_activate_context(carry_vault, turn=NONSENSE_TURN, anchor=ref)
+
+    with pytest.raises(ValueError) as unknown:
+        commands.op_activate_context(
+            carry_vault, turn=NONSENSE_TURN, anchor="Knowledge Base/Nowhere/absent.md"
+        )
+
+    assert str(spelled.value) == str(unknown.value)
+
+
+def test_an_absolute_path_is_refused_like_unknown(carry_vault: Path) -> None:
+    ref = str(carry_vault / CARRY_PAGE)
+
+    with pytest.raises(ValueError) as absolute:
+        commands.op_activate_context(carry_vault, turn=NONSENSE_TURN, anchor=ref)
+
+    with pytest.raises(ValueError) as unknown:
+        commands.op_activate_context(
+            carry_vault, turn=NONSENSE_TURN, anchor="Knowledge Base/Nowhere/absent.md"
+        )
+
+    assert str(absolute.value) == str(unknown.value)
+
+
+@pytest.mark.parametrize("spell", NON_CANONICAL_SPELLINGS)
+def test_a_non_canonical_spelling_never_reaches_the_carried_packet_builder(
+    carry_vault: Path, spell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stronger claim behind the refusal: it is not merely refused, it
+    never reaches the expensive builder at all — never mind what an
+    incidental match inside the units lane would or would not have caught.
+
+    `CARRY_PAGE` itself is the control: eligible and canonical, it MUST
+    still reach the builder and be served, or the other three assertions
+    would prove nothing about a builder this vault never calls at all.
+    """
+    calls: list[object] = []
+    real = working_set._carried_packet
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs.get("page"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(working_set, "_carried_packet", spy)
+
+    packet = commands.op_activate_context(carry_vault, turn=NONSENSE_TURN, anchor=CARRY_PAGE)
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert calls, "the control ref must reach the builder, or this proves nothing"
+    calls.clear()
+
+    for ref in (CARRY_SOURCE, spell(CARRY_PAGE), spell(CARRY_SOURCE)):
+        with pytest.raises(ValueError):
+            commands.op_activate_context(carry_vault, turn=NONSENSE_TURN, anchor=ref)
+
+    assert calls == [], calls
+
+
+def test_an_unknown_or_non_canonical_ref_logs_nothing_at_warning(
+    carry_vault: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """P1's last bullet: the caller-supplied ref must not reach a WARNING
+    log line. The structural fix (a catalogue lookup before any file read)
+    already keeps every ref this test tries from ever reaching the read
+    that used to log it."""
+    refs = [
+        "Knowledge Base/Nowhere/absent.md",
+        "./" + CARRY_SOURCE,
+        CARRY_SOURCE.replace("/", "//", 1),
+        str(carry_vault / CARRY_PAGE),
+    ]
+    for ref in refs:
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(ValueError):
+                commands.op_activate_context(carry_vault, turn=NONSENSE_TURN, anchor=ref)
+        leaked = [
+            record
+            for record in caplog.records
+            if record.levelno >= logging.WARNING and ref in record.getMessage()
+        ]
+        assert leaked == [], (ref, [r.getMessage() for r in leaked])
+
+
+def test_the_canonicalizer_rejects_every_non_canonical_form_and_accepts_the_real_one(
+    carry_vault: Path,
+) -> None:
+    """A direct, fast unit test of the gate itself, independent of the
+    slower end-to-end refusal-equality tests above."""
+    assert working_set._canonical_agent_page_ref(carry_vault, CARRY_PAGE) == CARRY_PAGE
+    for bad in (
+        "",
+        "./" + CARRY_PAGE,
+        CARRY_PAGE.replace("/", "//", 1),
+        CARRY_PAGE.replace("/", "\\"),
+        str(carry_vault / CARRY_PAGE),
+        "Knowledge Base/Notes/Journal/../Research/quillon-vantry-window.md",
+        "Knowledge Base/Nowhere/absent.md",
+    ):
+        assert working_set._canonical_agent_page_ref(carry_vault, bad) is None, bad
+
+
+def test_a_withheld_agent_picked_page_is_refused_before_the_compile(
+    carry_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P2 (finding 7): the release-plane decision for a picked page happens
+    BEFORE the expensive compile, not after it — the compile buys nothing a
+    withheld page can use, so it must never run for one."""
+    write_scope(carry_vault, paths="Knowledge Base/Notes/Research/*", name="Research")
+    write_rule(carry_vault, ceiling=0)
+    _reset_caches()
+    working_set_runtime.reset_caches_for_tests()
+
+    calls: list[object] = []
+    real = working_set._carried_packet
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs.get("page"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(working_set, "_carried_packet", spy)
+
+    with pytest.raises(ValueError):
+        with request_scope(_external()):
+            commands.op_activate_context(carry_vault, turn=NONSENSE_TURN, anchor=CARRY_PAGE)
+
+    assert calls == [], "a withheld page must never reach the compile"
+
+
+def test_an_index_anchor_override_still_works_when_the_early_check_applies(
+    carry_vault: Path,
+) -> None:
+    """The early release-plane check only ever short-circuits to the SAME
+    refusal the ordinary path would reach; it must never prevent a VISIBLE
+    ref, index anchor or agent-picked page, from being served."""
+    packet = commands.op_activate_context(carry_vault, turn=NONSENSE_TURN, anchor=REAL_ANCHOR)
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert packet["anchors"][0]["ref"] == REAL_ANCHOR
+
+
+def test_the_header_routes_by_kind() -> None:
+    """P3 (finding 6): `unit`, `pointer`, `state` and `session` lines are not
+    eligible `anchor` refs (a unit/state ref is not a page path at all, and a
+    session capture is raw material) and must be routed to `read_memory`;
+    every other kind keeps the `anchor=` default."""
+    from exomem._hooks import exomem_retrieve_nudge as hook
+
+    for kind in ("unit", "pointer", "state", "session"):
+        assert f"`{kind}`" in hook._WORKING_SET_HEADER, hook._WORKING_SET_HEADER
+    assert "read_memory" in hook._WORKING_SET_HEADER
+    assert "activate_context(anchor=...)" in hook._WORKING_SET_HEADER
+
+
+def test_a_resolved_packet_still_shows_its_answer_at_a_small_hook_ceiling() -> None:
+    """P4 (finding 10): recent context must not consume the whole render at
+    a small hook ceiling — capped to at most half of it, mirroring the
+    packet's own `_budgeted_recent` reservation, so current state/units/
+    pointers — the actual answer — still have room."""
+    from exomem._hooks import exomem_retrieve_nudge as hook
+
+    packet = {
+        "recent_context": [
+            {
+                "ref": f"Knowledge Base/Notes/Journal/note-{i:02d}.md",
+                "path": f"Knowledge Base/Notes/Journal/note-{i:02d}.md",
+                "title": f"Ordinary note {i:02d}",
+                "kind": "page",
+                "why": "edited",
+                "as_of": "2026-09-22",
+                "statement": "status: an ordinary sentence about ordinary work, "
+                "long enough to cost real characters on its own.",
+            }
+            for i in range(8)
+        ],
+        "anchors": [
+            {
+                "ref": "Knowledge Base/Products/Cargo Sled.md",
+                "path": "Knowledge Base/Products/Cargo Sled.md",
+                "title": "Cargo Sled",
+                "kind": "resource",
+                "lifecycle": "active",
+                "status": "resolved",
+                "evidence": ["exact_alias"],
+            }
+        ],
+        "roles": [{"id": "resources", "source": "anchor_default", "lane": "units"}],
+        "units": [
+            {
+                "ref": "exomem://vault/Knowledge%20Base/Products/Cargo%20Sled.md#unit-abc",
+                "role": "resources",
+                "text": "The cargo sled is rated for four hundred kilograms.",
+                "lifecycle": "active",
+                "updated": "2026-09-01",
+                "provenance": {"path": "Knowledge Base/Products/Cargo Sled.md"},
+            }
+        ],
+        "pointers": [],
+        "current_state": [
+            {
+                "anchor": "Knowledge Base/Products/Cargo Sled.md",
+                "statement": "state: in storage abroad",
+            }
+        ],
+        "ambiguity": [],
+        "missing": [],
+        "budget": {"limit_chars": 4000, "used_chars": 0},
+        "generation": {},
+        "abstained": False,
+    }
+
+    block = hook._format_working_set_block(packet, 900)
+    lines = block.splitlines()
+
+    assert any(line.startswith("- recent:") for line in lines), block
+    assert any(
+        line.startswith("- unit:") or line.startswith("- state:") for line in lines
+    ), block
+    recent_cost = sum(len(line) + 1 for line in lines if line.startswith("- recent:"))
+    assert recent_cost <= 900 // 2 + len(hook._WORKING_SET_HEADER), block
