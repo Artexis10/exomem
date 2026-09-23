@@ -32,6 +32,11 @@ recall response SHALL disclose that projection state.
 - **THEN** recall suppresses the old path immediately
 - **AND** a moved current identity is returned at most once under its current path
 
+#### Scenario: The pending shadow lifts when the batch converges
+
+- **WHEN** the lexical and reference lanes hold a pending page's committed generation and the components that gate its pending row complete
+- **THEN** recall stops shadowing that page's vector and graph evidence without waiting for another write or a restart
+
 #### Scenario: Restart cannot reconstruct a complete pending projection
 
 - **WHEN** managed recall starts with pending receipts but cannot prove or hydrate their complete current delta
