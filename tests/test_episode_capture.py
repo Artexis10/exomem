@@ -239,3 +239,21 @@ def test_unicode_spaces_collapse_so_every_accepted_line_is_one_the_writer_takes(
     assert recap.frontmatter["summary"] == recap.summary
     assert "- Compared two lamps" in recap.body
     assert "> I want the brass one." in recap.body
+
+
+def test_the_order_token_never_goes_back_past_the_newest_revision() -> None:
+    """Revisions are ordered by this token alone, so a clock that steps back
+    must still yield a token after the newest revision already on disk."""
+    assert capture.order_token(WHEN) == "20260518t091233000000"
+    assert capture.order_token(WHEN, after="20260517t000000000000") == "20260518t091233000000"
+    assert capture.order_token(WHEN, after="20260518t120000000000") == "20260518t120000000001"
+    assert capture.order_token(WHEN, after="20260518t091233000000") == "20260518t091233000001"
+    assert capture.order_token(WHEN, after="20261231t235959999999") == "20270101t000000000000"
+    recap = _prepare()
+    later = recap.slug_at("20260518t120000000001")
+    assert capture.filename_parts(f"2026-05-18-{later}.md") == (
+        recap.group,
+        "20260518t120000000001",
+        recap.digest[:8],
+    )
+    assert recap.slug_at("20260518t091233000000") == recap.slug

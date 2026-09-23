@@ -47,6 +47,7 @@ _SUBJECT_SLUG_CHARS = 40
 _FALLBACK_SLUG = "episode"
 _DIGEST_LABEL = "exomem-episode-recap-v1"
 _HOOK_KEY_LABEL = "exomem-episode-key-v1"
+_ORDER_FORMAT = "%Y%m%dt%H%M%S%f"
 
 #: Line and paragraph separators and the bidirectional overrides. Not control
 #: characters to `unicodedata`, but each either breaks the one-line rule or
@@ -82,9 +83,14 @@ class Recap:
     digest: str
     slug: str
     group: str
+    stem: str
     about: tuple[str, ...] = ()
     client: str | None = None
     frontmatter: dict[str, Any] = field(default_factory=dict)
+
+    def slug_at(self, order: str) -> str:
+        """This recap's slug with recording-order token `order`."""
+        return f"{self.stem}-ep{self.group}-{order}-{self.digest[:8]}"
 
 
 def _error(code: str, reason: str) -> EpisodeError:
@@ -118,6 +124,20 @@ def key_group(key: str, audience: str) -> str:
     """
     material = f"{audience}\0{key}".encode("utf-8", "surrogatepass")
     return hashlib.sha256(material).hexdigest()[:12]
+
+
+def order_token(when: dt.datetime, *, after: str | None = None) -> str:
+    """The UTC recording-order token for `when`, always after `after`.
+
+    Revisions are ordered by this token alone, so a clock that stepped back (an
+    NTP step, a second machine running behind) yields the microsecond after
+    the newest revision already on disk instead of a token before it.
+    """
+    token = when.astimezone(dt.UTC).strftime(_ORDER_FORMAT)
+    if after is None or token > after:
+        return token
+    newest = dt.datetime.strptime(after, _ORDER_FORMAT).replace(tzinfo=dt.UTC)
+    return (newest + dt.timedelta(microseconds=1)).strftime(_ORDER_FORMAT)
 
 
 def filename_parts(name: str) -> tuple[str, str, str] | None:
@@ -252,12 +272,11 @@ def prepare(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
-    order = when.astimezone(dt.UTC).strftime("%Y%m%dt%H%M%S%f")
     subject_slug = slugify_title(title, max_length=_SUBJECT_SLUG_CHARS)
     if subject_slug == "untitled" and "untitled" not in title.casefold():
         subject_slug = _FALLBACK_SLUG
     group = key_group(key, audience)
-    slug = f"{subject_slug}-ep{group}-{order}-{digest[:8]}"
+    slug = f"{subject_slug}-ep{group}-{order_token(when)}-{digest[:8]}"
 
     frontmatter: dict[str, Any] = {"summary": line, "episode": key, "episode_digest": digest}
     if label is not None:
@@ -272,6 +291,7 @@ def prepare(
         digest=digest,
         slug=slug,
         group=group,
+        stem=subject_slug,
         about=refs,
         client=label,
         frontmatter=frontmatter,

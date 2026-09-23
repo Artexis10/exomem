@@ -113,6 +113,10 @@ def _write(
         live = [item for item in revisions if item.live]
         if live and live[-1].frontmatter.get("episode_digest") == recap.digest:
             return _source(live[-1].path, live[-1].frontmatter), True
+        # Never before the newest revision on disk, whatever the clock says.
+        order = episode_capture.order_token(
+            when, after=revisions[-1].order if revisions else None
+        )
         try:
             result = add_module.add(
                 vault_root,
@@ -120,7 +124,7 @@ def _write(
                 content=recap.body,
                 title=recap.subject,
                 source_type=source_taxonomy.EPISODE_KIND,
-                slug=recap.slug,
+                slug=recap.slug_at(order),
                 today=when.replace(microsecond=0),
                 extra_frontmatter=recap.frontmatter,
                 supersede=tuple(item.path for item in live),

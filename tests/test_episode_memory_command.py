@@ -294,6 +294,46 @@ def test_another_audience_never_retires_or_replays_the_owners_recap(
     assert "status" not in _frontmatter(vault / replay["source"]["path"])
 
 
+def test_a_clock_step_back_still_orders_the_new_revision_last(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An NTP step, or a second machine running behind, must not make recent
+    context serve the retired revision."""
+    import datetime as dt
+
+    from exomem import episode_memory
+
+    class _Clock(dt.datetime):
+        at = dt.datetime(2026, 9, 23, 12, 0, tzinfo=dt.UTC)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.at if tz is None else cls.at.astimezone(tz)
+
+    class _Dt:
+        datetime = _Clock
+        UTC = dt.UTC
+
+    monkeypatch.setattr(episode_memory, "dt", _Dt)
+    with request_scope(owner_principal(surface="mcp")):
+        first = _record(vault)
+        _Clock.at -= dt.timedelta(hours=1)
+        second = _record(vault, summary="Chose the brass lamp; delivery booked for Friday.")
+
+    order = {
+        result["source"]["path"]: episode_capture.filename_parts(
+            result["source"]["path"].rsplit("/", 1)[-1]
+        )[1]
+        for result in (first, second)
+    }
+    assert order[second["source"]["path"]] > order[first["source"]["path"]]
+    assert _frontmatter(vault / first["source"]["path"])["status"] == "superseded"
+    mtimes = {
+        page.relative_to(vault).as_posix(): page.stat().st_mtime_ns for page in _episodes(vault)
+    }
+    assert working_set._recent_episodes(mtimes, limit=4) == (second["source"]["path"],)
+
+
 def test_a_ledger_failure_after_the_write_is_idempotent_on_retry(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
