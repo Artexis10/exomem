@@ -913,6 +913,71 @@ def clear_publication_refusal(vault_root: Path) -> None:
         _PUBLICATION_REFUSALS.pop(_publication_memo_key(vault_root), None)
 
 
+_WHOLE_VAULT_PASS_SECONDS: dict[str, float] = {}
+
+
+def _note_whole_vault_pass(vault_root: Path, seconds: float) -> None:
+    with _PUBLICATION_MEMO_LOCK:
+        _WHOLE_VAULT_PASS_SECONDS[_publication_memo_key(vault_root)] = seconds
+
+
+def last_whole_vault_pass_seconds(vault_root: Path) -> float | None:
+    """Wall time of the latest whole-vault pass over this vault in this process.
+
+    One pass is the unit a concurrent write invalidates: the drain waits for a
+    quiet window at least this long before it starts another one.
+    """
+    with _PUBLICATION_MEMO_LOCK:
+        return _WHOLE_VAULT_PASS_SECONDS.get(_publication_memo_key(vault_root))
+
+
+def _observe_full_marker(vault_root: Path) -> tuple[int, int] | None:
+    """The whole-vault debt standing before a rebuild attempt samples its epoch."""
+    try:
+        return deferred_index.graph_full_rebuild_observation(vault_root)
+    except Exception:  # noqa: BLE001 - an unread marker is simply not retired
+        return None
+
+
+def _retire_covered_full_marker(vault_root: Path, observed: tuple[int, int] | None) -> None:
+    """Retire the whole-vault debt a just-published rebuild provably paid.
+
+    Called after the publication hold and the owner claim are released. The
+    published ticket proved that no canonical batch committed and the recall
+    projection did not move between the attempt's epoch sample and the
+    replacement, and `observed` was read before that sample, so the new sidecar
+    covers every change that debt stood for. Without this, a coordinator or
+    recovery publication left the marker standing and the drain paid for the
+    same rebuild a second time. Debt raised at any point after the observation
+    -- during the pass or after the publication -- moves the marker's raise
+    count, so the retirement declines and that debt survives. Never raises: a
+    retained marker costs one redundant rebuild, never lost debt.
+
+    The drain is told either way: whatever backoff it is serving described the
+    graph this publication just replaced, and the per-path work queued behind
+    the marker can drain now.
+    """
+    if observed is not None:
+        try:
+            retired = deferred_index.retire_observed_graph_full_rebuild(vault_root, observed)
+        except Exception:  # noqa: BLE001 - the marker stays, so the debt stays
+            log.warning(
+                "graph publication could not retire its covered full marker", exc_info=True
+            )
+        else:
+            if retired:
+                log.info(
+                    "graph rebuild publication retired the full marker it covers marker=%s",
+                    observed[0],
+                )
+    try:
+        from . import graph_drain
+
+        graph_drain.note_graph_progress()
+    except Exception:  # noqa: BLE001 - a missed wake costs one poll, never the repair
+        pass
+
+
 #: Every reason `recover_suspended_graph` can decline, as a stable token.
 RECOVERY_DECLINE_EXTERNAL_PENDING = "external_change_pending"
 RECOVERY_DECLINE_GRAPH_DISABLED = "graph_disabled"
@@ -2644,8 +2709,13 @@ class EpistemicGraphIndex:
         _reap_preserved_temporaries(
             live, self.vault_root, state_root=self._mutation_coordinator.state_root
         )
+        published: dict[str, int] | None = None
+        paid_marker: tuple[int, int] | None = None
         while attempts < REBUILD_PUBLICATION_ATTEMPTS:
             attempts += 1
+            # Read before this attempt samples its epoch: whole-vault debt that
+            # already exists now is paid by the publication this attempt makes.
+            covered_marker = _observe_full_marker(self.vault_root)
             prepared_recall = freshness.prepare_recall_publication(self.vault_root, "vault")
             if prepared_recall is None:
                 self._reconcile_recall_publication()
@@ -2817,7 +2887,12 @@ class EpistemicGraphIndex:
                             attempts,
                             required.generation if required is not None else None,
                         )
-                        return report
+                        # Leave the hold and the owner claim before paying the
+                        # debt: the hold stays bounded to its ticket checks and
+                        # the replacement.
+                        published = report
+                        paid_marker = covered_marker
+                        break
                     finally:
                         _release_publication_hold(publication_hold)
             finally:
@@ -2848,6 +2923,9 @@ class EpistemicGraphIndex:
                 _reap_preserved_temporaries(
                     live, self.vault_root, state_root=self._mutation_coordinator.state_root
                 )
+        if published is not None:
+            _retire_covered_full_marker(self.vault_root, paid_marker)
+            return published
         if epoch_error is not None:
             raise epoch_error
         # Exhausting the publication attempts for any reason other than a proven
@@ -3406,6 +3484,7 @@ class EpistemicGraphIndex:
             while _may_restabilize(attempts, retarget=retarget, started=started):
                 attempts += 1
                 retarget = False
+                attempt_started = time.monotonic()
                 before_disk = _disk_vault_freshness(self.vault_root)
                 before = _recall_projection_identity(self.vault_root, disk_freshness=before_disk)
                 resolver = find_module.recall_resolver_snapshot(
@@ -3440,6 +3519,7 @@ class EpistemicGraphIndex:
                 pass_started = True
                 report = self._rebuild_all_pass(resolver)
                 after_disk = _disk_vault_freshness(self.vault_root)
+                _note_whole_vault_pass(self.vault_root, time.monotonic() - attempt_started)
                 # Bound to names so the `else` below can say *which* of the three
                 # conditions moved without re-running either O(vault) proof.  The
                 # walrus keeps the short-circuit exactly as it was: membership is
@@ -7610,9 +7690,53 @@ class GraphDispatchResult:
     def not_required(cls) -> GraphDispatchResult:
         return cls("not_required", "no_graph_input")
 
+    @property
+    def whole_vault_attempted(self) -> bool:
+        """Whether this dispatch ran, or joined, a whole-vault rebuild pass."""
+        return self.code in _WHOLE_VAULT_ATTEMPT_CODES
+
+
+#: Dispatch codes that mean a whole-vault pass ran for the marker (published or
+#: lost) or another owner's pass is running. A busy boundary, an unavailable
+#: epoch and a registry rebind are not whole-vault passes.
+_WHOLE_VAULT_ATTEMPT_CODES = frozenset(
+    {
+        "graph_rebuild_completed",
+        "graph_convergence_deferred",
+        "graph_convergence_failed",
+        "graph_rebuild_in_progress",
+    }
+)
+
+_FULL_MARKER_DISPATCHES: ContextVar[list[GraphDispatchResult] | None] = ContextVar(
+    "exomem_graph_full_marker_dispatches", default=None
+)
+
+
+@contextmanager
+def observe_full_marker_dispatches() -> Iterator[list[GraphDispatchResult]]:
+    """Collect every full-marker dispatch outcome produced inside this block."""
+    seen: list[GraphDispatchResult] = []
+    token = _FULL_MARKER_DISPATCHES.set(seen)
+    try:
+        yield seen
+    finally:
+        _FULL_MARKER_DISPATCHES.reset(token)
+
+
+def _record_full_marker_dispatch(result: GraphDispatchResult) -> GraphDispatchResult:
+    seen = _FULL_MARKER_DISPATCHES.get()
+    if seen is not None:
+        seen.append(result)
+    return result
+
 
 def converge_full_graph_marker(vault_root: Path) -> GraphDispatchResult:
     """Converge one observed full marker through rebind or the full-rebuild fallback."""
+    return _record_full_marker_dispatch(_converge_full_graph_marker(vault_root))
+
+
+def _converge_full_graph_marker(vault_root: Path) -> GraphDispatchResult:
     root = Path(vault_root)
     checkpoint: graph_sync.GraphSyncCheckpoint | None = None
     try:
@@ -7628,7 +7752,10 @@ def converge_full_graph_marker(vault_root: Path) -> GraphDispatchResult:
             operation="epistemic_graph_dispatch_full_marker",
             holder_kind="graph",
         ):
-            observed = deferred_index.graph_full_rebuild_pending(root)
+            # The marker and its raise count, so the clear below declines for
+            # any debt raised after this sample -- including a repeat at the
+            # same value, which a value compare-and-swap would erase.
+            observed = deferred_index.graph_full_rebuild_observation(root)
             if observed is None:
                 return GraphDispatchResult.not_required()
             state = graph_sync.classify_epoch(root)
@@ -7691,7 +7818,7 @@ def converge_full_graph_marker(vault_root: Path) -> GraphDispatchResult:
         if checkpoint is None:
             return GraphDispatchResult("failed", "graph_convergence_failed")
         return GraphDispatchResult("deferred", "graph_convergence_deferred", checkpoint)
-    deferred_index.clear_graph_full_rebuild(root, generation=observed)
+    deferred_index.retire_observed_graph_full_rebuild(root, observed)
     return GraphDispatchResult("completed", code, checkpoint)
 
 

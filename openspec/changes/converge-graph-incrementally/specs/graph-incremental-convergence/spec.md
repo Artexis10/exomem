@@ -362,6 +362,41 @@ registered rebuild: the caller that joins is precisely the caller that must not 
 - **WHEN** the queue write fails and the pass falls back to a whole-vault rebuild
 - **THEN** the dispatch does not claim the repair is queued
 
+### Requirement: Whole-vault graph repair is paid once and waits out a write burst
+
+Whole-vault graph debt is one durable marker, and more than one owner can run the
+rebuild that pays it. Every whole-vault publication SHALL retire the marker it
+observed before its epoch sample, and SHALL do so by compare-and-swap on the
+marker's raise count as well as its value, so any debt raised after that
+observation survives, including a repeat that leaves the value unchanged. The
+full-marker dispatcher SHALL clear its marker by the same comparison.
+
+A whole-vault pass publishes only when no write lands while it runs, so the
+drain SHALL hold a whole-vault attempt until the vault has been quiet since the
+last write's debt signal for one measured whole-vault pass, or for a 5 s floor
+before any pass has been measured. The hold SHALL NOT exceed 120 s past the first
+debt signal the attempt was held for; after that the attempt runs, paced by the
+no-progress backoff. A debt signal the drain raises itself SHALL NOT start the
+window, and per-path repair and its drain SHALL NOT be held.
+
+#### Scenario: A publication retires the debt it observed and nothing newer
+
+- **WHEN** a whole-vault publication lands while the full marker it observed
+  before its epoch sample stands, and further debt was raised after that
+  observation at the same marker value
+- **THEN** the marker survives the publication and the drain pays the newer debt
+- **AND** without that further debt, the publication retires the marker and no
+  owner rebuilds the same graph again
+
+#### Scenario: Whole-vault repair waits one measured pass, for at most 120 s
+
+- **WHEN** a whole-vault marker stands and writes keep arriving
+- **THEN** the drain starts no whole-vault attempt until the vault has been quiet
+  for one measured pass since the last write
+- **AND** if the writes never pause that long, the attempt still starts within
+  120 s of the first debt signal it was held for, and later attempts follow the
+  no-progress backoff
+
 ### Requirement: A graph rebuild and a canonical write may run concurrently without either losing
 
 A graph rebuild in flight SHALL NOT cause a concurrent canonical write to refuse, and a
