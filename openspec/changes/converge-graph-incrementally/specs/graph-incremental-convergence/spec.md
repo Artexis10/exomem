@@ -547,7 +547,11 @@ generation floor installed without its checkpoint.
 Graph work that holds the writers' canonical boundary SHALL NOT wait on the in-process
 batch commit: a batch holding it may be in its post-commit fan-out waiting for that
 boundary. A recovery checkpoint write under the boundary SHALL be skipped while a batch
-commits and left for the next attempt.
+commits and left for the next attempt. `reconcile` is exempt: it holds the boundary for
+its whole command, so a fan-out waiting on that boundary is refused for as long as
+reconcile runs whether or not reconcile then takes the batch lock, the inversion adds at
+most one bounded wait to reconcile itself, and skipping would fail the repair its caller
+asked for.
 
 #### Scenario: The full-marker dispatcher does not queue behind a committing batch
 
