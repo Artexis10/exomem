@@ -1,3 +1,5 @@
+> **Superseded (2026-09-23)** by `adopt-exomem-cloud-plain-cells`. Not to be implemented further; removed with its code in that change's retirement phase.
+
 ## Why
 
 Exomem Hosted needs to feel like a product, not an MCP integration project: an invited user should install one client-native plugin, sign into Exomem, and get governed long-term memory in a fresh conversation without URLs, local setup, custom instructions, skill uploads, or Exomem-specific prompting. The product now has a least-privilege Hosted agent profile, so the missing Exomem-side contract is a reproducible, platform-tested package that binds that profile to Claude and OpenAI clients.

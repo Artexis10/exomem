@@ -1,3 +1,5 @@
+> **Superseded (2026-09-23)** by `adopt-exomem-cloud-plain-cells`. Not to be implemented further; removed with its code in that change's retirement phase.
+
 ## Why
 
 The first governed write on a newly provisioned hosted cell commits the catalog and then fails because its activation acknowledgement tries to replace read-only custody. This leaves the active store ahead of external authority and blocks content serving; making the local copy writable would still lose the advance on Secret refresh or pod replacement.
