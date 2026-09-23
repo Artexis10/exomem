@@ -289,6 +289,38 @@ def test_in_pass_promotion_never_dispatches_a_component_before_its_dependencies(
     )
 
 
+def test_a_failed_dependency_holds_its_dependants_within_the_pass(
+    vault: Path, tmp_path: Path
+) -> None:
+    """Promotion inside a pass follows completion, never mere claim order."""
+    rel = "Knowledge Base/Notes/Insights/visibility-held.md"
+    _governed_write(
+        tmp_path, vault, rel_path=rel, source=_compiled_page("Held pass", "heldpassmarker")
+    )
+    receipt = _only_receipt(vault)
+    production = derived_drain.component_dispatcher()
+    dispatched: list[DerivedComponent] = []
+
+    def lexstore_fails(root: Path, status) -> bool:  # noqa: ANN001
+        dispatched.append(status.component)
+        if status.component is DerivedComponent.LEXSTORE:
+            return False
+        return production(root, status)
+
+    _one_pass(vault, dispatch=lexstore_fails)
+
+    dependants = {
+        component
+        for component, predecessors in derived_receipts._COMPONENT_DEPENDENCIES.items()
+        if DerivedComponent.LEXSTORE in predecessors
+    }
+    assert DerivedComponent.LEXSTORE in dispatched
+    assert not dependants & set(dispatched), dispatched
+    states = _states(vault, receipt)
+    assert states[DerivedComponent.LEXSTORE] == "retryable", states
+    assert all(states[component] == "prepared" for component in dependants), states
+
+
 def test_fast_acked_note_vector_row_is_readable_after_one_drain_pass(
     live_catalogue: Path, tmp_path: Path, model_free_encoder: list[int]
 ) -> None:
