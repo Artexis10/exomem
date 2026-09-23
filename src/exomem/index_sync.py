@@ -1982,12 +1982,17 @@ def converge_derived_component(
             # Nothing this fan-out can publish: a tombstone-only batch is
             # converged by the removal path the deleting writer already ran.
             return True
-        report = upsert_after_write(
-            root,
-            written,
-            created_paths=created,
-            publish_corpus_change=True,
-        )
+        from . import graph_sync
+
+        # A registered graph rebuild still starts; this fan-out just does not
+        # wait on it before the embedding step that follows the graph.
+        with graph_sync.standalone_join_waived():
+            report = upsert_after_write(
+                root,
+                written,
+                created_paths=created,
+                publish_corpus_change=True,
+            )
         if report.reconcile_required:
             return False
         _derived_memo_put(memo_key, report)

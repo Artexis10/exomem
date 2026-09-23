@@ -713,6 +713,43 @@ def note_persistent_publication(
         _forget(key)
 
 
+def note_components_completed(vault_root: Path, batch_ids: Iterable[str]) -> None:
+    """Derived components completed; retire whatever custody they settled.
+
+    Retirement needs both recall lanes to hold the generation *and* every
+    non-omittable component to be completed. The lanes publish inside the
+    receipt-owned fan-out, before the drain records the components that fan-out
+    proved, so the attempt :func:`note_persistent_publication` makes at that
+    moment cannot retire. Completing a component does not move the pending
+    generation fence either, so without this second attempt a cached projection
+    kept shadowing the page's vector and graph evidence until some unrelated
+    pending-row mutation happened to invalidate it.
+    """
+    named = {batch_id for batch_id in batch_ids if isinstance(batch_id, str) and batch_id}
+    if not named:
+        return
+    root = Path(vault_root)
+    key = _key(root)
+    with _STATE_LOCK:
+        state = _STATES.get(key)
+    if state is None or not derived_receipts.pending_visibility_snapshot_is_current(
+        root, state.snapshot_generation
+    ):
+        # The ordinary bounded hydration retires whatever has converged.
+        _forget(key)
+        overlay(root)
+        return
+    batches = tuple(
+        batch for batch in state.batches if batch.receipt.batch_id in named
+    )
+    if not batches:
+        return
+    # Nothing canonical moved, only component state: the fenced rows are reused.
+    projection = _reproject_named(root, batches, state.rows, set())
+    if _retire_settled(root, batches, projection):
+        _forget(key)
+
+
 # --------------------------------------------------------------------------- #
 # Operational status (content-free by construction)
 # --------------------------------------------------------------------------- #

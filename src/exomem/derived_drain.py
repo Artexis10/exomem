@@ -37,6 +37,7 @@ CanonicalGenerationObserver = Callable[[Path], str | None]
 PendingVisibilityPublisher = Callable[
     [Path, derived_receipts.DerivedBatchReceipt], bool
 ]
+PendingVisibilityRetirer = Callable[[Path, tuple[str, ...]], None]
 
 _LOCK = threading.Lock()
 _ACTIVE: dict[str, DerivedDrain] = {}
@@ -150,6 +151,17 @@ def pending_visibility_publisher() -> PendingVisibilityPublisher:
     return publish
 
 
+def pending_visibility_retirer() -> PendingVisibilityRetirer:
+    """Lane 2's retirement re-check after completions, bound lazily."""
+
+    def retire(vault_root: Path, batch_ids: tuple[str, ...]) -> None:
+        from . import pending_recall
+
+        pending_recall.note_components_completed(vault_root, batch_ids)
+
+    return retire
+
+
 def component_dispatcher() -> ComponentDispatcher:
     """Route one already-claimed component to the lane that owns it.
 
@@ -214,6 +226,7 @@ def drain_once(
     dispatch: ComponentDispatcher | None,
     observe_current_generation: CanonicalGenerationObserver | None = None,
     visibility_publisher: PendingVisibilityPublisher | None = None,
+    retire_visibility: PendingVisibilityRetirer | None = None,
     limit: int,
     now: float | None = None,
     owner: str | None = None,
@@ -237,9 +250,66 @@ def drain_once(
         lease_seconds=CLAIM_LEASE_SECONDS,
         now=started_at,
     )
-    completed = 0
-    max_attempt_count = max((status.attempt_count for status in claims), default=0)
-    oldest_due_at = min((status.next_attempt_at for status in claims), default=None)
+    completed_batches: list[str] = []
+    claimed_total = 0
+    max_attempt_count = 0
+    oldest_due_at: float | None = None
+    while claims:
+        claimed_total += len(claims)
+        max_attempt_count = max(
+            [max_attempt_count, *(status.attempt_count for status in claims)]
+        )
+        due = [status.next_attempt_at for status in claims]
+        oldest_due_at = min(due if oldest_due_at is None else [oldest_due_at, *due])
+        completed_now = _dispatch_claims(
+            vault_root,
+            claims,
+            dispatch=dispatch,
+            observe_current_generation=observe_current_generation,
+            started_at=started_at,
+        )
+        completed_batches.extend(completed_now)
+        remaining = int(limit) - claimed_total
+        if remaining <= 0 or not completed_now:
+            break
+        # A completion promotes its successors in the same store transaction,
+        # so they are ready now. Claim them inside this pass's allowance instead
+        # of leaving each dependency level for the next scheduler tick; the
+        # allowance still bounds the pass, and a failed claim backs off past
+        # this pass's clock, so nothing is retried within it.
+        claims = derived_receipts.claim_ready_components(
+            vault_root,
+            owner=claim_owner,
+            limit=remaining,
+            lease_seconds=CLAIM_LEASE_SECONDS,
+            now=started_at,
+        )
+    if completed_batches and retire_visibility is not None:
+        try:
+            retire_visibility(vault_root, tuple(dict.fromkeys(completed_batches)))
+        except Exception:  # noqa: BLE001 - read-side re-derivation; custody is unchanged
+            log.warning("pending visibility retirement re-check failed", exc_info=True)
+    _note_pass_observation(
+        vault_root,
+        claimed=claimed_total,
+        completed=len(completed_batches),
+        max_attempt_count=max_attempt_count,
+        oldest_due_at=oldest_due_at,
+        at=started_at,
+    )
+    return len(completed_batches)
+
+
+def _dispatch_claims(
+    vault_root: Path,
+    claims: tuple[DerivedComponentStatus, ...],
+    *,
+    dispatch: ComponentDispatcher | None,
+    observe_current_generation: CanonicalGenerationObserver | None,
+    started_at: float,
+) -> list[str]:
+    """Prove, dispatch and complete one claimed prefix; return completed batches."""
+    completed: list[str] = []
     for status in claims:
         failure_code = "component_unhandled"
         if observe_current_generation is not None:
@@ -306,7 +376,7 @@ def drain_once(
                     exc_info=True,
                 )
             if completed_current:
-                completed += 1
+                completed.append(status.batch_id)
                 call_ledger.note_derived_event("component_completed")
                 continue
             if not completion_failed:
@@ -327,14 +397,6 @@ def drain_once(
                 "derived component retry lost current custody component=%s",
                 status.component.value,
             )
-    _note_pass_observation(
-        vault_root,
-        claimed=len(claims),
-        completed=completed,
-        max_attempt_count=max_attempt_count,
-        oldest_due_at=oldest_due_at,
-        at=started_at,
-    )
     return completed
 
 
@@ -349,6 +411,7 @@ class DerivedDrain:
         observe_current_generation: CanonicalGenerationObserver | None = None,
         visibility_publisher: PendingVisibilityPublisher | None = None,
         resource_limit: int | None = None,
+        retire_visibility: PendingVisibilityRetirer | None = None,
     ) -> None:
         self.vault_root = Path(vault_root)
         # An unsupplied callback means "use production", never "run headless".
@@ -366,6 +429,11 @@ class DerivedDrain:
             pending_visibility_publisher()
             if visibility_publisher is None
             else visibility_publisher
+        )
+        self.retire_visibility = (
+            pending_visibility_retirer()
+            if retire_visibility is None
+            else retire_visibility
         )
         self.resource_limit = resource_limit
         self._stop = threading.Event()
@@ -418,6 +486,7 @@ class DerivedDrain:
                         dispatch=self.dispatch,
                         observe_current_generation=self.observe_current_generation,
                         visibility_publisher=self.visibility_publisher,
+                        retire_visibility=self.retire_visibility,
                         limit=limit,
                         now=current,
                         owner=self._owner,
