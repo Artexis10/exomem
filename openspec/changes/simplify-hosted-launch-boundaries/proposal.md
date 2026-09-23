@@ -1,3 +1,5 @@
+> **Superseded (2026-09-23)** by `adopt-exomem-cloud-plain-cells`. Not to be implemented further; removed with its code in that change's retirement phase.
+
 ## Why
 
 The hosted alpha needs a stable, fast service path whose runtime safety does not depend on marketplace approval. Complete that path with a nearby shared gateway, command-time contract checks and realistic client acceptance, without rebuilding the existing isolated-cell infrastructure.

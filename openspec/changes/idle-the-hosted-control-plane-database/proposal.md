@@ -1,3 +1,5 @@
+> **Superseded (2026-09-23)** by `adopt-exomem-cloud-plain-cells`. Not to be implemented further; removed with its code in that change's retirement phase.
+
 ## Why
 
 The hosted control plane keeps its serverless PostgreSQL endpoint awake continuously, so it is billed as if it were a provisioned server that never idles. Measured 2026-09-10, the endpoint was active 771,672 of the 849,600 seconds since the billing period opened, 91% of the clock at its 0.25-CU floor, for a fleet of one cell. That is 166 CU-hours a month against a 100-CU-hour free allowance.

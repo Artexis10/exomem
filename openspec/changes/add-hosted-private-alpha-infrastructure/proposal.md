@@ -1,3 +1,5 @@
+> **Superseded (2026-09-23)** by `adopt-exomem-cloud-plain-cells`: its remaining tasks move there, and its shipped Terraform and Ansible stay.
+
 ## Why
 
 Exomem's hosted tenant runtime and Substrate control plane are substantial but cannot yet provision or operate a real isolated cell. A private alpha for non-technical users now needs a reproducible cloud substrate, the missing durable provisioner, safe external routing, and proven off-cluster recovery rather than manual server setup.
