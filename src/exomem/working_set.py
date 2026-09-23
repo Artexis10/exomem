@@ -2330,21 +2330,7 @@ def _recent_context(
     # deriving the collection directories from the map alone left the exclusion
     # inert on exactly the cold path where those sources are all there is.
     collections = _recent_collection_dirs((*by_path, *mtimes))
-    # The hot profile's own edit rule (`hot_profile`): a last edit inside a
-    # write burst is a batch nobody chose, and one older than the latest
-    # burst may have lost the user's own page to it, so neither is offered
-    # as recent work. An edit after the burst is work again.
-    burst = _burst_paths(mtimes)
-    after_burst = max((int(mtimes[path]) for path in burst), default=0)
-    offered: dict[str, str] = {}
-    for rel in sorted(mtimes, key=lambda item: (-mtimes[item], item)):
-        # Newest first, and every burst page is at or before `after_burst`,
-        # so the first edit that is not later than it ends the source.
-        if len(offered) >= limit or int(mtimes[rel]) <= after_burst:
-            break
-        why = _recent_reason_for(rel, collections=collections)
-        if why and rel not in offered:
-            offered[rel] = why
+    offered = _recent_edits(mtimes, limit=limit, collections=collections)
     # Read pages rank by how much they were read, not by their last edit:
     # an edit time says nothing about a read, and ranking by it let any
     # eight fresher edits cut every read page from the block.
@@ -2430,6 +2416,70 @@ def _recent_context(
         if statement:
             entry["statement"] = statement
     return _without_collection_echoes(entries, collections)
+
+
+def _recent_edits(
+    mtimes: Mapping[str, int],
+    *,
+    limit: int,
+    collections: frozenset[str] = frozenset(),
+) -> dict[str, str]:
+    """`{path: why}` for the newest `limit` pages that are working context
+    (`edited`, or `captured` for a captured session), newest first, less any
+    edit at or before the latest write burst.
+
+    That is the hot profile's own edit rule (`hot_profile`): a last edit
+    inside a write burst is a batch nobody chose, and one older than the
+    latest burst may have lost the user's own page to it. An edit after the
+    burst is work again.
+
+    Only the LATEST burst matters, and only whether it reaches back over the
+    offers, so neither the registry nor every burst is sorted: a heap hands
+    the entries over newest first, the first chain that reaches
+    `HOT_PROFILE_BURST_PAGES` is the latest burst (`_burst_paths`' own chain
+    rule, read from the other end), and the scan stops once the offers are
+    full and no chain still open could reach back over them. The answer is
+    the one the full sort gives.
+    """
+    import heapq
+
+    from . import find_corpus
+
+    if limit <= 0:
+        return {}
+    heap = [(-int(mtime), rel) for rel, mtime in mtimes.items()]
+    heapq.heapify(heap)
+    offers: list[tuple[int, str, str]] = []
+    after_burst: int | None = None
+    # The open chain: its newest edit, its oldest so far, and its length.
+    top = last = size = 0
+    while heap:
+        negative, rel = heapq.heappop(heap)
+        mtime = -negative
+        if len(offers) >= limit:
+            if after_burst is not None:
+                break
+            oldest = offers[-1][0] if offers else 0
+            if mtime < oldest and (not size or top < oldest):
+                break
+        else:
+            why = _recent_reason_for(rel, collections=collections)
+            if why:
+                offers.append((mtime, rel, why))
+        if (
+            after_burst is None
+            and mtime > 0
+            and rel.rsplit("/", 1)[-1].casefold() not in find_corpus.NAVIGATION_BASENAMES
+        ):
+            if size and last - mtime <= HOT_PROFILE_BURST_GAP_NS:
+                size += 1
+            else:
+                top, size = mtime, 1
+            last = mtime
+            if size >= HOT_PROFILE_BURST_PAGES:
+                after_burst = top
+    cutoff = after_burst or 0
+    return {rel: why for mtime, rel, why in offers if mtime > cutoff}
 
 
 def _recent_mtimes(vault_root: Path) -> dict[str, int]:

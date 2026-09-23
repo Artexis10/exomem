@@ -1755,3 +1755,85 @@ def test_the_recent_statement_is_never_a_lifecycle_word(
     page.write_text(f"---\ntype: resource\n{frontmatter}---\n\nThe ledger.\n", encoding="utf-8")
 
     assert working_set._recent_frontmatter_statement(vault, rel) == expected
+
+
+# --------------------------------------------------------------------------- #
+# R-Q N4: the recent block finds the latest burst without sorting the registry.
+# --------------------------------------------------------------------------- #
+
+
+def _reference_recent_edits(
+    mtimes: dict[str, int], *, limit: int, collections: frozenset[str]
+) -> dict[str, str]:
+    """The edit source as R-P3 shipped it: every burst computed over the
+    whole registry, then a full newest-first sort cut at the latest burst."""
+    burst = working_set._burst_paths(mtimes)
+    after = max((int(mtimes[path]) for path in burst), default=0)
+    offered: dict[str, str] = {}
+    for rel in sorted(mtimes, key=lambda item: (-mtimes[item], item)):
+        if len(offered) >= limit or int(mtimes[rel]) <= after:
+            break
+        why = working_set._recent_reason_for(rel, collections=collections)
+        if why and rel not in offered:
+            offered[rel] = why
+    return offered
+
+
+def _random_registry(seed: int) -> dict[str, int]:
+    import random
+
+    rng = random.Random(seed)
+    kinds = (
+        "Knowledge Base/Notes/Journal/note-{}.md",
+        "Knowledge Base/Sources/Sessions/2026-09-{}-session.md",
+        "Knowledge Base/Evidence/receipt-{}.md",
+        "Knowledge Base/Notes/Area {}/index.md",
+        "Knowledge Base/Records/Depot Stock/Items/item-{}.md",
+    )
+    gaps_s = (0, 0, 0.1, 1, 2.9, 4.9, 5, 5.1, 6, 60, 3600)
+    stamp = 1_800_000_000_000_000_000
+    mtimes: dict[str, int] = {"Knowledge Base/Records/Depot Stock/_collection.md": stamp}
+    for index in range(rng.randrange(1, 60)):
+        stamp -= int(rng.choice(gaps_s) * 1e9)
+        path = rng.choice(kinds).format(index)
+        mtimes[path] = 0 if rng.random() < 0.03 else stamp
+    return mtimes
+
+
+def test_the_recent_edits_are_identical_to_the_full_sort() -> None:
+    """Bounded work, same answer: the burst fixtures' shapes (chains of three
+    or more within five seconds, a stalled tail, equal times, navigation
+    pages, zero times, captures and collection storage) at every limit."""
+    collections = frozenset({"Knowledge Base/Records/Depot Stock"})
+    for seed in range(400):
+        mtimes = _random_registry(seed)
+        for limit in (1, 3, 8):
+            assert working_set._recent_edits(
+                mtimes, limit=limit, collections=collections
+            ) == _reference_recent_edits(mtimes, limit=limit, collections=collections), (
+                seed,
+                limit,
+            )
+
+
+def test_the_recent_block_never_computes_every_burst(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the latest burst and the edits after it matter to the block, so
+    it must not sort the whole registry to find every burst: +5.7 ms a turn
+    at 8,000 notes."""
+
+    def every_burst(_mtimes):
+        raise AssertionError("the recent block computed every burst")
+
+    monkeypatch.setattr(working_set, "_burst_paths", every_burst)
+    monkeypatch.setattr(working_set, "_recently_activated", lambda *a, **k: ())
+    monkeypatch.setattr(working_set, "_recent_planning", lambda *a, **k: ())
+    monkeypatch.setattr(working_set, "_recent_frontmatter_statement", lambda *a, **k: "")
+    monkeypatch.setattr(working_set, "_is_current_page", lambda *_a: True)
+    mtimes = {f"Knowledge Base/Notes/note-{index}.md": _minutes_ago(index) for index in range(20)}
+
+    entries = working_set._recent_context(Path("/nonexistent"), rows=[], mtimes=mtimes)
+
+    assert [entry["path"] for entry in entries] == [
+        f"Knowledge Base/Notes/note-{index}.md" for index in range(8)
+    ]
+
