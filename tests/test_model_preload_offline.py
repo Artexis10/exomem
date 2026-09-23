@@ -164,6 +164,9 @@ def test_torch_encoder_loads_cached_weights_offline(
     spy = _Spy()
     monkeypatch.setitem(sys.modules, "sentence_transformers", _fake_sentence_transformers(spy))
     monkeypatch.setattr(accel, "select_device", lambda **_: "cpu")
+    # The hub client fixes its cache directory at import, so the tokenizer guard
+    # cannot see this fake cache; it has its own tests.
+    monkeypatch.setattr(embedding_backend, "require_tokenizer", lambda _name: "tokenizer.json")
 
     embedding_backend.load_encoder(embeddings.MODEL_NAME, backend=embedding_backend.TORCH)
 
@@ -191,6 +194,7 @@ def test_reranker_loads_cached_weights_offline(
     spy = _Spy()
     monkeypatch.setitem(sys.modules, "sentence_transformers", _fake_sentence_transformers(spy))
     monkeypatch.setattr(accel, "select_device", lambda **_: "cpu")
+    monkeypatch.setattr(embedding_backend, "require_tokenizer", lambda _name: "tokenizer.json")
 
     embeddings.get_reranker()
 

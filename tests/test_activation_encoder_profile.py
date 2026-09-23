@@ -1,4 +1,5 @@
-"""The activation encoder: its profile, fingerprint and own execution slot (step 4, T6).
+"""The activation encoder: its profile, fingerprint and own execution slot (step 4, T6),
+and the one served model it becomes (T6b).
 
 The activation index may run a different encoder from recall, which stays on
 `BAAI/bge-base-en-v1.5`. Such an encoder carries a profile, read from the model
@@ -14,7 +15,9 @@ are fakes and repository files are temporary files.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
+import re
 import sys
 import threading
 import types
@@ -35,28 +38,39 @@ from exomem import (
 )
 
 E5 = "intfloat/multilingual-e5-small"
+M3 = "BAAI/bge-m3"
 
 
 @pytest.fixture(autouse=True)
-def _clean(monkeypatch: pytest.MonkeyPatch):
+def _clean(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.delenv(embeddings.ACTIVATION_MODEL_ENV, raising=False)
     monkeypatch.setattr(embeddings, "_MODEL", None)
     monkeypatch.setattr(embeddings, "_ACTIVATION_MODEL", None)
+    monkeypatch.setenv(embedding_backend.ARTIFACT_DIR_ENV, str(tmp_path / "artifacts"))
     yield
 
 
-def _repo(tmp_path: Path, files: dict[str, object], monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Serve `files` as a model repository through `embedding_backend._resolve`."""
+def _repo(
+    tmp_path: Path, files: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> list[tuple[str, str | None]]:
+    """Serve `files` as a model repository through `embedding_backend._resolve`.
+
+    Returns every `(filename, revision)` asked for, so a test can pin that a
+    declared model is read at its pinned revision and never at a moving branch.
+    """
     root = tmp_path / "repo"
     for name, content in files.items():
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(content) if not isinstance(content, str) else content, encoding="utf-8")
-    asked: list[str] = []
+        if isinstance(content, bytes):
+            path.write_bytes(content)
+        else:
+            path.write_text(json.dumps(content) if not isinstance(content, str) else content, encoding="utf-8")
+    asked: list[tuple[str, str | None]] = []
 
-    def resolve(_model: str, filename: str) -> str:
-        asked.append(filename)
+    def resolve(_model: str, filename: str, revision: str | None = None) -> str:
+        asked.append((filename, revision))
         path = root / filename
         if not path.is_file():
             raise FileNotFoundError(filename)
@@ -384,11 +398,15 @@ def test_the_activation_slot_refuses_without_waiting_when_busy(monkeypatch: pyte
 
 
 def test_shared_topology_keeps_the_recall_query_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[str] = []
-    monkeypatch.setattr(embeddings, "embed_query_if_loaded", lambda text: seen.append(text) or np.zeros(3, dtype=np.float32))
+    seen: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        embeddings,
+        "embed_query_if_loaded",
+        lambda text, **kw: seen.append((text, kw)) or np.zeros(3, dtype=np.float32),
+    )
 
     assert embeddings.embed_activation_query_if_loaded("continue") is not None
-    assert seen == ["continue"]
+    assert seen == [("continue", {"max_tokens": embeddings.ACTIVATION_TURN_MAX_TOKENS})]
 
 
 def test_if_loaded_never_loads_either_model(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -456,3 +474,368 @@ def test_warm_up_preloads_a_separate_activation_model_only(
         readiness.reset()
 
     assert loads == expected
+
+
+# --------------------------------------------------------------------------- #
+# The served model: bge-m3 on ONNX Runtime int8 with external data (T6b)
+# --------------------------------------------------------------------------- #
+
+_M3_REPO = {
+    "1_Pooling/config.json": {"pooling_mode_cls_token": True, "pooling_mode_mean_tokens": False},
+    # The repository declares its full 8192-token window; the server reads 512.
+    "sentence_bert_config.json": {"max_seq_length": 8192, "do_lower_case": False},
+    "tokenizer_config.json": {"pad_token": "<pad>"},
+}
+
+
+def test_the_served_model_is_bge_m3_int8_with_external_data_at_512_tokens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = _repo(tmp_path, _M3_REPO, monkeypatch)
+
+    profile = embedding_backend.read_profile(M3)
+    served = embedding_backend.served_artifact(M3)
+
+    assert served is not None and re.fullmatch(r"[0-9a-f]{40}", served.revision)
+    assert (served.quantization, served.file_format) == (
+        embedding_backend.ORT_DYNAMIC_INT8,
+        embedding_backend.ONNX_EXTERNAL_DATA,
+    )
+    assert (profile.pooling, profile.max_seq, profile.pad_token) == ("cls", 512, "<pad>")
+    assert (profile.query_prefix, profile.passage_prefix) == ("", "")
+    assert (profile.revision, profile.quantization, profile.file_format) == (
+        served.revision,
+        served.quantization,
+        served.file_format,
+    )
+    # Every file is read at the pinned commit, never at a moving branch.
+    assert asked and {revision for _file, revision in asked} == {served.revision}
+    assert embedding_backend.served_artifact(E5) is None
+
+
+def test_every_served_model_is_capped_at_512_tokens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    long_model = "some-org/long-model"
+    _repo(
+        tmp_path,
+        {"sentence_bert_config.json": {"max_seq_length": 8192}, "tokenizer.json": "{}"},
+        monkeypatch,
+    )
+
+    class Model:
+        tokenizer = types.SimpleNamespace(pad_token="<pad>", num_special_tokens_to_add=lambda pair=False: 2)
+
+        def __init__(self) -> None:
+            self.max_seq_length = 8192
+            self.read_at: list[int] = []
+
+        def __iter__(self):
+            return iter([])
+
+        def encode(self, texts: list[str], **_kwargs: object) -> np.ndarray:
+            self.read_at.append(self.max_seq_length)
+            return np.ones((len(texts), 2), dtype=np.float32)
+
+    loaded = Model()
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        types.SimpleNamespace(SentenceTransformer=lambda *_a, **_k: loaded),
+    )
+    monkeypatch.setattr(runtime_resources, "configure_torch", lambda: None)
+
+    assert embedding_backend.read_profile(long_model).max_seq == 512
+    assert embedding_backend.profile_from_sentence_transformer(long_model, Model()).max_seq == 512
+
+    encoder = embedding_backend._TorchEncoder(long_model, "cpu", False)
+    encoder.encode(["a long passage"], batch_size=8)
+    encoder.encode(["a turn"], batch_size=8, max_tokens=40)
+    encoder.encode(["a long passage"], batch_size=8)
+
+    assert encoder.profile.max_seq == 512
+    # The torch lane reads what its profile says, and a capped encode reads 40
+    # of the text's own tokens, special tokens on top, for its own call only.
+    assert loaded.read_at == [512, 42, 512]
+    assert encoder.concurrent_encodes is False
+
+
+def test_the_fingerprint_names_the_served_bytes() -> None:
+    base = embedding_backend.EncoderProfile(
+        model=M3,
+        pooling="cls",
+        query_prefix="",
+        passage_prefix="",
+        max_seq=512,
+        pad_token="<pad>",
+        revision="a" * 40,
+        quantization=embedding_backend.ORT_DYNAMIC_INT8,
+        file_format=embedding_backend.ONNX_EXTERNAL_DATA,
+        artifact_digest="0123456789abcdef",
+    )
+    for change in (
+        {"revision": "b" * 40},
+        {"quantization": "fp32"},
+        {"file_format": "onnx"},
+        {"artifact_digest": "fedcba9876543210"},
+    ):
+        assert dataclasses.replace(base, **change).fingerprint() != base.fingerprint(), change
+    assert dataclasses.replace(base, pad_token="[PAD]").fingerprint() == base.fingerprint()
+
+    # A profile with no served artefact keeps the fingerprint it always had, so
+    # nothing already filed under it reads as another vector space.
+    plain = embedding_backend.EncoderProfile(
+        model=E5, pooling="mean", query_prefix="query: ", passage_prefix="passage: ", max_seq=512, pad_token="<pad>"
+    )
+    legacy = json.dumps(
+        {
+            "model": E5,
+            "pooling": "mean",
+            "query_prefix": "query: ",
+            "passage_prefix": "passage: ",
+            "max_seq": 512,
+            "normalize": "l2",
+        },
+        sort_keys=True,
+    )
+
+    assert plain.fingerprint() == f"{E5}|mean|l2|{hashlib.sha256(legacy.encode()).hexdigest()[:16]}"
+
+
+def test_a_model_without_its_tokenizer_json_never_loads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Offline, transformers rebuilds a tokenizer from whatever else the snapshot
+    holds and can turn CJK into `<unk>` or into nothing, with no error. A model
+    whose `tokenizer.json` is neither resident nor fetchable does not load, on
+    any lane: torch, ONNX, or the reranker."""
+    _repo(tmp_path, {"sentence_bert_config.json": {"max_seq_length": 512}}, monkeypatch)
+    constructed: list[str] = []
+    st = types.ModuleType("sentence_transformers")
+    st.SentenceTransformer = lambda *_a, **_k: constructed.append("bi-encoder")
+    st.CrossEncoder = lambda *_a, **_k: constructed.append("cross-encoder")
+    monkeypatch.setitem(sys.modules, "sentence_transformers", st)
+    monkeypatch.setattr(runtime_resources, "configure_torch", lambda: None)
+    monkeypatch.setattr(accel, "select_device", lambda **_: "cpu")
+    monkeypatch.setattr(embeddings, "_RERANKER", None)
+
+    for backend in (embedding_backend.TORCH, embedding_backend.ONNX):
+        with pytest.raises(embedding_backend.ModelFilesUnavailable, match="tokenizer.json"):
+            embedding_backend.load_encoder(E5, backend=backend)
+    with pytest.raises(embedding_backend.ModelFilesUnavailable, match="tokenizer.json"):
+        embeddings.get_reranker()
+
+    assert constructed == []
+    assert embeddings._RERANKER is None
+
+
+# --------------------------------------------------------------------------- #
+# The served artefact is built once per host, from the pinned export
+# --------------------------------------------------------------------------- #
+
+TINY = "some-org/tiny-served"
+TINY_REVISION = "0123456789abcdef0123456789abcdef01234567"
+TINY_WIDTH = 32
+
+
+def _tiny_served_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A real, tiny ONNX export with external data, declared as a served model.
+
+    Gather, Tanh, MatMul over a 64-word vocabulary: the quantiser rewrites the
+    embedding table and the matrix, and the float activation between them is
+    quantised per tensor at run time, as in the real model. Big enough that the
+    quantised weights leave the graph for the external data file.
+    """
+    onnx = pytest.importorskip("onnx")
+    pytest.importorskip("onnxruntime")
+    from onnx import TensorProto, helper, numpy_helper
+    from tokenizers import Tokenizer, models, pre_tokenizers, processors
+
+    rng = np.random.default_rng(7)
+    vocab = 64
+    words = ["<s>", "<pad>", "</s>", "<unk>"] + [f"w{i}" for i in range(vocab - 4)]
+    graph = helper.make_graph(
+        [
+            helper.make_node("Gather", ["table", "input_ids"], ["embedded"]),
+            helper.make_node("Tanh", ["embedded"], ["activated"]),
+            helper.make_node("MatMul", ["activated", "weight"], ["token_embeddings"]),
+        ],
+        "tiny",
+        [helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch", "sequence"])],
+        [helper.make_tensor_value_info("token_embeddings", TensorProto.FLOAT, ["batch", "sequence", TINY_WIDTH])],
+        [
+            numpy_helper.from_array(rng.standard_normal((vocab, TINY_WIDTH)).astype(np.float32), "table"),
+            numpy_helper.from_array(rng.standard_normal((TINY_WIDTH, TINY_WIDTH)).astype(np.float32), "weight"),
+        ],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 8
+    export = tmp_path / "export"
+    export.mkdir()
+    onnx.save_model(
+        model,
+        str(export / "model.onnx"),
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location="model.onnx_data",
+        size_threshold=0,
+    )
+    tokenizer = Tokenizer(models.WordLevel({word: i for i, word in enumerate(words)}, unk_token="<unk>"))
+    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    tokenizer.post_processor = processors.TemplateProcessing(
+        single="<s> $A </s>", special_tokens=[("<s>", 0), ("</s>", 2)]
+    )
+    asked = _repo(
+        tmp_path,
+        {
+            "onnx/model.onnx": (export / "model.onnx").read_bytes(),
+            "onnx/model.onnx_data": (export / "model.onnx_data").read_bytes(),
+            "tokenizer.json": tokenizer.to_str(),
+            "1_Pooling/config.json": {"pooling_mode_mean_tokens": True},
+            "sentence_bert_config.json": {"max_seq_length": 512},
+            "tokenizer_config.json": {"pad_token": "<pad>"},
+        },
+        monkeypatch,
+    )
+    served = embedding_backend.ServedArtifact(
+        revision=TINY_REVISION,
+        source=("onnx/model.onnx", "onnx/model.onnx_data"),
+        quantization=embedding_backend.ORT_DYNAMIC_INT8,
+        file_format=embedding_backend.ONNX_EXTERNAL_DATA,
+    )
+    monkeypatch.setitem(embedding_backend._SERVED, TINY, served)
+    monkeypatch.setitem(embedding_backend._DECLARED, TINY, ("", "", "mean", "<pad>"))
+    # Asked for an accelerator, the served artefact still runs where its parity was measured.
+    monkeypatch.setattr(accel, "select_device", lambda **_: "cuda")
+    return asked, served
+
+
+def test_the_served_artifact_is_built_once_at_the_pinned_revision_and_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked, served = _tiny_served_repo(tmp_path, monkeypatch)
+    quantized: list[tuple] = []
+    real_quantize = embedding_backend._quantize
+    monkeypatch.setattr(
+        embedding_backend, "_quantize", lambda *args: quantized.append(args) or real_quantize(*args)
+    )
+
+    first = embedding_backend.load_encoder(TINY, backend=embedding_backend.TORCH)
+    target = embedding_backend.artifact_dir(TINY, served)
+    manifest = json.loads((target / "artifact.json").read_text(encoding="utf-8"))
+
+    assert (first.backend, first.device, first.concurrent_encodes) == (embedding_backend.ONNX, "cpu", True)
+    assert first._session.get_providers() == ["CPUExecutionProvider"]
+    assert len(quantized) == 1
+    assert {revision for _file, revision in asked} == {TINY_REVISION}
+    assert sorted(path.name for path in target.iterdir()) == ["artifact.json", "model.onnx", "model.onnx.data"]
+    assert [path.name for path in target.parent.iterdir()] == [target.name], "a build leaves no stage behind"
+    assert re.fullmatch(r"[0-9a-f]{16}", first.profile.artifact_digest or "")
+    assert manifest["digest"] == first.profile.artifact_digest
+    assert (manifest["model"], manifest["revision"], manifest["quantization"], manifest["file_format"]) == (
+        TINY,
+        TINY_REVISION,
+        embedding_backend.ORT_DYNAMIC_INT8,
+        embedding_backend.ONNX_EXTERNAL_DATA,
+    )
+
+    second = embedding_backend.load_encoder(TINY)
+    texts = ["w1 w2 w3", "w4"]
+
+    assert len(quantized) == 1, "a built artefact is reused, not rebuilt"
+    assert second.profile == first.profile
+    vectors = second.encode(texts, batch_size=8)
+    assert vectors.shape == (2, TINY_WIDTH)
+    assert np.allclose(np.linalg.norm(vectors, axis=1), 1.0, atol=1e-5)
+    assert np.allclose(vectors, first.encode(texts, batch_size=8))
+
+
+def test_a_served_int8_vector_is_a_function_of_its_text_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dynamic int8 quantises each activation tensor with one scale, so in a
+    shared batch a text's vector moves with its neighbours (up to 0.02 cosine on
+    bge-m3). The served model runs one text per session call, so a vector is the
+    same whichever batch it was asked for in: what reuse by text assumes."""
+    _tiny_served_repo(tmp_path, monkeypatch)
+    encoder = embedding_backend.load_encoder(TINY)
+    texts = ["w1 w2 w3 w4 w5 w6 w7", "w8", "w9 w10"]
+
+    together = encoder.encode(texts, batch_size=8)
+    alone = np.vstack([encoder.encode([text], batch_size=8) for text in texts])
+
+    assert np.array_equal(together, alone)
+    assert np.array_equal(encoder.encode(texts, batch_size=8, max_tokens=2), np.vstack(
+        [encoder.encode([text], batch_size=8, max_tokens=2) for text in texts]
+    ))
+
+
+def test_the_quantiser_runs_outside_the_server_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The quantiser holds the fp32 graph and its int8 copy at once: 8.7 GB peak
+    for bge-m3. In a child process that memory goes back to the host when the
+    child exits, and running out of it ends the build, not the server."""
+    _tiny_served_repo(tmp_path, monkeypatch)
+    for name in [name for name in sys.modules if name.startswith("onnxruntime.quantization")]:
+        monkeypatch.delitem(sys.modules, name)
+
+    embedding_backend.load_encoder(TINY)
+
+    assert not [name for name in sys.modules if name.startswith("onnxruntime.quantization")]
+
+
+def test_a_failed_build_refuses_the_load_and_leaves_nothing_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _asked, served = _tiny_served_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(embedding_backend, "_QUANTIZE_CHILD", "raise SystemExit('the quantiser is unavailable')")
+
+    with pytest.raises(embedding_backend.ModelFilesUnavailable, match="the quantiser is unavailable"):
+        embedding_backend.load_encoder(TINY)
+
+    target = embedding_backend.artifact_dir(TINY, served)
+    assert not [path for path in target.parent.rglob("*") if path.is_file()]
+
+
+def test_a_damaged_artifact_is_rebuilt_to_the_same_digest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _asked, served = _tiny_served_repo(tmp_path, monkeypatch)
+    first = embedding_backend.load_encoder(TINY)
+    data = embedding_backend.artifact_dir(TINY, served) / "model.onnx.data"
+    data.write_bytes(data.read_bytes()[:-7])
+
+    again = embedding_backend.load_encoder(TINY)
+
+    assert again.profile.artifact_digest == first.profile.artifact_digest
+    assert again.profile.fingerprint() == first.profile.fingerprint()
+
+
+def test_a_capped_encode_reads_the_turn_s_head_and_leaves_the_shared_tokenizer_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _tiny_served_repo(tmp_path, monkeypatch)
+    encoder = embedding_backend.load_encoder(TINY)
+    long_turn = " ".join(f"w{i}" for i in range(4, 40))
+    head = "w4 w5 w6"  # the turn's first three tokens; <s> and </s> come on top
+
+    capped = encoder.encode([long_turn], batch_size=8, max_tokens=3)
+
+    assert np.allclose(capped, encoder.encode([head], batch_size=8), atol=1e-6)
+    assert np.allclose(encoder.encode([head], batch_size=8, max_tokens=3), encoder.encode([head], batch_size=8))
+    assert not np.allclose(encoder.encode([long_turn], batch_size=8), capped, atol=1e-3)
+    # A capped row next to a shorter one pads like any batch.
+    both = encoder.encode([long_turn, "w9"], batch_size=8, max_tokens=3)
+    assert np.allclose(both[0], capped[0], atol=1e-6)
+    assert np.allclose(both[1], encoder.encode(["w9"], batch_size=8)[0], atol=1e-6)
+
+
+# --------------------------------------------------------------------------- #
+# One model, one resident instance
+# --------------------------------------------------------------------------- #
+
+
+def test_equal_served_profiles_share_one_resident_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Activation and recall on one model hold ONE instance: one load, one memory cost."""
+    resident = object()
+    monkeypatch.setattr(embeddings, "MODEL_NAME", M3)
+    monkeypatch.setenv(embeddings.ACTIVATION_MODEL_ENV, M3)
+    monkeypatch.setattr(embeddings, "_MODEL", resident)
+    monkeypatch.setattr(embedding_backend, "load_encoder", lambda *_a, **_k: pytest.fail("one instance only"))
+
+    assert embeddings.activation_encoder_is_shared() is True
+    assert embeddings.get_activation_model() is resident
+    assert embeddings._ACTIVATION_MODEL is None

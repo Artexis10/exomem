@@ -325,6 +325,68 @@ def test_model_admission_is_reentrant_serial_and_preserves_status_capacity() -> 
     assert overlap == 1
 
 
+def test_one_admission_spans_a_bulk_encode_s_execution_turns() -> None:
+    """A bulk encode is one unit of admitted work, but it holds the execution slot
+    only per batch: between two turns another caller runs without waiting."""
+    gate = runtime_resources.ModelAdmissionGate(2)
+    turns: list[int] = []
+    between: list[int] = []
+
+    def other_turn() -> None:
+        with gate.execution(wait=False):
+            between.append(gate.admitted_count())
+
+    with gate.admission():
+        assert gate.admitted_count() == 1
+        with gate.execution():
+            turns.append(gate.admitted_count())
+        worker = threading.Thread(target=other_turn)
+        worker.start()
+        worker.join(timeout=1)
+        with gate.execution():
+            turns.append(gate.admitted_count())
+        with gate.admission():  # reentrant for its owner
+            assert gate.admitted_count() == 1
+
+    assert turns == [1, 1]
+    assert between == [2]
+    assert gate.admitted_count() == 0
+
+
+def test_an_admission_is_refused_without_waiting_when_capacity_is_spent() -> None:
+    gate = runtime_resources.ModelAdmissionGate(1)
+    refused: list[float] = []
+
+    def admit() -> None:
+        started = time.monotonic()
+        try:
+            with gate.admission():
+                pass
+        except runtime_resources.ModelBusyError:
+            refused.append(time.monotonic() - started)
+
+    with gate.admission():
+        worker = threading.Thread(target=admit)
+        worker.start()
+        worker.join(timeout=1)
+
+    assert len(refused) == 1 and refused[0] < 0.25
+    assert gate.admitted_count() == 0
+
+
+def test_the_process_gate_admits_a_bulk_encode_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime_resources, "_gate", None)
+    monkeypatch.setattr(runtime_resources, "_gate_capacity", None)
+
+    with runtime_resources.model_admission():
+        gate = runtime_resources._gate
+        assert gate is not None and gate.admitted_count() == 1
+        with runtime_resources.model_execution():
+            assert gate.admitted_count() == 1
+
+    assert gate.admitted_count() == 0
+
+
 def test_cold_product_getters_reserve_sync_status_capacity(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -469,6 +531,7 @@ def test_framework_adapters_receive_explicit_thread_budget(monkeypatch: pytest.M
     )
     from exomem import embedding_backend, extract
 
+    monkeypatch.setattr(embedding_backend, "_resolve", lambda *_args: "model-file")
     embedding_backend._TorchEncoder("model", "cpu", False)
 
     options = types.SimpleNamespace()
@@ -490,7 +553,6 @@ def test_framework_adapters_receive_explicit_thread_budget(monkeypatch: pytest.M
         "tokenizers",
         types.SimpleNamespace(Tokenizer=types.SimpleNamespace(from_file=lambda _path: tokenizer)),
     )
-    monkeypatch.setattr(embedding_backend, "_resolve", lambda *_args: "model-file")
     monkeypatch.setattr(embedding_backend, "_max_seq_length", lambda _name: 4)
     embedding_backend._OnnxEncoder("model", "cpu")
 
