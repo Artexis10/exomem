@@ -486,3 +486,121 @@ def test_reused_counts_only_the_page_s_own_rows_on_both_spans(live) -> None:
         call_spans.MCP_CALL_TOKEN.reset(handle)
 
     assert spans["index.embeddings.reuse"]["fields"] == {"texts": 3, "reused": 1, "recalled": 1}
+
+
+# ---------------- the real invalidation paths ----------------
+#
+# Each fills the hand-off through a real sweep, fires one production event, and
+# checks that the next upsert encodes every text itself and that the memory is
+# released, not merely hidden.
+
+
+def _fill_hand_off(vault: Path, log: list[tuple[str, str]]) -> list[str]:
+    body = "Invalidation paragraph one.\n\nInvalidation paragraph two."
+    corpus_aware._best_cosine_per_file(vault, title="Invalidation probe", body=body)
+    chunks = embeddings.chunk_text("Invalidation probe", body)
+    assert len(embeddings._PASSAGE_MEMO) == len(chunks), "the sweep filed nothing"
+    log.clear()
+    return chunks
+
+
+def _upsert_encodes_everything(chunks: list[str], log: list[tuple[str, str]]) -> None:
+    embeddings._embed_live_chunks_reusing(chunks, {})
+    assert sorted(text for _name, text in log) == sorted(chunks)
+
+
+def test_a_model_load_releases_the_hand_off(lifecycle, monkeypatch) -> None:
+    """Even a reload of the same model: its vectors are equal, but nothing proves it."""
+    vault, log = lifecycle
+    embeddings.get_model()
+    chunks = _fill_hand_off(vault, log)
+    monkeypatch.setattr(embeddings, "_MODEL", None)  # a load that no unload preceded
+    before_the_load = embeddings.passage_memo_stamp()
+
+    embeddings.get_model()
+
+    assert len(embeddings._PASSAGE_MEMO) == 0
+    # A sweep that began before the load files nothing under the loaded model.
+    embeddings.remember_passage_vectors(
+        chunks, np.ones((len(chunks), embeddings.VECTOR_DIM), np.float32), stamp=before_the_load
+    )
+    assert len(embeddings._PASSAGE_MEMO) == 0
+    _upsert_encodes_everything(chunks, log)
+
+
+def test_clearing_the_shared_indexes_releases_the_hand_off(lifecycle) -> None:
+    vault, log = lifecycle
+    embeddings.get_model()
+    chunks = _fill_hand_off(vault, log)
+
+    embeddings.clear_embedding_indexes()
+
+    assert len(embeddings._PASSAGE_MEMO) == 0
+    _upsert_encodes_everything(chunks, log)
+
+
+def test_the_reaper_s_cache_eviction_releases_the_hand_off(lifecycle) -> None:
+    from exomem import model_reaper
+
+    vault, log = lifecycle
+    embeddings.get_model()
+    chunks = _fill_hand_off(vault, log)
+    embeddings.get_embedding_index(vault)  # the slot evicts only a shared index
+    slot = next(s for s in model_reaper.default_slots() if s.name == "index-matrices")
+
+    slot.unload()
+
+    assert len(embeddings._PASSAGE_MEMO) == 0
+    _upsert_encodes_everything(chunks, log)
+
+
+def test_the_reaper_s_model_unload_releases_the_hand_off(lifecycle) -> None:
+    from exomem import model_reaper
+
+    vault, log = lifecycle
+    embeddings.get_model()
+    chunks = _fill_hand_off(vault, log)
+    slot = next(s for s in model_reaper.default_slots() if s.name == "embeddings")
+
+    assert slot.unload() is True
+
+    assert len(embeddings._PASSAGE_MEMO) == 0
+    _upsert_encodes_everything(chunks, log)
+
+
+def test_a_vector_encoded_before_an_unload_is_not_served_to_the_next_load(
+    lifecycle, monkeypatch
+) -> None:
+    """The reaper unloads between the sweep's encode and its filing, and the next
+    load is another encoder under the SAME model name -- a shared remote encoder,
+    changed weights -- so only the load generation tells the two apart."""
+    vault, log = lifecycle
+    loads = itertools.count(1)
+    monkeypatch.setattr(
+        embedding_backend,
+        "load_encoder",
+        lambda name, **_k: _TaggedModel(f"{name}#load{next(loads)}", log),
+    )
+    embeddings.get_model()
+    real_record = call_spans.record_span
+    unloaded: list[str] = []
+
+    def unload_after_the_encode(name, elapsed_ms, fields=None):
+        real_record(name, elapsed_ms, fields)
+        if name == "embeddings.encode" and not unloaded:
+            unloaded.append(name)
+            assert embeddings.unload_model() is True
+
+    monkeypatch.setattr(call_spans, "record_span", unload_after_the_encode)
+    body = "Unload paragraph one.\n\nUnload paragraph two."
+    corpus_aware._best_cosine_per_file(vault, title="Unload probe", body=body)
+    monkeypatch.setattr(call_spans, "record_span", real_record)
+    chunks = embeddings.chunk_text("Unload probe", body)
+    assert unloaded and embeddings._MODEL is None
+
+    vectors = embeddings._embed_live_chunks_reusing(chunks, {})
+
+    assert vectors[:, 0].tolist() == [_model_tag("model-a#load2")] * len(chunks), (
+        "the upsert took vectors the unloaded encoder produced"
+    )
+    assert embeddings._MODEL.name == "model-a#load2"
