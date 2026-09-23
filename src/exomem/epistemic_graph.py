@@ -5203,14 +5203,25 @@ class EpistemicGraphIndex:
                 and "graph_sync_digest" not in graph_values
             ) and not (acknowledged is not None and acknowledged.generation == predecessor):
                 snapshot.close()
-                if acknowledged is not None and graph_sync.GraphBuildOutcome.covering(
-                    acknowledged
-                ).covers(graph_checkpoint):
-                    # A drain already covers this generation: this refresh
-                    # arrived after the repair it would have made. Nothing is
-                    # owed, and falling back would withdraw a marker that
-                    # describes a current graph -- or register a whole-vault
-                    # rebuild for one.
+                if (
+                    acknowledged is not None
+                    and graph_sync.GraphBuildOutcome.covering(acknowledged).covers(
+                        graph_checkpoint
+                    )
+                    and self.available()
+                ):
+                    # A drain already covers this generation and the marker is
+                    # current: this refresh arrived after the repair it would
+                    # have made. Nothing is owed, and falling back would
+                    # withdraw a marker that describes a current graph.
+                    #
+                    # Only with the marker current. A registry update that
+                    # landed after the drain acknowledged leaves the marker
+                    # describing an older projection; returning here would
+                    # leave nothing queued to republish it, and the drain
+                    # daemon would pay a whole-vault rebuild for this page.
+                    # The fallback below queues it, and one per-path drain
+                    # republishes.
                     log.info(
                         "graph incremental refresh found its generation already "
                         "acknowledged generation=%s acknowledged=%s",

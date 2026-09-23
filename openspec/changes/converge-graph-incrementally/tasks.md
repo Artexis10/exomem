@@ -325,7 +325,8 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
 - [x] 7.6 Keep the queue converging under a steady writer. A drain records the resolver
   topology it derived under (else the next topology-changing write fell back on
   `stored_topology_fingerprint_mismatch`), keeps the rows it proved when the vault moves
-  elsewhere, a late refresh of an already-acknowledged generation is a no-op, and a
+  elsewhere, a late refresh of an already-acknowledged generation is a no-op while the
+  marker is current (and queues its page when a late registry update left it stale), and a
   receipt whose page's own bytes fail -- not UTF-8, or an `OSError` older than
   `GRAPH_POISON_MIN_AGE_SECONDS` -- is quarantined after `GRAPH_POISON_ATTEMPTS` rather
   than rotated forever, keeping the page's rows and retried on a stat change or after

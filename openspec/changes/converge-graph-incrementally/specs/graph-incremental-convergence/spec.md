@@ -409,8 +409,11 @@ lineage and acknowledgement wait for a drain the projection holds still for. A p
 drain indexed moving under it SHALL roll the pass back.
 
 A write's incremental refresh that finds its own generation already acknowledged -- a
-drain derived its batch first -- SHALL do nothing rather than fall back: nothing is
-owed, and the fallback would withdraw a current marker or register a whole-vault rebuild.
+drain derived its batch first -- and the availability marker current SHALL do nothing
+rather than fall back: nothing is owed, and the fallback would withdraw a current marker.
+When the marker is not current -- the write's registry update landed after the drain
+acknowledged -- the refresh SHALL queue its paths, so a per-path drain republishes the
+marker without a whole-vault rebuild.
 
 #### Scenario: A drain that repairs a created page keeps the next write incremental
 
@@ -426,8 +429,15 @@ owed, and the fallback would withdraw a current marker or register a whole-vault
 #### Scenario: A late refresh of an acknowledged generation is a no-op
 
 - **WHEN** a drain has acknowledged a write's generation before that write's own refresh
-  runs
+  runs, and the marker is current
 - **THEN** the refresh returns without work and the graph stays readable
+
+#### Scenario: A late refresh behind a late registry update queues its page
+
+- **WHEN** a drain acknowledges a write's generation, the write's registry update lands
+  after it, and the write's own refresh then runs
+- **THEN** the refresh queues the page, one per-path drain makes the graph readable again,
+  and no whole-vault pass runs
 
 ### Requirement: An underivable receipt is quarantined, not rotated forever
 
