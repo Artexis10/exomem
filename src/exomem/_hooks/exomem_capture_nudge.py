@@ -513,6 +513,21 @@ def _episode_ask(
     return EPISODE_ASK.replace("{key}", episode_key(client, session_id))
 
 
+def _note_continuation_record(session_id: str, tools: list[dict]) -> None:
+    """Count a record made in a `stop_hook_active` continuation. Never asks.
+
+    The ask blocks a Stop, and the agent answers it in the continuation that
+    follows, which Stops again with `stop_hook_active`. That record is the
+    coverage the ask asked for; dropping it would repeat the ask every cooldown.
+    """
+    if not session_id or not any(_successful_episode_record(tool) for tool in tools):
+        return
+    path = _episode_state_path(session_id)
+    state = _read_episode_state(path)
+    state["substantive_since_record"] = 0
+    _write_episode_state(path, state)
+
+
 def _pending_restart_marker() -> Path:
     return _hook_home() / ".cache" / "exomem-nudge" / PENDING_RESTART_MARKER
 
@@ -592,6 +607,12 @@ def main() -> int:
         return 0
 
     if data.get("stop_hook_active") or data.get("stopHookActive"):  # already blocked once
+        tpath = data.get("transcript_path") or data.get("transcriptPath")
+        if tpath and _EPISODE_ASK_PRESETS.get(level) is not None:
+            _note_continuation_record(
+                str(data.get("session_id") or data.get("sessionId") or ""),
+                _latest_turn(tpath)[1],
+            )
         return 0
     tpath = data.get("transcript_path") or data.get("transcriptPath")
     event_assistant_text = data.get("last_assistant_message") or data.get(

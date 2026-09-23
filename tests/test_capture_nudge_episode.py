@@ -209,6 +209,36 @@ def test_stop_hook_active_stays_silent(
     assert _stop(monkeypatch, capsys, transcript, active=True) is None
 
 
+@pytest.mark.parametrize("record", [True, False])
+def test_a_record_made_in_answer_to_the_ask_is_counted(
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    record: bool,
+) -> None:
+    """The ask blocks the Stop; the agent records in the continuation, which
+    Stops again with `stop_hook_active`. That record is the coverage the ask
+    asked for, so the next turn after the cooldown stays silent. The
+    continuation itself never asks, and without a record nothing is reset."""
+    k, cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    clock = {"now": 1_000_000.0}
+    monkeypatch.setattr(hook.time, "time", lambda: clock["now"])
+    assert _is_episode_ask(_stops(monkeypatch, capsys, tmp_path, k)[-1])
+
+    continuation = _transcript(
+        tmp_path,
+        "Recorded the recap.",
+        tool="mcp__exomem__episode_memory" if record else "mcp__exomem__remember",
+        tool_input={"action": "record", "subject": "Harbor Lamp purchase"},
+        name="continuation.jsonl",
+    )
+    assert _stop(monkeypatch, capsys, continuation, active=True) is None
+
+    clock["now"] += cooldown
+    assert _is_episode_ask(_stops(monkeypatch, capsys, tmp_path, 1)[-1]) is not record
+
+
 def test_prominence_off_is_silent(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
