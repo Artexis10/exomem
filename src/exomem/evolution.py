@@ -23,6 +23,7 @@ Every cap that drops content is reported in `truncation`.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 from . import context_pack, get_page
@@ -47,16 +48,28 @@ def _int_env(value: int | None, env: str, default: int) -> int:
         return default
 
 
-def _load_link(vault_root: Path, raw_wikilink: str) -> ParsedPage | None:
-    """Resolve a `supersedes`/`superseded_by` wikilink to its parsed page (or None)."""
+Keep = Callable[[str], bool] | None
+
+
+def _load_link(vault_root: Path, raw_wikilink: str, keep: Keep = None) -> ParsedPage | None:
+    """Resolve a `supersedes`/`superseded_by` wikilink to its parsed page (or None).
+
+    `keep` is the caller's release decision (`None` for the owner): a page it
+    refuses reads as a link to nothing, so a chain never crosses it.
+    """
     target = context_pack._wikilink_target(raw_wikilink)
     if not target:
         return None
     rel = target if target.endswith(".md") else target + ".md"
-    return find_module._CACHE.get(vault_root / rel, vault_root)
+    page = find_module._CACHE.get(vault_root / rel, vault_root)
+    if page is not None and keep is not None and not keep(page.rel_path):
+        return None
+    return page
 
 
-def _resolve_chain(vault_root: Path, start: ParsedPage) -> dict[str, ParsedPage]:
+def _resolve_chain(
+    vault_root: Path, start: ParsedPage, keep: Keep = None
+) -> dict[str, ParsedPage]:
     """Walk the supersession pointers from `start` both ways into the full chain.
 
     Forward via `superseded_by`, backward via `supersedes`, `seen`-guarded (the chain is
@@ -65,14 +78,14 @@ def _resolve_chain(vault_root: Path, start: ParsedPage) -> dict[str, ParsedPage]
     members: dict[str, ParsedPage] = {start.rel_path: start}
     cur: ParsedPage | None = start
     while cur and cur.superseded_by:
-        nxt = _load_link(vault_root, cur.superseded_by[0])
+        nxt = _load_link(vault_root, cur.superseded_by[0], keep)
         if nxt is None or nxt.rel_path in members:
             break
         members[nxt.rel_path] = nxt
         cur = nxt
     cur = start
     while cur and cur.supersedes:
-        prev = _load_link(vault_root, cur.supersedes[0])
+        prev = _load_link(vault_root, cur.supersedes[0], keep)
         if prev is None or prev.rel_path in members:
             break
         members[prev.rel_path] = prev
@@ -80,12 +93,14 @@ def _resolve_chain(vault_root: Path, start: ParsedPage) -> dict[str, ParsedPage]
     return members
 
 
-def _order_chain(vault_root: Path, members: dict[str, ParsedPage]) -> list[ParsedPage]:
+def _order_chain(
+    vault_root: Path, members: dict[str, ParsedPage], keep: Keep = None
+) -> list[ParsedPage]:
     """Order chain members oldest→newest along the pointer spine (origin → head)."""
     def _is_origin(p: ParsedPage) -> bool:
         if not p.supersedes:
             return True
-        prev = _load_link(vault_root, p.supersedes[0])
+        prev = _load_link(vault_root, p.supersedes[0], keep)
         return prev is None or prev.rel_path not in members
 
     origin = next((p for p in members.values() if _is_origin(p)), next(iter(members.values())))
@@ -97,7 +112,7 @@ def _order_chain(vault_root: Path, members: dict[str, ParsedPage]) -> list[Parse
         seen.add(cur.rel_path)
         if not cur.superseded_by:
             break
-        nxt = _load_link(vault_root, cur.superseded_by[0])
+        nxt = _load_link(vault_root, cur.superseded_by[0], keep)
         cur = nxt if (nxt is not None and nxt.rel_path in members) else None
     return ordered
 
@@ -121,7 +136,12 @@ def _transition_reason(vault_root: Path, new_page: ParsedPage) -> tuple[str | No
 
 
 def _build_timeline(
-    vault_root: Path, ordered: list[ParsedPage], *, anchor: str, max_versions: int
+    vault_root: Path,
+    ordered: list[ParsedPage],
+    *,
+    anchor: str,
+    max_versions: int,
+    keep: Keep = None,
 ) -> tuple[dict, int]:
     """Assemble one chain's timeline dict; returns (timeline, dropped_versions)."""
     dropped = 0
@@ -134,7 +154,7 @@ def _build_timeline(
     for page in shown:
         transition = None
         if page.superseded_by:
-            succ = _load_link(vault_root, page.superseded_by[0])
+            succ = _load_link(vault_root, page.superseded_by[0], keep)
             if succ is not None:
                 reason, tdate = _transition_reason(vault_root, succ)
                 transition = {"reason": reason, "date": tdate}
@@ -169,12 +189,15 @@ def build_timelines(
     *,
     max_chains: int | None = None,
     max_versions: int | None = None,
+    keep: Keep = None,
 ) -> dict:
     """Resolve the hits' supersession chains into ordered timelines. Pure measurement.
 
     Dedups hits that land on the same chain (keyed by active-head path), drops chains of
     length < 2, orders each by the pointer spine, caps to `max_chains` (find-relevance
     order) and each timeline to `max_versions`, reporting every drop in `truncation`.
+    A hit or chain member `keep` refuses is treated as absent before anything is built
+    or counted, so the anchor, the head and the caps rest on pages the caller may see.
     """
     max_chains = _int_env(max_chains, "EXOMEM_EVOLUTION_MAX_CHAINS", _DEFAULT_MAX_CHAINS)
     max_versions = _int_env(max_versions, "EXOMEM_EVOLUTION_MAX_VERSIONS", _DEFAULT_MAX_VERSIONS)
@@ -182,19 +205,21 @@ def build_timelines(
     seen_heads: set[str] = set()
     built: list[tuple[dict, int]] = []  # (timeline, dropped_versions)
     for hit in hits:
+        if keep is not None and not keep(hit.path):
+            continue
         page = find_module._CACHE.get(vault_root / hit.path, vault_root)
         if page is None:
             continue
-        members = _resolve_chain(vault_root, page)
+        members = _resolve_chain(vault_root, page, keep)
         if len(members) < 2:
             continue  # never superseded → no evolution to show
-        ordered = _order_chain(vault_root, members)
+        ordered = _order_chain(vault_root, members, keep)
         head = ordered[-1].rel_path
         if head in seen_heads:
             continue  # another hit already surfaced this chain
         seen_heads.add(head)
         built.append(_build_timeline(
-            vault_root, ordered, anchor=page.rel_path, max_versions=max_versions
+            vault_root, ordered, anchor=page.rel_path, max_versions=max_versions, keep=keep
         ))
 
     # Apply the chains cap FIRST, so per-timeline version-truncation notes below can only
@@ -235,6 +260,9 @@ def evolution(
     superseded — honestly empty, not an error. Results are bounded by `find`'s candidate
     pool (≤100): a chain whose only matching members fall outside it won't surface.
     """
+    from .governance import egress
+
+    keep = egress.restricted_release_filter(vault_root)
     # Overfetch candidates since several hits collapse into one chain; `find` clamps to
     # 100, so an "uncapped" (limit<=0) call fetches that full pool.
     overfetch = 100 if limit <= 0 else min(max(limit * _OVERFETCH, 25), 100)
@@ -246,7 +274,7 @@ def evolution(
         tags=tags,
         limit=overfetch,
     )
-    built = build_timelines(vault_root, hits, max_chains=limit)
+    built = build_timelines(vault_root, hits, max_chains=limit, keep=keep)
     return {"query": query, **built}
 
 
@@ -263,10 +291,17 @@ def evolution_for_path(
     pointer-ordered and measurement-only; a page with no supersession history returns an
     honest empty timeline.
     """
+    from .governance import egress
+
     try:
         canonical_path = get_page.get_page(vault_root, path=path).path
     except get_page.GetError as exc:
         raise ValueError(f"{exc.code}: {exc.reason}") from exc
+    keep = egress.restricted_release_filter(vault_root)
+    if keep is not None and not keep(canonical_path):
+        # Refused exactly as a missing page, so the answer is the same whether
+        # the page is withheld or was never written.
+        raise ValueError(f"NOT_FOUND: file does not exist: {get_page.missing_path_for(path)}")
     page = find_module._CACHE.get(vault_root / canonical_path, vault_root)
     if page is None:
         raise ValueError(f"NOT_FOUND: no readable page at {canonical_path}")
@@ -290,8 +325,11 @@ def evolution_for_page(
     Review-context assembly uses this seam to avoid reparsing the selected target for
     each response section. Callers that only have a path use :func:`evolution_for_path`.
     """
+    from .governance import egress
+
     canonical_path = target_path or page.rel_path
-    members = _resolve_chain(vault_root, page)
+    keep = egress.restricted_release_filter(vault_root)
+    members = _resolve_chain(vault_root, page, keep)
     if len(members) < 2:
         return {"target_path": canonical_path, "timelines": [], "truncation": []}
 
@@ -300,12 +338,13 @@ def evolution_for_page(
         "EXOMEM_EVOLUTION_MAX_VERSIONS",
         _DEFAULT_MAX_VERSIONS,
     )
-    ordered = _order_chain(vault_root, members)
+    ordered = _order_chain(vault_root, members, keep)
     timeline, dropped = _build_timeline(
         vault_root,
         ordered,
         anchor=canonical_path,
         max_versions=resolved_max,
+        keep=keep,
     )
     truncation = []
     if dropped:

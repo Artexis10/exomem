@@ -483,3 +483,64 @@ def test_a_guessed_relation_ref_to_a_withheld_page_reads_as_absent(
 
     assert _text(answers["A"]) == _text(answers["B"])
     assert answers["B"]["message"].startswith("REVIEW_REFRESH_REQUIRED")
+
+
+# ---------------------------------------------------------------------------
+# Evolution timelines are built over visible pages only
+# ---------------------------------------------------------------------------
+
+
+def _visible_pointer() -> tuple[dict[str, str], dict[str, str]]:
+    """A visible page names its withheld successor; the successor names it back."""
+    base = {
+        **_filler(),
+        f"{NOTES}/beta.md": _page(
+            "Beta",
+            "Beta rollout background.",
+            type="insight",
+            status="superseded",
+            superseded_by=f'["[[{WITHHELD_DIR}/newer]]"]',
+        ),
+    }
+    withheld = {
+        f"{WITHHELD_DIR}/newer.md": _page(
+            "Hidden Draft",
+            "Withheld body text about beta rollout.",
+            type="insight",
+            supersedes=f'["[[{NOTES}/beta]]"]',
+        )
+    }
+    return base, withheld
+
+
+_EVOLUTION_SURFACES: dict[str, dict[str, Any]] = {
+    "query": {"mode": "evolution", "query": "beta rollout"},
+    "path": {"mode": "evolution", "path": f"{NOTES}/beta.md"},
+    "withheld-path": {"mode": "evolution", "path": f"{WITHHELD_DIR}/newer.md"},
+}
+
+
+@pytest.mark.parametrize("scenario", ["supersedes-visible", "visible-pointer"])
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_evolution_reads_as_if_the_withheld_page_were_absent(
+    tmp_path: Path, audience: str, scenario: str
+) -> None:
+    base, withheld = _supersede() if scenario == "supersedes-visible" else _visible_pointer()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    principal = _principal(audience)
+
+    answers = {
+        variant: {
+            label: _call(vault, principal, "review_memory", **kwargs)
+            for label, kwargs in _EVOLUTION_SURFACES.items()
+        }
+        for variant, vault in vaults.items()
+    }
+
+    # A refusal echoes the caller's own spelling of the path it asked for.
+    assert not _names_withheld({k: v for k, v in answers["A"].items() if k != "withheld-path"})
+    for label in _EVOLUTION_SURFACES:
+        assert _text(answers["A"][label]) == _text(answers["B"][label]), label
+        assert _text(answers["C"][label]) == _text(answers["B"][label]), label
+    owner = _call(vaults["A"], None, "review_memory", mode="evolution", query="beta rollout")
+    assert f"{WITHHELD_DIR}/newer.md" in _text(owner["timelines"]), owner
