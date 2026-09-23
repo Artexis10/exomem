@@ -757,6 +757,14 @@ def _best_cosine_per_file(
                 if published_path
                 else {}
             )
+            # A text no row holds may still have been encoded by a sweep moments
+            # ago -- an edit's previous generation of these same paragraphs.
+            recalled = embeddings.recall_passage_vectors(
+                chunk for chunk in dict.fromkeys(chunks) if chunk not in stored
+            )
+            published = stored
+            if recalled:
+                stored = {**stored, **recalled}
             encoded = [chunk for chunk in chunks if chunk not in stored]
             # With nothing to reuse the whole draft is encoded as it always was;
             # otherwise only the unique texts the stored rows lack.
@@ -768,13 +776,17 @@ def _best_cosine_per_file(
                 measured["texts"] = len(to_encode)
                 measured["chars"] = sum(len(chunk) for chunk in to_encode)
                 if published_path:
-                    measured["reused"] = len(chunks) - len(encoded)
+                    measured["reused"] = sum(1 for chunk in chunks if chunk in published)
+                if recalled:
+                    measured["recalled"] = sum(1 for chunk in chunks if chunk in recalled)
             if full_encode:
                 vecs = embeddings.embed_texts(chunks, is_query=False)
+                embeddings.remember_passage_vectors(chunks, vecs)
             else:
                 lookup = {chunk: stored[chunk] for chunk in chunks if chunk in stored}
                 if to_encode:
                     fresh = embeddings.embed_texts(to_encode, is_query=False)
+                    embeddings.remember_passage_vectors(to_encode, fresh)
                     lookup.update(zip(to_encode, fresh, strict=True))
                 vecs = [lookup[chunk] for chunk in chunks]
             best_per_file: dict[str, float] = {}

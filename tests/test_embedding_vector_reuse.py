@@ -175,3 +175,59 @@ def test_stored_text_vectors_never_creates_the_sidecar(tmp_path, monkeypatch) ->
     index = embeddings.EmbeddingIndex(vault)
     assert index.stored_text_vectors("a.md") == ({}, {})
     assert not index.path.exists()
+
+
+# A sweep that scores a draft before (add) or beside (edit) the page's own rows
+# encodes texts no sidecar row holds. It hands those vectors on for a short
+# while, so the same write's commit, or the page's next edit, reuses them
+# instead of encoding the same text again. The hand-off is bounded, and it is
+# never trusted across a change of encoder or model.
+
+
+def test_an_upsert_reuses_a_text_a_sweep_just_encoded(live, monkeypatch) -> None:
+    vault, target, encoder = live
+    embeddings.remember_passage_vectors(["alpha", "beta"], encoder(["alpha", "beta"]))
+    encoder.calls.clear()
+    monkeypatch.setattr(embeddings, "_chunks_for_page", lambda *_a, **_k: ["alpha", "beta", "gamma"])
+    target.write_text(_source(["- [config_rule] Keep WAL enabled #sqlite ^obs-aaaa1111"]), encoding="utf-8")
+
+    assert embeddings.upsert_after_write_status(vault, [target]).status == "completed"
+
+    assert encoder.calls[0] == ["gamma"]
+    # alpha/beta keep the vector the sweep computed (stamp 1); gamma is fresh.
+    assert [(t, stamp) for _, t, stamp in _chunk_rows(vault)] == [
+        ("alpha", 1.0),
+        ("beta", 1.0),
+        ("gamma", 2.0),
+    ]
+
+
+def test_a_handed_on_vector_is_never_served_to_another_encoder(live, monkeypatch) -> None:
+    vault, target, encoder = live
+    embeddings.remember_passage_vectors(["alpha"], encoder(["alpha"]))
+    other = type(encoder)()
+    monkeypatch.setattr(embeddings, "embed_texts", other)
+
+    assert embeddings.recall_passage_vectors(["alpha"]) == {}
+    monkeypatch.setattr(embeddings, "_chunks_for_page", lambda *_a, **_k: ["alpha"])
+    target.write_text(_source(["- [config_rule] Keep WAL enabled #sqlite ^obs-aaaa1111"]), encoding="utf-8")
+    embeddings.upsert_after_write_status(vault, [target])
+    assert other.calls[0] == ["alpha"]
+
+
+def test_handed_on_vectors_are_bounded_and_released_with_the_model(live, monkeypatch) -> None:
+    _vault, _target, encoder = live
+    limit = embeddings.PASSAGE_MEMO_MAX_TEXTS
+    texts = [f"text {i}" for i in range(limit + 5)]
+    embeddings.remember_passage_vectors(texts, encoder(texts))
+
+    assert embeddings.recall_passage_vectors(texts[:5]) == {}
+    assert set(embeddings.recall_passage_vectors(texts[-3:])) == set(texts[-3:])
+
+    embeddings.unload_index_caches()
+    assert embeddings.recall_passage_vectors(texts[-3:]) == {}
+
+    embeddings.remember_passage_vectors(texts[:2], encoder(texts[:2]))
+    monkeypatch.setattr(embeddings, "_MODEL", object())
+    assert embeddings.unload_model() is True
+    assert embeddings.recall_passage_vectors(texts[:2]) == {}

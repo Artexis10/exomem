@@ -24,6 +24,8 @@ import sqlite3
 import sys
 import threading
 import time
+from collections import OrderedDict
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -141,6 +143,7 @@ def unload_model() -> bool:
         if _MODEL is None or BGE_GUARD.inflight() > 0:
             return False
         m, _MODEL = _MODEL, None
+    clear_passage_vectors()
     # Backends hold runtime memory the reference drop alone will not return: an
     # ONNX session owns arenas outside Python's heap, and torch owns a caching
     # allocator. `release` is where each says how to give it back.
@@ -241,6 +244,8 @@ def get_model():
             if _MODEL is not None:
                 return _MODEL
             _MODEL = embedding_backend.load_encoder(MODEL_NAME)
+            # A new model is a new encoder: nothing remembered before it holds.
+            clear_passage_vectors()
         BGE_GUARD.touch()  # start the idle clock at load, not epoch 0
         return _MODEL
 
@@ -1098,10 +1103,15 @@ def clear_embedding_indexes() -> None:
     with _INDEX_CACHE_LOCK:
         _INDEX_CACHE.clear()
         _CLIP_INDEX_CACHE.clear()
+    clear_passage_vectors()
 
 
 def unload_index_caches() -> dict[str, int]:
-    """Evict resident embedding/CLIP matrices from already-shared index objects."""
+    """Evict resident embedding/CLIP matrices from already-shared index objects.
+
+    The passage vectors advisory sweeps hand on are a cache of the same kind
+    and go with them."""
+    clear_passage_vectors()
     with _INDEX_CACHE_LOCK:
         embedding_indexes = list(_INDEX_CACHE.values())
         clip_indexes = list(_CLIP_INDEX_CACHE.values())
@@ -1482,6 +1492,90 @@ def _stored_text_vectors(
     return chunks, units
 
 
+#: Texts whose passage vectors an advisory sweep keeps for the next consumer.
+#: ~3 KiB of vector per text, so the whole hand-off stays a few MiB.
+PASSAGE_MEMO_MAX_TEXTS = 1024
+_PASSAGE_MEMO: OrderedDict[str, np.ndarray] = OrderedDict()
+_PASSAGE_MEMO_ENCODER: tuple[Any, Any] | None = None
+_PASSAGE_MEMO_LOCK = threading.Lock()
+
+
+def _passage_encoder() -> tuple[Any, Any]:
+    """The encoder a remembered vector came from. Resolved at call time, so a
+    replaced `embed_texts` never serves the vectors its predecessor computed."""
+    return (embed_texts, _embed_texts)
+
+
+def remember_passage_vectors(texts: Sequence[str], vectors: Any) -> None:
+    """Keep the passage vectors an advisory sweep just encoded, most recent last.
+
+    A sweep scores text no sidecar row holds: `add` sweeps its draft before the
+    commit publishes it, and an edit sweeps the page's bare paragraphs. Keeping
+    those vectors lets the same write's commit, or the page's next edit, take
+    them instead of encoding the same text again. A vector is a function of its
+    text and the encoder, so an entry is trusted only while that encoder is the
+    one in use, and the memo is dropped with the model. Only passages
+    (`is_query=False`) belong here: a query vector is a different function.
+    """
+    global _PASSAGE_MEMO_ENCODER
+    encoder = _passage_encoder()
+    try:
+        rows = [np.array(vector, dtype=np.float32) for vector in vectors]
+        if len(rows) != len(texts):
+            return
+        with _PASSAGE_MEMO_LOCK:
+            if _PASSAGE_MEMO_ENCODER is None or any(
+                held is not current
+                for held, current in zip(_PASSAGE_MEMO_ENCODER, encoder, strict=True)
+            ):
+                _PASSAGE_MEMO.clear()
+                _PASSAGE_MEMO_ENCODER = encoder
+            for text, row in zip(texts, rows, strict=True):
+                if row.shape != (VECTOR_DIM,):
+                    continue
+                row.setflags(write=False)
+                _PASSAGE_MEMO[text] = row
+                _PASSAGE_MEMO.move_to_end(text)
+            while len(_PASSAGE_MEMO) > PASSAGE_MEMO_MAX_TEXTS:
+                _PASSAGE_MEMO.popitem(last=False)
+    except Exception as e:  # noqa: BLE001 - the hand-off is an economy, never a failure
+        log.debug("passage vectors not remembered (%s)", type(e).__name__)
+
+
+def recall_passage_vectors(texts: Iterable[str]) -> dict[str, np.ndarray]:
+    """The remembered passage vector for each of `texts` that has one."""
+    encoder = _passage_encoder()
+    try:
+        with _PASSAGE_MEMO_LOCK:
+            if (
+                _PASSAGE_MEMO_ENCODER is None
+                or not _PASSAGE_MEMO
+                or any(
+                    held is not current
+                    for held, current in zip(_PASSAGE_MEMO_ENCODER, encoder, strict=True)
+                )
+            ):
+                return {}
+            found: dict[str, np.ndarray] = {}
+            for text in texts:
+                row = _PASSAGE_MEMO.get(text)
+                if row is not None:
+                    found[text] = row
+                    _PASSAGE_MEMO.move_to_end(text)
+            return found
+    except Exception as e:  # noqa: BLE001 - a failed lookup costs an encode, nothing more
+        log.debug("passage vectors not recalled (%s)", type(e).__name__)
+        return {}
+
+
+def clear_passage_vectors() -> None:
+    """Forget every remembered passage vector."""
+    global _PASSAGE_MEMO_ENCODER
+    with _PASSAGE_MEMO_LOCK:
+        _PASSAGE_MEMO.clear()
+        _PASSAGE_MEMO_ENCODER = None
+
+
 def _embed_live_chunks_reusing(
     texts: list[str], stored: dict[str, np.ndarray]
 ) -> np.ndarray:
@@ -1489,13 +1583,20 @@ def _embed_live_chunks_reusing(
 
     A vector is a function of its text, so an unchanged chunk keeps the vector
     the sidecar already published for that exact text. Appending one observation
-    to a ninety-chunk note then encodes one chunk, not ninety. With nothing to
-    reuse this is `_embed_live_chunks` unchanged."""
+    to a ninety-chunk note then encodes one chunk, not ninety. A text the
+    sidecar lacks but an advisory sweep just encoded (`add` sweeps its draft
+    before committing it) takes the sweep's vector. With nothing to reuse this
+    is `_embed_live_chunks` unchanged."""
+    recalled = recall_passage_vectors(
+        text for text in dict.fromkeys(texts) if text not in stored
+    )
+    if recalled:
+        stored = {**stored, **recalled}
     missing = [text for text in dict.fromkeys(texts) if text not in stored]
-    with call_spans.span(
-        "index.embeddings.reuse",
-        {"texts": len(texts), "reused": sum(1 for text in texts if text in stored)},
-    ):
+    fields = {"texts": len(texts), "reused": sum(1 for text in texts if text in stored)}
+    if recalled:
+        fields["recalled"] = sum(1 for text in texts if text in recalled)
+    with call_spans.span("index.embeddings.reuse", fields):
         if len(missing) == len(texts):
             return _embed_live_chunks(texts)
         lookup = {text: stored[text] for text in texts if text in stored}
