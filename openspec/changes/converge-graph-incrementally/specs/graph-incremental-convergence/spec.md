@@ -550,9 +550,9 @@ batch commit: a batch holding it may be in its post-commit fan-out waiting for t
 boundary. A recovery checkpoint write under the boundary SHALL be skipped while a batch
 commits and left for the next attempt. `reconcile` is exempt: it holds the boundary for
 its whole command, so a fan-out waiting on that boundary waits reconcile out either way;
-the inversion only turns that wait into the fan-out's own bounded refusal and adds at
-most one bounded wait to reconcile, while skipping the write would fail the repair its
-caller asked for.
+the inversion only turns that wait into the fan-out's own bounded refusal and adds one
+bounded wait per recovery write (reconcile has two), while skipping the write would fail
+the repair its caller asked for.
 
 #### Scenario: The full-marker dispatcher does not queue behind a committing batch
 
