@@ -543,6 +543,9 @@ SCHEMA_VERSION = 11
 #: (the default drops marks, which splits Indic words at every vowel sign).
 _FTS_TOKENIZE = "tokenize=\"unicode61 remove_diacritics 0 categories 'L* N* Co M*'\""
 CATALOG_FOREGROUND_DELTA_CAP = 32
+#: A rebuild temp untouched this long, and held open by no connection, is the
+#: leftover of a killed build; the next rebuild removes it.
+_ORPHAN_REBUILD_TEMP_AGE_SECONDS = 10 * 60
 
 # Publication-barrier timeouts. Every LIVE-sidecar mutation and journal-mode
 # transition shares the per-vault `lexical-catalog-publication` barrier so a
@@ -2964,6 +2967,74 @@ class LexicalStore:
         """The WAL/SHM sidecar files SQLite keeps alongside `base`."""
         return (Path(str(base) + "-wal"), Path(str(base) + "-shm"))
 
+    def _rebuild_temp_in_use(self, base: Path) -> bool:
+        """Does another connection hold this rebuild temp open?
+
+        An exclusive lock with no busy wait succeeds only when no connection,
+        in this process or another, has the database open. A file SQLite
+        cannot read at all is not in use.
+        """
+        try:
+            conn = self._connect(base)
+        except sqlite3.Error:
+            return False
+        try:
+            conn.execute("PRAGMA busy_timeout=0")
+            conn.execute("PRAGMA locking_mode=EXCLUSIVE")
+            conn.execute("BEGIN EXCLUSIVE")
+            conn.execute("ROLLBACK")
+            return False
+        except sqlite3.OperationalError as error:
+            text = str(error).lower()
+            return "locked" in text or "busy" in text
+        except sqlite3.Error:
+            return False
+        finally:
+            conn.close()
+
+    def _sweep_orphan_rebuild_temps(self) -> list[Path]:
+        """Remove rebuild temps a killed build left beside the live sidecar.
+
+        Each temp is a whole catalogue, and a catalogue version bump sends
+        every install through a rebuild. A temp family (the temp and its
+        WAL/SHM/journal) goes when every member is older than
+        `_ORPHAN_REBUILD_TEMP_AGE_SECONDS` and no connection holds the temp.
+        """
+        from . import vault as vault_module
+
+        families: dict[Path, list[Path]] = {}
+        for candidate in self.path.parent.glob(f"{self.path.name}.rebuild-*.tmp*"):
+            if not vault_module.is_lexical_rebuild_runtime_file_name(candidate.name):
+                continue
+            base_name = candidate.name
+            for suffix in ("-journal", "-wal", "-shm"):
+                if base_name.endswith(suffix):
+                    base_name = base_name.removesuffix(suffix)
+                    break
+            families.setdefault(candidate.with_name(base_name), []).append(candidate)
+        removed: list[Path] = []
+        now = time.time()
+        for base, members in families.items():
+            try:
+                if any(
+                    now - member.stat().st_mtime < _ORPHAN_REBUILD_TEMP_AGE_SECONDS
+                    for member in members
+                ):
+                    continue
+            except OSError:
+                continue
+            if base in members and self._rebuild_temp_in_use(base):
+                continue
+            for member in (base, *self._wal_shm_paths(base), base.with_name(f"{base.name}-journal")):
+                try:
+                    if _remove_lexical_rebuild_artifact(self.vault_root, member, missing_ok=True):
+                        removed.append(member)
+                except (OSError, RuntimeError):
+                    continue
+        if removed:
+            log.info("lexical rebuild: removed %d orphan temp file(s)", len(removed))
+        return removed
+
     def _cleanup_sidecar_files(self, base: Path) -> None:
         """Remove `base` and its WAL/SHM siblings, ignoring what is absent."""
         for candidate in (base, *self._wal_shm_paths(base)):
@@ -5043,6 +5114,10 @@ class LexicalStore:
         self._last_rebuild_result = None
         if backend() == "python":
             return self._decline_rebuild("transient_failure")
+        try:
+            self._sweep_orphan_rebuild_temps()
+        except Exception:  # noqa: BLE001 - housekeeping never blocks a rebuild
+            log.debug("lexical orphan rebuild-temp sweep failed", exc_info=True)
 
         try:
             with self._publication_lock():

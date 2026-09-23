@@ -261,3 +261,56 @@ def test_stale_age_threshold_is_shared_with_vault_module(tmp_path: Path) -> None
     assert just_fresh.exists()
     assert just_stale in removed
     assert not just_stale.exists()
+
+
+def _sqlite_temp(path: Path) -> Path:
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("CREATE TABLE t(x)")
+    conn.execute("INSERT INTO t VALUES (1)")
+    conn.commit()
+    conn.close()
+    for suffix in ("-wal", "-shm"):
+        companion = path.with_name(path.name + suffix)
+        if not companion.exists():
+            companion.write_bytes(b"")
+    return path
+
+
+def test_rebuild_start_sweeps_orphan_temps_older_than_ten_minutes(tmp_path: Path) -> None:
+    """A killed rebuild leaves a whole catalogue behind as a temp. The next
+    rebuild removes temps (and their WAL/SHM) untouched for ten minutes and
+    not open, and keeps a fresh temp and one another connection still holds."""
+    import sqlite3
+
+    note = tmp_path / "Knowledge Base" / "note.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# Note\n\nalpha body\n", encoding="utf-8")
+    assert lexstore.search_bm25(tmp_path, "alpha", k=3, scope="kb") is not None
+
+    orphan = _sqlite_temp(_lexical_temp(tmp_path))
+    fresh = _sqlite_temp(_lexical_temp(tmp_path))
+    held = _sqlite_temp(_lexical_temp(tmp_path))
+    walless_base = _lexical_temp(tmp_path)
+    walless = walless_base.with_name(walless_base.name + "-wal")
+    walless.write_bytes(b"")
+    for base in (orphan, held):
+        for member in (base, base.with_name(base.name + "-wal"), base.with_name(base.name + "-shm")):
+            _age_file(member, minutes_ago=11)
+    _age_file(walless, minutes_ago=11)
+    holder = sqlite3.connect(held)
+    holder.execute("PRAGMA journal_mode=WAL")
+    holder.execute("SELECT count(*) FROM t").fetchone()
+    try:
+        assert lexstore.get_store(tmp_path).rebuild_atomic()
+    finally:
+        holder.close()
+
+    assert not orphan.exists()
+    assert not orphan.with_name(orphan.name + "-wal").exists()
+    assert not orphan.with_name(orphan.name + "-shm").exists()
+    assert not walless.exists()
+    assert fresh.exists()
+    assert held.exists()
