@@ -31,7 +31,7 @@ The dense half (one multilingual encoder for recall and activation, the fingerpr
 
 ### Modified Capabilities
 
-None in the lexical half. `close-memory-loop`'s memory-loop delta states lexical corroboration as "two distinct content stems"; with tokenizer v2 that count is taken over word and run units, as this change's spec states. The wording is reconciled when either change archives.
+None in the lexical half. `close-memory-loop`'s memory-loop delta, still active, now states its lexical corroboration and carry pairing over word and run units, matching this change's spec.
 
 ## Impact
 

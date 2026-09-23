@@ -76,4 +76,4 @@ LongMemEval is not part of this gate.
 - **The scanner costs more than the ASCII path.** A 6.5 KB English page with typographic dashes tokenizes in about 1.6× the ASCII path's time, because only the non-ASCII stretches are normalised and scanned.
 - **No stemming for non-English Latin languages.** Accepted, as above.
 - **A CJK turn earns no lexical `retrieval` in activation.** One run is one unit. That is conservative, and semantic evidence is its second contact.
-- **Activation's carry pairs stems.** The carry pairing in the batch-1 activation work places every stem of one raw token at one position. It needs the unit rule too, so the merge is gated on that rule being on the base.
+- **Activation's carry pairs units.** The carry reads rarity on the turn's surface forms and pairs two distinctive stems only when they come from different words or runs, so an accented word and its folded variant, or the bigrams of one Japanese run, never make a phrase with themselves; the parts of a joined compound still pair.

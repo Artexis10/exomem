@@ -285,10 +285,13 @@ its paths become evidence, SHALL NOT rebuild or apply a foreground delta, and
 SHALL NOT fall back to an in-process corpus scan. Its readiness result SHALL be
 reported as `generation.lexical_evidence`; incomplete publication SHALL remain
 non-cacheable. Title/alias overlap alone SHALL NOT be relabelled as retrieval.
-Lexical corroboration SHALL match at least two distinct content stems from the
+Lexical corroboration SHALL match at least two distinct content units from the
 turn after the shared stopword filter, with that predicate applied before the
-ranked result limit. Repeated or inflected forms of one stem SHALL NOT provide
-the second match. This restriction SHALL NOT change ordinary recall.
+ranked result limit. A unit is one word or one unspaced run (a CJK sentence
+written without spaces); its stems, such as an accented word's folded variant
+or a run's character bigrams, count once, and a run counts only when most of
+its content bigrams match. Repeated or inflected forms of one stem SHALL NOT
+provide the second match. This restriction SHALL NOT change ordinary recall.
 Categorical lexical-overlap evidence SHALL additionally require genuine name
 contact: two or more of the shared broad terms among the anchor's own
 authored title/alias terms. A single shared authored term SHALL NOT by
@@ -429,8 +432,11 @@ measured as a document frequency at or below `max(3, ceil(0.5% of the indexed
 pages in scope))` over the same catalogue the ranking uses, navigation pages not
 counted toward a stem's frequency, and raw-material pages counted neither toward
 a stem's frequency nor among the indexed pages. A hit SHALL additionally satisfy a proximity
-condition: two of its matched distinctive stems occur within a declared token
-window of each other, within one sentence of the turn. Distance SHALL be
+condition: two of its matched distinctive stems from two different units occur
+within a declared token window of each other, within one sentence of the turn.
+The stems of one word or one unspaced run SHALL NOT pair with each other, and
+rarity SHALL be read on the turn's surface forms; the parts of a joined
+compound (`girvan-slot`) are separate words and pair at distance zero. Distance SHALL be
 measured over the turn's own tokens, function words included; sentence-ending
 punctuation and line breaks SHALL end a window and a comma SHALL NOT. A
 number of distinctive stems occurring anywhere in the turn SHALL NOT by
@@ -503,6 +509,13 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
 - **THEN** that page is not a candidate and the turn abstains `unresolved`
 - **AND** the same two stems said as a phrase DO make it a candidate, as do
   three of that page's distinctive stems sitting anywhere in the turn
+
+#### Scenario: One word or one unspaced run is not a phrase
+
+- **WHEN** a turn is a single accented word, or a single Japanese run, that
+  appears on exactly one page of a measurable corpus
+- **THEN** no page is carried: its folded variant or its bigrams are one unit
+  and never pair with each other
 
 #### Scenario: A stub sharing only ordinary words is not named
 
