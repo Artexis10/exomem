@@ -683,3 +683,47 @@ def test_restricted_entity_identity_reads_as_if_the_withheld_entity_were_absent(
     assert "Dana" not in _text(list(answers["A"].values()))
     assert _text(answers["A"]) == _text(answers["B"])
     assert answers["A"]["Dana Example"]["status"] == "no_match"
+
+
+# ---------------------------------------------------------------------------
+# Directory listings collapse what the caller may not see
+# ---------------------------------------------------------------------------
+
+
+_BROWSE_SURFACES: dict[str, dict[str, Any]] = {
+    "list-notes": {"mode": "list", "path": NOTES},
+    "list-notes-recursive": {"mode": "list", "path": NOTES, "recursive": True},
+    "list-withheld-folder": {"mode": "list", "path": WITHHELD_DIR},
+    "list-withheld-file": {"mode": "list", "path": f"{WITHHELD_DIR}/linker.md"},
+    "overview": {"mode": "overview"},
+    "overview-notes": {"mode": "overview", "path": NOTES},
+}
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_browsing_reads_as_if_the_withheld_folder_were_absent(
+    tmp_path: Path, audience: str
+) -> None:
+    base, withheld = _inbound_linker()
+    vaults = {
+        "B": _materialize(tmp_path / "B" / "vault", dict(base), audience),
+        "A": _materialize(tmp_path / "A" / "vault", {**base, **withheld}, audience),
+    }
+    principal = _principal(audience)
+
+    answers = {
+        variant: {
+            label: _call(vault, principal, "browse_memory", **kwargs)
+            for label, kwargs in _BROWSE_SURFACES.items()
+        }
+        for variant, vault in vaults.items()
+    }
+
+    # A refusal echoes the caller's own spelling of the path it asked for.
+    assert not _names_withheld(
+        {k: v for k, v in answers["A"].items() if not k.startswith("list-withheld")}
+    )
+    for label in _BROWSE_SURFACES:
+        assert _text(answers["A"][label]) == _text(answers["B"][label]), label
+    owner = _call(vaults["A"], None, "browse_memory", mode="list", path=NOTES)
+    assert WITHHELD_DIR in _text(owner)

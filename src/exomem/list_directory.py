@@ -70,6 +70,13 @@ def list_directory(
     recursive: bool = False,
     include_hidden: bool = False,
 ) -> ListDirectoryResult:
+    from .governance import egress
+
+    # A caller other than the owner lists what it may see: a withheld file is
+    # not an entry, and a folder holding only withheld files reads as a folder
+    # that is not there. The owner's listing is unchanged (`keep` is None).
+    keep = egress.restricted_release_filter(vault_root)
+    collapsed: dict[str, bool] = {}
     # Empty string means vault root.
     if path is None or not str(path).strip():
         rel_path = ""
@@ -82,7 +89,10 @@ def list_directory(
         # `path` reads as missing — byte-identical to resolve_under_vault's own
         # must_exist failure — before the must_be_dir check below can leak an
         # excluded file's existence via NOT_A_DIR.
-        if access.refuse_if_excluded(vault_root, rel_path):
+        if access.refuse_if_excluded(vault_root, rel_path) or (
+            keep is not None
+            and _withheld_target(vault_root, rel_path, keep, include_hidden, collapsed)
+        ):
             raise ListDirectoryError(
                 code="NOT_FOUND", reason=f"path does not exist: {rel_path}"
             )
@@ -120,12 +130,79 @@ def list_directory(
         )
         if access.refuse_if_excluded(vault_root, child_rel):
             continue
+        if keep is not None and _withheld_target(
+            vault_root,
+            child_rel,
+            keep,
+            include_hidden,
+            collapsed,
+            is_dir=held_entry.identity.kind == "directory",
+        ):
+            continue
         entries.append(_entry_for_held(held_entry, child_rel))
 
     # Stable ordering: directories first, then files; alpha within each group.
     entries.sort(key=lambda e: (0 if e.type == "directory" else 1, e.path.lower()))
 
     return ListDirectoryResult(path=rel_path, entries=entries)
+
+
+def _listable(parts: list[str], include_hidden: bool) -> bool:
+    if any(privacy_log.is_reserved_hosted_vault_path(part) for part in parts):
+        return False
+    return include_hidden or not any(
+        part.startswith(".") or part == "_attachments" for part in parts
+    )
+
+
+def _withheld_target(
+    vault_root: Path,
+    rel_path: str,
+    keep,
+    include_hidden: bool,
+    collapsed: dict[str, bool],
+    *,
+    is_dir: bool | None = None,
+) -> bool:
+    """True when the caller may not see this file, or anything in this folder.
+
+    A folder is withheld when it holds at least one listable file the caller
+    may not see and none it may: in a vault without those files the folder
+    would not exist. An empty folder, or one holding only unlisted files, is
+    listed as it always was. Files are decided lazily, in walk order, and the
+    walk stops at the first visible one.
+    """
+    if is_dir is None:
+        is_dir = (Path(vault_root) / rel_path).is_dir()
+    if not is_dir:
+        return not keep(rel_path)
+    cached = collapsed.get(rel_path)
+    if cached is not None:
+        return cached
+    withheld_seen = False
+    result = False
+    try:
+        held = reserved_paths.list_generic_tree(vault_root, rel_path or ".", recursive=True)
+    except reserved_paths.ReservedPathLeafError:
+        held = ()
+    for entry in held:
+        if entry.identity.kind == "directory":
+            continue
+        parts = entry.relative_path.split("/")
+        if not _listable(parts, include_hidden):
+            continue
+        child_rel = (
+            f"{rel_path.rstrip('/')}/{entry.relative_path}" if rel_path else entry.relative_path
+        )
+        if access.refuse_if_excluded(vault_root, child_rel):
+            continue
+        if keep(child_rel):
+            break
+        withheld_seen = True
+    else:
+        result = withheld_seen
+    collapsed[rel_path] = result
+    return result
 
 
 def _entry_for_held(
