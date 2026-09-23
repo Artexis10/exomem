@@ -238,6 +238,40 @@ second rebuild, and a newer external mark survives clear-through of the sampled
 epoch. Reconciliation evicts resolver and inbound caches before it retires an
 observed mark, so a newly available graph cannot share stale dependent answers.
 
+## Phase 3 as measured: the constraint was publication, and the full fix was parked
+
+Task 7.1 first closed Phase 3 on a drain-cost measurement. Under writes the binding
+constraint turned out to be the whole-vault pass's vault-global stabilization proof,
+which any recorded write defeats, and the Class C mark that followed: it cooled recall
+for every reader and made the next writes' lineage gaps uncoverable, so they registered
+more whole-vault passes.
+
+The full response -- publish a pass at the checkpoint it sampled, queue its residue, and
+withhold the availability marker while any graph work is queued -- was built and pinned
+(`fix/graph-convergence-contract`, `fbd16eea`) and parked. Paired against the U5 tree at
+3,000 pages it cost availability that no correctness gain justified: a graph unreadable
+for 14-15 s at one writer against U5's 0.5 s, and 21-49 s against 6-9 s at five writers,
+with write latency and CPU worse too. The marker invariant closes a hole of bounded
+staleness in derived relations that the queue drain repairs anyway; main keeps U5's
+behaviour.
+
+What landed from that work stands on its own:
+
+- **Class C needs positive evidence.** A moved pass is classified against the
+  registry's own history. Recorded movement is a publication failure with no mark; an
+  unexplained difference is marked scoped to its paths. Main raised Class C with an
+  unscoped mark under governed writes alone in every probe run; the classifier removes it
+  without changing the #576 re-target budget.
+- **No lock-order inversion with a committing batch.** Graph work that holds the
+  writers' boundary skips a recovery checkpoint write while a batch commits, instead of
+  waiting on the batch lock a writer holds while it waits for that boundary.
+- **The queue keeps converging under a steady writer.** A drain records the topology it
+  derived under, keeps rows it proved when the vault moves elsewhere, a late refresh of
+  an acknowledged generation is a no-op, and an underivable receipt is quarantined after
+  bounded attempts.
+- **Residual lag is reported** wherever unavailability is reported, without a vault walk;
+  the read fence stays fail-closed.
+
 ## Alternatives considered
 
 **Tune the join bound.** This was the previous attempt. Rejected: the constant is

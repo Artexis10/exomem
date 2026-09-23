@@ -42,3 +42,46 @@ the graph can become from work that was queued but never drained.
 
 - **WHEN** paths are queued for graph repair and no drain call site fires
 - **THEN** the periodic reconciliation drains them, bounding how stale the graph becomes
+
+### Requirement: A graph proof cools the event registry only on evidence it is behind the disk
+
+A graph proof MAY mark the event registry externally pending only on positive evidence
+that the registry is behind the disk (Class C, #508 §1 as amended here):
+
+1. the freshness identity supplied to a whole-vault pass does not name the resolver
+   bytes the pass reads; or
+2. the recall projection moved across an in-flight whole-vault pass, and at the pass's
+   end the registry's recall map differs from the direct-disk stat map on a path that
+   neither the registry's complete history since its checkpoint nor a standing
+   path-scoped watcher mark accounts for; or
+3. the recall policy version or access fingerprint changed across the pass.
+
+Movement the registry accounts for — a governed write the service committed, or an
+external event the watcher recorded or marked — SHALL NOT mark the registry externally
+pending or invalidate it. A pass that cannot stabilize under it is a publication
+failure (Class B): the graph's own recovery state and retry memo, as for any other
+publication failure. A comparison that cannot complete, because the registry is not
+live or its history is incomplete, proves nothing and is Class B too.
+
+A Class C mark SHALL name the unexplained paths when the proof can enumerate them and
+SHALL be unscoped only when it cannot. It is allocated once per proof, and its clearers
+are unchanged.
+
+#### Scenario: Governed writes during every attempt of a whole-vault pass
+
+- **WHEN** governed writes commit during every attempt of a whole-vault pass until its
+  re-target budget is spent
+- **THEN** the pass fails as a publication failure
+- **AND** no external-pending epoch is allocated, recall stays live and the corpus cache
+  stays warm
+
+#### Scenario: An unrecorded edit marks exactly its paths
+
+- **WHEN** a page's bytes change during a whole-vault pass without any recorder
+  observing it
+- **THEN** the pass raises Class C and the external-pending mark names exactly that page
+
+#### Scenario: An incomplete registry history is not evidence
+
+- **WHEN** a whole-vault pass ends with the registry not live
+- **THEN** the pass fails as a publication failure and nothing is marked

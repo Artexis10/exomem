@@ -397,6 +397,87 @@ window, and per-path repair and its drain SHALL NOT be held.
   120 s of the first debt signal it was held for, and later attempts follow the
   no-progress backoff
 
+### Requirement: A drain keeps the queue converging under a steady writer
+
+A drain SHALL record the resolver topology fingerprint it derived its rows under, in the
+transaction that writes them, so the next topology-changing write can prove its old
+resolver instead of falling back to a whole-vault rebuild.
+
+A drain SHALL land the rows it proved against their own bytes at commit even when the
+projection moved elsewhere during its pass, and retire their receipts; its marker,
+lineage and acknowledgement wait for a drain the projection holds still for. A page the
+drain indexed moving under it SHALL roll the pass back.
+
+A write's incremental refresh that finds its own generation already acknowledged -- a
+drain derived its batch first -- SHALL do nothing rather than fall back: nothing is
+owed, and the fallback would withdraw a current marker or register a whole-vault rebuild.
+
+#### Scenario: A drain that repairs a created page keeps the next write incremental
+
+- **WHEN** a drain repairs a page a write created, and a later write changes topology
+- **THEN** the later write proves its old resolver against the stored fingerprint and
+  does not fall back on a fingerprint mismatch
+
+#### Scenario: A drain keeps the rows it proved when the vault moves elsewhere
+
+- **WHEN** a write to another page moves the projection during every drain pass
+- **THEN** each drain lands the rows it proved and retires their receipts
+
+#### Scenario: A late refresh of an acknowledged generation is a no-op
+
+- **WHEN** a drain has acknowledged a write's generation before that write's own refresh
+  runs
+- **THEN** the refresh returns without work and the graph stays readable
+
+### Requirement: An underivable receipt is quarantined, not rotated forever
+
+A queued path whose isolated drain attempt fails for a reason other than a race -- its
+bytes cannot be read -- SHALL be counted, and after a bounded number of failed attempts
+its receipt SHALL be quarantined: its graph rows are dropped, as a whole-vault pass
+derives none for a page it cannot read, and its receipt leaves the queue by exact
+revision. A movement or readiness refusal SHALL NOT count. A queued path that derived to
+no rows -- deleted, or no longer recall Markdown -- SHALL retire its receipt with the
+deletion. The residual lag and the doctor SHALL report quarantined paths; a path that
+later derives forgets its failures, and a later write queues it as ordinary work.
+
+#### Scenario: One unreadable page does not keep the queue from emptying
+
+- **WHEN** a queued page's bytes cannot be read on every drain attempt
+- **THEN** after the bounded attempts its receipt is quarantined, the rest of the queue
+  converges, and the lag and doctor report one quarantined path
+
+### Requirement: Residual graph lag is reported
+
+When graph unavailability is reported because the graph is catching up, the system SHALL
+report the residual lag: the acknowledged and committed generations, how many
+generations the graph is behind, the queued path count, the age of the oldest queued
+debt, whether the gap is covered by durable debt records, whether a full rebuild is
+pending, and how many paths are quarantined. It SHALL be readable without a vault walk.
+The graph is catching up when it is behind or has work queued, every skipped generation
+is receipt-covered, and neither a full-rebuild marker nor a recovery barrier stands; a
+deferral's own withdrawal is not a recovery barrier, because the queue is its repair.
+
+When the graph is catching up, `graph_context`'s unavailable payload SHALL say "graph
+catching up" and carry the lag; every other refusal keeps its payload. The doctor SHALL
+warn rather than fail on a receipt-covered lag younger than its recovery age, and SHALL
+still fail an uncovered gap, a standing full marker, a persisted recovery barrier and a
+malformed checkpoint. The drain's settled log line SHALL carry the lag.
+
+The read fence stays fail-closed: a lagging graph is reported, not served.
+
+#### Scenario: A catching-up graph says so with its lag
+
+- **WHEN** a committed generation's paths are queued behind the acknowledgement and a
+  caller asks for graph context
+- **THEN** the unavailable payload says the graph is catching up and carries the lag
+
+#### Scenario: The doctor warns on a covered lag and fails an uncovered gap
+
+- **WHEN** the graph lags behind a receipt-covered gap younger than the recovery age
+- **THEN** the doctor reports a warning with the lag
+- **AND** when a generation in the gap has neither a durable debt record nor a queued
+  receipt, the doctor still fails
+
 ### Requirement: A graph rebuild and a canonical write may run concurrently without either losing
 
 A graph rebuild in flight SHALL NOT cause a concurrent canonical write to refuse, and a
@@ -430,6 +511,18 @@ replacing against a stale one.
 Publication epoch sampling SHALL observe a canonical batch from outside, never from
 within: it SHALL be serialized against the canonical mutation hold so it cannot read a
 generation floor installed without its checkpoint.
+
+Graph work that holds the writers' canonical boundary SHALL NOT wait on the in-process
+batch commit: a batch holding it may be in its post-commit fan-out waiting for that
+boundary. A recovery checkpoint write under the boundary SHALL be skipped while a batch
+commits and left for the next attempt.
+
+#### Scenario: The full-marker dispatcher does not queue behind a committing batch
+
+- **WHEN** the dispatcher holds the canonical boundary, finds the epoch recoverable, and
+  a canonical batch in the same process is committing
+- **THEN** the dispatcher returns without writing the recovery checkpoint, and no
+  writer is refused the boundary while it waits
 
 #### Scenario: A rebuild's scratch files do not fail an unrelated write
 

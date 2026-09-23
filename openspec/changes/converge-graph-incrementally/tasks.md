@@ -286,13 +286,60 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   7.2–7.4 stay unopened: relaxing an access-safety-grade fence, and retiring the
   classification and refusal-memo machinery, are not changes to make against a
   constraint that measurement says is not binding.
-- [ ] 7.2 If still binding: replace only the content-freshness term with a check against
-  the durable dirty set, readable cross-process so a cold reader can evaluate it. Leave
-  the recall-policy-version and access-fingerprint terms fail-closed and all-or-nothing —
-  those are access safety, not content staleness.
-- [ ] 7.3 Report residual lag as a reported dimension rather than a fail-closed one.
-- [ ] 7.4 Reduce the stabilization, publication, and supersession retry budgets now that
-  whole-vault rebuilds are rare, and retire the classification and refusal-memo machinery
-  that exists only to make repeated doomed rebuilds survivable.
+  **Re-measured 2026-09-23.** Under writes the binding constraint is not the read term
+  but the whole-vault pass's vault-global stabilization proof, which any recorded write
+  defeats, and the Class C mark that followed it: on the personal cell (0.90-0.91, 33 h)
+  62 whole-vault publications, seven Class C exhaustions, every one inside committed
+  governed writes. 7.2 and 7.4 responded to that and are parked (below); 7.3, 7.6 and 7.7
+  landed.
+- [ ] 7.2 **Parked.** Publish a whole-vault pass at the checkpoint it sampled when every
+  movement across it is recorded (catch-up publication), with the availability marker
+  withheld while graph work is queued. Built and pinned on
+  `fix/graph-convergence-contract` (`fbd16eea`), then parked by ruling because the
+  paired bar against the U5 tree (3,000 pages, back to back) regressed availability and
+  write latency: longest unreadable stretch 48.8 s vs 9.0 s and 21.5 s vs 5.9 s at five
+  writers, 15.3 s vs 0.5 s and 14.0 s vs 0.5 s at one writer; write p50 3.13 vs 0.65 s
+  and 2.25 vs 0.51 s at five writers; CPU +52-65% at five writers. The marker invariant
+  (7.6's first half) was ruled not worth it: the hole it closes is bounded staleness of
+  derived relations that the queue drain later repairs, and closing it cost a refusal
+  until the debt is paid, 14-15 s at one writer against 0.5 s. The original 7.2, a
+  dirty-set check in the read snapshot, stays superseded: reads were not the binding
+  constraint.
+- [x] 7.3 Report residual lag as a reported dimension rather than a fail-closed one.
+  `graph_lag` (acknowledged and committed generations, queued paths and oldest age,
+  receipt coverage, full marker, quarantined paths; no vault walk), "graph catching up"
+  with the lag on `graph_context`'s refusal, the doctor's warning on covered lag and on
+  quarantined paths, and the lag on the drain's settled line
+  (`tests/test_graph_lag_reporting.py`). The read fence stays fail-closed.
+- [ ] 7.4 **Parked.** Reduce the stabilization, publication, and supersession retry
+  budgets, and retire the drain's whole-vault quiet window. Both depended on 7.2: without
+  catch-up a recorded write still defeats a pass, so the #576 re-target and the quiet
+  window stay. If revisited, publication attempts stay at four: an attempt that finds
+  recall preparation cold is spent on the reconcile alone, and recovering from one
+  unrecorded race at the publication seam takes three
+  (`test_original_index_publication_seam_rechecks_freshness_before_replace`). Retiring the
+  window exposed a lock-order inversion that main also has once whole-vault work runs
+  inside a burst; its fix landed (7.8).
 - [ ] 7.5 Confirm the pinned surface digests did not move: this change alters a response
   contract, not a tool schema. Confirm rather than assume.
+- [x] 7.6 Keep the queue converging under a steady writer. A drain records the resolver
+  topology it derived under (else the next topology-changing write fell back on
+  `stored_topology_fingerprint_mismatch`), keeps the rows it proved when the vault moves
+  elsewhere, a late refresh of an already-acknowledged generation is a no-op, and a
+  receipt no drain can derive is quarantined after `GRAPH_POISON_ATTEMPTS` rather than
+  rotated forever (`tests/test_graph_deferred_queue.py`). The marker invariant is parked
+  with 7.2.
+- [x] 7.7 Cool the event registry only on evidence it is behind the disk: classify a
+  moved whole-vault pass against the registry's own history; recorded movement is a
+  publication failure with no mark, and a Class C mark names the unexplained paths
+  (`tests/test_graph_class_c_evidence.py`). Probe L (3,000 pages, three governed writers
+  at one write a second, one direct rebuild): main raised Class C with an unscoped mark in
+  3 of 3 runs (8 attempts, 111-132 s, load 5-10); this change raised Class B with no mark
+  in 2 of 2 (8 attempts, 109-118 s, load 8-10).
+- [x] 7.8 Graph work holding the writers' boundary never waits on a committing batch:
+  the full-marker dispatcher's and the full-upsert recovery's checkpoint writes skip while
+  a batch commits (`vault.batch_commit_if_idle`). Measured on the catch-up branch at five
+  writers: `MUTATION_BUSY` refusals every 5 s for 26-42 s, holder
+  `epistemic_graph_dispatch_full_marker`, from the dispatcher waiting on the batch lock
+  held by a writer waiting on the boundary
+  (`tests/test_graph_repair_coalescing.py::test_the_dispatcher_never_waits_on_a_committing_batch_under_the_boundary`).
