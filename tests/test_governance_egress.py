@@ -27,6 +27,7 @@ from exomem.governance import (
     authorization_session_lifecycle,
     bridges,
     egress,
+    policy,
     receipts,
 )
 from exomem.governance.decisions import Decision
@@ -2552,6 +2553,45 @@ def test_hit_receipt_describes_only_the_final_limited_representation(vault: Path
         egress.emit_boundary_receipt(collector)
     outcomes = _receipt_records(vault)[0]["outcomes"]
     assert len(outcomes) == 1
+
+
+def test_outcome_for_decision_never_reads_a_path_outside_the_vault(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """`_outcome_for_decision` hashes a candidate's bytes for the receipt when
+    no `content_hash` is already known. That candidate is expected to already
+    be a decided, vault-relative path, but this is the last thing that
+    touches the filesystem before the receipt is written, so it must not read
+    (and record the size of) a path that escapes the vault, even if one
+    reached this far."""
+    outside_dir = tmp_path_factory.mktemp("outside")
+    outside = outside_dir / "server-secret.txt"
+    outside.write_bytes(b"OUTSIDE-SECRET-" * 10)
+    traversal = "../" * 12 + str(outside).lstrip("/")
+
+    opened: list[str] = []
+    real_read_bytes = Path.read_bytes
+
+    def _spy_read_bytes(self: Path) -> bytes:
+        opened.append(str(self))
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _spy_read_bytes)
+
+    with egress.disclosure_boundary(vault, "probe") as collector:
+        egress._outcome_for_decision(
+            vault,
+            traversal,
+            decision=None,
+            policy=policy.load(vault),
+            audience="external",
+            outcome="released",
+        )
+    outcome = collector.outcomes[-1].value
+
+    assert opened == []
+    assert "content_hash" not in outcome
+    assert "size" not in outcome
 
 
 def test_large_reduction_receipt_uses_truthful_bounded_aggregates(vault: Path) -> None:

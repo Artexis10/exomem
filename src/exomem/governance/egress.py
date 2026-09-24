@@ -286,13 +286,27 @@ def _outcome_for_decision(
         if ref is not None:
             value["ref"] = ref
     else:
+        # Defence in depth: `rel_path` is expected to already be a decided,
+        # vault-relative candidate, but this hash is the last thing that
+        # touches the filesystem before the receipt is written. Confining it
+        # here too means an unconfined candidate that reaches this far still
+        # cannot make the receipt read (and hash the size of) an arbitrary
+        # server file — it just loses its content hash.
         try:
             target = Path(vault_root) / rel_path
-            raw = target.read_bytes()
-            value["content_hash"] = hashlib.sha256(raw).hexdigest()
-            value["size"] = len(raw)
-        except OSError:
+            resolved = target.resolve()
+            resolved.relative_to(Path(vault_root).resolve())
+        except (OSError, ValueError):
             pass
+        else:
+            if resolved.is_file():
+                try:
+                    raw = resolved.read_bytes()
+                except OSError:
+                    pass
+                else:
+                    value["content_hash"] = hashlib.sha256(raw).hexdigest()
+                    value["size"] = len(raw)
     collector = _collector()
     outcome_key = (
         rel_path,
