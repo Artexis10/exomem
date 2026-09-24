@@ -658,6 +658,8 @@ class DreamerStore:
             "VALUES (?, ?, ?, ?)",
             rows,
         )
+        # Bounded by the candidates: a delivery outlives its row by nothing.
+        conn.execute("DELETE FROM deliveries WHERE id NOT IN (SELECT id FROM candidates)")
 
     @staticmethod
     def deliveries(conn: sqlite3.Connection) -> list[tuple[str, str, str, float]]:

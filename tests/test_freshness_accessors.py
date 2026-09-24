@@ -73,3 +73,25 @@ def test_live_signature_is_a_point_lookup(
     page.unlink()
     freshness.on_files_changed(vault, deleted=[page])
     assert freshness.live_signature(vault, "vault", page) is None
+
+
+def test_live_signatures_batches_the_scope_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    one = _page(vault, "Knowledge Base/Notes/one.md")
+    two = _page(vault, "Knowledge Base/Notes/two.md")
+    absent = vault / "Knowledge Base/Notes/absent.md"
+    assert freshness.live_signatures(vault, "vault", [one]) is None
+    _seed(vault, one, two)
+    keys: list[str] = []
+    real_key = freshness._key
+    monkeypatch.setattr(
+        freshness, "_key", lambda root, scope: keys.append(scope) or real_key(root, scope)
+    )
+    assert freshness.live_signatures(vault, "vault", [one, str(two), absent]) == [
+        freshness.stat_signature(one),
+        freshness.stat_signature(two),
+        None,
+    ]
+    assert keys == ["vault"]

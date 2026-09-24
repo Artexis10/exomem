@@ -234,6 +234,30 @@ def running() -> bool:
         return _thread is not None and _thread.is_alive()
 
 
+def delivering() -> bool:
+    """True when this process serves upkeep items: its worker runs, on or paused.
+
+    The activation carrier is live only here, where deliveries are remembered
+    and then recorded by the worker. Reads no file.
+    """
+    with _LOCK:
+        alive = _thread is not None and _thread.is_alive()
+        return alive and _STATE.setting in {"on", "paused"}
+
+
+def failure() -> dict[str, Any] | None:
+    """`{"since": <UTC date-time>}` while the worker is failing, else None."""
+    with _LOCK:
+        if (
+            _STATE.setting == "off"
+            or _STATE.consecutive_failures < policy.FAILED_AFTER
+            or _STATE.failed_since is None
+        ):
+            return None
+        since = _STATE.failed_since
+    return {"since": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(since))}
+
+
 def _run(vault_root: Path) -> None:
     clock = Clock()
     while not _stop.is_set():
@@ -416,10 +440,12 @@ def run_once(
                 if work.remaining > len(processed):
                     stop_reason = "pages"
             now = clock.time()
+            delivered = _record_deliveries(store, conn)
             token = dreamer_families.review_state_token(vault_root)
             next_settle = store.get_meta(conn, "next_settle_at")
             refresh = (
-                bool(processed)
+                delivered
+                or bool(processed)
                 or token != store.get_meta(conn, "deliverable_token")
                 or (isinstance(next_settle, (int, float)) and now >= float(next_settle))
             )
@@ -480,6 +506,19 @@ def _process(
             dreamer_delta.mark_processed(store, conn, vault_root, rel, signature)
     finally:
         ctx.close()
+
+
+def _record_deliveries(store: dreamer_store.DreamerStore, conn: Any) -> bool:
+    """Write the carrier's in-process deliveries to the sidecar. True if any."""
+    from . import upkeep
+
+    pending = upkeep.pending_deliveries()
+    if not pending:
+        return False
+    with store.write(conn):
+        store.record_deliveries(conn, pending)
+    upkeep.forget_deliveries(pending)
+    return True
 
 
 def _record_tick(

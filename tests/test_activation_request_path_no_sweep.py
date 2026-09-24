@@ -1427,3 +1427,61 @@ def test_episode_recaps_hold_the_ceilings_at_ten_and_at_five_hundred(
     # two-sided band measured request noise (447 against 373 calls, 2026-09-23)
     # rather than growth.
     assert many.total <= few.total + 20, (few.report(), many.report())
+
+
+def test_a_session_start_with_upkeep_holds_the_same_ceilings(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
+) -> None:
+    """D1-T11: a session start that attaches an upkeep item reads the dreamer's
+    sidecar read-only and a few live signatures from memory. It enumerates
+    nothing and pays the same ceilings as every other warm request."""
+    import dreamer_fixture
+
+    from exomem import dreamer, dreamer_store, upkeep
+
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _write_collection(vault)
+    _warm_activation(vault, warm_managed_cell)
+    _drain_background_walks()
+    pages = sorted(
+        path.relative_to(vault).as_posix()
+        for path in (vault / "Knowledge Base").rglob("*.md")
+        if "_Schema" not in path.parts and "Records" not in path.parts
+    )
+    dreamer_fixture.plant_deliverable(vault, pages[0], pages[1:3], now=time.time())
+    monkeypatch.setattr(dreamer, "delivering", lambda: True)
+
+    def measure(carrier: bool) -> tuple[dict, _FilesystemCalls]:
+        upkeep.reset_delivery_state()
+        dreamer_store.clear_reader_memo()
+        with monkeypatch.context() as patch:
+            if not carrier:
+                patch.setattr(dreamer, "delivering", lambda: False)
+            scheduled = _no_background_walks(patch)
+            calls = _FilesystemCalls(vault)
+            calls.install(patch)
+            packet = commands.op_activate_context(vault, turn=TURN)
+        assert scheduled == [], scheduled
+        return packet, calls
+
+    first, cold = measure(carrier=False)
+    carried, with_upkeep = measure(carrier=True)
+    plain, without = measure(carrier=False)
+    assert "upkeep" not in first and "upkeep" not in plain
+    assert carried["upkeep"]["items"], carried.get("upkeep")
+    assert carried["abstained"] is False, carried.get("abstention")
+    for calls in (cold, with_upkeep, without):
+        assert calls.enumerations <= WARM_REQUEST_ENUMERATION_CEILING, calls.report()
+        assert calls.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, calls.report()
+        assert calls.unattributable == 0, calls.report()
+    # Against the same request without it: no enumeration, and a handful of
+    # calls (the sidecar's existence check, the envelope's config read and the
+    # release filter's policy read).
+    assert with_upkeep.enumerations == without.enumerations, (without.report(), with_upkeep.report())
+    # Measured +28 (2026-09-24): the release filter's policy and tombstone
+    # reads, the sidecar's existence check, the config read and one scope-key
+    # resolution for the batched signature lookup.
+    assert with_upkeep.total <= without.total + 40, (without.report(), with_upkeep.report())
+    assert WARM_REQUEST_ENUMERATION_CEILING == 8
+    assert WARM_REQUEST_FILESYSTEM_CALL_CEILING == 1200

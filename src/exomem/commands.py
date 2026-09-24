@@ -5982,6 +5982,13 @@ def op_activate_context(
     record one at the conversation's next decision or stopping point. It is
     advice, at most once per half hour, and absent when proactive capture is off.
 
+    At the start of your session a packet may also carry `upkeep`: at most one
+    item the background upkeep pass proposed, such as two notes that could be
+    connected or an entity page that newer facts have outgrown. It carries its
+    own `route`, a `context_route` to read first, and a `dispose` route
+    (`triage_memory` dismiss or snooze). Consideration does not authorize
+    mutation: act through the route under its own rules, or dispose of it.
+
     Use `ask_memory` instead when you already know what you are looking for; use
     this when you do not, and follow it with `read_memory` on whatever ref the
     packet points at.
@@ -6022,11 +6029,12 @@ def op_activate_context(
         session: Optional opaque conversation identifier, at most 256
             characters, such as the `episode` key an `episode_memory` record
             returned. Only a vault-keyed hash of it is recorded. Neither
-            argument ever changes the packet.
+            argument changes the packet's material; `session` only says whose
+            session start an `upkeep` item may arrive at.
 
     Returns: {recent_context, anchors, roles, units, pointers, current_state,
              missing, ambiguity, budget, generation, abstained, abstention?,
-             continuity?, episode_due?}. `recent_context` is first and is present on an
+             continuity?, episode_due?, upkeep?}. `recent_context` is first and is present on an
              abstained packet too. An abstained packet always empties
              `roles`, `units`, `pointers` and `current_state` — no material
              about an anchor that did not resolve — but `anchors` (a
@@ -6068,8 +6076,10 @@ def op_activate_context(
     # and the abstention paths are the ones a struggling server takes most.
     #
     # `client` and `session` stop HERE: they are recorded by the activation
-    # log after the packet exists and never reach resolution, the packet, its
-    # cache key or the continuity token.
+    # log after the packet exists and never reach resolution, the packet's
+    # material, its cache key or the continuity token. `session` has one other
+    # reader, the upkeep carrier below, where it names the caller whose session
+    # start may carry one upkeep item.
     started = time.perf_counter()
     with state_paths_module.resolution_scope():
         bound_token = None
@@ -6089,6 +6099,12 @@ def op_activate_context(
                 anchor=anchor,
                 include_timings=include_timings,
             )
+            # After the guard and outside the packet cache, like `continuity`:
+            # at a caller's session start, at most one upkeep item, and only in
+            # the process whose background worker proposed it. Never raises.
+            from . import upkeep as upkeep_module
+
+            upkeep_module.for_packet(vault_root, packet, session=session)
         except Exception as error:
             query_log.log_activation_call(
                 vault_root,

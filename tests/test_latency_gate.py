@@ -693,6 +693,47 @@ def test_working_set_compiler_stays_bounded_at_scale(tmp_path: Path, model_free)
     assert len(json.dumps(packet)) < 24_000
 
 
+@pytest.mark.timeout(300)
+def test_working_set_compiler_with_an_upkeep_item_stays_bounded(
+    tmp_path: Path, model_free, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D1-T11: a session start that carries an upkeep item pays the same
+    ceiling. Every measured call is a session start, so every one reads the
+    sidecar, checks signatures, builds the release filter and attaches."""
+    import dreamer_fixture
+    from synth_vault import gen_entity_overlay
+
+    from exomem import commands, dreamer, dreamer_store, upkeep, working_set_runtime
+
+    vault = _build_dense_vault(tmp_path, N_NOTES)
+    gen_entity_overlay(vault, 500, seed=19)
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
+    _measure_working_set(vault)  # builds the index and warms the lanes
+    pages = sorted(
+        path.relative_to(vault).as_posix()
+        for path in (vault / "Knowledge Base").rglob("*.md")
+    )[:3]
+    dreamer_fixture.plant_deliverable(vault, pages[0], pages[1:], now=time.time())
+    monkeypatch.setattr(dreamer, "delivering", lambda: True)
+
+    def call() -> dict:
+        working_set_runtime.reset_caches_for_tests()
+        upkeep.reset_delivery_state()
+        dreamer_store.clear_reader_memo()
+        return commands.op_activate_context(vault, turn=WORKING_SET_TURN, include_timings=True)
+
+    packet = call()
+    assert packet["upkeep"]["items"], packet.get("upkeep")
+    samples = [_compiler_ms(call()["timings"]) for _ in range(3)]
+    compiler_ms = statistics.median(samples)
+    assert compiler_ms < CEIL_WORKING_SET_MS, (
+        f"context compiler with an upkeep item took {compiler_ms:.1f}ms @ {N_NOTES} notes "
+        f"(ceiling {CEIL_WORKING_SET_MS:.1f}ms)"
+    )
+    assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
+
+
 @pytest.mark.timeout(600)
 def test_working_set_compiler_does_not_scale_linearly(tmp_path: Path, model_free) -> None:
     from synth_vault import gen_entity_overlay

@@ -16,11 +16,17 @@ appears, not even as a number.
 
 from __future__ import annotations
 
+import hashlib
+import logging
+import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
 from . import dreamer_families, dreamer_store, review_state
+
+log = logging.getLogger(__name__)
 
 UPKEEP_PREFIX = "exomem://review/upkeep/"
 DEFAULT_REVIEW_LIMIT = 10
@@ -500,3 +506,264 @@ def deliverable_rows(vault_root: Path, view: dreamer_store.StoreView) -> list[di
                 continue
         out.append(row)
     return out
+
+
+# ----------------------------------------------------------------------
+# the activation carrier
+# ----------------------------------------------------------------------
+
+#: No two deliveries on one vault within this, whatever their callers: one
+#: person is often two callers (a hook door and a connector).
+VAULT_SPACING_SECONDS = 600
+#: At most this many items per delivery key per UTC day.
+PER_KEY_DAILY_CAP = 3
+#: A second delivery of one `(id, fingerprint)` waits this long after the first
+#: and goes to another caller; after it the item is held (the worker's
+#: `dreamer_families.MAX_DELIVERIES`).
+SECOND_DELIVERY_AFTER_SECONDS = 7 * 86400
+#: An item is offered whole or not at all; it never exceeds this many characters.
+MAX_ITEM_CHARS = 400
+#: Candidates tried per session start before the carrier gives up.
+MAX_TRIED = 4
+#: Keys remembered for the session-start rule; the oldest is forgotten first.
+LEDGER_CAP = 512
+#: In-process deliveries kept for the held check until the worker records them.
+PENDING_CAP = 256
+
+_monotonic = time.monotonic
+_wall = time.time
+
+_DELIVERY_LOCK = threading.Lock()
+_LAST_SEEN: OrderedDict[tuple[str, ...], float] = OrderedDict()
+_VAULT_LAST: dict[str, float] = {}
+_KEY_DAY: dict[tuple[str, ...], tuple[str, int]] = {}
+_PENDING: list[tuple[str, str, str, float]] = []
+
+
+def reset_delivery_state() -> None:
+    with _DELIVERY_LOCK:
+        _LAST_SEEN.clear()
+        _VAULT_LAST.clear()
+        _KEY_DAY.clear()
+        _PENDING.clear()
+
+
+def delivery_key(vault_root: Path, session: str | None) -> tuple[str, ...] | None:
+    """Who is asking, for the session-start rule, or None when nobody can be keyed.
+
+    U6's `session` when the caller sent a valid one (the hook door), else the
+    capture sweep's ledger key: the process for stdio, CLI and REST, the stable
+    principal or bearer scope over HTTP, and None for stateless HTTP. The raw
+    session is never kept, only a hash of it.
+    """
+    from . import capture_sweep, query_log
+
+    vault = str(vault_root)
+    if isinstance(session, str) and 0 < len(session) <= query_log.SESSION_MAX_CHARS:
+        digest = hashlib.sha256(f"{vault}\0{session}".encode("utf-8", "surrogatepass")).hexdigest()[
+            :24
+        ]
+        return ("session", digest, vault)
+    key = capture_sweep.ledger_key(Path(vault_root))
+    return tuple(str(part) for part in key) if key is not None else None
+
+
+def _caller_hash(key: tuple[str, ...]) -> str:
+    return hashlib.sha256("\0".join(key).encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def _session_start(key: tuple[str, ...], now: float) -> bool:
+    """Note this activation; True when it opens a session for `key`."""
+    from . import capture_sweep
+
+    with _DELIVERY_LOCK:
+        last = _LAST_SEEN.pop(key, None)
+        _LAST_SEEN[key] = now
+        while len(_LAST_SEEN) > LEDGER_CAP:
+            _LAST_SEEN.popitem(last=False)
+    return last is None or now - last >= capture_sweep.QUIET_SECONDS
+
+
+def _utc_day(wall: float) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(wall))
+
+
+def _caps_allow(key: tuple[str, ...], vault: str, now: float, wall: float) -> bool:
+    with _DELIVERY_LOCK:
+        last = _VAULT_LAST.get(vault)
+        if last is not None and now - last < VAULT_SPACING_SECONDS:
+            return False
+        day, count = _KEY_DAY.get(key, ("", 0))
+        return not (day == _utc_day(wall) and count >= PER_KEY_DAILY_CAP)
+
+
+def _note_delivery(
+    key: tuple[str, ...], vault: str, row: dict[str, Any], now: float, wall: float
+) -> None:
+    today = _utc_day(wall)
+    with _DELIVERY_LOCK:
+        _VAULT_LAST[vault] = now
+        day, count = _KEY_DAY.get(key, ("", 0))
+        _KEY_DAY[key] = (today, count + 1 if day == today else 1)
+        if len(_KEY_DAY) > LEDGER_CAP:
+            _KEY_DAY.pop(next(iter(_KEY_DAY)))
+        _PENDING.append((str(row["id"]), str(row["fingerprint"]), _caller_hash(key), wall))
+        del _PENDING[:-PENDING_CAP]
+
+
+def pending_deliveries() -> list[tuple[str, str, str, float]]:
+    """In-process deliveries the worker has not recorded yet (a copy)."""
+    with _DELIVERY_LOCK:
+        return list(_PENDING)
+
+
+def forget_deliveries(recorded: list[tuple[str, str, str, float]]) -> None:
+    """Drop deliveries the worker has now written to the sidecar."""
+    done = set(recorded)
+    with _DELIVERY_LOCK:
+        _PENDING[:] = [entry for entry in _PENDING if entry not in done]
+
+
+def item_text(item: dict[str, Any]) -> str:
+    """The item's prose as the packet budget counts it."""
+    subject = (item.get("subject") or {}).get("title") or ""
+    return (
+        f"{item.get('label') or ''}: {subject} — {item.get('why') or ''} [{item.get('ref') or ''}]"
+    )
+
+
+def _packet_paths(packet: dict[str, Any]) -> set[str]:
+    paths: set[str] = set()
+    for section in ("recent_context", "anchors"):
+        for entry in packet.get(section) or ():
+            if isinstance(entry, dict) and entry.get("path"):
+                path = str(entry["path"])
+                paths.add(path if path.endswith(".md") else path + ".md")
+    return paths
+
+
+def _row_paths(row: dict[str, Any]) -> set[str]:
+    return {str(item.get("path")) for item in row.get("evidence") or () if item.get("path")} | {
+        str(row.get("subject_path") or "")
+    }
+
+
+def _signatures_live(vault_root: Path, row: dict[str, Any]) -> bool:
+    """Every stored evidence signature still equals the live one."""
+    from . import dreamer_delta, freshness
+
+    evidence = [item for item in row.get("evidence") or () if item.get("path")]
+    live = freshness.live_signatures(
+        vault_root, dreamer_delta.SCOPE, [Path(vault_root) / str(item["path"]) for item in evidence]
+    )
+    if live is None:
+        return False
+    return all(
+        signature is not None and dreamer_store.encode_sig(signature) == item.get("sig")
+        for item, signature in zip(evidence, live, strict=True)
+    )
+
+
+def _earlier(view: dreamer_store.StoreView, row: dict[str, Any]) -> list[tuple[str, float]]:
+    """Earlier deliveries of this `(id, fingerprint)`: stored plus in-process."""
+    cid, fingerprint = str(row["id"]), str(row["fingerprint"])
+    seen = [
+        (caller, at)
+        for rid, fp, caller, at in (*view.deliveries, *pending_deliveries())
+        if rid == cid and fp == fingerprint
+    ]
+    return sorted(set(seen), key=lambda pair: pair[1])
+
+
+def for_packet(vault_root: Path, packet: dict[str, Any], *, session: str | None = None) -> None:
+    """Attach at most one upkeep item to a session-start packet. Never raises.
+
+    Live only in the process that runs the worker (the managed service), which
+    is where deliveries are remembered and then recorded. Off, nothing is read
+    and nothing is attached. Any error attaches nothing.
+    """
+    from . import dreamer
+
+    try:
+        if not dreamer.delivering():
+            return
+        _attach(Path(vault_root), packet, session=session, dreamer=dreamer)
+    except Exception:  # noqa: BLE001 - upkeep never breaks an activation
+        log.debug("upkeep carrier failed (non-fatal)", exc_info=True)
+        packet.pop("upkeep", None)
+
+
+def _attach(vault_root: Path, packet: dict[str, Any], *, session: str | None, dreamer) -> None:
+    from . import envelope, working_set
+    from .governance import egress
+
+    if (packet.get("abstention") or {}).get("reason") == "disabled":
+        return
+    key = delivery_key(vault_root, session)
+    if key is None:
+        return
+    now, wall = _monotonic(), _wall()
+    if not _session_start(key, now):
+        return
+    if envelope.active().get("structural_suggestions") == "off":
+        return
+    block: dict[str, Any] = {}
+    failure = dreamer.failure()
+    if failure is not None:
+        block = {"status": "failed", "since": failure.get("since")}
+    vault = str(vault_root)
+    if not working_set.budget_exhausted("working_set.upkeep") and _caps_allow(
+        key, vault, now, wall
+    ):
+        chosen = _choose(vault_root, packet, key, wall, egress=egress)
+        if chosen is not None:
+            row, item = chosen
+            block["items"] = [item]
+            budget = packet.setdefault("budget", {})
+            budget["used_chars"] = int(budget.get("used_chars") or 0) + len(item_text(item))
+            _note_delivery(key, vault, row, now, wall)
+    if block:
+        packet["upkeep"] = block
+
+
+def _choose(
+    vault_root: Path, packet: dict[str, Any], key: tuple[str, ...], wall: float, *, egress
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    view = dreamer_store.read_view(vault_root)
+    if view is None:
+        return None
+    rows = deliverable_rows(vault_root, view)
+    if not rows:
+        return None
+    recent = _packet_paths(packet)
+    rows.sort(
+        key=lambda row: (
+            0 if recent & _row_paths(row) else 1,
+            _family_rank(str(row.get("family") or "")),
+            float(row.get("settled_at") or 0.0),
+            str(row["id"]),
+        )
+    )
+    budget = packet.get("budget") or {}
+    room = int(budget.get("limit_chars") or 0) - int(budget.get("used_chars") or 0)
+    caller = _caller_hash(key)
+    with egress.disclosure_boundary(vault_root, "upkeep_advisory"):
+        keep = _keep(vault_root)
+        for row in rows[:MAX_TRIED]:
+            earlier = _earlier(view, row)
+            if len(earlier) >= dreamer_families.MAX_DELIVERIES:
+                continue
+            if earlier:
+                first_caller, first_at = earlier[0]
+                if first_caller == caller or wall - first_at < SECOND_DELIVERY_AFTER_SECONDS:
+                    continue
+            if not _signatures_live(vault_root, row):
+                continue
+            item = serve(row, keep=keep, delivered_before=len(earlier))
+            if item is None:
+                continue
+            text = item_text(item)
+            if len(text) > MAX_ITEM_CHARS or len(text) > room:
+                continue
+            return row, item
+    return None

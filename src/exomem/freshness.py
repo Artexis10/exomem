@@ -1749,6 +1749,24 @@ def live_signature(
         return _maps.get(key, {}).get(str(path))
 
 
+def live_signatures(
+    vault_root: Path, scope: str, paths: Iterable[Path | str]
+) -> list[FileSignature | None] | None:
+    """Several live paths' signatures in one lock, or None when the scope is not live.
+
+    `live_signature` for a batch: the scope key (a path resolution) is computed
+    once rather than once per path. Each path is spelled the way the map keys it.
+    """
+    if not event_indexes_enabled():
+        return None
+    key = _key(vault_root, scope)
+    with _lock:
+        if key not in _live:
+            return None
+        live = _maps.get(key, {})
+        return [live.get(str(path)) for path in paths]
+
+
 def live_entries(vault_root: Path, scope: str) -> dict[str, FileSignature] | None:
     """The live `{abs_path_str: signature}` map for a scope, or None when not live.
 

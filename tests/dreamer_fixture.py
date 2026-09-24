@@ -194,3 +194,64 @@ def run_to_quiet(vault: Path, *, now: float | None = None, limit: int = 60) -> l
         if result.stop_reason not in {"pages", "cpu", "wall"}:
             break
     return results
+
+
+def plant_deliverable(vault: Path, subject: str, contributors: list[str], *, now: float) -> str:
+    """Store one settled, deliverable hydration-shaped item over existing pages.
+
+    For suites that measure the carrier on a vault the worker never ran on:
+    the evidence signatures are the live ones, two contributors carry two
+    origins, and the review-state token is current. Returns the candidate id.
+    """
+    from exomem import dreamer_delta, dreamer_families, dreamer_store, relation_queue
+
+    def entry(path: str, role: str, origin: str) -> dict:
+        return {
+            "path": path,
+            "ref": relation_queue._fallback_ref(path),
+            "sig": dreamer_store.encode_sig(dreamer_delta.live_signature(vault, path)),
+            "role": role,
+            "origin": origin,
+            "title": Path(path).stem.replace("-", " ").title(),
+        }
+
+    evidence = [entry(subject, "subject", "")] + [
+        entry(path, "contributor", f"origin-{index}") for index, path in enumerate(contributors)
+    ]
+    assert all(item["sig"] for item in evidence), "plant needs a live freshness registry"
+    store = dreamer_store.DreamerStore(vault)
+    conn = store.connect()
+    try:
+        with store.write(conn):
+            cid = store.upsert_proposal(
+                conn,
+                family=dreamer_families.HYDRATION_FAMILY,
+                kind=dreamer_families.HYDRATION_KIND,
+                subject_path=subject,
+                subject_ref=evidence[0]["ref"],
+                proposal_key="",
+                evidence=evidence,
+                route={
+                    "tool": "maintain_memory",
+                    "args": {
+                        "mode": "curation",
+                        "curation_action": "work-item",
+                        "paths": [subject, *contributors],
+                    },
+                },
+                reason_code="newer_linked_facts",
+                producer=dreamer_families.HYDRATION_FAMILY,
+                signal_version="planted",
+                now=now - 2 * dreamer_families.SETTLE_SECONDS,
+            )
+            store.set_deliverable(
+                conn,
+                cid,
+                deliverable=True,
+                token=dreamer_families.review_state_token(vault),
+                settled_at=now - dreamer_families.SETTLE_SECONDS,
+            )
+    finally:
+        conn.close()
+    dreamer_store.clear_reader_memo()
+    return cid
