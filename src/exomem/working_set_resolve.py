@@ -425,6 +425,109 @@ def _depossessive_token(token: str) -> str:
     return token if folded in STOPWORDS else folded
 
 
+#: Scripts written without spaces between words (scriptio continua), by
+#: declared Unicode ranges: a turn token in one of them is a run of words, and
+#: an anchor's name can sit inside it. Japanese mixes Han, Hiragana and
+#: Katakana within one word, so they are one class. Hangul is not here: Korean
+#: separates words with spaces.
+_CONTINUA_RANGES: tuple[tuple[str, int, int], ...] = (
+    ("cjk", 0x3005, 0x3007),  # 々 〆 〇
+    ("cjk", 0x3040, 0x309F),  # Hiragana
+    ("cjk", 0x30A0, 0x30FF),  # Katakana
+    ("cjk", 0x31F0, 0x31FF),  # Katakana phonetic extensions
+    ("cjk", 0x3400, 0x4DBF),  # CJK extension A
+    ("cjk", 0x4E00, 0x9FFF),  # CJK unified ideographs
+    ("cjk", 0xF900, 0xFAFF),  # CJK compatibility ideographs
+    ("cjk", 0xFF66, 0xFF9F),  # halfwidth Katakana
+    ("cjk", 0x20000, 0x323AF),  # CJK extensions B-H
+    ("thai", 0x0E00, 0x0E7F),
+    ("lao", 0x0E80, 0x0EFF),
+    ("myanmar", 0x1000, 0x109F),
+    ("myanmar", 0xA9E0, 0xA9FF),
+    ("myanmar", 0xAA60, 0xAA7F),
+    ("khmer", 0x1780, 0x17FF),
+    ("khmer", 0x19E0, 0x19FF),
+)
+
+
+def _continua_class(text: str) -> str | None:
+    """The scriptio-continua class every code point of `text` belongs to, or None."""
+    found: str | None = None
+    for char in text:
+        point = ord(char)
+        cls = next((name for name, low, high in _CONTINUA_RANGES if low <= point <= high), None)
+        if cls is None or (found is not None and cls != found):
+            return None
+        found = cls
+    return found
+
+
+def _contained_names(
+    analysis: TurnAnalysis, rows: Sequence[AnchorFacts], term_counts: Mapping[str, int]
+) -> frozenset[str]:
+    """Anchors whose name sits inside one of the turn's unspaced runs (design §6.3).
+
+    A name qualifies when it is at least two code points, wholly in the run's
+    script class, contained in the run, and rare (`term_anchor_counts` at most
+    `RARE_TERM_MAX_ANCHORS`). A name all of whose occurrences lie inside
+    another anchor's longer contained name is consumed: the turn spelled the
+    longer name, not this one.
+    """
+    runs = [
+        (position, token, cls)
+        for position, token in enumerate(analysis.tokens)
+        if (cls := _continua_class(token)) is not None
+    ]
+    if not runs:
+        return frozenset()
+    found: dict[str, tuple[str, tuple[tuple[int, int, int], ...]]] = {}
+    for row in rows:
+        best: tuple[str, tuple[tuple[int, int, int], ...]] | None = None
+        for name in {normalize(row.title), *row.aliases} - {""}:
+            cls = _continua_class(name) if len(name) >= 2 else None
+            if cls is None:
+                continue
+            occurrences = tuple(
+                (position, start, start + len(name))
+                for position, token, run_cls in runs
+                if run_cls == cls and token != name
+                for start in _occurrences(token, name)
+            )
+            if occurrences and (best is None or len(name) > len(best[0])):
+                best = (name, occurrences)
+        if best is not None:
+            found[row.anchor_id] = best
+    contained: set[str] = set()
+    for anchor_id, (name, occurrences) in found.items():
+        count = term_counts.get(name)
+        if count is None or count > RARE_TERM_MAX_ANCHORS:
+            continue
+        consumed = all(
+            any(
+                other_id != anchor_id
+                and position == other_position
+                and other_start <= start
+                and end <= other_end
+                and other_end - other_start > end - start
+                for other_id, (_other_name, other_occurrences) in found.items()
+                for other_position, other_start, other_end in other_occurrences
+            )
+            for position, start, end in occurrences
+        )
+        if not consumed:
+            contained.add(anchor_id)
+    return frozenset(contained)
+
+
+def _occurrences(text: str, name: str) -> list[int]:
+    starts: list[int] = []
+    start = text.find(name)
+    while start >= 0:
+        starts.append(start)
+        start = text.find(name, start + 1)
+    return starts
+
+
 def _clears_rare_term_length(term: str, *, acronyms: frozenset[str] = frozenset()) -> bool:
     """Is `term` long enough to be a lead?
 
@@ -670,6 +773,8 @@ def candidates_for(
             continue
         term_positions.setdefault(folded_term, []).append(index)
 
+    contained = _contained_names(analysis, rows, term_counts)
+
     # Pass 2 of 2: the ordinary per-row evidence assembly, reusing pass 1's
     # own matched phrases rather than recomputing them.
     out: list[CandidateFacts] = []
@@ -758,6 +863,16 @@ def candidates_for(
                 )
                 if not consumed:
                     evidence.add("rare_term")
+        # An unspaced script writes a name inside a run of words, never as a
+        # token of its own: containment is its `rare_term` (design §6.3),
+        # never `exact_alias`, and like any `rare_term` it needs a second,
+        # independent contact to resolve.
+        if (
+            row.anchor_id in contained
+            and not matched_phrases
+            and not evidence & {"lexical_overlap", "rare_term"}
+        ):
+            evidence.add("rare_term")
         if bands.get(row.anchor_id):
             evidence.add("vector_band")
         if claims_winner is not None and claims_winner == row.path:
