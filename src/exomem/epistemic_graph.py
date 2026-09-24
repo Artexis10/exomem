@@ -6887,7 +6887,7 @@ class EpistemicGraphIndex:
             or any(int(row[-1] or 0) > per_source_cap for row in shared_source_rows)
         )
 
-        def shown(*paths: Any) -> bool:
+        def released(*paths: Any) -> bool:
             return keep is None or all(keep(_with_md(str(path or ""))) for path in paths)
 
         def remember(
@@ -6925,7 +6925,7 @@ class EpistemicGraphIndex:
                 authored_match,
                 _source_total,
             ) = row
-            if not shown(target):
+            if not released(target):
                 continue
             target_rel = remember(target, target_id, target_count)
             review_evidence = _json(evidence_raw)
@@ -6962,7 +6962,7 @@ class EpistemicGraphIndex:
             definition = self.registry.definition(str(relation_type or ""))
             authored_relation = relation_registry.normalize_relation(str(raw_relation or ""))
             if (
-                not shown(target)
+                not released(target)
                 or definition is None
                 or definition.family not in _LIFT_RELATION_FAMILIES
                 or not _is_writable_relation_label(authored_relation)
@@ -7027,7 +7027,7 @@ class EpistemicGraphIndex:
                 authored_match,
                 _source_total,
             ) = row
-            if not shown(target):
+            if not released(target):
                 continue
             target_rel = remember(target, target_id, target_count)
             key = (str(source), target_rel)
@@ -7081,7 +7081,7 @@ class EpistemicGraphIndex:
                 authored_match,
                 _source_total,
             ) = row
-            if not shown(other, str(target_key or "").removeprefix("file:")):
+            if not released(other, str(target_key or "").removeprefix("file:")):
                 continue
             target_rel = remember(other, target_id, target_count)
             key = (str(source), target_rel)
@@ -7128,7 +7128,7 @@ class EpistemicGraphIndex:
                 authored_match,
                 _source_total,
             ) = row
-            if not shown(target):
+            if not released(target):
                 continue
             target_rel = remember(target, target_id, target_count, target_exists)
             methods[str(source)]["frontmatter_sources"].append(
@@ -7150,7 +7150,7 @@ class EpistemicGraphIndex:
             authored_match,
             _source_total,
         ) in shared_source_rows[:branch_cap]:
-            if not shown(target, str(shared_key or "").removeprefix("file:")):
+            if not released(target, str(shared_key or "").removeprefix("file:")):
                 continue
             target_rel = remember(target, target_id, target_count)
             methods[str(source)]["shared_sources"].append(
