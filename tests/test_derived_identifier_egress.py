@@ -868,3 +868,22 @@ def test_the_owner_still_writes_to_a_page_withheld_from_others(tmp_path: Path) -
 
     assert "__error__" not in answer, answer
     assert "More text." in (vault / _WITHHELD_TARGET).read_text(encoding="utf-8")
+
+
+def test_a_call_no_surface_bound_keeps_the_write_it_had(tmp_path: Path) -> None:
+    """An in-process call outside any request has no audience to decide for.
+
+    The derived and write-door filters apply to a bound caller other than the
+    owner; with nothing bound they stand aside, and the dispatcher's entry
+    filter still decides what such a call may read.
+    """
+    base, withheld = _write_door_fixture()
+    vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external", scope=_WRITE_SCOPE)
+    command, kwargs = _WRITE_DOORS["append"]
+    _reset()
+
+    assert egress.restricted_release_filter(vault) is None
+    assert egress.write_target_withheld(vault, _WITHHELD_TARGET) is False
+    writer_lease.invoke_command(_COMMANDS[command], vault, **kwargs)
+
+    assert "More text." in (vault / _WITHHELD_TARGET).read_text(encoding="utf-8")

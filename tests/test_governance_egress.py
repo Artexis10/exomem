@@ -2350,21 +2350,62 @@ def _through_dispatcher(vault: Path, name: str, **kwargs):
     return invoke_command(command, vault, **kwargs)
 
 
+def _answer(call) -> str:
+    """The caller-visible answer: the result, or the refusal text."""
+    try:
+        return str(call())
+    except ValueError as error:
+        return f"ValueError: {error}"
+
+
+def _answer_then_absent(vault: Path, call) -> tuple[str, str]:
+    """Answer once over the governed fixture, then once with the withheld
+    folder removed, so the two can be compared."""
+    import shutil
+
+    with request_scope(_external()):
+        governed = _answer(call)
+    shutil.rmtree(vault / "Knowledge Base" / "Notes" / "Patterns")
+    _reset_governance_caches()
+    with request_scope(_external()):
+        absent = _answer(call)
+    return governed, absent
+
+
 def test_browse_memory_does_not_leak_a_withheld_path(vault: Path) -> None:
     """`browse_memory` is not in `commands.COMMANDS` in this build, so it is
     driven through the exact composition the dispatcher applies: leaf, then
-    `postfilter`."""
+    `postfilter`. Every file in the listed folder is withheld, so the folder
+    answers exactly as a folder that is not there."""
     _restricted_vault(vault)
-    with request_scope(_external()):
+
+    def call():
         raw = commands.op_browse_memory(vault, path="Knowledge Base/Notes/Patterns", mode="list")
-        out = egress.postfilter("browse_memory", raw, vault)
-    assert "kill-switch-for-risky-releases" not in str(out)
+        return egress.postfilter("browse_memory", raw, vault)
+
+    governed, absent = _answer_then_absent(vault, call)
+    assert "kill-switch-for-risky-releases" not in governed
+    assert governed == absent
 
 
 def test_list_directory_does_not_leak_a_withheld_path(vault: Path) -> None:
     _restricted_vault(vault)
+    governed, absent = _answer_then_absent(
+        vault,
+        lambda: _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns"),
+    )
+    assert "kill-switch-for-risky-releases" not in governed
+    assert governed == absent
+
+
+def test_list_directory_still_lists_a_folder_with_visible_pages(vault: Path) -> None:
+    """A folder that holds a visible page is listed, without its withheld pages."""
+    _restricted_vault(vault)
     with request_scope(_external()):
-        out = _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
+        out = _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes")
+    names = [entry["name"] for entry in out["entries"]]
+    assert "Insights" in names
+    assert "Patterns" not in names
     assert "kill-switch-for-risky-releases" not in str(out)
 
 
@@ -2401,10 +2442,14 @@ def test_dispatcher_backstop_drops_withheld_entries(vault: Path) -> None:
 def test_dispatcher_emits_one_plaintext_free_receipt_after_final_governed_representation(
     vault: Path,
 ) -> None:
-    """The owning dispatcher, not the reusable postfilter, records egress."""
+    """The owning dispatcher, not the reusable postfilter, records egress.
+
+    Every file in the listed folder is withheld, so the listing answers as a
+    missing folder; the decisions behind that answer are still recorded."""
     _restricted_vault(vault)
     with request_scope(_external()):
-        _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
 
     records = _receipt_records(vault)
     assert len(records) == 1
@@ -2438,8 +2483,9 @@ def test_ungoverned_dispatcher_recall_writes_no_receipt(vault: Path) -> None:
 def test_external_dispatcher_retries_mint_distinct_boundary_ids(vault: Path) -> None:
     _restricted_vault(vault)
     with request_scope(_external()):
-        _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
-        _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
+        for _attempt in range(2):
+            with pytest.raises(ValueError, match="NOT_FOUND"):
+                _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
     records = _receipt_records(vault)
     assert len(records) == 2
     assert records[0]["event_id"] != records[1]["event_id"]

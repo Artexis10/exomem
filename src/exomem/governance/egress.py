@@ -65,7 +65,7 @@ from . import membership as membership_module
 from . import policy as policy_module
 from .decisions import Decision, decide
 from .policy import DISCLOSURE_MAX, DISCLOSURE_MIN, Policy
-from .principal import OWNER_AUDIENCE, RequestPrincipal, effective_principal
+from .principal import OWNER_AUDIENCE, RequestPrincipal, current_principal, effective_principal
 
 log = logging.getLogger(__name__)
 
@@ -5507,7 +5507,7 @@ def restricted_release_filter(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
 ) -> Any:
-    """`release_walk_filter` for any caller but the owner; `None` for the owner.
+    """`release_walk_filter` for a bound caller other than the owner, else `None`.
 
     A derived structure (a relation proposal, a context pack, a timeline, a
     listing) decides its candidates before it counts, ranks or emits them, so
@@ -5515,7 +5515,13 @@ def restricted_release_filter(
     keeps exactly the answer and the cost it had: its reads still pass the
     dispatcher's entry filter, as before, and nothing here decides for it.
     """
-    who = principal if principal is not None else effective_principal()
+    who = principal if principal is not None else current_principal()
+    if who is None:
+        # A library call outside any request: no surface bound a caller, so
+        # there is no audience to decide for and the leaf answers as it always
+        # did. Every surface binds a principal before the dispatcher, whose
+        # entry filter still decides for the unbound floor.
+        return None
     if who.resolved and who.audience_id == OWNER_AUDIENCE:
         return None
     return release_walk_filter(vault_root, principal=who, purpose=purpose)
