@@ -19,6 +19,7 @@
 
 - [x] 3.1 Take the page release decision before an exact unit read resolves any reference, serve a unit only from a page released in full, and build its citation from the released frontmatter.
 - [x] 3.2 Resolve a graph-context unit seed whose parent is withheld as a unit of an absent page, on `connect_memory` context and the `graph_context` leaf, and answer a withheld context page seed as an absent page.
+- [x] 3.4 Decide a unit seed by every page the resolver can consult, including a parent named by path, and never substitute the owner's seed.
 - [x] 3.3 Record the withheld receipt for a withheld undecodable read, as a decodable read does.
 
 ## 4. Verification

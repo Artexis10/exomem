@@ -9,8 +9,11 @@ caller must answer exactly as an absent page does.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 from starlette.testclient import TestClient
@@ -21,7 +24,7 @@ from test_semantic_unit_graph import (
     _unit_context_fixture,
 )
 
-from exomem import commands, server
+from exomem import commands, semantic_index, server
 from exomem.governance import egress, membership, policy
 from exomem.governance import principal as principal_module
 
@@ -193,3 +196,178 @@ def test_graph_context_owner_still_seeds_from_the_unit(vault: Path) -> None:
 
     assert context["unit_status"] == "found"
     assert context["seeds"]
+
+
+# ---------------------------------------------------------------------------
+# Refs that name their page by path: exomem://vault/ and exomem://source/
+# ---------------------------------------------------------------------------
+
+NOID = "Knowledge Base/Notes/Insights/noid-page.md"
+NOID_TEXT = (
+    "---\ntype: insight\ntitle: No id\n---\n# No id\n\n"
+    "## Observations\n- [configuration] Idless sentinel IDLESS-3 ^q-1\n"
+)
+
+
+def _idless_seeds(vault: Path) -> list[str]:
+    _unit_context_fixture(vault)
+    (vault / NOID).write_text(NOID_TEXT, encoding="utf-8")
+    _rebuild_with_live_checkpoint(vault)
+    _reset_caches()
+    state = semantic_index.current_parent_index_state(vault, NOID)
+    real = [unit.unit_ref for unit in state.document.units if unit.unit_ref]
+    assert real and real[0].startswith("exomem://vault/"), real
+    return [
+        *real,
+        f"exomem://vault/{quote(NOID)}#nope",
+        f"exomem://source/{quote(NOID[:-3])}#q-1",
+        f"exomem://vault/{quote(_SOURCE)}#compact-1",
+    ]
+
+
+def _remove_idless(vault: Path) -> None:
+    (vault / NOID).unlink()
+    _rebuild_with_live_checkpoint(vault)
+    _reset_caches()
+
+
+def test_rest_path_named_unit_seeds_of_a_withheld_page_answer_like_an_absent_page(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seeds = _idless_seeds(vault)
+    _withhold_insights(vault)
+    client = _rest_client(monkeypatch)
+    requests = [
+        {"operation": operation, "unit_ref": seed}
+        for seed in seeds
+        for operation in ("context", "graph-context")
+    ]
+
+    def run() -> list:
+        return [
+            client.post("/api/connect_memory", json=body, headers=CF_HEADERS).content
+            for body in requests
+        ]
+
+    withheld = run()
+    _remove_idless(vault)
+    (vault / _SOURCE).unlink()
+    _rebuild_with_live_checkpoint(vault)
+    _reset_caches()
+    absent = run()
+
+    assert withheld == absent
+    assert not any(b"IDLESS" in body for body in withheld)
+
+
+def test_mcp_path_named_unit_seeds_of_a_withheld_page_answer_like_an_absent_page(
+    vault: Path,
+) -> None:
+    seeds = _idless_seeds(vault)
+    _withhold_insights(vault)
+    mcp = server.build_server(require_auth=False)
+    who = principal_module.RequestPrincipal(audience_id=CF_AUDIENCE, surface="mcp")
+
+    def run() -> list[str]:
+        out = []
+        for seed in seeds:
+            with principal_module.request_scope(who):
+                result = asyncio.run(
+                    mcp.call_tool(
+                        "connect_memory",
+                        {"operation": "context", "unit_ref": seed},
+                        run_middleware=False,
+                    )
+                )
+            out.append(json.dumps(result.structured_content, sort_keys=True))
+        return out
+
+    withheld = run()
+    _remove_idless(vault)
+    (vault / _SOURCE).unlink()
+    _rebuild_with_live_checkpoint(vault)
+    _reset_caches()
+    absent = run()
+
+    assert withheld == absent
+    assert not any("IDLESS" in text for text in withheld)
+
+
+# ---------------------------------------------------------------------------
+# A path-named parent candidate is confined to the vault before it is decided
+# ---------------------------------------------------------------------------
+
+
+def test_vault_path_named_unit_seed_naming_a_path_outside_the_vault_is_never_opened(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """A caller-named `exomem://vault/` or `exomem://source/` parent is
+    decoded before it is confined. An absolute path or a `../` traversal must
+    be rejected as undecidable (withheld) before the candidate is ever
+    stat'd or read — not merely answered as withheld after the filesystem is
+    already touched."""
+    _unit_context_fixture(vault)
+    _withhold_insights(vault)
+    outside_dir = tmp_path_factory.mktemp("outside")
+    outside = outside_dir / "server-secret.txt"
+    outside.write_bytes(b"OUTSIDE-SECRET-" * 10)
+
+    vault_resolved = str(vault.resolve())
+    opened_outside: list[str] = []
+    real_read_bytes = Path.read_bytes
+
+    def _spy_read_bytes(self: Path) -> bytes:
+        try:
+            inside = str(self.resolve()).startswith(vault_resolved)
+        except OSError:
+            inside = False
+        if not inside:
+            opened_outside.append(str(self))
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _spy_read_bytes)
+
+    traversal = "../" * 12 + str(outside).lstrip("/")
+    forms = [
+        f"exomem://vault/{quote(str(outside), safe='')}#x",
+        f"exomem://vault/{outside}#x",
+        f"exomem://vault/{traversal}#x",
+        f"exomem://source/{quote(str(outside_dir / 'server-secret'), safe='')}#x",
+    ]
+    who = _cf_principal()
+    for ref in forms:
+        with principal_module.request_scope(who):
+            context = commands.op_graph_context(vault, unit_ref=ref)
+        assert context["unit_status"] == "missing", (ref, context)
+
+    assert opened_outside == []
+
+
+# ---------------------------------------------------------------------------
+# The owner's view never changes, even when the index is stale
+# ---------------------------------------------------------------------------
+
+
+def test_owner_seed_view_is_unchanged_by_a_policy_with_a_stale_index(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _source, compact, _rich = _unit_context_fixture(vault)
+    text = (vault / _SOURCE).read_text(encoding="utf-8")
+    duplicates = [
+        vault / f"Knowledge Base/Notes/Insights/aa-duplicate-{index:02d}.md" for index in range(20)
+    ]
+    for duplicate in duplicates:
+        duplicate.write_text(text, encoding="utf-8")
+    _rebuild_with_live_checkpoint(vault)
+    for duplicate in duplicates:
+        duplicate.unlink()
+    _reset_caches()
+    client = _rest_client(monkeypatch)
+    body = {"unit_ref": compact.unit_ref}
+
+    ungoverned = _context(client, body, OWNER_HEADERS)
+    _withhold_insights(vault)
+    governed = _context(client, body, OWNER_HEADERS)
+
+    assert b"parent_ref_validation_work_exhausted" in ungoverned[1]
+    assert governed == ungoverned

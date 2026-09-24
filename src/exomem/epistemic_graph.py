@@ -9637,6 +9637,40 @@ def indexed_unit_parent_path_resolution(vault_root: Path, unit_ref: str) -> tupl
         conn.close()
 
 
+def unit_ref_indexed_paths(vault_root: Path, unit_ref: str) -> tuple[list[str], bool]:
+    """Every page path the graph can consult while resolving `unit_ref`.
+
+    Resolution walks the parent-ref rows for the reference's parent, current
+    or not, and each row reports drift about its own page; the unit-seed query
+    reads the node rows carrying the reference itself. Both are bounded here
+    exactly as the resolver bounds them. The flag is True when there are more
+    parent rows than the resolver examines.
+    """
+    idx = EpistemicGraphIndex(vault_root)
+    conn = idx._open_read_snapshot()
+    if conn is None:
+        return [], False
+    try:
+        parent_ref, separator, _fragment = str(unit_ref or "").rpartition("#")
+        parent_rows = (
+            conn.execute(
+                "SELECT path FROM graph_parent_refs WHERE parent_ref = ? ORDER BY path LIMIT ?",
+                (parent_ref, UNIT_PARENT_REF_MAX_CANDIDATES + 1),
+            ).fetchall()
+            if separator and parent_ref
+            else []
+        )
+        node_rows = conn.execute(
+            "SELECT path FROM graph_nodes WHERE unit_ref = ? ORDER BY kind, path, node_key LIMIT ?",
+            (unit_ref, UNIT_PARENT_REF_MAX_CANDIDATES),
+        ).fetchall()
+        paths = {str(row[0]) for row in parent_rows[:UNIT_PARENT_REF_MAX_CANDIDATES]}
+        paths.update(str(row[0]) for row in node_rows if row[0])
+        return sorted(paths), len(parent_rows) > UNIT_PARENT_REF_MAX_CANDIDATES
+    finally:
+        conn.close()
+
+
 def indexed_unit_parent_paths(vault_root: Path, unit_ref: str) -> list[str]:
     paths, _work_exhausted = indexed_unit_parent_path_resolution(vault_root, unit_ref)
     return paths
