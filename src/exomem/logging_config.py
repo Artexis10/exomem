@@ -161,6 +161,15 @@ def resolve_log_dir(default: Path | None = None) -> Path:
     env = os.environ.get("EXOMEM_LOG_DIR", "").strip()
     if env:
         return Path(env)
+    from .cloud_cell import cloud_mode_enabled
+
+    if cloud_mode_enabled():
+        # A cloud cell's home and default state live on the tenant volume that
+        # backups copy (design D1.2 "Log directory"), so an unset or empty
+        # EXOMEM_LOG_DIR falls back to the pod's writable temp dir, never there.
+        import tempfile
+
+        return Path(tempfile.gettempdir()) / "exomem-logs"
     if default is not None:
         return default
     checkout_root = Path(__file__).resolve().parents[2]

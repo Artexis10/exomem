@@ -910,7 +910,13 @@ def recover_full_receipt_graph_epoch(vault_root: Path, *, build: bool = True) ->
             ):
                 epoch = graph_sync.classify_epoch(root)
                 if epoch.kind in {"pre_floor", "recoverable"}:
-                    graph_sync.recover_checkpoint(root)
+                    # Not while a batch commits: it may be waiting in its
+                    # post-commit fan-out for the boundary held here.
+                    from . import vault as vault_module
+
+                    with vault_module.batch_commit_if_idle() as idle:
+                        if idle:
+                            graph_sync.recover_checkpoint(root)
                 if graph_sync.classify_epoch(root).kind != "coherent":
                     return False
         elif epoch.kind == "legacy":
@@ -1103,9 +1109,12 @@ def _drain_graph_work(
         return processed
 
     for receipt in stalled:
+        path = vault_root / receipt.rel_path
         try:
-            single = index.drain_paths([vault_root / receipt.rel_path])
+            single = index.drain_paths([path])
         except Exception:  # noqa: BLE001 - one poison page must not pin the queue
+            # A busy boundary, a locked store, anything raised out of the pass:
+            # a readiness refusal, never the page's fault, so it never counts.
             log.warning(
                 "deferred graph receipt failed; work remains queued", exc_info=True
             )
@@ -1113,14 +1122,105 @@ def _drain_graph_work(
             continue
         if receipt.rel_path in set(single.get("indexed", ())):
             processed += deferred_index.clear_graph_receipts(vault_root, [receipt])
-        else:
+            continue
+        if single.get("moved") or single.get("requires_rebuild") or single.get("disabled"):
+            # A race or a vault not ready: the page is not the problem, and
+            # counting it would quarantine a page for being written to.
+            deferred_index.rotate_graph_receipts(vault_root, [receipt])
+            continue
+        cause = index._underivable_cause(receipt.rel_path)
+        if cause == "no_rows":
+            # Deleted, or no longer recall Markdown: the pass removed its rows,
+            # which is the whole repair, so the receipt retires with them
+            # rather than rotating behind the queue forever.
+            processed += deferred_index.clear_graph_receipts(vault_root, [receipt])
+            continue
+        if cause is None:
+            # The page reads and decodes now: whatever stopped the pass was not
+            # its bytes.
             log.warning("deferred graph receipt incomplete; work remains queued")
+            deferred_index.rotate_graph_receipts(vault_root, [receipt])
+            continue
+        attempts, first_failed_at = deferred_index.note_graph_failure(
+            vault_root, receipt.rel_path
+        )
+        if attempts < epistemic_graph.GRAPH_POISON_ATTEMPTS or (
+            cause == "unreadable"
+            and time.time() - first_failed_at < epistemic_graph.GRAPH_POISON_MIN_AGE_SECONDS
+        ):
+            log.warning("deferred graph receipt %s; work remains queued", cause)
+            deferred_index.rotate_graph_receipts(vault_root, [receipt])
+            continue
+        # Bounded: the page's own bytes have failed every attempt. Its receipt
+        # is set aside so the queue can empty around it; its rows stay, because
+        # the page still exists. A change to it, or the slow retry timer,
+        # queues it again (`requeue_quarantined_graph_paths`).
+        if deferred_index.quarantine_graph_receipt(
+            vault_root, receipt, signature=_graph_stat_token(path)
+        ):
+            log.warning(
+                "deferred graph receipt quarantined after %d failed attempts cause=%s",
+                attempts,
+                cause,
+            )
+            processed += 1
+        else:
             deferred_index.rotate_graph_receipts(vault_root, [receipt])
     if not deferred_index.snapshot_graph(vault_root, limit=1):
         # This tick cleared the last receipt, so the same stranding applies to
         # whatever withdrew while it ran.
         _republish_graph_availability(index)
     return processed
+
+
+def _graph_stat_token(path: Path) -> str:
+    """The stat signature a quarantined page is retried on a change to."""
+    try:
+        st = path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return "absent"
+    except OSError:
+        return "unstatable"
+    return f"{st.st_mtime_ns}:{st.st_ctime_ns}:{st.st_size}"
+
+
+def requeue_quarantined_graph_paths(vault_root: Path) -> int:
+    """Give quarantined pages one more attempt; return how many were queued.
+
+    A page is retried once `GRAPH_QUARANTINE_RETRY_SECONDS` have passed since
+    its last failure, and sooner when its stat signature has changed since it
+    was set aside -- edited, replaced, deleted -- but no sooner than its change
+    backoff. The backoff matters because a release signals the drain and the
+    drain calls this on every wake: without it, a page a sync tool keeps
+    rewriting was retried every couple of seconds. One readonly read when
+    nothing is quarantined.
+    """
+    from . import epistemic_graph
+
+    quarantined = deferred_index.quarantined_graph_paths(vault_root)
+    if not quarantined:
+        return 0
+    now = time.time()
+    due = []
+    for rel, signature, last_failed_at, attempts in quarantined:
+        waited = now - last_failed_at
+        if waited >= epistemic_graph.GRAPH_QUARANTINE_RETRY_SECONDS or (
+            waited >= _quarantine_change_backoff(attempts)
+            and _graph_stat_token(vault_root / rel) != signature
+        ):
+            due.append(rel)
+    return deferred_index.release_graph_quarantine(vault_root, due)
+
+
+def _quarantine_change_backoff(attempts: int) -> float:
+    """Seconds after its last failure before a changed quarantined page is retried."""
+    from . import epistemic_graph
+
+    excess = max(0, attempts - epistemic_graph.GRAPH_POISON_ATTEMPTS)
+    return min(
+        epistemic_graph.GRAPH_QUARANTINE_RETRY_SECONDS,
+        epistemic_graph.GRAPH_QUARANTINE_CHANGE_BACKOFF_SECONDS * 2**excess,
+    )
 
 
 def _republish_graph_availability(index) -> None:

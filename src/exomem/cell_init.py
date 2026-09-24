@@ -60,16 +60,48 @@ class CellInitResult:
     vault_created: bool
 
 
+def account_home() -> Path:
+    """The running account's passwd home: the cloud cell's `/data/host`.
+
+    The same entry standalone custody resolves its host-control root from
+    (`authorization_custody._standalone_host_control_root`), never `$HOME`,
+    which a pod spec can set to anything.
+    """
+    try:
+        import pwd
+
+        home = Path(pwd.getpwuid(os.geteuid()).pw_dir)
+    except (ImportError, KeyError, OSError):
+        raise CellInitError(
+            "CELL_INIT_HOST_ROOT_UNAVAILABLE",
+            "prepare_directories",
+            "the running account has no passwd home",
+        ) from None
+    if not home.is_absolute():
+        raise CellInitError(
+            "CELL_INIT_HOST_ROOT_UNAVAILABLE",
+            "prepare_directories",
+            "the running account's passwd home is not absolute",
+        )
+    return home
+
+
 def _ensure_private_directory(path: Path) -> None:
     """Create `path` if absent and enforce mode `0700`, every run.
 
     Idempotent enforcement, not just first creation: a Kubernetes `fsGroup`
     volume can leave a freshly mounted directory setgid at a looser mode
-    (`2755`) than the owner-only mode D2 requires.
+    (`2755`) than the owner-only mode D2 requires. The mode is set through a
+    descriptor opened without following a final symlink, so a symlink planted
+    at `path` is refused (`ELOOP`) and its target is never touched.
     """
     path.mkdir(parents=True, exist_ok=True)
     if os.name != "nt":
-        os.chmod(path, 0o700)
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fchmod(fd, 0o700)
+        finally:
+            os.close(fd)
 
 
 def _staging_siblings(vault_root: Path) -> list[Path]:

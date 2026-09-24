@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.92.0](https://github.com/Artexis10/exomem/compare/v0.91.1...v0.92.0) (2026-09-23)
+
+
+### Features
+
+* **activation:** carry recent context, resolve referents and named pages ([#1358](https://github.com/Artexis10/exomem/issues/1358)) ([cd946ef](https://github.com/Artexis10/exomem/commit/cd946efa88f08f223dfefa1d2315d91c7af26752))
+* **auth:** let a configured OAuth identity act as the owner ([#1356](https://github.com/Artexis10/exomem/issues/1356)) ([02d8435](https://github.com/Artexis10/exomem/commit/02d8435f020bb2b0ca7abf57f5168e831a207075))
+* **cloud:** add the Exomem Cloud cell mode and image ([#1355](https://github.com/Artexis10/exomem/issues/1355)) ([cd1adb5](https://github.com/Artexis10/exomem/commit/cd1adb5199d71dd0fbb6b39c2e398c5657cd3ab1))
+* **graph:** add a counts-only relation census ([#1359](https://github.com/Artexis10/exomem/issues/1359)) ([7ffb084](https://github.com/Artexis10/exomem/commit/7ffb084607566e62bd44a2a06830f045f7723455))
+* **infra:** add the Exomem Cloud control database server ([#1354](https://github.com/Artexis10/exomem/issues/1354)) ([412bbfc](https://github.com/Artexis10/exomem/commit/412bbfcceb32182b7c5726455434e83b692111a0))
+
+
+### Bug Fixes
+
+* **cloud:** keep caller-chosen identifiers out of cell logs and harden cell-init ([#1360](https://github.com/Artexis10/exomem/issues/1360)) ([8a47ae2](https://github.com/Artexis10/exomem/commit/8a47ae2d03e628f6906f2ac57ab0407c1ca2cd01))
+* **deps:** bump six locked packages past published advisories ([#1352](https://github.com/Artexis10/exomem/issues/1352)) ([200590e](https://github.com/Artexis10/exomem/commit/200590e5b18548e94051048b5a0fa96ac98eda30))
+
+
+### Performance
+
+* stop re-encoding text a write just encoded ([#1357](https://github.com/Artexis10/exomem/issues/1357)) ([ed1dd28](https://github.com/Artexis10/exomem/commit/ed1dd287c90f60d2bf261652034922d681886546))
+
 ## [0.91.1](https://github.com/Artexis10/exomem/compare/v0.91.0...v0.91.1) (2026-09-23)
 
 
