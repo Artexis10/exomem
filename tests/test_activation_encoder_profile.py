@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import io
 import json
 import re
 import sys
+import tarfile
 import threading
 import types
 from pathlib import Path
@@ -48,6 +50,11 @@ def _clean(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(embeddings, "_MODEL", None)
     monkeypatch.setattr(embeddings, "_ACTIVATION_MODEL", None)
     monkeypatch.setenv(embedding_backend.ARTIFACT_DIR_ENV, str(tmp_path / "artifacts"))
+    # No test reaches a network: a published artefact is fetched from a local
+    # directory that is empty unless a test publishes into it.
+    monkeypatch.setenv("EXOMEM_MODEL_ARTIFACT_URL", (tmp_path / "no-assets").as_uri())
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.setattr(embedding_backend, "_ACQUIRE_FAILED", {}, raising=False)
     yield
 
 
@@ -826,6 +833,247 @@ def test_a_capped_encode_reads_the_turn_s_head_and_leaves_the_shared_tokenizer_a
 # --------------------------------------------------------------------------- #
 # One model, one resident instance
 # --------------------------------------------------------------------------- #
+
+
+# --------------------------------------------------------------------------- #
+# T6c: a host downloads the published artefact before it ever builds one
+# --------------------------------------------------------------------------- #
+
+
+def _publish(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, served):
+    """What a maintainer does with the release script: build the artefact once,
+    pin its digest, and publish it as a release asset in a directory the host's
+    download URL points at. The host then starts with an empty artefact dir."""
+    monkeypatch.setenv(embedding_backend.ARTIFACT_DIR_ENV, str(tmp_path / "maintainer"))
+    embedding_backend.load_encoder(TINY)
+    digest = embedding_backend.artifact_sha256(embedding_backend.artifact_dir(TINY, served))
+    pinned = dataclasses.replace(served, digest=digest)
+    monkeypatch.setitem(embedding_backend._SERVED, TINY, pinned)
+    assets = tmp_path / "assets"
+    asset = embedding_backend.write_artifact_asset(TINY, pinned, assets)
+    monkeypatch.setenv(embedding_backend.ARTIFACT_DIR_ENV, str(tmp_path / "host"))
+    monkeypatch.setenv(embedding_backend.ARTIFACT_URL_ENV, assets.as_uri())
+    return pinned, asset
+
+
+def _rewrite_asset(asset: Path, members: dict[str, bytes]) -> None:
+    with tarfile.open(asset, "w", format=tarfile.USTAR_FORMAT) as tar:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+
+def test_a_host_downloads_the_published_artifact_instead_of_building_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The build peaks at 8.7 GB for bge-m3 and needs about 2.8 GB of disk; a
+    download verified against the pinned digest needs neither."""
+    _asked, served = _tiny_served_repo(tmp_path, monkeypatch)
+    pinned, asset = _publish(tmp_path, monkeypatch, served)
+    monkeypatch.setattr(embedding_backend, "_quantize", lambda *_a: pytest.fail("a verified download is not rebuilt"))
+
+    encoder = embedding_backend.load_encoder(TINY)
+
+    target = embedding_backend.artifact_dir(TINY, pinned)
+    assert asset.name == f"tiny-served-int8-{pinned.digest[:8]}.onnx.tar"
+    assert encoder.profile.artifact_digest == pinned.digest[:16]
+    assert embedding_backend.artifact_sha256(target) == pinned.digest
+    assert sorted(path.name for path in target.iterdir()) == ["artifact.json", "model.onnx", "model.onnx.data"]
+    assert [path.name for path in target.parent.iterdir()] == [target.name], "a download leaves no stage behind"
+    assert encoder.encode(["w1 w2"], batch_size=8).shape == (1, TINY_WIDTH)
+
+
+@pytest.mark.parametrize("damage", ["other bytes", "an extra member", "a path outside the directory"])
+def test_a_download_that_is_not_the_pinned_artifact_is_refused_and_built_locally(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    _asked, served = _tiny_served_repo(tmp_path, monkeypatch)
+    pinned, asset = _publish(tmp_path, monkeypatch, served)
+    with tarfile.open(asset) as tar:
+        members = {member.name: tar.extractfile(member).read() for member in tar}
+    if damage == "other bytes":
+        data = bytearray(members["model.onnx.data"])
+        data[len(data) // 2] ^= 0xFF
+        members["model.onnx.data"] = bytes(data)
+    elif damage == "an extra member":
+        members["run-me.sh"] = b"echo hello"
+    else:
+        members["../outside.txt"] = b"escaped"
+    _rewrite_asset(asset, members)
+    built: list[tuple] = []
+    real_quantize = embedding_backend._quantize
+    monkeypatch.setattr(embedding_backend, "_quantize", lambda *args: built.append(args) or real_quantize(*args))
+
+    encoder = embedding_backend.load_encoder(TINY)
+
+    assert len(built) == 1, "a refused download falls back to the local build"
+    assert encoder.profile.artifact_digest == pinned.digest[:16], "the local build is deterministic"
+    assert not list(tmp_path.rglob("outside.txt")) and not list(tmp_path.rglob("run-me.sh"))
+
+
+def test_an_unavailable_download_falls_back_to_the_local_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _asked, served = _tiny_served_repo(tmp_path, monkeypatch)
+    monkeypatch.setitem(embedding_backend._SERVED, TINY, dataclasses.replace(served, digest="0" * 64))
+    built: list[tuple] = []
+    real_quantize = embedding_backend._quantize
+    monkeypatch.setattr(embedding_backend, "_quantize", lambda *args: built.append(args) or real_quantize(*args))
+
+    encoder = embedding_backend.load_encoder(TINY)
+
+    assert len(built) == 1
+    assert re.fullmatch(r"[0-9a-f]{16}", encoder.profile.artifact_digest or "")
+
+
+def test_the_published_bge_m3_artifact_is_a_github_release_asset(monkeypatch: pytest.MonkeyPatch) -> None:
+    served = embedding_backend.served_artifact(M3)
+    monkeypatch.delenv(embedding_backend.ARTIFACT_URL_ENV, raising=False)
+
+    assert served is not None and re.fullmatch(r"[0-9a-f]{64}", served.digest or "")
+    assert served.digest.startswith("7b9a0b3b0b292643"), "the digest T6b's fingerprint names"
+    assert embedding_backend.artifact_url(M3, served) == (
+        "https://github.com/Artexis10/exomem/releases/download/served-models/bge-m3-int8-7b9a0b3b.onnx.tar"
+    )
+    for off in ("", "off", "0", "none"):
+        monkeypatch.setenv(embedding_backend.ARTIFACT_URL_ENV, off)
+        assert embedding_backend.artifact_url(M3, served) is None, off
+    monkeypatch.delenv(embedding_backend.ARTIFACT_URL_ENV)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    assert embedding_backend.artifact_url(M3, served) is None, "an offline host never downloads"
+    assert embedding_backend.artifact_url(M3, dataclasses.replace(served, digest=None)) is None
+
+
+def test_a_failed_acquisition_is_not_retried_on_every_load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A host that cannot download and cannot build would otherwise start the
+    8.7 GB build again on every write that asks for the model."""
+    _tiny_served_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(embedding_backend, "_QUANTIZE_CHILD", "raise SystemExit('no memory for the quantiser')")
+    attempts: list[int] = []
+    real_build = embedding_backend._build_artifact
+    monkeypatch.setattr(embedding_backend, "_build_artifact", lambda *a: attempts.append(1) or real_build(*a))
+    clock = [1000.0]
+    monkeypatch.setattr(embedding_backend.time, "monotonic", lambda: clock[0])
+
+    with pytest.raises(embedding_backend.ModelFilesUnavailable, match="no memory for the quantiser"):
+        embedding_backend.load_encoder(TINY)
+    with pytest.raises(embedding_backend.ModelFilesUnavailable, match="retried after"):
+        embedding_backend.load_encoder(TINY)
+    assert attempts == [1]
+
+    clock[0] += embedding_backend.ACQUIRE_RETRY_SECONDS + 1
+    with pytest.raises(embedding_backend.ModelFilesUnavailable, match="no memory for the quantiser"):
+        embedding_backend.load_encoder(TINY)
+    assert attempts == [1, 1]
+
+
+def test_the_release_asset_is_byte_for_byte_reproducible(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _asked, served = _tiny_served_repo(tmp_path, monkeypatch)
+    embedding_backend.load_encoder(TINY)
+
+    first = embedding_backend.write_artifact_asset(TINY, served, tmp_path / "first")
+    second = embedding_backend.write_artifact_asset(TINY, served, tmp_path / "second")
+
+    assert first.read_bytes() == second.read_bytes()
+    with tarfile.open(first) as tar:
+        members = [(m.name, m.isreg(), m.mtime, m.uid, m.gid, m.mode) for m in tar]
+    assert members == [
+        ("model.onnx", True, 0, 0, 0, 0o644),
+        ("model.onnx.data", True, 0, 0, 0, 0o644),
+    ]
+    digest = embedding_backend.artifact_sha256(embedding_backend.artifact_dir(TINY, served))
+    assert first.name == f"tiny-served-int8-{digest[:8]}.onnx.tar"
+
+
+def _release_script():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "build_served_model_asset.py"
+    spec = importlib.util.spec_from_file_location("build_served_model_asset", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_release_script_publishes_only_the_pinned_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _asked, served = _tiny_served_repo(tmp_path, monkeypatch)
+    script = _release_script()
+
+    assert script.main(["--model", TINY, "--out", str(tmp_path / "unpinned")]) == 0
+    digest = embedding_backend.artifact_sha256(embedding_backend.artifact_dir(TINY, served))
+    monkeypatch.setitem(embedding_backend._SERVED, TINY, dataclasses.replace(served, digest=digest))
+    assert script.main(["--model", TINY, "--out", str(tmp_path / "pinned")]) == 0
+    assert (tmp_path / "pinned" / f"tiny-served-int8-{digest[:8]}.onnx.tar").is_file()
+    assert "served-models/tiny-served-int8-" in capsys.readouterr().out
+
+    monkeypatch.setitem(embedding_backend._SERVED, TINY, dataclasses.replace(served, digest="f" * 64))
+    assert script.main(["--model", TINY, "--out", str(tmp_path / "wrong")]) == 1
+    assert not (tmp_path / "wrong").exists()
+
+
+def test_the_served_encoder_runs_two_threads_unless_the_budget_is_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _tiny_served_repo(tmp_path, monkeypatch)
+    seen: list[dict] = []
+    real = runtime_resources.configure_onnx_session_options
+    monkeypatch.setattr(
+        runtime_resources,
+        "configure_onnx_session_options",
+        lambda options, **kw: seen.append(kw) or real(options, **kw),
+    )
+
+    embedding_backend.load_encoder(TINY)
+
+    assert embedding_backend.SERVED_DEFAULT_THREADS == 2
+    assert seen == [{"default_threads": embedding_backend.SERVED_DEFAULT_THREADS}]
+
+
+@pytest.mark.parametrize(
+    "mode_name, recall_model, loads, ensured",
+    [
+        ("normal", M3, ["recall"], []),
+        ("quiet", M3, [], [M3]),
+        ("normal", "BAAI/bge-base-en-v1.5", [], []),
+    ],
+)
+def test_warm_up_readies_a_served_recall_model_off_the_request_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode_name: str,
+    recall_model: str,
+    loads: list[str],
+    ensured: list[str],
+) -> None:
+    """A served model's first load may download or build it; that belongs to the
+    warm-up, never to whichever request comes first. Normal mode preloads the
+    one shared instance; quiet mode, which loads no model at boot, still fetches
+    the artefact; a hub-file model keeps its lazy load."""
+    monkeypatch.setattr(embeddings, "MODEL_NAME", recall_model)
+    monkeypatch.setenv("EXOMEM_MODE", mode_name)
+    monkeypatch.delenv("EXOMEM_PRELOAD_MODELS", raising=False)
+    monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
+    readiness.reset()
+    calls: list[str] = []
+    ensured_calls: list[str] = []
+    monkeypatch.setattr(warmup, "warm_retrieval_catalog", lambda _root: True, raising=False)
+    monkeypatch.setattr(warmup, "warm_caches", lambda _root, **_kw: {})
+    monkeypatch.setattr("exomem.semantic_contract.build_corpus_context", lambda _root: None)
+    monkeypatch.setattr(
+        embeddings, "get_model", lambda: calls.append("recall") or types.SimpleNamespace(encode=lambda _t: None)
+    )
+    monkeypatch.setattr(embeddings, "get_reranker", lambda: pytest.fail("the reranker stays lazy"))
+    monkeypatch.setattr(embeddings, "get_clip_model", lambda: pytest.fail("CLIP stays lazy"))
+    monkeypatch.setattr(embedding_backend, "ensure_served_artifact", lambda name: ensured_calls.append(name))
+
+    try:
+        warmup.warm_all(tmp_path)
+        ready = readiness.is_ready("embeddings")
+    finally:
+        readiness.reset()
+
+    assert (calls, ensured_calls, ready) == (loads, ensured, True)
 
 
 def test_equal_served_profiles_share_one_resident_instance(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -131,10 +131,18 @@ def configure_torch(torch: Any | None = None) -> None:
         pass
 
 
-def configure_onnx_session_options(options: Any) -> None:
-    """Make ONNX's otherwise independent pools obey the common budget."""
+def configure_onnx_session_options(options: Any, *, default_threads: int | None = None) -> None:
+    """Make ONNX's otherwise independent pools obey the common budget.
+
+    `default_threads` is a session's own default while `EXOMEM_CPU_THREADS` is
+    unset, never more than the CPUs this process may use; an explicit budget
+    always wins.
+    """
     policy = resolve_policy()
-    options.intra_op_num_threads = policy.cpu_threads
+    threads = policy.cpu_threads
+    if default_threads is not None and policy.cpu_source == "default":
+        threads = max(1, min(default_threads, effective_online_cpus()))
+    options.intra_op_num_threads = threads
     options.inter_op_num_threads = 1
 
 

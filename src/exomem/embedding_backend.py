@@ -27,7 +27,10 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
+import time
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +69,22 @@ ORT_DYNAMIC_INT8 = "ort-dynamic-int8"
 ONNX_EXTERNAL_DATA = "onnx-external-data"
 _ARTIFACT_FILES = ("model.onnx", "model.onnx.data")
 _ARTIFACT_MANIFEST = "artifact.json"
+#: Where a served model's published artefact is downloaded from: a base URL the
+#: asset name (`artifact_asset_name`) is appended to. Empty or ``off`` disables
+#: the download, and so does `HF_HUB_OFFLINE`; the host then builds locally.
+ARTIFACT_URL_ENV = "EXOMEM_MODEL_ARTIFACT_URL"
+DEFAULT_ARTIFACT_URL = "https://github.com/Artexis10/exomem/releases/download/served-models"
+_URL_OFF = {"", "0", "off", "none", "false", "no"}
+#: A published asset is bounded; a response past this is not an artefact.
+_MAX_ASSET_BYTES = 2 << 30
+#: How long a failed acquisition (no download, no build) is remembered before
+#: a load tries again, so a host that cannot build does not start the build on
+#: every write that asks for the model.
+ACQUIRE_RETRY_SECONDS = 900.0
+_ACQUIRE_FAILED: dict[tuple[str, str], tuple[float, str]] = {}
+#: Intra-op threads a served model's session uses while `EXOMEM_CPU_THREADS` is
+#: unset: the 40-token turn's p95 was 132 ms at two against 304 at one.
+SERVED_DEFAULT_THREADS = 2
 
 
 class ModelFilesUnavailable(RuntimeError):
@@ -175,6 +194,9 @@ class ServedArtifact:
     source: tuple[str, ...]
     quantization: str
     file_format: str
+    #: sha256 of the published artefact's bytes (`artifact_sha256`); None when
+    #: nothing is published and every host builds its own.
+    digest: str | None = None
 
 
 #: The one model a personal server serves for activation and recall alike, at
@@ -186,6 +208,7 @@ _SERVED: dict[str, ServedArtifact] = {
         source=("onnx/model.onnx", "onnx/model.onnx_data", "onnx/Constant_7_attr__value"),
         quantization=ORT_DYNAMIC_INT8,
         file_format=ONNX_EXTERNAL_DATA,
+        digest="7b9a0b3b0b292643752db19f9ae29113d632ac30393c9a56b97d4b075dc81c44",
     ),
 }
 
@@ -451,7 +474,10 @@ class _OnnxEncoder:
 
         options = ort.SessionOptions()
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        runtime_resources.configure_onnx_session_options(options)
+        if served is None:
+            runtime_resources.configure_onnx_session_options(options)
+        else:
+            runtime_resources.configure_onnx_session_options(options, default_threads=SERVED_DEFAULT_THREADS)
         self._session = ort.InferenceSession(onnx_path, sess_options=options, providers=providers)
         self._inputs = {spec.name for spec in self._session.get_inputs()}
         self.device = device
@@ -590,8 +616,9 @@ def artifact_dir(model_name: str, served: ServedArtifact) -> Path:
     return root / model_cache.snapshot_dirname(model_name) / served.revision / served.quantization
 
 
-def _artifact_digest(target: Path) -> str | None:
-    """The digest of the artefact's bytes, or None when a file is missing."""
+def artifact_sha256(target: Path) -> str | None:
+    """sha256 over the artefact's file names and bytes, or None when a file is
+    missing. Its first 16 hex digits are the digest the fingerprint names."""
     digest = hashlib.sha256()
     try:
         for name in _ARTIFACT_FILES:
@@ -601,7 +628,48 @@ def _artifact_digest(target: Path) -> str | None:
                     digest.update(chunk)
     except OSError:
         return None
-    return digest.hexdigest()[:16]
+    return digest.hexdigest()
+
+
+def _artifact_digest(target: Path) -> str | None:
+    full = artifact_sha256(target)
+    return full[:16] if full else None
+
+
+def artifact_asset_name(model_name: str, served: ServedArtifact, digest: str | None = None) -> str:
+    """The release asset's file name, e.g. ``bge-m3-int8-7b9a0b3b.onnx.tar``."""
+    quant = "int8" if served.quantization == ORT_DYNAMIC_INT8 else served.quantization
+    return f"{model_name.rsplit('/', 1)[-1].lower()}-{quant}-{(digest or served.digest or '')[:8]}.onnx.tar"
+
+
+def artifact_url(model_name: str, served: ServedArtifact) -> str | None:
+    """The published artefact's URL, or None when there is none to fetch."""
+    if not served.digest or model_cache._truthy(os.environ.get(model_cache.HF_OFFLINE_ENV)):
+        return None
+    base = os.environ.get(ARTIFACT_URL_ENV)
+    base = DEFAULT_ARTIFACT_URL if base is None else base.strip()
+    if base.lower() in _URL_OFF:
+        return None
+    return f"{base.rstrip('/')}/{artifact_asset_name(model_name, served)}"
+
+
+def write_artifact_asset(model_name: str, served: ServedArtifact, out_dir: Path) -> Path:
+    """Pack the built artefact as its release asset, byte for byte reproducible:
+    two regular files, fixed order, zero owner and time, no extended headers."""
+    source = artifact_dir(model_name, served)
+    digest = artifact_sha256(source)
+    if digest is None:
+        raise ModelFilesUnavailable(f"{model_name}: no built artefact at {source}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    asset = out_dir / artifact_asset_name(model_name, served, digest)
+    with tarfile.open(asset, "w", format=tarfile.USTAR_FORMAT) as tar:
+        for name in _ARTIFACT_FILES:
+            info = tarfile.TarInfo(name)
+            info.size = (source / name).stat().st_size
+            info.mode = 0o644
+            with open(source / name, "rb") as fh:
+                tar.addfile(info, fh)
+    return asset
 
 
 def _read_manifest(target: Path) -> dict:
@@ -630,15 +698,87 @@ def ensure_artifact(model_name: str, served: ServedArtifact) -> tuple[str, str]:
         "file_format": served.file_format,
     }
     if digest is None or manifest.get("digest") != digest or any(manifest.get(k) != v for k, v in expected.items()):
-        log.info("building %s %s artefact at %s", model_name, served.quantization, target)
-        _build_artifact(model_name, served, target)
+        key = (model_name, served.revision)
+        failed = _ACQUIRE_FAILED.get(key)
+        if failed is not None and time.monotonic() - failed[0] < ACQUIRE_RETRY_SECONDS:
+            raise ModelFilesUnavailable(f"{failed[1]} (retried after {int(ACQUIRE_RETRY_SECONDS)} s)")
+        try:
+            if not _fetch_artifact(model_name, served, target):
+                log.info("building %s %s artefact at %s", model_name, served.quantization, target)
+                _build_artifact(model_name, served, target)
+        except ModelFilesUnavailable as error:
+            _ACQUIRE_FAILED[key] = (time.monotonic(), str(error))
+            raise
+        _ACQUIRE_FAILED.pop(key, None)
         digest = _artifact_digest(target)
         if digest is None:
             raise ModelFilesUnavailable(f"{model_name}: the built artefact at {target} is incomplete")
+        if served.digest and not served.digest.startswith(digest):
+            log.info("%s: the local build's digest %s differs from the published one", model_name, digest)
         (target / _ARTIFACT_MANIFEST).write_text(
             json.dumps({**expected, "digest": digest}, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
     return str(target / _ARTIFACT_FILES[0]), digest
+
+
+def ensure_served_artifact(model_name: str) -> None:
+    """Fetch or build a served model's artefact without loading it (quiet-mode warm-up)."""
+    served = served_artifact(model_name)
+    if served is not None:
+        ensure_artifact(model_name, served)
+
+
+def _fetch_artifact(model_name: str, served: ServedArtifact, target: Path) -> bool:
+    """Install the published artefact into `target` when it is the pinned one.
+
+    False, and nothing installed, when there is none to fetch, the download
+    fails, or the asset is not exactly the pinned artefact: two regular files
+    whose bytes hash to `served.digest`. The caller then builds locally, which
+    is always correct and only costs memory and time.
+    """
+    url = artifact_url(model_name, served)
+    if url is None:
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=f".{target.name}-fetch-", dir=target.parent))
+    try:
+        asset = stage / "asset.tar"
+        try:
+            with urllib.request.urlopen(url, timeout=60) as response, open(asset, "wb") as out:  # noqa: S310 — https or an operator's mirror
+                received = 0
+                while chunk := response.read(8 << 20):
+                    received += len(chunk)
+                    if received > _MAX_ASSET_BYTES:
+                        log.warning("%s: %s is larger than any artefact; building locally", model_name, url)
+                        return False
+                    out.write(chunk)
+        except (OSError, ValueError) as error:
+            log.info("%s: no published artefact at %s (%s); building locally", model_name, url, error)
+            return False
+        out_dir = stage / "out"
+        out_dir.mkdir()
+        try:
+            with tarfile.open(asset) as tar:
+                members = tar.getmembers()
+                if sorted(m.name for m in members) != sorted(_ARTIFACT_FILES) or not all(m.isreg() for m in members):
+                    log.warning("%s: %s holds other files than the artefact; refused", model_name, url)
+                    return False
+                for member in members:
+                    with tar.extractfile(member) as src, open(out_dir / member.name, "wb") as dst:
+                        shutil.copyfileobj(src, dst, 8 << 20)
+        except (OSError, tarfile.TarError) as error:
+            log.warning("%s: %s is not a readable artefact (%s); refused", model_name, url, error)
+            return False
+        if artifact_sha256(out_dir) != served.digest:
+            log.warning("%s: %s does not match the pinned digest; refused, building locally", model_name, url)
+            return False
+        target.mkdir(parents=True, exist_ok=True)
+        for name in reversed(_ARTIFACT_FILES):
+            os.replace(out_dir / name, target / name)
+        log.info("installed the published %s artefact from %s", model_name, url)
+        return True
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
 
 
 def _build_artifact(model_name: str, served: ServedArtifact, target: Path) -> None:
