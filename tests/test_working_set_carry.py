@@ -1258,6 +1258,26 @@ def test_a_sentence_boundary_ends_the_window() -> None:
     ) == (("girvan", "slot"),)
 
 
+def test_a_sentence_end_in_any_script_ends_the_window() -> None:
+    """The window is split on the RAW turn, so a script's own sentence end
+    has to be named: the Devanagari danda and double danda, the Greek
+    question mark (which NFKC would read as a semicolon), the Arabic
+    question mark and full stop, the Armenian full stop, and the CJK full
+    stop and fullwidth exclamation and question marks."""
+    for breaker in (
+        "।", "॥", ";", "؟", "۔", "։", "。", "！", "？"
+    ):
+        assert working_set_runtime.adjacent_rare_pairs(
+            f"the lisbon run{breaker} the harbour run", ("lisbon", "harbour")
+        ) == (), repr(breaker)
+
+    rare = ("लिस्बन", "बंदरगाह")
+    assert working_set_runtime.adjacent_rare_pairs("लिस्बन का दौरा। बंदरगाह बंद था", rare) == ()
+    assert working_set_runtime.adjacent_rare_pairs("लिस्बन बंदरगाह बंद था", rare) == (
+        tuple(sorted(rare)),
+    )
+
+
 def test_a_hyphenated_name_pairs_on_both_of_its_stems() -> None:
     """One raw token can carry two stems. "girvan-slot" is the phrase said
     as tightly as a phrase can be said, and reading only the first stem

@@ -689,8 +689,13 @@ def content_stems(turn: str) -> tuple[str, ...]:
 
 #: What ends a proximity window. Sentence-ending punctuation and a line
 #: break; a comma deliberately does not, being punctuation inside a phrase
-#: rather than between two of them.
-_SENTENCE_BREAK = re.compile(r"[.!?;\n\r]+")
+#: rather than between two of them. The split reads the raw turn, so each
+#: script's own sentence end is named: the Devanagari danda and double
+#: danda, the Greek question mark, the Arabic question mark and full stop,
+#: the Armenian full stop, and the CJK full stop and fullwidth ! and ?.
+_SENTENCE_BREAK = re.compile(
+    "[.!?;\n\r।॥;؟۔։。！？]+"
+)
 #: The joiners `working_set_index.tokens_of` admits inside a term. The parts
 #: they join are separate words of one compound.
 _TOKEN_JOINERS = re.compile(r"['\-]+")
