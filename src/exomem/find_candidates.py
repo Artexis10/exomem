@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
 
 from . import find_policy, find_results, find_types
 from .find_types import FindTimings, GraphProvenance, ParsedPage
@@ -148,30 +148,11 @@ def collapse_frame_children(
     return out
 
 
-#: The dense lead is lexically invisible and fusion withheld a vote for a page
-#: in another script than the lead: the query's words lead into another script.
-CROSSING_VOTES_WITHHELD = "lexical_votes_across_scripts"
-#: The dense lead is lexically invisible, no lexical candidate holds a content
-#: word of the query, and the query is written in another script than the lead.
-CROSSING_UNMATCHED = "query_script_differs_from_dense_lead"
-#: Why fusion withheld a lexical vote, as the explain trace reports it.
-WITHHELD_REASON = "other_script_than_dense_lead"
-
-
-class LexicalVisibility(NamedTuple):
-    """What fusion learned about the lexical lanes against the dense lead."""
-
-    #: Lexical-lane candidates whose votes fusion withholds.
-    withheld: frozenset[str]
-    #: Why the request crosses scripts (`CROSSING_*`), or None when it does not.
-    crossing: str | None
-
-    @property
-    def crosses_language(self) -> bool:
-        return self.crossing is not None
-
-
-_LEXICALLY_VISIBLE = LexicalVisibility(frozenset(), None)
+LexicalVisibility = find_policy.LexicalVisibility
+_LEXICALLY_VISIBLE = find_policy.LEXICALLY_VISIBLE
+CROSSING_VOTES_WITHHELD = find_policy.CROSSING_VOTES_WITHHELD
+CROSSING_UNMATCHED = find_policy.CROSSING_UNMATCHED
+WITHHELD_REASON = find_policy.WITHHELD_REASON
 
 
 def _lexical_visibility(
@@ -184,87 +165,16 @@ def _lexical_visibility(
     window: int,
     page_of: PageOf,
 ) -> LexicalVisibility:
-    """Which lexical votes fusion withholds, and whether the request crosses scripts.
-
-    The dense lane is the only lane that can match a page written in another
-    language than the query. When its strongest candidate shares no content word
-    with the query, the lexical lanes cannot see that page at all, and their
-    votes rank other pages by vocabulary overlap with the query. Where those
-    pages are written in another script than the dense lead -- the query's own,
-    when the lead is in another -- reciprocal-rank fusion would let one partial
-    match plus a weaker dense vote outrank the dense lead.
-
-    So, with the dense lead lexically invisible, a lexical lane stops voting for
-    a page that (a) holds only some of the query's content words and (b) is
-    written mostly in another letter script than the dense lead
-    (`find_policy.dominant_script`, the table the rerank coverage gate reads).
-    The page keeps its dense and other votes. Words are counted as the
-    degraded-retention gate counts them (`find_policy.query_word_stem_groups`),
-    function words excluded. There is no threshold and no language detection: a
-    lead in the query's own script never costs a same-script page its vote, so
-    an English vault ranks exactly as before. A Latin-script query whose answer
-    is an English page (German, Estonian) is not protected by this rule.
-
-    Only candidates that can reach the fused window are read. The walk follows
-    the fusion of the dense and lexical lanes (`lexical_rankings` weighted by
-    `lane_weights`, the dense lane first) and stops once `window` pages have kept
-    their votes. Withholding only lowers the withheld page's score, so the pages
-    that keep their votes rank among themselves exactly as in this walk, and a
-    page the walk did not reach cannot enter the first `window` of the fusion.
-    Lanes fused later (graph, temporal, CLIP) and the post-fusion multipliers
-    are not in the walk; the window is the depth that multiplier pass reads.
-
-    The request crosses scripts, with the dense lead invisible, when a vote was
-    withheld (`CROSSING_VOTES_WITHHELD`), or when no candidate in the window
-    holds any content word of the query and the query itself is written in
-    another script than the lead (`CROSSING_UNMATCHED`). A query that matches
-    nothing in the lead's own script (an English paraphrase under an English
-    lead) does not cross. A reranker that cannot judge across languages is
-    skipped on a crossing request. The caller skips this in vector mode, where
-    no lexical lane ran and there is no evidence either way.
-    """
-    if not vector_ranking:
-        return _LEXICALLY_VISIBLE
-    lexical = {path for lane in lexical_rankings for path in lane}
-    groups = find_policy.query_word_stem_groups(query)
-    content_words = sum(1 for _stems, is_function, _required in groups if not is_function)
-    if not content_words:
-        return _LEXICALLY_VISIBLE
-    lead_path = vector_ranking[0]
-    lead = page_of(lead_path)
-    if lead is None or find_policy.stem_word_coverage(lead.stem_set, groups)[2]:
-        return _LEXICALLY_VISIBLE
-    lead_script = lead.letter_script
-    # Only a query in another script than the lead can cross by matching nothing,
-    # so only then must same-script candidates be read for a content word.
-    unmatched_can_cross = find_policy.dominant_script(query) != lead_script
-    from . import fusion
-
-    order = fusion.reciprocal_rank_fusion_weighted(
-        [vector_ranking, *lexical_rankings], list(lane_weights), k=rrf_k
+    """The dense-lead guard (`find_policy.lexical_visibility`) over parsed pages."""
+    return find_policy.lexical_visibility(
+        query=query,
+        vector_ranking=vector_ranking,
+        lexical_rankings=lexical_rankings,
+        lane_weights=lane_weights,
+        rrf_k=rrf_k,
+        window=window,
+        view_of=page_of,
     )
-    withheld: set[str] = set()
-    any_content_match = False
-    kept = 0
-    for path, _score in order:
-        if kept >= window:
-            break
-        if path in lexical and path != lead_path:
-            page = page_of(path)
-            if page is not None:
-                other_script = page.letter_script != lead_script
-                if other_script or (unmatched_can_cross and not any_content_match):
-                    matched = find_policy.stem_word_coverage(page.stem_set, groups)[2]
-                    any_content_match = any_content_match or matched > 0
-                    if other_script and matched < content_words:
-                        withheld.add(path)
-                        continue
-        kept += 1
-    if withheld:
-        return LexicalVisibility(frozenset(withheld), CROSSING_VOTES_WITHHELD)
-    if unmatched_can_cross and not any_content_match:
-        return LexicalVisibility(frozenset(), CROSSING_UNMATCHED)
-    return _LEXICALLY_VISIBLE
 
 
 def collect_candidates(
