@@ -33,6 +33,12 @@ The entry filter decides the listed fields and any key ending in `_path`, `_key`
 
 `write_target_withheld` is true only for an existing file the writer may not see. Each door checks it at the point where it already answers a missing target, and raises that same answer, so the refusal is the absent refusal by construction.
 
+### Link resolution follows the reader's view
+
+The graph resolves each wikilink once, over the whole vault, and stores only the result. No stored-schema change is needed to re-resolve it: the dependency index already records every page's raw link targets and their lookup keys. For a reader other than the owner, a per-request view re-resolves lazily and only where a request looks: for each page a graph walk touches, and for each page whose recorded targets name one of those pages, a target whose whole-vault candidates (full path, stem, title) include a page the reader may not see is resolved again with those candidates removed, and that page's link edges are re-derived over the reader's view. Only those candidates are decided. The owner never builds a view.
+
+The same view applies where a read surface resolves links itself: inbound links count a bare link when the target's basename is unique among visible pages, pack neighbours resolve and are decided before ranking and the cap, and relation proposals resolve body links over the view. The page provenance strip keeps a bare stem that a visible page also answers to (a shared stem or title), because in the reader's view it names that visible page.
+
 ### Counts and ranks follow filtering; whole-vault aggregates are the owner's
 
 Review queues (attention, activation, relation debt, stale, contradiction) decide each finding's page and related pages before fusion, so ranks, scores, totals and summaries are computed over what the caller receives. `inbound-links` counts the links it lists after deciding their source pages. The relation queue counts the source pages it decided; when more visible pages exist than its cap it reports truncation without an unscanned count.
@@ -51,5 +57,6 @@ Recall diagnostics are computed over the whole corpus before release decisions: 
 
 ## Risks / Trade-offs
 
+- A bare link whose only candidates are withheld pages is still stripped from a visible page's link list and provenance, as the provenance rule requires, although the twin without that page lists it as an unresolved reference. Keeping it would relax that rule and is left for a ruling.
+- Recall's graph lane builds its candidates in a cache shared across principals, so the pages it reaches by a hop still follow whole-vault resolution for a restricted reader; the in-degree it computed is not returned to such a reader. Deciding hops per audience needs that cache keyed by audience and is left for a ruling.
 - A folder delete by a restricted writer that holds both visible and withheld files, and a create whose path collides with a withheld file, cannot answer exactly as the absent case without either changing the withheld page or changing the contract. They are left for a ruling.
-- Link resolution itself still runs over the whole vault for restricted readers; that is the next part of this change.

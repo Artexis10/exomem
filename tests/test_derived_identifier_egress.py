@@ -1075,3 +1075,104 @@ def test_restricted_recall_diagnostics_read_as_if_the_withheld_page_were_absent(
         assert _text(answers["C"][label]) == _text(answers["B"][label]), label
     owner = _call(vaults["A"], None, "ask_memory", **_ASK_SURFACES["explain"])
     assert "retrieval_profile" in owner
+
+
+# ---------------------------------------------------------------------------
+# Visible links resolve for a restricted reader as the vault it sees would
+# ---------------------------------------------------------------------------
+
+_LINKS_TO = "See [[{t}]] for background on the rollout.\n\n## Relations\n\n- supports [[{t}]]\n"
+
+
+def _stem_collision() -> tuple[dict[str, str], dict[str, str]]:
+    """A withheld page shares the stem a visible link names."""
+    base = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page("Alpha", _LINKS_TO.format(t="beta"), type="insight"),
+        f"{NOTES}/beta.md": _page("Beta", "Beta rollout background.", type="insight"),
+    }
+    withheld = {f"{WITHHELD_DIR}/beta.md": _page("Hidden Draft", "Withheld body text.", type="insight")}
+    return base, withheld
+
+
+def _title_collision() -> tuple[dict[str, str], dict[str, str]]:
+    """A withheld page shares the title a visible link names."""
+    base = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page("Alpha", _LINKS_TO.format(t="Beta Topic"), type="insight"),
+        f"{NOTES}/2026-01-01-beta-topic.md": _page(
+            "Beta Topic", "Beta topic rollout background.", type="insight", title="Beta Topic"
+        ),
+    }
+    withheld = {
+        f"{WITHHELD_DIR}/other-page.md": _page(
+            "Beta Topic", "Withheld body text.", type="insight", title="Beta Topic"
+        )
+    }
+    return base, withheld
+
+
+_LINK_SCENARIOS = {
+    "stem": (_stem_collision, f"{NOTES}/beta.md"),
+    "title": (_title_collision, f"{NOTES}/2026-01-01-beta-topic.md"),
+    "stem-beats-title": (_stem_beats_title, f"{NOTES}/g-page.md"),
+}
+
+
+def _link_surfaces(target: str) -> dict[str, tuple[str, dict[str, Any]]]:
+    alpha = f"{NOTES}/alpha.md"
+    return {
+        "graph-context-alpha": ("connect_memory", {"operation": "graph-context", "path": alpha}),
+        "graph-context-alpha-2": (
+            "connect_memory",
+            {"operation": "graph-context", "path": alpha, "depth": 2},
+        ),
+        "graph-context-target": ("connect_memory", {"operation": "graph-context", "path": target}),
+        "context-alpha": ("connect_memory", {"operation": "context", "path": alpha}),
+        "inbound-target": ("connect_memory", {"operation": "inbound-links", "target": target}),
+        "suggest-alpha": ("connect_memory", {"operation": "suggest-relations", "path": alpha}),
+        "read-alpha": ("read_memory", {"path": alpha, "links": True}),
+        "read-target": ("read_memory", {"path": target, "links": True}),
+    }
+
+
+@pytest.mark.parametrize("scenario", sorted(_LINK_SCENARIOS))
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_link_resolution_reads_as_if_the_withheld_page_were_absent(
+    tmp_path: Path, audience: str, scenario: str
+) -> None:
+    fixture, target = _LINK_SCENARIOS[scenario]
+    base, withheld = fixture()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    principal = _principal(audience)
+    surfaces = _link_surfaces(target)
+
+    answers = {
+        variant: {
+            label: _call(vault, principal, command, **kwargs)
+            for label, (command, kwargs) in surfaces.items()
+        }
+        for variant, vault in vaults.items()
+    }
+
+    assert not _names_withheld(answers["A"])
+    for label in surfaces:
+        assert "__error__" not in answers["A"][label], answers["A"][label]
+        assert _text(answers["A"][label]) == _text(answers["B"][label]), label
+        assert _text(answers["C"][label]) == _text(answers["B"][label]), label
+    edges = answers["A"]["graph-context-alpha"]["graph"]["edges"]
+    assert any(edge["dst_key"] == f"file:{target}" for edge in edges), edges
+
+
+def test_the_owner_still_resolves_links_over_every_page(tmp_path: Path) -> None:
+    base, withheld = _stem_collision()
+    vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")
+
+    owner = _call(
+        vault, None, "connect_memory", operation="graph-context", path=f"{NOTES}/alpha.md"
+    )
+
+    # Over the whole vault the bare link is ambiguous, so no edge reaches beta.
+    assert not any(
+        edge["dst_key"] == f"file:{NOTES}/beta.md" for edge in owner["graph"]["edges"]
+    )

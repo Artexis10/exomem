@@ -957,9 +957,15 @@ def _withheld_keys(withheld_paths: frozenset[str]) -> tuple[frozenset[str], froz
 
 
 def _string_names_withheld(
-    value: str, withheld_paths: frozenset[str], *, reference_field: bool = False
+    value: str,
+    withheld_paths: frozenset[str],
+    *,
+    reference_field: bool = False,
+    exempt_stems: frozenset[str] = frozenset(),
 ) -> bool:
     full, stems = _withheld_keys(withheld_paths)
+    if exempt_stems:
+        stems = stems - exempt_stems
 
     def _hit(candidate: str, *, is_wikilink_target: bool = False) -> bool:
         # `_canonical_references` (plural): a PLAIN candidate containing
@@ -993,7 +999,11 @@ def _string_names_withheld(
 
 
 def _names_withheld(
-    value: Any, withheld_paths: frozenset[str], *, reference_field: bool = False
+    value: Any,
+    withheld_paths: frozenset[str],
+    *,
+    reference_field: bool = False,
+    exempt_stems: frozenset[str] = frozenset(),
 ) -> bool:
     """True when `value` mentions any withheld path, in any reference form,
     at any nesting depth.
@@ -1008,15 +1018,22 @@ def _names_withheld(
     if not withheld_paths:
         return False
     if isinstance(value, str):
-        return _string_names_withheld(value, withheld_paths, reference_field=reference_field)
+        return _string_names_withheld(
+            value, withheld_paths, reference_field=reference_field, exempt_stems=exempt_stems
+        )
     if isinstance(value, Mapping):
         return any(
-            _names_withheld(v, withheld_paths, reference_field=reference_field)
+            _names_withheld(
+                v, withheld_paths, reference_field=reference_field, exempt_stems=exempt_stems
+            )
             for v in value.values()
         )
     if isinstance(value, (list, tuple, set, frozenset)):
         return any(
-            _names_withheld(v, withheld_paths, reference_field=reference_field) for v in value
+            _names_withheld(
+                v, withheld_paths, reference_field=reference_field, exempt_stems=exempt_stems
+            )
+            for v in value
         )
     return False
 
@@ -3868,28 +3885,28 @@ def annotate_page(
         # below had nothing to match. Gathered across ALL fields and resolved
         # ONCE — resolving per field meant five corpus walks per page.
         bare_stems.update(_iter_reference_stems(page.get(name)))
-    if bare_stems:
-        referenced.update(_resolve_reference_stems(vault_root, bare_stems))
-    withheld = frozenset(
-        rel
-        for rel in referenced
-        if rel != rel_path
-        and (
-            (
-                ref_decision := _decide_path(
-                    vault_root,
-                    rel,
-                    policy=policy,
-                    audience=who.audience_id,
-                    purpose=declared_purpose,
-                    grants_hash=grants_hash,
-                    authorization_session=who.authorization_session_id,
-                    authorization_context=who.verified_authorization_session,
-                )
-            )
-            is None
-            or ref_decision.level < RELEASE_FLOOR
+    stem_matches = _reference_stem_matches(vault_root, bare_stems) if bare_stems else {}
+    for matches in stem_matches.values():
+        referenced.update(matches)
+
+    def _below_floor(rel: str) -> bool:
+        ref_decision = _decide_path(
+            vault_root,
+            rel,
+            policy=policy,
+            audience=who.audience_id,
+            purpose=declared_purpose,
+            grants_hash=grants_hash,
+            authorization_session=who.authorization_session_id,
+            authorization_context=who.verified_authorization_session,
         )
+        return ref_decision is None or ref_decision.level < RELEASE_FLOOR
+
+    withheld = frozenset(rel for rel in referenced if rel != rel_path and _below_floor(rel))
+    exempt_stems = (
+        _visibly_named_stems(vault_root, stem_matches, withheld, _below_floor)
+        if withheld and stem_matches
+        else frozenset()
     )
     if level == LEVEL_EXCERPT:
         body = parsed.body if snapshot_content is not None else str(page.get("body") or "")
@@ -3913,7 +3930,7 @@ def annotate_page(
             )
         return excerpt
 
-    out = _strip_page_provenance(dict(page), withheld)
+    out = _strip_page_provenance(dict(page), withheld, exempt_stems=exempt_stems)
     if decision.release_strip:
         out = bridges.strip_provenance(
             out,
@@ -3987,31 +4004,79 @@ def _resolve_reference_targets(vault_root: Path, targets: Iterable[str]) -> set[
 
 def _resolve_reference_stems(vault_root: Path, stems: Iterable[str]) -> set[str]:
     """Map bare wikilink stems onto the vault paths they name."""
+    return {
+        rel for matches in _reference_stem_matches(vault_root, stems).values() for rel in matches
+    }
+
+
+def _reference_stem_matches(vault_root: Path, stems: Iterable[str]) -> dict[str, set[str]]:
+    """Each bare wikilink stem (casefolded) and the vault paths sharing it."""
     wanted = {s.casefold() for s in stems}
     if not wanted:
-        return set()
-    found: set[str] = set()
+        return {}
+    found: dict[str, set[str]] = {}
     for page in Path(vault_root).rglob("*.md"):
-        if page.stem.casefold() in wanted and page.is_file():
-            found.add(str(page.relative_to(Path(vault_root))).replace("\\", "/"))
+        stem = page.stem.casefold()
+        if stem in wanted and page.is_file():
+            found.setdefault(stem, set()).add(
+                str(page.relative_to(Path(vault_root))).replace("\\", "/")
+            )
     return found
 
 
-def _strip_page_provenance(page: dict[str, Any], withheld_paths: frozenset[str]) -> dict[str, Any]:
+def _visibly_named_stems(
+    vault_root: Path,
+    stem_matches: Mapping[str, set[str]],
+    withheld: frozenset[str],
+    below_floor: Callable[[str], bool],
+) -> frozenset[str]:
+    """Bare stems that a page the reader may see also answers to.
+
+    A link resolves over the reader's view: when a page it may see shares a
+    stem with a withheld page, or holds that stem as its title, the stem names
+    that visible page, exactly as in a vault without the withheld one, and is
+    not a reference to the withheld page. Only stems a withheld page shares
+    are considered, and only their other candidates are decided.
+    """
+    exempt: set[str] = set()
+    titles: Mapping[str, list[str]] | None = None
+    for stem, matches in stem_matches.items():
+        if not matches & withheld:
+            continue
+        if any(rel not in withheld for rel in matches):
+            exempt.add(stem)
+            continue
+        if titles is None:
+            from .. import find as find_module
+
+            titles = find_module.recall_resolver_snapshot(Path(vault_root)).titles
+        if any(not below_floor(f"{no_ext}.md") for no_ext in titles.get(stem, ())):
+            exempt.add(stem)
+    return frozenset(exempt)
+
+
+def _strip_page_provenance(
+    page: dict[str, Any],
+    withheld_paths: frozenset[str],
+    *,
+    exempt_stems: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
     if not withheld_paths:
         return page
+    names = functools.partial(_names_withheld, exempt_stems=exempt_stems)
+
     frontmatter = page.get("frontmatter")
     if isinstance(frontmatter, Mapping):
         clean_fm = dict(frontmatter)
         for name in _FRONTMATTER_PROVENANCE_FIELDS:
             value = clean_fm.get(name)
             if isinstance(value, list):
-                kept = [v for v in value if not _names_withheld(v, withheld_paths)]
+                kept = [v for v in value if not names(v, withheld_paths)]
                 if kept:
                     clean_fm[name] = kept
                 else:
                     clean_fm.pop(name, None)
-            elif value is not None and _names_withheld(value, withheld_paths):
+            elif value is not None and names(value, withheld_paths):
                 clean_fm.pop(name, None)
         page["frontmatter"] = clean_fm
     for name in _PAGE_PROVENANCE_FIELDS:
@@ -4022,22 +4087,22 @@ def _strip_page_provenance(page: dict[str, Any], withheld_paths: frozenset[str])
         # is a reference — see `_names_withheld(reference_field=...)`.
         ref = True
         if isinstance(value, list):
-            kept = [v for v in value if not _names_withheld(v, withheld_paths, reference_field=ref)]
+            kept = [v for v in value if not names(v, withheld_paths, reference_field=ref)]
             page[name] = kept
         elif isinstance(value, Mapping):
             page[name] = {
                 key: (
-                    [v for v in item if not _names_withheld(v, withheld_paths, reference_field=ref)]
+                    [v for v in item if not names(v, withheld_paths, reference_field=ref)]
                     if isinstance(item, list)
                     else item
                 )
                 for key, item in value.items()
                 if not (
                     not isinstance(item, list)
-                    and _names_withheld(item, withheld_paths, reference_field=ref)
+                    and names(item, withheld_paths, reference_field=ref)
                 )
             }
-        elif _names_withheld(value, withheld_paths, reference_field=ref):
+        elif names(value, withheld_paths, reference_field=ref):
             page.pop(name, None)
     return page
 

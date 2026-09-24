@@ -5317,6 +5317,7 @@ def _outbound_wikilink_paths(
     resolver=None,
     *,
     allowed_paths: AbstractSet[str] | None = None,
+    visible: Callable[[str], bool] | None = None,
 ) -> list[str]:
     """Vault-relative POSIX paths (no .md) that this page's body links to.
 
@@ -5330,6 +5331,8 @@ def _outbound_wikilink_paths(
     ``allowed_paths`` may provide that request's exact checkpoint-bound recall
     projection, avoiding a filesystem policy walk for every resolved link.
     Callers without such a snapshot retain the live policy check.
+    ``visible`` is a reader's view (`None` for the owner): targets then
+    resolve over the pages it admits, as in a vault without the others.
     """
     from .vault import (
         find_body_wikilinks,
@@ -5347,7 +5350,7 @@ def _outbound_wikilink_paths(
             continue
         try:
             canonical, warning = normalize_wikilink(
-                target, vault_root, resolver=resolver, strict=False
+                target, vault_root, resolver=resolver, strict=False, visible=visible
             )
         except Exception:  # noqa: BLE001 - malformed links are skipped during ranking.
             continue

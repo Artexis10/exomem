@@ -478,13 +478,22 @@ def _neighborhood(
     vault_root: Path, packed_pages: list[ParsedPage], max_neighbors: int
 ) -> tuple[list[dict], int]:
     """1-hop inbound+outbound wikilink neighbours of the packed notes, packed notes
-    excluded, ranked by co-citation (distinct packed notes linked), capped."""
+    excluded, ranked by co-citation (distinct packed notes linked), capped.
+
+    For a reader other than the owner, links resolve over the pages it may see
+    and a neighbour it may not see is decided before ranking and the cap.
+    """
+    from .governance import egress
+
+    visible = egress.visible_page_filter(vault_root)
     packed_canon = {corpus_aware._canon(p.rel_path) for p in packed_pages}
     # canon -> {"path", "directions": set, "referenced_by": set}
     neigh: dict[str, dict] = {}
 
     def _touch(target_path: str, packed_rel: str, direction: str) -> None:
         if not recall_policy.is_recall_candidate(vault_root, vault_root / target_path):
+            return
+        if visible is not None and not visible(target_path):
             return
         canon = corpus_aware._canon(target_path)
         if canon in packed_canon:
@@ -495,10 +504,12 @@ def _neighborhood(
         entry["directions"].add(direction)
         entry["referenced_by"].add(packed_rel)
 
+    # The owner's calls are made exactly as before.
+    view: dict = {} if visible is None else {"visible": visible}
     for page in packed_pages:
-        for target in find_module._outbound_wikilink_paths(page, vault_root):
+        for target in find_module._outbound_wikilink_paths(page, vault_root, **view):
             _touch(target, page.rel_path, "out")
-        for link in vault_module.find_inbound_wikilinks(vault_root, page.rel_path):
+        for link in vault_module.find_inbound_wikilinks(vault_root, page.rel_path, **view):
             _touch(link.path, page.rel_path, "in")
 
     items = sorted(

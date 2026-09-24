@@ -24,7 +24,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import IO, TYPE_CHECKING, Any, BinaryIO, Literal
 
 import yaml
@@ -6378,7 +6378,12 @@ def evict_inbound_index(vault_root: Path) -> bool:
         return _INBOUND_INDEX.pop(root, None) is not None
 
 
-def find_inbound_wikilinks(vault_root: Path, target_rel_path: str) -> list[InboundLink]:
+def find_inbound_wikilinks(
+    vault_root: Path,
+    target_rel_path: str,
+    *,
+    visible: Callable[[str], bool] | None = None,
+) -> list[InboundLink]:
     """Return every wikilink in the vault that resolves to `target_rel_path`.
 
     `target_rel_path` is vault-relative POSIX, with or without `.md`. Matches
@@ -6393,6 +6398,10 @@ def find_inbound_wikilinks(vault_root: Path, target_rel_path: str) -> list[Inbou
 
     Served from the process-cached inbound-link index (one read pass per
     vault revision) — results identical to scanning every file per call.
+
+    `visible` is a reader's view (see `egress.visible_page_filter`; `None`
+    for the owner): uniqueness is then counted over the pages it admits, as
+    in a vault without the others. Only a basename that is shared is decided.
     """
     target = target_rel_path.replace("\\", "/").removesuffix(".md")
     target_full = target if target.startswith(kb_prefix()) else kb_prefix() + target
@@ -6400,7 +6409,14 @@ def find_inbound_wikilinks(vault_root: Path, target_rel_path: str) -> list[Inbou
     target_basename = target.rsplit("/", 1)[-1]
 
     data = _inbound_index(vault_root)
-    basename_unique = data.stem_counts.get(target_basename, 0) == 1
+    stem_count = data.stem_counts.get(target_basename, 0)
+    if visible is not None and stem_count > 1:
+        stem_count = sum(
+            1
+            for rel in data.known_rels
+            if PurePosixPath(rel).stem == target_basename and visible(rel)
+        )
+    basename_unique = stem_count == 1
 
     candidates: list[_InboundEntry] = []
     candidates.extend(data.buckets.get(target_full, ()))

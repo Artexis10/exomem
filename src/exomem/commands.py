@@ -5610,8 +5610,13 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
     """
     requested = str(target)
     target = _resolve_memory_identifier(vault_root, target)
+    # The caller's view (`None` for the owner): a bare link counts when the
+    # target's basename is unique among the pages the caller may see.
+    visible = egress_module.visible_page_filter(vault_root)
     try:
-        result = list_inbound_links_module.list_inbound_links(vault_root, target=target)
+        result = list_inbound_links_module.list_inbound_links(
+            vault_root, target=target, visible=visible
+        )
     except list_inbound_links_module.ListInboundLinksError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
     payload = result.as_dict()
@@ -5641,10 +5646,9 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
     # The count is the length of the list the caller receives: a link from a
     # page it may not see is decided here, before counting, rather than left
     # for the entry filter to drop beside a count that still includes it.
-    keep = egress_module.restricted_release_filter(vault_root)
-    if keep is not None:
+    if visible is not None:
         payload["inbound"] = [
-            row for row in payload["inbound"] if keep(str(row.get("path") or ""))
+            row for row in payload["inbound"] if visible(str(row.get("path") or ""))
         ]
         payload["count"] = len(payload["inbound"])
     return payload
