@@ -22,6 +22,7 @@ and index updates are determined by the operation, not the caller.
 |---|---|---|
 | **bootstrap** | Return a portable, versioned operating contract for generic MCP clients. A skill-aware agent fetches session state when current policy or capabilities are absent, with compact fallback when its exposed schema or server cannot accept the skill contract; use diagnostics profile for timing/performance interpretation | — |
 | **add** | Capture raw input as immutable source | `Sources/<Kind>/[<Domain>/]` |
+| **episode_memory** | Record a bounded recap of a conversation — worked on, decided, left open, at most three verbatim user statements — once at a decision or stopping point (`action="record"`); reuse its `episode` key for later revisions, which retire the previous one. `action="inspect"` reads the key's revision history | `Sources/Episodes/` |
 | **note** | Compile a structured note from raw input or thinking | `Notes/<type>/` |
 | **link** | Create or update an entity, wire backlinks | `Entities/<type>/` |
 | **preserve** | Capture a **text** factual artifact for an incident scope. Binaries (PDF / image / any file) go out-of-band via upload (see the media transport guidance below), not this tool | `Evidence/<scope>/` |

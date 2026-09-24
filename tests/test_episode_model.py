@@ -540,3 +540,15 @@ def test_historical_effect_cannot_rebind_or_disappear_after_revision() -> None:
         model.revise_proposal(state, candidate, _proposal({**step, "effect_revision": 3}))
     with pytest.raises(model.EpisodeError, match="EPISODE_ATTEMPTED_LEAF"):
         model.revise_proposal(state, candidate, _proposal(_step(suffix="replacement")))
+
+
+def test_input_evidence_may_carry_the_refs_a_recap_concerns() -> None:
+    from exomem import episode_model
+
+    refs = ["exomem://memory/69b2b4d3-d4c3-4361-8714-91b8f1b1c0b1"]
+    state = episode_model.start_episode("turn-42", {"digest": "a" * 64, "about": refs})
+    assert state["input_revisions"][0]["evidence"]["about"] == refs
+    assert state["input_revisions"][0]["recovery"] == "unavailable"
+    for bad in (["x"] * 4, [""], [1], "exomem://memory/x", ["y" * 2049], ["x", "x"]):
+        with pytest.raises(episode_model.EpisodeError, match="EPISODE_EVIDENCE_INVALID"):
+            episode_model.start_episode("turn-42", {"digest": "a" * 64, "about": bad})

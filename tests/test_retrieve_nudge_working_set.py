@@ -220,8 +220,15 @@ def _serve(monkeypatch: pytest.MonkeyPatch, packet: dict | None) -> list[dict]:
     """Answer the working-set rung with `packet`, recording every request body."""
     seen: list[dict] = []
 
-    def _fetch(prompt, api_key, continuity="", timeout=0.0):
-        seen.append({"prompt": prompt, "continuity": continuity, "key": api_key})
+    def _fetch(prompt, api_key, continuity="", timeout=0.0, attribution=None):
+        seen.append(
+            {
+                "prompt": prompt,
+                "continuity": continuity,
+                "key": api_key,
+                "attribution": attribution,
+            }
+        )
         return packet
 
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
@@ -736,7 +743,7 @@ def test_the_packet_replaces_the_reminder(
     tmp_path: Path,
     working_set_mode: None,
 ) -> None:
-    _serve(monkeypatch, _packet())
+    seen = _serve(monkeypatch, _packet())
 
     context = _context(_run(monkeypatch, capsys, _event(), tmp_path / "home"))
 
@@ -744,6 +751,11 @@ def test_the_packet_replaces_the_reminder(
     assert hook.REMINDER not in context
     assert "depot stock: 180 kg" in context
     assert len(context) <= hook._working_set_max_chars()
+    # The rung carries the session's attribution, never the raw session id.
+    assert seen[0]["attribution"] == {
+        "client": "claude-code",
+        "session": hook.episode_key("claude-code", SESSION),
+    }
 
 
 def test_a_transport_failure_falls_back_to_the_reminder(
@@ -2049,3 +2061,58 @@ def test_the_referent_line_follows_what_actually_supplied_the_referent(
     block = hook._format_working_set_block(packet, 4000)
 
     assert ("- referent:" in block) is printed
+
+
+# --------------------------------------------------------------------------- #
+# Episode recaps: a raw-material line, so `read_memory` is the follow-up
+# --------------------------------------------------------------------------- #
+
+
+def test_an_episode_entry_renders_as_a_session_line_with_its_summary() -> None:
+    hook = _load_hook_module()
+    path = (
+        "Knowledge Base/Sources/Episodes/"
+        "2026-09-21-harbor-lamp-purchase-ep0123456789ab-20260921t101500000000-0a0b0c0d.md"
+    )
+    packet = {
+        "recent_context": [
+            {
+                "ref": path,
+                "path": path,
+                "title": "Harbor Lamp purchase",
+                "kind": "episode",
+                "why": "episode",
+                "as_of": "2026-09-21",
+                "statement": "summary: Chose the brass lamp.",
+                "episode": "ep-" + "0" * 31 + "1",
+            }
+        ],
+        "anchors": [],
+        "roles": [],
+        "units": [],
+        "pointers": [],
+        "current_state": [],
+        "ambiguity": [],
+        "missing": [],
+        "budget": {"limit_chars": 4000, "used_chars": 0},
+        "generation": {},
+        "abstained": True,
+        "abstention": {"reason": "unresolved"},
+    }
+
+    lines = hook._recent_lines(packet)
+
+    assert lines == [f"- session: Harbor Lamp purchase — summary: Chose the brass lamp. [{path}]"]
+    assert "`session` line with `read_memory`" in hook._WORKING_SET_HEADER
+
+
+def test_the_deployed_retrieve_hook_still_matches_the_packaged_one() -> None:
+    packaged = RETRIEVE_SCRIPT.read_bytes()
+    deployed = (
+        Path(__file__).resolve().parents[1]
+        / "plugins"
+        / "claude-code"
+        / "hooks"
+        / "exomem_retrieve_nudge.py"
+    ).read_bytes()
+    assert deployed == packaged

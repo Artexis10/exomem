@@ -29,9 +29,10 @@ from exomem import commands, prominence
 
 #: The ceiling the change's spec sets for the line, in served-JSON bytes.
 CARRIER_MAX_BYTES = 220
-#: The compact profile's ceiling and the margin its own test warns below.
+#: The compact profile's ceiling and the margin its own test warns below
+#: (`tests/test_bootstrap_compact_budget.py`, which records why the margin is 400).
 COMPACT_BYTE_CEILING = 63_300
-HEADROOM_WARNING_BYTES = 512
+HEADROOM_WARNING_BYTES = 400
 
 CARRYING_LEVELS = ("balanced", "maximal")
 SILENT_LEVELS = ("off", "light")
@@ -158,7 +159,7 @@ def test_the_line_costs_at_most_its_budget_in_served_json() -> None:
 #:
 #: The two assertions below are deliberately not the same assertion. The HARD
 #: ceiling is a claim about every level, because a payload over it is a payload a
-#: client truncates. The 512-byte WARNING margin is a claim about the DEFAULT
+#: client truncates. The WARNING margin is a claim about the DEFAULT
 #: level only: `maximal` exists in order to spend prose budget, and it was
 #: already inside the warning band before this change (375 bytes at base), so
 #: requiring the margin there would be requiring `maximal` not to be `maximal`.

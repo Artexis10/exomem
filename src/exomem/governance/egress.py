@@ -47,7 +47,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote
 
-from .. import find_corpus, memory_refs, reserved_paths
+from .. import find_corpus, memory_refs, reserved_paths, vault
 from ..find_types import Hit, SemanticUnitHit
 from ..kbdir import kb_dirname
 from . import (
@@ -286,13 +286,27 @@ def _outcome_for_decision(
         if ref is not None:
             value["ref"] = ref
     else:
+        # Defence in depth: `rel_path` is expected to already be a decided,
+        # vault-relative candidate, but this hash is the last thing that
+        # touches the filesystem before the receipt is written. Confining it
+        # here too means an unconfined candidate that reaches this far still
+        # cannot make the receipt read (and hash the size of) an arbitrary
+        # server file — it just loses its content hash.
         try:
             target = Path(vault_root) / rel_path
-            raw = target.read_bytes()
-            value["content_hash"] = hashlib.sha256(raw).hexdigest()
-            value["size"] = len(raw)
-        except OSError:
+            resolved = target.resolve()
+            resolved.relative_to(Path(vault_root).resolve())
+        except (OSError, ValueError):
             pass
+        else:
+            if resolved.is_file():
+                try:
+                    raw = resolved.read_bytes()
+                except OSError:
+                    pass
+                else:
+                    value["content_hash"] = hashlib.sha256(raw).hexdigest()
+                    value["size"] = len(raw)
     collector = _collector()
     outcome_key = (
         rel_path,
@@ -1760,42 +1774,12 @@ def resolve_visible_identifier(
             "INVALID_REFERENCE", f"invalid memory reference: {raw!r}"
         )
 
-    candidates = tuple(
-        rel_path
-        for rel_path in memory_refs.paths_for_ids_read_only(
-            vault_root, (memory_id,)
-        ).get(memory_id, ())
-        if not reserved_paths.classify_logical(rel_path).blocked
-        if not lifecycle.is_tombstoned(vault_root, rel_path)
+    visible = _visible_candidates(
+        vault_root,
+        memory_refs.paths_for_ids_read_only(vault_root, (memory_id,)).get(memory_id, ()),
+        principal=principal,
+        purpose=purpose,
     )
-    policy = policy_module.load(vault_root)
-    who = principal if principal is not None else effective_principal()
-    if policy.empty:
-        visible = candidates
-    elif policy.blocked or not who.resolved:
-        visible = ()
-    else:
-        declared_purpose = _declared_purpose(vault_root, who, purpose)
-        grants_hash = _grants_hash(policy)
-        visible = tuple(
-            rel_path
-            for rel_path in candidates
-            if (
-                decision := _decide_path(
-                    vault_root,
-                    rel_path,
-                    policy=policy,
-                    audience=who.audience_id,
-                    purpose=declared_purpose,
-                    grants_hash=grants_hash,
-                    authorization_session=who.authorization_session_id,
-                    authorization_context=who.verified_authorization_session,
-                )
-            )
-            is not None
-            and decision.level > LEVEL_NONE
-        )
-
     if len(visible) > 1:
         raise memory_refs.ReferenceError(
             "AMBIGUOUS_REFERENCE",
@@ -1806,6 +1790,85 @@ def resolve_visible_identifier(
             "REFERENCE_NOT_FOUND", f"memory id not found: {memory_id}"
         )
     return visible[0]
+
+
+def _visible_candidates(
+    vault_root: Path,
+    paths: Iterable[str],
+    *,
+    principal: RequestPrincipal | None,
+    purpose: str | None,
+) -> tuple[str, ...]:
+    """The pages holding one id that the caller may see, as if the rest were absent."""
+    candidates = tuple(
+        rel_path
+        for rel_path in paths
+        if not reserved_paths.classify_logical(rel_path).blocked
+        if not lifecycle.is_tombstoned(vault_root, rel_path)
+    )
+    policy = policy_module.load(vault_root)
+    who = principal if principal is not None else effective_principal()
+    if policy.empty:
+        return candidates
+    if policy.blocked or not who.resolved:
+        return ()
+    declared_purpose = _declared_purpose(vault_root, who, purpose)
+    grants_hash = _grants_hash(policy)
+    return tuple(
+        rel_path
+        for rel_path in candidates
+        if (
+            decision := _decide_path(
+                vault_root,
+                rel_path,
+                policy=policy,
+                audience=who.audience_id,
+                purpose=declared_purpose,
+                grants_hash=grants_hash,
+                authorization_session=who.authorization_session_id,
+                authorization_context=who.verified_authorization_session,
+            )
+        )
+        is not None
+        and decision.level > LEVEL_NONE
+    )
+
+
+def visible_memory_refs(
+    vault_root: Path,
+    values: Iterable[str],
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> frozenset[str]:
+    """The memory refs among `values` that name exactly one page the caller may see.
+
+    `resolve_visible_identifier` for a batch: one corpus scan for all of them,
+    never one per ref, and the scan runs whatever the refs are, so the work
+    says nothing about which of them exist. An unknown, withheld or ambiguous
+    ref is simply absent from the answer, and the three are indistinguishable.
+    """
+    wanted = {
+        value: memory_id
+        for value in dict.fromkeys(str(item or "").strip() for item in values)
+        if (memory_id := memory_refs.parse_memory_ref(value)) is not None
+    }
+    if not wanted:
+        return frozenset()
+    found = memory_refs.paths_for_ids_read_only(Path(vault_root), wanted.values())
+    return frozenset(
+        value
+        for value, memory_id in wanted.items()
+        if len(
+            _visible_candidates(
+                Path(vault_root),
+                found.get(memory_id, ()),
+                principal=principal,
+                purpose=purpose,
+            )
+        )
+        == 1
+    )
 
 
 def _scope_label(policy: Policy, decision: Decision) -> str | None:
@@ -4422,6 +4485,9 @@ _COMMAND_PROJECTOR_KIND: dict[str, str] = {
     # what it emits is refs and short provenance-bearing excerpts naming vault
     # items, which is exactly what the structure backstop filters.
     "activate_context": "structure",
+    # `inspect` names the caller's own recap by ref; `record` names the page
+    # the caller just wrote. Both go through the dispatcher cross-check.
+    "episode_memory": "structure",
 }
 
 # Receipt adapters follow the same default-deny registry as serializers.  A
@@ -4451,6 +4517,7 @@ _COMMAND_OUTCOME_ADAPTER: dict[str, str] = {
     "plan_memory": "structure",
     "schema_memory": "structure",
     "activate_context": "structure",
+    "episode_memory": "structure",
 }
 
 # Every content selector declares both evidence collection and tombstone
@@ -4558,6 +4625,10 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "revise": "mutation",
         "rebaseline": "mutation",
         "discard": "mutation",
+    },
+    ("episode_memory", "action"): {
+        "record": "mutation",
+        "inspect": "structure",
     },
     ("plan_memory", "action"): {
         "inspect": "structure",
@@ -4970,6 +5041,91 @@ def release_level_for(
         purpose=declared_purpose,
     )
     return level
+
+
+#: A unit reference whose parent names no page. A seed whose parent is withheld
+#: from the caller is resolved as this instead, so the resolver, its drift
+#: accounting and every lane after it take the branch a unit of an absent page
+#: takes, rather than a branch that exists only because the page does.
+UNRESOLVABLE_UNIT_REF = "exomem://memory/unavailable#unavailable"
+
+
+def unit_parent_withheld(
+    vault_root: Path,
+    unit_ref: str,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> bool:
+    """True when a page a unit reference names is not released to the caller.
+
+    Whether a unit reference resolves, and the drift reported while resolving
+    it, are facts about the pages the resolver consults, so a graph seed is
+    decided by those pages before the graph is asked. The candidates are every
+    path the graph's own rows can consult for the reference (current or not;
+    `epistemic_graph.unit_ref_indexed_paths`), every page the reference's
+    memory id names in the reference index, and the page an
+    `exomem://vault/` or `exomem://source/` parent names by path — confined to
+    the vault the same way any caller-named path is (`vault.resolve_under_vault`);
+    a name that does not resolve inside the vault is undecidable and counts as
+    withheld without ever being stat'd or read. Each candidate is decided at
+    `RELEASE_FLOOR`, the level below which the graph guard already withholds a
+    seed; a path that cannot be decided counts as withheld, and a walk with
+    more rows than the resolver examines cannot prove every page visible.
+
+    An explicit sub-floor decision withholds the owner's seed exactly as it
+    withholds anyone else's, so a rule that names the `owner` audience still
+    applies to a unit seed. What does not apply to the owner is an
+    UNDECIDABLE candidate: a walk with more rows than the resolver examines
+    (`work_exhausted`), or a stale row naming a path that is no longer
+    there, is a graph artifact rather than a policy decision, and must not
+    cost the owner the stale-status and drift report the unguarded answer
+    carries. For anyone else, an undecidable candidate counts as withheld,
+    because a walk that cannot prove every candidate visible cannot prove the
+    page released either.
+    """
+    vault_root = Path(vault_root)
+    policy = policy_module.load(vault_root)
+    if policy.empty and not lifecycle.tombstoned_paths(vault_root):
+        return False
+    who = principal if principal is not None else effective_principal()
+    is_owner = who.resolved and who.audience_id == OWNER_AUDIENCE
+    parent_ref, separator, _fragment = str(unit_ref or "").rpartition("#")
+    if not separator or not parent_ref:
+        return False
+    from .. import epistemic_graph
+
+    indexed, work_exhausted = epistemic_graph.unit_ref_indexed_paths(vault_root, unit_ref)
+    if work_exhausted and not is_owner:
+        return True
+    candidates = set(indexed)
+    memory_id = memory_refs.parse_memory_ref(parent_ref)
+    if memory_id is not None:
+        candidates.update(
+            memory_refs.paths_for_ids_read_only(vault_root, (memory_id,)).get(memory_id, ())
+        )
+    elif parent_ref.lower().startswith(("exomem://vault/", "exomem://source/")):
+        named = memory_refs.resolve_identifier_read_only(vault_root, parent_ref)
+        try:
+            _named_abs, named = vault.resolve_under_vault(vault_root, named)
+        except vault.VaultPathError:
+            return True
+        candidates.add(named)
+    for rel_path in sorted(candidates):
+        level = release_level_for(vault_root, rel_path, principal=who, purpose=purpose)
+        if level is None:
+            # Undecidable — a stale or budget-truncated graph row pointing at
+            # a path that is no longer there, most often. For anyone else
+            # that is indistinguishable from a page withheld from them, so it
+            # counts as withheld. The owner is never denied a page over a
+            # graph artifact; only an explicit sub-floor decision (an
+            # owner-targeted rule) withholds the owner's seed, below.
+            if is_owner:
+                continue
+            return True
+        if level < RELEASE_FLOOR:
+            return True
+    return False
 
 
 def release_level_for_path_only(
