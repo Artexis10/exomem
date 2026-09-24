@@ -4085,7 +4085,8 @@ def _strip_page_provenance(
             value = clean_fm.get(name)
             if isinstance(value, list):
                 kept = [v for v in value if not names(v, withheld_paths)]
-                if kept:
+                # An empty list names nothing, so it stays as written.
+                if kept or not value:
                     clean_fm[name] = kept
                 else:
                     clean_fm.pop(name, None)

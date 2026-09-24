@@ -1200,6 +1200,28 @@ def test_a_restricted_reviewer_can_act_on_a_link_its_view_resolved(
     assert _text(answers["C"]) == _text(answers["B"])
 
 
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_an_empty_provenance_list_stays_as_written(tmp_path: Path, audience: str) -> None:
+    base = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page(
+            "Alpha", "See [[zeta-plan]] for background.", type="insight", sources=[]
+        ),
+    }
+    withheld = {f"{WITHHELD_DIR}/zeta-plan.md": _page("Hidden Draft", "Withheld body text.")}
+    vaults = _twins(tmp_path, base, withheld, audience)
+
+    answers = {
+        variant: _call(
+            vault, _principal(audience), "read_memory", path=f"{NOTES}/alpha.md", links=True
+        )
+        for variant, vault in vaults.items()
+    }
+
+    assert answers["A"]["frontmatter"]["sources"] == []
+    assert _text(answers["A"]["frontmatter"]) == _text(answers["B"]["frontmatter"])
+
+
 def test_the_owner_still_resolves_links_over_every_page(tmp_path: Path) -> None:
     base, withheld = _stem_collision()
     vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")
