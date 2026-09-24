@@ -2812,11 +2812,15 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         "resolve-entity-type": "structure",
         "propose-relation": "structure",
         "save-relations": "mutation",
+        "census": "structure",
     }
     schema = product["schema_memory"]
     assert commands.invocation_is_read_only(schema, {"operation": "infer"})
     assert not commands.invocation_is_read_only(schema, {"operation": "infer", "save": True})
     assert commands.invocation_is_read_only(schema, {"operation": "validate"})
+    assert commands.invocation_is_read_only(
+        schema, {"operation": "census", "subject": "relations"}
+    )
     assert commands.invocation_is_read_only(
         schema, {"operation": "resolve", "subject": "workflow-contracts"}
     )

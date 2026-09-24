@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -22,6 +23,8 @@ from typing import Any
 
 from .command_surface import canonical_request_id
 from .log_events import log_event
+from .cloud_cell import cloud_mode_enabled
+from .privacy_log import content_private_logging_enabled, log_http_method, log_session_ref
 
 ASGIMessage = dict[str, Any]
 Receive = Callable[[], Awaitable[ASGIMessage]]
@@ -32,6 +35,10 @@ logger = logging.getLogger("exomem.access")
 _REQUEST_ID_HEADER = b"x-exomem-request-id"
 _SESSION_ID_HEADER = b"mcp-session-id"
 _CF_RAY_HEADER = b"cf-ray"
+#: Cloudflare's own ray shape. Under content-private logging a `cf-ray` of any
+#: other shape is caller-chosen text, so it is dropped rather than logged. A
+#: cloud cell has no Cloudflare in front of it at all, so it never logs one.
+_CF_RAY_SHAPE = re.compile(r"[0-9a-f]{16}(-[A-Z]{3})?")
 
 
 def access_log_disabled(env: dict[str, str] | None = None) -> bool:
@@ -94,14 +101,17 @@ class AccessLogMiddleware:
         finally:
             duration_ms = round((time.perf_counter() - t0) * 1000, 2)
             fields: dict[str, Any] = {
-                "method": method,
+                "method": log_http_method(method),
                 "status": response_status.get("status"),
                 "duration_ms": duration_ms,
                 "request_id": request_id,
             }
-            if session_id:
-                fields["session_id"] = session_id
-            if cf_ray:
+            session_ref = log_session_ref(session_id)
+            if session_ref:
+                fields["session_id"] = session_ref
+            if cf_ray and not cloud_mode_enabled() and (
+                not content_private_logging_enabled() or _CF_RAY_SHAPE.fullmatch(cf_ray)
+            ):
                 fields["cf_ray"] = cf_ray
             # The raw path is client-controlled text (any URL a client requests
             # is logged, including 404 probes), so it is content-classified:
