@@ -512,8 +512,7 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
 - **WHEN** a turn that resolves no anchor shares exactly two distinctive
   stems with a page and says them further apart than the declared window
 - **THEN** that page is not a candidate and the turn abstains `unresolved`
-- **AND** the same two stems said as a phrase DO make it a candidate, as do
-  three of that page's distinctive stems sitting anywhere in the turn
+- **AND** the same two stems said as a phrase DO make it a candidate
 
 #### Scenario: One word is not a phrase, and an unspaced run never pairs
 

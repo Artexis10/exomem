@@ -568,7 +568,8 @@ def lexical_evidence(
         return [], "available"
     try:
         # A full-page match on the same single name word is not a second fact.
-        # Retain two distinct content stems; exact aliases still resolve alone.
+        # Require two distinct content units (words or unspaced runs); exact
+        # aliases still resolve alone.
         content_turn = " ".join(
             token for token in working_set_index.tokens_of(working_set_index.normalize(turn))
             if token not in working_set_index.STOPWORDS
