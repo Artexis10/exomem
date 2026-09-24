@@ -349,14 +349,31 @@ def test_cell_init_cli_never_touches_a_host_root_outside_cloud_mode(
     assert captured["host_root"] is None
 
 
-def test_cell_init_cli_enforces_the_process_home_root_in_cloud_mode(
+def _fake_passwd_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
+    import pwd
+
+    real = pwd.getpwuid
+
+    def fake_getpwuid(uid: int):
+        entry = real(uid)
+        return pwd.struct_passwd((*entry[:5], str(home), *entry[6:]))
+
+    monkeypatch.setattr(pwd, "getpwuid", fake_getpwuid)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX passwd database only")
+def test_cell_init_cli_enforces_the_passwd_home_root_in_cloud_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Inside a real cloud cell, `Path.home()` (the image's `usermod --home
-    /data/host`) is passed through as `host_root` (design D3.1)."""
+    """Inside a real cloud cell, the account's passwd home (the image's
+    `usermod --home /data/host`) is passed through as `host_root` (design
+    D3.1) -- the same entry standalone custody resolves, never `$HOME`, which
+    a pod spec can override."""
     monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
-    fake_home = tmp_path / "fake-home"
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    passwd_home = tmp_path / "passwd-home"
+    decoy_home = tmp_path / "decoy-home"
+    _fake_passwd_home(monkeypatch, passwd_home)
+    monkeypatch.setenv("HOME", str(decoy_home))
     real_run = cell_init.run_cell_init
     captured: dict[str, object] = {}
 
@@ -369,5 +386,27 @@ def test_cell_init_cli_enforces_the_process_home_root_in_cloud_mode(
     code = _cell_init_main(["--vault", str(tmp_path / "vault"), "--json"])
 
     assert code == 0
-    assert captured["host_root"] == fake_home
-    assert stat.S_IMODE(os.stat(fake_home).st_mode) == 0o700
+    assert captured["host_root"] == passwd_home
+    assert stat.S_IMODE(os.stat(passwd_home).st_mode) == 0o700
+    assert not decoy_home.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks and modes only")
+@pytest.mark.parametrize("which", ["vault", "host"])
+def test_cell_init_refuses_a_symlinked_directory_without_touching_its_target(
+    tmp_path: Path, which: str
+) -> None:
+    """A planted symlink at `/data/vault` or `/data/host` is refused, and its
+    target's mode is never changed on the way to that refusal."""
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    os.chmod(target, 0o755)
+    vault = tmp_path / "vault"
+    host = tmp_path / "host"
+    (vault if which == "vault" else host).symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(cell_init.CellInitError) as caught:
+        cell_init.run_cell_init(vault, host_root=host)
+
+    assert caught.value.code == "CELL_INIT_DIRECTORY_FAILED"
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o755
