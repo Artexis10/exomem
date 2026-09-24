@@ -4071,14 +4071,14 @@ def test_outbound_links_keep_permitted_stems(vault: Path) -> None:
     assert "rrf-fusion-beats-score-normalization" in json.dumps(page, default=str)
 
 
-def test_a_bare_stem_shared_by_two_pages_fails_closed(vault: Path) -> None:
-    """Ambiguity resolves to WITHHELD, deliberately.
+def test_a_bare_stem_shared_with_a_withheld_page_names_the_visible_one(vault: Path) -> None:
+    """A withheld candidate is absent before ambiguity is decided.
 
-    `Notes/.../shared-name.md` is permitted and `Patterns/shared-name.md` is
-    withheld. A bare wikilink `[[shared-name]]` cannot tell us which page the
-    author meant — and inside a reference list the bare-word asymmetry that
-    protects prose does not apply. Failing closed costs one over-blocked
-    reference entry; failing open leaks the existence of a withheld page.
+    `Notes/Insights/shared-name.md` is permitted and `Notes/Patterns/shared-name.md` is
+    withheld. For the restricted reader the bare `[[shared-name]]` names the one page it
+    may see, exactly as it would in a vault without the withheld page; dropping it would
+    tell the reader that another page shares the name. The full twin comparison lives in
+    `tests/test_derived_identifier_egress.py`.
     """
     permitted_twin = vault / "Knowledge Base" / "Notes" / "Insights" / "shared-name.md"
     permitted_twin.parent.mkdir(parents=True, exist_ok=True)
@@ -4098,9 +4098,9 @@ def test_a_bare_stem_shared_by_two_pages_fails_closed(vault: Path) -> None:
         page = commands.op_read_memory(
             vault, path="Knowledge Base/Notes/Insights/cites-twin.md", links=True
         )
-    assert "shared-name" not in json.dumps(page.get("links"), default=str), (
-        "an ambiguous bare stem matching a withheld page must fail closed"
-    )
+    links = json.dumps(page.get("links"), default=str)
+    assert "shared-name" in links
+    assert "Patterns" not in links
 
 
 # --------------------------------------------------------------------------
