@@ -73,7 +73,8 @@ Facts verified against the code, including by the independent critic review of 2
    - The call-trace middleware runs in its content-free form (as `hosted=True` does), so no `query=` is logged.
    - **Journals.** The query, read and write journals (`query_log`) are off whenever content-private logging is enabled. The check lives in `query_log` itself, not in the manifest or in a test-only variable, so it fails closed. Cloud mode also sets `EXOMEM_DISABLE_USAGE_BOOST` and `EXOMEM_DISABLE_RELEVANCE_CHECK`, as the hosted runtime does, because those features read the journals.
    - **Call ledger.** Under content-private logging, a ledger row keeps no target paths, no hashes of argument values and no caller-chosen argument names. It keeps the command, the argument count, value lengths, duration and error code. A hash of a short value is an offline confirmation oracle for a guessed query.
-   - **Log directory.** The image defaults `EXOMEM_LOG_DIR` to `/tmp/exomem-logs`, so no runtime log ever lands on the tenant volume that D8 backs up, even without the manifest's setting.
+   - **Caller identifiers.** Under content-private logging, the client name from MCP `clientInfo` or `User-Agent` is logged only as its client family (`claude-ai`, `chatgpt`, `codex`, `claude-code` or `other`), a client version only when it is a plain dotted number, and the `mcp-session-id` header only as a short digest. A `cf-ray` header that is not Cloudflare's own ray shape is dropped. These are caller-chosen text, so they never reach a log verbatim.
+   - **Log directory.** The image defaults `EXOMEM_LOG_DIR` to `/tmp/exomem-logs`, so no runtime log ever lands on the tenant volume that D8 backs up, even without the manifest's setting. In cloud mode an unset or empty `EXOMEM_LOG_DIR` falls back to `<tmp>/exomem-logs`, never to a home- or checkout-derived path on the volume.
 3. **Tool surface.**
    - The members of `CLOUD_SURFACE_EXCLUSIONS` are removed from the MCP server after registration.
    - Each entry uses the `HostedSurfaceExclusion` shape: `command`; `reason`, stating what is technically broken; and `lifted_when`.
@@ -81,7 +82,7 @@ Facts verified against the code, including by the independent critic review of 2
    - Legacy MCP aliases (`EXOMEM_MCP_LEGACY_COMPAT`) are never registered in cloud mode. A cell has no legacy clients, and aliases would re-expose the leaves of excluded commands.
 4. **Read-only mode.** With `EXOMEM_CLOUD_READ_ONLY=1` the cell refuses every mutating command with `CLOUD_CELL_READ_ONLY`, before vault access. Mutation is classified from the command registry, not from a copied list. Reads keep working.
 5. **Routes.** Only MCP (`/mcp`), `/health` and `/health/ready` are registered. REST (`/api/*`), `/upload` and `/download` are not, because FastMCP custom routes do not inherit MCP authentication.
-6. **Configuration.** No `.env` file is loaded; configuration comes only from the pod environment. That covers every loader, including the runtime-resource dotenv policy, not only the server's.
+6. **Configuration.** No `.env` file is loaded; configuration comes only from the pod environment. That covers every loader, including the runtime-resource dotenv policy and the CLI's own (`auth sessions`, `doctor`), not only the server's.
 
 The tool list is UX, not a security boundary. The boundary is the container, its volume and its network policy.
 
@@ -107,7 +108,7 @@ A writable `emptyDir` is mounted at `/tmp`. The pod sets `TMPDIR=/tmp`, `EXOMEM_
 
 The StatefulSet has one init container, `cell-init`, using the same image as the runtime. It runs non-root with the volume mounted and the server not yet started. The volume is ReadWriteOnce and the replica count is 1, so this is genuinely offline. The container is idempotent:
 
-1. It creates `/data/vault` and `/data/host` if absent, and sets both to mode `0700`.
+1. It creates `/data/vault` and `/data/host` if absent, and sets both to mode `0700`. `/data/host` is the running account's passwd home, the same entry custody resolves, never `$HOME`. The mode is set through a descriptor opened without following a final symlink, so a symlink planted at either path fails the step and its target is never changed.
 2. If `/data/vault` is not a vault, it initializes one **atomically**. It builds the vault in a staging directory on the same volume (`/data/.vault-init-*`), then renames the staging directory onto `/data/vault`, which must be absent or empty. Stale staging directories from an earlier crash are removed first. A non-empty `/data/vault` that is not a vault fails with `CELL_INIT_VAULT_UNRECOGNIZED` and is never overlaid: an interrupted init cannot produce it, so it means something else wrote there.
 3. It runs `exomem maintain --vault /data/vault --migrate-state --offline --json`.
 

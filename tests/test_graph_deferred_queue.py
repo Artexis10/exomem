@@ -863,3 +863,553 @@ def test_every_generation_recording_enqueue_declares_its_path_set() -> None:
         "half owns. Declare the site and its claim, or pass generation=None -- "
         "an unknown row never counts as coverage."
     )
+
+
+# --- The drain records what it derived under ------------------------------------
+
+
+def _acknowledged(root: Path) -> int:
+    acknowledged = graph_sync.acknowledged_checkpoint(root)
+    return 0 if acknowledged is None else int(acknowledged.generation)
+
+
+def _write_without_graph_repair(
+    root: Path, monkeypatch: pytest.MonkeyPatch, pages: dict[str, str]
+) -> int:
+    """One canonical batch whose graph repair is left to the queue.
+
+    The batch enqueues its paths and records its debt generation before it
+    commits, exactly as every canonical batch does; only the dispatch that
+    would repair them in-line is switched off, so the drain is what converges
+    them.
+    """
+    with monkeypatch.context() as patch:
+        patch.setattr(epistemic_graph, "graph_scheduling_enabled", lambda: False)
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(root / rel, content) for rel, content in pages.items()],
+            vault_root=root,
+        )
+    checkpoint = graph_sync.read_checkpoint(root)
+    assert checkpoint is not None
+    assert _acknowledged(root) < int(checkpoint.generation)
+    return int(checkpoint.generation)
+
+
+def test_a_drain_records_the_topology_it_derived_under(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A drain that repairs a created page leaves the stored topology behind it.
+
+    The next topology-changing write rebuilds the old resolver from the stored
+    entries it changed and compares its fingerprint to the stored one. A drain
+    that re-derived rows under a topology it never recorded makes that compare
+    fail, and the write falls back to a whole-vault rebuild.
+    """
+    import logging
+
+    created = "Knowledge Base/Notes/Insights/queue-n.md"
+    _write_without_graph_repair(
+        vault, monkeypatch, {created: _page("N", "N is new and cites [[queue-a]].")}
+    )
+    index_sync.drain_graph_work(vault)
+    assert deferred_index.list_graph_paths(vault) == []
+    assert EpistemicGraphIndex(vault).available()
+
+    caplog.set_level(logging.INFO, logger="exomem.epistemic_graph")
+    vault_module.batch_atomic_write(
+        [
+            vault_module.PlannedWrite(
+                vault / "Knowledge Base/Notes/Insights/queue-m.md",
+                _page("M", "M is new too."),
+            )
+        ],
+        vault_root=vault,
+    )
+
+    assert "stored_topology_fingerprint_mismatch" not in caplog.text
+    assert EpistemicGraphIndex(vault).available()
+
+
+def test_a_drain_under_recorded_movement_still_lands_the_rows_it_proved(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Movement elsewhere in the vault is not a reason to throw proven rows away.
+
+    The drain proves every page it indexed against that page's own bytes at
+    commit. A write landing on another page moves the vault-global projection,
+    which bars the marker, lineage and acknowledgement -- not the rows. Rolling
+    the whole pass back made every drain lose to the next write under a steady
+    writer, so the queue never shrank while writes kept landing.
+    """
+    committed = _write_without_graph_repair(
+        vault, monkeypatch, {PAGE_A: _page("A", "A is revised against [[queue-b]].")}
+    )
+    real_index_path = EpistemicGraphIndex._index_path
+    landed: list[int] = []
+
+    def index_then_write(self: Any, conn: Any, path: Path, **kwargs: Any) -> bool:
+        outcome = real_index_path(self, conn, path, **kwargs)
+        if Path(path).name == Path(PAGE_A).name:
+            landed.append(1)
+            # A steady writer: every pass over A, the batch and its isolated
+            # retry alike, sees another write land elsewhere. Its post-commit
+            # registry update lands outside the drain's hold, which is what
+            # moves the projection under a real drain.
+            (vault / PAGE_C).write_text(
+                _page("C", f"C lands mid-drain, revision {len(landed)}."), encoding="utf-8"
+            )
+            _seed_live_freshness(vault)
+            deferred_index.add_graph_receipts(vault, [PAGE_C])
+        return outcome
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_index_path", index_then_write)
+    index_sync.drain_graph_work(vault)
+    monkeypatch.undo()
+
+    assert landed
+    assert deferred_index.list_graph_paths(vault) == [PAGE_C], (
+        "the drain threw away rows it proved against their own bytes"
+    )
+    assert _acknowledged(vault) < committed, "a drain the vault moved under acknowledged"
+
+    index_sync.drain_graph_work(vault)
+
+    assert deferred_index.list_graph_paths(vault) == []
+    assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
+
+
+def test_a_late_refresh_whose_generation_a_drain_acknowledged_leaves_the_graph_readable(
+    vault: Path,
+) -> None:
+    """A write's own refresh can arrive after a drain already converged its batch.
+
+    The drain proved the batch's paths and acknowledged its generation, so the
+    refresh finds the acknowledgement at its own generation rather than the one
+    before it. That is not a lineage gap: nothing is owed. Falling back there
+    withdrew the marker behind a barrier with nothing queued, and the drain
+    daemon paid a whole-vault recovery for a graph that was current (probe B
+    at five writers).
+    """
+    # The batch commits without its post-commit dispatch, which is the refresh
+    # this test runs late; the registry learns of it the way the fan-out would.
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(vault / PAGE_A, _page("A", "A is revised against [[queue-b]]."))],
+        vault_root=vault,
+        post_commit_fanout=False,
+    )
+    _seed_live_freshness(vault)
+    checkpoint = graph_sync.read_checkpoint(vault)
+    assert checkpoint is not None
+    index_sync.drain_graph_work(vault)
+    assert _acknowledged(vault) == int(checkpoint.generation)
+    assert EpistemicGraphIndex(vault).available()
+
+    report = EpistemicGraphIndex(vault).refresh_paths(
+        [vault / PAGE_A], graph_checkpoint=checkpoint
+    )
+
+    assert not report.get("deferred"), report
+    assert EpistemicGraphIndex(vault).available(), (
+        "a refresh for an already-acknowledged generation withdrew the marker"
+    )
+    assert not EpistemicGraphIndex(vault).reads_suspended()
+
+
+def test_a_late_refresh_behind_a_late_registry_update_repairs_per_path(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The no-op is only for a refresh that finds the marker current.
+
+    Here the drain acknowledges the write's generation against the registry
+    as it stood, then the write's registry update lands, which leaves the
+    marker describing an older projection. The late refresh then finds its
+    generation acknowledged. Returning without work there left nothing queued
+    and nothing able to republish the marker, so the drain daemon paid a
+    whole-vault rebuild for one page (probe L2: 3.6 s, one whole-vault pass,
+    against 0.9 s and none on main). It must queue the page, as main does, so
+    one per-path drain makes the graph readable again.
+    """
+    passes: list[int] = []
+    real_pass = EpistemicGraphIndex._rebuild_all_pass
+
+    def counted(self: Any, *args: Any, **kwargs: Any) -> Any:
+        passes.append(1)
+        return real_pass(self, *args, **kwargs)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_rebuild_all_pass", counted)
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(vault / PAGE_A, _page("A", "A is revised against [[queue-b]]."))],
+        vault_root=vault,
+        post_commit_fanout=False,
+    )
+    checkpoint = graph_sync.read_checkpoint(vault)
+    assert checkpoint is not None
+    index_sync.drain_graph_work(vault)
+    assert _acknowledged(vault) == int(checkpoint.generation)
+    assert EpistemicGraphIndex(vault).available()
+    # The write's registry update lands after the drain acknowledged.
+    freshness.on_files_changed(vault, changed=[vault / PAGE_A])
+    assert not EpistemicGraphIndex(vault).available()
+
+    report = EpistemicGraphIndex(vault).refresh_paths(
+        [vault / PAGE_A], graph_checkpoint=checkpoint
+    )
+
+    assert report.get("queued"), report
+    assert deferred_index.list_graph_paths(vault) == [PAGE_A]
+    index_sync.drain_graph_work(vault)
+    assert EpistemicGraphIndex(vault).available()
+    assert passes == [], "a whole-vault pass repaired one late page"
+    monkeypatch.setattr(EpistemicGraphIndex, "_rebuild_all_pass", real_pass)
+    assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
+
+
+# --- Quarantine stops hot retries and nothing else ------------------------------
+
+
+def _node_rows(root: Path, rel: str) -> list[tuple[Any, ...]]:
+    conn = sqlite3.connect(EpistemicGraphIndex(root).path)
+    try:
+        return conn.execute(
+            "SELECT node_key, source_hash FROM graph_nodes WHERE path = ? ORDER BY node_key",
+            (rel,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def _refuse_reads(
+    monkeypatch: pytest.MonkeyPatch, root: Path, rel: str, error: Exception
+) -> None:
+    """The page's bytes cannot be read: a lock, a sync tool, a permission."""
+    real_read = vault_module.read_bytes_without_pinning
+    target = (root / rel).resolve()
+
+    def refuse(path: Path, *args: Any, **kwargs: Any) -> Any:
+        if Path(path).resolve() == target:
+            raise error
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(vault_module, "read_bytes_without_pinning", refuse)
+
+
+def _undecodable_reads(monkeypatch: pytest.MonkeyPatch, root: Path, rel: str) -> None:
+    """The page's bytes are read, and are not UTF-8."""
+    real_read = vault_module.read_bytes_without_pinning
+    target = (root / rel).resolve()
+
+    def garble(path: Path, *args: Any, **kwargs: Any) -> Any:
+        if Path(path).resolve() == target:
+            return b"---\ntype: insight\n---\n# \xff\xfe not utf-8\n"
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(vault_module, "read_bytes_without_pinning", garble)
+
+
+def _age_graph_failures(root: Path, seconds: float) -> None:
+    """Time passes: every recorded failure happened `seconds` earlier."""
+    conn = sqlite3.connect(deferred_index.store_path(root))
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE graph_failures SET first_failed_at = first_failed_at - ?, "
+                "last_failed_at = last_failed_at - ?",
+                (seconds, seconds),
+            )
+    finally:
+        conn.close()
+
+
+def _failure_attempts(root: Path, rel: str) -> int:
+    conn = sqlite3.connect(deferred_index.store_path(root))
+    try:
+        row = conn.execute(
+            "SELECT attempts FROM graph_failures WHERE rel_path = ?", (rel,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return 0 if row is None else int(row[0])
+
+
+def _poison_min_age() -> float:
+    # Read with a default, as `GRAPH_POISON_ATTEMPTS` was, so a tree without the
+    # minimum age fails these tests on behaviour rather than on a missing name.
+    return float(getattr(epistemic_graph, "GRAPH_POISON_MIN_AGE_SECONDS", 600.0))
+
+
+def _change_backoff(attempts: int) -> float:
+    """How long after its last failure a changed quarantined page may be retried."""
+    base = float(getattr(epistemic_graph, "GRAPH_QUARANTINE_CHANGE_BACKOFF_SECONDS", 5.0))
+    return min(
+        epistemic_graph.GRAPH_QUARANTINE_RETRY_SECONDS,
+        base * 2 ** max(0, attempts - epistemic_graph.GRAPH_POISON_ATTEMPTS),
+    )
+
+
+def _drain_ticks(root: Path, ticks: int) -> None:
+    for _ in range(ticks):
+        index_sync.drain_graph_work(root)
+
+
+def _quarantine_unreadable_page_a(
+    root: Path, monkeypatch: pytest.MonkeyPatch, lock: pytest.MonkeyPatch
+) -> int:
+    """PAGE_A's revision is queued, its bytes stay unreadable past the minimum age.
+
+    The refusal is set on `lock`, a `monkeypatch.context()`, so leaving that
+    context is the lock being released.
+    """
+    committed = _write_without_graph_repair(
+        root,
+        monkeypatch,
+        {
+            PAGE_A: _page("A", "A is revised against [[queue-b]]."),
+            PAGE_C: _page("C", "C is new and cites nothing."),
+        },
+    )
+    _refuse_reads(lock, root, PAGE_A, PermissionError("the page cannot be read"))
+    _drain_ticks(root, epistemic_graph.GRAPH_POISON_ATTEMPTS)
+    _age_graph_failures(root, _poison_min_age())
+    _drain_ticks(root, 1)
+    return committed
+
+
+def test_a_busy_boundary_never_counts_against_a_page(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A drain refused by a writer mid-batch says nothing about the page.
+
+    `drain_paths` raising -- the canonical boundary busy (`MUTATION_BUSY`), a
+    locked SQLite store -- is a readiness refusal. Counting it quarantined a
+    healthy page under a steady writer and dropped its rows, leaving the graph
+    unreadable until a whole-vault rebuild. Whatever raises out of the drain
+    rotates, as it always did, however long it lasts.
+    """
+    from exomem.cli_ops import OpError
+
+    committed = _write_without_graph_repair(
+        vault, monkeypatch, {PAGE_A: _page("A", "A is revised against [[queue-b]].")}
+    )
+    before = _node_rows(vault, PAGE_A)
+    assert before
+    refusals: list[Exception] = [
+        OpError("MUTATION_BUSY", "a writer holds the vault mutation boundary"),
+        sqlite3.OperationalError("database is locked"),
+    ]
+    for refusal in refusals:
+
+        def refuse(self: Any, paths: list[Path], error: Exception = refusal) -> Any:
+            raise error
+
+        with monkeypatch.context() as patch:
+            patch.setattr(EpistemicGraphIndex, "drain_paths", refuse)
+            _drain_ticks(vault, epistemic_graph.GRAPH_POISON_ATTEMPTS + 1)
+            assert deferred_index.list_graph_paths(vault) == [PAGE_A], refusal
+            assert epistemic_graph.graph_lag(vault)["quarantined_paths"] == 0, refusal
+            # However long it lasts.
+            _age_graph_failures(vault, 10 * _poison_min_age())
+            _drain_ticks(vault, 1)
+
+        assert deferred_index.list_graph_paths(vault) == [PAGE_A], refusal
+        assert _failure_attempts(vault, PAGE_A) == 0, refusal
+        assert epistemic_graph.graph_lag(vault)["quarantined_paths"] == 0, refusal
+        assert _node_rows(vault, PAGE_A) == before, refusal
+
+    index_sync.drain_graph_work(vault)
+
+    assert deferred_index.list_graph_paths(vault) == []
+    assert _acknowledged(vault) == committed
+    assert EpistemicGraphIndex(vault).available()
+    assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
+
+
+def test_a_transient_read_lock_neither_quarantines_nor_drops_a_page(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page an editor or a sync tool holds for a moment is not poison.
+
+    Its bytes refuse a few drain ticks in a row, then read normally. Counting
+    those ticks quarantined the page and deleted its rows, so the graph stayed
+    readable but without the page, and nothing repaired the drift. An `OSError`
+    counts only once it has outlived `GRAPH_POISON_MIN_AGE_SECONDS`, measured
+    in minutes rather than ticks; until then the receipt rotates and the rows
+    of the page's last readable version stay.
+    """
+    committed = _write_without_graph_repair(
+        vault, monkeypatch, {PAGE_A: _page("A", "A is revised against [[queue-b]].")}
+    )
+    before = _node_rows(vault, PAGE_A)
+    assert before
+
+    with monkeypatch.context() as patch:
+        _refuse_reads(patch, vault, PAGE_A, PermissionError("the page is locked"))
+        _drain_ticks(vault, epistemic_graph.GRAPH_POISON_ATTEMPTS + 2)
+
+        assert deferred_index.list_graph_paths(vault) == [PAGE_A]
+        assert epistemic_graph.graph_lag(vault)["quarantined_paths"] == 0
+        assert _node_rows(vault, PAGE_A) == before
+
+    index_sync.drain_graph_work(vault)
+
+    assert deferred_index.list_graph_paths(vault) == []
+    assert _failure_attempts(vault, PAGE_A) == 0, "a derived page kept its failures"
+    assert _acknowledged(vault) == committed
+    assert EpistemicGraphIndex(vault).available()
+    assert epistemic_graph.graph_drift(vault) == []
+    assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
+
+
+def test_an_unreadable_page_is_quarantined_rather_than_rotated_forever(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page that stays unreadable past the minimum age stops being retried hot.
+
+    Rotated forever, its receipt keeps the queue from ever emptying, so the
+    drain never settles and the lag never clears. After
+    `GRAPH_POISON_ATTEMPTS` failed isolated attempts spanning at least
+    `GRAPH_POISON_MIN_AGE_SECONDS` the receipt leaves the queue by exact
+    revision, and the lag and the doctor report the path. Quarantine only stops
+    the hot retries: the page still exists, so the rows of its last readable
+    version stay.
+    """
+    from exomem import doctor
+
+    rows_before = _node_rows(vault, PAGE_A)
+    assert rows_before
+    with monkeypatch.context() as locked:
+        committed = _quarantine_unreadable_page_a(vault, monkeypatch, locked)
+
+    assert deferred_index.list_graph_paths(vault) == []
+    assert _node_rows(vault, PAGE_A) == rows_before, "quarantine dropped an existing page's rows"
+    lag = epistemic_graph.graph_lag(vault)
+    assert lag["quarantined_paths"] == 1
+    assert _acknowledged(vault) == committed
+    assert EpistemicGraphIndex(vault).available()
+    check = doctor._check_graph_sync_state(vault)
+    assert check.status == "warn", check.message
+    assert check.details is not None and check.details["quarantined_paths"] == 1
+
+
+def test_undecodable_bytes_count_without_waiting_for_an_age(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bytes that are not UTF-8 are a property of the page, not of the moment.
+
+    Every attempt counts; after `GRAPH_POISON_ATTEMPTS` the receipt is
+    quarantined. The page exists, so its rows stay.
+    """
+    _write_without_graph_repair(
+        vault, monkeypatch, {PAGE_A: _page("A", "A is revised against [[queue-b]].")}
+    )
+    before = _node_rows(vault, PAGE_A)
+    assert before
+    _undecodable_reads(monkeypatch, vault, PAGE_A)
+
+    _drain_ticks(vault, epistemic_graph.GRAPH_POISON_ATTEMPTS)
+
+    assert deferred_index.list_graph_paths(vault) == []
+    assert epistemic_graph.graph_lag(vault)["quarantined_paths"] == 1
+    assert _node_rows(vault, PAGE_A) == before
+
+
+def test_a_quarantined_page_is_retried_when_it_changes_and_on_a_slow_timer(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Quarantine is not forever: a changed page, or enough time, earns a retry.
+
+    An out-of-band edit changes the page's stat signature, which re-queues it
+    at the drain's next wake; with no change at all, it is re-queued once
+    `GRAPH_QUARANTINE_RETRY_SECONDS` have passed since its last failure. A
+    retry that derives the page forgets its failures.
+    """
+    with monkeypatch.context() as locked:
+        _quarantine_unreadable_page_a(vault, monkeypatch, locked)
+        assert epistemic_graph.graph_lag(vault)["quarantined_paths"] == 1
+
+        # Unchanged, and not yet due: nothing is re-queued.
+        assert index_sync.requeue_quarantined_graph_paths(vault) == 0
+        assert deferred_index.list_graph_paths(vault) == []
+
+        # Edited out of band while still locked: re-queued once its change
+        # backoff has passed, fails, set aside again.
+        (vault / PAGE_A).write_text(_page("A", "A is edited out of band."), encoding="utf-8")
+        _seed_live_freshness(vault)
+        _age_graph_failures(vault, _change_backoff(_failure_attempts(vault, PAGE_A)))
+        assert index_sync.requeue_quarantined_graph_paths(vault) == 1
+        assert deferred_index.list_graph_paths(vault) == [PAGE_A]
+        index_sync.drain_graph_work(vault)
+        assert deferred_index.list_graph_paths(vault) == []
+        assert epistemic_graph.graph_lag(vault)["quarantined_paths"] == 1
+
+    # The lock is released with no change to the page: the slow timer retries it.
+    assert index_sync.requeue_quarantined_graph_paths(vault) == 0
+    _age_graph_failures(vault, epistemic_graph.GRAPH_QUARANTINE_RETRY_SECONDS)
+    assert index_sync.requeue_quarantined_graph_paths(vault) == 1
+    index_sync.drain_graph_work(vault)
+
+    assert deferred_index.list_graph_paths(vault) == []
+    assert epistemic_graph.graph_lag(vault)["quarantined_paths"] == 0
+    assert _failure_attempts(vault, PAGE_A) == 0
+    assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
+
+
+def test_a_page_that_keeps_changing_is_retried_no_faster_than_its_backoff(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stat change earns a retry, but not one per drain wake.
+
+    Re-queueing a quarantined page signals the drain, and the drain re-checks
+    quarantined pages on every wake, so a page a sync tool keeps rewriting with
+    bad bytes was retried about every 1.8 s for as long as it changed (reviewer
+    probe Q2, `hot`). A changed page is retried no sooner than
+    `GRAPH_QUARANTINE_CHANGE_BACKOFF_SECONDS` after its last failure, doubling
+    with each failed attempt past `GRAPH_POISON_ATTEMPTS`.
+    """
+    _write_without_graph_repair(
+        vault, monkeypatch, {PAGE_A: _page("A", "A is revised against [[queue-b]].")}
+    )
+    _undecodable_reads(monkeypatch, vault, PAGE_A)
+    _drain_ticks(vault, epistemic_graph.GRAPH_POISON_ATTEMPTS)
+    assert epistemic_graph.graph_lag(vault)["quarantined_paths"] == 1
+
+    for rewrite in range(3):
+        attempts = _failure_attempts(vault, PAGE_A)
+        (vault / PAGE_A).write_text(
+            _page("A", f"A is rewritten out of band, {rewrite}."), encoding="utf-8"
+        )
+        _seed_live_freshness(vault)
+        assert index_sync.requeue_quarantined_graph_paths(vault) == 0, (
+            f"a changed page was retried inside its backoff after {attempts} attempts"
+        )
+        _age_graph_failures(vault, _change_backoff(attempts) / 2)
+        assert index_sync.requeue_quarantined_graph_paths(vault) == 0
+        _age_graph_failures(vault, _change_backoff(attempts) / 2)
+        assert index_sync.requeue_quarantined_graph_paths(vault) == 1
+        index_sync.drain_graph_work(vault)
+        assert deferred_index.list_graph_paths(vault) == []
+        assert _failure_attempts(vault, PAGE_A) == attempts + 1
+        assert epistemic_graph.graph_lag(vault)["quarantined_paths"] == 1
+
+
+def test_a_full_rebuild_that_derives_a_quarantined_page_clears_its_record(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A whole-vault pass that reads the page answers the quarantine.
+
+    The record outliving it left the doctor warning about a page that the
+    published graph had just derived.
+    """
+    from exomem import doctor
+
+    with monkeypatch.context() as locked:
+        _quarantine_unreadable_page_a(vault, monkeypatch, locked)
+        assert epistemic_graph.graph_lag(vault)["quarantined_paths"] == 1
+    # The lock is released; the page itself is unchanged.
+
+    EpistemicGraphIndex(vault).rebuild_all()
+
+    assert epistemic_graph.graph_lag(vault)["quarantined_paths"] == 0
+    assert _failure_attempts(vault, PAGE_A) == 0
+    check = doctor._check_graph_sync_state(vault)
+    assert not (check.details or {}).get("quarantined_paths"), check.message
+    assert "could not be read" not in check.message
