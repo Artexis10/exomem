@@ -743,8 +743,15 @@ class EmbeddingFreshness(StrEnum):
     UNVERIFIABLE = "unverifiable"
 
 
-def _safe_markdown_rel_path(value: object) -> str | None:
-    """Normalize one persisted Markdown identity without permitting traversal."""
+def _safe_markdown_rel_path(
+    value: object, *, knowledge_base_only: bool = True
+) -> str | None:
+    """Normalize one persisted Markdown identity without permitting traversal.
+
+    ``knowledge_base_only=False`` keeps every traversal refusal but admits a
+    vault-relative page outside the knowledge base -- what a vault-scope
+    advisory can name as its counterpart.
+    """
     if not isinstance(value, str):
         return None
     if "\\" in value:
@@ -759,7 +766,7 @@ def _safe_markdown_rel_path(value: object) -> str | None:
         or any(part in {"", ".", ".."} for part in path.parts)
         or not normalized.lower().endswith(".md")
         or not path.parts
-        or path.parts[0] != kb_dirname()
+        or (knowledge_base_only and path.parts[0] != kb_dirname())
     ):
         return None
     return path.as_posix()

@@ -525,6 +525,91 @@ def detected_overlap_advisory_groups(
     return [("overlap", list(candidates))]
 
 
+#: The routes whose committed write carries the default duplicate/overlap sweep.
+WRITE_ADVISORY_ROUTES = frozenset({"remember", "edit"})
+
+
+@dataclass(frozen=True)
+class WriteAdvisoryInputs:
+    """Exactly what one route's write-time sweep reads, and nothing else.
+
+    `remember` scores the draft (its title and normalized body) with the page's
+    just-published vectors reused where the chunk text matches, flags
+    near-duplicates of its own type only, and flags overlaps. `edit` scores the
+    new body's bare paragraphs (no title) for overlaps only. The same object
+    drives the inline sweep and the deferred one, so under fast acknowledgement
+    the background result is this function's output for these inputs, not an
+    approximation reconstructed from the page afterwards.
+    """
+
+    route: str
+    target_rel_path: str
+    self_path: str
+    body: str
+    title: str = ""
+    note_type: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.route not in WRITE_ADVISORY_ROUTES:
+            raise ValueError(f"unknown write advisory route: {self.route}")
+
+
+def write_advisory_for(
+    vault_root: Path,
+    inputs: WriteAdvisoryInputs,
+    *,
+    record_surfacing: bool = True,
+) -> list[EmittedWriteAdvisory]:
+    """Run one route's default duplicate/overlap sweep over its exact inputs."""
+    if inputs.route == "remember":
+        cosines = _best_cosine_per_file(
+            vault_root,
+            title=inputs.title,
+            body=inputs.body,
+            published_path=inputs.target_rel_path,
+        )
+        duplicate_candidates = detect_duplicates(
+            vault_root,
+            title=inputs.title,
+            body=inputs.body,
+            self_path=inputs.self_path,
+            types_filter=[inputs.note_type] if inputs.note_type else None,
+            precomputed=cosines,
+        )
+        overlap_candidates = detect_contradictions(
+            vault_root,
+            title=inputs.title,
+            body=inputs.body,
+            self_path=inputs.self_path,
+            precomputed=cosines,
+        )
+        return emitted_write_advisory_groups(
+            vault_root,
+            self_path=inputs.self_path,
+            groups=[
+                ("near-duplicate", duplicate_candidates),
+                *detected_overlap_advisory_groups(overlap_candidates),
+            ],
+            record_surfacing=record_surfacing,
+        )
+    candidates = detect_contradictions(
+        vault_root,
+        title="",
+        body=inputs.body,
+        self_path=inputs.self_path,
+    )
+    # The grouping and emission half of the advisory: a ref batch and a
+    # review-state read per candidate. Timed separately from the cosine sweep
+    # because they fail for different reasons and are fixed in different places.
+    with call_spans.span("advisory.overlap_groups", {"candidates": len(candidates)}):
+        return emitted_write_advisory_groups(
+            vault_root,
+            self_path=inputs.self_path,
+            groups=detected_overlap_advisory_groups(candidates),
+            record_surfacing=record_surfacing,
+        )
+
+
 def triage_write_advisory(
     vault_root: Path,
     *,

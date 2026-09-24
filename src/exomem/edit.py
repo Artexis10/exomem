@@ -40,7 +40,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import (
-    call_spans,
     corpus_aware,
     indexes,
     reserved_paths,
@@ -927,8 +926,28 @@ def commit_edit(
     # `write.*` service histograms are unconditional); only the response key
     # is gated.
     timings = MutationTimings()
+    from . import writer_lease
+
+    # The default sweep reads only the new body's bare paragraphs, and only when
+    # the body changed. Under fast acknowledgement the batch's `write_advisory`
+    # component runs it with these exact inputs; an edit that does not touch
+    # the body declares that it has no sweep, so it takes no advisory custody.
+    body_changed = any(item.startswith("body") for item in changed)
+    body_match = _FM_PATTERN.match(new_text)
+    advisory_inputs = (
+        corpus_aware.WriteAdvisoryInputs(
+            route="edit",
+            target_rel_path=rel_path,
+            self_path=rel_path,
+            body=body_match.group(2) if body_match is not None else new_text,
+        )
+        if body_changed
+        else None
+    )
     try:
-        with semantic_contract.call_context("write"):
+        with semantic_contract.call_context("write"), writer_lease.declare_write_advisory(
+            advisory_inputs
+        ):
             preflight = semantic_writes.preflight_existing(
                 vault_root,
                 path=rel_path,
@@ -965,30 +984,16 @@ def commit_edit(
     # Suggestions are measurements, never dispositions. They run only after
     # the guarded semantic batch succeeds, so validation/blocking paths cannot
     # mutate model/cache state or spend embedding work.
-    body_changed = any(item.startswith("body") for item in changed)
-    if body_changed and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        match = _FM_PATTERN.match(new_text)
+    if (
+        advisory_inputs is not None
+        and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS")
+        and not writer_lease.write_advisory_deferred(vault_root, advisory_inputs)
+    ):
         try:
-            candidates = corpus_aware.detect_contradictions(
-                vault_root,
-                title="",
-                body=match.group(2) if match is not None else new_text,
-                self_path=rel_path,
+            warnings.extend(
+                emitted.warning
+                for emitted in corpus_aware.write_advisory_for(vault_root, advisory_inputs)
             )
-            # The grouping and emission half of the advisory: a ref batch and a
-            # review-state read per candidate. Timed separately from the cosine
-            # sweep because they fail for different reasons and are fixed in
-            # different places.
-            with call_spans.span(
-                "advisory.overlap_groups", {"candidates": len(candidates)}
-            ):
-                warnings.extend(
-                    corpus_aware.emit_write_advisory_groups(
-                        vault_root,
-                        self_path=rel_path,
-                        groups=corpus_aware.detected_overlap_advisory_groups(candidates),
-                    )
-                )
         except Exception as error:  # noqa: BLE001 — nudges never break an edit
             log.debug(
                 "corpus-aware contradiction check failed (non-fatal): %s", error

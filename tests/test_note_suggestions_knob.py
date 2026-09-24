@@ -210,3 +210,102 @@ def test_remember_declares_the_new_default_on_its_tool_surface() -> None:
     assert inspect.signature(commands.op_remember).parameters["suggestions"].default is False
     assert inspect.signature(commands.op_note).parameters["suggestions"].default is False
     assert inspect.signature(note_module.note).parameters["suggestions"].default is False
+
+
+# --------------------------------------------------------------------------- #
+# Fast durable acknowledgement: the deferred component owns the sweep
+# --------------------------------------------------------------------------- #
+
+
+def _leased_note(tmp_path: Path, vault: Path, **kwargs) -> dict:
+    """One `remember` through the real lease, as an MCP call routes it."""
+    import uuid
+    from types import SimpleNamespace
+
+    from exomem import writer_lease
+
+    def leaf(root: Path, **_surface_kwargs):
+        result = note_module.note(root, **kwargs)
+        return {"path": result.path, "warnings": list(result.warnings)}
+
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "lease-state")
+    )
+    return manager.invoke(
+        SimpleNamespace(name="remember", leaf=leaf, read_only=False),
+        (vault,),
+        {"response_detail": "compact", "suggestions": kwargs.get("suggestions", False)},
+        idempotency_key=None,
+        mutation_request_id=str(uuid.uuid4()),
+    )
+
+
+def test_fast_ack_delivers_the_dedupe_sweep_through_its_deferred_result(
+    vault: Path,
+    tmp_path: Path,
+    corpus_spies: dict[str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under fast acknowledgement the sweep is not computed inline.
+
+    The receipt's `write_advisory` component computes it in the background and
+    the terminal carries its exact result reference instead, so an inline
+    sweep would only double the work and delay the acknowledgement.
+    """
+    monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", "1")
+    terminal = _leased_note(
+        tmp_path,
+        vault,
+        content="# Fast knob probe\n\nBody.",
+        note_type="insight",
+        title="Fast knob probe",
+        status="draft",
+    )
+
+    assert terminal["status"] == "committed"
+    assert terminal["advisory_sync"] == "pending"
+    assert terminal["advisory_result_ref"].startswith("exomem://write-advisory-result/")
+    assert corpus_spies == {"suggest": 0, "cosine": 0}
+
+
+def test_fast_ack_keeps_explicit_suggestions_synchronous(
+    vault: Path,
+    tmp_path: Path,
+    corpus_spies: dict[str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`suggestions=true` stays the explicit synchronous opt-in, sweep included."""
+    monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", "1")
+    _leased_note(
+        tmp_path,
+        vault,
+        content="# Fast knob on probe\n\nBody.",
+        note_type="insight",
+        title="Fast knob on probe",
+        suggestions=True,
+        status="draft",
+    )
+
+    assert corpus_spies == {"suggest": 1, "cosine": 1}
+
+
+def test_fast_ack_off_keeps_the_inline_sweep(
+    vault: Path,
+    tmp_path: Path,
+    corpus_spies: dict[str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the flag off, a leased write sweeps inline exactly as before."""
+    monkeypatch.delenv("EXOMEM_FAST_DURABLE_ACK", raising=False)
+    terminal = _leased_note(
+        tmp_path,
+        vault,
+        content="# Slow knob probe\n\nBody.",
+        note_type="insight",
+        title="Slow knob probe",
+        status="draft",
+    )
+
+    assert terminal["status"] == "committed"
+    assert "advisory_result_ref" not in terminal
+    assert corpus_spies == {"suggest": 0, "cosine": 1}

@@ -114,11 +114,41 @@ the advisory SHALL reuse those vectors rather than encode the same generation
 again. `suggestions=true` SHALL remain an explicit enriched synchronous opt-in
 whose added latency is outside the default fast-acknowledgement guarantee.
 
+For a route that sweeps inline, the deferred sweep SHALL compute exactly what
+that route's inline sweep computes, through the same function over the same
+inputs, and the route SHALL NOT also sweep inline when its committed batch holds
+the advisory custody: `remember` scores the draft title and normalized body,
+reuses the page's published vectors where the chunk text matches, flags
+near-duplicates of the note's own type only, and flags overlaps, in the inline
+tie order; `edit` scores the new body's bare paragraphs for overlaps only, and
+an edit that leaves the body unchanged takes no advisory custody; a vault-scope
+write reports the same counterparts, including pages outside the knowledge
+base. The route's inputs are held in the committing process only; a component
+that runs where they are unavailable falls back to its generic sweep over the
+page's published vectors rather than leaving the job pending. `capture` keeps
+its inline sweep and takes no advisory custody.
+
 #### Scenario: Default compiled write needs an advisory sweep
 
 - **WHEN** a default compact compiled write commits and its near-duplicate or overlap sweep is unfinished
 - **THEN** the terminal reports `advisory_sync="pending"`, returns its stable result reference, and does not run the sweep inline
 - **AND** exact lookup later returns ready, failed, or superseded rather than leaving a finished or failed job permanently pending
+
+#### Scenario: A fast-acknowledged remember or edit returns its sweep by reference
+
+- **WHEN** fast acknowledgement is active and a default `remember`, or an `edit` that changes the body, commits a batch holding the advisory custody
+- **THEN** the write computes no inline duplicate or overlap sweep and returns none of its warnings
+- **AND** the ready result reached through `advisory_result_ref` carries, in order, exactly the warnings the same write returns with fast acknowledgement off
+
+#### Scenario: An edit that leaves the body unchanged has no advisory job
+
+- **WHEN** fast acknowledgement is active and an edit changes only frontmatter
+- **THEN** the terminal reports `advisory_sync="not_required"` and carries no result reference, as the inline sweep computes nothing for it
+
+#### Scenario: Fast acknowledgement off leaves every inline sweep unchanged
+
+- **WHEN** `EXOMEM_FAST_DURABLE_ACK` is not `1`
+- **THEN** `remember`, `edit` and `capture` compute their inline sweeps and return their warnings exactly as before
 
 #### Scenario: Exact retry replays the advisory reference
 

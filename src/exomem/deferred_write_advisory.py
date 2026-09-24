@@ -29,7 +29,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import call_spans, corpus_aware, derived_receipts
+from . import advisory_handoff, call_spans, corpus_aware, derived_receipts
 from .derived_receipts import (
     DerivedAdvisoryCandidate,
     DerivedBatchReceipt,
@@ -222,7 +222,31 @@ def _candidates_for(
             # reached nobody. The stamp is committed after publication succeeds.
             record_surfacing=False,
         )
+    return _candidates_from_emitted(vault_root, emitted, result_ref=result_ref), emitted
 
+
+def _candidates_for_route(
+    vault_root: Path,
+    inputs: corpus_aware.WriteAdvisoryInputs,
+    *,
+    result_ref: str,
+) -> tuple[tuple[DerivedAdvisoryCandidate, ...], list[Any]]:
+    """The route's own sweep over its exact inputs: what it returns inline.
+
+    The surfacing stamp waits for publication, as on the generic path; it
+    changes no warning of this result.
+    """
+    emitted = corpus_aware.write_advisory_for(vault_root, inputs, record_surfacing=False)
+    return _candidates_from_emitted(vault_root, emitted, result_ref=result_ref), emitted
+
+
+def _candidates_from_emitted(
+    vault_root: Path,
+    emitted: list[Any],
+    *,
+    result_ref: str,
+) -> tuple[DerivedAdvisoryCandidate, ...]:
+    """Bind each emitted advisory to its counterpart's current fingerprint."""
     candidates: dict[tuple[str, str], DerivedAdvisoryCandidate] = {}
     for item in emitted:
         if item.identity is None or item.counterpart_rel_path is None:
@@ -246,7 +270,7 @@ def _candidates_for(
         )
         if len(candidates) >= MAX_RESULT_CANDIDATES:
             break
-    return tuple(candidates.values()), emitted
+    return tuple(candidates.values())
 
 
 def _publish(
@@ -358,6 +382,39 @@ def execute_write_advisory(
             observed=observed,
             now=now,
         )
+
+    route_inputs = advisory_handoff.route_inputs(vault_root, batch_id)
+    if route_inputs is not None and route_inputs.target_rel_path == stored.target_rel_path:
+        # The leaf declared its sweep and skipped it inline: run exactly that
+        # sweep here, over exactly those inputs.
+        try:
+            candidates, emitted = _candidates_for_route(
+                vault_root, route_inputs, result_ref=ref
+            )
+        except Exception as error:  # noqa: BLE001 - optional advisory fails closed and soft
+            if not isinstance(error, _UnaddressableAdvisory):
+                log.warning("advisory computation failed batch=%s", batch_id, exc_info=True)
+            return _publish(
+                vault_root,
+                claimed_status,
+                state="failed",
+                failure_code="advisory_failed",
+                observed=observed,
+                now=now,
+            )
+        execution = _publish(
+            vault_root,
+            claimed_status,
+            state="ready",
+            candidates=candidates,
+            observed=observed,
+            now=now,
+        )
+        if execution.outcome == "published":
+            corpus_aware.record_write_advisory_surfacing(vault_root, emitted)
+        if execution.outcome in {"published", "already_published", "superseded"}:
+            advisory_handoff.forget_route_inputs(vault_root, batch_id)
+        return execution
 
     from . import embeddings  # numpy-backed; loaded only when a claim is executed
 

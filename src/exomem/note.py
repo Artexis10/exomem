@@ -1924,16 +1924,29 @@ def note(
             encoded_token,
         )
     commit_started = time.perf_counter()
+    from . import writer_lease
+
+    advisory_inputs = corpus_aware.WriteAdvisoryInputs(
+        route="remember",
+        target_rel_path=destination,
+        self_path=rel_note_no_ext,
+        title=title,
+        body=body_clean,
+        note_type=note_type,
+    )
     try:
-        committed = semantic_writes.commit_creation(
-            root,
-            preflight=preflight,
-            auxiliary_writes=tuple(auxiliary),
-            relation_disposition=relation_disposition,
-            relation_review_hash=relation_review_hash,
-            relation_review_reason=relation_review_reason,
-            operation="create",
-        )
+        # Under fast acknowledgement the default sweep below is handed to the
+        # batch's `write_advisory` component with these exact inputs.
+        with writer_lease.declare_write_advisory(advisory_inputs):
+            committed = semantic_writes.commit_creation(
+                root,
+                preflight=preflight,
+                auxiliary_writes=tuple(auxiliary),
+                relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                relation_review_reason=relation_review_reason,
+                operation="create",
+            )
     except (semantic_writes.SemanticWriteError, relation_review.RelationReviewError) as error:
         raise NoteError(
             error.code,
@@ -1955,8 +1968,13 @@ def note(
     # The near-dup/contradiction sweep is a dedupe guardrail and stays on in
     # every mode (locked by tests/test_note_suggestions_knob.py). Its latency
     # lives inside the widened edge budget; `note write timings ...
-    # advisory_ms` keeps both attributable when they grow.
-    if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+    # advisory_ms` keeps both attributable when they grow. Under fast durable
+    # acknowledgement the sweep still runs, but not here: the batch's
+    # `write_advisory` component runs it with the same inputs, and the terminal
+    # carries its exact result reference.
+    if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS") and not (
+        writer_lease.write_advisory_deferred(root, advisory_inputs)
+    ):
         try:
             if suggestions:
                 corpus_suggestions = [
@@ -1973,32 +1991,10 @@ def note(
                 ]
             # Post-commit: the commit just published this page's chunk vectors,
             # so the sweep reads them back instead of encoding the draft again.
-            cosines = corpus_aware._best_cosine_per_file(
-                root, title=title, body=body_clean, published_path=destination
-            )
-            duplicate_candidates = corpus_aware.detect_duplicates(
-                root,
-                title=title,
-                body=body_clean,
-                self_path=rel_note_no_ext,
-                types_filter=[note_type],
-                precomputed=cosines,
-            )
-            overlap_candidates = corpus_aware.detect_contradictions(
-                root,
-                title=title,
-                body=body_clean,
-                self_path=rel_note_no_ext,
-                precomputed=cosines,
-            )
-            advisory_warnings = corpus_aware.emit_write_advisory_groups(
-                root,
-                self_path=rel_note_no_ext,
-                groups=[
-                    ("near-duplicate", duplicate_candidates),
-                    *corpus_aware.detected_overlap_advisory_groups(overlap_candidates),
-                ],
-            )
+            advisory_warnings = [
+                emitted.warning
+                for emitted in corpus_aware.write_advisory_for(root, advisory_inputs)
+            ]
         except Exception:  # noqa: BLE001 — optional suggestions are best-effort
             log.debug("corpus-aware nudges failed (non-fatal)", exc_info=True)
     warnings.extend(advisory_warnings)

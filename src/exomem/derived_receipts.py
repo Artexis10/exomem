@@ -401,7 +401,19 @@ class DerivedAdvisoryCandidate:
     triage_fingerprint: str
 
     def __post_init__(self) -> None:
-        _safe_rel_path(self.counterpart_rel_path, label="counterpart_rel_path")
+        # A vault-scope sweep names counterparts outside the knowledge base, and
+        # the result must carry exactly the warnings the write returns inline.
+        counterpart = deferred_index._safe_markdown_rel_path(
+            self.counterpart_rel_path, knowledge_base_only=False
+        )
+        if (
+            counterpart is None
+            or counterpart != self.counterpart_rel_path
+            or len(counterpart) > _MAX_REL_PATH
+        ):
+            raise ValueError(
+                "counterpart_rel_path must be a bounded safe vault Markdown rel_path"
+            )
         _bounded(
             self.counterpart_fingerprint,
             label="counterpart_fingerprint",

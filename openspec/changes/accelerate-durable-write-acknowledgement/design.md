@@ -299,6 +299,20 @@ while custody declined for a real compiled page silently loses the
 duplicate/overlap signal. The worker publishes `not_required` when it later
 proves the page inapplicable.
 
+A route that sweeps inline declares its exact sweep inputs around its commit
+(owner ruling on task 5.12). `remember` declares the draft title, normalized
+body and note type; `edit` declares the new body when it changed, and declares
+no sweep when it did not, so that edit takes no advisory custody. The committed
+batch hands the declared inputs to its component in process memory -- the draft
+is content and never enters the receipt -- and the component runs the route's
+own sweep (`corpus_aware.write_advisory_for`) over them, so the deferred result
+is the inline result and the route skips its inline sweep. A component that
+runs where the inputs are unavailable (a restart between acknowledgement and
+execution) falls back to the generic sweep over the page's published vectors,
+converging the job instead of stranding it. `capture` keeps its inline sweep.
+A candidate's counterpart may be any safe vault-relative Markdown page, because a
+vault-scope sweep names pages outside the knowledge base.
+
 Advisory output remains noncanonical and fail-open with respect to the committed
 write. The compact terminal returns a stable opaque
 `exomem://write-advisory-result/<id>` reference. Exact

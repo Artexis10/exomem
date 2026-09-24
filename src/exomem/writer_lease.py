@@ -283,6 +283,9 @@ class _FastAcknowledgementBatch:
     receipt: Any
     canonical_commit_monotonic: float
     advisory_target: str | None = None
+    #: The route's own sweep inputs, when the leaf declared them for this
+    #: batch's advisory target (`declare_write_advisory`).
+    advisory_inputs: Any | None = None
 
 
 @dataclass(slots=True)
@@ -300,6 +303,7 @@ class _FastAcknowledgementSession:
     #: prepared batch that rolls back must leave the claim for its successor.
     advisory_claimed: bool = False
     advisory_prepared_target: str | None = None
+    advisory_prepared_inputs: Any | None = None
     batches: list[_FastAcknowledgementBatch] = field(default_factory=list)
 
 
@@ -458,6 +462,54 @@ def active_derived_batch_custody(vault_root: Path) -> bool:
     )
 
 
+#: What the running leaf declared about its default duplicate/overlap sweep:
+#: unset (the leaf declared nothing), ``None`` (the leaf's write has no sweep),
+#: or the route's exact `corpus_aware.WriteAdvisoryInputs`.
+_UNDECLARED: Any = object()
+_DECLARED_WRITE_ADVISORY: ContextVar[Any] = ContextVar(
+    "exomem_declared_write_advisory", default=_UNDECLARED
+)
+
+
+@contextmanager
+def declare_write_advisory(inputs: Any | None) -> Iterator[None]:
+    """Declare, around a leaf's canonical commit, what its default sweep reads.
+
+    A route that sweeps inline passes its exact inputs; under fast
+    acknowledgement the committed batch then hands them to its `write_advisory`
+    component, which runs the same sweep over them, and the leaf skips its own.
+    ``None`` declares that this write has no default sweep, so the batch takes
+    no advisory custody at all. A leaf that declares nothing keeps the
+    component's generic behaviour.
+    """
+    token = _DECLARED_WRITE_ADVISORY.set(inputs)
+    try:
+        yield
+    finally:
+        _DECLARED_WRITE_ADVISORY.reset(token)
+
+
+def write_advisory_deferred(vault_root: Path, inputs: Any) -> bool:
+    """Whether a committed batch of this session carries exactly these inputs.
+
+    True only under fast acknowledgement, for this exact vault, when a batch
+    this mutation committed holds the session's advisory custody together with
+    the very inputs the leaf declared. The leaf then skips its inline sweep:
+    the component runs it and the terminal carries its result reference.
+    Anything else -- no session, a claim released to a later batch, other
+    inputs -- keeps the inline sweep.
+    """
+    session = _ACTIVE_FAST_ACK_SESSION.get()
+    if session is None or not session.advisory_claimed:
+        return False
+    if _fast_ack_root_key(vault_root) != _fast_ack_root_key(session.vault_root):
+        return False
+    return any(
+        batch.advisory_target is not None and batch.advisory_inputs is inputs
+        for batch in session.batches
+    )
+
+
 def current_canonical_generation(vault_root: Path) -> str | None:
     """Public reader for the vault's current canonical generation.
 
@@ -567,6 +619,17 @@ def prepare_active_derived_batch(
         _release_superseded_advisory_claim(session, paths)
     advisory_target: str | None = None
     advisory_fingerprint: str | None = None
+    declared = _DECLARED_WRITE_ADVISORY.get()
+    advisory_inputs = None
+    if declared is None:
+        # The leaf's write has no default sweep: nothing to defer.
+        advisory_target_rel_path = None
+    elif declared is not _UNDECLARED:
+        if getattr(declared, "target_rel_path", None) == advisory_target_rel_path:
+            advisory_inputs = declared
+        else:
+            # The batch is not about the page the leaf's sweep reads.
+            advisory_target_rel_path = None
     if (
         session.advisory_required
         and not session.advisory_claimed
@@ -584,6 +647,9 @@ def prepare_active_derived_batch(
             advisory_target = advisory_target_rel_path
             advisory_fingerprint = after_hash
     session.advisory_prepared_target = advisory_target
+    session.advisory_prepared_inputs = (
+        advisory_inputs if advisory_target is not None else None
+    )
     required_components = set(derived_receipts.DerivedComponent)
     if advisory_target is None:
         required_components.remove(derived_receipts.DerivedComponent.WRITE_ADVISORY)
@@ -618,18 +684,27 @@ def complete_active_derived_batch(
     if session is None:
         raise RuntimeError("derived receipt committed outside its acknowledgement session")
     advisory_target = session.advisory_prepared_target
+    advisory_inputs = session.advisory_prepared_inputs
     session.advisory_prepared_target = None
+    session.advisory_prepared_inputs = None
     if advisory_target is not None:
         # The canonical batch is known committed, so this is the point the
         # session's one advisory job becomes real. A batch that prepared a
         # target and then rolled back never reaches here and leaves the claim
         # available to the next governed batch in the same mutation.
         session.advisory_claimed = True
+        if advisory_inputs is not None:
+            from . import advisory_handoff
+
+            advisory_handoff.register_route_inputs(
+                session.vault_root, receipt.batch_id, advisory_inputs
+            )
     session.batches.append(
         _FastAcknowledgementBatch(
             receipt,
             float(canonical_commit_monotonic),
             advisory_target=advisory_target,
+            advisory_inputs=advisory_inputs if advisory_target is not None else None,
         )
     )
 
