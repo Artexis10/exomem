@@ -6,7 +6,7 @@ import logging
 import os
 from collections.abc import Callable, Mapping
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -51,6 +51,10 @@ class CandidateBundle:
     multiplier_chain_by_path: dict[str, list[dict[str, float | str]]] | None
     #: Why the request crosses scripts, or None (see `_lexical_visibility`).
     lexical_crossing: str | None = None
+    #: Pages whose lexical votes fusion withheld, with the rank each lexical
+    #: lane gave them before it did (`WITHHELD_REASON`). The lane rankings above
+    #: are the ones fusion used, so they no longer hold these pages.
+    lexical_votes_withheld: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 def empty_bundle(
@@ -150,6 +154,8 @@ CROSSING_VOTES_WITHHELD = "lexical_votes_across_scripts"
 #: The dense lead is lexically invisible, no lexical candidate holds a content
 #: word of the query, and the query is written in another script than the lead.
 CROSSING_UNMATCHED = "query_script_differs_from_dense_lead"
+#: Why fusion withheld a lexical vote, as the explain trace reports it.
+WITHHELD_REASON = "other_script_than_dense_lead"
 
 
 class LexicalVisibility(NamedTuple):
@@ -652,15 +658,30 @@ def collect_candidates(
             page_of=page_of,
         )
     )
-    if visibility.withheld:
-        bm25_ranking = [path for path in bm25_ranking if path not in visibility.withheld]
-        keyword_ranking = [path for path in keyword_ranking if path not in visibility.withheld]
     if capture_trace and mode != "vector":
         lane_statuses["keyword"] = {
             "status": "participated" if keyword_ranking else "available_nonmatching",
             "backend": "case_insensitive_substring",
             "metric": {"name": "rank", "direction": "lower", "rounding": "none"},
         }
+    lexical_votes_withheld: dict[str, dict[str, int]] = {}
+    if visibility.withheld:
+        for lane_name, ranking in (("bm25", bm25_ranking), ("keyword", keyword_ranking)):
+            for rank, path in enumerate(ranking, start=1):
+                if path in visibility.withheld:
+                    lexical_votes_withheld.setdefault(path, {})[lane_name] = rank
+        bm25_ranking = [path for path in bm25_ranking if path not in visibility.withheld]
+        keyword_ranking = [path for path in keyword_ranking if path not in visibility.withheld]
+        if capture_trace:
+            for lane_name in ("bm25", "keyword"):
+                count = sum(1 for lanes in lexical_votes_withheld.values() if lane_name in lanes)
+                if count and lane_name in lane_statuses:
+                    # Additive and undeclared in `retrieval_models.LaneProfile`
+                    # so the published outputSchema does not move.
+                    lane_statuses[lane_name]["votes_withheld"] = {
+                        "count": count,
+                        "reason": WITHHELD_REASON,
+                    }
     rankings = [
         r
         for r in (vector_ranking, bm25_ranking, keyword_ranking, clip_ranking)
@@ -961,4 +982,5 @@ def collect_candidates(
         adjusted_score_by_path=adjusted_score_by_path,
         multiplier_chain_by_path=multiplier_chain_by_path,
         lexical_crossing=visibility.crossing,
+        lexical_votes_withheld=lexical_votes_withheld,
     )

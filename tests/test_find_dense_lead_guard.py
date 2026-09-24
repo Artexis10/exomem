@@ -188,3 +188,56 @@ def test_an_english_partial_match_under_an_english_lead_keeps_its_votes(
     guarded = _ranked(vault, query)
     assert guarded == _unguarded(vault, monkeypatch, query)
     assert guarded[0] == partial
+
+
+def _explained(vault: Path, query: str) -> dict:
+    from exomem import commands
+
+    return commands.op_ask_memory(
+        vault,
+        query=query,
+        limit=10,
+        mode="hybrid",
+        scope="kb-only",
+        graph=False,
+        rerank=False,
+        detail="compact",
+        explain=True,
+    )
+
+
+def test_a_withheld_vote_is_recorded_in_the_lane_profiles_and_on_the_hit(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # "повторная" is a whole word of the Russian poison and "с" only a
+    # substring of it, so the substring lane matches the poison, and BM25 ranks
+    # it and the other Russian page ("с" alone) on one word each. Every one of
+    # those votes is withheld against the English lead, and the keyword lane
+    # still reports that it participated.
+    _plant_vector_lane(monkeypatch, [_GOLD, _RU_POISON, _OTHER])
+    result = _explained(vault, "повторная с")
+    lanes = result["retrieval_profile"]["lanes"]
+    reason = "other_script_than_dense_lead"
+    assert lanes["bm25"]["status"] == "participated"
+    assert lanes["bm25"]["votes_withheld"] == {"count": 2, "reason": reason}
+    assert lanes["keyword"]["status"] == "participated"
+    assert lanes["keyword"]["votes_withheld"] == {"count": 1, "reason": reason}
+    hits = {hit["path"].removeprefix(f"{kb_dirname()}/"): hit for hit in result["hits"]}
+    poison = hits[_RU_POISON]["ranking_explanation"]
+    assert poison["lexical_votes_withheld"] == {
+        "reason": "other_script_than_dense_lead",
+        "lanes": {"bm25": 1, "keyword": 1},
+    }
+    assert set(poison["lanes"]) == {"vector"}
+    assert "lexical_votes_withheld" not in hits[_GOLD]["ranking_explanation"]
+
+
+def test_no_withheld_record_when_the_guard_is_silent(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _plant_vector_lane(monkeypatch, [_POISON, _GOLD, _OTHER])
+    result = _explained(vault, "Wiederholung mit Ausbilder")
+    lanes = result["retrieval_profile"]["lanes"]
+    assert "votes_withheld" not in lanes["bm25"]
+    assert "votes_withheld" not in lanes["keyword"]
+    assert all("lexical_votes_withheld" not in hit["ranking_explanation"] for hit in result["hits"])
