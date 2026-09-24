@@ -10,10 +10,11 @@ cross-language 2 -> 6). English improved (golden NDCG@10 0.931 -> 0.962).
 Coverage is declared per reranker, as data: the scripts it reads, and whether it
 can judge a query against a passage in another language. No language is
 detected. A query is outside the scripts when most of its letters are in
-scripts the reranker does not declare. A request crosses languages when the
-dense lead shares no content word with the query and fusion found the lexical
-lanes voting in another vocabulary (or matching no content word at all). Either
-keeps the fused order, explicit rerank included.
+scripts the reranker does not declare. A request crosses scripts when the
+dense lead shares no content word with the query and fusion withheld a lexical
+vote for a page in another script than the lead. Either keeps the fused order,
+explicit rerank included. A German or Estonian query answered by an English page
+is Latin on both sides and is still reranked: a known gap.
 """
 
 from __future__ import annotations
@@ -97,6 +98,7 @@ _GOLD = "Notes/Patterns/retry-with-backoff.md"
 _POISON = "Notes/Languages/de/wiederholungspruefung.md"
 _OTHER = "Notes/Languages/de/kantine.md"
 _RUSSIAN = "Notes/Languages/ru/krysha.md"
+_CHINESE = "Notes/Languages/zh/chongshi-kaoshi.md"
 
 _PAGES: dict[str, tuple[str, str]] = {
     _GOLD: (
@@ -110,6 +112,7 @@ _PAGES: dict[str, tuple[str, str]] = {
     ),
     _OTHER: ("Kantine", "Die Kantine bietet montags Müsli mit Brötchen an."),
     _RUSSIAN: ("Ремонт крыши гаража", "Крыша гаража протекала после дождей."),
+    _CHINESE: ("重试考试安排", "没有通过考试的学员可以在一个月后重试考试。"),
 }
 
 
@@ -179,20 +182,34 @@ def test_a_query_outside_the_rerankers_scripts_keeps_the_fused_order(
     assert calls == []
 
 
-def test_a_cross_language_request_keeps_the_fused_order(
+def test_a_cross_script_request_keeps_the_fused_order(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls = _plant(monkeypatch, [_GOLD, _POISON, _OTHER])
-    profile = _rerank_profile(vault, "Wiederholungsversuche mit exponentieller Rücksetzung")
+    # A Chinese query (a covered script) whose dense lead is an English page:
+    # fusion withheld the Chinese look-alike's lexical vote, so the request
+    # crosses scripts and the English-and-Chinese reranker does not judge it.
+    calls = _plant(monkeypatch, [_GOLD, _CHINESE, _OTHER])
+    profile = _rerank_profile(vault, "重试的指数退避")
     assert (profile["decision"], profile["reason"]) == ("skipped", "cross_language_not_covered")
     assert calls == []
 
 
-def test_a_cross_lingual_reranker_still_runs_on_a_cross_language_request(
+def test_a_cross_lingual_reranker_still_runs_on_a_cross_script_request(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls = _plant(monkeypatch, [_GOLD, _POISON, _OTHER])
+    calls = _plant(monkeypatch, [_GOLD, _CHINESE, _OTHER])
     monkeypatch.setattr(embeddings, "RERANKER_NAME", "BAAI/bge-reranker-v2-m3")
+    profile = _rerank_profile(vault, "重试的指数退避")
+    assert profile["decision"] == "ran"
+    assert calls
+
+
+def test_a_latin_query_with_a_latin_lead_is_reranked_even_across_languages(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # German query, English answer: both Latin, so nothing marks the request
+    # as crossing and the reranker runs. Known gap, recorded with the twin bar.
+    calls = _plant(monkeypatch, [_GOLD, _POISON, _OTHER])
     profile = _rerank_profile(vault, "Wiederholungsversuche mit exponentieller Rücksetzung")
     assert profile["decision"] == "ran"
     assert calls
@@ -205,3 +222,4 @@ def test_a_same_language_request_in_a_covered_script_is_reranked(
     profile = _rerank_profile(vault, "Wiederholung mit Ausbilder")
     assert profile["decision"] == "ran"
     assert calls
+

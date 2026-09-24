@@ -8,6 +8,7 @@ import re
 from collections.abc import Callable, Set
 from dataclasses import dataclass
 from datetime import date, timedelta
+from functools import lru_cache
 
 from .find_types import Hit
 from .ranking_config import DEFAULT_RANKING, RankingConfig
@@ -646,6 +647,7 @@ def reranker_coverage(model_name: str) -> RerankerCoverage:
     return _RERANKER_COVERAGE.get(model_name, _UNDECLARED_RERANKER)
 
 
+@lru_cache(maxsize=4096)
 def _letter_script(character: str) -> str:
     from . import text_scripts
 
@@ -660,20 +662,30 @@ def _letter_script(character: str) -> str:
     return text_scripts.uniform_letter_script(character) or "other"
 
 
-def dominant_script(query: str) -> str | None:
-    """The script most of the query's letters are written in; None with no letters.
+_ASCII_LETTER = re.compile(r"[A-Za-z]")
+_NON_ASCII = re.compile(r"[^\x00-\x7f]+")
+
+
+def dominant_script(text: str) -> str | None:
+    """The script most of the text's letters are written in; None with no letters.
 
     Read from the declared Unicode blocks in `text_scripts`, after NFKC, so a
     full-width Latin letter is Latin. Scripts the table does not declare read as
-    "other". No language is detected.
+    "other". No language is detected. ASCII letters are counted in bulk, so an
+    English page costs one regex pass.
     """
     import unicodedata
 
+    normalized = unicodedata.normalize("NFKC", text or "")
     counts: dict[str, int] = {}
-    for character in unicodedata.normalize("NFKC", query or ""):
-        if unicodedata.category(character).startswith("L"):
-            script = _letter_script(character)
-            counts[script] = counts.get(script, 0) + 1
+    ascii_letters = len(_ASCII_LETTER.findall(normalized))
+    if ascii_letters:
+        counts["latin"] = ascii_letters
+    for run in _NON_ASCII.findall(normalized):
+        for character in run:
+            if unicodedata.category(character).startswith("L"):
+                script = _letter_script(character)
+                counts[script] = counts.get(script, 0) + 1
     if not counts:
         return None
     return min(counts, key=lambda script: (-counts[script], script))

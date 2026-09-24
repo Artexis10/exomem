@@ -146,13 +146,6 @@ def collapse_frame_children(
     return out
 
 
-#: Two pages sharing at least this many index stems are taken to be written in
-#: one vocabulary. Measured on the golden fixture plus the multilingual recall
-#: pages (2026-09-23): any two English pages share 7 or more stems, and a German,
-#: Russian, Japanese or Estonian page shares at most 2 with an English page.
-_SHARED_VOCABULARY_FLOOR = 3
-
-
 class LexicalVisibility(NamedTuple):
     """What fusion learned about the lexical lanes against the dense lead."""
 
@@ -179,18 +172,20 @@ def _lexical_visibility(
     language than the query. When its strongest candidate shares no content word
     with the query, the lexical lanes cannot see that page at all, and their
     votes rank other pages by vocabulary overlap with the query. Where those
-    pages are written in another vocabulary than the dense lead -- the query's
-    own language, when the lead is in another -- reciprocal-rank fusion would let
-    one partial match plus a weaker dense vote outrank the dense lead.
+    pages are written in another script than the dense lead -- the query's own,
+    when the lead is in another -- reciprocal-rank fusion would let one partial
+    match plus a weaker dense vote outrank the dense lead.
 
     So, with the dense lead lexically invisible, a lexical lane stops voting for
-    a page that (a) holds only some of the query's content words and (b) shares
-    fewer than `_SHARED_VOCABULARY_FLOOR` stems with the dense lead. Two pages in
-    one language share its common words; pages in two languages share at most a
-    loanword or a number. The page keeps its dense and other votes. Words are
-    counted as the degraded-retention gate counts them
-    (`find_policy.query_word_stem_groups`), function words excluded. No language
-    is detected: both tests compare token sets.
+    a page that (a) holds only some of the query's content words and (b) is
+    written mostly in another letter script than the dense lead
+    (`find_policy.dominant_script`, the table the rerank coverage gate reads).
+    The page keeps its dense and other votes. Words are counted as the
+    degraded-retention gate counts them (`find_policy.query_word_stem_groups`),
+    function words excluded. There is no threshold and no language detection: a
+    lead in the query's own script never costs a same-script page its vote, so
+    an English vault ranks exactly as before. A Latin-script query whose answer
+    is an English page (German, Estonian) is not protected by this rule.
 
     The request crosses languages when, with the dense lead invisible, some vote
     was withheld or no lexical candidate holds any content word of the query:
@@ -206,7 +201,7 @@ def _lexical_visibility(
     lead = page_of(vector_ranking[0])
     if lead is None or find_policy.stem_word_coverage(lead.stem_set, groups)[2]:
         return _LEXICALLY_VISIBLE
-    lead_stems = lead.stem_set
+    lead_script = lead.letter_script
     withheld: set[str] = set()
     any_content_match = False
     for path in dict.fromkeys(path for lane in lexical_rankings for path in lane):
@@ -216,7 +211,7 @@ def _lexical_visibility(
         stems = page.stem_set
         matched = find_policy.stem_word_coverage(stems, groups)[2]
         any_content_match = any_content_match or matched > 0
-        if matched < content_words and len(stems & lead_stems) < _SHARED_VOCABULARY_FLOOR:
+        if matched < content_words and page.letter_script != lead_script:
             withheld.add(path)
     return LexicalVisibility(frozenset(withheld), bool(withheld) or not any_content_match)
 
