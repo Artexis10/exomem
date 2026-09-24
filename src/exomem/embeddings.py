@@ -71,6 +71,12 @@ MAX_WORDS_PER_CHUNK = 350
 # by visual content. An EMBEDDER (measurement) like bge — not a captioning VLM —
 # so it stays in-bounds for the pure-substrate server. ViT-B/32 → 512-dim.
 CLIP_MODEL_NAME = "clip-ViT-B-32"
+#: The activation index's own encoder (close-memory-loop, step 4). Unset, or naming
+#: `MODEL_NAME`, is the shared topology: activation uses the recall singleton on the
+#: process-wide model gate, exactly as before. Any other model is a second guarded
+#: singleton with an execution slot of its own, so an interactive query encode never
+#: queues behind a recall write's bulk encode. Recall itself never changes model.
+ACTIVATION_MODEL_ENV = "EXOMEM_ACTIVATION_MODEL"
 _MODEL = None
 #: Advanced under `_MODEL_LOCK` on every load and every unload of `_MODEL`, so a
 #: vector can say which resident model produced it (see `passage_memo_stamp`).
@@ -80,6 +86,18 @@ _RERANKER = None
 _RERANKER_LOCK = threading.Lock()
 _CLIP_MODEL = None
 _CLIP_LOCK = threading.Lock()
+_ACTIVATION_MODEL = None
+_ACTIVATION_MODEL_LOCK = threading.Lock()
+_ACTIVATION_GATE: runtime_resources.ModelAdmissionGate | None = None
+_ACTIVATION_GATE_LOCK = threading.Lock()
+#: The interactive lane: single query encodes, on a model that can encode
+#: concurrently, never wait for (or are refused behind) a bulk batch.
+_INTERACTIVE_GATE: runtime_resources.ModelAdmissionGate | None = None
+_INTERACTIVE_GATE_LOCK = threading.Lock()
+#: Tokens of an activation turn that are read, the model's special tokens on
+#: top. A turn's head says what it is about, and the request path has no budget
+#: for reading a pasted page.
+ACTIVATION_TURN_MAX_TOKENS = 40
 _IMPORT_FAILED = False  # one-time soft-fail flag for upsert_after_write
 _CLIP_IMPORT_FAILED = False
 
@@ -133,6 +151,7 @@ class _ModelGuard:
 BGE_GUARD = _ModelGuard("embeddings")
 RERANKER_GUARD = _ModelGuard("reranker")
 CLIP_GUARD = _ModelGuard("clip")
+ACTIVATION_GUARD = _ModelGuard("activation")
 
 
 def unload_model() -> bool:
@@ -152,6 +171,24 @@ def unload_model() -> bool:
     # Backends hold runtime memory the reference drop alone will not return: an
     # ONNX session owns arenas outside Python's heap, and torch owns a caching
     # allocator. `release` is where each says how to give it back.
+    release = getattr(m, "release", None)
+    if release is not None:
+        with contextlib.suppress(Exception):  # unload must never raise
+            release()
+    del m
+    gc.collect()
+    accel.empty_cache()
+    return True
+
+
+def unload_activation_model() -> bool:
+    """Drop a separate activation encoder. See `unload_model`; the shared
+    topology holds nothing here, so this is then a no-op."""
+    global _ACTIVATION_MODEL
+    with _ACTIVATION_MODEL_LOCK:
+        if _ACTIVATION_MODEL is None or ACTIVATION_GUARD.inflight() > 0:
+            return False
+        m, _ACTIVATION_MODEL = _ACTIVATION_MODEL, None
     release = getattr(m, "release", None)
     if release is not None:
         with contextlib.suppress(Exception):  # unload must never raise
@@ -270,6 +307,7 @@ def get_reranker():
 
             device = accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
             log.info("loading reranker %s on %s", RERANKER_NAME, device)
+            embedding_backend.require_tokenizer(RERANKER_NAME)
             _RERANKER = model_cache.load_offline_first(
                 RERANKER_NAME,
                 lambda **kw: CrossEncoder(RERANKER_NAME, device=device, **kw),
@@ -1098,21 +1136,87 @@ def _embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     if not texts:
         return np.zeros((0, VECTOR_DIM), dtype=np.float32)
     model = get_model()
-    if is_query:
-        texts = [QUERY_PREFIX + t for t in texts]
-    with BGE_GUARD.active(), runtime_resources.model_execution():
-        vecs = model.encode(
+    query_prefix, passage_prefix = _prefixes(model, MODEL_NAME)
+    prefix = query_prefix if is_query else passage_prefix
+    if prefix:
+        texts = [prefix + t for t in texts]
+    with BGE_GUARD.active():
+        return _encode_in_turns(
+            model,
             texts,
-            batch_size=encode_batch_size(model),
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-            show_progress_bar=False,
+            admission=runtime_resources.model_admission,
+            execution=runtime_resources.model_execution,
         )
-    return vecs.astype(np.float32, copy=False)
 
 
-def embed_query_if_loaded(text: str) -> np.ndarray | None:
-    """Encode one query only when the text encoder is already resident."""
+def _prefixes(model, model_name: str) -> tuple[str, str]:
+    """The query and passage prefixes the resident model was trained with."""
+    profile = getattr(model, "profile", None)
+    if isinstance(profile, embedding_backend.EncoderProfile):
+        return profile.query_prefix, profile.passage_prefix
+    query, passage, _pooling, _pad = embedding_backend._DECLARED.get(
+        model_name, embedding_backend._UNDECLARED
+    )
+    return query, passage
+
+
+def _encode_in_turns(model, texts: list[str], *, admission, execution) -> np.ndarray:
+    """The background lane: a bulk encode, one batch per execution turn.
+
+    One admission covers the whole encode, so it is one unit of admitted work,
+    but the execution slot is released between batches, so no encode is held
+    behind the whole of another. Several batches are formed longest first, as
+    sentence-transformers forms them, so they pad no more than one call did;
+    rows come back in input order.
+    """
+    size = encode_batch_size(model)
+    order = np.argsort([-len(text) for text in texts]) if len(texts) > size else np.arange(len(texts))
+    parts: list[np.ndarray] = []
+    with admission():
+        for start in range(0, len(texts), size):
+            batch = [texts[i] for i in order[start : start + size]]
+            with execution():
+                vecs = model.encode(
+                    batch,
+                    batch_size=size,
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                )
+            parts.append(np.asarray(vecs, dtype=np.float32))
+    stacked = parts[0] if len(parts) == 1 else np.concatenate(parts, axis=0)
+    out = np.empty_like(stacked)
+    out[order] = stacked
+    return out
+
+
+def _interactive_execution(model, bulk_execution):
+    """The slot one interactive query encode runs in; it never waits.
+
+    A model that can encode concurrently (an ONNX Runtime session) serves query
+    encodes on a lane of their own, so a query is never refused behind a bulk
+    batch on the same instance; a second query at the same moment still reads
+    `busy`. Any other model shares its bulk slot, where `wait=False` refuses
+    while a batch runs.
+    """
+    global _INTERACTIVE_GATE
+    if not getattr(model, "concurrent_encodes", False):
+        return bulk_execution(wait=False)
+    with _INTERACTIVE_GATE_LOCK:
+        if _INTERACTIVE_GATE is None:
+            _INTERACTIVE_GATE = runtime_resources.ModelAdmissionGate(
+                runtime_resources.resolve_policy().model_admission
+            )
+        gate = _INTERACTIVE_GATE
+    return gate.execution(wait=False)
+
+
+def embed_query_if_loaded(text: str, *, max_tokens: int | None = None) -> np.ndarray | None:
+    """Encode one query only when the text encoder is already resident.
+
+    ``max_tokens`` caps how much of the text is read; None reads up to the
+    model's own limit.
+    """
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return None
     if not _MODEL_LOCK.acquire(blocking=False):
@@ -1125,20 +1229,147 @@ def embed_query_if_loaded(text: str) -> np.ndarray | None:
             _MODEL_LOCK.release()
         if model is None:
             return None
+        query_prefix, _passage_prefix = _prefixes(model, MODEL_NAME)
+        cap = {} if max_tokens is None else {"max_tokens": max_tokens}
         caller = _encode_caller() if call_spans.MCP_CALL_TOKEN.get() is not None else "off-path"
         with (
             call_spans.span("embeddings.encode", {"texts": 1, "chars": len(text)}),
             call_spans.span(f"encode.by.{caller}"),
-            runtime_resources.model_execution(wait=False),
+            _interactive_execution(model, runtime_resources.model_execution),
         ):
             vecs = model.encode(
-                [QUERY_PREFIX + text],
+                [query_prefix + text],
                 batch_size=encode_batch_size(model),
                 convert_to_numpy=True,
                 normalize_embeddings=True,
                 show_progress_bar=False,
+                **cap,
             )
-        return vecs.astype(np.float32, copy=False)[0]
+        return np.asarray(vecs, dtype=np.float32)[0]
+
+
+def activation_model_name() -> str:
+    """The activation encoder's model: `EXOMEM_ACTIVATION_MODEL`, else recall's."""
+    return (os.environ.get(ACTIVATION_MODEL_ENV) or "").strip() or MODEL_NAME
+
+
+def activation_encoder_is_shared() -> bool:
+    """True when activation uses the recall singleton itself.
+
+    Equal names are equal profiles: a served model's revision, quantisation and
+    file format are a function of its name (`embedding_backend.served_artifact`),
+    and both lanes load through the same backend. So one model named twice is
+    ONE resident instance, loaded once and paid for once.
+    """
+    return activation_model_name() == MODEL_NAME
+
+
+def _activation_gate() -> runtime_resources.ModelAdmissionGate:
+    global _ACTIVATION_GATE
+    with _ACTIVATION_GATE_LOCK:
+        if _ACTIVATION_GATE is None:
+            _ACTIVATION_GATE = runtime_resources.ModelAdmissionGate(
+                runtime_resources.resolve_policy().model_admission
+            )
+        return _ACTIVATION_GATE
+
+
+def activation_execution(*, wait: bool = True):
+    """The execution slot activation encodes run in.
+
+    Shared topology: the process-wide gate, as every recall encode. Separate
+    model: a gate private to that singleton, so the activation query never meets
+    the recall writer's bulk encodes and the nonblocking rule reads `busy` only
+    when activation's own encoder is busy.
+    """
+    if activation_encoder_is_shared():
+        return runtime_resources.model_execution(wait=wait)
+    return _activation_gate().execution(wait=wait)
+
+
+def _activation_admission():
+    if activation_encoder_is_shared():
+        return runtime_resources.model_admission()
+    return _activation_gate().admission()
+
+
+def get_activation_model():
+    """The activation encoder, loading it if needed — never from a request thread.
+
+    The recall singleton in the shared topology; otherwise a second lazily loaded
+    singleton, registered with the reaper and preloaded by warm-up like the rest.
+    """
+    global _ACTIVATION_MODEL
+    if activation_encoder_is_shared():
+        return get_model()
+    with activation_execution():
+        if _ACTIVATION_MODEL is not None:
+            return _ACTIVATION_MODEL
+        with _ACTIVATION_MODEL_LOCK:
+            if _ACTIVATION_MODEL is None:
+                _ACTIVATION_MODEL = embedding_backend.load_encoder(activation_model_name())
+        ACTIVATION_GUARD.touch()
+        return _ACTIVATION_MODEL
+
+
+def embed_activation_query_if_loaded(text: str) -> np.ndarray | None:
+    """Encode one activation turn only when its encoder is already resident.
+
+    Never loads and never waits: `None` when cold, `ModelBusyError` when the
+    encoder's own slot is taken. The turn is read at `ACTIVATION_TURN_MAX_TOKENS`.
+    In the shared topology this is `embed_query_if_loaded` with that cap.
+    """
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return None
+    if activation_encoder_is_shared():
+        return embed_query_if_loaded(text, max_tokens=ACTIVATION_TURN_MAX_TOKENS)
+    if not _ACTIVATION_MODEL_LOCK.acquire(blocking=False):
+        raise runtime_resources.ModelBusyError("model compute is busy; retry shortly")
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(ACTIVATION_GUARD.active())
+            model = _ACTIVATION_MODEL
+        finally:
+            _ACTIVATION_MODEL_LOCK.release()
+        if model is None:
+            return None
+        query_prefix, _passage_prefix = _prefixes(model, activation_model_name())
+        caller = _encode_caller() if call_spans.MCP_CALL_TOKEN.get() is not None else "off-path"
+        with (
+            call_spans.span("embeddings.encode", {"texts": 1, "chars": len(text)}),
+            call_spans.span(f"encode.by.{caller}"),
+            _interactive_execution(model, activation_execution),
+        ):
+            vecs = model.encode(
+                [query_prefix + text],
+                batch_size=encode_batch_size(model),
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+                max_tokens=ACTIVATION_TURN_MAX_TOKENS,
+            )
+        return np.asarray(vecs, dtype=np.float32)[0]
+
+
+def embed_activation_passages(texts: list[str]) -> np.ndarray:
+    """Encode activation signatures with the activation encoder's passage prefix.
+
+    Loads the encoder when it is cold, so it belongs to the background index
+    build, never to a request thread. The shared topology is `embed_texts`.
+    """
+    if activation_encoder_is_shared():
+        return embed_texts(texts, is_query=False)
+    if not texts:
+        return np.zeros((0, 0), dtype=np.float32)
+    model = get_activation_model()
+    _query_prefix, passage_prefix = _prefixes(model, activation_model_name())
+    with ACTIVATION_GUARD.active():
+        return _encode_in_turns(
+            model,
+            [passage_prefix + text for text in texts],
+            admission=_activation_admission,
+            execution=activation_execution,
+        )
 
 
 def vector_backend_active(vault_root: Path) -> bool:
@@ -1605,8 +1836,13 @@ class PassageStamp(NamedTuple):
 
 
 def _vector_space() -> str:
-    """The vector space an encode produces now. One seam: an encoder profile's
-    own ``fingerprint()`` replaces this when a vault can hold more than one."""
+    """The vector space an encode produces now: the resident encoder's own
+    fingerprint, which for a served model names the exact bytes it runs. An
+    encoder with no profile (none loaded, or a substitute) is named by the
+    model it stands for."""
+    profile = getattr(_MODEL, "profile", None)
+    if isinstance(profile, embedding_backend.EncoderProfile):
+        return profile.fingerprint()
     return embedding_backend.fingerprint(MODEL_NAME)
 
 

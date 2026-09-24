@@ -7,6 +7,7 @@ the text each vector was computed from, so an unchanged text keeps its vector.
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import random
 import sqlite3
@@ -604,3 +605,34 @@ def test_a_vector_encoded_before_an_unload_is_not_served_to_the_next_load(
         "the upsert took vectors the unloaded encoder produced"
     )
     assert embeddings._MODEL.name == "model-a#load2"
+
+
+def test_the_stamp_names_the_resident_encoder_s_own_identity(lifecycle) -> None:
+    """The vector space is the loaded encoder's own fingerprint, so a vector of
+    another build of the same model -- other bytes under the same name -- is
+    never handed on."""
+    embeddings.get_model()
+    profile = embedding_backend.EncoderProfile(
+        model="model-a",
+        pooling="cls",
+        query_prefix="",
+        passage_prefix="",
+        max_seq=512,
+        pad_token="<pad>",
+        revision="a" * 40,
+        quantization=embedding_backend.ORT_DYNAMIC_INT8,
+        file_format=embedding_backend.ONNX_EXTERNAL_DATA,
+        artifact_digest="0123456789abcdef",
+    )
+    embeddings._MODEL.profile = profile
+    stamp = embeddings.passage_memo_stamp()
+    embeddings.remember_passage_vectors(
+        ["alpha"], np.ones((1, embeddings.VECTOR_DIM), np.float32), stamp=stamp
+    )
+
+    assert stamp.space == profile.fingerprint()
+    assert set(embeddings.recall_passage_vectors(["alpha"], stamp=embeddings.passage_memo_stamp())) == {"alpha"}
+
+    embeddings._MODEL.profile = dataclasses.replace(profile, artifact_digest="fedcba9876543210")
+
+    assert embeddings.recall_passage_vectors(["alpha"], stamp=embeddings.passage_memo_stamp()) == {}

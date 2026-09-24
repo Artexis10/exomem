@@ -19,10 +19,18 @@ and CLIP, so only the hosted lane — which withholds both — can drop it.
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import json
 import logging
 import os
+import shutil
+import subprocess
+import sys
+import tempfile
 from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 import numpy as np
@@ -44,6 +52,24 @@ _VALID = (TORCH, ONNX)
 #: which is exactly the failure a similarity gate is meant to catch.
 _POOLING_CLS = "cls"
 _DEFAULT_MAX_SEQ = 512
+#: Every served model reads at most this many tokens, whatever its repository
+#: declares (bge-m3 declares 8192). Passages are chunked below it upstream, and
+#: attention cost grows with the square of the window.
+SERVED_MAX_SEQ = 512
+
+#: Where a served model's built artefact lives. Unset, it sits beside the hub
+#: cache (`HF_HOME`), so an image that mounts that as a volume keeps it too.
+ARTIFACT_DIR_ENV = "EXOMEM_MODEL_ARTIFACT_DIR"
+#: ONNX Runtime's dynamic quantiser, int8 weights (`QInt8`, `MatMulConstBOnly`).
+ORT_DYNAMIC_INT8 = "ort-dynamic-int8"
+#: An ONNX graph whose weights live in one external `<graph>.data` file.
+ONNX_EXTERNAL_DATA = "onnx-external-data"
+_ARTIFACT_FILES = ("model.onnx", "model.onnx.data")
+_ARTIFACT_MANIFEST = "artifact.json"
+
+
+class ModelFilesUnavailable(RuntimeError):
+    """A model file the load needs is neither resident nor fetchable."""
 
 
 class Encoder(Protocol):
@@ -53,6 +79,12 @@ class Encoder(Protocol):
     backend: str
     #: Device the model actually landed on, in torch's vocabulary.
     device: str
+    #: How the model encodes — pooling, prefixes, limit — and so which vectors.
+    profile: EncoderProfile
+    #: Whether two threads may encode on this one instance at once. ONNX
+    #: Runtime's `InferenceSession.run` may; sentence-transformers reconfigures
+    #: its tokenizer per call, so the torch lane may not.
+    concurrent_encodes: bool
 
     def encode(
         self,
@@ -62,6 +94,7 @@ class Encoder(Protocol):
         normalize_embeddings: bool = True,
         convert_to_numpy: bool = True,
         show_progress_bar: bool = False,
+        max_tokens: int | None = None,
     ) -> np.ndarray: ...
 
     def release(self) -> None:
@@ -107,6 +140,202 @@ def _importable(module: str) -> bool:
         return False
 
 
+#: What a model repository does not say about itself: the prefixes each model was
+#: trained with, and the pooling and padding token to assume when a cached copy
+#: predates the files that do say (an ONNX cache from before profiles existed
+#: holds no `1_Pooling/config.json`). Recall's model keeps exactly what the
+#: shipped encoder always did: CLS, `[PAD]`, and its query prefix.
+_DECLARED: dict[str, tuple[str, str, str, str]] = {
+    # model: (query prefix, passage prefix, pooling, padding token)
+    "BAAI/bge-base-en-v1.5": (
+        "Represent this sentence for searching relevant passages: ",
+        "",
+        _POOLING_CLS,
+        "[PAD]",
+    ),
+    "intfloat/multilingual-e5-small": ("query: ", "passage: ", "mean", "<pad>"),
+    "intfloat/multilingual-e5-base": ("query: ", "passage: ", "mean", "<pad>"),
+    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2": ("", "", "mean", "<pad>"),
+    "BAAI/bge-m3": ("", "", _POOLING_CLS, "<pad>"),
+}
+_UNDECLARED = ("", "", _POOLING_CLS, "[PAD]")
+
+
+@dataclass(frozen=True)
+class ServedArtifact:
+    """The exact bytes a declared model is served from, built once per host.
+
+    ``revision`` pins the repository commit every file of the model is read at,
+    so a moving ``main`` never moves the vectors. ``source`` is the published
+    ONNX export at that commit, graph first; it is quantised as
+    ``quantization`` says into ``file_format``.
+    """
+
+    revision: str
+    source: tuple[str, ...]
+    quantization: str
+    file_format: str
+
+
+#: The one model a personal server serves for activation and recall alike, at
+#: about 0.65 GB resident. Its int8 anchor-contact verdicts equal fp32's on the
+#: multilingual fixture, which no other candidate's did (step-4 design §16.6).
+_SERVED: dict[str, ServedArtifact] = {
+    "BAAI/bge-m3": ServedArtifact(
+        revision="5617a9f61b028005a4858fdac845db406aefb181",
+        source=("onnx/model.onnx", "onnx/model.onnx_data", "onnx/Constant_7_attr__value"),
+        quantization=ORT_DYNAMIC_INT8,
+        file_format=ONNX_EXTERNAL_DATA,
+    ),
+}
+
+
+def served_artifact(model_name: str) -> ServedArtifact | None:
+    """The artefact `model_name` is served from, or None for a hub-file model."""
+    return _SERVED.get(model_name)
+
+
+@dataclass(frozen=True)
+class EncoderProfile:
+    """How one model turns text into a vector: read from the model, never guessed.
+
+    Pooling, the sequence limit and the padding token come from the repository's
+    own `1_Pooling/config.json`, `sentence_bert_config.json` and
+    `tokenizer_config.json` (or from the loaded sentence-transformers model, which
+    read the same files). The prefixes are the model's training convention, which
+    no file records, so they come from `_DECLARED`.
+    """
+
+    model: str
+    pooling: str
+    query_prefix: str
+    passage_prefix: str
+    max_seq: int
+    pad_token: str
+    onnx_file: str = "onnx/model.onnx"
+    #: A served model's pinned commit, quantisation, file format and the digest
+    #: of the built bytes. None for a model served from its hub files.
+    revision: str | None = None
+    quantization: str | None = None
+    file_format: str | None = None
+    artifact_digest: str | None = None
+
+    def fingerprint(self) -> str:
+        """Identity of the vector space: model, pooling, prefixes, limit, L2,
+        and for a served model the exact bytes it runs: revision, quantisation,
+        file format and their digest.
+
+        Never the backend, the padding token or the ONNX file: those are how a
+        runtime computes a vector, not which vector it computes, and a backend
+        swap must not look like a model change. A model with no served artefact
+        keeps the fingerprint it always had.
+        """
+        fields: dict[str, object] = {
+            "model": self.model,
+            "pooling": self.pooling,
+            "query_prefix": self.query_prefix,
+            "passage_prefix": self.passage_prefix,
+            "max_seq": self.max_seq,
+            "normalize": "l2",
+        }
+        for name in ("revision", "quantization", "file_format", "artifact_digest"):
+            value = getattr(self, name)
+            if value is not None:
+                fields[name] = value
+        identity = json.dumps(fields, sort_keys=True)
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+        return f"{self.model}|{self.pooling}|l2|{digest}"
+
+
+def _read_json(model_name: str, filename: str) -> dict | None:
+    try:
+        with open(_model_file(model_name, filename), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:  # noqa: BLE001 — an absent config falls back to the declared value
+        log.debug("no %s for %s; using the declared value", filename, model_name)
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _pooling_from_config(config: dict | None) -> str | None:
+    if not config:
+        return None
+    if config.get("pooling_mode_cls_token"):
+        return _POOLING_CLS
+    if config.get("pooling_mode_mean_tokens"):
+        return "mean"
+    return None
+
+
+def _pad_from_config(config: dict | None) -> str | None:
+    value = (config or {}).get("pad_token")
+    if isinstance(value, dict):
+        value = value.get("content")
+    return str(value) if value else None
+
+
+def read_profile(model_name: str) -> EncoderProfile:
+    """The profile of `model_name`, read from its repository files.
+
+    Called where a model loads, never on a request thread: it resolves up to
+    three small files from the local hub cache, offline-first, at the model's
+    pinned revision when it has one. A served model's artefact digest is known
+    only once the artefact is built, so the encoder that builds it adds it.
+    """
+    query, passage, pooling, pad = _DECLARED.get(model_name, _UNDECLARED)
+    served = served_artifact(model_name)
+    return EncoderProfile(
+        model=model_name,
+        pooling=_pooling_from_config(_read_json(model_name, "1_Pooling/config.json")) or pooling,
+        query_prefix=query,
+        passage_prefix=passage,
+        max_seq=_max_seq_length(model_name),
+        pad_token=_pad_from_config(_read_json(model_name, "tokenizer_config.json")) or pad,
+        revision=served.revision if served else None,
+        quantization=served.quantization if served else None,
+        file_format=served.file_format if served else None,
+    )
+
+
+def profile_from_sentence_transformer(model_name: str, model) -> EncoderProfile:
+    """The same profile, read off a loaded sentence-transformers model.
+
+    That model already parsed the repository's pooling and tokenizer files, so
+    reading them back costs no I/O and gives the torch lane exactly the profile
+    `read_profile` gives the ONNX lane.
+    """
+    query, passage, pooling, pad = _DECLARED.get(model_name, _UNDECLARED)
+    try:
+        for module in model:
+            mode = getattr(module, "get_pooling_mode_str", None)
+            if callable(mode):
+                pooling = str(mode())
+                break
+    except TypeError:  # not a module sequence — keep the declared pooling
+        pass
+    max_seq = getattr(model, "max_seq_length", None)
+    tokenizer_pad = getattr(getattr(model, "tokenizer", None), "pad_token", None)
+    return EncoderProfile(
+        model=model_name,
+        pooling=pooling,
+        query_prefix=query,
+        passage_prefix=passage,
+        max_seq=min(int(max_seq), SERVED_MAX_SEQ) if isinstance(max_seq, int) and max_seq > 0 else _DEFAULT_MAX_SEQ,
+        pad_token=str(tokenizer_pad) if isinstance(tokenizer_pad, str) and tokenizer_pad else pad,
+    )
+
+
+def _pool(hidden: np.ndarray, mask: np.ndarray, pooling: str) -> np.ndarray:
+    """Pool token states the way the model was trained to: CLS, or the mean of
+    the tokens the attention mask keeps (padding never counts)."""
+    if pooling == _POOLING_CLS:
+        return hidden[:, 0]
+    if pooling == "mean":
+        weights = mask[..., None].astype(hidden.dtype)
+        return (hidden * weights).sum(axis=1) / np.maximum(weights.sum(axis=1), 1e-9)
+    raise ValueError(f"unsupported pooling {pooling!r}")
+
+
 def fingerprint(model_name: str) -> str:
     """Identity of the vectors a vault holds — model and pooling, not backend.
 
@@ -117,28 +346,63 @@ def fingerprint(model_name: str) -> str:
     return f"{model_name}|{_POOLING_CLS}|l2"
 
 
+def require_tokenizer(model_name: str) -> str:
+    """The model's `tokenizer.json`, or a refusal to load the model at all.
+
+    Without that file, transformers rebuilds a tokenizer from whatever else the
+    snapshot holds, and offline it can turn CJK text into `<unk>` or into
+    nothing, with no error: every vector of such text would be silently wrong.
+    A load that cannot have the file, resident or fetched, does not happen.
+    """
+    try:
+        return _model_file(model_name, "tokenizer.json")
+    except Exception as error:  # noqa: BLE001 — any resolution failure is the same refusal
+        raise ModelFilesUnavailable(
+            f"{model_name}: tokenizer.json is neither in the model cache nor fetchable, "
+            "and without it non-Latin text would encode wrongly; fetch the model with "
+            "network access once, then offline loads work"
+        ) from error
+
+
 class _TorchEncoder:
     """sentence-transformers, unchanged in behaviour from the pre-seam path."""
 
     backend = TORCH
+    concurrent_encodes = False
 
     def __init__(self, model_name: str, device: str, half: bool) -> None:
         # Heavy import stays local — keyword-mode and a lean install must not pay it.
         runtime_resources.configure_torch()
         from sentence_transformers import SentenceTransformer
 
+        require_tokenizer(model_name)
         model = model_cache.load_offline_first(
             model_name,
             lambda **kw: SentenceTransformer(model_name, device=device, **kw),
         )
+        self.profile = profile_from_sentence_transformer(model_name, model)
+        limit = getattr(model, "max_seq_length", None)
+        if isinstance(limit, int) and limit > self.profile.max_seq:
+            model.max_seq_length = self.profile.max_seq
         self._model = _maybe_half(model, device) if half else model
         self.device = device
 
-    def encode(self, texts, **kwargs) -> np.ndarray:
+    def encode(self, texts, *, max_tokens: int | None = None, **kwargs) -> np.ndarray:
         kwargs.setdefault("convert_to_numpy", True)
         kwargs.setdefault("normalize_embeddings", True)
         kwargs.setdefault("show_progress_bar", False)
-        return self._model.encode(texts, **kwargs)
+        if max_tokens is None:
+            return self._model.encode(texts, **kwargs)
+        # Only safe because this lane never encodes concurrently: every caller
+        # holds the execution slot that serialises this instance. The limit
+        # counts the model's special tokens, the cap does not.
+        specials = getattr(getattr(self._model, "tokenizer", None), "num_special_tokens_to_add", None)
+        limit = self._model.max_seq_length
+        self._model.max_seq_length = min(limit, max_tokens + (specials(pair=False) if callable(specials) else 0))
+        try:
+            return self._model.encode(texts, **kwargs)
+        finally:
+            self._model.max_seq_length = limit
 
     def release(self) -> None:
         self._model = None
@@ -148,30 +412,47 @@ class _TorchEncoder:
 class _OnnxEncoder:
     """ONNX Runtime over the model's published ONNX export.
 
-    Reimplements only what sentence-transformers did for this model: tokenize,
-    run the encoder, take the CLS vector, L2-normalise. There is no torch here,
-    which is the entire reason the hosted image can shed ~300 MiB per cell.
+    Reimplements only what sentence-transformers does: tokenize, run the encoder,
+    pool the way the model's profile says (CLS for bge, the masked mean for e5 and
+    MiniLM), L2-normalise. Padding uses the tokenizer's own padding token, which
+    is `[PAD]` (id 0) for BERT vocabularies and `<pad>` (id 1) for XLM-R ones.
+    There is no torch here, which is the entire reason the hosted image can shed
+    ~300 MiB per cell.
+
+    A served model runs its built artefact instead of the hub export, on CPU
+    only: its int8 parity with fp32 was measured there, and nowhere else.
     """
 
     backend = ONNX
+    concurrent_encodes = True
 
     def __init__(self, model_name: str, device: str) -> None:
         import onnxruntime as ort
         from tokenizers import Tokenizer
 
-        onnx_path = _resolve(model_name, "onnx/model.onnx")
-        tokenizer_path = _resolve(model_name, "tokenizer.json")
+        self.profile = read_profile(model_name)
+        tokenizer_path = require_tokenizer(model_name)
+        served = served_artifact(model_name)
+        if served is None:
+            onnx_path = _model_file(model_name, self.profile.onnx_file)
+            providers = _providers(device)
+        else:
+            onnx_path, digest = ensure_artifact(model_name, served)
+            self.profile = dataclasses.replace(self.profile, artifact_digest=digest)
+            device, providers = "cpu", ["CPUExecutionProvider"]
 
         self._tokenizer = Tokenizer.from_file(tokenizer_path)
-        self._tokenizer.enable_truncation(max_length=_max_seq_length(model_name))
-        self._tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")
+        self._tokenizer.enable_truncation(max_length=self.profile.max_seq)
+        pad_id = self._tokenizer.token_to_id(self.profile.pad_token)
+        if pad_id is None:
+            raise ValueError(f"{model_name}: padding token {self.profile.pad_token!r} is not in its tokenizer")
+        self._tokenizer.enable_padding(pad_id=pad_id, pad_token=self.profile.pad_token)
+        self._pad_id = pad_id
 
         options = ort.SessionOptions()
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         runtime_resources.configure_onnx_session_options(options)
-        self._session = ort.InferenceSession(
-            onnx_path, sess_options=options, providers=_providers(device)
-        )
+        self._session = ort.InferenceSession(onnx_path, sess_options=options, providers=providers)
         self._inputs = {spec.name for spec in self._session.get_inputs()}
         self.device = device
 
@@ -183,27 +464,69 @@ class _OnnxEncoder:
         normalize_embeddings: bool = True,
         convert_to_numpy: bool = True,  # noqa: ARG002 — always numpy; kept for parity
         show_progress_bar: bool = False,  # noqa: ARG002 — no progress bar to suppress
+        max_tokens: int | None = None,
     ) -> np.ndarray:
         if not texts:
             return np.zeros((0, 0), dtype=np.float32)
+        # Dynamic int8 quantises each activation tensor with one scale, so in a
+        # shared batch a text's vector moves with its neighbours (up to 0.02
+        # cosine on bge-m3). One text per run keeps a vector a function of its
+        # text alone, which reuse by text assumes; on CPU it is also faster
+        # than padding a batch (measured 396 against 624 s per 1,000 anchors).
+        step = 1 if self.profile.quantization == ORT_DYNAMIC_INT8 else max(1, batch_size)
         out: list[np.ndarray] = []
-        for start in range(0, len(texts), max(1, batch_size)):
-            out.append(self._encode_batch(texts[start : start + batch_size], normalize_embeddings))
+        for start in range(0, len(texts), step):
+            out.append(self._encode_batch(texts[start : start + step], normalize_embeddings, max_tokens))
         return np.vstack(out)
 
-    def _encode_batch(self, batch: list[str], normalize: bool) -> np.ndarray:
-        encodings = self._tokenizer.encode_batch(batch)
-        feed = {
-            "input_ids": np.array([e.ids for e in encodings], dtype=np.int64),
-            "attention_mask": np.array([e.attention_mask for e in encodings], dtype=np.int64),
-            "token_type_ids": np.array([e.type_ids for e in encodings], dtype=np.int64),
-        }
+    def _encode_batch(self, batch: list[str], normalize: bool, max_tokens: int | None = None) -> np.ndarray:
+        # Collapse whitespace first. A sentencepiece tokenizer (XLM-R: e5, MiniLM)
+        # strips and collapses it in its own normaliser, which the exported
+        # `tokenizer.json` does not reproduce: a trailing space became an extra
+        # word-boundary token and moved e5's vector to cosine 0.96 against torch.
+        # A BERT tokenizer uses whitespace only as a separator, so for bge this
+        # changes no token id.
+        encodings = self._tokenizer.encode_batch([" ".join(text.split()) for text in batch])
+        if max_tokens is not None:
+            feed = self._capped_feed(encodings, max_tokens)
+        else:
+            feed = {
+                "input_ids": np.array([e.ids for e in encodings], dtype=np.int64),
+                "attention_mask": np.array([e.attention_mask for e in encodings], dtype=np.int64),
+                "token_type_ids": np.array([e.type_ids for e in encodings], dtype=np.int64),
+            }
         hidden = self._session.run(None, {k: v for k, v in feed.items() if k in self._inputs})[0]
-        pooled = hidden[:, 0]  # CLS
+        pooled = _pool(hidden, feed["attention_mask"], self.profile.pooling)
         if normalize:
             norms = np.linalg.norm(pooled, axis=1, keepdims=True)
             pooled = pooled / np.maximum(norms, 1e-12)
         return pooled.astype(np.float32, copy=False)
+
+    def _capped_feed(self, encodings, limit: int) -> dict[str, np.ndarray]:
+        """The batch with each text read at its first `limit` tokens.
+
+        The model's leading and trailing special tokens stay on top of the
+        `limit`, which is what the tokenizer's own right-hand truncation of a
+        single sequence at `limit` plus those tokens gives. Truncation is the
+        tokenizer's shared state, and setting it while another thread encodes
+        raises; so the cap is applied to the token rows instead.
+        """
+        rows: list[list[int]] = []
+        for encoding in encodings:
+            kept = [i for i, attended in enumerate(encoding.attention_mask) if attended]
+            ids = [encoding.ids[i] for i in kept]
+            special = [encoding.special_tokens_mask[i] for i in kept]
+            head = next((i for i, flag in enumerate(special) if not flag), len(ids))
+            tail = next((i for i, flag in enumerate(reversed(special)) if not flag), 0)
+            if len(ids) - head - tail > limit:
+                ids = ids[: head + limit] + ids[len(ids) - tail :]
+            rows.append(ids)
+        width = max(len(row) for row in rows)
+        return {
+            "input_ids": np.array([row + [self._pad_id] * (width - len(row)) for row in rows], dtype=np.int64),
+            "attention_mask": np.array([[1] * len(row) + [0] * (width - len(row)) for row in rows], dtype=np.int64),
+            "token_type_ids": np.zeros((len(rows), width), dtype=np.int64),
+        }
 
     def release(self) -> None:
         self._session = None
@@ -230,24 +553,152 @@ def _providers(device: str) -> list[str]:
     return preferred
 
 
-def _resolve(model_name: str, filename: str) -> str:
+def _resolve(model_name: str, filename: str, revision: str | None = None) -> str:
     """Path to a model file, from the local hub cache when the snapshot is resident."""
     from huggingface_hub import hf_hub_download
 
     return model_cache.load_offline_first(
         model_name,
-        lambda **kw: hf_hub_download(model_name, filename, **kw),
+        lambda **kw: hf_hub_download(model_name, filename, revision=revision, **kw),
     )
 
 
+def _model_file(model_name: str, filename: str) -> str:
+    """A model file at the model's pinned revision when it is a served model."""
+    served = served_artifact(model_name)
+    if served is None:
+        return _resolve(model_name, filename)
+    return _resolve(model_name, filename, served.revision)
+
+
 def _max_seq_length(model_name: str) -> int:
-    """The model's declared sequence limit, defaulting to BERT's 512."""
+    """The model's declared sequence limit, defaulting to BERT's 512 and never above it."""
     try:
-        with open(_resolve(model_name, "sentence_bert_config.json"), encoding="utf-8") as fh:
-            return int(json.load(fh).get("max_seq_length") or _DEFAULT_MAX_SEQ)
+        with open(_model_file(model_name, "sentence_bert_config.json"), encoding="utf-8") as fh:
+            declared = int(json.load(fh).get("max_seq_length") or _DEFAULT_MAX_SEQ)
     except Exception:  # noqa: BLE001 — a missing config must not block loading
         log.debug("no sentence_bert_config for %s; using %d", model_name, _DEFAULT_MAX_SEQ)
         return _DEFAULT_MAX_SEQ
+    return min(declared, SERVED_MAX_SEQ)
+
+
+def artifact_dir(model_name: str, served: ServedArtifact) -> Path:
+    """Where `model_name`'s served artefact is built: one directory per revision
+    and quantisation, so a new pin never overwrites the bytes an old one named."""
+    configured = os.environ.get(ARTIFACT_DIR_ENV, "").strip()
+    root = Path(configured).expanduser() if configured else model_cache.hub_dir().parent / "exomem-artifacts"
+    return root / model_cache.snapshot_dirname(model_name) / served.revision / served.quantization
+
+
+def _artifact_digest(target: Path) -> str | None:
+    """The digest of the artefact's bytes, or None when a file is missing."""
+    digest = hashlib.sha256()
+    try:
+        for name in _ARTIFACT_FILES:
+            digest.update(name.encode("utf-8") + b"\0")
+            with open(target / name, "rb") as fh:
+                while chunk := fh.read(8 << 20):
+                    digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()[:16]
+
+
+def _read_manifest(target: Path) -> dict:
+    try:
+        data = json.loads((target / _ARTIFACT_MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def ensure_artifact(model_name: str, served: ServedArtifact) -> tuple[str, str]:
+    """The served ONNX graph's path and the digest of its bytes, built on first use.
+
+    The bytes are hashed on every load (about 0.4 s for bge-m3's 0.55 GB), so the
+    fingerprint names what actually runs. Bytes that no longer match the digest
+    they were built with are rebuilt; the build is deterministic, so a repaired
+    artefact has its old digest back and nothing stored under it is re-embedded.
+    """
+    target = artifact_dir(model_name, served)
+    digest = _artifact_digest(target)
+    manifest = _read_manifest(target)
+    expected = {
+        "model": model_name,
+        "revision": served.revision,
+        "quantization": served.quantization,
+        "file_format": served.file_format,
+    }
+    if digest is None or manifest.get("digest") != digest or any(manifest.get(k) != v for k, v in expected.items()):
+        log.info("building %s %s artefact at %s", model_name, served.quantization, target)
+        _build_artifact(model_name, served, target)
+        digest = _artifact_digest(target)
+        if digest is None:
+            raise ModelFilesUnavailable(f"{model_name}: the built artefact at {target} is incomplete")
+        (target / _ARTIFACT_MANIFEST).write_text(
+            json.dumps({**expected, "digest": digest}, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    return str(target / _ARTIFACT_FILES[0]), digest
+
+
+def _build_artifact(model_name: str, served: ServedArtifact, target: Path) -> None:
+    """Quantise the pinned export into `target`, via a stage beside it.
+
+    The hub cache holds the export as symlinks into its blob store, and onnx
+    refuses external data behind a symlink or a hard link, so the source files
+    are copied into the stage first. Files move into `target` data first, so a
+    graph never names data that is not there.
+    """
+    sources = [Path(_resolve(model_name, name, served.revision)).resolve() for name in served.source]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=f".{target.name}-build-", dir=target.parent))
+    try:
+        (stage / "source").mkdir()
+        (stage / "out").mkdir()
+        for name, path in zip(served.source, sources, strict=True):
+            shutil.copyfile(path, stage / "source" / Path(name).name)
+        _quantize(
+            served,
+            str(stage / "source" / Path(served.source[0]).name),
+            str(stage / "out" / _ARTIFACT_FILES[0]),
+        )
+        target.mkdir(parents=True, exist_ok=True)
+        for name in reversed(_ARTIFACT_FILES):
+            os.replace(stage / "out" / name, target / name)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+#: The quantiser, run as `python -c` with the source and output graph paths.
+_QUANTIZE_CHILD = (
+    "import sys\n"
+    "from onnxruntime.quantization import QuantType, quantize_dynamic\n"
+    "quantize_dynamic(sys.argv[1], sys.argv[2], weight_type=QuantType.QInt8,"
+    " use_external_data_format=True, extra_options={'MatMulConstBOnly': True})\n"
+)
+
+
+def _quantize(served: ServedArtifact, source: str, out: str) -> None:
+    """Quantise in a child process.
+
+    The quantiser holds the fp32 graph and its int8 copy at once, 8.7 GB at peak
+    for bge-m3. In a child, that memory goes back to the host when the child
+    exits, and running out of it ends the build rather than the server.
+    """
+    if served.quantization != ORT_DYNAMIC_INT8 or served.file_format != ONNX_EXTERNAL_DATA:
+        raise ValueError(f"no builder for {served.quantization} as {served.file_format}")
+    result = subprocess.run(
+        [sys.executable, "-c", _QUANTIZE_CHILD, source, out],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip().splitlines()[-1:] or [f"exit {result.returncode}"]
+        raise ModelFilesUnavailable(
+            f"building the int8 model failed ({detail[0]}); it needs onnxruntime and onnx, "
+            "which exomem[embeddings] installs"
+        )
 
 
 def _maybe_half(model, device: str):
@@ -266,9 +717,13 @@ def load_encoder(model_name: str, *, backend: str | None = None) -> Encoder:
 
     Device selection stays with `accel`, which already returns ``cpu`` when torch
     is absent — so a torch-free image resolves correctly without a special case.
+    A served model runs its ONNX artefact whatever backend is preferred: torch
+    cannot run those bytes, and they are what its fingerprint names. It runs on
+    CPU without probing for an accelerator.
     """
-    chosen = backend or resolve_backend()
-    device = accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
+    served = served_artifact(model_name) is not None
+    chosen = ONNX if served else backend or resolve_backend()
+    device = "cpu" if served else accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
     log.info("loading embedding model %s on %s via %s", model_name, device, chosen)
     if chosen == ONNX:
         return _OnnxEncoder(model_name, device)
