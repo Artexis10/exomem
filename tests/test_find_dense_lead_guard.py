@@ -241,3 +241,63 @@ def test_no_withheld_record_when_the_guard_is_silent(
     assert "votes_withheld" not in lanes["bm25"]
     assert "votes_withheld" not in lanes["keyword"]
     assert all("lexical_votes_withheld" not in hit["ranking_explanation"] for hit in result["hits"])
+
+
+def test_the_guard_reads_only_candidates_that_can_reach_the_fused_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 120 English pages hold both query words, so both lexical lanes nominate
+    # them (BM25 up to the fused depth, the substring lane up to three times
+    # that), and the dense lead holds neither. The guard reads only candidates
+    # that can still reach the fused window, and its work is reported as its
+    # own timing stage.
+    from functools import cached_property
+
+    from exomem import lexstore
+    from exomem.find_types import FindTimings, ParsedPage
+    from exomem.ranking_config import DEFAULT_RANKING
+
+    root = tmp_path / "vault"
+    notes = root / kb_dirname() / "Notes" / "Insights"
+    notes.mkdir(parents=True)
+    (notes / "lead.md").write_text(
+        "---\ntype: note\ntitle: Lead\nupdated: 2026-09-01\n---\n\n# Lead\n\nA page about sewing.\n",
+        encoding="utf-8",
+    )
+    for index in range(120):
+        (notes / f"needle-{index:03d}.md").write_text(
+            f"---\ntype: note\ntitle: Note {index}\nupdated: 2026-09-01\n---\n\n"
+            f"# Note {index}\n\nThe needle number {index} is kept in the drawer.\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(root))
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    find_module.clear_cache()
+    embeddings_module.clear_embedding_indexes()
+    lexstore.reset_memo()
+    lexstore.clear_stores()
+    lexstore.ensure_fresh(root)
+    _plant_vector_lane(monkeypatch, ["Notes/Insights/lead.md"])
+
+    read: set[str] = set()
+    for name in ("stem_set", "letter_script"):
+        original = ParsedPage.__dict__[name].func
+
+        def reading(self, _original=original):
+            read.add(self.rel_path)
+            return _original(self)
+
+        wrapped = cached_property(reading)
+        wrapped.__set_name__(ParsedPage, name)
+        monkeypatch.setattr(ParsedPage, name, wrapped)
+
+    timings = FindTimings()
+    hits = find_module.find(
+        root, query="needle drawer", limit=10, mode="hybrid", rerank=False, graph=False,
+        timings=timings,
+    )
+    assert len(hits) == 10
+    window = max(10 * DEFAULT_RANKING.candidate_multiplier, DEFAULT_RANKING.candidate_floor)
+    assert len(read) <= window + 1  # the lead and at most the fused window
+    assert "lexical_guard" in timings.as_dict()["stages"]

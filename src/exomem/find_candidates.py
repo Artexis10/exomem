@@ -179,9 +179,12 @@ def _lexical_visibility(
     query: str,
     vector_ranking: list[str],
     lexical_rankings: tuple[list[str], ...],
+    lane_weights: tuple[float, ...],
+    rrf_k: int,
+    window: int,
     page_of: PageOf,
 ) -> LexicalVisibility:
-    """Which lexical votes fusion withholds, and whether the request crosses languages.
+    """Which lexical votes fusion withholds, and whether the request crosses scripts.
 
     The dense lane is the only lane that can match a page written in another
     language than the query. When its strongest candidate shares no content word
@@ -202,39 +205,64 @@ def _lexical_visibility(
     an English vault ranks exactly as before. A Latin-script query whose answer
     is an English page (German, Estonian) is not protected by this rule.
 
+    Only candidates that can reach the fused window are read. The walk follows
+    the fusion of the dense and lexical lanes (`lexical_rankings` weighted by
+    `lane_weights`, the dense lane first) and stops once `window` pages have kept
+    their votes. Withholding only lowers the withheld page's score, so the pages
+    that keep their votes rank among themselves exactly as in this walk, and a
+    page the walk did not reach cannot enter the first `window` of the fusion.
+    Lanes fused later (graph, temporal, CLIP) and the post-fusion multipliers
+    are not in the walk; the window is the depth that multiplier pass reads.
+
     The request crosses scripts, with the dense lead invisible, when a vote was
-    withheld (`CROSSING_VOTES_WITHHELD`), or when no lexical candidate holds any
-    content word of the query and the query itself is written in another script
-    than the lead (`CROSSING_UNMATCHED`). A query that matches nothing in the
-    lead's own script (an English paraphrase under an English lead) does not
-    cross. A reranker that cannot judge across languages is skipped on a
-    crossing request. The caller skips this in vector mode, where no lexical
-    lane ran and there is no evidence either way.
+    withheld (`CROSSING_VOTES_WITHHELD`), or when no candidate in the window
+    holds any content word of the query and the query itself is written in
+    another script than the lead (`CROSSING_UNMATCHED`). A query that matches
+    nothing in the lead's own script (an English paraphrase under an English
+    lead) does not cross. A reranker that cannot judge across languages is
+    skipped on a crossing request. The caller skips this in vector mode, where
+    no lexical lane ran and there is no evidence either way.
     """
     if not vector_ranking:
         return _LEXICALLY_VISIBLE
+    lexical = {path for lane in lexical_rankings for path in lane}
     groups = find_policy.query_word_stem_groups(query)
     content_words = sum(1 for _stems, is_function, _required in groups if not is_function)
     if not content_words:
         return _LEXICALLY_VISIBLE
-    lead = page_of(vector_ranking[0])
+    lead_path = vector_ranking[0]
+    lead = page_of(lead_path)
     if lead is None or find_policy.stem_word_coverage(lead.stem_set, groups)[2]:
         return _LEXICALLY_VISIBLE
     lead_script = lead.letter_script
+    # Only a query in another script than the lead can cross by matching nothing,
+    # so only then must same-script candidates be read for a content word.
+    unmatched_can_cross = find_policy.dominant_script(query) != lead_script
+    from . import fusion
+
+    order = fusion.reciprocal_rank_fusion_weighted(
+        [vector_ranking, *lexical_rankings], list(lane_weights), k=rrf_k
+    )
     withheld: set[str] = set()
     any_content_match = False
-    for path in dict.fromkeys(path for lane in lexical_rankings for path in lane):
-        page = page_of(path)
-        if page is None:
-            continue
-        stems = page.stem_set
-        matched = find_policy.stem_word_coverage(stems, groups)[2]
-        any_content_match = any_content_match or matched > 0
-        if matched < content_words and page.letter_script != lead_script:
-            withheld.add(path)
+    kept = 0
+    for path, _score in order:
+        if kept >= window:
+            break
+        if path in lexical and path != lead_path:
+            page = page_of(path)
+            if page is not None:
+                other_script = page.letter_script != lead_script
+                if other_script or (unmatched_can_cross and not any_content_match):
+                    matched = find_policy.stem_word_coverage(page.stem_set, groups)[2]
+                    any_content_match = any_content_match or matched > 0
+                    if other_script and matched < content_words:
+                        withheld.add(path)
+                        continue
+        kept += 1
     if withheld:
         return LexicalVisibility(frozenset(withheld), CROSSING_VOTES_WITHHELD)
-    if not any_content_match and find_policy.dominant_script(query) != lead_script:
+    if unmatched_can_cross and not any_content_match:
         return LexicalVisibility(frozenset(), CROSSING_UNMATCHED)
     return _LEXICALLY_VISIBLE
 
@@ -648,16 +676,19 @@ def collect_candidates(
         recall_paths=recall_paths,
     )
     keyword_ranking = _eligible(keyword_ranking)
-    visibility = (
-        _LEXICALLY_VISIBLE
-        if mode == "vector"
-        else _lexical_visibility(
-            query=query_norm,
-            vector_ranking=vector_ranking,
-            lexical_rankings=(bm25_ranking, keyword_ranking),
-            page_of=page_of,
-        )
-    )
+    visibility = _LEXICALLY_VISIBLE
+    if mode != "vector" and vector_ranking:
+        guard_weights = config.intent_weights(intent or find_policy.classify_intent(query))
+        with _span(timings, "lexical_guard"):
+            visibility = _lexical_visibility(
+                query=query_norm,
+                vector_ranking=vector_ranking,
+                lexical_rankings=(bm25_ranking, keyword_ranking),
+                lane_weights=tuple(guard_weights[:3]),
+                rrf_k=config.rrf_k,
+                window=candidate_k,
+                page_of=page_of,
+            )
     if capture_trace and mode != "vector":
         lane_statuses["keyword"] = {
             "status": "participated" if keyword_ranking else "available_nonmatching",
