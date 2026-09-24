@@ -397,6 +397,120 @@ window, and per-path repair and its drain SHALL NOT be held.
   120 s of the first debt signal it was held for, and later attempts follow the
   no-progress backoff
 
+### Requirement: A drain keeps the queue converging under a steady writer
+
+A drain SHALL record the resolver topology fingerprint it derived its rows under, in the
+transaction that writes them, so the next topology-changing write can prove its old
+resolver instead of falling back to a whole-vault rebuild.
+
+A drain SHALL land the rows it proved against their own bytes at commit even when the
+projection moved elsewhere during its pass, and retire their receipts; its marker,
+lineage and acknowledgement wait for a drain the projection holds still for. A page the
+drain indexed moving under it SHALL roll the pass back.
+
+A write's incremental refresh that finds its own generation already acknowledged -- a
+drain derived its batch first -- and the availability marker current SHALL do nothing
+rather than fall back: nothing is owed, and the fallback would withdraw a current marker.
+When the marker is not current -- the write's registry update landed after the drain
+acknowledged -- the refresh SHALL queue its paths, so a per-path drain republishes the
+marker without a whole-vault rebuild.
+
+#### Scenario: A drain that repairs a created page keeps the next write incremental
+
+- **WHEN** a drain repairs a page a write created, and a later write changes topology
+- **THEN** the later write proves its old resolver against the stored fingerprint and
+  does not fall back on a fingerprint mismatch
+
+#### Scenario: A drain keeps the rows it proved when the vault moves elsewhere
+
+- **WHEN** a write to another page moves the projection during every drain pass
+- **THEN** each drain lands the rows it proved and retires their receipts
+
+#### Scenario: A late refresh of an acknowledged generation is a no-op
+
+- **WHEN** a drain has acknowledged a write's generation before that write's own refresh
+  runs, and the marker is current
+- **THEN** the refresh returns without work and the graph stays readable
+
+#### Scenario: A late refresh behind a late registry update queues its page
+
+- **WHEN** a drain acknowledges a write's generation, the write's registry update lands
+  after it, and the write's own refresh then runs
+- **THEN** the refresh queues the page, one per-path drain makes the graph readable again,
+  and no whole-vault pass runs
+
+### Requirement: An underivable receipt is quarantined, not rotated forever
+
+A queued path whose isolated drain attempt fails on its own bytes -- they are not UTF-8,
+or reading them raises an operating-system error that persists past a minimum age of
+minutes since its first failure -- SHALL be counted, and after a bounded number of such
+failures its receipt SHALL be quarantined: it leaves the queue by exact revision so the
+queue can empty around it. Quarantine SHALL only stop hot retries: the rows of a page
+that still exists SHALL NOT be deleted. A movement or readiness refusal SHALL NOT count:
+anything raised out of the drain pass -- a busy mutation boundary, a locked store -- and
+a page that reads and decodes when checked rotate their receipt, however long they last.
+A queued path that derived to no rows -- deleted, or no longer recall Markdown -- SHALL
+retire its receipt with the deletion.
+
+A quarantined path SHALL be queued again when its stat signature changes, no sooner than
+a backoff after its last failure that grows with each failed attempt, and otherwise on a
+slow periodic retry. Any pass that derives the page, including a whole-vault
+rebuild, SHALL clear its failure record. The residual lag and the doctor SHALL report
+quarantined paths.
+
+#### Scenario: One unreadable page does not keep the queue from emptying
+
+- **WHEN** a queued page's bytes cannot be read on every drain attempt for longer than
+  the minimum age
+- **THEN** after the bounded attempts its receipt is quarantined, its existing rows stay,
+  the rest of the queue converges, and the lag and doctor report one quarantined path
+
+#### Scenario: A busy boundary or a brief lock never quarantines a page
+
+- **WHEN** the drain pass is refused by a busy boundary or a locked store, or a page is
+  unreadable for a few drain ticks and then reads normally
+- **THEN** its receipt rotates without counting, its rows stay, and the drain repairs it
+  once the refusal ends
+
+#### Scenario: A quarantined page is retried and its record cleared once it derives
+
+- **WHEN** a quarantined page changes, its retry interval passes, or a whole-vault
+  rebuild derives it
+- **THEN** it is queued again or derived, and a pass that derives it clears its record
+  and the doctor's warning
+
+### Requirement: Residual graph lag is reported
+
+When graph unavailability is reported because the graph is catching up, the system SHALL
+report the residual lag: the acknowledged and committed generations, how many
+generations the graph is behind, the queued path count, the age of the oldest queued
+debt, whether the gap is covered by durable debt records, whether a full rebuild is
+pending, and how many paths are quarantined. It SHALL be readable without a vault walk.
+The graph is catching up when it is behind or has work queued, every skipped generation
+is receipt-covered, and neither a full-rebuild marker nor a recovery barrier stands; a
+deferral's own withdrawal is not a recovery barrier, because the queue is its repair.
+
+When the graph is catching up, `graph_context`'s unavailable payload SHALL say "graph
+catching up" and carry the lag; every other refusal keeps its payload. The doctor SHALL
+warn rather than fail on a receipt-covered lag younger than its recovery age, and SHALL
+still fail an uncovered gap, a standing full marker, a persisted recovery barrier and a
+malformed checkpoint. The drain's settled log line SHALL carry the lag.
+
+The read fence stays fail-closed: a lagging graph is reported, not served.
+
+#### Scenario: A catching-up graph says so with its lag
+
+- **WHEN** a committed generation's paths are queued behind the acknowledgement and a
+  caller asks for graph context
+- **THEN** the unavailable payload says the graph is catching up and carries the lag
+
+#### Scenario: The doctor warns on a covered lag and fails an uncovered gap
+
+- **WHEN** the graph lags behind a receipt-covered gap younger than the recovery age
+- **THEN** the doctor reports a warning with the lag
+- **AND** when a generation in the gap has neither a durable debt record nor a queued
+  receipt, the doctor still fails
+
 ### Requirement: A graph rebuild and a canonical write may run concurrently without either losing
 
 A graph rebuild in flight SHALL NOT cause a concurrent canonical write to refuse, and a
@@ -430,6 +544,22 @@ replacing against a stale one.
 Publication epoch sampling SHALL observe a canonical batch from outside, never from
 within: it SHALL be serialized against the canonical mutation hold so it cannot read a
 generation floor installed without its checkpoint.
+
+Graph work that holds the writers' canonical boundary SHALL NOT wait on the in-process
+batch commit: a batch holding it may be in its post-commit fan-out waiting for that
+boundary. A recovery checkpoint write under the boundary SHALL be skipped while a batch
+commits and left for the next attempt. `reconcile` is exempt: it holds the boundary for
+its whole command, so a fan-out waiting on that boundary waits reconcile out either way;
+the inversion only turns that wait into the fan-out's own bounded refusal and adds one
+bounded wait per recovery write (reconcile has two), while skipping the write would fail
+the repair its caller asked for.
+
+#### Scenario: The full-marker dispatcher does not queue behind a committing batch
+
+- **WHEN** the dispatcher holds the canonical boundary, finds the epoch recoverable, and
+  a canonical batch in the same process is committing
+- **THEN** the dispatcher returns without writing the recovery checkpoint, and no
+  writer is refused the boundary while it waits
 
 #### Scenario: A rebuild's scratch files do not fail an unrelated write
 

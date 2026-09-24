@@ -86,6 +86,26 @@ REBUILD_PUBLICATION_ATTEMPTS = REBUILD_STABILIZATION_ATTEMPTS * 2
 # single pass — while a supersession that survives it is not transient, so
 # re-running the rebuild cannot be what fixes it.
 REBUILD_SUPERSESSION_RETRIES = 1
+#: Isolated drain attempts a queued path may fail before its receipt is
+#: quarantined. A page whose bytes cannot be read derives nothing and leaves
+#: its receipt queued; rotated forever, it keeps the queue from ever emptying.
+#: Only a fault of the page's own bytes counts -- bytes that are not UTF-8, or
+#: an `OSError` that outlives `GRAPH_POISON_MIN_AGE_SECONDS` -- never a busy
+#: boundary, a locked store or a race, which rotate. Quarantine only stops the
+#: hot retries: the page keeps the rows of its last readable version.
+GRAPH_POISON_ATTEMPTS = 3
+#: How long an `OSError` reading a page must persist, from its first failed
+#: attempt, before it counts toward quarantine. Minutes, not ticks: an editor
+#: or a sync tool holding a page for a moment is not poison.
+GRAPH_POISON_MIN_AGE_SECONDS = 600.0
+#: How long a quarantined page waits, from its last failure, before one more
+#: attempt with no change to it.
+GRAPH_QUARANTINE_RETRY_SECONDS = 3600.0
+#: How long a quarantined page whose stat signature changed waits, from its last
+#: failure, before it is retried. Doubles with each failed attempt past
+#: `GRAPH_POISON_ATTEMPTS`, up to `GRAPH_QUARANTINE_RETRY_SECONDS`: a page a
+#: sync tool keeps rewriting would otherwise be retried on every drain wake.
+GRAPH_QUARANTINE_CHANGE_BACKOFF_SECONDS = 5.0
 # The epoch kinds a *per-path* repair may run against. `recoverable` is excluded
 # on purpose: it means the checkpoint is behind its floor, so the lineage does
 # not yet say what the paths should be repaired to. See
@@ -1485,6 +1505,24 @@ def _reap_unowned_temporaries(live: Path, *, vault_root: Path, keep: int) -> lis
             "reaped %d orphaned graph rebuild artifact(s) from %s", len(removed), directory
         )
     return removed
+
+
+def _disk_vault_entries(vault_root: Path) -> dict[str, freshness.FileSignature]:
+    """Direct-disk stat map of the ordinary-recall projection, one walk.
+
+    The same walk and admission `_disk_vault_freshness` digests, kept as a map
+    so a pass-end proof can say *which* paths the registry disagrees with, not
+    only that the digest moved.
+    """
+    entries: dict[str, freshness.FileSignature] = {}
+    for path in recall_policy.iter_recall_markdown(
+        vault_root, vault_module.walk_vault_md(vault_root)
+    ):
+        try:
+            entries[str(path)] = freshness.stat_signature(path)
+        except OSError:
+            continue
+    return entries
 
 
 def _disk_vault_freshness(vault_root: Path) -> tuple[int, int, str]:
@@ -2925,6 +2963,7 @@ class EpistemicGraphIndex:
                 )
         if published is not None:
             _retire_covered_full_marker(self.vault_root, paid_marker)
+            self._forget_rebuilt_graph_failures()
             return published
         if epoch_error is not None:
             raise epoch_error
@@ -3471,6 +3510,32 @@ class EpistemicGraphIndex:
         # cause belonging to the branch it takes.
         moved_cause = "no stabilization attempt completed"
         publication_cause = "no stabilization attempt completed"
+        # What the Class C mark may name. A proof that enumerated its
+        # unexplained paths marks exactly those; any attempt whose evidence
+        # could not name them makes the mark unscoped, as every mark was before.
+        unexplained_paths: set[str] = set()
+        unexplained_unscoped = False
+
+        def classify(cause: str) -> None:
+            """Class C only on positive evidence the registry is behind the disk.
+
+            Movement the registry recorded -- a governed write this service
+            committed -- is not evidence: an attempt it defeats is a
+            publication failure (Class B), and re-targets as before.
+            """
+            nonlocal projection_moved, moved_cause, publication_cause, unexplained_unscoped
+            kind, paths = self._classify_movement(before, after_identity)
+            if kind == "recorded":
+                publication_cause = f"{cause}, and the registry recorded every change"
+            elif kind == "unclassifiable":
+                publication_cause = f"{cause}, and the registry could not account for it"
+            else:
+                projection_moved = True
+                moved_cause = cause
+                if paths is None:
+                    unexplained_unscoped = True
+                else:
+                    unexplained_paths.update(paths)
         # #576. Whether the *last* attempt was invalidated by a moving
         # projection, which is the only condition worth re-targeting: the
         # newer baseline is sampled fresh at the top of every attempt, so an
@@ -3503,6 +3568,7 @@ class EpistemicGraphIndex:
                     # admitted cause.
                     self._mark_unavailable()
                     projection_moved = True
+                    unexplained_unscoped = True
                     retarget = True
                     moved_cause = "the supplied freshness identity did not name the resolver bytes"
                     # The *recall* resolver stays. Every read of it revalidates
@@ -3564,10 +3630,10 @@ class EpistemicGraphIndex:
                             stable = True
                             return report
                         # The projection moved between writing the availability
-                        # marker and confirming it: Class C, second cause.
-                        projection_moved = True
+                        # marker and confirming it: Class C, second cause --
+                        # unless the registry recorded that movement.
                         retarget = True
-                        moved_cause = (
+                        classify(
                             "the recall projection moved after the availability "
                             "marker was written"
                         )
@@ -3608,15 +3674,14 @@ class EpistemicGraphIndex:
                 else:
                     # `_recall_projection_identity`, `_recall_membership` or the
                     # resolver source versions changed across the pass: Class C,
-                    # second admitted cause.
-                    projection_moved = True
+                    # second admitted cause -- unless the registry recorded it.
                     retarget = True
                     if after_identity != before:
-                        moved_cause = "the recall projection identity moved across the pass"
+                        classify("the recall projection identity moved across the pass")
                     elif after_membership != resolver_membership:
-                        moved_cause = "the recall membership moved across the pass"
+                        classify("the recall membership moved across the pass")
                     else:
-                        moved_cause = "the resolver source versions moved across the pass"
+                        classify("the resolver source versions moved across the pass")
             exhausted = (
                 "epistemic graph rebuild did not stabilize after "
                 f"{attempts} attempts in {time.monotonic() - started:.1f}s"
@@ -3656,7 +3721,145 @@ class EpistemicGraphIndex:
                 # replaced it. Withdraw admission out of band without modifying
                 # the old live sidecar bytes. Marked exactly once per proof, so
                 # a repeating Class B refusal can never allocate an epoch here.
-                freshness.mark_external_pending(self.vault_root)
+                # Scoped to the paths the proof could name: an unscoped mark
+                # makes every later lineage gap uncoverable, and fences far more
+                # than the evidence covers.
+                if unexplained_unscoped or not unexplained_paths:
+                    freshness.mark_external_pending(self.vault_root)
+                else:
+                    freshness.mark_external_pending(
+                        self.vault_root,
+                        paths=[self.vault_root / rel for rel in sorted(unexplained_paths)],
+                    )
+
+    def _relative_signatures(
+        self, entries: dict[str, freshness.FileSignature]
+    ) -> dict[str, freshness.FileSignature]:
+        """Key a registry or walk stat map by vault-relative path.
+
+        Registry keys are canonicalised event paths and walk keys are
+        `walk_vault_md` paths; the two spell a file the same way when both are
+        under the literal vault root, and `_vault_rel` settles every other
+        spelling, so a recorded write can never read as unexplained (nor an
+        unrecorded one as recorded) because of how a path was written down.
+        """
+        relative: dict[str, freshness.FileSignature] = {}
+        for key, signature in entries.items():
+            try:
+                rel: str | None = Path(key).relative_to(self.vault_root).as_posix()
+            except ValueError:
+                rel = _vault_rel(self.vault_root, key)
+            if rel is not None:
+                relative[rel] = signature
+        return relative
+
+    def _recorded_since(
+        self, lineage: freshness.RecallFreshnessCheckpoint
+    ) -> set[str] | None:
+        """Paths the registry accounts for since `lineage`, or None if it cannot say.
+
+        Its complete history from the checkpoint, plus every standing
+        path-scoped watcher mark: an event observed before its debounce is
+        recorded, just not yet published.
+        """
+        delta = freshness.recall_delta_since(self.vault_root, "vault", lineage)
+        if not delta.complete:
+            return None
+        recorded = {
+            rel
+            for raw in (*delta.changed, *delta.deleted)
+            if (rel := _vault_rel(self.vault_root, raw)) is not None
+        }
+        recorded.update(
+            rel
+            for raw in freshness.external_pending_paths(self.vault_root)
+            if (rel := _vault_rel(self.vault_root, raw)) is not None
+        )
+        return recorded
+
+    def _unexplained_differences(
+        self,
+    ) -> (
+        tuple[
+            freshness.RecallFreshnessCheckpoint,
+            dict[str, freshness.FileSignature],
+            set[str],
+            set[str],
+        ]
+        | None
+    ):
+        """The registry-vs-disk comparison, or None when the registry cannot answer.
+
+        Returns the registry checkpoint `c1` the comparison was taken against,
+        the disk stat map keyed by relative path, the paths on which registry
+        and disk differ, and those of them the registry's complete history from
+        `c1` (plus standing path-scoped watcher marks) does not explain.
+        """
+        try:
+            lineage, registry = freshness.recall_projection_snapshot(
+                self.vault_root, "vault", allow_fallback=False
+            )
+        except freshness.RecallProjectionUnavailable:
+            return None
+        disk = self._relative_signatures(_disk_vault_entries(self.vault_root))
+        recorded_map = self._relative_signatures(registry)
+        differing = {
+            rel
+            for rel in recorded_map.keys() | disk.keys()
+            if recorded_map.get(rel) != disk.get(rel)
+        }
+        unexplained: set[str] = set()
+        if differing:
+            explained = self._recorded_since(lineage)
+            if explained is None:
+                return None
+            unexplained = differing - explained
+            if unexplained:
+                with _sampling_boundary(self._canonical_mutation_coordinator()):
+                    pass
+                explained = self._recorded_since(lineage)
+                if explained is None:
+                    return None
+                unexplained -= explained
+        return lineage, disk, differing, unexplained
+
+    def _classify_movement(
+        self,
+        before: tuple[tuple[int, int, str], str, str],
+        after_identity: tuple[tuple[int, int, str], str, str],
+    ) -> tuple[str, frozenset[str] | None]:
+        """Decide whether movement across a whole-vault pass is evidence.
+
+        Returns `("recorded", None)` when the registry's own history explains
+        every registry-vs-disk difference, `("unrecorded", paths)` for positive
+        evidence the registry is behind the disk (`paths` None when the proof
+        cannot name them: a policy change), or `("unclassifiable", None)` when
+        the registry cannot answer, which proves nothing either way.
+
+        The comparison is a map difference explained by history, not a
+        stillness test: a stillness test fails under load for the same reason
+        the pass did, because the walk takes seconds and writes land inside it.
+        `X = {p : registry[p] != disk[p]}` is taken against the registry's own
+        checkpoint and is recorded when the registry's complete delta from it
+        (or a standing path-scoped watcher mark) names every path in it.
+        """
+        if before[1:] != after_identity[1:]:
+            return "unrecorded", None
+        sample = self._unexplained_differences()
+        if sample is None:
+            return "unclassifiable", None
+        lineage, _disk, differing, unexplained = sample
+        if (lineage.policy_version, lineage.access_policy_fingerprint) != before[1:]:
+            return "unclassifiable", None
+        log.info(
+            "graph rebuild movement classified class=%s differing=%d unexplained=%d",
+            "unrecorded" if unexplained else "recorded",
+            len(differing),
+            len(unexplained),
+        )
+        if unexplained:
+            return "unrecorded", frozenset(unexplained)
+        return "recorded", None
 
     def _rebuild_all_pass(
         self,
@@ -3809,6 +4012,83 @@ class EpistemicGraphIndex:
             finally:
                 conn.close()
 
+    def _forget_rebuilt_graph_failures(self) -> None:
+        """Forget the failures of pages a just-published whole-vault pass derived.
+
+        The pass started from empty tables, so a page with rows in the published
+        sidecar is a page it read. Its record describes a failure that no longer
+        holds, and left standing it keeps the doctor warning about a page the
+        graph now carries. Never raises: a stale record costs a warning until
+        the page's next retry, never the publication.
+        """
+        try:
+            failed = deferred_index.graph_failure_paths(self.vault_root)
+            if not failed:
+                return
+            conn = self._connect_existing(readonly=True)
+            try:
+                derived = {
+                    rel
+                    for rel in failed
+                    if conn.execute(
+                        "SELECT 1 FROM graph_nodes WHERE path = ? LIMIT 1", (rel,)
+                    ).fetchone()
+                    is not None
+                }
+            finally:
+                conn.close()
+            if derived:
+                deferred_index.forget_graph_failures(self.vault_root, derived)
+        except Exception:  # noqa: BLE001 - a stale record never fails a publication
+            log.warning(
+                "graph publication could not forget derived page failures", exc_info=True
+            )
+
+    def _underivable_cause(self, rel: str) -> str | None:
+        """Why a pass that did not index `rel` could not, if the page is why.
+
+        `"no_rows"`: nothing to derive -- an absent path, or one that is not
+        recall Markdown, which `_index_path` deletes rather than indexes -- so
+        the receipt is repaired by that deletion. `"undecodable"`: its bytes
+        are not UTF-8. `"unreadable"`: reading it raised `OSError`. None: the
+        page reads and decodes now, so whatever stopped the pass was not the
+        page.
+        """
+        path = self.vault_root / rel
+        if not rel.lower().endswith(".md") or vault_module.in_excluded_scan_dir(rel):
+            return "no_rows"
+        try:
+            path.stat()
+        except (FileNotFoundError, NotADirectoryError):
+            return "no_rows"
+        except OSError:
+            return "unreadable"
+        try:
+            if not recall_policy.is_recall_candidate(self.vault_root, path):
+                return "no_rows"
+            vault_module.read_bytes_without_pinning(path).decode("utf-8")
+        except UnicodeDecodeError:
+            return "undecodable"
+        except OSError:
+            return "unreadable"
+        return None
+
+    def _read_barrier_value(self) -> str | None:
+        """The persisted read barrier's value, or None. An unreadable sidecar reads None."""
+        if not self.path.exists():
+            return None
+        try:
+            conn = self._connect_existing(readonly=True)
+            try:
+                row = conn.execute(
+                    "SELECT value FROM graph_meta WHERE key = ?", (_READ_BARRIER_KEY,)
+                ).fetchone()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return None
+        return None if row is None else str(row[0])
+
     def reads_suspended(self) -> bool:
         """Whether a persisted read barrier requires repair or publication."""
         if not self.path.exists():
@@ -3914,11 +4194,23 @@ class EpistemicGraphIndex:
         *,
         checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
         graph_checkpoint: graph_sync.GraphSyncCheckpoint | None = None,
+        topology: str | None = None,
     ) -> None:
+        """Publish the availability marker and the lineage it stands on.
+
+        `topology`, when given, is the resolver topology fingerprint the rows
+        were derived under, which the next topology-changing refresh proves its
+        old resolver against.
+        """
         conn.execute(
             "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
             (_AVAILABILITY_FRESHNESS_KEY, _availability_freshness_value(identity)),
         )
+        if topology is not None:
+            conn.execute(
+                "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                (_RESOLVER_TOPOLOGY_KEY, topology),
+            )
         conn.execute(
             "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
             ("schema_version", str(SCHEMA_VERSION)),
@@ -4908,15 +5200,39 @@ class EpistemicGraphIndex:
                 )
             )
             predecessor = graph_checkpoint.generation - 1
+            acknowledged = _graph_sync_acknowledgement(graph_values)
             if not (
                 predecessor == 0
                 and "graph_sync_generation" not in graph_values
                 and "graph_sync_digest" not in graph_values
-            ) and not (
-                (acknowledged := _graph_sync_acknowledgement(graph_values)) is not None
-                and acknowledged.generation == predecessor
-            ):
+            ) and not (acknowledged is not None and acknowledged.generation == predecessor):
                 snapshot.close()
+                if (
+                    acknowledged is not None
+                    and graph_sync.GraphBuildOutcome.covering(acknowledged).covers(
+                        graph_checkpoint
+                    )
+                    and self.available()
+                ):
+                    # A drain already covers this generation and the marker is
+                    # current: this refresh arrived after the repair it would
+                    # have made. Nothing is owed, and falling back would
+                    # withdraw a marker that describes a current graph.
+                    #
+                    # Only with the marker current. A registry update that
+                    # landed after the drain acknowledged leaves the marker
+                    # describing an older projection; returning here would
+                    # leave nothing queued to republish it, and the drain
+                    # daemon would pay a whole-vault rebuild for this page.
+                    # The fallback below queues it, and one per-path drain
+                    # republishes.
+                    log.info(
+                        "graph incremental refresh found its generation already "
+                        "acknowledged generation=%s acknowledged=%s",
+                        graph_checkpoint.generation,
+                        acknowledged.generation,
+                    )
+                    return {"indexed_files": 0, "nodes": 0, "edges": 0}
                 return fallback("acknowledgement_is_not_the_predecessor")
         stored_checkpoint = self._stored_recall_checkpoint(snapshot)
         if stored_checkpoint is None or not freshness.recall_is_live(self.vault_root, "vault"):
@@ -5275,7 +5591,9 @@ class EpistemicGraphIndex:
         Publication is allowed to fail. The indexing is already durable in the
         sidecar, so a refused marker costs a later republish, not the work; and
         a write that landed mid-drain has enqueued its own receipt at a new
-        revision, which this drain's compare-and-swap clear cannot retire.
+        revision, which this drain's compare-and-swap clear cannot retire. Only
+        a page this pass indexed moving under it rolls the pass back; movement
+        elsewhere keeps the proven rows and withholds the publication.
         """
         report: dict[str, Any] = {
             "indexed_files": 0,
@@ -5340,12 +5658,20 @@ class EpistemicGraphIndex:
                 # `GRAPH_SYNC_LINEAGE_CONFLICT`, raised at the *next* write
                 # rather than here.
                 nonlocal published
+                if not self._source_versions_current(indexed_versions):
+                    # A page this pass indexed moved under it: those rows are
+                    # stale, so nothing here may land.
+                    raise _DrainPublicationMoved
                 if not (
                     _incremental_projection_identity(self.vault_root) == before
-                    and self._source_versions_current(indexed_versions)
                     and freshness.recall_checkpoint(self.vault_root, "vault") == checkpoint
                 ):
-                    raise _DrainPublicationMoved
+                    # The vault moved elsewhere under the pass. Every row it
+                    # wrote is proven against its own bytes, so the rows land
+                    # and their receipts retire; the movement queued its own.
+                    # The marker, lineage and acknowledgement describe the whole
+                    # projection, and wait for a drain it holds still for.
+                    return
                 self._publish_available_marker_in_transaction(
                     conn,
                     before,
@@ -5355,6 +5681,12 @@ class EpistemicGraphIndex:
                     # now, not the one that was committed when the drain
                     # started.
                     graph_checkpoint=self._drained_graph_checkpoint(batch),
+                    # The resolver this drain derived under, which already
+                    # holds every page the registry names: a queued topology
+                    # change is repaired from its own receipt, and a stale
+                    # fingerprint only sends the next topology-changing write
+                    # to a whole-vault rebuild (stored_topology_fingerprint_mismatch).
+                    topology=_resolver_topology_fingerprint(resolver),
                 )
                 published = True
 
@@ -7099,6 +7431,66 @@ def _matches_entity_families(
     return family is not None and family in families
 
 
+def graph_lag(vault_root: Path) -> dict[str, Any]:
+    """How far the published graph trails the canonical checkpoint.
+
+    O(1) reads plus one indexed queue read -- the canonical checkpoint and
+    floor, the sidecar's acknowledgement and barrier, the debt records for the
+    gap, the queue's depth and oldest age -- and never a vault walk, because
+    readers and the doctor call it on the refusal path.
+
+    `catching_up` is the state a write deferred to the queue or a drain behind a steady writer
+    leaves: the sidecar exists, it is behind or has work queued, every skipped
+    generation is receipt-covered, and neither a full-rebuild marker nor a
+    recovery barrier stands. A deferral's own withdrawal (the `unavailable`
+    barrier a refresh leaves when it hands its paths to the queue) is not a
+    recovery barrier: the queue is the repair. Readers still refuse in it; this
+    only says the refusal is convergence in progress rather than a fault.
+    """
+    epoch = graph_sync.classify_epoch(vault_root)
+    committed = int(epoch.checkpoint.generation) if epoch.checkpoint is not None else 0
+    acknowledged = (
+        int(epoch.acknowledgement.generation) if epoch.acknowledgement is not None else 0
+    )
+    behind = max(0, committed - acknowledged)
+    queued, oldest = deferred_index.graph_queue_age(vault_root)
+    quarantined = deferred_index.graph_quarantined_count(vault_root)
+    full_rebuild_pending = deferred_index.graph_full_rebuild_pending(vault_root) is not None
+    covered = behind == 0
+    if behind and not freshness.external_pending_unscoped(vault_root):
+        gap = range(acknowledged + 1, committed + 1)
+        try:
+            known, unknown, recorded, has_record = deferred_index.graph_gap_coverage(
+                vault_root, gap
+            )
+        except Exception:  # noqa: BLE001 - an unreadable queue covers nothing
+            known, unknown, recorded, has_record = frozenset(), True, frozenset(), False
+        if has_record:
+            known = known | recorded
+        covered = not unknown and all(generation in known for generation in gap)
+    index = EpistemicGraphIndex(vault_root)
+    exists = index.path.exists()
+    barrier = exists and index._read_barrier_value() not in (None, "unavailable")
+    return {
+        "acknowledged_generation": acknowledged,
+        "committed_generation": committed,
+        "generations_behind": behind,
+        "queued_paths": queued,
+        "oldest_queued_age_seconds": None if oldest is None else round(oldest, 3),
+        "gap_receipt_covered": covered,
+        "full_rebuild_pending": full_rebuild_pending,
+        "quarantined_paths": quarantined,
+        "catching_up": bool(
+            exists
+            and epoch.kind == "coherent"
+            and (behind or queued)
+            and covered
+            and not full_rebuild_pending
+            and not barrier
+        ),
+    }
+
+
 def graph_context(
     vault_root: Path,
     *,
@@ -7157,6 +7549,16 @@ def graph_context(
             "edges": [],
             "truncation": [],
         }
+        try:
+            lag = graph_lag(vault_root)
+        except Exception:  # noqa: BLE001 - the refusal must not fail on its explanation
+            log.debug("graph lag unreadable", exc_info=True)
+            lag = None
+        if lag is not None and lag["catching_up"]:
+            # Still a refusal: the rows behind the queue are stale. The reason
+            # says it is convergence in progress, and the lag says how far.
+            unavailable["reason"] = "graph catching up"
+            unavailable["lag"] = lag
         if unit_ref is not None:
             unavailable["unit_status"] = "stale"
             unavailable["warnings"] = [_drift_warning({"graph_sidecar_unavailable": 1})]
@@ -7841,7 +8243,13 @@ def _converge_full_graph_marker(vault_root: Path) -> GraphDispatchResult:
                 return GraphDispatchResult.not_required()
             state = graph_sync.classify_epoch(root)
             if state.kind in {"pre_floor", "recoverable"}:
-                graph_sync.recover_checkpoint(root)
+                # Never wait on a committing batch while holding the writers'
+                # boundary: that batch may be in its post-commit fan-out waiting
+                # for this boundary, and each writer queued behind it would be
+                # refused in turn (CG-2). The epoch is left for the next tick.
+                with vault_module.batch_commit_if_idle() as idle:
+                    if idle:
+                        graph_sync.recover_checkpoint(root)
                 state = graph_sync.classify_epoch(root)
             checkpoint = graph_sync.read_checkpoint(root)
             if state.kind not in {"legacy", "coherent"}:

@@ -535,6 +535,18 @@ def _connect_created_owned(
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS graph_failures (
+            rel_path TEXT PRIMARY KEY,
+            attempts INTEGER NOT NULL,
+            first_failed_at REAL NOT NULL,
+            last_failed_at REAL NOT NULL,
+            quarantined INTEGER NOT NULL DEFAULT 0,
+            signature TEXT
+        )
+        """
+    )
     for event in ("INSERT", "UPDATE", "DELETE"):
         conn.execute(
             f"CREATE TRIGGER IF NOT EXISTS graph_upserts_generation_{event.lower()} "
@@ -1584,7 +1596,177 @@ def list_graph_paths(vault_root: Path, *, limit: int | None = None) -> list[str]
 
 
 def clear_graph_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:
-    return _clear_plain_receipts(vault_root, receipts, table="graph_upserts")
+    """CAS-clear graph receipts; a path derived at last forgets its failures."""
+    cleared = _clear_plain_receipts(vault_root, receipts, table="graph_upserts")
+    if receipts:
+        forget_graph_failures(vault_root, {receipt.rel_path for receipt in receipts})
+    return cleared
+
+
+def note_graph_failure(vault_root: Path, rel_path: str) -> tuple[int, float]:
+    """Count one failed isolated attempt to derive `rel_path`.
+
+    Returns the attempts so far and when the first of them failed. Counted per
+    path, not per receipt revision: a page that cannot be read fails the same
+    way whatever revision queued it.
+    """
+    now = time.time()
+    conn = _connect(vault_root, create=True)
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO graph_failures(rel_path, attempts, first_failed_at, last_failed_at) "
+                "VALUES (?, 1, ?, ?) ON CONFLICT(rel_path) DO UPDATE SET "
+                "attempts = attempts + 1, last_failed_at = excluded.last_failed_at",
+                (rel_path, now, now),
+            )
+            row = conn.execute(
+                "SELECT attempts, first_failed_at FROM graph_failures WHERE rel_path = ?",
+                (rel_path,),
+            ).fetchone()
+        if row is None:
+            return 1, now
+        return int(row[0]), float(row[1])
+    finally:
+        conn.close()
+
+
+def quarantine_graph_receipt(
+    vault_root: Path, receipt: DeferredReceipt, *, signature: str | None
+) -> bool:
+    """Set a receipt no drain can derive aside, by exact revision.
+
+    Its row leaves the queue, so the queue can empty around it, and the path
+    is recorded as quarantined for the lag and the doctor with the stat
+    `signature` it failed at: a change to it earns a retry
+    (`release_graph_quarantine`). A newer revision -- a write that landed
+    since -- stays queued as ordinary work.
+    """
+    conn = _connect(vault_root, create=True)
+    try:
+        with conn:
+            removed = conn.execute(
+                "DELETE FROM graph_upserts WHERE rel_path = ? AND revision = ?",
+                (receipt.rel_path, receipt.revision),
+            ).rowcount
+            if removed:
+                now = time.time()
+                conn.execute(
+                    "INSERT INTO graph_failures(rel_path, attempts, first_failed_at, "
+                    "last_failed_at, quarantined, signature) VALUES (?, 1, ?, ?, 1, ?) "
+                    "ON CONFLICT(rel_path) DO UPDATE SET quarantined = 1, "
+                    "last_failed_at = excluded.last_failed_at, signature = excluded.signature",
+                    (receipt.rel_path, now, now, signature),
+                )
+        return bool(removed)
+    finally:
+        conn.close()
+
+
+def quarantined_graph_paths(
+    vault_root: Path,
+) -> list[tuple[str, str | None, float, int]]:
+    """Each quarantined path, the stat signature it failed at, when it last failed,
+    and how many attempts have failed.
+
+    An absent or unreadable store reads as none.
+    """
+    rows = _graph_failure_rows(vault_root, "WHERE quarantined = 1")
+    return [
+        (str(rel), None if sig is None else str(sig), float(at), int(attempts))
+        for rel, sig, at, attempts in rows
+    ]
+
+
+def graph_failure_paths(vault_root: Path) -> list[str]:
+    """Every path with a recorded failure, quarantined or not. Absent store: none."""
+    return [str(row[0]) for row in _graph_failure_rows(vault_root, "")]
+
+
+def _graph_failure_rows(vault_root: Path, where: str) -> list[tuple[Any, ...]]:
+    if not store_path(vault_root).exists():
+        return []
+    try:
+        conn = _connect_readonly(vault_root)
+        try:
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'graph_failures'"
+            ).fetchone():
+                return []
+            return conn.execute(
+                "SELECT rel_path, signature, last_failed_at, attempts FROM graph_failures "
+                f"{where} ORDER BY rel_path"
+            ).fetchall()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return []
+
+
+def release_graph_quarantine(vault_root: Path, rel_paths: list[str]) -> int:
+    """Queue quarantined paths for one more attempt; return how many were queued.
+
+    Queued first and released second, so a crash between the two leaves a path
+    both queued and quarantined -- retried, and re-quarantined or forgotten by
+    that attempt -- rather than neither. The failure count and its first
+    failure stay: a retry that fails again is set aside on that one attempt.
+    """
+    if not rel_paths:
+        return 0
+    add_graph(vault_root, list(rel_paths))
+    conn = _connect(vault_root, create=True)
+    try:
+        with conn:
+            conn.executemany(
+                "UPDATE graph_failures SET quarantined = 0 WHERE rel_path = ?",
+                [(rel,) for rel in sorted(set(rel_paths))],
+            )
+    finally:
+        conn.close()
+    return len(set(rel_paths))
+
+
+def graph_quarantined_count(vault_root: Path) -> int:
+    """How many paths are quarantined as underivable. An unreadable store reads 0."""
+    if not store_path(vault_root).exists():
+        return 0
+    try:
+        conn = _connect_readonly(vault_root)
+        try:
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'graph_failures'"
+            ).fetchone():
+                return 0
+            row = conn.execute(
+                "SELECT count(*) FROM graph_failures WHERE quarantined = 1"
+            ).fetchone()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return 0
+    return int(row[0] or 0)
+
+
+def forget_graph_failures(vault_root: Path, rel_paths: set[str]) -> None:
+    """Drop the failure record of paths that derived; best effort, one read first."""
+    if not rel_paths or not store_path(vault_root).exists():
+        return
+    try:
+        conn = _connect(vault_root, create=True)
+        try:
+            with conn:
+                if not conn.execute("SELECT 1 FROM graph_failures LIMIT 1").fetchone():
+                    return
+                conn.executemany(
+                    "DELETE FROM graph_failures WHERE rel_path = ?",
+                    [(rel,) for rel in sorted(rel_paths)],
+                )
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        # The record only feeds the quarantine count; a stale one costs a
+        # quarantine a little sooner, never a lost repair.
+        return
 
 
 def clear_graph(vault_root: Path, rel_paths: list[str] | None = None) -> int:
@@ -1604,6 +1786,35 @@ def clear_graph(vault_root: Path, rel_paths: list[str] | None = None) -> int:
 
 def rotate_graph_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:
     return rotate_receipts(vault_root, receipts, queue="graph")
+
+
+def graph_queue_age(vault_root: Path) -> tuple[int, float | None]:
+    """How many graph receipts are queued, and how long ago the oldest was.
+
+    One indexed read on one connection, for lag reporting. The age runs from
+    a row's first enqueue: a requeue keeps it, so repair that keeps losing its
+    compare-and-swap still reads as old. An unreadable store reads as empty.
+    """
+    if not store_path(vault_root).exists():
+        return 0, None
+    try:
+        conn = _connect_readonly(vault_root)
+        try:
+            columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(graph_upserts)")
+            }
+            if not columns:
+                return 0, None
+            count, oldest = conn.execute(
+                "SELECT count(*), min(created_at) FROM graph_upserts"
+            ).fetchone()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return 0, None
+    if not count or oldest is None:
+        return int(count or 0), None
+    return int(count), max(0.0, time.time() - float(oldest))
 
 
 def graph_status(vault_root: Path | None) -> dict[str, Any]:
