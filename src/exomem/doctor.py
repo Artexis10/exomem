@@ -950,7 +950,21 @@ def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
             f"Run `{_REBUILD_VECTORS_CMD}` to recover the derived graph.",
             details=details,
         )
+    from . import deferred_index
+
+    quarantined = deferred_index.graph_quarantined_count(vault_root)
+    if quarantined:
+        details["quarantined_paths"] = quarantined
     if state == "current":
+        if quarantined:
+            return _check(
+                "graph_sync.state",
+                "warn",
+                f"graph_sync is current at generation {generation}, but {quarantined} "
+                "page(s) could not be read; the graph keeps their last readable version.",
+                "Check the files' permissions or encoding; a change to a page retries it.",
+                details=details,
+            )
         return _check(
             "graph_sync.state",
             "pass",
@@ -958,6 +972,29 @@ def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
             details=details,
         )
     if state == "recovery_required":
+        from . import epistemic_graph
+
+        try:
+            lag = epistemic_graph.graph_lag(vault_root)
+        except Exception:  # noqa: BLE001 - an unreadable lag leaves the failure standing
+            lag = None
+        if (
+            lag is not None
+            and lag["catching_up"]
+            and (lag["oldest_queued_age_seconds"] or 0.0) < RECOVERY_AGE_FAIL_SECONDS
+        ):
+            # Every skipped generation is queued repair the drain is working
+            # through: a catch-up publication or a truncated drain. Readers
+            # refuse meanwhile; that is lag to watch, not a graph to recover.
+            return _check(
+                "graph_sync.state",
+                "warn",
+                f"graph_sync is catching up at generation {generation}: "
+                f"{lag['generations_behind']} generation(s) behind, "
+                f"{lag['queued_paths']} path(s) queued, every gap receipt-covered.",
+                "No action needed while the lag shrinks; the graph drain converges it.",
+                details={**details, "lag": lag},
+            )
         if checkpoint is not None:
             remediation = graph_sync.committed_graph_failure(checkpoint)[
                 "graph_sync_remediation"
@@ -987,6 +1024,50 @@ def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
         "cannot be trusted.",
         f"Run `{_REBUILD_VECTORS_CMD}` to recover the derived graph.",
         details=details,
+    )
+
+
+def _check_relation_census(vault_root: Path | None) -> DoctorCheck:
+    """One line of relation quality from the published graph snapshot.
+
+    Informational: edge quality is never a setup failure, so an available
+    census passes and an unavailable one only warns (`graph_sync.state` owns
+    the graph's health). Doctor is a read-only local preflight run by the
+    owner, so it declares the owner-local caller the census serves.
+    """
+    if vault_root is None:
+        return _check(
+            "relations.census",
+            "pass",
+            "No vault configured; the relation census was not read.",
+        )
+    from . import relation_census
+    from .governance.principal import library_scope
+
+    try:
+        with library_scope():
+            result = relation_census.census(vault_root)
+    except Exception as error:  # noqa: BLE001 - diagnostics must not crash doctor
+        return _check(
+            "relations.census",
+            "warn",
+            f"Relation census unavailable: {type(error).__name__}.",
+        )
+    if not result.get("available"):
+        return _check(
+            "relations.census",
+            "warn",
+            relation_census.summary_line(result),
+            "Run `exomem relations census` once the graph is current.",
+        )
+    return _check(
+        "relations.census",
+        "pass",
+        relation_census.summary_line(result),
+        details={
+            "graph_generation": result.get("graph_generation"),
+            "eligible_pages": result["cohort"]["eligible_pages"],
+        },
     )
 
 
@@ -3328,6 +3409,7 @@ def doctor(
         _check_write_path_env_flags(vault_root),
         _check_frozen_verifier(),
         check_graph_recovery_age(vault_root),
+        _check_relation_census(vault_root),
     ]
     runtime_processes = _check_runtime_processes()
     if runtime_processes is not None:

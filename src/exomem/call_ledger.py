@@ -304,6 +304,13 @@ def build_row(
     committed_targets: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Assemble one complete, self-hashing ledger row."""
+    from .privacy_log import log_client_label, log_client_version, log_session_ref
+
+    # Caller-chosen header and handshake text: bounded under content-private
+    # logging, verbatim otherwise.
+    session_id = log_session_ref(session_id)
+    client_name = log_client_label(client_name)
+    client_version = log_client_version(client_version)
     arg_names, args, args_truncated = _argument_shape(arguments or {})
     targets, targets_truncated = _target_paths(arguments or {}, committed_targets)
     row: dict[str, Any] = {
