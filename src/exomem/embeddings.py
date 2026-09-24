@@ -1179,6 +1179,19 @@ def activation_encoder_is_shared() -> bool:
     return activation_model_name() == MODEL_NAME
 
 
+def activation_fingerprint() -> str | None:
+    """The vector space the resident activation encoder produces, or None when
+    it is cold. Activation vectors are stored under it and read only by it."""
+    shared = activation_encoder_is_shared()
+    model = _MODEL if shared else _ACTIVATION_MODEL
+    if model is None:
+        return None
+    profile = getattr(model, "profile", None)
+    if isinstance(profile, embedding_backend.EncoderProfile):
+        return profile.fingerprint()
+    return embedding_backend.fingerprint(MODEL_NAME if shared else activation_model_name())
+
+
 def _activation_gate() -> runtime_resources.ModelAdmissionGate:
     global _ACTIVATION_GATE
     with _ACTIVATION_GATE_LOCK:

@@ -1039,7 +1039,10 @@ def signature_evidence(
     An unavailable scorer removes one evidence kind, not the structural
     resolver or its release guard. It cannot justify a cached negative result.
     A catalogue too small to calibrate the band (`uncalibrated`) is not worth
-    an encode.
+    an encode. The turn is encoded on the activation encoder's interactive
+    lane, read at its first `ACTIVATION_TURN_MAX_TOKENS` tokens, and measured
+    only against vectors that encoder made: a cold encoder is `unavailable`
+    (activation never loads one), and vectors of another encoder are `absent`.
     """
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return {}, "disabled"
@@ -1048,18 +1051,22 @@ def signature_evidence(
 
         if readiness.should_defer("embeddings"):
             return {}, "warming"
-        vectors = index.vectors()
-        if not vectors:
+        fingerprint = embeddings.activation_fingerprint()
+        if fingerprint is None:
+            return {}, "unavailable"
+        ids, matrix = index.vector_matrix(fingerprint)
+        if matrix is None:
             return {}, "absent"
-        if len(vectors) < int(ranking_config.DEFAULT_RANKING.working_set_semantic_min_population):
+        config = ranking_config.DEFAULT_RANKING
+        if len(ids) < int(config.working_set_semantic_min_population):
             return {}, "uncalibrated"
         try:
-            query_vector = embeddings.embed_query_if_loaded(turn)
+            query_vector = embeddings.embed_activation_query_if_loaded(turn)
         except runtime_resources.ModelBusyError:
             return {}, "busy"
         if query_vector is None:
             return {}, "unavailable"
-        return working_set_resolve.vector_bands(vectors, query_vector, ranking_config.DEFAULT_RANKING)
+        return working_set_resolve.matrix_bands(ids, matrix, query_vector, config)
     except Exception:  # noqa: BLE001 - optional scorer failure is explicit
         log.debug("activation signature evidence unavailable", exc_info=True)
         return {}, "unavailable"

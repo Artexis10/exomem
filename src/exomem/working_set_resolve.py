@@ -986,28 +986,45 @@ def vector_bands(
     a word naming four anchors from being rare. Returns `({}, "uncalibrated")`
     when there is no chance level. The similarity never leaves this function.
     """
-    config = config or DEFAULT_RANKING
     if not vectors or query_vector is None:
+        return {}, "ready"
+    try:
+        import numpy as np
+
+        ids: list[str] = []
+        rows: list[Any] = []
+        width = np.asarray(query_vector).size
+        for anchor_id, vector in vectors.items():
+            candidate = np.asarray(vector, dtype="float32").reshape(-1)
+            candidate_norm = float(np.linalg.norm(candidate))
+            if candidate.size != width or candidate_norm == 0.0:
+                continue  # a malformed row costs its band, nothing else
+            ids.append(anchor_id)
+            rows.append(candidate / candidate_norm)
+        if not rows:
+            return {}, "ready"
+        matrix = np.vstack(rows)
+    except Exception:  # noqa: BLE001 - the vector lane is optional by contract
+        return {}, "ready"
+    return matrix_bands(tuple(ids), matrix, query_vector, config)
+
+
+def matrix_bands(
+    ids: Sequence[str], matrix: Any, query_vector: Any, config: RankingConfig | None = None
+) -> tuple[dict[str, bool], str]:
+    """`vector_bands` over the index's cached, L2-normalised signature matrix:
+    one matrix-vector product and a median, not a loop over rows."""
+    config = config or DEFAULT_RANKING
+    if matrix is None or not len(ids) or query_vector is None:
         return {}, "ready"
     try:
         import numpy as np
 
         query = np.asarray(query_vector, dtype="float32").reshape(-1)
         norm = float(np.linalg.norm(query))
-        if norm == 0.0:
+        if norm == 0.0 or query.shape[0] != matrix.shape[1]:
             return {}, "ready"
-        ids: list[str] = []
-        rows: list[Any] = []
-        for anchor_id, vector in vectors.items():
-            candidate = np.asarray(vector, dtype="float32").reshape(-1)
-            candidate_norm = float(np.linalg.norm(candidate))
-            if candidate.shape != query.shape or candidate_norm == 0.0:
-                continue  # a malformed row costs its band, nothing else
-            ids.append(anchor_id)
-            rows.append(candidate / candidate_norm)
-        if not rows:
-            return {}, "ready"
-        similarities = np.vstack(rows) @ (query / norm)
+        similarities = matrix @ (query / norm)
     except Exception:  # noqa: BLE001 - the vector lane is optional by contract
         return {}, "ready"
     cleared = semantic_band(

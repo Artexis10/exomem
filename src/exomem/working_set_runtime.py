@@ -967,7 +967,11 @@ def _schedule_build(vault_root: Path, *, freshness_stamp: str = "") -> None:
 
     def _warm() -> None:
         try:
-            working_set_index.WorkingSetIndex(root).update(freshness_stamp=freshness_stamp or None)
+            # The one pass that may load a cold activation encoder: it runs off
+            # the request thread, which never loads a model.
+            working_set_index.WorkingSetIndex(root).update(
+                freshness_stamp=freshness_stamp or None, load_encoder=True
+            )
         except Exception:  # noqa: BLE001 - the optional stage stays soft-failing
             log.warning("activation index background build failed", exc_info=True)
         finally:
