@@ -316,11 +316,32 @@ def _body_wikilink_candidates(
     canonical_lines = {
         relation.line for relation in document.note_relations if relation.canonical
     }
+    from .governance import egress
+
+    visible = egress.visible_page_filter(vault_root)
     index = epistemic_graph_module.EpistemicGraphIndex(vault_root)
     connection = index._open_read_snapshot()
     if connection is None:
         return []
     try:
+        if visible is not None:
+            # The queue proposed this page's links as the reader's view
+            # resolves them; regenerate the same ones.
+            link_rows = epistemic_graph_module._VisibleLinkView(
+                vault_root, connection, visible, index.registry
+            ).body_link_rows(page.rel_path)
+            if link_rows is not None:
+                return [
+                    {
+                        "from": page.rel_path,
+                        "to": target,
+                        "relation_type": "links_to",
+                        "method": "wikilink",
+                        "evidence": payload["evidence"],
+                    }
+                    for target, payload, *_rest in link_rows[: max(0, int(limit))]
+                    if isinstance(payload.get("evidence"), dict)
+                ]
         rows = connection.execute(
             "SELECT d.path, d.title, e.review_evidence "
             "FROM graph_edges e JOIN graph_nodes d "

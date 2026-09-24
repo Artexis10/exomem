@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -1131,6 +1132,7 @@ def _link_surfaces(target: str) -> dict[str, tuple[str, dict[str, Any]]]:
         "context-alpha": ("connect_memory", {"operation": "context", "path": alpha}),
         "inbound-target": ("connect_memory", {"operation": "inbound-links", "target": target}),
         "suggest-alpha": ("connect_memory", {"operation": "suggest-relations", "path": alpha}),
+        "relation-queue": ("review_memory", {"mode": "relation-queue"}),
         "read-alpha": ("read_memory", {"path": alpha, "links": True}),
         "read-target": ("read_memory", {"path": target, "links": True}),
     }
@@ -1162,6 +1164,40 @@ def test_restricted_link_resolution_reads_as_if_the_withheld_page_were_absent(
         assert _text(answers["C"][label]) == _text(answers["B"][label]), label
     edges = answers["A"]["graph-context-alpha"]["graph"]["edges"]
     assert any(edge["dst_key"] == f"file:{target}" for edge in edges), edges
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_reviewer_can_act_on_a_link_its_view_resolved(
+    tmp_path: Path, audience: str
+) -> None:
+    base, withheld = _stem_collision()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    principal = _principal(audience)
+
+    answers = {}
+    for variant, vault in vaults.items():
+        queue = _call(vault, principal, "review_memory", mode="relation-queue")
+        (item,) = [
+            item
+            for group in queue["groups"]
+            for item in group["items"]
+            if item["method"] == "wikilink"
+        ]
+        answer = _call(
+            vault,
+            principal,
+            "triage_memory",
+            ref=item["ref"],
+            action="dismiss",
+            source_path=item["source_path"],
+        )
+        # The decision's own timestamp differs between any two runs.
+        stamped = re.sub(r'"updated_at": "[^"]*"', '"updated_at": ""', _text(answer))
+        answers[variant] = json.loads(stamped)
+
+    assert "__error__" not in answers["A"], answers["A"]
+    assert _text(answers["A"]) == _text(answers["B"])
+    assert _text(answers["C"]) == _text(answers["B"])
 
 
 def test_the_owner_still_resolves_links_over_every_page(tmp_path: Path) -> None:

@@ -6840,6 +6840,26 @@ class EpistemicGraphIndex:
                 "ORDER BY source_path, target_path, dst_key LIMIT ?",
                 (*selected, per_source_cap, branch_cap + 1),
             ).fetchall()
+            if keep is not None:
+                # A source whose body links could resolve to a page this reader
+                # may not see proposes the links a vault without it would.
+                view = _VisibleLinkView(self.vault_root, conn, keep, self.registry)
+                by_source: dict[str, list[tuple[Any, ...]]] = {}
+                for row in wiki_and_authored_rows:
+                    by_source.setdefault(str(row[1]), []).append(row)
+                for source in selected:
+                    link_rows = view.body_link_rows(source)
+                    if link_rows is None:
+                        continue
+                    by_source[source] = [
+                        (0, source, target, json.dumps(evidence), raw, target_id,
+                         target_count, authored, len(link_rows))
+                        for target, evidence, raw, target_id, target_count, authored
+                        in link_rows[:per_source_cap]
+                    ]
+                wiki_and_authored_rows = [
+                    row for source in sorted(by_source) for row in by_source[source]
+                ][: branch_cap + 1]
         except sqlite3.Error:
             return {
                 "status": "warming",
@@ -10177,6 +10197,7 @@ class _VisibleLinkView:
         self._resolver: vault_module.WikilinkResolver | None = None
         self._changes: dict[str, bool] = {}
         self._edges: dict[str, list[dict[str, Any]] | None] = {}
+        self._evidence: dict[str, dict[str, dict[str, Any]]] = {}
 
     def _shared_resolver(self) -> vault_module.WikilinkResolver:
         """The recall resolver the graph itself is built with, read once per view."""
@@ -10242,11 +10263,61 @@ class _VisibleLinkView:
             resolver=self._shared_resolver(),
             visible=self.keep,
         )
-        return [
-            json.loads(json.dumps(edge.as_dict(), sort_keys=True))
+        resolved = [edge for edge in edges if edge.origin in _RESOLVED_LINK_ORIGINS]
+        self._evidence[rel_path] = {
+            edge.edge_key: json.loads(
+                json.dumps(edge.review_evidence or {}, ensure_ascii=False, sort_keys=True)
+            )
+            for edge in resolved
+        }
+        return [json.loads(json.dumps(edge.as_dict(), sort_keys=True)) for edge in resolved]
+
+    def body_link_rows(self, rel_path: str) -> list[tuple[Any, ...]] | None:
+        """`rel_path`'s body-link edges here, or `None` when they are unchanged.
+
+        Each row is `(target path, review evidence, raw relation, target exomem
+        id, pages sharing that id, authored)` in the order the stored graph
+        ranks them (occurrence, target, relation); `authored` marks a target
+        the page also names with a `links_to` relation line.
+        """
+        edges = self.page_edges(rel_path)
+        if edges is None:
+            return None
+        authored = {
+            str(edge["dst_key"])
             for edge in edges
-            if edge.origin in _RESOLVED_LINK_ORIGINS
-        ]
+            if edge["origin"] == "markdown_relation" and edge["raw_relation"] == "links_to"
+        }
+        evidence = self._evidence.get(rel_path, {})
+        ranked: list[tuple[tuple[int, str, str], tuple[Any, ...]]] = []
+        for edge in edges:
+            if edge["origin"] != "wikilink":
+                continue
+            target = self.conn.execute(
+                "SELECT d.path, d.exomem_id, CASE WHEN d.exomem_id IS NULL THEN 0 ELSE "
+                "(SELECT COUNT(*) FROM graph_nodes ids WHERE ids.kind = 'file' "
+                "AND ids.exomem_id = d.exomem_id) END FROM graph_nodes d "
+                "WHERE d.node_key = ? AND d.kind = 'file'",
+                (edge["dst_key"],),
+            ).fetchone()
+            if target is None:
+                continue
+            payload = evidence.get(str(edge["edge_key"]), {})
+            occurrence = (payload.get("internal") or {}).get("occurrence", -1)
+            ranked.append(
+                (
+                    (int(occurrence), str(target[0]), str(edge["raw_relation"])),
+                    (
+                        str(target[0]),
+                        payload,
+                        str(edge["raw_relation"]),
+                        target[1],
+                        int(target[2] or 0),
+                        str(edge["dst_key"]) in authored,
+                    ),
+                )
+            )
+        return [row for _key, row in sorted(ranked, key=lambda item: item[0])]
 
     def inbound_sources(self, rel_path: str) -> set[str]:
         """Visible pages whose links to `rel_path`'s names resolve differently here."""
