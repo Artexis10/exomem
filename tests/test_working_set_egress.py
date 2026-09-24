@@ -901,7 +901,9 @@ Never tow without checking [[Cargo Sled]] first.
     working_set_index.WorkingSetIndex(vault).reset()
     working_set_index.WorkingSetIndex(vault).rebuild()
 
-    write_scope(vault, paths="Products/**")
+    # Only the linked page is withheld: the anchor resolves for the caller, and
+    # the guard must resolve the prose link to decide it.
+    write_scope(vault, paths="Products/Cargo Sled.md")
     write_rule(vault, ceiling=0, audience="external")
 
     # Publication owns catalogue warming. Activation must not rebuild it just
