@@ -26,6 +26,16 @@ Tunables (env): EXOMEM_CAPTURE_NUDGE_DISABLE=1 (off), EXOMEM_CAPTURE_NUDGE_MIN_C
 per char), EXOMEM_CAPTURE_NUDGE_COOLDOWN_SEC (default 300). The legacy KB_CAPTURE_NUDGE_*
 names are still accepted for back-compat (aliased to the EXOMEM_* names at startup).
 
+Episode ask. Every K substantive turns (K and a cooldown by prominence,
+`_EPISODE_ASK_PRESETS`; EXOMEM_EPISODE_ASK_TURNS / EXOMEM_EPISODE_ASK_COOLDOWN_SEC
+override) the hook asks for one `episode_memory` record under a key derived from
+the client and session id alone (`episode_key`), so the key survives compaction
+without the hook reading a transcript record. Only a SUCCESSFUL record resets the
+count: an unrelated write, a `Saved ->` marker or a failed record leaves the
+episode pending. When the ask is due it takes that Stop; on every other Stop the
+per-turn capture reminder behaves exactly as before. The hook never records
+anything itself — hooks trigger, agents author.
+
 Contract (Claude Code / Codex Stop hook): read the event JSON on stdin; print
 `{"decision":"block","reason":...}` and exit 0 to block the stop and feed the
 reminder to the agent; exit 0 with no output to allow the stop. Never raises — a
@@ -34,6 +44,7 @@ hook crash must not break the session.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -55,7 +66,8 @@ _KB_WRITE = re.compile(
     # read-only discovery that leaves the check armed.
     r"record_memory:(?:create|append|update|revise|rebaseline)|"
     r"plan_memory:(?:create|add|update|triage)|"
-    r"observe_memory:(?:add|update|remove)"
+    r"observe_memory:(?:add|update|remove)|"
+    r"episode_memory:record"
     r")",
     re.I,
 )
@@ -86,6 +98,21 @@ REMINDER = (
     "structural_suggestions/restructure_execution; relations: link_acceptance. Else/no "
     "Knowledge Base: stop."
 )
+
+
+#: The episode ask. Its own constant, so `REMINDER`'s bytes (and every pin on
+#: them) stay exactly as they were. `{key}` is the session's episode key.
+EPISODE_ASK = (
+    "[Exomem episode check] Several substantive turns have passed since this "
+    "session's last episode record. If the conversation reached a decision or a "
+    'stopping point, call episode_memory once with action="record", '
+    'episode="{key}", a one-line subject and summary, and short worked_on, decided '
+    "and open items; add said only for a user statement worth keeping verbatim. "
+    "Distil; no transcript. If nothing durable happened, do nothing."
+)
+#: The label the server derives the same key from (`episode_capture.hook_key`).
+_EPISODE_CLIENT_LABELS = {"claude": "claude-code", "codex": "codex"}
+_EPISODE_KEY_LABEL = "exomem-episode-key-v1"
 
 
 # Back-compat: the tunables were renamed KB_CAPTURE_NUDGE_* -> EXOMEM_CAPTURE_NUDGE_*
@@ -121,6 +148,15 @@ _PROMINENCE_PRESETS = {
     "light": (800, 900),
     "balanced": (300, 300),
     "maximal": (120, 60),
+}
+# Episode-ask cadence per level: (substantive turns since the last record,
+# seconds between asks) or None. Duplicated from `exomem.prominence` for the
+# same standalone reason; `tests/test_capture_nudge_episode.py` pins the two.
+_EPISODE_ASK_PRESETS = {
+    "off": None,
+    "light": (12, 3600),
+    "balanced": (6, 1200),
+    "maximal": (3, 600),
 }
 _PROMINENCE_ALIASES = {
     "none": "off",
@@ -392,6 +428,106 @@ PENDING_RESTART_MARKER = "pending-restart"
 _PENDING_RESTART_MAX_AGE_SEC = 24 * 3600
 
 
+def episode_key(client: str, session_id: str) -> str:
+    """The session's episode key: a pure function of client and session id.
+
+    Mirror of `exomem.episode_capture.hook_key`, which this standalone script
+    cannot import.
+    """
+    material = f"{_EPISODE_KEY_LABEL}\0{client}\0{session_id}".encode("utf-8", "surrogatepass")
+    return "ep-" + hashlib.sha256(material).hexdigest()[:32]
+
+
+def _successful_episode_record(tool: dict) -> bool:
+    """A completed `episode_memory` record — the only thing that covers an episode."""
+    if tool.get("failed"):
+        return False
+    tool_input = tool.get("input") if isinstance(tool.get("input"), dict) else {}
+    return (
+        bool(re.search(r"(?:exomem|knowledge[_-]?base).*episode_memory", str(tool.get("name") or ""), re.I))
+        and str(tool_input.get("action") or "") == "record"
+    )
+
+
+def _episode_state_path(session_id: str) -> Path:
+    key = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id)[:120]
+    return _hook_home() / ".cache" / "exomem-nudge" / f"episode_{key}"
+
+
+def _read_episode_state(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — missing/corrupt state starts the count over
+        return {"substantive_since_record": 0, "last_ask_ts": 0.0}
+    if not isinstance(data, dict):
+        return {"substantive_since_record": 0, "last_ask_ts": 0.0}
+    try:
+        return {
+            "substantive_since_record": max(0, int(data.get("substantive_since_record") or 0)),
+            "last_ask_ts": float(data.get("last_ask_ts") or 0.0),
+        }
+    except (TypeError, ValueError):
+        return {"substantive_since_record": 0, "last_ask_ts": 0.0}
+
+
+def _write_episode_state(path: Path, state: dict) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state), encoding="utf-8")
+    except Exception:  # noqa: BLE001 — the counter is strictly best-effort
+        pass
+
+
+def _episode_ask(
+    session_id: str, tools: list[dict], substantive: bool, level: str
+) -> str | None:
+    """Update this session's episode coverage and return the ask when it is due.
+
+    Coverage is hook-local: covered through the last successful record,
+    pending while substantive turns accrue after it. Asking never resets the
+    count — only a record does — so an ignored ask repeats after its cooldown.
+    """
+    preset = _EPISODE_ASK_PRESETS.get(level)
+    if preset is None or not session_id:
+        return None
+    turns = _env_int("EXOMEM_EPISODE_ASK_TURNS", preset[0])
+    cooldown = _env_int("EXOMEM_EPISODE_ASK_COOLDOWN_SEC", preset[1])
+    path = _episode_state_path(session_id)
+    state = _read_episode_state(path)
+    if any(_successful_episode_record(tool) for tool in tools):
+        state["substantive_since_record"] = 0
+    elif substantive:
+        state["substantive_since_record"] += 1
+    now = time.time()
+    due = (
+        turns > 0
+        and state["substantive_since_record"] >= turns
+        and now - state["last_ask_ts"] >= cooldown
+    )
+    if due:
+        state["last_ask_ts"] = now
+    _write_episode_state(path, state)
+    if not due:
+        return None
+    client = _EPISODE_CLIENT_LABELS.get(_hook_client(), _hook_client())
+    return EPISODE_ASK.replace("{key}", episode_key(client, session_id))
+
+
+def _note_continuation_record(session_id: str, tools: list[dict]) -> None:
+    """Count a record made in a `stop_hook_active` continuation. Never asks.
+
+    The ask blocks a Stop, and the agent answers it in the continuation that
+    follows, which Stops again with `stop_hook_active`. That record is the
+    coverage the ask asked for; dropping it would repeat the ask every cooldown.
+    """
+    if not session_id or not any(_successful_episode_record(tool) for tool in tools):
+        return
+    path = _episode_state_path(session_id)
+    state = _read_episode_state(path)
+    state["substantive_since_record"] = 0
+    _write_episode_state(path, state)
+
+
 def _pending_restart_marker() -> Path:
     return _hook_home() / ".cache" / "exomem-nudge" / PENDING_RESTART_MARKER
 
@@ -460,7 +596,8 @@ def main() -> int:
     _normalize_env_aliases()
     if os.environ.get("EXOMEM_CAPTURE_NUDGE_DISABLE"):
         return 0
-    preset = _PROMINENCE_PRESETS[_prominence()]
+    level = _prominence()
+    preset = _PROMINENCE_PRESETS[level]
     if preset is None:  # prominence=off — the user asked for explicit invocation only
         return 0
     try:
@@ -470,6 +607,12 @@ def main() -> int:
         return 0
 
     if data.get("stop_hook_active") or data.get("stopHookActive"):  # already blocked once
+        tpath = data.get("transcript_path") or data.get("transcriptPath")
+        if tpath and _EPISODE_ASK_PRESETS.get(level) is not None:
+            _note_continuation_record(
+                str(data.get("session_id") or data.get("sessionId") or ""),
+                _latest_turn(tpath)[1],
+            )
         return 0
     tpath = data.get("transcript_path") or data.get("transcriptPath")
     event_assistant_text = data.get("last_assistant_message") or data.get(
@@ -489,16 +632,26 @@ def main() -> int:
     # fallback and to retain best-effort successful-write detection.
     transcript_text, tools = _latest_turn(tpath) if tpath else ("", [])
     assistant_text = event_assistant_text or transcript_text
-    if any(_successful_kb_write(tool) for tool in tools):  # already captured this turn
-        return 0
+    session_id = str(data.get("session_id") or data.get("sessionId") or "")
     if _restart_pending(tools):  # hooks are live but the MCP server is not loaded yet
+        return 0
+    # Before every write/Saved shortcut below: those silence the per-turn
+    # reminder, but they never cover the episode (task 4.1).
+    ask = _episode_ask(
+        session_id, tools, len(assistant_text.strip()) >= min_chars, level
+    )
+    if ask is not None:
+        _log(assistant_text)
+        print(json.dumps({"decision": "block", "reason": ask}))
+        return 0
+    if any(_successful_kb_write(tool) for tool in tools):  # already captured this turn
         return 0
     if re.search(r"Saved\s*(?:->|→|:)", assistant_text):
         return 0
     if len(assistant_text.strip()) < min_chars:  # trivial turn, not a landing
         return 0
 
-    ok, stamp = _cooldown_ok(str(data.get("session_id") or data.get("sessionId") or ""), cooldown)
+    ok, stamp = _cooldown_ok(session_id, cooldown)
     if not ok:  # fired recently this session — keep cost bounded
         return 0
 

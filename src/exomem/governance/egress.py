@@ -1760,42 +1760,12 @@ def resolve_visible_identifier(
             "INVALID_REFERENCE", f"invalid memory reference: {raw!r}"
         )
 
-    candidates = tuple(
-        rel_path
-        for rel_path in memory_refs.paths_for_ids_read_only(
-            vault_root, (memory_id,)
-        ).get(memory_id, ())
-        if not reserved_paths.classify_logical(rel_path).blocked
-        if not lifecycle.is_tombstoned(vault_root, rel_path)
+    visible = _visible_candidates(
+        vault_root,
+        memory_refs.paths_for_ids_read_only(vault_root, (memory_id,)).get(memory_id, ()),
+        principal=principal,
+        purpose=purpose,
     )
-    policy = policy_module.load(vault_root)
-    who = principal if principal is not None else effective_principal()
-    if policy.empty:
-        visible = candidates
-    elif policy.blocked or not who.resolved:
-        visible = ()
-    else:
-        declared_purpose = _declared_purpose(vault_root, who, purpose)
-        grants_hash = _grants_hash(policy)
-        visible = tuple(
-            rel_path
-            for rel_path in candidates
-            if (
-                decision := _decide_path(
-                    vault_root,
-                    rel_path,
-                    policy=policy,
-                    audience=who.audience_id,
-                    purpose=declared_purpose,
-                    grants_hash=grants_hash,
-                    authorization_session=who.authorization_session_id,
-                    authorization_context=who.verified_authorization_session,
-                )
-            )
-            is not None
-            and decision.level > LEVEL_NONE
-        )
-
     if len(visible) > 1:
         raise memory_refs.ReferenceError(
             "AMBIGUOUS_REFERENCE",
@@ -1806,6 +1776,85 @@ def resolve_visible_identifier(
             "REFERENCE_NOT_FOUND", f"memory id not found: {memory_id}"
         )
     return visible[0]
+
+
+def _visible_candidates(
+    vault_root: Path,
+    paths: Iterable[str],
+    *,
+    principal: RequestPrincipal | None,
+    purpose: str | None,
+) -> tuple[str, ...]:
+    """The pages holding one id that the caller may see, as if the rest were absent."""
+    candidates = tuple(
+        rel_path
+        for rel_path in paths
+        if not reserved_paths.classify_logical(rel_path).blocked
+        if not lifecycle.is_tombstoned(vault_root, rel_path)
+    )
+    policy = policy_module.load(vault_root)
+    who = principal if principal is not None else effective_principal()
+    if policy.empty:
+        return candidates
+    if policy.blocked or not who.resolved:
+        return ()
+    declared_purpose = _declared_purpose(vault_root, who, purpose)
+    grants_hash = _grants_hash(policy)
+    return tuple(
+        rel_path
+        for rel_path in candidates
+        if (
+            decision := _decide_path(
+                vault_root,
+                rel_path,
+                policy=policy,
+                audience=who.audience_id,
+                purpose=declared_purpose,
+                grants_hash=grants_hash,
+                authorization_session=who.authorization_session_id,
+                authorization_context=who.verified_authorization_session,
+            )
+        )
+        is not None
+        and decision.level > LEVEL_NONE
+    )
+
+
+def visible_memory_refs(
+    vault_root: Path,
+    values: Iterable[str],
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> frozenset[str]:
+    """The memory refs among `values` that name exactly one page the caller may see.
+
+    `resolve_visible_identifier` for a batch: one corpus scan for all of them,
+    never one per ref, and the scan runs whatever the refs are, so the work
+    says nothing about which of them exist. An unknown, withheld or ambiguous
+    ref is simply absent from the answer, and the three are indistinguishable.
+    """
+    wanted = {
+        value: memory_id
+        for value in dict.fromkeys(str(item or "").strip() for item in values)
+        if (memory_id := memory_refs.parse_memory_ref(value)) is not None
+    }
+    if not wanted:
+        return frozenset()
+    found = memory_refs.paths_for_ids_read_only(Path(vault_root), wanted.values())
+    return frozenset(
+        value
+        for value, memory_id in wanted.items()
+        if len(
+            _visible_candidates(
+                Path(vault_root),
+                found.get(memory_id, ()),
+                principal=principal,
+                purpose=purpose,
+            )
+        )
+        == 1
+    )
 
 
 def _scope_label(policy: Policy, decision: Decision) -> str | None:
@@ -4422,6 +4471,9 @@ _COMMAND_PROJECTOR_KIND: dict[str, str] = {
     # what it emits is refs and short provenance-bearing excerpts naming vault
     # items, which is exactly what the structure backstop filters.
     "activate_context": "structure",
+    # `inspect` names the caller's own recap by ref; `record` names the page
+    # the caller just wrote. Both go through the dispatcher cross-check.
+    "episode_memory": "structure",
 }
 
 # Receipt adapters follow the same default-deny registry as serializers.  A
@@ -4451,6 +4503,7 @@ _COMMAND_OUTCOME_ADAPTER: dict[str, str] = {
     "plan_memory": "structure",
     "schema_memory": "structure",
     "activate_context": "structure",
+    "episode_memory": "structure",
 }
 
 # Every content selector declares both evidence collection and tombstone
@@ -4558,6 +4611,10 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "revise": "mutation",
         "rebaseline": "mutation",
         "discard": "mutation",
+    },
+    ("episode_memory", "action"): {
+        "record": "mutation",
+        "inspect": "structure",
     },
     ("plan_memory", "action"): {
         "inspect": "structure",

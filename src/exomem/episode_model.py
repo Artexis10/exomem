@@ -34,6 +34,9 @@ _ADAPTER_PENDING_ROUTES = {"source", "evidence", "records", "planning", "experim
 _NO_EFFECT_ROUTES = _ADAPTER_PENDING_ROUTES | {"no_capture"}
 MAX_STATE_BYTES = 256 * 1024
 MAX_INPUT_REVISIONS = 64
+#: Refs of existing pages an input concerns, retained with it. Opaque here;
+#: the recorder resolves and visibility-filters them before they arrive.
+MAX_INPUT_ABOUT = 3
 MAX_ATTESTATIONS = 64
 MAX_EFFECT_HISTORY = 64
 MAX_ATTEMPTS = 64
@@ -107,7 +110,7 @@ def leaf_id(candidate: str, key: str) -> str:
 
 
 def _evidence(raw: Any) -> dict[str, Any]:
-    if not isinstance(raw, Mapping) or set(raw) - {"reference", "excerpt", "digest"}:
+    if not isinstance(raw, Mapping) or set(raw) - {"reference", "excerpt", "digest", "about"}:
         raise _fail("EPISODE_EVIDENCE_INVALID", "evidence has unknown fields")
     value = dict(raw)
     if value.get("reference") is not None and (
@@ -126,11 +129,21 @@ def _evidence(raw: Any) -> dict[str, Any]:
         not isinstance(value["digest"], str) or not _HEX.fullmatch(value["digest"])
     ):
         raise _fail("EPISODE_EVIDENCE_INVALID", "digest is invalid")
+    about = value.get("about")
+    if about is not None and (
+        not isinstance(about, (list, tuple))
+        or len(about) > MAX_INPUT_ABOUT
+        or len(set(about)) != len(about)
+        or not all(isinstance(ref, str) and 0 < len(ref) <= 2048 for ref in about)
+    ):
+        raise _fail("EPISODE_EVIDENCE_INVALID", "about is invalid")
     keep = {
         key: value[key] for key in ("reference", "excerpt", "digest") if value.get(key) is not None
     }
     if not keep:
         raise _fail("EPISODE_EVIDENCE_INVALID", "evidence is empty")
+    if about:
+        keep["about"] = list(about)
     keep["recovery"] = "available" if {"reference", "excerpt"} & set(keep) else "unavailable"
     return keep
 
