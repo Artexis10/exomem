@@ -64,13 +64,18 @@ For a reader other than the owner, a derived answer that depends on how a visibl
 #### Scenario: A withheld page shares a visible link's stem
 
 - **WHEN** a withheld page's stem or title collides with a visible link's target
-- **THEN** a restricted reader's graph context, links, inbound counts and audit findings are those of the twin without the withheld page
+- **THEN** a restricted reader's graph context, context pack, links, inbound counts, relation proposals and relation queue are those of the twin without the withheld page
 
 ### Requirement: Counts follow filtering and whole-vault aggregates go to the owner
 
-A count or rank a restricted caller receives SHALL be computed over the entries it receives. A whole-vault aggregate that a restricted view cannot recompute SHALL be served to the owner only under a governed policy, and SHALL answer other audiences with `available: false` and `reason: "audience_restricted"`, decided before anything is read.
+A count or rank a restricted caller receives SHALL be computed over the entries it receives, and retrieval diagnostics computed before release decisions SHALL NOT be returned to it. A whole-vault aggregate that a restricted view cannot recompute SHALL be served to the owner only under a governed policy, and SHALL answer other audiences with `available: false` and `reason: "audience_restricted"`, decided before anything is read.
 
 #### Scenario: A count beside a filtered list
 
 - **WHEN** a restricted caller receives a filtered list with a count or ranks
 - **THEN** the count equals the list's length and the ranks are consecutive
+
+#### Scenario: A whole-vault aggregate asked for by a restricted caller
+
+- **WHEN** a caller other than the owner asks for an audit, a registry inferred from the corpus, or a coverage block under a governed policy
+- **THEN** it receives `available: false` with `reason: "audience_restricted"`, and the owner receives the aggregate unchanged

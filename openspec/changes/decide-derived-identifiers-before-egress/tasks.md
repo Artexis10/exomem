@@ -12,10 +12,10 @@
 
 ## 2. Resolution and aggregates
 
-- [ ] 2.1 Re-resolve, for restricted readers only, the links whose candidate set includes a withheld page, lazily and with no new owner cost.
-- [ ] 2.2 Compute counts as the length of the filtered list and renumber ranks after filtering; hide retrieval diagnostics that are computed before filtering.
-- [ ] 2.3 Serve whole-vault aggregates to the owner only under a governed policy.
-- [ ] 2.4 Answer activation abstentions for restricted callers as `unresolved`, and decide name and term tables per audience within the no-sweep ceilings.
+- [x] 2.1 Re-resolve, for restricted readers only, the links whose candidate set includes a withheld page, lazily and with no new owner cost.
+- [x] 2.2 Compute counts as the length of the filtered list and renumber ranks after filtering; hide retrieval diagnostics that are computed before filtering.
+- [x] 2.3 Serve whole-vault aggregates to the owner only under a governed policy.
+- [x] 2.4 Answer activation abstentions for restricted callers as `unresolved`, and decide name and term tables per audience within the no-sweep ceilings.
 
 ## 3. Verification
 
