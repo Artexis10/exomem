@@ -35,7 +35,7 @@ None in the lexical half. `close-memory-loop`'s memory-loop delta, still active,
 
 ## Impact
 
-- **Code:** `bm25.py`, new `text_scripts.py`, `lexstore.py`, `find.py`, `find_policy.py`, `find_results.py`, `referent_resolution.py`, `governance/projected_retrieval.py`.
+- **Code:** `bm25.py`, new `text_scripts.py`, `lexstore.py`, `find.py`, `find_policy.py`, `find_results.py`, `referent_resolution.py`, `governance/projected_retrieval.py`, and activation's carry in `working_set_runtime.py`.
 - **State:** one background rebuild of each vault's lexical catalogue on upgrade, which also removes rebuild temps a killed build left behind. Until it publishes, `find` answers `RETRIEVAL_INDEX_WARMING` on a vault of more than 64 pages (a smaller unmanaged vault rebuilds inline), and activation's lexical stage reports `stale`, as for any rebuild.
 - **English:** an all-ASCII vault gets identical tokens, index and scores, and punctuation, symbols, spaces and format characters separate exactly as before. English tokens change only where the text holds non-ASCII letters or marks, or numbers such as ² and ½ that NFKC turns into digits. The golden fixture ranks identically on both lexical backends.
 - **No model, no new dependency.** Snowball's Russian, Greek and Armenian stemmers ship in the existing `snowballstemmer` package. Nothing is default-on that was off.
