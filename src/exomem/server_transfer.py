@@ -148,13 +148,14 @@ def download_principal(
 ) -> principal_module.RequestPrincipal:
     """Canonical audience for a `/download` caller (design D5).
 
-    Two credentials reach this route and they are NOT the same human:
-    `EXOMEM_UPLOAD_TOKEN` (and tokens minted from it) is the vault owner's own
-    key, while a Cloudflare Access assertion carries a real third-party
-    identity. Resolving both to `owner` would let a CF-Access downloader
-    inherit the owner's ceiling — so the CF claims are folded into the same id
-    space `server_rest._rest_principal` uses, and a grant authored for that
-    human on MCP or REST applies here too.
+    Three credentials reach this route and they are NOT the same human.
+    `EXOMEM_UPLOAD_TOKEN` itself is the vault owner's own key. A token minted
+    from it is signed with that key but was handed to whoever called
+    `transfer_artifact`, so it resolves to the audience it carries — the
+    minting caller's — and only the owner's own mint carries `owner`. A
+    Cloudflare Access assertion carries a real third-party identity, folded
+    into the same id space `server_rest._rest_principal` uses, so a grant
+    authored for that human on MCP or REST applies here too.
 
     Module-level (not a closure over the route) so the resolution contract is
     directly testable without reaching through a registered endpoint.
@@ -163,10 +164,22 @@ def download_principal(
         header = request.headers.get("authorization", "")
         if header.startswith("Bearer "):
             presented = header[len("Bearer ") :].strip()
-            if secrets.compare_digest(
-                presented, config.upload_token
-            ) or upload_tokens.verify(presented, config.upload_token, scope="download"):
+            # Bytes, not str: `compare_digest` raises on a non-ASCII str, and a
+            # header is whatever bytes the caller sent.
+            if secrets.compare_digest(presented.encode(), config.upload_token.encode()):
                 return principal_module.owner_principal(surface="transfer")
+            audience = upload_tokens.bound_audience(presented, config.upload_token)
+            if audience == principal_module.OWNER_AUDIENCE:
+                return principal_module.owner_principal(surface="transfer")
+            if audience is not None:
+                # The reserved `\x00` ids (the fail-closed floor, the unnamed
+                # probe) are no grant target: a token carrying one decides as
+                # the floor rather than as a resolved identity.
+                if audience.startswith("\x00"):
+                    return principal_module.most_restrictive_principal(surface="transfer")
+                return principal_module.RequestPrincipal(
+                    audience_id=audience, surface="transfer"
+                )
     if config.cf_jwks is not None:
         claims = cf_access.verified_claims(
             request.headers.get("cf-access-jwt-assertion"),
@@ -210,7 +223,7 @@ def register_transfer_routes(
             header = request.headers.get("authorization", "")
             if header.startswith("Bearer "):
                 presented = header[len("Bearer ") :].strip()
-                if not secrets.compare_digest(presented, config.upload_token):
+                if not secrets.compare_digest(presented.encode(), config.upload_token.encode()):
                     lane = upload_tokens.lane_for_token(presented, config.upload_token)
                     if lane is not None:
                         return lane
@@ -221,9 +234,15 @@ def register_transfer_routes(
             header = request.headers.get("authorization", "")
             if header.startswith("Bearer "):
                 presented = header[len("Bearer ") :].strip()
-                if secrets.compare_digest(presented, config.upload_token):
+                if secrets.compare_digest(presented.encode(), config.upload_token.encode()):
                     return True
-                if upload_tokens.verify(presented, config.upload_token, scope=scope):
+                if scope == "download":
+                    # Only a capability naming its minting principal opens
+                    # `/download`. One minted before that binding names nobody,
+                    # so it is refused rather than guessed to be the owner.
+                    if upload_tokens.bound_audience(presented, config.upload_token):
+                        return True
+                elif upload_tokens.verify(presented, config.upload_token, scope=scope):
                     return True
                 if scope == "upload" and upload_tokens.lane_for_token(
                     presented, config.upload_token
@@ -409,6 +428,8 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
                 {"code": "INVALID_PATH", "reason": "query param `path` (vault-relative) is required"},
                 status_code=400,
             )
+        # Spelled exactly as the resolver spells a path it cannot find.
+        requested = path.strip().replace("\\", "/").lstrip("/")
         try:
             abs_path, rel = resolve_under_vault(
                 vault_root, path, must_exist=True, must_be_file=True
@@ -432,8 +453,24 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
             except reserved_paths.ReservedPathLeafError:
                 raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}") from None
         except VaultPathError as exc:
-            status = 404 if exc.code == "NOT_FOUND" else 400
-            return JSONResponse({"code": exc.code, "reason": exc.reason}, status_code=status)
+            if exc.code in ("NOT_FOUND", "NOT_A_FILE"):
+                # Missing, withheld, reserved and folder all answer with ONE
+                # body built from the request. On a case-insensitive filesystem
+                # the resolver re-spells an existing path to its on-disk casing,
+                # so echoing its spelling would tell a withheld file from a
+                # missing one — and reveal what the withheld file is really
+                # called. A folder is never a download, and naming it one would
+                # confirm that a folder inside a withheld scope exists.
+                return JSONResponse(
+                    {"code": "NOT_FOUND", "reason": f"path does not exist: {requested}"},
+                    status_code=404,
+                )
+            # A fixed reason: the resolver's own names the absolute server path
+            # a traversal reached, or the target an escaping symlink points at.
+            return JSONResponse(
+                {"code": "INVALID_PATH", "reason": "path is not a vault-relative file path"},
+                status_code=400,
+            )
         filename = quote(abs_path.name, safe="")
         return Response(
             snapshot.data,
