@@ -1030,32 +1030,39 @@ def budget_exhausted(stage: str, *, reserve: float | None = None) -> bool:
     return True
 
 
-def signature_evidence(index: working_set_index.WorkingSetIndex, turn: str):
-    """Optional semantic corroboration over anchors, never the recall corpus.
+def signature_evidence(
+    index: working_set_index.WorkingSetIndex, turn: str
+) -> tuple[dict[str, bool], str]:
+    """Optional semantic corroboration over anchors, never the recall corpus:
+    `vector_band` per anchor, and the state of the lane.
 
     An unavailable scorer removes one evidence kind, not the structural
     resolver or its release guard. It cannot justify a cached negative result.
+    A catalogue too small to calibrate the band (`uncalibrated`) is not worth
+    an encode.
     """
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        return {}, None, "disabled"
+        return {}, "disabled"
     try:
-        from . import embeddings, readiness, runtime_resources
+        from . import embeddings, ranking_config, readiness, runtime_resources
 
         if readiness.should_defer("embeddings"):
-            return {}, None, "warming"
+            return {}, "warming"
         vectors = index.vectors()
         if not vectors:
-            return {}, None, "absent"
+            return {}, "absent"
+        if len(vectors) < int(ranking_config.DEFAULT_RANKING.working_set_semantic_min_population):
+            return {}, "uncalibrated"
         try:
             query_vector = embeddings.embed_query_if_loaded(turn)
         except runtime_resources.ModelBusyError:
-            return {}, None, "busy"
+            return {}, "busy"
         if query_vector is None:
-            return {}, None, "unavailable"
-        return vectors, query_vector, "ready"
+            return {}, "unavailable"
+        return working_set_resolve.vector_bands(vectors, query_vector, ranking_config.DEFAULT_RANKING)
     except Exception:  # noqa: BLE001 - optional scorer failure is explicit
         log.debug("activation signature evidence unavailable", exc_info=True)
-        return {}, None, "unavailable"
+        return {}, "unavailable"
 
 
 # --------------------------------------------------------------------------- #
@@ -1652,9 +1659,9 @@ def compile_packet(
         raise BudgetExhausted("working_set.semantic")
     with _span(timings, "working_set.semantic"):
         if anchor:
-            vectors, query_vector, semantic_state = {}, None, "agent_choice"
+            bands, semantic_state = {}, "agent_choice"
         else:
-            vectors, query_vector, semantic_state = signature_evidence(index, turn)
+            bands, semantic_state = signature_evidence(index, turn)
     generation["semantic_evidence"] = semantic_state
 
     if budget_exhausted("working_set.resolve"):
@@ -1687,8 +1694,7 @@ def compile_packet(
             candidates = working_set_resolve.candidates_for(
                 analysis,
                 rows,
-                vectors=vectors,
-                query_vector=query_vector,
+                bands=bands,
                 retrieval_paths=retrieval_paths,
                 routing_targets=_routing_targets(
                     root, index_token[1], index_token=index_token

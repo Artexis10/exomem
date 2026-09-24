@@ -10,6 +10,36 @@ from exomem import commands, embeddings, lexstore, readiness, working_set_index,
 from exomem.runtime_resources import ModelBusyError
 
 
+#: Planted signature space: the two outlier anchors sit on axis 0, which is the
+#: turn's own direction; every other signature points elsewhere.
+DIM = 64
+QUERY = np.eye(DIM, dtype=np.float32)[0]
+
+
+def _plant_signatures(conn, anchors, outliers: set[str], n: int = 60, seed: int = 5) -> None:
+    """Plant a population the corpus-relative band can calibrate against.
+
+    The band measures a turn against the median and spread of the whole
+    catalogue and needs at least 50 vectors, so a handful of fixture anchors
+    alone would be `uncalibrated`. `n` background signatures, random in the
+    same space, stand in for the rest of a catalogue; the named `outliers` are
+    the turn's own direction and the fixture's other anchors are orthogonal.
+    """
+    rng = np.random.default_rng(seed)
+    for row in anchors:
+        vector = QUERY if row.title in outliers else np.eye(DIM, dtype=np.float32)[1]
+        conn.execute(
+            "INSERT INTO anchor_vectors(anchor_id, vector) VALUES (?, ?)",
+            (row.anchor_id, np.asarray(vector, dtype=np.float32).tobytes()),
+        )
+    for i in range(n):
+        vector = rng.standard_normal(DIM).astype(np.float32)
+        conn.execute(
+            "INSERT INTO anchor_vectors(anchor_id, vector) VALUES (?, ?)",
+            (f"planted:background-{i}", (vector / np.linalg.norm(vector)).tobytes()),
+        )
+
+
 def test_activation_latency_gate_counts_the_entire_request():
     from test_latency_gate import _compiler_ms
 
@@ -41,18 +71,13 @@ def signatures(vault: Path, monkeypatch: pytest.MonkeyPatch):
     # the operation, catalogue, resolver, role lanes and egress are real.
     conn = index._connect()
     assert conn is not None
-    for row in index.anchors():
-        vector = [1.0, 0.0] if row.title in {"Cargo Sled", "Cedar Carrier"} else [0.0, 1.0]
-        conn.execute(
-            "INSERT INTO anchor_vectors(anchor_id, vector) VALUES (?, ?)",
-            (row.anchor_id, np.asarray(vector, dtype=np.float32).tobytes()),
-        )
+    _plant_signatures(conn, index.anchors(), {"Cargo Sled", "Cedar Carrier"})
     conn.commit()
     index.close()
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS")
     monkeypatch.setattr(readiness, "should_defer", lambda component: False)
     monkeypatch.setattr(
-        embeddings, "embed_query_if_loaded", lambda text: np.asarray([1.0, 0.0]), raising=False
+        embeddings, "embed_query_if_loaded", lambda text: QUERY, raising=False
     )
     calls = []
     monkeypatch.setattr(commands.find_module, "find", lambda *a, **k: calls.append(k) or [])
@@ -113,7 +138,7 @@ def test_transient_semantic_failure_does_not_poison_packet_cache(signatures, mon
     assert first["generation"]["semantic_evidence"] == state
     assert first["abstained"] is True
     monkeypatch.setattr(readiness, "should_defer", lambda component: False)
-    monkeypatch.setattr(embeddings, "embed_query_if_loaded", lambda text: np.asarray([1.0, 0.0]))
+    monkeypatch.setattr(embeddings, "embed_query_if_loaded", lambda text: QUERY)
     second = working_set_runtime.serve(vault, turn="Could the sled cope?", max_chars=4000)
     assert second["generation"]["semantic_evidence"] == "ready"
     assert second["abstained"] is False
@@ -269,3 +294,25 @@ def test_publication_between_evidence_and_compilation_cannot_mix_generations(
     assert packet["generation"]["lexical_evidence"] == "stale"
     assert packet["units"] == []
     assert working_set_runtime._PACKET_CACHE == {}
+
+
+def test_a_catalogue_too_small_to_calibrate_bands_nothing(signatures, monkeypatch):
+    """Below 50 signatures there is no chance level to measure a turn against:
+    the state is `uncalibrated`, no anchor earns `vector_band`, and the turn is
+    not even encoded."""
+    vault, _ = signatures
+    index = working_set_index.WorkingSetIndex(vault)
+    conn = index._connect()
+    conn.execute("DELETE FROM anchor_vectors WHERE anchor_id LIKE 'planted:%'")
+    conn.commit()
+    index.close()
+    encodes = []
+    monkeypatch.setattr(embeddings, "embed_query_if_loaded", lambda text, **_kw: encodes.append(text) or QUERY)
+
+    packet = commands.op_activate_context(vault, turn="Could the sled cope?")
+
+    assert packet["generation"]["semantic_evidence"] == "uncalibrated"
+    sled = next(a for a in packet["anchors"] if a["title"] == "Cargo Sled")
+    assert "vector_band" not in sled["evidence"]
+    assert sled["status"] == "partial"
+    assert encodes == []

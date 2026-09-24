@@ -15,7 +15,9 @@ exercised by the unit tests and by the live operation.
 
 from __future__ import annotations
 
+import math
 import re
+import statistics
 import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -564,6 +566,7 @@ def candidates_for(
     *,
     vectors: Mapping[str, Any] | None = None,
     query_vector: Any | None = None,
+    bands: Mapping[str, bool] | None = None,
     routing_targets: Sequence[Any] = (),
     retrieval_paths: frozenset[str] = frozenset(),
     used_paths: frozenset[str] = frozenset(),
@@ -577,6 +580,9 @@ def candidates_for(
     (`WorkingSetIndex.term_anchor_counts()`), the structure `rare_term`'s
     rarity check is measured against. Absent (`None`) simply means no anchor
     can earn `rare_term` this call — never a fabricated rarity.
+
+    `bands` is `vector_bands`' decision, computed where the turn is encoded;
+    without it the band is computed here from `vectors` and `query_vector`.
 
     `hot_paths` is the top of the caller's recency profile
     (`working_set.hot_profile`), passed in like `used_paths` because it is a
@@ -622,7 +628,8 @@ def candidates_for(
     )
     cue_categories = analysis.cue_categories
     claims_winner = _claims_winner(analysis, routing_targets)
-    bands = _vector_bands(rows, vectors, query_vector, config) if query_vector is not None else {}
+    if bands is None:
+        bands = _vector_bands(rows, vectors, query_vector, config) if query_vector is not None else {}
     min_terms = max(1, int(config.working_set_lexical_min_terms))
 
     # R2 (fix/activation-competing-senses), pass 1 of 2: each row's own
@@ -819,41 +826,95 @@ def _claims_winner(analysis: TurnAnalysis, routing_targets: Sequence[Any]) -> st
     return str(collection) if isinstance(collection, str) else None
 
 
+#: A spread below this is a population whose signatures are all alike (empty
+#: or identical), which has no chance level to measure a turn against.
+_BAND_MIN_SPREAD = 1e-6
+
+
+def semantic_band(similarities: Any, *, alpha: float, min_population: int) -> frozenset[int] | None:
+    """Rows whose similarity to the turn clears the chance maximum; None when
+    the population cannot be calibrated.
+
+    `m = median(s)`, `σ = 1.4826 · MAD(s)`, and `k(N, α) = Φ⁻¹((1-α)^(1/N))` is
+    the level the largest of N unrelated similarities exceeds with probability
+    α. Row i clears when `s_i ≥ m + k·σ`. The median and MAD are unmoved by the
+    few rows a turn is really about, and the rule is invariant to adding a
+    constant to every similarity or scaling them all, so no number in it
+    belongs to one model, one language or one vault. Fewer than
+    `min_population` rows, or a degenerate spread, has no chance level (design
+    §5.1).
+    """
+    import numpy as np
+
+    values = np.asarray(similarities, dtype="float64").reshape(-1)
+    n = int(values.size)
+    if n < max(1, int(min_population)) or not np.all(np.isfinite(values)):
+        return None
+    centre = float(np.median(values))
+    spread = 1.4826 * float(np.median(np.abs(values - centre)))
+    if spread < _BAND_MIN_SPREAD:
+        return None
+    level = statistics.NormalDist().inv_cdf(math.pow(1.0 - float(alpha), 1.0 / n))
+    return frozenset(int(i) for i in np.flatnonzero(values >= centre + level * spread))
+
+
+def vector_bands(
+    vectors: Mapping[str, Any] | None,
+    query_vector: Any,
+    config: RankingConfig | None = None,
+) -> tuple[dict[str, bool], str]:
+    """`vector_band` per signature, and whether the population was calibrated.
+
+    Every signature in `vectors` is the population the turn is measured
+    against. If more than `RARE_TERM_MAX_ANCHORS` anchors clear, none bands: a
+    turn similar to many anchors is about a topic, the same judgement that stops
+    a word naming four anchors from being rare. Returns `({}, "uncalibrated")`
+    when there is no chance level. The similarity never leaves this function.
+    """
+    config = config or DEFAULT_RANKING
+    if not vectors or query_vector is None:
+        return {}, "ready"
+    try:
+        import numpy as np
+
+        query = np.asarray(query_vector, dtype="float32").reshape(-1)
+        norm = float(np.linalg.norm(query))
+        if norm == 0.0:
+            return {}, "ready"
+        ids: list[str] = []
+        rows: list[Any] = []
+        for anchor_id, vector in vectors.items():
+            candidate = np.asarray(vector, dtype="float32").reshape(-1)
+            candidate_norm = float(np.linalg.norm(candidate))
+            if candidate.shape != query.shape or candidate_norm == 0.0:
+                continue  # a malformed row costs its band, nothing else
+            ids.append(anchor_id)
+            rows.append(candidate / candidate_norm)
+        if not rows:
+            return {}, "ready"
+        similarities = np.vstack(rows) @ (query / norm)
+    except Exception:  # noqa: BLE001 - the vector lane is optional by contract
+        return {}, "ready"
+    cleared = semantic_band(
+        similarities,
+        alpha=float(config.working_set_semantic_alpha),
+        min_population=int(config.working_set_semantic_min_population),
+    )
+    if cleared is None:
+        return {}, "uncalibrated"
+    if len(cleared) > RARE_TERM_MAX_ANCHORS:
+        cleared = frozenset()
+    return {anchor_id: index in cleared for index, anchor_id in enumerate(ids)}, "ready"
+
+
 def _vector_bands(
     rows: Sequence[AnchorFacts],
     vectors: Mapping[str, Any] | None,
     query_vector: Any,
     config: RankingConfig,
 ) -> dict[str, bool]:
-    """Band membership only. The cosine never leaves this function."""
-    if not vectors:
-        return {}
-    try:
-        import numpy as np
-
-        query = np.asarray(query_vector, dtype="float32")
-        norm = float(np.linalg.norm(query))
-        if norm == 0.0:
-            return {}
-        query = query / norm
-    except Exception:  # noqa: BLE001 - the vector lane is optional by contract
-        return {}
-    bands: dict[str, bool] = {}
-    strong = float(config.working_set_vector_strong)
-    for row in rows:
-        vector = vectors.get(row.anchor_id)
-        if vector is None:
-            continue
-        try:
-            candidate = np.asarray(vector, dtype="float32")
-            candidate_norm = float(np.linalg.norm(candidate))
-            if candidate_norm == 0.0:
-                continue
-            cosine = float(np.dot(query, candidate / candidate_norm))
-        except Exception:  # noqa: BLE001 - a malformed row costs its band, nothing else
-            continue
-        bands[row.anchor_id] = cosine >= strong
-    return bands
+    """Band membership only (`vector_bands` without its state)."""
+    return vector_bands(vectors, query_vector, config)[0]
 
 
 def add_graph_corroboration(
