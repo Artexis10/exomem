@@ -74,7 +74,7 @@ A graph-context seed SHALL be decided the same way. A unit reference whose paren
 - **WHEN** a context or graph-context request is seeded with a page path, or with a unit reference that names its page by memory id or by path, and that page is withheld from the caller
 - **THEN** the answer is the one the same request receives when the page is absent, with no resolution status or drift that exists only because the page does
 
-#### Scenario: The owner's seed answer does not depend on a policy
+#### Scenario: The owner's seed answer does not depend on the graph's row budget
 
-- **WHEN** the owner seeds a context from a unit reference while a policy exists
-- **THEN** the answer, including any stale-index drift and budget reports, is the one the owner receives with no policy
+- **WHEN** the owner seeds a context from a unit reference while a policy exists and the graph's index holds more parent rows for that reference than the resolver examines
+- **THEN** the stale-index drift and budget report the owner would receive with no policy are not replaced by a withheld answer, even though a rule that names the owner audience still decides the owner's candidates the same way it decides any other caller's
