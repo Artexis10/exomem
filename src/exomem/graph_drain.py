@@ -223,6 +223,20 @@ def _queue_pending(vault_root: Path) -> bool:
         return False
 
 
+def _requeue_quarantined(vault_root: Path) -> None:
+    """Queue quarantined pages that changed or are due a slow retry. Never raises.
+
+    Here rather than in the drain: a settled graph is never drained, and a
+    quarantined page's retry has to reach it anyway.
+    """
+    from . import index_sync
+
+    try:
+        index_sync.requeue_quarantined_graph_paths(vault_root)
+    except Exception:  # noqa: BLE001 - a missed retry waits for the next wake
+        log.debug("graph drain: quarantined paths unreadable", exc_info=True)
+
+
 def _pending(vault_root: Path) -> bool:
     """True when the graph owes work of either kind.
 
@@ -434,6 +448,7 @@ def _run(vault_root: Path) -> None:
             # Settle. `wait` returning True here means a stop was requested.
             if _stop.wait(DEBOUNCE_SECONDS):
                 break
+        _requeue_quarantined(vault_root)
         if not _pending(vault_root):
             backoff = 0.0
             held_since = None
@@ -455,7 +470,20 @@ def _run(vault_root: Path) -> None:
         held_since = None
         processed = _work_once(vault_root)
         if not _pending(vault_root):
-            log.info("graph drain: graph settled (%d unit(s) of work cleared)", processed)
+            from . import epistemic_graph
+
+            try:
+                lag = epistemic_graph.graph_lag(vault_root)
+            except Exception:  # noqa: BLE001 - a log line never stops the drain
+                lag = {}
+            log.info(
+                "graph drain: graph settled (%d unit(s) of work cleared) "
+                "generations_behind=%s queued_paths=%s quarantined_paths=%s",
+                processed,
+                lag.get("generations_behind"),
+                lag.get("queued_paths"),
+                lag.get("quarantined_paths"),
+            )
             backoff = 0.0
             not_before = 0.0
             interval = IDLE_POLL_SECONDS

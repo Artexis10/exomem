@@ -266,6 +266,23 @@ def test_the_message_names_the_class_and_the_resolver_identity_cause(
     assert "Class C" in message
     assert "resolver bytes" in message
 
+def _registry_behind_the_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Report the simulated movement as unrecorded: positive Class C evidence.
+
+    The movement these tests simulate (a patched proof, not real bytes) leaves
+    the registry and the disk agreeing, which the classifier rightly calls
+    recorded: no evidence the registry is behind (OpenSpec `live-index-freshness`,
+    "A graph proof cools the event registry only on evidence it is behind the
+    disk"). These tests pin what the pass does once that evidence exists -- the
+    cause it names, how it meets a supersession -- so the classifier is told it
+    exists. The classifier itself is pinned in `test_graph_class_c_evidence.py`.
+    """
+    monkeypatch.setattr(
+        EpistemicGraphIndex,
+        "_classify_movement",
+        lambda *_args, **_kwargs: ("unrecorded", None),
+    )
+
 
 def test_the_message_distinguishes_a_moved_source_version_from_the_others(
     vault: Path, monkeypatch: pytest.MonkeyPatch
@@ -274,6 +291,7 @@ def test_the_message_distinguishes_a_moved_source_version_from_the_others(
     monkeypatch.setattr(
         EpistemicGraphIndex, "_source_versions_current", lambda *_args, **_kwargs: False
     )
+    _registry_behind_the_disk(monkeypatch)
 
     with pytest.raises(epistemic_graph.GraphProjectionMoved) as raised:
         EpistemicGraphIndex(vault)._rebuild_all_locked()

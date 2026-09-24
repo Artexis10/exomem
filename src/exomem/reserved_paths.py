@@ -966,14 +966,17 @@ def mutation_remediation(descriptor_id: str | None) -> str:
     return "Use the owning subsystem's bounded control operation."
 
 
-def _leaf_spelling(value: object) -> tuple[str, str]:
+def _leaf_spelling(value: object, *, physical: bool = False) -> tuple[str, str]:
     classified = classify_logical(value)
     if classified.disposition is PathDisposition.RESERVED:
         raise ReservedPathLeafError("RESERVED_PATH")
     if classified.disposition is PathDisposition.INVALID:
         raise ReservedPathLeafError("UNSAFE_PATH")
     assert isinstance(value, (str, os.PathLike))
-    relative = unicodedata.normalize("NFKC", os.fspath(value)).replace("\\", "/")
+    spelling = os.fspath(value)
+    if not physical:
+        spelling = unicodedata.normalize("NFKC", spelling)
+    relative = spelling.replace("\\", "/")
     parent, separator, leaf = relative.rpartition("/")
     if not separator:
         parent, leaf = ".", relative
@@ -987,6 +990,7 @@ def read_generic_bytes(
     value: object,
     *,
     identities: IdentityCatalogue | None = None,
+    physical: bool = False,
 ) -> GenericFileSnapshot:
     """Read one ordinary file through the retained no-follow leaf.
 
@@ -994,12 +998,20 @@ def read_generic_bytes(
     names may be a private-state name, so generic acquisition refuses it even
     when the caller supplied an ordinary-looking spelling. Named private
     identities published by owners are refused independently of link count.
+
+    `physical=True` opens the spelling exactly as given rather than its NFKC
+    form, for a path a walk of the disk found: on a byte-exact file system a
+    macOS-origin NFD name and its NFKC form are different names, and only the
+    walked one exists. Classification is unchanged -- it still reads the NFKC,
+    case-folded form -- so a reserved name is refused under any spelling.
     """
 
     with _generic_identity_catalogue_scope(
         vault_root, value, identities=identities
     ) as current:
-        return _read_generic_bytes_held(vault_root, value, identities=current)
+        return _read_generic_bytes_held(
+            vault_root, value, identities=current, physical=physical
+        )
 
 
 def _read_generic_bytes_held(
@@ -1007,9 +1019,10 @@ def _read_generic_bytes_held(
     value: object,
     *,
     identities: IdentityCatalogue,
+    physical: bool = False,
 ) -> GenericFileSnapshot:
 
-    parent_path, leaf = _leaf_spelling(value)
+    parent_path, leaf = _leaf_spelling(value, physical=physical)
     acquired = held_fs.acquire(Path(vault_root))
     if not acquired.ok:
         raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")

@@ -284,3 +284,66 @@ def test_marker_retirement_stays_outside_the_publication_hold(
         f"marker retirement ran {retirements} (True = under the publication hold)"
     )
     assert deferred_index.graph_full_rebuild_pending(vault) is None
+
+
+def test_the_dispatcher_never_waits_on_a_committing_batch_under_the_boundary(
+    vault: Path,
+) -> None:
+    """A recovery write under the writers' boundary must not queue behind a batch.
+
+    Measured at five writers (CG-2): the dispatcher held the canonical boundary,
+    found the epoch recoverable and called `recover_checkpoint`, whose batch
+    write waited on the in-process batch lock. The batch holding that lock was
+    in its post-commit fan-out, waiting five seconds for the canonical boundary
+    the dispatcher held; each writer behind it did the same, so writers were
+    refused `MUTATION_BUSY` one after another for 26-42 s. The dispatcher now
+    leaves recovery to the next tick while a batch is committing.
+    """
+    import threading
+    import time
+
+    from exomem import vault as vault_module
+
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(vault / PAGE_B, _page("B", "B is revised."))],
+        vault_root=vault,
+        post_commit_fanout=False,
+    )
+    checkpoint = graph_sync.read_checkpoint(vault)
+    assert checkpoint is not None
+    graph_sync._write_floor(
+        vault, graph_sync.GraphSyncGenerationFloor.create(int(checkpoint.generation) + 1)
+    )
+    assert graph_sync.classify_epoch(vault).kind == "recoverable"
+    deferred_index.mark_graph_full_rebuild(vault, generation=int(checkpoint.generation))
+
+    committing = threading.Event()
+    release = threading.Event()
+
+    def hold_the_batch_lock() -> None:
+        with vault_module._BATCH_COMMIT_LOCK:
+            committing.set()
+            release.wait(30.0)
+
+    holder = threading.Thread(target=hold_the_batch_lock)
+    holder.start()
+    assert committing.wait(5.0)
+    outcome: list[Any] = []
+    dispatcher = threading.Thread(
+        target=lambda: outcome.append(epistemic_graph.converge_full_graph_marker(vault))
+    )
+    try:
+        started = time.monotonic()
+        dispatcher.start()
+        dispatcher.join(timeout=5.0)
+        waited = time.monotonic() - started
+        assert not dispatcher.is_alive(), (
+            "the dispatcher waited on a committing batch while holding the writers' boundary"
+        )
+        assert waited < 5.0
+        assert outcome and outcome[0].outcome != "completed"
+        assert deferred_index.graph_full_rebuild_pending(vault) is not None
+    finally:
+        release.set()
+        holder.join(timeout=30.0)
+        dispatcher.join(timeout=60.0)
