@@ -2767,7 +2767,17 @@ def guard_working_set(
     # nothing to say, which is what `lane_truncated` and `budget` already refuse to
     # do. The marker names no path and no name: it says a section lost something,
     # which is what the caller needs to know and the most it may be told.
-    if removed and isinstance(guarded.get("missing"), list):
+    #
+    # Only for material released above L0. An L0 item is omitted silently
+    # (`LEVEL_NONE`): a marker saying a section lost something would tell the
+    # caller that something it may not know of exists, which is the answer a
+    # vault without that item never gives. The markers name no path, so they
+    # are kept whenever any removed material was released at a notice level.
+    noticed = any(
+        (decision := decisions.get(path)) is not None and decision.level > LEVEL_NONE
+        for path in withheld
+    )
+    if removed and noticed and isinstance(guarded.get("missing"), list):
         guarded["missing"].extend(
             {"role": section, "reason": "withheld"} for section in sorted(removed)
         )
@@ -2778,7 +2788,10 @@ def guard_working_set(
     # goes with it, since a unit's only warrant was the anchor it hung from.
     if packet.get("anchors") and not guarded["anchors"] and not guarded.get("abstained"):
         guarded["abstained"] = True
-        guarded["abstention"] = {"reason": "withheld"}
+        # At L0 the turn resolved nothing the caller may know of, which is
+        # what `unresolved` says; `withheld` is for material released at a
+        # notice level, which the caller may know exists.
+        guarded["abstention"] = {"reason": "withheld" if noticed else "unresolved"}
         for section in ("units", "pointers", "current_state", "roles"):
             guarded[section] = []
         # `missing` is deliberately NOT cleared: its markers are the only thing

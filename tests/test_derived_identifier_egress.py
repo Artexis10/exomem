@@ -1176,3 +1176,131 @@ def test_the_owner_still_resolves_links_over_every_page(tmp_path: Path) -> None:
     assert not any(
         edge["dst_key"] == f"file:{NOTES}/beta.md" for edge in owner["graph"]["edges"]
     )
+
+
+# ---------------------------------------------------------------------------
+# Activation resolves a turn over the anchors the caller may see
+# ---------------------------------------------------------------------------
+
+
+def _hub(h1: str, body: str, **frontmatter: Any) -> str:
+    return _page(h1, body, type="hub", tags=["hub"], **frontmatter)
+
+
+def _activation_base(hub: str) -> dict[str, str]:
+    return {
+        **_filler(),
+        f"{NOTES}/orion-status.md": _page(
+            "Orion Status",
+            f"The Orion Program launch slipped two weeks. [[{NOTES}/orion-program]]",
+            type="insight",
+        ),
+        f"{NOTES}/orion-program.md": hub,
+    }
+
+
+_PROGRAM_HUB = _hub(
+    "Orion Program", f"Hub for the Orion Program. [[{NOTES}/orion-status]]", title="Orion Program"
+)
+_ACTIVATION_SCENARIOS: dict[str, tuple[str, dict[str, str]]] = {
+    "same-title": (
+        _PROGRAM_HUB,
+        {f"{WITHHELD_DIR}/orion-private.md": _hub("Orion Program", "Withheld body text.", title="Orion Program")},
+    ),
+    "rarity": (
+        _PROGRAM_HUB,
+        {
+            f"{WITHHELD_DIR}/orion-side-{index}.md": _hub(
+                f"Orion Side {index}", "Withheld body text.", title=f"Orion Side {index}"
+            )
+            for index in range(3)
+        },
+    ),
+    "derived-alias": (
+        _hub(
+            "Orion — Launch Plan",
+            f"Hub for the Orion launch. [[{NOTES}/orion-status]]",
+            title="Orion — Launch Plan",
+        ),
+        {f"{WITHHELD_DIR}/orion-private.md": _hub("Orion", "Withheld body text.", title="Orion")},
+    ),
+    "alias": (
+        _hub(
+            "Orion Program",
+            f"Hub for the Orion Program. [[{NOTES}/orion-status]]",
+            title="Orion Program",
+            aliases=["OP-7"],
+        ),
+        {
+            f"{WITHHELD_DIR}/orion-private.md": _hub(
+                "Private Thing", "Withheld body text.", title="Private Thing", aliases=["OP-7"]
+            )
+        },
+    ),
+    "withheld-only": (
+        _PROGRAM_HUB,
+        {
+            f"{WITHHELD_DIR}/nimbus-plan.md": _hub(
+                "Nimbus Plan", "Withheld body text.", title="Nimbus Plan"
+            )
+        },
+    ),
+}
+_TURNS = (
+    "What is the status of the Orion Program?",
+    "orion",
+    "Tell me about OP-7",
+    "What slipped in the Orion launch?",
+    "What is in the Nimbus Plan?",
+)
+
+
+def _activated(vault: Path, principal: RequestPrincipal | None) -> dict[str, Any]:
+    from exomem import lexstore, working_set_index, working_set_runtime
+
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).reset()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    answers = {}
+    for turn in _TURNS:
+        packet = _call(vault, principal, "activate_context", turn=turn)
+        answers[turn] = {
+            key: value
+            for key, value in packet.items()
+            if key not in {"timings", "continuity", "generation"}
+        }
+        answers[turn]["generation"] = sorted((packet.get("generation") or {}).keys())
+    return answers
+
+
+@pytest.mark.parametrize("scenario", sorted(_ACTIVATION_SCENARIOS))
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_activation_reads_as_if_the_withheld_anchor_were_absent(
+    tmp_path: Path, audience: str, scenario: str
+) -> None:
+    hub, withheld = _ACTIVATION_SCENARIOS[scenario]
+    vaults = _twins(tmp_path, _activation_base(hub), withheld, audience)
+    principal = _principal(audience)
+
+    answers = {variant: _activated(vault, principal) for variant, vault in vaults.items()}
+
+    assert not _names_withheld(answers["A"])
+    for turn in _TURNS:
+        packet = answers["A"][turn]
+        assert "freshness_key" not in packet["generation"]
+        assert (packet.get("abstention") or {}).get("reason") != "withheld", packet
+        assert not [m for m in packet.get("missing") or () if m.get("reason") == "withheld"]
+        assert _text(packet) == _text(answers["B"][turn]), turn
+        assert _text(answers["C"][turn]) == _text(answers["B"][turn]), turn
+
+
+def test_the_owner_still_activates_a_page_withheld_from_others(tmp_path: Path) -> None:
+    hub, withheld = _ACTIVATION_SCENARIOS["withheld-only"]
+    vault = _materialize(tmp_path / "vault", {**_activation_base(hub), **withheld}, "external")
+
+    answers = _activated(vault, None)
+
+    packet = answers["What is in the Nimbus Plan?"]
+    assert [anchor["path"] for anchor in packet["anchors"]] == [f"{WITHHELD_DIR}/nimbus-plan.md"]
+    assert "freshness_key" in packet["generation"]

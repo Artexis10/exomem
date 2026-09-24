@@ -39,6 +39,12 @@ The graph resolves each wikilink once, over the whole vault, and stores only the
 
 The same view applies where a read surface resolves links itself: inbound links count a bare link when the target's basename is unique among visible pages, pack neighbours resolve and are decided before ranking and the cap, and relation proposals resolve body links over the view. The page provenance strip keeps a bare stem that a visible page also answers to (a shared stem or title), because in the reader's view it names that visible page.
 
+### Activation resolves over the caller's view
+
+The activation index counts names, aliases and name terms over every anchor at build time; a withheld anchor can make a visible name ambiguous, a turn word common, or retire a derived short name. For a caller other than the owner, `working_set_resolve.audience_view` decides only the anchors the turn's words reach, counts a name term's visible owners until it is common among them, restores a derived short name that only a withheld anchor retired, and drops the anchors decided withheld before evidence is assembled; an anchor reached by other evidence is decided before resolution. No per-audience table is stored, and the decisions stay within the activation path's filesystem ceilings. Such a packet is not cached: keying the cache by audience and purpose would be a second copy of the release plane, and purpose never enters a cache key.
+
+The guard omits L0 material silently, as `LEVEL_NONE` defines: a `withheld` marker, or a `withheld` abstention, tells the caller that something it may not know of exists. Material released at a notice level keeps its markers. A packet whose every anchor the guard removed at L0 abstains as `unresolved`. The vault freshness key counts and digests every file, so a restricted caller does not receive it.
+
 ### Counts and ranks follow filtering; whole-vault aggregates are the owner's
 
 Review queues (attention, activation, relation debt, stale, contradiction) decide each finding's page and related pages before fusion, so ranks, scores, totals and summaries are computed over what the caller receives. `inbound-links` counts the links it lists after deciding their source pages. The relation queue counts the source pages it decided; when more visible pages exist than its cap it reports truncation without an unscanned count.
@@ -53,6 +59,8 @@ Recall diagnostics are computed over the whole corpus before release decisions: 
 - Entity creation when the only match is withheld proceeds, and the owner reconciles the duplicate later. That trade-off is accepted: the alternative answers differently for a withheld entity and an absent one.
 - The `audience_restricted` refusal of whole-vault aggregates. What it prevents: audit findings, inferred counts, denominators and coverage that move with pages the caller may not see. Cost when it fires wrongly: a restricted caller receives no aggregate, which is owner work under a governed policy. That caller pays; the owner and every caller under an empty policy are served as before.
 - Hiding recall diagnostics from a restricted caller. What it prevents: lane and rank numbers that reveal whether a withheld page matched. Cost when it fires wrongly: a restricted caller cannot inspect ranking; the hits are unchanged. The owner keeps every diagnostic.
+- Omitting L0 material without a marker, and abstaining as `unresolved`. What it prevents: an existence signal for material the caller may not know of. Cost when it fires wrongly: a restricted caller is not told that a section lost something; that caller pays, and material at a notice level is still reported. The owner never pays.
+- Not returning the vault freshness key to a restricted caller, and not caching its packets. What they prevent: a file count and digest that move with withheld pages, and one audience's resolution served to another. Cost: a restricted client loses a diagnostic stamp and repeated identical turns are compiled again. That caller pays; the owner's packet and cache are unchanged.
 - A call no surface bound is not decided by these filters, as the owner is not. Every surface binds a principal before the dispatcher, whose entry filter still decides what an unbound call may read.
 
 ## Risks / Trade-offs

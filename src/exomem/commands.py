@@ -6137,7 +6137,7 @@ def op_activate_context(
                 )
             )
         try:
-            return _op_activate_context_body(
+            packet = _op_activate_context_body(
                 vault_root,
                 turn,
                 max_chars,
@@ -6149,6 +6149,19 @@ def op_activate_context(
         finally:
             if bound_token is not None:
                 request_budget_module.reset_current(bound_token)
+    # The freshness key counts and digests every file in the vault, so it
+    # moves with pages the caller may not see; a reader other than the owner
+    # does not receive it. The owner's packet is unchanged.
+    generation = packet.get("generation") if isinstance(packet, dict) else None
+    if (
+        isinstance(generation, dict)
+        and "freshness_key" in generation
+        and egress_module.restricted_release_filter(vault_root, purpose=purpose) is not None
+    ):
+        packet["generation"] = {
+            key: value for key, value in generation.items() if key != "freshness_key"
+        }
+    return packet
 
 
 def _op_activate_context_body(
@@ -6511,7 +6524,11 @@ def _op_activate_context_body(
     # marker saying a section lost something. A timing side channel that discloses
     # strictly less than a documented field is not the thing to spend a request
     # budget closing.
-    if anchor and (guarded is None or _abstention_reason(guarded) == "withheld"):
+    # The guard answers an L0 anchor as `unresolved` and a notice-level one as
+    # `withheld`; either way the override's one anchor is gone.
+    if anchor and (
+        guarded is None or _abstention_reason(guarded) in {"withheld", "unresolved"}
+    ):
         raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
     if guarded is None:
         return _abstain("withheld", generation=packet.get("generation") or generation_stub)

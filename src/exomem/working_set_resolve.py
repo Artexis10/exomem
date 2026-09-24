@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -25,6 +25,7 @@ from .ranking_config import DEFAULT_RANKING, RankingConfig
 from .working_set_index import (
     RARE_TERM_MAX_ANCHORS,
     STOPWORDS,
+    derived_short_name,
     fold_plural,
     fold_possessive,
     normalize,
@@ -804,6 +805,134 @@ def candidates_for(
         rest = [item for item in out if "recency" not in item.evidence]
         return tuple(sorted([*hot, *rest[: MAX_CANDIDATES - len(hot)]], key=_candidate_order))
     return tuple(out[:MAX_CANDIDATES])
+
+
+def _derived_key(title: str) -> str:
+    derived = derived_short_name(title)
+    return normalize(derived) if derived else ""
+
+
+def _authored_names(row: AnchorFacts) -> tuple[str, ...]:
+    """The title and the aliases the index did not derive from the title."""
+    derived = _derived_key(row.title)
+    return (row.title, *(alias for alias in row.aliases if alias != derived))
+
+
+def _name_terms(names: Iterable[str]) -> frozenset[str]:
+    """Name terms as `candidates_for` compares them with the turn's."""
+    return frozenset(
+        folded
+        for term in tokens_of(" ".join(names))
+        if (folded := _fold_lexical_term(term)) is not None
+    )
+
+
+def _counted_terms(names: Iterable[str]) -> frozenset[str]:
+    """Name terms as the index counts their owners (`term_anchor_counts`)."""
+    return frozenset(fold_plural(term) for term in tokens_of(" ".join(names)))
+
+
+def audience_view(
+    analysis: TurnAnalysis,
+    rows: Sequence[AnchorFacts],
+    term_anchor_counts: Mapping[str, int] | None,
+    visible: Callable[[str], bool],
+) -> tuple[tuple[AnchorFacts, ...], dict[str, int], frozenset[str]]:
+    """This turn's catalogue as a reader other than the owner sees it.
+
+    Names, aliases and name-term counts are computed over every anchor when
+    the index is built, so an anchor the reader may not see can make a visible
+    anchor's name ambiguous, a turn word common, or retire a derived short
+    name. This decides, lazily, only the anchors the turn's words can reach
+    (by name, alias, derived short name or name term), stopping a term's count
+    once it is common among visible anchors. It returns the rows without the
+    anchors decided withheld, the name-term counts over visible owners, and the
+    ids of the anchors it decided. A derived short name only a withheld anchor
+    retired is restored. An anchor with no page names nothing to withhold.
+
+    Nothing here reads the vault except the decisions themselves, so the
+    request stays within the activation path's filesystem ceilings.
+    """
+    counts = dict(term_anchor_counts or {})
+    phrases = (
+        frozenset(analysis.ngrams)
+        | frozenset(analysis.tokens)
+        | frozenset(
+            folded
+            for token in analysis.tokens
+            if (folded := fold_possessive(token)) not in STOPWORDS
+        )
+    )
+    turn_terms = frozenset(
+        folded
+        for term in frozenset(analysis.tokens) - _STOPWORDS
+        if (folded := _fold_lexical_term(term)) is not None
+    )
+    decided: dict[str, bool] = {}
+
+    def seen(row: AnchorFacts) -> bool:
+        verdict = decided.get(row.anchor_id)
+        if verdict is None:
+            verdict = not row.path or bool(visible(row.path))
+            decided[row.anchor_id] = verdict
+        return verdict
+
+    owners: dict[str, list[AnchorFacts]] = {}
+    derived_holders: dict[str, list[AnchorFacts]] = {}
+    for row in rows:
+        names = {normalize(name) for name in (row.title, *row.aliases)} - {""}
+        if names & phrases or len(_name_terms((row.title, *row.aliases)) & turn_terms) >= 2:
+            seen(row)
+        for term in _counted_terms(_authored_names(row)) & turn_terms:
+            owners.setdefault(term, []).append(row)
+        derived = _derived_key(row.title)
+        if derived:
+            derived_holders.setdefault(derived, []).append(row)
+
+    for term, term_owners in sorted(owners.items()):
+        withheld = 0
+        visible_count = 0
+        for row in sorted(term_owners, key=lambda item: item.anchor_id):
+            if seen(row):
+                visible_count += 1
+                if visible_count > RARE_TERM_MAX_ANCHORS:
+                    break
+            else:
+                withheld += 1
+        else:
+            if term in counts:
+                counts[term] = max(0, counts[term] - withheld)
+
+    restored: dict[str, tuple[str, ...]] = {}
+    for key, holders in sorted(derived_holders.items()):
+        if key not in phrases:
+            continue
+        for row in holders:
+            if key in row.aliases or not seen(row):
+                continue
+            rivals = [
+                other
+                for other in rows
+                if other.anchor_id != row.anchor_id
+                and (
+                    key in {normalize(name) for name in _authored_names(other)}
+                    or _derived_key(other.title) == key
+                )
+            ]
+            if any(seen(other) for other in rivals):
+                continue
+            key_terms = _counted_terms((key,))
+            if key_terms and all(
+                counts.get(term, 0) <= RARE_TERM_MAX_ANCHORS for term in key_terms
+            ):
+                restored[row.anchor_id] = (*row.aliases, key)
+
+    kept = tuple(
+        replace(row, aliases=restored[row.anchor_id]) if row.anchor_id in restored else row
+        for row in rows
+        if decided.get(row.anchor_id, True)
+    )
+    return kept, counts, frozenset(decided)
 
 
 def _claims_winner(analysis: TurnAnalysis, routing_targets: Sequence[Any]) -> str | None:

@@ -1078,9 +1078,17 @@ def serve(
         anchor=anchor,
         continuity_refs=continuity_refs,
     )
+    # A reader other than the owner resolves anchors over its own view
+    # (`working_set_resolve.audience_view`), so its packet is neither served
+    # from nor stored in this cache: keying it by audience and purpose would be
+    # a second copy of the release plane, and purpose never enters a cache key.
+    # The owner's identity and hits are exactly what they were.
+    from .governance import egress
+
+    cacheable = egress.restricted_release_filter(root, purpose=purpose) is None
     cache_identity = (str(root.absolute()), key, lexical_state, index.token())
     with _CACHE_LOCK:
-        cached = _PACKET_CACHE.get(cache_identity)
+        cached = _PACKET_CACHE.get(cache_identity) if cacheable else None
         if cached is not None:
             _PACKET_CACHE.move_to_end(cache_identity)
     if cached is not None:
@@ -1155,6 +1163,8 @@ def serve(
         "busy",
         "unavailable",
     } or lexical_state not in {"available", "not_requested", "agent_choice"}:
+        return packet
+    if not cacheable:
         return packet
     with _CACHE_LOCK:
         _PACKET_CACHE[cache_identity] = copy.deepcopy(packet)

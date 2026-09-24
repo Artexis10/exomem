@@ -10,7 +10,9 @@ A restricted caller's answer should read as if the pages withheld from it were a
 - For a caller other than the owner, derived structures decide their candidates before they assemble, cap, rank or count them: `connect_memory` `context` and `graph-context` (seeds, packed pages, the graph walk and its edges), relation proposals and the relation queue (targets and the pages their evidence rests on), evolution timelines (anchors, heads and chain members), entity identity (`resolve-entity`, `create-entity`), and directory listings and overview totals.
 - A writer other than the owner resolves its links over the pages it may see: a stem, title or path that matches only withheld pages resolves, warns and lists as it would if they were absent.
 - Write doors decide their target before resolving or changing it. A target the writer may not see answers exactly as a missing one and is never read or changed.
-- Planned in the same change: link resolution per audience for restricted callers, counts and ranks computed after filtering, and whole-vault aggregates served to the owner only under a governed policy.
+- For a reader other than the owner, links whose candidates include a withheld page resolve as a vault without it would resolve them, lazily and only where a request looks: graph context and context walks, inbound links, pack neighbours, relation proposals, and the page provenance strip.
+- Counts and ranks are computed after filtering. Whole-vault aggregates (audit, registries inferred from the corpus, activation and relation-queue coverage) are served to the owner only under a governed policy; other audiences receive `available: false` with `reason: "audience_restricted"`. Recall diagnostics computed before release decisions are not returned to a restricted caller.
+- Activation resolves a restricted caller's turn over the anchors it may see, omits L0 material silently (abstaining as `unresolved`), and does not return the vault freshness key to it.
 
 ## Capabilities
 
@@ -21,9 +23,10 @@ None.
 ### Modified Capabilities
 
 - `release-gate`: derived identifiers, derived structures, write-time link resolution and write doors are decided for the caller before they are emitted or acted on.
+- `context-activation`: anchors resolve over a restricted caller's view, L0 material is omitted without a marker, and such a caller's packet is not cached.
 
 ## Impact
 
-- Affected code: `governance/egress.py` (entry fields, `restricted_release_filter`, `visible_page_filter`, `write_target_withheld`, `guard_graph_context` edge endpoints), `memory_context.py`, `epistemic_graph.py` (`graph_context`, `suggest_relations`, the relation review batch), `relation_queue.py`, `evolution.py`, `entity_candidates.py`, `list_directory.py`, `overview.py`, `vault.py` (`normalize_wikilink`, `resolve_under_vault`), `note.py`, `link.py`, `semantic_contract.py`, `capture_sweep.py`, and the write doors in `edit.py`, `replace.py`, `move_file.py`, `delete_file.py`, `delete_directory.py`, `append_to_file.py`, `reclassify_source.py` and `commands.py`.
+- Affected code: `governance/egress.py` (entry fields, `restricted_release_filter`, `visible_page_filter`, `write_target_withheld`, `guard_graph_context` edge endpoints), `memory_context.py`, `epistemic_graph.py` (`graph_context`, `suggest_relations`, the relation review batch), `relation_queue.py`, `evolution.py`, `attention.py`, `context_pack.py`, `link_summary.py`, `list_inbound_links.py`, `find.py`, `working_set.py`, `working_set_resolve.py`, `working_set_runtime.py`, `entity_candidates.py`, `list_directory.py`, `overview.py`, `vault.py` (`normalize_wikilink`, `resolve_under_vault`), `note.py`, `link.py`, `semantic_contract.py`, `capture_sweep.py`, and the write doors in `edit.py`, `replace.py`, `move_file.py`, `delete_file.py`, `delete_directory.py`, `append_to_file.py`, `reclassify_source.py` and `commands.py`.
 - Affected tests: `tests/test_derived_identifier_egress.py` is new. It builds twin vaults (none withheld, one colliding withheld page, one neutral withheld page) and requires the restricted answers to match, for the `external` audience and for a verified principal.
-- Contract: no tool schema or description changes. A restricted caller sees fewer entries, and a refusal it could already receive for a missing page now also covers a withheld one. The owner's answers are unchanged.
+- Contract: no tool schema or description changes. A restricted caller sees fewer entries and fewer diagnostic fields, whole-vault aggregates answer it with `audience_restricted`, and a refusal it could already receive for a missing page now also covers a withheld one. The owner's answers are unchanged.

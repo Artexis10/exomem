@@ -1606,6 +1606,13 @@ def _carried_packet(
         )
 
 
+def _reader_view(root: Path, purpose: str | None):
+    """The caller's page view for anchor resolution, or `None` for the owner."""
+    from .governance import egress
+
+    return egress.visible_page_filter(root, purpose=purpose)
+
+
 def compile_packet(
     vault_root: Path,
     *,
@@ -1684,36 +1691,64 @@ def compile_packet(
             # unknown and a withheld ref share.
             resolution = working_set_resolve.resolve(chosen, turn_tokens=analysis.tokens)
         else:
-            candidates = working_set_resolve.candidates_for(
-                analysis,
-                rows,
-                vectors=vectors,
-                query_vector=query_vector,
-                retrieval_paths=retrieval_paths,
-                routing_targets=_routing_targets(
-                    root, index_token[1], index_token=index_token
-                ),
-                used_paths=_used_paths(root, rows),
-                # Computed once per request, like `used_paths`, and for the
-                # same reason: it is a fact about the vault that every row is
-                # measured against, not something the loop can derive. Only
-                # for a referential turn: on any other the prior decides
-                # nothing, so it is not computed and the turn resolves exactly
-                # as it did before the prior could supply a referent.
-                hot_paths=(
-                    hot_profile(
-                        root,
-                        rows=rows,
-                        continuity_refs=continuity_refs,
-                        continuity_minted_ns=continuity_minted_ns,
-                        continuity_passed=passed,
-                        mtimes=mtimes,
-                    )
-                    if analysis.referential
-                    else frozenset()
-                ),
-                term_anchor_counts=index.term_anchor_counts(),
-            )
+            term_counts = index.term_anchor_counts()
+            # A reader other than the owner resolves the turn over the anchors
+            # it may see: the ones the turn's words can reach are decided, and
+            # name-term counts and derived short names follow its view.
+            visible = _reader_view(root, purpose)
+            decided_ids: frozenset[str] = frozenset()
+            if visible is not None:
+                rows, term_counts, decided_ids = working_set_resolve.audience_view(
+                    analysis, rows, term_counts, visible
+                )
+
+            def _candidates(rows: tuple[working_set_resolve.AnchorFacts, ...]) -> tuple:
+                return working_set_resolve.candidates_for(
+                    analysis,
+                    rows,
+                    vectors=vectors,
+                    query_vector=query_vector,
+                    retrieval_paths=retrieval_paths,
+                    routing_targets=_routing_targets(
+                        root, index_token[1], index_token=index_token
+                    ),
+                    used_paths=_used_paths(root, rows),
+                    # Computed once per request, like `used_paths`, and for the
+                    # same reason: it is a fact about the vault that every row is
+                    # measured against, not something the loop can derive. Only
+                    # for a referential turn: on any other the prior decides
+                    # nothing, so it is not computed and the turn resolves exactly
+                    # as it did before the prior could supply a referent.
+                    hot_paths=(
+                        hot_profile(
+                            root,
+                            rows=rows,
+                            continuity_refs=continuity_refs,
+                            continuity_minted_ns=continuity_minted_ns,
+                            continuity_passed=passed,
+                            mtimes=mtimes,
+                        )
+                        if analysis.referential
+                        else frozenset()
+                    ),
+                    term_anchor_counts=term_counts,
+                )
+
+            candidates = _candidates(rows)
+            if visible is not None:
+                # An anchor reached only by evidence other than its words
+                # (recall, claims, recency, similarity) is decided here, and the
+                # candidates are drawn again without it.
+                unseen = {
+                    candidate.anchor_id
+                    for candidate in candidates
+                    if candidate.anchor_id not in decided_ids
+                    and candidate.path
+                    and not visible(candidate.path)
+                }
+                if unseen:
+                    rows = tuple(row for row in rows if row.anchor_id not in unseen)
+                    candidates = _candidates(rows)
             candidates = working_set_resolve.add_graph_corroboration(
                 candidates, retrieval_paths=retrieval_paths
             )
