@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -90,19 +91,25 @@ def read_semantic_unit(
     *,
     page: GetResult,
     unit_ref: str,
+    frontmatter: Mapping[str, Any] | None = None,
 ) -> SemanticUnitReadResponse:
-    """Resolve one current unit exactly; never substitute a nearby unit."""
+    """Resolve one current unit exactly; never substitute a nearby unit.
+
+    `frontmatter`, when given, is the frontmatter released to the caller and
+    is what the parent citation is built from, so a provenance field the
+    release plane stripped does not come back through the citation.
+    """
     state = semantic_index.current_parent_index_state(
         vault_root,
         page.path,
         source=page.content,
     )
-    frontmatter, body, _ = vault.parse_frontmatter(page.content)
+    parsed_frontmatter, body, _ = vault.parse_frontmatter(page.content)
     resolution = state.document.resolve_unit(unit_ref)
     parent = _parent_citation(
         page,
         state.document.parent_ref,
-        frontmatter=frontmatter,
+        frontmatter=dict(frontmatter) if frontmatter is not None else parsed_frontmatter,
     )
     if resolution.unit is None:
         return SemanticUnitReadResponse(
