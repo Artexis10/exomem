@@ -836,15 +836,27 @@ The cross-encoder reranker reorders a query's top candidates. It runs on explici
 `rerank=True`, or automatically in performance mode on an accelerated device; CPU
 services leave it off by default. `EXOMEM_DISABLE_RANKING` turns it off entirely.
 
-Each reranker declares what it can judge, and `find` keeps the fused order outside
-it (`retrieval_profile.rerank.reason` says why):
+Each reranker declares what it can judge, and recall keeps the fused order outside
+it, explicit `rerank=True` included (`retrieval_profile.rerank.reason` says why).
+Governed projected recall applies the same gate.
 
 | Reranker | Scripts | Across languages | Notes |
 |---|---|---|---|
-| `BAAI/bge-reranker-base` (default) | Latin, Han | no | Trained on English and Chinese. Skipped for a query written mostly in another script (`query_script_not_covered`), and for a request whose best dense match shares no content word with the query while the query's words lead only into another vocabulary (`cross_language_not_covered`). |
-| `BAAI/bge-reranker-v2-m3` (opt-in) | all | yes | Multilingual, about 1.3-1.8 GB more memory and roughly 45 s per 30-pair rerank on 2 CPU cores, so meant for accelerated hosts. Select it with `EXOMEM_RANKING_MODEL=BAAI/bge-reranker-v2-m3`. Its coverage is declared from its model card. |
+| `BAAI/bge-reranker-base` (default) | Latin, Han | no | Trained on English and Chinese. Skipped for a query written mostly in another script (`query_script_not_covered`). Also skipped when the best dense match shares no content word with the query and either the query's words matched pages in another script than that match (`cross_language_not_covered`) or matched nothing while the query itself is in another script than that match (`cross_script_lead_not_covered`). |
+| `BAAI/bge-reranker-v2-m3` (opt-in) | all (assumed) | yes (assumed) | Select it with `EXOMEM_RANKING_MODEL=BAAI/bge-reranker-v2-m3`. Its model card says only that it is multilingual. The all-scripts, cross-language declaration is an assumption that has not been measured here. Its cost is a design estimate, not a measurement: about 1.3-1.8 GB more memory and roughly 45 s per 30-pair rerank on 2 CPU cores. So it is meant for accelerated hosts. |
 
-A reranker named in `EXOMEM_RANKING_MODEL` without a declaration is not gated.
+A reranker without a declaration is not gated: the owner configured it and is
+trusted with it. The declaration is looked up by the exact model name, so a local
+path or a mirror of `BAAI/bge-reranker-base` is undeclared and not gated either.
+
+The gate works by script, not by language, because no language is detected.
+Two consequences follow:
+
+- A German or Estonian query whose answer is an English page is Latin on both
+  sides, so nothing marks it as crossing and the default reranker runs. On the
+  multilingual fixture this reranking can put a same-language look-alike above
+  the English answer. This is an open gap.
+- A Japanese query written mostly in kanji reads as Han and is reranked.
 
 ## GPU notes (CUDA / Blackwell / Apple Silicon MPS)
 

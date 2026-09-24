@@ -620,13 +620,18 @@ class RerankerCoverage:
 #: whole, but moved a Russian gold from rank 1 to 3 and another out of the top
 #: ten, and on German and Estonian queries answered by an English page it put
 #: the same-language look-alike first again. `BAAI/bge-reranker-v2-m3` is the
-#: multilingual opt-in for accelerated hosts (`EXOMEM_RANKING_MODEL`); its
-#: coverage is declared from its model card, not measured here.
+#: multilingual opt-in for accelerated hosts (`EXOMEM_RANKING_MODEL`). Its card
+#: says only "multilingual": the all-scripts, cross-lingual declaration below is
+#: an assumption, not measured here. Coverage is by script, not by language:
+#: a Latin-script query answered by an English page (German, Estonian) is not
+#: gated, and a kanji-dominant Japanese query reads as Han.
 _RERANKER_COVERAGE: dict[str, RerankerCoverage] = {
     "BAAI/bge-reranker-base": RerankerCoverage(frozenset({"latin", "han"}), cross_lingual=False),
     "BAAI/bge-reranker-v2-m3": RerankerCoverage(None, cross_lingual=True),
 }
 #: A reranker the owner configured without a declaration is trusted as configured.
+#: The lookup is by exact name, so a local path or mirror of a declared model is
+#: undeclared too.
 _UNDECLARED_RERANKER = RerankerCoverage(None, cross_lingual=True)
 
 #: Block-name markers that split the declared unspaced blocks into scripts; any
