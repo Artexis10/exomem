@@ -379,7 +379,11 @@ def _read_page_snapshot(path: Path, vault_root: Path):
 
     try:
         relative = path.absolute().relative_to(vault_root.absolute()).as_posix()
-        return reserved_paths.read_generic_bytes(vault_root, relative)
+        # The corpus reads pages a walk of the disk found, so it opens the
+        # spelling the walk found: the freshness identity and the graph name a
+        # macOS-origin NFD page that way, and its NFKC form names no file on a
+        # byte-exact file system.
+        return reserved_paths.read_generic_bytes(vault_root, relative, physical=True)
     except (OSError, ValueError, reserved_paths.ReservedPathLeafError) as error:
         if privacy_log.content_private_logging_enabled():
             log.warning("hosted content parse failed code=HOSTED_CONTENT_READ_FAILED")
