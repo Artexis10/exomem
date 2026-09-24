@@ -31,7 +31,7 @@ The dense half (one multilingual encoder for recall and activation, the fingerpr
 
 ### Modified Capabilities
 
-None in the lexical half. `close-memory-loop`'s memory-loop delta, still active, now states its lexical corroboration and carry pairing over word and run units, matching this change's spec.
+None in the lexical half. `close-memory-loop`'s memory-loop delta, still active, now states its lexical corroboration over word and run units, matching this change's spec, and its carry pairing over words only: the CJK carry stays off.
 
 ## Impact
 

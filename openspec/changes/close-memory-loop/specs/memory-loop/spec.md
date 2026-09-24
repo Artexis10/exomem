@@ -432,11 +432,16 @@ measured as a document frequency at or below `max(3, ceil(0.5% of the indexed
 pages in scope))` over the same catalogue the ranking uses, navigation pages not
 counted toward a stem's frequency, and raw-material pages counted neither toward
 a stem's frequency nor among the indexed pages. A hit SHALL additionally satisfy a proximity
-condition: two of its matched distinctive stems from two different units occur
+condition: two of its matched distinctive stems from two different words occur
 within a declared token window of each other, within one sentence of the turn.
-The stems of one word or one unspaced run SHALL NOT pair with each other, and
-rarity SHALL be read on the turn's surface forms; the parts of a joined
-compound (`girvan-slot`) are separate words and pair at distance zero. Distance SHALL be
+The stems of one word SHALL NOT pair with each other, and rarity SHALL be read
+on the turn's surface forms; the parts of a joined compound (`girvan-slot`) are
+separate words and pair at distance zero. An unspaced run (a script indexed as
+bigrams: Han, kana, Hangul, Thai and the like) SHALL contribute no pairable
+stem, so a turn written in those scripts is never carried and SHALL NOT run the
+ranking query. This is a stated limit: two runs share particles and endings
+with every page in their script, and pairing them would need a position model
+over character offsets. Distance SHALL be
 measured over the turn's own tokens, function words included; sentence-ending
 punctuation and line breaks SHALL end a window and a comma SHALL NOT. A
 number of distinctive stems occurring anywhere in the turn SHALL NOT by
@@ -510,12 +515,15 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
 - **AND** the same two stems said as a phrase DO make it a candidate, as do
   three of that page's distinctive stems sitting anywhere in the turn
 
-#### Scenario: One word or one unspaced run is not a phrase
+#### Scenario: One word is not a phrase, and an unspaced run never pairs
 
-- **WHEN** a turn is a single accented word, or a single Japanese run, that
-  appears on exactly one page of a measurable corpus
-- **THEN** no page is carried: its folded variant or its bigrams are one unit
+- **WHEN** a turn is a single accented word that appears on exactly one page
+  of a measurable corpus
+- **THEN** no page is carried: the word and its folded variant are one word
   and never pair with each other
+- **AND** a turn written in an unspaced script carries no page, whether it is
+  one Japanese run or two runs ("明日は、散歩です", "오늘은 회의입니다")
+  sharing only particles and endings with a page, and it runs no ranking query
 
 #### Scenario: A stub sharing only ordinary words is not named
 

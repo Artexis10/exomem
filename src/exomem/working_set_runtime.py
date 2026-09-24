@@ -722,10 +722,18 @@ def adjacent_rare_pairs(
     One raw token may carry several stems ("girvan-slot", "o'brien"), and
     all of them are placed at that token's position: a compound is the
     phrase said as tightly as a phrase can be said. But a pair needs two
-    UNITS: the stems of one word ("jätka" and its folded variant) or of one
-    unspaced run (every bigram of 東京タワーの高さ) are one thing said once,
-    never a phrase with itself. The raw token is split on its joiners first,
-    so the parts of a joined compound still pair at distance zero.
+    WORDS: the stems of one word ("jätka" and its folded variant) are one
+    thing said once, never a phrase with itself. The raw token is split on
+    its joiners first, so the parts of a joined compound still pair at
+    distance zero.
+
+    An UNSPACED RUN (Han, kana, Hangul, Thai and the other bigram-indexed
+    scripts) contributes nothing: the carry stays off for those scripts.
+    A run's bigrams sit at one token position, and two runs side by side
+    share particles and endings (日は, です, 니다) with every page in their
+    script, so pairing them named pages the turn never mentioned —
+    "明日は、散歩です" carried a weather note — and cost |A|x|B| pair
+    groups, a minute of activation for a long Japanese turn.
 
     Each pair is returned once, sorted, so the caller's query sees a stable
     set.
@@ -749,6 +757,8 @@ def adjacent_rare_pairs(
             for part in _TOKEN_JOINERS.split(token):
                 for unit in bm25_module.token_units(part, query=True):
                     unit_id += 1
+                    if unit.run:
+                        continue
                     for stem in dict.fromkeys(unit.stems):
                         if stem in wanted:
                             placed.append((index, unit_id, stem))
