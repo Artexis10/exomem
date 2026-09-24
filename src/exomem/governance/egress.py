@@ -47,7 +47,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote
 
-from .. import find_corpus, memory_refs, reserved_paths
+from .. import find_corpus, memory_refs, reserved_paths, vault
 from ..find_types import Hit, SemanticUnitHit
 from ..kbdir import kb_dirname
 from . import (
@@ -4994,11 +4994,13 @@ def unit_parent_withheld(
     path the graph's own rows can consult for the reference (current or not;
     `epistemic_graph.unit_ref_indexed_paths`), every page the reference's
     memory id names in the reference index, and the page an
-    `exomem://vault/` or `exomem://source/` parent names by path. Each is
-    decided at `RELEASE_FLOOR`, the level below which the graph guard already
-    withholds a seed; a path that cannot be decided counts as withheld, and a
-    walk with more rows than the resolver examines cannot prove every page
-    visible.
+    `exomem://vault/` or `exomem://source/` parent names by path — confined to
+    the vault the same way any caller-named path is (`vault.resolve_under_vault`);
+    a name that does not resolve inside the vault is undecidable and counts as
+    withheld without ever being stat'd or read. Each candidate is decided at
+    `RELEASE_FLOOR`, the level below which the graph guard already withholds a
+    seed; a path that cannot be decided counts as withheld, and a walk with
+    more rows than the resolver examines cannot prove every page visible.
 
     The owner is never substituted. The decision exists to keep a caller from
     learning about pages withheld from it, and the owner's own answer,
@@ -5027,7 +5029,12 @@ def unit_parent_withheld(
             memory_refs.paths_for_ids_read_only(vault_root, (memory_id,)).get(memory_id, ())
         )
     elif parent_ref.lower().startswith(("exomem://vault/", "exomem://source/")):
-        candidates.add(memory_refs.resolve_identifier_read_only(vault_root, parent_ref))
+        named = memory_refs.resolve_identifier_read_only(vault_root, parent_ref)
+        try:
+            _named_abs, named = vault.resolve_under_vault(vault_root, named)
+        except vault.VaultPathError:
+            return True
+        candidates.add(named)
     for rel_path in sorted(candidates):
         level = release_level_for(vault_root, rel_path, principal=who, purpose=purpose)
         if level is None or level < RELEASE_FLOOR:

@@ -294,6 +294,56 @@ def test_mcp_path_named_unit_seeds_of_a_withheld_page_answer_like_an_absent_page
 
 
 # ---------------------------------------------------------------------------
+# A path-named parent candidate is confined to the vault before it is decided
+# ---------------------------------------------------------------------------
+
+
+def test_vault_path_named_unit_seed_naming_a_path_outside_the_vault_is_never_opened(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """A caller-named `exomem://vault/` or `exomem://source/` parent is
+    decoded before it is confined. An absolute path or a `../` traversal must
+    be rejected as undecidable (withheld) before the candidate is ever
+    stat'd or read — not merely answered as withheld after the filesystem is
+    already touched."""
+    _unit_context_fixture(vault)
+    _withhold_insights(vault)
+    outside_dir = tmp_path_factory.mktemp("outside")
+    outside = outside_dir / "server-secret.txt"
+    outside.write_bytes(b"OUTSIDE-SECRET-" * 10)
+
+    vault_resolved = str(vault.resolve())
+    opened_outside: list[str] = []
+    real_read_bytes = Path.read_bytes
+
+    def _spy_read_bytes(self: Path) -> bytes:
+        try:
+            inside = str(self.resolve()).startswith(vault_resolved)
+        except OSError:
+            inside = False
+        if not inside:
+            opened_outside.append(str(self))
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _spy_read_bytes)
+
+    traversal = "../" * 12 + str(outside).lstrip("/")
+    forms = [
+        f"exomem://vault/{quote(str(outside), safe='')}#x",
+        f"exomem://vault/{outside}#x",
+        f"exomem://vault/{traversal}#x",
+        f"exomem://source/{quote(str(outside_dir / 'server-secret'), safe='')}#x",
+    ]
+    who = _cf_principal()
+    for ref in forms:
+        with principal_module.request_scope(who):
+            context = commands.op_graph_context(vault, unit_ref=ref)
+        assert context["unit_status"] == "missing", (ref, context)
+
+    assert opened_outside == []
+
+
+# ---------------------------------------------------------------------------
 # The owner's view never changes, even when the index is stale
 # ---------------------------------------------------------------------------
 
