@@ -5016,25 +5016,30 @@ def unit_parent_withheld(
     seed; a path that cannot be decided counts as withheld, and a walk with
     more rows than the resolver examines cannot prove every page visible.
 
-    The owner is never substituted. The decision exists to keep a caller from
-    learning about pages withheld from it, and the owner's own answer,
-    including its drift and budget reports, must not change because a policy
-    exists.
+    An explicit sub-floor decision withholds the owner's seed exactly as it
+    withholds anyone else's, so a rule that names the `owner` audience still
+    applies to a unit seed. What does not apply to the owner is an
+    UNDECIDABLE candidate: a walk with more rows than the resolver examines
+    (`work_exhausted`), or a stale row naming a path that is no longer
+    there, is a graph artifact rather than a policy decision, and must not
+    cost the owner the stale-status and drift report the unguarded answer
+    carries. For anyone else, an undecidable candidate counts as withheld,
+    because a walk that cannot prove every candidate visible cannot prove the
+    page released either.
     """
     vault_root = Path(vault_root)
     policy = policy_module.load(vault_root)
     if policy.empty and not lifecycle.tombstoned_paths(vault_root):
         return False
     who = principal if principal is not None else effective_principal()
-    if who.resolved and who.audience_id == OWNER_AUDIENCE:
-        return False
+    is_owner = who.resolved and who.audience_id == OWNER_AUDIENCE
     parent_ref, separator, _fragment = str(unit_ref or "").rpartition("#")
     if not separator or not parent_ref:
         return False
     from .. import epistemic_graph
 
     indexed, work_exhausted = epistemic_graph.unit_ref_indexed_paths(vault_root, unit_ref)
-    if work_exhausted:
+    if work_exhausted and not is_owner:
         return True
     candidates = set(indexed)
     memory_id = memory_refs.parse_memory_ref(parent_ref)
@@ -5051,7 +5056,17 @@ def unit_parent_withheld(
         candidates.add(named)
     for rel_path in sorted(candidates):
         level = release_level_for(vault_root, rel_path, principal=who, purpose=purpose)
-        if level is None or level < RELEASE_FLOOR:
+        if level is None:
+            # Undecidable — a stale or budget-truncated graph row pointing at
+            # a path that is no longer there, most often. For anyone else
+            # that is indistinguishable from a page withheld from them, so it
+            # counts as withheld. The owner is never denied a page over a
+            # graph artifact; only an explicit sub-floor decision (an
+            # owner-targeted rule) withholds the owner's seed, below.
+            if is_owner:
+                continue
+            return True
+        if level < RELEASE_FLOOR:
             return True
     return False
 
