@@ -223,3 +223,43 @@ def test_a_same_language_request_in_a_covered_script_is_reranked(
     assert profile["decision"] == "ran"
     assert calls
 
+
+def test_vector_mode_never_reads_as_crossing_languages(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No lexical lane runs in vector mode, so there is no evidence either way
+    # and an English paraphrase keeps its explicit rerank.
+    calls = _plant(monkeypatch, [_GOLD, _OTHER])
+    result = commands.op_ask_memory(
+        vault,
+        query="halt pounding an ailing upstream",
+        limit=5,
+        mode="vector",
+        scope="kb-only",
+        graph=False,
+        rerank=True,
+        detail="compact",
+        explain=True,
+    )
+    assert result["retrieval_profile"]["rerank"]["decision"] == "ran"
+    assert calls
+
+
+def test_an_english_paraphrase_that_matches_nothing_lexically_is_reranked(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The query's words are on no page at all; its script is the dense lead's.
+    calls = _plant(monkeypatch, [_GOLD, _OTHER])
+    profile = _rerank_profile(vault, "halt pounding an ailing upstream")
+    assert profile["decision"] == "ran"
+    assert calls
+
+
+def test_a_query_that_matches_nothing_in_another_script_than_the_lead_has_its_own_reason(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A Chinese query whose words are on no page, answered by an English lead.
+    calls = _plant(monkeypatch, [_GOLD, _OTHER])
+    profile = _rerank_profile(vault, "熔断器的半开状态")
+    assert (profile["decision"], profile["reason"]) == ("skipped", "cross_script_lead_not_covered")
+    assert calls == []

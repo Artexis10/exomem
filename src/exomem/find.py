@@ -227,6 +227,12 @@ _RECALL_PATH_CACHE: OrderedDict[
 _RECALL_PATH_CACHE_LOCK = threading.Lock()
 _RECALL_PATH_CACHE_SIZE = 32
 MAX_RERANK_CANDIDATES = 300
+#: Why a reranker that cannot judge across languages is skipped, by the way
+#: fusion saw the request cross scripts (`find_candidates.CROSSING_*`).
+_RERANK_CROSSING_REASONS = {
+    find_candidates.CROSSING_VOTES_WITHHELD: "cross_language_not_covered",
+    find_candidates.CROSSING_UNMATCHED: "cross_script_lead_not_covered",
+}
 _FOREGROUND_LEXICAL_REPAIR_PAGE_CAP = 64
 _FIND_CACHE_DELTA_PATH_CAP = 64
 
@@ -4556,9 +4562,12 @@ def _find_semantic(
         if not find_policy.reranker_reads_query(coverage, query):
             do_rerank = False
             rerank_outcome = {"decision": "skipped", "reason": "query_script_not_covered"}
-        elif bundle.crosses_language and not coverage.cross_lingual:
+        elif bundle.lexical_crossing is not None and not coverage.cross_lingual:
             do_rerank = False
-            rerank_outcome = {"decision": "skipped", "reason": "cross_language_not_covered"}
+            rerank_outcome = {
+                "decision": "skipped",
+                "reason": _RERANK_CROSSING_REASONS[bundle.lexical_crossing],
+            }
 
     if do_rerank and readiness.should_defer("reranker"):
         # Background warm-up owns the reranker load right now — calling

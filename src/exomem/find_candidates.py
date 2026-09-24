@@ -49,10 +49,8 @@ class CandidateBundle:
     raw_fused_score_by_path: dict[str, float]
     adjusted_score_by_path: dict[str, float]
     multiplier_chain_by_path: dict[str, list[dict[str, float | str]]] | None
-    #: The dense lead shares no content word with the query and the lexical
-    #: lanes voted in another vocabulary or matched no content word: the
-    #: request crosses languages (see `_lexical_visibility`).
-    crosses_language: bool = False
+    #: Why the request crosses scripts, or None (see `_lexical_visibility`).
+    lexical_crossing: str | None = None
 
 
 def empty_bundle(
@@ -146,17 +144,28 @@ def collapse_frame_children(
     return out
 
 
+#: The dense lead is lexically invisible and fusion withheld a vote for a page
+#: in another script than the lead: the query's words lead into another script.
+CROSSING_VOTES_WITHHELD = "lexical_votes_across_scripts"
+#: The dense lead is lexically invisible, no lexical candidate holds a content
+#: word of the query, and the query is written in another script than the lead.
+CROSSING_UNMATCHED = "query_script_differs_from_dense_lead"
+
+
 class LexicalVisibility(NamedTuple):
     """What fusion learned about the lexical lanes against the dense lead."""
 
     #: Lexical-lane candidates whose votes fusion withholds.
     withheld: frozenset[str]
-    #: The request crosses languages: the dense lead is lexically invisible and
-    #: the lexical lanes voted in another vocabulary or matched no content word.
-    crosses_language: bool
+    #: Why the request crosses scripts (`CROSSING_*`), or None when it does not.
+    crossing: str | None
+
+    @property
+    def crosses_language(self) -> bool:
+        return self.crossing is not None
 
 
-_LEXICALLY_VISIBLE = LexicalVisibility(frozenset(), False)
+_LEXICALLY_VISIBLE = LexicalVisibility(frozenset(), None)
 
 
 def _lexical_visibility(
@@ -187,10 +196,14 @@ def _lexical_visibility(
     an English vault ranks exactly as before. A Latin-script query whose answer
     is an English page (German, Estonian) is not protected by this rule.
 
-    The request crosses languages when, with the dense lead invisible, some vote
-    was withheld or no lexical candidate holds any content word of the query:
-    the query's words then lead only into another vocabulary, or nowhere. A
-    reranker that cannot judge across languages is skipped on such a request.
+    The request crosses scripts, with the dense lead invisible, when a vote was
+    withheld (`CROSSING_VOTES_WITHHELD`), or when no lexical candidate holds any
+    content word of the query and the query itself is written in another script
+    than the lead (`CROSSING_UNMATCHED`). A query that matches nothing in the
+    lead's own script (an English paraphrase under an English lead) does not
+    cross. A reranker that cannot judge across languages is skipped on a
+    crossing request. The caller skips this in vector mode, where no lexical
+    lane ran and there is no evidence either way.
     """
     if not vector_ranking:
         return _LEXICALLY_VISIBLE
@@ -213,7 +226,11 @@ def _lexical_visibility(
         any_content_match = any_content_match or matched > 0
         if matched < content_words and page.letter_script != lead_script:
             withheld.add(path)
-    return LexicalVisibility(frozenset(withheld), bool(withheld) or not any_content_match)
+    if withheld:
+        return LexicalVisibility(frozenset(withheld), CROSSING_VOTES_WITHHELD)
+    if not any_content_match and find_policy.dominant_script(query) != lead_script:
+        return LexicalVisibility(frozenset(), CROSSING_UNMATCHED)
+    return _LEXICALLY_VISIBLE
 
 
 def collect_candidates(
@@ -625,11 +642,15 @@ def collect_candidates(
         recall_paths=recall_paths,
     )
     keyword_ranking = _eligible(keyword_ranking)
-    visibility = _lexical_visibility(
-        query=query_norm,
-        vector_ranking=vector_ranking,
-        lexical_rankings=(bm25_ranking, keyword_ranking),
-        page_of=page_of,
+    visibility = (
+        _LEXICALLY_VISIBLE
+        if mode == "vector"
+        else _lexical_visibility(
+            query=query_norm,
+            vector_ranking=vector_ranking,
+            lexical_rankings=(bm25_ranking, keyword_ranking),
+            page_of=page_of,
+        )
     )
     if visibility.withheld:
         bm25_ranking = [path for path in bm25_ranking if path not in visibility.withheld]
@@ -939,5 +960,5 @@ def collect_candidates(
         raw_fused_score_by_path=raw_fused_score_by_path,
         adjusted_score_by_path=adjusted_score_by_path,
         multiplier_chain_by_path=multiplier_chain_by_path,
-        crosses_language=visibility.crosses_language,
+        lexical_crossing=visibility.crossing,
     )
