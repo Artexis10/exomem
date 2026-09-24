@@ -1356,3 +1356,74 @@ def test_an_agent_picked_page_holds_the_same_ceilings(
     assert calls.enumerations <= WARM_REQUEST_ENUMERATION_CEILING, calls.report()
     assert calls.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, calls.report()
     assert calls.unattributable == 0, calls.report()
+
+
+def _write_episodes(vault: Path, count: int, *, start: int = 0) -> list[Path]:
+    """`count` recaps of distinct conversations, oldest first, a second apart."""
+    from exomem import episode_capture
+
+    folder = vault / "Knowledge Base" / "Sources" / "Episodes"
+    folder.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for index in range(start, start + count):
+        key = "ep-" + f"{index:032x}"
+        page = folder / (
+            f"2026-09-21-topic-{index}-ep{episode_capture.key_group(key, 'owner')}"
+            f"-20260921t{index:012d}-0a0b0c0d.md"
+        )
+        page.write_text(
+            "---\ntype: source\n"
+            f"title: Topic {index}\nsource_type: episode\n"
+            f"summary: Where conversation {index} left off.\nepisode: {key}\n"
+            "tags: []\ningested_into: []\n---\n\n# Topic\n\n## Capture\n\n"
+            "### Worked on\n\n- Something\n",
+            encoding="utf-8",
+        )
+        written.append(page)
+    return written
+
+
+def test_episode_recaps_hold_the_ceilings_at_ten_and_at_five_hundred(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
+) -> None:
+    """Episode entries come off the freshness map the block already copies and
+    the at-most-eight cached reads it already makes: a vault with fifty times
+    the recaps pays the same enumerations and a flat number of calls."""
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _write_collection(vault)
+
+    def _measure() -> tuple[dict, _FilesystemCalls]:
+        now = time.time()
+        pages = sorted((vault / "Knowledge Base").rglob("*.md"))
+        for index, page in enumerate(pages):
+            os.utime(page, (now - 10_000 - index * 2, now - 10_000 - index * 2))
+        newest = sorted((vault / "Knowledge Base" / "Sources" / "Episodes").glob("*.md"))[-1]
+        os.utime(newest, (now - 60, now - 60))
+        _warm_activation(vault, warm_managed_cell)
+        _drain_background_walks()
+        with monkeypatch.context() as patch:
+            scheduled = _no_background_walks(patch)
+            calls = _FilesystemCalls(vault)
+            calls.install(patch)
+            packet = commands.op_activate_context(vault, turn="continue")
+        assert scheduled == [], scheduled
+        episodes = [entry for entry in packet["recent_context"] if entry["why"] == "episode"]
+        assert episodes and episodes[0]["path"] == newest.relative_to(vault).as_posix()
+        return packet, calls
+
+    _write_episodes(vault, 10)
+    _, few = _measure()
+    _write_episodes(vault, 490, start=10)
+    _, many = _measure()
+
+    for calls in (few, many):
+        assert calls.enumerations <= WARM_REQUEST_ENUMERATION_CEILING, calls.report()
+        assert calls.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, calls.report()
+        assert calls.unattributable == 0, calls.report()
+    assert many.enumerations == few.enumerations, (few.report(), many.report())
+    # One-sided on purpose: fifty times the recaps must not cost more. The
+    # first measurement also pays page-cache misses the second may not, so a
+    # two-sided band measured request noise (447 against 373 calls, 2026-09-23)
+    # rather than growth.
+    assert many.total <= few.total + 20, (few.report(), many.report())
