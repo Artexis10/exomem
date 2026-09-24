@@ -446,6 +446,7 @@ def attention(
             )
         )
     ]
+    findings = _decided_findings(vault_root, findings)
     ranked = _rank(findings, categories=resolved, limit=0)
     if (report.metadata or {}).get("coverage") is not None:
         ranked.meta = {"coverage": report.metadata["coverage"]}
@@ -459,6 +460,35 @@ def attention(
         annotations=annotations,
         record_surfacing=record_surfacing,
     )
+
+
+def _decided_findings(vault_root: Path, findings: list[AuditFinding]) -> list[AuditFinding]:
+    """The findings the caller may be ranked over.
+
+    For the owner, and for a call no surface bound, this is every finding and
+    nothing changes. For another audience a finding on a page it may not see,
+    or one relating such a page, is dropped BEFORE `_rank`, so ranks, scores,
+    totals and the summary are computed over what it receives, exactly as if
+    the withheld pages were absent. The contradiction queue's trailing
+    summary counts pairs capped before any decision, so it is not folded in
+    for such a caller.
+    """
+    from .governance import egress
+
+    visible = egress.visible_page_filter(Path(vault_root))
+    if visible is None:
+        return findings
+    return [
+        finding
+        for finding in findings
+        if not (
+            finding.category == "corpus_contradictions"
+            and finding.meta
+            and "truncated" in finding.meta
+        )
+        and visible(finding.path)
+        and all(visible(path) for path in finding.paths or ())
+    ]
 
 
 def _observation_due_at(finding: AuditFinding) -> dt.datetime | None:
@@ -562,6 +592,7 @@ def activation(
     )
     scan = activation_module.scan(vault_root)
     findings = [f for f in scan.findings if f.category not in excluded]
+    findings = _decided_findings(vault_root, findings)
     ranked = _rank(
         findings,
         categories=resolved,
@@ -569,7 +600,12 @@ def activation(
         category_order=activation_module.ACTIVATION_CATEGORIES,
         proposed_fix=_ACTIVATION_FIX,
     )
-    ranked.coverage = scan.coverage
+    # Coverage is a reduction over every eligible page, so no filter applied
+    # to it can remove what a withheld page contributed: it is the owner's.
+    from .governance import egress
+
+    refusal = egress.owner_only_aggregate(Path(vault_root))
+    ranked.coverage = scan.coverage if refusal is None else refusal
     return _apply_review_state(
         vault_root,
         ranked,

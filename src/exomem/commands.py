@@ -2194,6 +2194,11 @@ def _require_supported_projected_find_request(
         )
 
 
+#: Hit signals ranked or counted over the whole corpus, before any page is
+#: decided: a caller other than the owner does not receive them (see `op_find`).
+_CORPUS_RANK_SIGNALS = ("bm25_rank", "vector_rank", "keyword_rank", "clip_rank", "graph_in_degree")
+
+
 def op_find(
     vault_root: Path,
     query: str = "",
@@ -2467,6 +2472,17 @@ def op_find(
             explain=explain,
         )
     auto_rerank = rerank is None and find_module.auto_rerank_allowed_by_policy()
+    # A caller other than the owner receives no retrieval diagnostics. Lane
+    # statuses, fusion weights, raw scores, the emit count, per-lane ranks,
+    # graph in-degree and the keyword-fallback marker are computed over the
+    # whole corpus before any page is decided, so each moves with pages the
+    # caller may not see. The hits themselves are unchanged.
+    restricted = (
+        projection_runtime is None
+        and egress_module.restricted_release_filter(vault_root, purpose=purpose) is not None
+    )
+    if restricted:
+        explain = False
     compute_profile: dict[str, str | bool] = {}
     if explain:
         from . import mode as mode_module
@@ -2696,6 +2712,15 @@ def op_find(
             compact=(detail == "compact"),
             withheld_paths=release.withheld_paths,
         )
+        if restricted:
+            for hit in hit_dicts:
+                signals = hit.get("signals")
+                if not isinstance(signals, dict):
+                    continue
+                for name in _CORPUS_RANK_SIGNALS:
+                    signals.pop(name, None)
+                if not signals:
+                    hit.pop("signals", None)
         if projection_runtime is None:
             ref_index = memory_refs_module.ReferenceIndex(vault_root)
             # The recall serializer is the one caller the no-walk contract
@@ -2751,6 +2776,9 @@ def op_find(
     # keyword. Distinct from `warming`: warming is the transient, expected boot
     # window; `degraded` means a lane broke (e.g. a corrupt embedding sidecar or
     # a crashing model) and the fallback should be investigated, not waited out.
+    if restricted:
+        # Whether any lane matched is decided over the whole corpus.
+        failed = [component for component in failed if component != "keyword"]
     degraded_marker: list[str] | None = sorted(set(failed)) if failed else None
     # Advisory, and present only when the budget actually cost the caller
     # something: a block that always appeared would be a response-shape change
@@ -3488,6 +3516,9 @@ def op_audit(
         presentation/truncation facts. Full detail preserves raw findings.
     """
     audit_module.validate_presentation_controls(detail, legacy_sample_limit)
+    refusal = egress_module.owner_only_aggregate(vault_root)
+    if refusal is not None:
+        return refusal
     report = audit_module.audit(
         vault_root,
         categories=categories,
@@ -5606,6 +5637,16 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
         payload["target"] = requested.strip().replace("\\", "/").lstrip("/")
         payload["inbound"] = []
         payload["count"] = 0
+        return payload
+    # The count is the length of the list the caller receives: a link from a
+    # page it may not see is decided here, before counting, rather than left
+    # for the entry filter to drop beside a count that still includes it.
+    keep = egress_module.restricted_release_filter(vault_root)
+    if keep is not None:
+        payload["inbound"] = [
+            row for row in payload["inbound"] if keep(str(row.get("path") or ""))
+        ]
+        payload["count"] = len(payload["inbound"])
     return payload
 
 
@@ -9648,6 +9689,19 @@ def op_schema_memory(
         supported=operation == "save-entity-types"
         or (subject == "relations" and operation == "save-relations"),
     )
+    if subject in {"categories", "relations", "contract"} and (
+        operation == "infer"
+        or (
+            operation == "diff"
+            and proposal is None
+            and not (subject == "contract" and compare_to)
+        )
+    ):
+        # Inferring from the corpus (directly, or as the other side of a
+        # diff) reduces every page; it is the owner's under a governed policy.
+        refusal = egress_module.owner_only_aggregate(vault_root)
+        if refusal is not None:
+            return {"subject": subject, **refusal}
     if subject == "entity-types" and operation == "resolve-entity-type":
         if (
             any(

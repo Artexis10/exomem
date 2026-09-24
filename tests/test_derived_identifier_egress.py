@@ -887,3 +887,191 @@ def test_a_call_no_surface_bound_keeps_the_write_it_had(tmp_path: Path) -> None:
     writer_lease.invoke_command(_COMMANDS[command], vault, **kwargs)
 
     assert "More text." in (vault / _WITHHELD_TARGET).read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Counts and ranks follow the filtered list; whole-vault aggregates are the owner's
+# ---------------------------------------------------------------------------
+
+_RESTRICTED = {"available": False, "reason": "audience_restricted"}
+_VOLATILE_KEYS = frozenset({"first_surfaced_at"})
+
+
+def _stable(value: Any) -> Any:
+    """Drop per-vault timestamps that differ between two otherwise equal runs."""
+    if isinstance(value, dict):
+        return {k: _stable(v) for k, v in value.items() if k not in _VOLATILE_KEYS}
+    if isinstance(value, list):
+        return [_stable(v) for v in value]
+    return value
+
+
+_REVIEW_MODES = ("attention", "activation", "relation-debt", "stale", "contradiction")
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_review_ranks_read_as_if_the_withheld_page_were_absent(
+    tmp_path: Path, audience: str
+) -> None:
+    base, withheld = _inbound_linker()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    principal = _principal(audience)
+
+    answers = {
+        variant: {
+            mode: _stable(_call(vault, principal, "review_memory", mode=mode))
+            for mode in _REVIEW_MODES
+        }
+        for variant, vault in vaults.items()
+    }
+
+    for mode in _REVIEW_MODES:
+        assert "__error__" not in answers["A"][mode], answers["A"][mode]
+        assert _text(answers["A"][mode]) == _text(answers["B"][mode]), mode
+        assert _text(answers["C"][mode]) == _text(answers["B"][mode]), mode
+    ranks = [
+        reason["rank"]
+        for item in answers["A"]["relation-debt"]["items"]
+        for reason in item["reasons"]
+    ]
+    assert ranks == list(range(1, len(ranks) + 1))
+    assert answers["A"]["activation"]["coverage"] == _RESTRICTED
+    owner = _call(vaults["A"], None, "review_memory", mode="activation")
+    assert owner["coverage"]["eligible_pages"] > 0
+
+
+_AGGREGATES: dict[str, tuple[str, dict[str, Any]]] = {
+    "review-audit": ("review_memory", {"mode": "audit", "detail": "full"}),
+    "maintain-audit": ("maintain_memory", {"mode": "audit", "detail": "full"}),
+    "infer-relations": ("schema_memory", {"operation": "infer", "subject": "relations"}),
+    "infer-categories": ("schema_memory", {"operation": "infer", "subject": "categories"}),
+    "diff-relations-corpus": ("schema_memory", {"operation": "diff", "subject": "relations"}),
+    "diff-categories-corpus": ("schema_memory", {"operation": "diff", "subject": "categories"}),
+}
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_whole_vault_aggregates_are_served_to_the_owner_only(
+    tmp_path: Path, audience: str
+) -> None:
+    base, withheld = _inbound_linker()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    principal = _principal(audience)
+
+    answers = {
+        variant: {
+            label: _call(vault, principal, command, **kwargs)
+            for label, (command, kwargs) in _AGGREGATES.items()
+        }
+        for variant, vault in vaults.items()
+    }
+
+    for label in _AGGREGATES:
+        assert {k: answers["A"][label].get(k) for k in _RESTRICTED} == _RESTRICTED, label
+        assert _text(answers["A"][label]) == _text(answers["B"][label]), label
+        assert _text(answers["C"][label]) == _text(answers["B"][label]), label
+    owner = {
+        label: _call(vaults["A"], None, command, **kwargs)
+        for label, (command, kwargs) in _AGGREGATES.items()
+    }
+    assert "findings" in owner["review-audit"]
+    assert "page_count" in owner["infer-categories"]
+    assert all(answer.get("available") is not False for answer in owner.values())
+
+
+_QUEUE_COUNT_FIELDS = (*_QUEUE_FIELDS, "pages_scanned", "pages_truncated", "pages_unscanned", "coverage")
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_relation_queue_counts_read_as_if_the_withheld_page_were_absent(
+    tmp_path: Path, audience: str
+) -> None:
+    base, withheld = _inbound_linker()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    principal = _principal(audience)
+
+    answers = {}
+    for variant, vault in vaults.items():
+        queue = _call(vault, principal, "review_memory", mode="relation-queue")
+        answers[variant] = {field: queue.get(field) for field in _QUEUE_COUNT_FIELDS}
+
+    assert answers["A"]["coverage"] == _RESTRICTED
+    assert _text(answers["A"]) == _text(answers["B"])
+    assert _text(answers["C"]) == _text(answers["B"])
+    owner = _call(vaults["A"], None, "review_memory", mode="relation-queue")
+    assert owner["coverage"]["eligible_pages"] > 0
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_inbound_link_counts_follow_the_listed_links(tmp_path: Path, audience: str) -> None:
+    base, withheld = _inbound_linker()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    principal = _principal(audience)
+
+    answers = {
+        variant: {
+            target: _call(vault, principal, "connect_memory", operation="inbound-links", target=target)
+            for target in (f"{NOTES}/lonely.md", f"{NOTES}/beta.md")
+        }
+        for variant, vault in vaults.items()
+    }
+
+    assert _text(answers["A"]) == _text(answers["B"])
+    assert _text(answers["C"]) == _text(answers["B"])
+    for answer in answers["A"].values():
+        assert answer["count"] == len(answer["inbound"])
+    owner = _call(
+        vaults["A"], None, "connect_memory", operation="inbound-links", target=f"{NOTES}/lonely.md"
+    )
+    assert owner["count"] == 1
+
+
+def _term_only_withheld() -> tuple[dict[str, str], dict[str, str]]:
+    """Only a withheld page contains the query term; a visible page shares a second term."""
+    base = {
+        **_filler(),
+        f"{NOTES}/visible.md": _page(
+            "Visible Note", "Quarterly review mentions pricing once.", type="insight"
+        ),
+    }
+    withheld = {
+        f"{WITHHELD_DIR}/memo.md": _page(
+            "Memo", "Confidential zephyrine pricing terms for the review.", type="insight"
+        )
+    }
+    return base, withheld
+
+
+_ASK_SURFACES: dict[str, dict[str, Any]] = {
+    "compact": {"query": "zephyrine", "limit": 5},
+    "explain": {"query": "zephyrine", "limit": 5, "explain": True},
+    "full": {"query": "pricing review", "limit": 5, "detail": "full"},
+    "explain-shared": {"query": "pricing review", "limit": 5, "explain": True},
+}
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_recall_diagnostics_read_as_if_the_withheld_page_were_absent(
+    tmp_path: Path, audience: str
+) -> None:
+    base, withheld = _term_only_withheld()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    principal = _principal(audience)
+
+    answers = {}
+    for variant, vault in vaults.items():
+        _call(vault, principal, "ask_memory", **_ASK_SURFACES["compact"])  # warm
+        answers[variant] = {
+            label: _call(vault, principal, "ask_memory", **kwargs)
+            for label, kwargs in _ASK_SURFACES.items()
+        }
+
+    for label in _ASK_SURFACES:
+        answer = answers["A"][label]
+        assert "__error__" not in _text(answer), answer
+        assert "retrieval_profile" not in _text(answer), answer
+        assert "ranking_explanation" not in _text(answer), answer
+        assert _text(answer) == _text(answers["B"][label]), label
+        assert _text(answers["C"][label]) == _text(answers["B"][label]), label
+    owner = _call(vaults["A"], None, "ask_memory", **_ASK_SURFACES["explain"])
+    assert "retrieval_profile" in owner

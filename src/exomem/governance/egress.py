@@ -5527,6 +5527,39 @@ def restricted_release_filter(
     return release_walk_filter(vault_root, principal=who, purpose=purpose)
 
 
+#: The reason a whole-vault aggregate gives an audience it is not served to;
+#: the same value the relation census uses.
+AUDIENCE_RESTRICTED = "audience_restricted"
+
+
+def owner_only_aggregate(
+    vault_root: Path,
+    *,
+    principal: RequestPrincipal | None = None,
+) -> dict[str, Any] | None:
+    """The refusal a whole-vault aggregate gives a caller other than the owner.
+
+    An audit, a schema inferred from the corpus, or a coverage block reduces
+    every page, so no filter applied to its result can remove what a page the
+    caller may not see contributed. Under a governed policy it is therefore
+    served to the owner only, as the relation census is; every other bound
+    audience receives `available: false` with `reason: "audience_restricted"`,
+    decided from the principal and the policy before anything is read. Under
+    an empty policy, for the owner, and for a call no surface bound, this is
+    `None` and the aggregate is served as before.
+
+    What it prevents: counts, findings and denominators that move with pages
+    the caller may not see. When it fires wrongly a restricted caller gets no
+    aggregate; that caller pays, and the owner never does.
+    """
+    who = principal if principal is not None else current_principal()
+    if who is None or (who.resolved and who.audience_id == OWNER_AUDIENCE):
+        return None
+    if policy_module.load(Path(vault_root)).empty:
+        return None
+    return {"available": False, "reason": AUDIENCE_RESTRICTED}
+
+
 def write_target_withheld(
     vault_root: Path,
     rel_path: str,
@@ -5915,7 +5948,12 @@ def _reconcile_attention_counts(payload: Any) -> Any:
     if not all(isinstance(item, Mapping) for item in items):
         return payload
     summary: dict[str, int] = {}
-    states: dict[str, int] = {}
+    # Every state the surface reports keeps its key, so the summary's shape
+    # does not change with what was filtered.
+    previous_states = payload.get("state_summary")
+    states: dict[str, int] = (
+        dict.fromkeys(previous_states, 0) if isinstance(previous_states, Mapping) else {}
+    )
     for item in items:
         for reason in item.get("reasons", ()):
             if isinstance(reason, Mapping) and isinstance(reason.get("category"), str):

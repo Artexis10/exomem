@@ -33,10 +33,21 @@ The entry filter decides the listed fields and any key ending in `_path`, `_key`
 
 `write_target_withheld` is true only for an existing file the writer may not see. Each door checks it at the point where it already answers a missing target, and raises that same answer, so the refusal is the absent refusal by construction.
 
+### Counts and ranks follow filtering; whole-vault aggregates are the owner's
+
+Review queues (attention, activation, relation debt, stale, contradiction) decide each finding's page and related pages before fusion, so ranks, scores, totals and summaries are computed over what the caller receives. `inbound-links` counts the links it lists after deciding their source pages. The relation queue counts the source pages it decided; when more visible pages exist than its cap it reports truncation without an unscanned count.
+
+A whole-vault aggregate cannot be recomputed from a filtered result: an audit, a registry inferred from the corpus (directly, or as the corpus side of a diff), the activation coverage block and the relation queue's coverage block. Under a governed policy these are served to the owner only, as the relation census is (`egress.owner_only_aggregate`); every other bound audience receives `available: false` and `reason: "audience_restricted"`, decided from the principal and the policy before anything is read.
+
+Recall diagnostics are computed over the whole corpus before release decisions: lane statuses, fusion weights, raw scores and the emit count (`explain`), per-lane ranks and graph in-degree (`signals`), and the keyword-fallback marker (`degraded`). A restricted caller does not receive them; its hits and their order are unchanged. The BM25 IDF and fusion-order residual among visible hits is a known limit.
+
 ### Controls
 
 - Dropping an entry, collapsing a folder, and answering a withheld write target as missing. What they prevent: a restricted caller learning that a withheld page exists, what it is called, or what it links, and a restricted writer changing it. Cost when they fire wrongly: a restricted caller misses an entry or cannot write a page it could not read either; that caller pays. The owner never pays: every one of these is `None` or `False` for the owner.
 - Entity creation when the only match is withheld proceeds, and the owner reconciles the duplicate later. That trade-off is accepted: the alternative answers differently for a withheld entity and an absent one.
+- The `audience_restricted` refusal of whole-vault aggregates. What it prevents: audit findings, inferred counts, denominators and coverage that move with pages the caller may not see. Cost when it fires wrongly: a restricted caller receives no aggregate, which is owner work under a governed policy. That caller pays; the owner and every caller under an empty policy are served as before.
+- Hiding recall diagnostics from a restricted caller. What it prevents: lane and rank numbers that reveal whether a withheld page matched. Cost when it fires wrongly: a restricted caller cannot inspect ranking; the hits are unchanged. The owner keeps every diagnostic.
+- A call no surface bound is not decided by these filters, as the owner is not. Every surface binds a principal before the dispatcher, whose entry filter still decides what an unbound call may read.
 
 ## Risks / Trade-offs
 

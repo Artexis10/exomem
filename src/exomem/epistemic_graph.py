@@ -6167,6 +6167,7 @@ class EpistemicGraphIndex:
         page and item caps and before anything is counted.
         """
         from . import context_refs, relation_queue, review_state, semantic_contract
+        from .governance import egress as egress_module
 
         page_cap = min(50, max(0, int(limit_pages)))
         item_cap = min(64, max(0, int(limit_per_page)))
@@ -6190,7 +6191,13 @@ class EpistemicGraphIndex:
                 "coverage": {"eligible_pages": 0, "relation_scan_complete": False},
             }
         try:
-            coverage_row = conn.execute(
+            # Coverage reduces every eligible page, so under a governed policy
+            # it is the owner's: another audience is refused it before it is
+            # read, and its page totals below count only pages it was decided.
+            coverage_refusal = (
+                None if keep is None else egress_module.owner_only_aggregate(self.vault_root)
+            )
+            coverage_row = None if coverage_refusal is not None else conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(activation_connected), 0), "
                 "COALESCE(SUM(activation_typed_relations > 0), 0), "
                 "COALESCE(SUM(activation_connected = 1 "
@@ -6202,7 +6209,7 @@ class EpistemicGraphIndex:
                 "COALESCE(SUM(activation_unregistered), 0) "
                 "FROM graph_nodes WHERE kind = 'file' AND review_eligible = 1"
             ).fetchone()
-            coverage = dict(
+            coverage = {} if coverage_row is None else dict(
                 zip(
                     (
                         "eligible_pages",
@@ -6218,7 +6225,7 @@ class EpistemicGraphIndex:
                     strict=True,
                 )
             )
-            eligible_total = coverage["eligible_pages"]
+            eligible_total = coverage.get("eligible_pages", 0)
             source_query = (
                 "SELECT n.path, n.title, n.source_hash, n.activation_signal_version, "
                 "n.exomem_id, CASE WHEN n.exomem_id IS NULL THEN 0 ELSE "
@@ -6227,6 +6234,7 @@ class EpistemicGraphIndex:
                 "FROM graph_nodes n WHERE n.kind = 'file' AND n.review_eligible = 1 "
                 "ORDER BY n.activation_priority, n.path"
             )
+            decided_all = True
             if keep is None:
                 source_rows = conn.execute(
                     f"{source_query} LIMIT ?", (source_cap + 1,)
@@ -6239,7 +6247,12 @@ class EpistemicGraphIndex:
                     if keep(str(row[0])):
                         source_rows.append(row)
                         if len(source_rows) > source_cap:
+                            decided_all = False
                             break
+                # The caller's eligible total is known when every source was
+                # decided; otherwise it exceeds the cap, which is all the
+                # truncation flag needs.
+                eligible_total = len(source_rows)
             selected_rows = source_rows[:source_cap]
             selected = [str(row[0]) for row in selected_rows]
             if not selected or page_cap == 0 or item_cap == 0:
@@ -6256,7 +6269,8 @@ class EpistemicGraphIndex:
                         "placeholder_target": 0,
                         "decided": 0,
                     },
-                    "coverage": {
+                    "coverage": coverage_refusal
+                    or {
                         **coverage,
                         "relation_pages_scanned": 0,
                         "relation_candidate_pages_found": 0,
@@ -7020,6 +7034,9 @@ class EpistemicGraphIndex:
                     "relation_scan_complete": False,
                 },
             }
+        unscanned = {"pages_unscanned": max(0, eligible_total - pages_scanned)}
+        if not decided_all:
+            unscanned = {}  # more visible pages than the cap; not counted
         return {
             "status": "available",
             "mode": "relation-queue",
@@ -7029,10 +7046,11 @@ class EpistemicGraphIndex:
             "pages_shown": len(groups),
             "pages_scanned": pages_scanned,
             "pages_truncated": pages_truncated,
-            "pages_unscanned": max(0, eligible_total - pages_scanned),
+            **unscanned,
             "items_truncated": items_truncated,
             "filtered": filtered,
-            "coverage": {
+            "coverage": coverage_refusal
+            or {
                 **coverage,
                 "relation_pages_scanned": pages_scanned,
                 "relation_candidate_pages_found": len(groups),
