@@ -8,7 +8,14 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from . import entity_types, get_page, memory_refs, relation_registry, vocabulary_evidence
+from . import (
+    entity_types,
+    get_page,
+    memory_refs,
+    relation_registry,
+    vault,
+    vocabulary_evidence,
+)
 from .governance import egress
 from .governance.policy import DISCLOSURE_MAX
 from .governance.principal import effective_principal
@@ -125,12 +132,17 @@ def _validate_live_choice(vault_root: Path, item: WorkItem, decision: Mapping[st
         )
 
 
-def _path(item: Mapping[str, Any], ref: str) -> str:
-    # Hints locate point reads; they never authorize them or establish identity.
+def _path(vault_root: Path, item: Mapping[str, Any], ref: str) -> str:
+    # Hints locate point reads; they never authorize them or establish identity,
+    # and a hint that leaves the vault locates nothing.
     path = item.get("paths", {}).get(ref, ref)
     if not isinstance(path, str) or "://" in path:
         raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work")
-    return path
+    try:
+        _abs, rel = vault.resolve_under_vault(vault_root, path)
+    except vault.VaultPathError as exc:
+        raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work") from exc
+    return rel
 
 
 def _visible(vault_root: Path, item: Mapping[str, Any]) -> bool:
@@ -144,14 +156,15 @@ def _visible(vault_root: Path, item: Mapping[str, Any]) -> bool:
         return False
     try:
         return all(
-            egress.release_level_for(vault_root, _path(item, ref)) == DISCLOSURE_MAX for ref in refs
+            egress.release_level_for(vault_root, _path(vault_root, item, ref)) == DISCLOSURE_MAX
+            for ref in refs
         )
     except (ValueError, OSError):
         return False
 
 
 def _read(vault_root: Path, item: Mapping[str, Any], ref: str) -> dict[str, Any]:
-    path = _path(item, ref)
+    path = _path(vault_root, item, ref)
     if egress.release_level_for(vault_root, path) != DISCLOSURE_MAX:
         raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work")
     try:
