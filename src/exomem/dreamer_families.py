@@ -47,9 +47,14 @@ _INACTIVE_STATUSES = frozenset({"superseded", "archived", "draft", "planned", "d
 class Deferred(Exception):
     """A page cannot be processed right now (a derived read is unavailable).
 
-    Not a failure: the tick stops, the page stays pending, and the next tick
-    retries it. Raised instead of proposing from a partial view.
+    Not a failure: the tick skips the page, which stays pending behind the
+    pages that can run, and a later tick retries it. Raised instead of
+    proposing from a partial view. `reason` is a closed code status reports.
     """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 @dataclass
@@ -79,7 +84,7 @@ class Context:
 
             conn = epistemic_graph.EpistemicGraphIndex(self.vault_root)._open_read_snapshot()
             if conn is None:
-                raise Deferred("graph unavailable")
+                raise Deferred("graph_unavailable")
             self._graph.append(conn)
         return self._graph[0]
 
@@ -239,6 +244,15 @@ def _authored_between(ctx: Context, page: Any, other: Any) -> bool:
     return False
 
 
+def _identity_wait(vault_root: Path) -> str:
+    """Why exact relation refs are unavailable: a cold cache, or a stale one."""
+    from . import semantic_contract
+
+    if semantic_contract.current_reference_identity_snapshot(vault_root) is None:
+        return "identity_cache_cold"
+    return "identity_unavailable"
+
+
 def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
     """The open relation proposals whose source page is `rel_path`, by relation id."""
     from . import activation, epistemic_graph, relation_queue, review_state
@@ -266,7 +280,7 @@ def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
             continue
         refs = relation_queue._hinted_candidate_refs(ctx.vault_root, candidate, snapshot=snapshot)
         if refs is None:
-            raise Deferred("reference identity unavailable")
+            raise Deferred(_identity_wait(ctx.vault_root))
         reason, enriched = relation_queue._classify_candidate(
             ctx.vault_root,
             page,

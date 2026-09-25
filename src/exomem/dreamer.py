@@ -76,6 +76,8 @@ class TickResult:
     wall: float
     cpu: float
     error_code: str | None = None
+    #: Why pages were held this tick (a closed code), or None.
+    waiting: str | None = None
 
 
 class CpuLedger:
@@ -284,9 +286,9 @@ def _loop_once(vault_root: Path, clock: Clock) -> float:
             _STATE.waiting_reason = None
             _STATE.waiting_since = None
         result = run_once(vault_root, clock=clock, should_stop=_stop.is_set)
-        # A tick that found nothing to do waits a full poll, not a duty cycle.
-        idle = result.stop_reason in {"idle", "drained"} and not result.processed
-        sleep = policy.POLL_SECONDS if idle else policy.sleep_after_tick(result.wall)
+        # A tick that moved nothing forward (nothing to do, or only pages that
+        # cannot run yet) waits a full poll, not a duty cycle.
+        sleep = policy.sleep_after_tick(result.wall) if result.processed else policy.POLL_SECONDS
     with _LOCK:
         _STATE.loops += 1
     return sleep
@@ -391,6 +393,8 @@ def run_once(
     started_cpu = clock.thread_time()
     started_real = _time.monotonic()
     processed: list[str] = []
+    held: list[str] = []
+    waiting: str | None = None
     stop_reason = "drained"
     error_code: str | None = None
     store = dreamer_store.DreamerStore(vault_root)
@@ -432,14 +436,22 @@ def run_once(
                     break
                 try:
                     _process(store, conn, vault_root, rel, now=clock.time())
-                except dreamer_families.Deferred:
-                    stop_reason = "deferred"
-                    break
+                except dreamer_families.Deferred as deferred:
+                    # Not now: the page stays pending, behind the pages that can run.
+                    with store.write(conn):
+                        store.pending_hold(conn, rel)
+                    held.append(rel)
+                    waiting = deferred.reason
+                    continue
                 processed.append(rel)
             else:
+                if held and not processed:
+                    stop_reason = "deferred"
                 # More pending than this tick took, or subjects a changed page
                 # just queued: the next tick continues rather than idling.
-                if work.remaining > len(processed) or (processed and store.pending_count(conn) > 0):
+                elif work.remaining > len(processed) or (
+                    processed and store.pending_count(conn) > 0
+                ):
                     stop_reason = "pages"
             now = clock.time()
             delivered = _record_deliveries(store, conn)
@@ -478,6 +490,7 @@ def run_once(
         stop=stop_reason,
         error_code=error_code,
         cpu=cpu,
+        waiting=waiting,
     )
     if conn is not None:
         conn.close()
@@ -488,6 +501,7 @@ def run_once(
         wall=wall,
         cpu=cpu,
         error_code=error_code,
+        waiting=waiting,
     )
 
 
@@ -533,6 +547,7 @@ def _record_tick(
     stop: str,
     error_code: str | None,
     cpu: float,
+    waiting: str | None = None,
 ) -> None:
     now_mono = clock.monotonic()
     with _LOCK:
@@ -551,7 +566,16 @@ def _record_tick(
         else:
             state.consecutive_failures = 0
             state.failed_since = None
-        state.phase = "failed" if state.consecutive_failures >= policy.FAILED_AFTER else "idle"
+        if waiting is None:
+            state.waiting_reason = None
+            state.waiting_since = None
+        elif state.waiting_reason != waiting:
+            state.waiting_reason = waiting
+            state.waiting_since = clock.time()
+        if state.consecutive_failures >= policy.FAILED_AFTER:
+            state.phase = "failed"
+        else:
+            state.phase = "idle" if waiting is None else "waiting"
         health = _health_locked(now_mono)
     if conn is None or stop == "idle":
         return
@@ -573,6 +597,8 @@ def _health_locked(now_mono: float) -> dict[str, Any]:
     state = _STATE
     return {
         "state": state.phase,
+        "waiting_reason": state.waiting_reason,
+        "waiting_since": state.waiting_since,
         "last_tick_at": state.last_tick_at,
         "last_stop_reason": state.last_stop_reason,
         "last_error_code": state.last_error_code,

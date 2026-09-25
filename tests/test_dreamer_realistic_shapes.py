@@ -252,3 +252,84 @@ def test_a_requeued_subject_does_not_requeue_its_neighbours(
     assert processed[0] == fx.SOURCE_ONE
     assert len(processed) == len(set(processed)) <= 5
     assert _pending(vault) == []
+
+
+# ----------------------------------------------------------------------
+# F2: a page that cannot run yet is held, visibly, without spinning
+# ----------------------------------------------------------------------
+
+
+def _seen(vault: Path) -> set[str]:
+    store = dreamer_store.DreamerStore(vault)
+    conn = store.connect()
+    try:
+        return {str(row[0]) for row in conn.execute("SELECT path FROM seen")}
+    finally:
+        conn.close()
+
+
+def test_a_cold_identity_cache_holds_its_pages_and_lets_the_rest_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Id-bearing pages and a cold identity cache, as after a restart with no
+    # write since: the suites disable the corpus-context cache.
+    monkeypatch.setenv("EXOMEM_DREAMER", "on")
+    vault = fx.build_realistic(tmp_path)
+    results = [dreamer.run_once(vault, budget=dreamer.Budget(pages=1)) for _ in range(10)]
+    assert all(result.stop_reason != "error" for result in results), results
+    held = set(_pending(vault))
+    assert held and held <= {fx.CAVITATION, fx.SEAL_WEAR, fx.INLET, fx.ENTITY}, held
+    # The pages queued behind the held ones were not starved.
+    assert {fx.SOURCE_ONE, fx.SOURCE_TWO, fx.SOURCE_THREE} <= _seen(vault)
+    last = results[-1]
+    assert last.processed == () and last.stop_reason == "deferred", last
+    status = dreamer.status(vault)
+    assert status["state"] == "waiting", status
+    assert status["waiting_reason"] == "identity_cache_cold", status
+    assert status["sidecar"]["waiting_reason"] == "identity_cache_cold", status
+
+    # Once the cache is warm the held pages go through and the reason clears.
+    fx.warm_identity(vault, monkeypatch)
+    _quiet(vault)
+    assert _pending(vault) == []
+    assert held <= _seen(vault)
+    assert dreamer.status()["waiting_reason"] is None
+
+
+def test_a_held_pass_ticks_at_most_once_per_poll(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import dreamer_policy
+
+    poll = 1.0
+    monkeypatch.setattr(dreamer_policy, "IDLE_SECONDS", 0.5)
+    monkeypatch.setattr(dreamer_policy, "SETTLE_FLOOR_SECONDS", 0.5)
+    monkeypatch.setattr(dreamer_policy, "settle_seconds", lambda _last: 0.5)
+    monkeypatch.setattr(dreamer_policy, "POLL_SECONDS", poll)
+    monkeypatch.setattr(dreamer_policy, "MIN_SLEEP_SECONDS", 0.1)
+    monkeypatch.setenv("EXOMEM_DREAMER", "on")
+    vault = fx.build_realistic(tmp_path)
+    ticks: list[tuple[float, object]] = []
+    real = dreamer.run_once
+
+    def counted(*args, **kwargs):
+        result = real(*args, **kwargs)
+        ticks.append((time.monotonic(), result))
+        return result
+
+    monkeypatch.setattr(dreamer, "run_once", counted)
+    dreamer.start(vault)
+    try:
+        time.sleep(6.0)
+    finally:
+        dreamer.stop(timeout=5)
+    stalled = [result for _at, result in ticks if not result.processed]
+    assert stalled, ticks
+    gaps = [
+        later_at - at
+        for (at, result), (later_at, _later) in zip(ticks, ticks[1:])
+        if not result.processed
+    ]
+    print(f"\nHELD ticks={len(ticks)} stalled={len(stalled)} gaps={[round(g, 2) for g in gaps]}")
+    assert all(gap >= poll * 0.9 for gap in gaps), gaps
+    assert dreamer.status()["waiting_reason"] == "identity_cache_cold"

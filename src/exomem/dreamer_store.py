@@ -35,7 +35,7 @@ from .state_paths import vault_state_dir
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SIDECAR_NAME = "dreamer.sqlite"
 
 #: Past this size the global-count families disable themselves (`capacity`)
@@ -65,7 +65,8 @@ _CODE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _TABLES = (
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)",
     "CREATE TABLE IF NOT EXISTS seen (path TEXT PRIMARY KEY, sig TEXT NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS pending (path TEXT PRIMARY KEY)",
+    # `held` orders a page that could not run yet behind the rest of the queue.
+    "CREATE TABLE IF NOT EXISTS pending (path TEXT PRIMARY KEY, held INTEGER NOT NULL DEFAULT 0)",
     """
     CREATE TABLE IF NOT EXISTS candidates (
         id TEXT PRIMARY KEY, family TEXT NOT NULL, kind TEXT NOT NULL,
@@ -356,9 +357,14 @@ class DreamerStore:
         return [
             str(row[0])
             for row in conn.execute(
-                "SELECT path FROM pending ORDER BY path LIMIT ?", (max(0, int(limit)),)
+                "SELECT path FROM pending ORDER BY held, path LIMIT ?", (max(0, int(limit)),)
             )
         ]
+
+    @staticmethod
+    def pending_hold(conn: sqlite3.Connection, path: str) -> None:
+        """Keep `path` pending, behind every page that can run now."""
+        conn.execute("UPDATE pending SET held=1 WHERE path=?", (path,))
 
     @staticmethod
     def pending_remove(conn: sqlite3.Connection, path: str) -> None:
