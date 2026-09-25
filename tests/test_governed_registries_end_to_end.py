@@ -138,3 +138,94 @@ def test_end_to_end_on_a_vault_with_no_products_or_systems_folder(
     assert generation.get("roles_hash") == effective_roles.roles_hash
     assert generation.get("conventions_source") == "vault"
     assert generation.get("conventions_hash") == effective_conventions.conventions_hash
+
+
+# --------------------------------------------------------------------------- #
+# Task 5.4: the vault-owned registries change activation only. `find` and
+# `ask_memory` answer every input byte for byte the same with a conventions
+# override, a roles override, a learned referential cue and a learned name in
+# place as without them.
+# --------------------------------------------------------------------------- #
+
+
+_RECALL_INPUTS = (
+    "Cargo Sled constraints",
+    "who coordinates the northern corridor",
+    "continue",
+    "weiter",
+    "Schlitten",
+    "depot ledger winter schedule",
+)
+
+
+def _recall_outputs(root: Path) -> list[str]:
+    import json
+
+    from exomem import find as find_module
+
+    find_module.clear_cache()
+    outputs = []
+    for query in _RECALL_INPUTS:
+        for result in (
+            commands.op_find(root, query=query),
+            commands.op_ask_memory(root, query=query),
+        ):
+            payload = dict(result) if isinstance(result, dict) else {"result": result}
+            payload.pop("timings", None)
+            payload.pop("due_state", None)
+            outputs.append(json.dumps(payload, sort_keys=True, default=str))
+    return outputs
+
+
+def test_find_and_ask_memory_are_unchanged_by_the_activation_registries(vault: Path) -> None:
+    from test_working_set_index import _seed_planning, _seed_structure
+
+    from exomem import lexstore
+    from exomem.vault import content_hash
+
+    root = vault
+    _seed_structure(root)
+    _seed_planning(root)
+    lexstore.ensure_fresh(root)
+    context_roles.clear_cache()
+    ac.clear_cache()
+    sled = "Knowledge Base/Products/Cargo Sled.md"
+    # The learned name is written first, so both runs read the same page bytes.
+    commands.op_edit_memory(
+        root,
+        path=sled,
+        why="the user calls it this",
+        operation={
+            "kind": "patch_frontmatter",
+            "field": "learned_aliases",
+            "value": ["Schlitten"],
+            "expected_hash": content_hash((root / sled).read_text(encoding="utf-8")),
+        },
+    )
+    lexstore.ensure_fresh(root)
+    before = _recall_outputs(root)
+
+    commands.op_schema_memory(
+        root,
+        subject="activation-conventions",
+        operation="save-conventions",
+        proposal={
+            "schema_version": 1,
+            "anchors": {"resource": {"add_folders": ["Notes/Insights"]}},
+            "stopwords": {"add": ["northern"]},
+            "referential": {"add_cues": ["weiter"]},
+        },
+        why="parity check",
+        expected_hash=ac.load_conventions(root).content_hash,
+    )
+    commands.op_schema_memory(
+        root,
+        subject="context-roles",
+        operation="save-roles",
+        proposal={"schema_version": 1, "roles": {"constraints": {"add_cues": ["ceiling"]}}},
+        why="parity check",
+        expected_hash=context_roles.load_roles(root).roles_hash,
+    )
+    lexstore.ensure_fresh(root)
+
+    assert _recall_outputs(root) == before
