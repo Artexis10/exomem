@@ -273,8 +273,12 @@ def _compare_with_known_findings(report: Report, path: Path, only: set[int] | No
         message = (step.failure or {}).get("message", "")
         entry = known.get(step.number)
         # A listed step passes the check only when it fails for the listed
-        # reason: the same step failing any other way is a regression.
-        expected = entry is not None and step.status == "failed" and entry["match"] in message
+        # reason: the same step failing any other way is a regression. A step
+        # that joins several problems with "; " is listed with each_problem,
+        # so a new problem riding beside the known one is still caught.
+        expected = entry is not None and step.status == "failed" and all(
+            entry["match"] in part for part in (message.split("; ") if entry.get("each_problem") else [message])
+        )
         if step.status != "passed" and not expected:
             unexpected.append({"step": step.number, "status": step.status, "message": message[:300]})
         if step.status == "passed" and entry is not None:

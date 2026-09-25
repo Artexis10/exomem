@@ -22,6 +22,7 @@ upstream Dockerfiles themselves.
 from __future__ import annotations
 
 import datetime as dt
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -253,8 +254,12 @@ def build_cellctl_image(run_id: str, workdir: Path, *, mode: str) -> str:
         present = set(
             run(["docker", "run", "--rm", "--entrypoint", "ls", base, site]).stdout.split()
         )
+        # Metadata goes by distribution name too, so a resolve that picks a
+        # different version of something the base has leaves no second
+        # dist-info claiming it.
+        base_dists = {_dist_name(name) for name in present if name.endswith(".dist-info")}
         for entry in list(extra.iterdir()):
-            if entry.name in present:
+            if entry.name in present or (entry.name.endswith(".dist-info") and _dist_name(entry.name) in base_dists):
                 shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
         dockerfile = f"FROM {base}\nCOPY extra {site}\n"
     else:
@@ -267,6 +272,11 @@ def build_cellctl_image(run_id: str, workdir: Path, *, mode: str) -> str:
     (context / "Dockerfile").write_text(dockerfile, encoding="utf-8")
     run(["docker", "build", "--tag", tag, str(context)], timeout=900)
     return tag
+
+
+def _dist_name(dist_info: str) -> str:
+    """`Foo_Bar-1.2.dist-info` -> `foo-bar` (PEP 503 normalization)."""
+    return re.sub(r"[-_.]+", "-", dist_info.split("-", 1)[0]).lower()
 
 
 def load_into_k3s(k3s_container: str, tag: str) -> str:

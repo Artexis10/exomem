@@ -188,6 +188,7 @@
   - step 10: follows from step 9.
 
   Capture p95 was 2.05 s against its 1 s target. All other targets were met: provisioning 19.6 s, upgrade 48.0 s, warm `initialize` p95 0.017 s, `tools/list` p95 0.057 s, cited recall p95 0.71 s.
+- [ ] 5.4 A manual dispatch of the `Cloud rehearsal` workflow on `main`, with the cell image built from `Dockerfile --target cloud`, writes a valid report with `outcome.gates_node` true. P4 does not start until it does.
 
 ## 6. Node deployment and owner acceptance (P4)
 

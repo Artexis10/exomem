@@ -72,7 +72,7 @@ def test_harness_check_fails_only_on_unknown_findings(tmp_path: Path) -> None:
         json.dumps({"steps": {
             "3": {"match": "isPkceVerifier", "owner": "o"},
             "9": {"match": "x", "owner": "o"},
-            "10": {"match": "A-side cross-recall is unverified", "owner": "o"},
+            "10": {"match": "A-side cross-recall is unverified", "owner": "o", "each_problem": True},
         }}),
         encoding="utf-8",
     )
@@ -86,6 +86,17 @@ def test_harness_check_fails_only_on_unknown_findings(tmp_path: Path) -> None:
     # Step 5 is not listed; step 10 is listed but failed for another reason.
     assert [item["step"] for item in result["unexpected"]] == [5, 10]
     assert [item["step"] for item in result["resolved_known_findings"]] == [9]
+
+    # A new isolation problem joined beside the known one is not hidden.
+    run.steps[9].failure = {"message": "tenant B recalled tenant A's note; tenant A's cell answers 503 "
+                            "CELL_NOT_READY, so the A-side cross-recall is unverified (see step 9)"}
+    assert 10 in [item["step"] for item in _compare_with_known_findings(run, baseline, None)["unexpected"]]
+    run.steps[9].failure = {"message": "tenant A's cell answers 503 CELL_NOT_READY, so the A-side "
+                            "cross-recall is unverified (see step 9)"}
+    assert 10 not in [item["step"] for item in _compare_with_known_findings(run, baseline, None)["unexpected"]]
+    # Without each_problem a message's own "; " is not a separator (step 3's is prose).
+    run.steps[2].failure = {"message": "the endpoint refuses it (isPkceVerifier: ...); the SDK draws ..."}
+    assert 3 not in [item["step"] for item in _compare_with_known_findings(run, baseline, None)["unexpected"]]
 
 
 def test_the_shipped_baseline_parses() -> None:
@@ -200,3 +211,10 @@ def test_the_lock_dir_overlay_matches_the_runtime_exactly_once() -> None:
         pytest.skip("the runtime fix is on this branch; the probe will skip the overlay")
     assert source.count(build.LOCK_DIR_ANCHOR) == 1
     compile(source.replace(build.LOCK_DIR_ANCHOR, build.LOCK_DIR_REPLACEMENT), "vault.py", "exec")
+
+
+def test_dist_info_is_matched_by_distribution_name() -> None:
+    from cloud_rehearsal.build import _dist_name
+
+    assert _dist_name("urllib3-2.5.0.dist-info") == _dist_name("urllib3-2.2.3.dist-info")
+    assert _dist_name("python_dateutil-2.9.0.dist-info") == "python-dateutil"
