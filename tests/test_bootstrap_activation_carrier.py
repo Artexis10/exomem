@@ -30,9 +30,12 @@ from exomem import commands, prominence
 #: The ceiling the change's spec sets for the line, in served-JSON bytes.
 CARRIER_MAX_BYTES = 220
 #: The compact profile's ceiling and the margin its own test warns below
-#: (`tests/test_bootstrap_compact_budget.py`, which records why the margin is 400).
+#: (`tests/test_bootstrap_compact_budget.py`, which records why the margin is 512).
 COMPACT_BYTE_CEILING = 63_300
-HEADROOM_WARNING_BYTES = 400
+HEADROOM_WARNING_BYTES = 512
+#: `maximal` gets its own, smaller floor rather than none at all -- see the
+#: rationale beside `BUDGET_SURFACES` below.
+MAXIMAL_HEADROOM_WARNING_BYTES = 256
 
 CARRYING_LEVELS = ("balanced", "maximal")
 SILENT_LEVELS = ("off", "light")
@@ -153,17 +156,30 @@ def test_the_line_costs_at_most_its_budget_in_served_json() -> None:
 
 
 #: The two surfaces that differ in what compact serves, and every engagement
-#: level. Measured 2026-09-18 with the carrier line in place, `(default surface,
-#: claude-code)` headroom: off 2,755/2,746 · light 2,471/2,462 ·
-#: balanced 557/548 · maximal 192/183.
+#: level. Measured 2026-09-25 after the compact-bootstrap redundancy trim, with
+#: the carrier line in place, `(default surface, claude-code)` headroom:
+#: off 2,862/2,853 · light 2,578/2,569 · balanced 664/655 · maximal 299/290.
 #:
-#: The two assertions below are deliberately not the same assertion. The HARD
+#: The three assertions below are deliberately not the same assertion. The HARD
 #: ceiling is a claim about every level, because a payload over it is a payload a
-#: client truncates. The WARNING margin is a claim about the DEFAULT
-#: level only: `maximal` exists in order to spend prose budget, and it was
-#: already inside the warning band before this change (375 bytes at base), so
-#: requiring the margin there would be requiring `maximal` not to be `maximal`.
-#: Which level is the default is asserted below rather than assumed.
+#: client truncates. The two WARNING margins are narrower claims, one per level
+#: that gets one.
+#:
+#: `maximal` used to get no margin at all: it exists to spend prose budget, and
+#: an earlier version of this docstring argued that requiring headroom there
+#: would be requiring `maximal` not to be `maximal`. That left `maximal`'s
+#: warning band unmeasured, and it is the level `close-memory-loop`'s
+#: `episode_memory` command quietly ran down to 82/73 bytes before anyone
+#: noticed -- the ceiling test still passed the whole time, because 82 bytes is
+#: still under it. `MAXIMAL_HEADROOM_WARNING_BYTES` closes that gap at half of
+#: the default level's floor: small enough that `maximal` can still carry
+#: prose the other levels do not, large enough that the NEXT unmeasured
+#: addition warns before it becomes another silent 82-byte close call.
+#:
+#: The DEFAULT level keeps the larger floor, because it is what an install with
+#: no stored preference actually resolves through, and it is the case most
+#: additions are written and measured against. Which level is the default is
+#: asserted below rather than assumed.
 BUDGET_SURFACES = (None, "claude-code")
 
 
@@ -223,6 +239,24 @@ def test_the_default_level_is_the_one_the_margin_is_claimed_for() -> None:
     claiming something this change did not establish."""
     assert prominence.DEFAULT_PROMINENCE == "balanced"
     assert prominence.DEFAULT_PROMINENCE in CARRYING_LEVELS
+
+
+@pytest.mark.parametrize("surface", BUDGET_SURFACES)
+def test_the_maximal_level_keeps_a_headroom_floor(
+    monkeypatch: pytest.MonkeyPatch, surface: str | None
+) -> None:
+    """`maximal` is allowed a thinner margin than the default level, not none:
+    see the rationale beside `MAXIMAL_HEADROOM_WARNING_BYTES` above."""
+    payload = _compact_for(monkeypatch, level="maximal", surface=surface)
+    size = len(json.dumps(payload))
+    headroom = COMPACT_BYTE_CEILING - size
+
+    assert prominence.ACTIVATION_CARRIER_LINE in json.dumps(payload["engagement"])
+    assert headroom >= MAXIMAL_HEADROOM_WARNING_BYTES, (
+        f"compact bootstrap at maximal on {surface or 'the default surface'} is "
+        f"{size:,} bytes with {headroom:,} bytes of headroom; maximal must leave "
+        f"at least {MAXIMAL_HEADROOM_WARNING_BYTES:,}"
+    )
 
 
 def test_a_hook_capable_client_is_not_a_separate_worst_case(

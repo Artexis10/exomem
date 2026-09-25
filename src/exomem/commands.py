@@ -1275,8 +1275,8 @@ def op_bootstrap(
                 "Records silently infer goals, success, failure, or personal judgments."
             ),
             "manual_first": (
-                "Canonical Records remain ordinary editable files; direct human edits and "
-                "work without an agent are supported product paths."
+                "Canonical Records remain ordinary editable files; manual edits without "
+                "Exomem are a supported path."
             ),
             "template_rule": (
                 "Templates are ordinary editable entry scaffolds; collection schema and "
@@ -1313,8 +1313,8 @@ def op_bootstrap(
             "uncommitted commitment, unknown health, and inbox horizon."
         ),
         "manual_first": (
-            "Canonical Planning remains ordinary editable Markdown; direct human edits and "
-            "work without an agent are supported product paths."
+            "Canonical Planning remains ordinary editable Markdown; manual edits without "
+            "Exomem are a supported path."
         ),
         "template_independence": (
             "Templates are optional editable scaffolds; Planning schema and validation do not "
@@ -1380,8 +1380,8 @@ def op_bootstrap(
             ),
             "state_the_expectation_first": (
                 "Write down what you expect before the answer arrives. A durable "
-                "expectation about a future observation is a prediction unit with a "
-                "check_by date; an expectation recorded afterwards proves nothing."
+                "expectation is a prediction unit with a check_by date; an expectation "
+                "recorded afterwards proves nothing."
             ),
             "judge_categorically": (
                 "Close a claim with one word from the outcome vocabulary below. This "
@@ -1424,10 +1424,10 @@ def op_bootstrap(
             },
         },
         "capture_nudge": (
-            "When the user states a durable expectation about a future observation, "
-            "capture it then as a prediction unit with a check_by date. Left in prose, "
-            "or in the assistant's own short-term memory, nothing can ever check it. "
-            "Skip passing speculation; capture what the user would want held to."
+            "When the user states a durable expectation, capture it then as a "
+            "prediction unit with a check_by date. Left in prose, or in the "
+            "assistant's own short-term memory, nothing can ever check it. Skip "
+            "passing speculation; capture what the user would want held to."
         ),
         "capture_the_outcome": (
             "When a concrete method was actually carried out and the user reports the "
@@ -1678,7 +1678,10 @@ def op_bootstrap(
                 # and it matters MOST here: the block arrives unasked on a
                 # hookless client's ordinary write response, and that client has
                 # no detector-aware skill behind it.
-                "capture_sweep_handling": "a `capture_sweep` block on a write response means this is the first durable write after a quiet interval: make one bounded pass over the recent exchange for anything else worth keeping, judged by whether it would materially improve a later decision, lookup, repeated task, comparison or continuation. Its `consider` list is examples, not a closed set; `written_recently` is what not to write again, and `unpaged_mentions` names what the page reached for without a page. You decide: write what qualifies in the user's own language, and say nothing when nothing does",
+                # The "worth keeping" bar is the same one `engagement.contract.capture`
+                # spells out in full (a later decision, lookup, repeated task,
+                # comparison or continuation); it is not repeated here.
+                "capture_sweep_handling": "a `capture_sweep` block on a write response means this is the first durable write after a quiet interval: make one bounded pass over the recent exchange for anything else worth keeping. Its `consider` list is examples, not a closed set; `written_recently` is what not to write again, and `unpaged_mentions` names what the page reached for without a page. You decide: write what qualifies in the user's own language, and say nothing when nothing does",
                 "review_reason": "every review decision records WHY as a closed code: lead the `why` with intentional:, false_positive:, handled:, deferred:, or too_frequent: followed by the free text. Anything else records unspecified",
                 "family_disposition": "when the user asks to stop hearing about a KIND of signal, quiet that family rather than lowering prominence, which silences everything: triage_memory(ref='exomem://review/family/<family>', action='quiet'|'off'|'normal', why='<code>: ...'). quiet drops it from the default review union and every carrier; off also drops it from explicit category review; normal restores it",
                 "family_disposition_reading": "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists the registered family vocabulary, what is quiet and why, and the delegation envelope beside it, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due",
