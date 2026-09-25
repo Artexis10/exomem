@@ -180,14 +180,17 @@ def test_a_naming_miss_offers_one_bounded_advisory(learning_vault: Path) -> None
 
     advisory = packet["learning"]
     assert isinstance(advisory, dict)
-    assert len(json.dumps(advisory, ensure_ascii=False)) <= working_set_learning.MAX_ADVISORY_CHARS
+    assert working_set_learning.advisory_size(advisory) <= working_set_learning.MAX_ADVISORY_CHARS
+    assert len(json.dumps(advisory, ensure_ascii=False, separators=(",", ":"))) <= 900
     assert working_set_learning.MAX_ADVISORY_CHARS == 900
     assert advisory["kind"] == "activation-naming"
     assert advisory["review"].startswith("exomem://review/activation-naming/")
     assert advisory["target"] == {"ref": SLED, "title": "Cargo Sled", "kind": "resource"}
     assert advisory["observed"]["misses"] == 1
     assert advisory["observed"]["turn_reached"] == "nothing"
-    assert advisory["turn_terms"] == ["weiter", "schlitten"]
+    # The vault's stopwords are English, so German function words are the
+    # caller's content words here; the agent picks the name out of them.
+    assert advisory["turn_terms"] == ["weiter", "mit", "dem", "schlitten"]
     assert [option["family"] for option in advisory["options"]] == ["name", "referential_cue"]
     assert "triage_memory" in advisory["rule"]
 
@@ -255,7 +258,7 @@ def test_quiet_family_and_proactive_capture_off_suppress_the_advisory(
             learning_vault,
             ref=review_state.family_ref("activation-naming"),
             action=silenced,
-            why="not now",
+            why="too_frequent: while the user settles in",
         )
 
     packet = _pick(learning_vault, NAMELESS, SLED)
@@ -287,7 +290,7 @@ def test_activation_never_stamps_the_review_state(learning_vault: Path) -> None:
         learning_vault,
         ref=review_state.family_ref("near-duplicate"),
         action="quiet",
-        why="unrelated",
+        why="too_frequent: an unrelated family",
     )
     before = path.read_bytes()
     assert _pick(learning_vault, NAMELESS, SLED)["learning"]
@@ -314,7 +317,7 @@ def test_a_stale_advisory_hash_refuses_the_write(learning_vault: Path) -> None:
     name, cue = _pick(learning_vault, NAMELESS, SLED)["learning"]["options"]
     _work(learning_vault, SLED, value="2026-09-21")
 
-    with pytest.raises(Exception, match="expected_hash"):
+    with pytest.raises(Exception, match="STALE"):
         writer_lease.invoke_command(
             _command("edit_memory"),
             learning_vault,

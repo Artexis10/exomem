@@ -136,6 +136,7 @@ from . import workflow_skills as workflow_skills_module
 from . import working_set as working_set_module
 from . import working_set_heat as working_set_heat_module
 from . import working_set_index as working_set_index_module
+from . import working_set_learning as working_set_learning_module
 from . import working_set_runtime as working_set_runtime_module
 from .command_surface import (
     DESTRUCTIVE_OPS,  # noqa: F401 - re-exported for server.py
@@ -6574,6 +6575,20 @@ def _op_activate_context_body(
     if token:
         packet["continuity"] = token
     if anchor:
+        # The pick is also the learning sensor (close-memory-loop step 5):
+        # classified after the guard admitted it and BEFORE it is recorded as
+        # heat, against the profile this request compiled with. Its advisory
+        # rides on this response only, like `episode_due`: never cached,
+        # never part of the key, and nothing it names is written.
+        learning = working_set_learning_module.observe_pick(
+            vault_root,
+            turn=turn,
+            packet=packet,
+            profile=working_set_heat_module.profile(vault_root),
+            attribution=attribution,
+        )
+        if learning is not None:
+            packet["learning"] = learning
         # The agent's admitted choice is a deliberate act (design D6): after the
         # guard, so a refused or withheld pick never reaches here. Serving a
         # packet is never heat; only this seam and the read and citation seams
@@ -8729,6 +8744,15 @@ def op_triage_memory(
         )
     if corpus_aware_module.is_write_advisory_ref(ref):
         return corpus_aware_module.triage_write_advisory(
+            vault_root,
+            ref=ref,
+            action=action,
+            until=until,
+            why=why,
+            expected_fingerprint=expected_fingerprint,
+        )
+    if working_set_learning_module.is_advisory_ref(ref):
+        return working_set_learning_module.triage(
             vault_root,
             ref=ref,
             action=action,

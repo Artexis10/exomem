@@ -242,12 +242,14 @@ def registered_families() -> frozenset[str]:
     """
     from . import attention as attention_module
     from . import corpus_aware as corpus_aware_module
+    from . import working_set_learning as working_set_learning_module
     from .vocabulary_notifications import REVIEW_FAMILIES
 
     return frozenset(
         {
             *attention_module._TRIAGEABLE_CATEGORIES,
             *corpus_aware_module._WRITE_ADVISORY_KINDS,
+            *working_set_learning_module._ADVISORY_KINDS,
             *REVIEW_FAMILIES.values(),
         }
     )
