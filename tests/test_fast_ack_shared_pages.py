@@ -632,3 +632,82 @@ def test_reconcile_keeps_a_batch_stranded_while_the_lanes_lack_its_bytes(
         vault, converge=index_sync.converge_paths_from_current_bytes
     ) == {"stranded": 1, "retired": 0, "remaining": 1}
     assert [state for _id, state, _paths in _batches(vault)] == ["reconcile_required"]
+
+
+# --------------------------------------------------------------------------- #
+# Diagnosis (owner ruling R4): a committed-uncertain acknowledgement says why
+# --------------------------------------------------------------------------- #
+
+
+def test_a_failed_acknowledgement_logs_a_content_free_cause(
+    live_catalogue: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The log names the class, the stage and the proof outcome, and no path."""
+    vault = live_catalogue
+    title = "Uncertain cause probe"
+
+    def unprovable(root, receipt, *, current_generation, **_kwargs):
+        return derived_receipts.DerivedBatchProof(
+            batch_id=receipt.batch_id,
+            outcome="reconcile_required",
+            canonical_generation=current_generation,
+            path_states=(),
+            ready_components=(),
+        )
+
+    monkeypatch.setattr(derived_receipts, "prove_committed", unprovable)
+
+    def leaf(vault_root: Path, **_surface_kwargs):
+        result = note_module.note(
+            vault_root,
+            content=f"# {title}\n\nBody.",
+            note_type="insight",
+            title=title,
+            status="draft",
+        )
+        return {"path": result.path, "warnings": list(result.warnings)}
+
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "lease-state")
+    )
+    with caplog.at_level("WARNING", logger="exomem.writer_lease"):
+        terminal = manager.invoke(
+            SimpleNamespace(name="remember", leaf=leaf, read_only=False),
+            (vault,),
+            {"response_detail": "compact"},
+            idempotency_key=None,
+            mutation_request_id=str(uuid.uuid4()),
+        )
+
+    # The persisted terminal degrades to pending derived work; it never claims
+    # the derived custody was proven.
+    assert terminal["status"] == "committed", terminal
+    assert terminal["derived_sync"] == "pending", terminal
+    [record] = [
+        r for r in caplog.records if "fast acknowledgement failed" in r.getMessage()
+    ]
+    message = record.getMessage()
+    assert "class=RuntimeError" in message
+    assert "stage=receipt_proof" in message
+    assert "outcome=reconcile_required" in message
+    assert "Knowledge Base" not in message and "uncertain-cause-probe" not in message
+
+
+def test_the_cause_fragment_keeps_only_closed_tokens() -> None:
+    """A code or field that is not a closed token is dropped, never echoed."""
+
+    class Coded(Exception):
+        code = "PATH_GUARD_CHANGED"
+
+    class Leaky(Exception):
+        code = "Knowledge Base/Notes/secret.md"
+
+    assert writer_lease._content_free_cause(
+        Coded(), stage="receipt_proof", component="lexstore", outcome=None
+    ) == "class=Coded code=PATH_GUARD_CHANGED stage=receipt_proof component=lexstore"
+    assert writer_lease._content_free_cause(
+        Leaky("Knowledge Base/Notes/secret.md"), stage="Knowledge Base/x.md"
+    ) == "class=Leaky"

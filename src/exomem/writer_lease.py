@@ -754,6 +754,27 @@ def _acknowledge_derived_batches(
         )
 
 
+_CLOSED_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+_CLOSED_TOKEN = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def _content_free_cause(error: BaseException, **fields: str | None) -> str:
+    """One log fragment naming a failure without any vault content.
+
+    The exception class and, when it carries one, a closed upper-case code; then
+    each named field, kept only when it is a closed lower-case token. Messages,
+    paths and argument values never appear.
+    """
+    code = getattr(error, "code", None)
+    parts = [f"class={type(error).__name__}"]
+    if isinstance(code, str) and _CLOSED_CODE.fullmatch(code):
+        parts.append(f"code={code}")
+    for name, value in fields.items():
+        if isinstance(value, str) and _CLOSED_TOKEN.fullmatch(value):
+            parts.append(f"{name}={value}")
+    return " ".join(parts)
+
+
 def _acknowledgement_component_names() -> tuple[str, ...]:
     """The derived components one acknowledgement is answerable for.
 
@@ -783,6 +804,9 @@ def _acknowledge_derived_batches_timed(
     # a multi-batch mutation. A failure before any status is read owes the whole
     # set, which is the honest answer -- nothing about them was proven.
     owed: dict[str, set[str]] = {}
+    # Where the acknowledgement was when it failed, for a content-free log:
+    # closed stage names, a component name and a proof outcome, never a path.
+    where: dict[str, str | None] = {"stage": "setup", "component": None, "outcome": None}
 
     def still_owed() -> tuple[str, ...] | None:
         """What is owed, or None when no batch was examined at all.
@@ -822,12 +846,14 @@ def _acknowledge_derived_batches_timed(
                 _current_canonical_generation(session.vault_root)
                 or receipt.canonical_generation
             )
+            where.update(stage="receipt_proof", component=None, outcome=None)
             with call_spans.span("derived.receipt_proof"):
                 proof = derived_receipts.prove_committed(
                     session.vault_root,
                     receipt,
                     current_generation=observed_generation,
                 )
+            where["outcome"] = proof.outcome
             if proof.batch_id != receipt.batch_id or proof.canonical_replay_authorized:
                 raise RuntimeError("derived receipt proof does not match this batch")
             if proof.outcome == "superseded":
@@ -841,6 +867,7 @@ def _acknowledge_derived_batches_timed(
                 raise RuntimeError(
                     "derived receipt did not prove the committed generation"
                 )
+            where["stage"] = "pending_visibility"
             with call_spans.span("derived.pending_visibility"):
                 published = derived_receipts.publish_pending_visibility(
                     session.vault_root,
@@ -849,6 +876,7 @@ def _acknowledge_derived_batches_timed(
                 )
             if not published:
                 raise RuntimeError("pending visibility publication was not proven")
+            where["stage"] = "signal"
             derived_receipts.signal_components(session.vault_root, receipt)
 
         for batch in session.batches:
@@ -860,6 +888,7 @@ def _acknowledge_derived_batches_timed(
             owed[receipt.batch_id] = batch_owed
             statuses = []
             for component in derived_receipts.DerivedComponent:
+                where.update(stage="component_status", component=component.value)
                 status = derived_receipts.component_status(
                     session.vault_root, receipt, component
                 )
@@ -871,6 +900,7 @@ def _acknowledge_derived_batches_timed(
                     statuses.append(status)
                     continue
                 if status.state == "claimed":
+                    where["stage"] = "component_wait"
                     status = _wait_for_derived_component(
                         session.vault_root,
                         receipt,
@@ -945,13 +975,14 @@ def _acknowledge_derived_batches_timed(
     except _PostCommitOutcomeUncertain:
         raise
     except Exception as error:
-        # Name the class only in the log -- never the message, which can carry
-        # a path. The caller's terminal names the derived components instead:
-        # an exception class tells a reader nothing about what is behind.
+        # Content-free cause (owner ruling R4): the exception class, a closed
+        # code, the stage, the component and the proof outcome -- never the
+        # message, which can carry a path. The caller's terminal names the
+        # derived components owed.
         logger.warning(
             "fast acknowledgement failed; the persisted terminal degrades to "
             "derived_sync=pending (%s)",
-            type(error).__name__,
+            _content_free_cause(error, **where),
         )
         uncertain = _PostCommitOutcomeUncertain()
         uncertain.derived_components = still_owed()
@@ -4321,6 +4352,11 @@ class LeaseManager:
                     _ACTIVE_MUTATION_COMMITTED.get()
                     and getattr(error, "committed", None) is not True
                 ):
+                    logger.warning(
+                        "committed mutation raised after its canonical commit; the "
+                        "terminal is committed-uncertain (%s)",
+                        _content_free_cause(error, stage="post_commit_leaf"),
+                    )
                     raise _PostCommitOutcomeUncertain() from error
                 raise
             finally:
@@ -4625,6 +4661,11 @@ class LeaseManager:
                     }
                 return result
             except Exception as error:
+                logger.warning(
+                    "graph commit evidence could not be persisted; the terminal is "
+                    "committed-uncertain (%s)",
+                    _content_free_cause(error, stage="graph_commit_evidence"),
+                )
                 raise _PostCommitOutcomeUncertain() from error
 
         def exact_commit_evidence(
