@@ -413,6 +413,15 @@ spec:
           (!has(v.projected) || !has(v.projected.sources) ||
             v.projected.sources.all(s, has(s.configMap) || has(s.secret) || has(s.downwardAPI))))
       message: cellctl may run only pod templates whose volumes are persistentVolumeClaim, emptyDir, secret, configMap, downwardAPI or projected, with no CSI inline volume, and whose projected volume sources are configMap, secret or downwardAPI.
+    # 4d. ...and they run only in a namespace labelled for its own cell, the
+    # label that puts it inside the isolation policy's namespaceSelector. An
+    # exo-cell-* namespace someone else made without it never takes a pod.
+    - expression: >-
+        !(request.resource.resource in ['statefulsets', 'jobs']) || request.operation == 'DELETE' ||
+        (namespaceObject != null && has(namespaceObject.metadata.labels) &&
+          'exomem.io/cloud-cell' in namespaceObject.metadata.labels &&
+          namespaceObject.metadata.labels['exomem.io/cloud-cell'] == variables.namespaceName.substring(9))
+      message: cellctl may run a StatefulSet or Job only in a namespace whose exomem.io/cloud-cell label names its own cell.
     # 4c. ...and none of them may pick its node, runtime or priority, or
     # rewrite name resolution. cellctl renders no scheduling constraints. A StatefulSet may not carry its own
     # volumeClaimTemplates: the cell's one PVC is rendered separately.

@@ -184,6 +184,7 @@ Server-side apply is idempotent, so a duplicate pass after a crash is harmless. 
   Namespaced rights are bound cluster-wide, because the namespaces are created at runtime.
 - **Admission.** One `ValidatingAdmissionPolicy`, bound to requests from cellctl's ServiceAccount, confines those rights. Its `matchConstraints` cover every resource and subresource with `resources: ["*/*"]`. Kubernetes rejects `"*/*"` listed alongside anything else, and `"*"` alone would miss subresources. It denies:
   - any write outside a namespace named `exo-cell-<16 base32>`;
+  - a StatefulSet or Job in a namespace whose `exomem.io/cloud-cell` label does not name its own cell, so an `exo-cell-*` namespace someone else made without it never takes a pod;
   - namespace create or update without the `exomem.io/cloud-cell` label naming its own cell, or without the Pod Security `restricted` labels for `enforce`, `audit` and `warn`, or with an `enforce-version` other than the platform's pinned Pod Security version (the one every platform namespace and cellctl's renderer use), so a cell namespace can never be relabelled to an older, weaker version;
   - any container image not matching `<configured cell repository>@sha256:<64 hex>`;
   - any pod template, in a StatefulSet or a Job, that does not set `automountServiceAccountToken: false`, that has a volume other than `persistentVolumeClaim`, `emptyDir`, `secret`, `configMap`, `downwardAPI` or `projected` (an allowlist, so `csi`, `ephemeral` and `image` volumes are denied), that has a projected volume source other than `configMap`, `secret` or `downwardAPI` (an allowlist, so `serviceAccountToken`, `podCertificate` and `clusterTrustBundle` are all denied), or that sets `nodeName`, `nodeSelector`, `affinity`, `tolerations`, `runtimeClassName`, `priorityClassName` or `hostAliases` (cellctl renders no scheduling constraints); and a StatefulSet with its own `volumeClaimTemplates`;
@@ -376,7 +377,7 @@ Each step retries until its check holds. A failed observation never counts as ab
 
 ### D11. Direct TLS ingress
 
-- **Exposure.** The platform Traefik exposes only its `websecure` entrypoint on the node's port 443 through `hostPort`. servicelb stays disabled, and `web` is never exposed.
+- **Exposure.** The platform Traefik exposes only its `websecure` entrypoint on the node's port 443 through `hostPort`. servicelb stays disabled, and `web` is never exposed on a node port; it stays on the ClusterIP Service the Cloudflare tunnel targets, and `websecure` is not added to that Service.
 - **Certificates.** cert-manager obtains the MCP hostname's certificate with an ACME DNS-01 solver through a Cloudflare DNS-edit token, so certificates live in Secrets and need no volume. The issuer is a namespaced `Issuer` in `exomem-cloud`, not a `ClusterIssuer`, and its solver is restricted with `selector.dnsNames` to the MCP hostname, so no other namespace can mint names in the zone with the DNS-edit token. The Cloudflare record is DNS-only.
 - **Firewall.** The Hetzner firewall opens 443 and admin SSH.
 - **Public routes.** Only the gateway's IngressRoute is public. Cells, cellctl and the Kubernetes API are not.

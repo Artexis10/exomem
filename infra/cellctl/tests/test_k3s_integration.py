@@ -1099,6 +1099,23 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
     assert "exomem-cellctl-isolation" in denied_fresh_statefulset.stderr, denied_fresh_statefulset.stderr
     _kubectl(k3s.name, ["delete", "namespace", fresh_namespace, "--wait=false"])
 
+    # Security LOW: an exo-cell-* namespace someone else made without the cell
+    # label is outside the isolation selector, so cellctl may not run a pod there.
+    print("[3.10] scenario: admission denies a Job in an unlabelled exo-cell namespace another party made")
+    stray_namespace = namespace_name(_cell_id())
+    stray = copy.deepcopy(forged_namespace)
+    stray["metadata"]["name"] = stray_namespace
+    _kubectl(k3s.name, ["create", "--filename=-"], documents=[stray])
+    stray_job = copy.deepcopy(fresh_job)
+    stray_job["metadata"]["namespace"] = stray_namespace
+    denied_stray = _kubectl(
+        k3s.name, ["create", "--dry-run=server", "--filename=-", f"--as={cellctl_username}"],
+        documents=[stray_job], check=False,
+    )
+    assert denied_stray.returncode != 0
+    assert "exomem.io/cloud-cell label names its own cell" in denied_stray.stderr, denied_stray.stderr
+    _kubectl(k3s.name, ["delete", "namespace", stray_namespace, "--wait=false"])
+
     print("[3.10] scenario: admission denies deleting default-deny")
     denied_delete = _kubectl(
         k3s.name,

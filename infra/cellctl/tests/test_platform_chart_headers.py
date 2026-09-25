@@ -313,6 +313,10 @@ def test_cellctl_runs_a_pod_only_where_its_deny_all_default_deny_exists() -> Non
     scope = _find(documents, "ValidatingAdmissionPolicy", "exomem-cellctl-scope")
     expressions = " ".join(v["expression"] for v in scope["spec"]["validations"])
     assert "variables.labels['exomem.io/cloud-cell'] == variables.namespaceName.substring(9)" in expressions
+    # ...and runs a pod only in a namespace that carries it.
+    assert (
+        "namespaceObject.metadata.labels['exomem.io/cloud-cell'] == variables.namespaceName.substring(9)" in expressions
+    )
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
