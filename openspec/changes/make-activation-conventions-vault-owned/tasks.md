@@ -99,7 +99,7 @@
 - [x] 5.3 Latency gate: `working_set` stages within `CEIL_WORKING_SET_MS` at 2k and 8k
       notes with the shipped registry, with an override at the caps, and with one rule
       admitting a large folder (reported, not gated).
-- [ ] 5.4 Three-door parity (MCP, CLI, REST) still holds; `ask_memory` and `find`
+- [x] 5.4 Three-door parity (MCP, CLI, REST) still holds; `ask_memory` and `find`
       byte-identical for every input.
 - [ ] 5.5 Real-turn run on the owner's snapshot with the shipped registry: every
       negative turn still abstains and nothing is served from a partial anchor. Evidence
@@ -107,11 +107,23 @@
 
 ## 6. Delivery
 
-- [ ] 6.1 Scaffold skill reference: how an agent reads `generation`, diagnoses an
+- [x] 6.1 Scaffold skill reference: how an agent reads `generation`, diagnoses an
       abstention caused by uncovered conventions, validates and saves an override with
       the owner's approval.
-- [ ] 6.2 Regenerate derived artifacts (tool schemas and fingerprint, capabilities doc,
+- [x] 6.2 Regenerate derived artifacts (tool schemas and fingerprint, capabilities doc,
       plugin tree, hosted render, harness modules pin); `openspec validate --all
       --strict`; privacy gate; full sharded corpus at the delivery boundary.
 - [ ] 6.3 Independent review of the diff, then archive this change with
       `openspec archive` in the same delivery.
+
+## 7. Referential vocabulary and reversible history (close-memory-loop step 5)
+
+- [x] 7.1 A `referential` section: the shipped seed equals the lists previously in
+      `working_set_resolve`, the override adds and drops cues and filler words with
+      findings for unsound entries, and a turn digest separate from the index digest
+      joins only the packet cache key (`tests/test_activation_conventions_referential.py`).
+- [x] 7.2 Governed registry saves write a snapshot and a `log.md` entry with the
+      override; `history` and `restore` for both subjects
+      (`tests/test_schema_memory_governance_registries.py`).
+- [x] 7.3 The canonical `context-roles` requirement "Review-gated evolution" names the
+      owner's agent's reasoned, hash-guarded governed save as owner-authored.

@@ -63,10 +63,11 @@
 
 ## 7. Deliver governed adaptation and derived working context
 
-- [ ] 7.1 Connect capture/activation corrections to bounded review candidates for registered roles, cues and vault conventions; verify provenance, stale-candidate refusal, applicable authority and no hardcoded private domain logic.
+- [ ] 7.1 Connect activation corrections to bounded review candidates (step 5): the agent's pick is the sensor, a counted miss carries one advisory naming the existing writers for `learned_aliases` and referential cues; verify provenance, stale-candidate refusal, applicable authority, no persisted turn text and no hardcoded private domain logic.
 - [ ] 7.2 Apply a permitted correction through typed writers and consume it in a fresh session; verify reversible version history, improved behaviour and unchanged identity/provenance/abstention invariants.
 - [ ] 7.3 Implement the compact derived hot-profile projection with explicit budgets and source-version invalidation; verify correction, expiry, deletion, supersession and disclosure changes cannot leave a stale current profile.
 - [ ] 7.4 Add derived activation priors behind bounded ranking inputs; verify explicit anchors, ambiguity and current state remain authoritative, and report rare-anchor/popularity-trap negatives with usefulness and latency.
+- [ ] 7.5 Record capture and destination corrections through episode proposal revisions (with 3.8 and 3.9) and turn them into convention candidates through the dreamer carrier (with 8.2); verify provenance, stale-candidate refusal and applicable authority.
 
 ## 8. Deliver bounded consolidation and evaluate optional verifiers
 

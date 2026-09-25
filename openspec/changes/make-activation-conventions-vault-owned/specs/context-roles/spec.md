@@ -83,3 +83,25 @@ SHALL write the registry.
 #### Scenario: A stale hash refuses the save
 - **WHEN** the registry changed after the agent read it
 - **THEN** the save is refused and nothing is written
+
+## MODIFIED Requirements
+
+### Requirement: Review-gated evolution
+Changes to the role vocabulary, category sets or cue table SHALL happen only through
+a shipped registry revision or an explicit vault override authored by the owner.
+Authored by the owner includes a reasoned, hash-guarded save made through
+`schema_memory` by the owner's agent; it never includes a server component acting on
+its own. No server component SHALL mutate the registry, and any proposal to extend it
+(for example from a consolidation sensor or an activation-correction advisory) SHALL
+only propose, entering a review surface rather than the registry. The registry hash
+SHALL be part of the packet's `generation` block so a change in roles is visible in
+every packet built from it.
+
+#### Scenario: Registry hash changes with the registry
+- **WHEN** a vault override adds a cue pattern
+- **THEN** the next packet's `generation.roles_hash` differs from the previous one
+
+#### Scenario: An advisory proposes and the agent's governed save writes
+- **WHEN** a learning advisory names `schema_memory` as the writer for a correction
+- **THEN** nothing changes until the owner's agent saves a reviewed proposal with a
+  reason and the current hash, and a proposal with a stale hash is refused

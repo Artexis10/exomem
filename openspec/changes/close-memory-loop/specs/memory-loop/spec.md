@@ -645,11 +645,12 @@ which a recorded act — an edit, a read, a pick, a citation or an episode — o
 previous packet's own answer may establish task relevance, and it SHALL be
 bounded by every condition below.
 
-A turn SHALL be referential only when it speaks one of the declared referential
-cues, matched on whole tokens rather than as a substring of a longer word, AND
-says nothing else: once the matched cue words, function words and one closed,
-declared set of filler words that refer to the work without naming it are
-removed, no word SHALL remain. A turn that speaks a cue word in its ordinary
+A turn SHALL be referential only when it speaks one of the cues of the effective
+referential vocabulary — the shipped seed as extended or narrowed by the vault's
+activation conventions — matched on whole tokens rather than as a substring of a
+longer word, AND says nothing else: once the matched cue words, function words
+and the effective vocabulary's closed set of filler words that refer to the work
+without naming it are removed, no word SHALL remain. A turn that speaks a cue word in its ordinary
 sense or names anything besides it ("update my resume", "check the status of my
 flight", "what's next for <a page>") SHALL NOT be referential, and a turn SHALL
 NOT be referential merely because it is short. Recency evidence SHALL

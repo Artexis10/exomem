@@ -114,8 +114,10 @@ the shipped registry. Every packet SHALL carry `generation.conventions_source`
   `generation.conventions_source = "shipped"` with a finding naming the failure
 
 ### Requirement: A conventions edit rebuilds the sidecar
-The conventions digest SHALL be taken over the effective conventions, the values in
-force after bounds and findings are applied. It SHALL be stored in the activation sidecar, and a sidecar whose
+The conventions index digest SHALL be taken over the effective conventions the index
+is built from — anchors, skip folders, state and date fields, stopwords and the rarity
+threshold — the values in force after bounds and findings are applied, and never over
+the referential vocabulary. It SHALL be stored in the activation sidecar, and a sidecar whose
 stored digest differs from the effective one SHALL be wiped and rebuilt exactly as on a
 schema-version mismatch, whether or not any vault file changed. The digest SHALL be part
 of the packet cache key and of the continuity token's payload, so that no packet built
@@ -140,8 +142,10 @@ under the previous conventions is served and a token minted under them reports `
 `schema_memory` SHALL accept the subject `activation-conventions` to validate a proposed
 override and return its findings, diff it against the effective registry, and save a
 reviewed proposal under an expected-hash guard with a stated reason through the
-dedicated operation `save-conventions`. The save SHALL refuse a proposal that has any
-finding and SHALL write only the override file; `infer` SHALL be refused for this
+dedicated operation `save-conventions`. The expected hash SHALL cover the whole
+registry, index values and referential vocabulary together. The save SHALL refuse a
+proposal that has any finding and SHALL write only the override file and the history
+the governed-save history requirement names; `infer` SHALL be refused for this
 subject. The hosted gateway SHALL allow these calls while the
 generic file tools remain refused for the schema folder.
 
@@ -158,3 +162,53 @@ generic file tools remain refused for the schema folder.
 #### Scenario: Findings come back before anything is written
 - **WHEN** an agent validates a proposal holding one rejected folder rule
 - **THEN** the response lists the finding and nothing is written
+
+### Requirement: Referential cues and filler are a vault-extendable seed
+The words that make a turn referential SHALL be vault data: a `referential` section of
+the activation conventions, whose shipped seed lists the cues and the closed filler set,
+and whose override grammar SHALL accept `add_cues`, `drop_cues`, `add_filler` and
+`drop_filler`. Product code SHALL hold no referential word list. An added cue SHALL
+tokenise to at least one word that is neither a stopword nor an effective filler word; a
+filler entry SHALL be exactly one token; a `drop_*` entry SHALL name a shipped entry;
+entries SHALL be at most 64 characters, with at most 64 added cues and 128 added filler
+words; an entry MAY be a mapping carrying only `value`, `why`, `at` and `evidence`. Any
+violation SHALL be a finding, which the governed save refuses. The referential vocabulary
+SHALL have its own turn digest, which SHALL join the packet cache key and
+`generation.conventions_turn_hash` and SHALL NOT wipe the anchor sidecar or enter the
+continuity token.
+
+#### Scenario: The seed equals the previous lists
+- **WHEN** a vault has no referential override
+- **THEN** every turn is referential exactly when it was before the lists moved
+
+#### Scenario: A learned cue costs no rebuild
+- **WHEN** an agent adds a cue through `save-conventions`
+- **THEN** a turn made only of that cue is referential, the anchor sidecar keeps its
+  generation, a continuity token minted before the save is not reported `stale`, and no
+  packet cached before the save is served for the turn
+
+#### Scenario: A cue with nothing of its own is refused
+- **WHEN** a proposal adds a cue made only of stopwords or filler words
+- **THEN** validation reports a finding and the save is refused
+
+#### Scenario: Narrowing is allowed
+- **WHEN** an override drops a shipped cue
+- **THEN** a turn made only of that cue is no longer referential
+
+### Requirement: Governed registry saves keep reversible history
+Every `save-roles` and `save-conventions` SHALL, in the same atomic batch as the
+override, snapshot the bytes it replaced under `_Schema/history/<registry>/` with the
+operation, the reason and both hashes, and prepend a `log.md` entry naming the reason
+and both hashes. The newest 20 snapshots SHALL be kept. `schema_memory` SHALL offer
+`history`, which lists the kept versions with their time, reason and hashes, and
+`restore`, which takes a `version`, a `why` and the current `expected_hash`, validates
+the version like a proposal and saves it as a governed save of its own.
+
+#### Scenario: A change is undone
+- **WHEN** an agent restores the version a save replaced
+- **THEN** the registry's hash equals its hash before that save and the restore is
+  itself listed in `history`
+
+#### Scenario: A stale restore is refused
+- **WHEN** the registry changed after the agent read its hash
+- **THEN** the restore is refused and nothing is written
