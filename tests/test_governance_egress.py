@@ -4971,3 +4971,37 @@ def test_owner_explain_labels_purpose_branches_before_conservative_meet(
     ]
     assert result["scope_contributions"][0]["option_values"] == {"abstract": "declared abstract"}
     assert result["scope_contributions"][1]["option_values"] == {}
+
+
+def test_a_page_named_in_many_fields_is_decided_once_per_payload(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The entry filter decides each page once, however many fields name it."""
+    from exomem.governance import lifecycle
+
+    page = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    _reset_caches()
+    seen: list[str] = []
+    real = lifecycle.is_tombstoned
+
+    def counted(vault_root: Path, rel_path: str) -> bool:
+        seen.append(rel_path)
+        return real(vault_root, rel_path)
+
+    monkeypatch.setattr(lifecycle, "is_tombstoned", counted)
+    payload = {
+        "items": [
+            {"path": page, "to": page, "from": page, "source_path": page, "target_path": page}
+            for _ in range(20)
+        ]
+    }
+
+    with request_scope(_external()):
+        kept = egress.filter_withheld_entries(vault, payload)
+
+    assert len(kept["items"]) == 20
+    # Resolving the reference, deciding it and the decision's own check: a
+    # constant per page, not one per field that names it.
+    assert seen.count(page) <= 3

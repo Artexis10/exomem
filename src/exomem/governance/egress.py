@@ -6113,14 +6113,16 @@ def filter_withheld_entries(
     def _permitted(rel_path: str) -> bool:
         """True when this vault item may be named. Non-vault paths are NOT
         decided here — see `_is_vault_item`."""
+        # A payload names the same page in many fields; decide it once per
+        # call. Every stored verdict already reflects the tombstone check.
+        cached = verdicts.get(rel_path)
+        if cached is not None:
+            return cached
         if lifecycle.is_tombstoned(vault_root, rel_path):
             verdicts[rel_path] = False
             return False
         if fail_closed:
             return False
-        cached = verdicts.get(rel_path)
-        if cached is not None:
-            return cached
         decision = _decide_path(
             vault_root,
             rel_path,
@@ -6146,6 +6148,8 @@ def filter_withheld_entries(
         return allowed
 
     resolved_items: dict[str, str | None] = {}
+    # One listing per directory per call: (exact names, first name per casefold).
+    listings: dict[Path, tuple[frozenset[str], dict[str, str]] | None] = {}
 
     def _resolve_vault_item(rel_path: str) -> str | None:
         """The real vault-relative path this reference names, or `None`.
@@ -6190,20 +6194,22 @@ def filter_withheld_entries(
         current = vault_root
         real: list[str] = []
         for part in parts:
-            folded = part.casefold()
-            exact: str | None = None
-            insensitive: str | None = None
-            try:
-                with os.scandir(current) as entries:
-                    for entry in entries:
-                        if entry.name == part:
-                            exact = entry.name
-                            break
-                        if insensitive is None and entry.name.casefold() == folded:
-                            insensitive = entry.name
-            except OSError:
+            if current not in listings:
+                try:
+                    with os.scandir(current) as entries:
+                        names = [entry.name for entry in entries]
+                except OSError:
+                    listings[current] = None
+                else:
+                    first: dict[str, str] = {}
+                    for name in names:
+                        first.setdefault(name.casefold(), name)
+                    listings[current] = (frozenset(names), first)
+            listing = listings[current]
+            if listing is None:
                 return None
-            match = exact if exact is not None else insensitive
+            exact_names, by_casefold = listing
+            match = part if part in exact_names else by_casefold.get(part.casefold())
             if match is None:
                 return None
             real.append(match)
