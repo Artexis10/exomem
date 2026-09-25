@@ -304,3 +304,22 @@ def test_cellctl_runs_a_pod_only_where_its_deny_all_default_deny_exists() -> Non
     assert binding["spec"]["validationActions"] == ["Deny"]
     assert binding["spec"]["paramRef"] == {"name": ISOLATION_PARAM_NAME, "parameterNotFoundAction": "Deny"}
     assert "matchResources" not in binding["spec"]
+    # The param is resolved before matchConditions, so the policy itself is
+    # scoped to cell namespaces; other controllers' Jobs never reach it.
+    assert policy["spec"]["matchConstraints"]["namespaceSelector"] == {
+        "matchExpressions": [{"key": "exomem.io/cloud-cell", "operator": "Exists"}]
+    }
+    # ...and the scope policy makes every namespace cellctl writes carry it.
+    scope = _find(documents, "ValidatingAdmissionPolicy", "exomem-cellctl-scope")
+    expressions = " ".join(v["expression"] for v in scope["spec"]["validations"])
+    assert "variables.labels['exomem.io/cloud-cell'] == variables.namespaceName.substring(9)" in expressions
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_cloudflare_tunnel_keeps_a_single_web_port_while_websecure_rides_hostport() -> None:
+    documents = _helm_template()
+    traefik = _find(documents, "Service", "platform-header-test-traefik")
+    assert [port["name"] for port in traefik["spec"]["ports"]] == ["web"]
+    deployment = _find(documents, "Deployment", "platform-header-test-traefik")
+    ports = {port["name"]: port for port in deployment["spec"]["template"]["spec"]["containers"][0]["ports"]}
+    assert ports["websecure"]["hostPort"] == 443

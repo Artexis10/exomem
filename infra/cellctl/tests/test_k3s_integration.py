@@ -1058,6 +1058,9 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
     fresh_namespace = namespace_name(_cell_id())
     fresh = copy.deepcopy(forged_namespace)
     fresh["metadata"]["name"] = fresh_namespace
+    # The scope policy requires the cell label, which is also what puts the
+    # namespace inside the isolation policy's namespaceSelector.
+    fresh["metadata"]["labels"]["exomem.io/cloud-cell"] = fresh_namespace.removeprefix("exo-cell-")
     _kubectl(k3s.name, ["create", "--filename=-", f"--as={cellctl_username}"], documents=[fresh])
     fresh_job = {
         "apiVersion": "batch/v1",

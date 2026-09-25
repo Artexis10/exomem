@@ -165,8 +165,10 @@ traefik:
       # overwrites X-Real-Ip with the peer address hostPort preserves; the
       # cloud gateway's own NetworkPolicy (cloud-gateway.yaml) is what makes
       # that header trustworthy, by admitting ingress only from these pods.
+      # Not added to the ClusterIP Service: hostPort is the only way in, and
+      # the tunnel keeps its single `web` port.
       expose:
-        default: true
+        default: false
       exposedPort: 443
       hostPort: 443
   providers:

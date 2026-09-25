@@ -370,13 +370,16 @@ spec:
     # Pod Security labels at the platform's pinned version (v1.35, as every
     # other platform namespace and cellctl's own renderer use), so cellctl can
     # never relabel a cell namespace to an older, weaker Pod Security version.
+    # It must also carry exomem.io/cloud-cell naming its own cell, which is
+    # what puts it inside the isolation policy's namespaceSelector.
     - expression: >-
         request.resource.resource != 'namespaces' || request.operation == 'DELETE' ||
-        (variables.labels['pod-security.kubernetes.io/enforce'] == 'restricted' &&
+        (variables.labels['exomem.io/cloud-cell'] == variables.namespaceName.substring(9) &&
+          variables.labels['pod-security.kubernetes.io/enforce'] == 'restricted' &&
           variables.labels['pod-security.kubernetes.io/audit'] == 'restricted' &&
           variables.labels['pod-security.kubernetes.io/warn'] == 'restricted' &&
           variables.labels['pod-security.kubernetes.io/enforce-version'] == 'v1.35')
-      message: cellctl may create or update a namespace only with the restricted Pod Security labels at enforce-version v1.35.
+      message: cellctl may create or update a namespace only with its exomem.io/cloud-cell label and the restricted Pod Security labels at enforce-version v1.35.
     # 3. Every container and init container image cellctl runs must be
     # digest-pinned from the configured cell repository.
     - expression: >-
@@ -557,6 +560,15 @@ spec:
     apiVersion: networking.k8s.io/v1
     kind: NetworkPolicy
   matchConstraints:
+    # The binding's param is resolved before matchConditions run, so without
+    # this every other controller's Job or StatefulSet in a namespace with no
+    # default-deny would be denied too. The scope policy requires every
+    # namespace cellctl creates or updates to carry this label, so a cell
+    # namespace can never fall outside it.
+    namespaceSelector:
+      matchExpressions:
+        - key: exomem.io/cloud-cell
+          operator: Exists
     resourceRules:
       - apiGroups: ["apps", "batch"]
         apiVersions: ["*"]
