@@ -1080,3 +1080,62 @@ def test_a_withheld_page_leaves_no_trace_in_a_guests_packet(heat_vault: Path) ->
     owner = _continue(heat_vault)
     assert owner["generation"]["hot_profile"] != absent["generation"]["hot_profile"]
 
+
+_MIN_NS = 60 * 1_000_000_000
+
+
+def test_a_guest_never_shares_the_owners_cache_entry(heat_vault: Path) -> None:
+    """Round 2 recheck (R2-A): a caller's own profile and a released view can
+    land on the same `HeatProfile.digest` when the withheld page falls
+    outside the digest's window (the top referent rows and vault contacts it
+    is built from). If the packet cache keyed only on that digest, an owner
+    request compiled first would leave its packet in the cache under an
+    identity a later guest request also computes -- serving the guest a
+    packet ranked from a page withheld from it, order-dependent on which
+    caller asked first. The owner call runs first here, and the packet cache
+    is never reset between it and the guest's, so a real collision would be
+    caught. The guest's packet must equal the twin compiled fresh, with the
+    packet cache reset right before it (review F2/R2-A: withheld equals
+    absent, including through the cache)."""
+    from exomem.governance.principal import owner_principal
+
+    probe = heat_vault / "Knowledge Base" / "Projects" / "Probe"
+    probe.mkdir(parents=True, exist_ok=True)
+    rels = []
+    for n in range(26):
+        page = probe / f"probe-page-{n:02d}.md"
+        page.write_text(f"# Probe page {n}\n\nA plain working page number {n}.\n", encoding="utf-8")
+        rels.append(str(page.relative_to(heat_vault)))
+    _continue(heat_vault)  # cold seed
+    _live(heat_vault)
+    lexstore.ensure_fresh(heat_vault)
+    working_set_runtime.reset_caches_for_tests()
+
+    now = time.time_ns()
+    events = [
+        working_set_heat.HeatEvent(now - 10 * _MIN_NS + n * 1_000_000_000, rel, "work", origin="edit_memory")
+        for n, rel in enumerate(rels)
+    ]
+    events.append(working_set_heat.HeatEvent(now - 60 * _MIN_NS, CARRY_PAGE, "read", origin="read"))
+    events.append(working_set_heat.HeatEvent(now - 90 * _MIN_NS, MARIT, "read", origin="read"))
+    assert working_set_heat.append(heat_vault, sorted(events))
+    write_scope(heat_vault, paths="Knowledge Base/Notes/Research/*", name="Research")
+    write_rule(heat_vault, ceiling=0)
+    _reset_caches()
+
+    # A fresh, correctly-filtered guest compile: the baseline every guest
+    # request must match, regardless of what else has been cached.
+    absent = _guest_continue(heat_vault)
+
+    # Now compile the owner's packet first (unfiltered, may rank CARRY_PAGE),
+    # then ask as the guest -- with NO packet-cache reset in between, so a
+    # digest collision would actually be exercised.
+    working_set_runtime.reset_caches_for_tests()
+    with request_scope(owner_principal(surface="mcp")):
+        _continue(heat_vault)
+    with request_scope(_external()):
+        guest = _continue(heat_vault)
+    guest = {key: value for key, value in guest.items() if key not in ("continuity", "timings")}
+
+    assert guest == absent
+

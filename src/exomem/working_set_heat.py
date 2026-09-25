@@ -640,6 +640,7 @@ def view_digest(
     *,
     marks: Mapping[str, SessionMark] | None = None,
     continuity_passed: bool = False,
+    released_paths: frozenset[str] | None = None,
 ) -> str:
     """The digest of what THIS caller's packet is compiled from: the vault
     digest alone for a caller with no keys, else that plus its own session
@@ -650,10 +651,22 @@ def view_digest(
     and a keyless duplicate of it (the hook's call, then the agent's) hit
     the same cache entry. Not with a continuity token: a keyed caller ranks
     it in its own session tier and a keyless one in the vault tier, so their
-    packets differ even when the keyed caller's tiers are empty (review F5)."""
+    packets differ even when the keyed caller's tiers are empty (review F5).
+
+    `released_paths` is the caller's released view's kept path set, passed
+    ONLY for a non-owner caller under a non-empty governed policy (`serve`
+    passes it whenever it ran `released_view`). It is folded in
+    unconditionally -- not only when it changes the digest -- so an owner's
+    packet, keyed on the unfiltered profile, can never collide with a
+    restricted caller's, even when the digest's own window (the top referent
+    rows and vault contacts) never reaches the withheld page (review R2-A)."""
     who = attribution or Attribution()
+    marker = ("non_owner", tuple(sorted(released_paths))) if released_paths is not None else None
     if not who.session and not who.workspace:
-        return profile.digest
+        if marker is None:
+            return profile.digest
+        material = repr((profile.digest, marker))
+        return hashlib.sha256(material.encode("utf-8", "surrogatepass")).hexdigest()[:16]
     scoped = [
         (lead.tier, lead.token, lead.groups[:4])
         for lead in leading(profile, attribution=who, marks=marks)
@@ -664,9 +677,9 @@ def view_digest(
         for item in recent(profile, attribution=who, marks=marks, limit=_DIGEST_CONTACTS)
         if item.tier != TIER_VAULT
     ]
-    if not scoped and not contacts and not (continuity_passed and who.session):
+    if not scoped and not contacts and not (continuity_passed and who.session) and marker is None:
         return profile.digest
-    material = repr((profile.digest, scoped, contacts))
+    material = repr((profile.digest, scoped, contacts, marker))
     return hashlib.sha256(material.encode("utf-8", "surrogatepass")).hexdigest()[:16]
 
 

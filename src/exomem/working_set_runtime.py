@@ -1173,7 +1173,8 @@ def serve(
         released = (
             _heat_release_filter(root, purpose=purpose) if keyed or not owner else None
         )
-        if released is not None and not owner:
+        restricted_view = released is not None and not owner
+        if restricted_view:
             # Withheld equals absent for heat (review F2): a caller other than
             # the owner ranks only the pages released to it, so another
             # audience's work on a page it may not see leaves no trace in its
@@ -1190,8 +1191,18 @@ def serve(
         except Exception:  # noqa: BLE001 - a thread that cannot be decided is not ranked
             log.warning("session thread visibility check failed; ranking none", exc_info=True)
             marks = {}
+        # A restricted caller's cache key always carries a non-owner marker
+        # plus a hash of its released view's kept paths (review R2-A), so an
+        # owner's packet -- keyed on the unfiltered profile's own digest --
+        # can never be served to it, even when the digest's own window never
+        # reaches the withheld page.
+        released_paths = frozenset(heat_profile.all_rows) if restricted_view else None
         heat_digest = working_set_heat.view_digest(
-            heat_profile, attribution, marks=marks, continuity_passed=continuity_passed
+            heat_profile,
+            attribution,
+            marks=marks,
+            continuity_passed=continuity_passed,
+            released_paths=released_paths,
         )
     key = cache_key(
         freshness_key=freshness_key,
