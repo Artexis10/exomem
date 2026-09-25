@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import uuid
+
 import asyncpg
 import pytest
 
-from .conftest import CellDatabase
+from .conftest import CellDatabase, insert_tenant
 
 
 async def test_generation_bumps_only_on_desired_column_change(cell_db: CellDatabase) -> None:
     owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
     try:
-        await owner.execute("INSERT INTO tenants (tenant_id) VALUES ('tenant-a')")
+        tenant = await insert_tenant(owner, "tenant-a")
         await owner.execute(
             "INSERT INTO exomem_cloud_cells (cell_id, tenant_id, desired_state) "
-            "VALUES ('aaaaaaaaaaaaaaaa', 'tenant-a', 'running')"
+            "VALUES ('aaaaaaaaaaaaaaaa', $1, 'running')",
+            tenant,
         )
         generation = await owner.fetchval(
             "SELECT generation FROM exomem_cloud_cells WHERE cell_id = 'aaaaaaaaaaaaaaaa'"
@@ -54,15 +57,17 @@ async def test_generation_bumps_only_on_desired_column_change(cell_db: CellDatab
 async def test_tenant_can_have_only_one_non_deleted_cell(cell_db: CellDatabase) -> None:
     owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
     try:
-        await owner.execute("INSERT INTO tenants (tenant_id) VALUES ('tenant-b')")
+        tenant = await insert_tenant(owner, "tenant-b")
         await owner.execute(
             "INSERT INTO exomem_cloud_cells (cell_id, tenant_id, desired_state) "
-            "VALUES ('bbbbbbbbbbbbbbbb', 'tenant-b', 'running')"
+            "VALUES ('bbbbbbbbbbbbbbbb', $1, 'running')",
+            tenant,
         )
         with pytest.raises(asyncpg.UniqueViolationError):
             await owner.execute(
                 "INSERT INTO exomem_cloud_cells (cell_id, tenant_id, desired_state) "
-                "VALUES ('cccccccccccccccc', 'tenant-b', 'running')"
+                "VALUES ('cccccccccccccccc', $1, 'running')",
+                tenant,
             )
     finally:
         await owner.close()
@@ -71,10 +76,11 @@ async def test_tenant_can_have_only_one_non_deleted_cell(cell_db: CellDatabase) 
 async def test_gateway_role_cannot_write_desired_state(cell_db: CellDatabase) -> None:
     owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
     try:
-        await owner.execute("INSERT INTO tenants (tenant_id) VALUES ('tenant-c')")
+        tenant = await insert_tenant(owner, "tenant-c")
         await owner.execute(
             "INSERT INTO exomem_cloud_cells (cell_id, tenant_id, desired_state) "
-            "VALUES ('dddddddddddddddd', 'tenant-c', 'running')"
+            "VALUES ('dddddddddddddddd', $1, 'running')",
+            tenant,
         )
     finally:
         await owner.close()
@@ -102,10 +108,11 @@ async def test_gateway_role_cannot_write_desired_state(cell_db: CellDatabase) ->
 async def test_cellctl_role_cannot_write_desired_columns(cell_db: CellDatabase) -> None:
     owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
     try:
-        await owner.execute("INSERT INTO tenants (tenant_id) VALUES ('tenant-d')")
+        tenant = await insert_tenant(owner, "tenant-d")
         await owner.execute(
             "INSERT INTO exomem_cloud_cells (cell_id, tenant_id, desired_state) "
-            "VALUES ('eeeeeeeeeeeeeeee', 'tenant-d', 'running')"
+            "VALUES ('eeeeeeeeeeeeeeee', $1, 'running')",
+            tenant,
         )
     finally:
         await owner.close()
@@ -123,3 +130,16 @@ async def test_cellctl_role_cannot_write_desired_columns(cell_db: CellDatabase) 
         )
     finally:
         await cellctl.close()
+
+
+async def test_a_cell_row_needs_an_existing_tenant(cell_db: CellDatabase) -> None:
+    owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
+    try:
+        with pytest.raises(asyncpg.ForeignKeyViolationError):
+            await owner.execute(
+                "INSERT INTO exomem_cloud_cells (cell_id, tenant_id, desired_state) "
+                "VALUES ('ffffffffffffffff', $1, 'running')",
+                uuid.uuid4(),
+            )
+    finally:
+        await owner.close()

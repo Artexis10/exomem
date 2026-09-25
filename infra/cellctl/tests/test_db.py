@@ -3,6 +3,7 @@ disposable Postgres with the C1-C1d fixture schema applied."""
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 
 import asyncpg
@@ -11,18 +12,18 @@ import pytest
 from cellctl import db
 from cellctl.secrets import generate_backup_data_key, unwrap_secret, wrap_secret
 
-from .conftest import CellDatabase
+from .conftest import CellDatabase, insert_tenant, tenant_uuid
 
 
 async def _seed_cell(cell_db: CellDatabase, cell_id: str, tenant_id: str) -> None:
     owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
     try:
-        await owner.execute("INSERT INTO tenants (tenant_id) VALUES ($1)", tenant_id)
+        tenant = await insert_tenant(owner, tenant_id)
         await owner.execute(
             "INSERT INTO exomem_cloud_cells (cell_id, tenant_id, desired_state) "
             "VALUES ($1, $2, 'running')",
             cell_id,
-            tenant_id,
+            tenant,
         )
     finally:
         await owner.close()
@@ -38,6 +39,19 @@ async def test_select_all_rows_returns_the_seeded_cell(cell_db: CellDatabase) ->
     assert [r.cell_id for r in rows] == ["aaaaaaaaaaaaaaaa"]
     assert rows[0].desired_state == "running"
     assert rows[0].observed_state is None
+
+
+async def test_select_all_rows_reads_tenant_id_as_the_tenants_uuid(cell_db: CellDatabase) -> None:
+    # C1's tenant_id is uuid REFERENCES exomem_tenants(id); asyncpg hands it
+    # back as uuid.UUID, never as text.
+    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    try:
+        rows = await db.select_all_rows(connection)
+    finally:
+        await connection.close()
+    assert isinstance(rows[0].tenant_id, uuid.UUID)
+    assert rows[0].tenant_id == tenant_uuid("tenant-a")
 
 
 async def test_write_observed_persists_through_the_cellctl_role(cell_db: CellDatabase) -> None:
@@ -197,7 +211,7 @@ async def test_read_cell_image_reads_the_settings_row(cell_db: CellDatabase) -> 
     owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
     try:
         await owner.execute(
-            "UPDATE exomem_cloud_settings SET value = to_jsonb($1::text) WHERE key = 'cell_image'",
+            "INSERT INTO exomem_cloud_settings (key, value) VALUES ('cell_image', to_jsonb($1::text)) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
             "registry.example/cell@sha256:" + "a" * 64,
         )
     finally:
@@ -237,7 +251,7 @@ async def test_a_cell_id_with_a_trailing_newline_is_skipped_when_the_row_is_read
     def record(cell_id: str) -> dict:
         values = {column: None for column in db.CELL_COLUMNS}
         values.update(
-            cell_id=cell_id, tenant_id="t", storage_gib=10, rollout_priority=1, desired_state="running", generation=1, ready=False
+            cell_id=cell_id, tenant_id=tenant_uuid("t"), storage_gib=10, rollout_priority=1, desired_state="running", generation=1, ready=False
         )
         return values
 

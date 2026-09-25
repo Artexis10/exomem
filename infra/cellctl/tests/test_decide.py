@@ -27,6 +27,8 @@ from cellctl.state import (
     RolloutRow,
 )
 
+from .conftest import tenant_uuid
+
 NOW = datetime(2026, 1, 1, 3, tzinfo=UTC)  # 03:00 UTC -- inside the default 02:00-05:00 backup window
 IMAGE_A = "registry.example/cell@sha256:" + "a" * 64
 IMAGE_B = "registry.example/cell@sha256:" + "b" * 64
@@ -38,7 +40,7 @@ CONFIG = ReconcileConfig()
 def row(**overrides) -> CellRow:
     defaults = dict(
         cell_id="aaaaaaaaaaaaaaaa",
-        tenant_id="tenant-a",
+        tenant_id=tenant_uuid("tenant-a"),
         storage_gib=10,
         rollout_priority=1,
         desired_state="running",

@@ -21,7 +21,7 @@ from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 from cellctl.storage.interface import VolumeInfo
 
-from .conftest import CellDatabase
+from .conftest import CellDatabase, insert_tenant, tenant_uuid
 
 IMAGE_A = "registry.example/cell@sha256:" + "a" * 64
 
@@ -114,15 +114,15 @@ def _cluster_config() -> reconcile.ClusterConfig:
 async def _seed_cell(cell_db: CellDatabase, cell_id: str, tenant_id: str, *, desired_state: str = "running") -> None:
     owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
     try:
-        await owner.execute("INSERT INTO tenants (tenant_id) VALUES ($1)", tenant_id)
+        tenant = await insert_tenant(owner, tenant_id)
         await owner.execute(
             "INSERT INTO exomem_cloud_cells (cell_id, tenant_id, desired_state) VALUES ($1, $2, $3)",
             cell_id,
-            tenant_id,
+            tenant,
             desired_state,
         )
         await owner.execute(
-            "UPDATE exomem_cloud_settings SET value = to_jsonb($1::text) WHERE key = 'cell_image'", IMAGE_A
+            "INSERT INTO exomem_cloud_settings (key, value) VALUES ('cell_image', to_jsonb($1::text)) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", IMAGE_A
         )
     finally:
         await owner.close()
@@ -254,7 +254,7 @@ async def test_deletion_runs_to_completion_across_passes(cell_db: CellDatabase) 
 def _row(**overrides: object) -> CellRow:
     defaults: dict[str, object] = dict(
         cell_id="aaaaaaaaaaaaaaaa",
-        tenant_id="tenant-a",
+        tenant_id=tenant_uuid("tenant-a"),
         storage_gib=10,
         rollout_priority=1,
         desired_state="deleted",
@@ -387,7 +387,7 @@ async def test_a_converged_ready_cell_is_still_considered_for_a_fresh_upgrade(
                 "UPDATE exomem_cloud_cells SET last_backup_at = $1 WHERE cell_id = $2", now, "aaaaaaaaaaaaaaaa"
             )
             await owner.execute(
-                "UPDATE exomem_cloud_settings SET value = to_jsonb($1::text) WHERE key = 'cell_image'", IMAGE_B
+                "INSERT INTO exomem_cloud_settings (key, value) VALUES ('cell_image', to_jsonb($1::text)) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", IMAGE_B
             )
         finally:
             await owner.close()
@@ -417,7 +417,7 @@ async def test_run_loop_wakes_on_an_insert_notification_for_a_fresh_row(
     owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
     try:
         await owner.execute(
-            "UPDATE exomem_cloud_settings SET value = to_jsonb($1::text) WHERE key = 'cell_image'", IMAGE_A
+            "INSERT INTO exomem_cloud_settings (key, value) VALUES ('cell_image', to_jsonb($1::text)) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", IMAGE_A
         )
     finally:
         await owner.close()
@@ -443,10 +443,11 @@ async def test_run_loop_wakes_on_an_insert_notification_for_a_fresh_row(
 
         owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
         try:
-            await owner.execute("INSERT INTO tenants (tenant_id) VALUES ('tenant-notify')")
+            tenant = await insert_tenant(owner, "tenant-notify")
             await owner.execute(
                 "INSERT INTO exomem_cloud_cells (cell_id, tenant_id, desired_state) "
-                "VALUES ('ffffffffffffffff', 'tenant-notify', 'running')"
+                "VALUES ('ffffffffffffffff', $1, 'running')",
+                tenant,
             )
         finally:
             await owner.close()
@@ -594,7 +595,7 @@ async def test_run_loop_reconnects_after_its_database_session_is_killed(
     owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
     try:
         await owner.execute(
-            "UPDATE exomem_cloud_settings SET value = to_jsonb($1::text) WHERE key = 'cell_image'", IMAGE_A
+            "INSERT INTO exomem_cloud_settings (key, value) VALUES ('cell_image', to_jsonb($1::text)) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", IMAGE_A
         )
     finally:
         await owner.close()
@@ -642,10 +643,11 @@ async def test_run_loop_reconnects_after_its_database_session_is_killed(
 
         owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
         try:
-            await owner.execute("INSERT INTO tenants (tenant_id) VALUES ('tenant-reconnect')")
+            tenant = await insert_tenant(owner, "tenant-reconnect")
             await owner.execute(
                 "INSERT INTO exomem_cloud_cells (cell_id, tenant_id, desired_state) "
-                "VALUES ('eeeeeeeeeeeeeeee', 'tenant-reconnect', 'running')"
+                "VALUES ('eeeeeeeeeeeeeeee', $1, 'running')",
+                tenant,
             )
         finally:
             await owner.close()
@@ -931,7 +933,7 @@ _NOW_DIGEST = datetime(2026, 1, 1, 12, tzinfo=UTC)
 def _clean_row(cell_id: str, **overrides: object) -> CellRow:
     defaults: dict[str, object] = dict(
         cell_id=cell_id,
-        tenant_id=f"tenant-{cell_id[0]}",
+        tenant_id=tenant_uuid(f"tenant-{cell_id[0]}"),
         storage_gib=10,
         rollout_priority=1,
         desired_state="running",
@@ -1093,7 +1095,7 @@ async def _pass(connection, cluster, now, secrets=None, memory=None) -> None:
 async def _set_cell_image(cell_db: CellDatabase, image: str) -> None:
     owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
     try:
-        await owner.execute("UPDATE exomem_cloud_settings SET value = to_jsonb($1::text) WHERE key = 'cell_image'", image)
+        await owner.execute("INSERT INTO exomem_cloud_settings (key, value) VALUES ('cell_image', to_jsonb($1::text)) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", image)
     finally:
         await owner.close()
 

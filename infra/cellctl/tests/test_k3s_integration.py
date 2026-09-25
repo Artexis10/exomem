@@ -468,7 +468,7 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
 
     cell_id = _cell_id()
     namespace = namespace_name(cell_id)
-    tenant_id = f"tenant-{uuid.uuid4().hex[:12]}"
+    tenant_id = uuid.uuid4()
     admin_dsn = cell_db.dsn(role="substrate_owner")
     app_dsn = cell_db.dsn(role="exomem_cellctl")
 
@@ -487,7 +487,7 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
             await connection.close()
 
     asyncio.run(
-        _exec_admin("INSERT INTO tenants (tenant_id) VALUES ($1)", tenant_id)
+        _exec_admin("INSERT INTO exomem_tenants (id) VALUES ($1)", tenant_id)
     )
     asyncio.run(
         _exec_admin(
@@ -498,7 +498,7 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
         )
     )
     asyncio.run(
-        _exec_admin("UPDATE exomem_cloud_settings SET value = $1 WHERE key = 'cell_image'", json.dumps(good_image))
+        _exec_admin("INSERT INTO exomem_cloud_settings (key, value) VALUES ('cell_image', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", json.dumps(good_image))
     )
 
     secrets_config = SecretsConfig(
@@ -687,7 +687,7 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
 
     print("[3.10] scenario: upgrade to a never-ready canary forces a restore back to the previous image")
     previous_image = good_image
-    asyncio.run(_exec_admin("UPDATE exomem_cloud_settings SET value = $1 WHERE key = 'cell_image'", json.dumps(broken_image)))
+    asyncio.run(_exec_admin("INSERT INTO exomem_cloud_settings (key, value) VALUES ('cell_image', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", json.dumps(broken_image)))
 
     _restore_check_count = 0
 
@@ -765,7 +765,7 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
         # carries the previous attempt's snapshot, and the outage must still
         # fail this attempt's own fresh backup regardless of what that
         # column holds.
-        asyncio.run(_exec_admin("UPDATE exomem_cloud_settings SET value = $1 WHERE key = 'cell_image'", json.dumps(broken_image)))
+        asyncio.run(_exec_admin("INSERT INTO exomem_cloud_settings (key, value) VALUES ('cell_image', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", json.dumps(broken_image)))
 
         _outage_check_count = 0
         outage_hold_started_at = None
@@ -858,7 +858,7 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
             timeout=30, description="MinIO to be running again",
         )
 
-    asyncio.run(_exec_admin("UPDATE exomem_cloud_settings SET value = $1 WHERE key = 'cell_image'", json.dumps(good_image)))
+    asyncio.run(_exec_admin("INSERT INTO exomem_cloud_settings (key, value) VALUES ('cell_image', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", json.dumps(good_image)))
     _wait_for(
         lambda: _reconciled_to("running", "read_only"),
         timeout=60, interval=2, description="cell to settle after the outage scenario",
@@ -979,8 +979,8 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
     print("[3.10] scenario: a second cell converges; cross-cell and DNS/egress denial, gateway-can-reach")
     cell_id_2 = _cell_id()
     namespace_2 = namespace_name(cell_id_2)
-    tenant_id_2 = f"tenant-{uuid.uuid4().hex[:12]}"
-    asyncio.run(_exec_admin("INSERT INTO tenants (tenant_id) VALUES ($1)", tenant_id_2))
+    tenant_id_2 = uuid.uuid4()
+    asyncio.run(_exec_admin("INSERT INTO exomem_tenants (id) VALUES ($1)", tenant_id_2))
     asyncio.run(
         _exec_admin(
             "INSERT INTO exomem_cloud_cells (cell_id, tenant_id, desired_state, desired_image) VALUES ($1, $2, 'running', NULL)",

@@ -50,17 +50,24 @@ jobs:
           sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
           test "$(helm version --template '{{.Version}}')" = "v${HELM_VERSION}"
       - name: Install the PostgreSQL 16 server binaries the fixture runs
+        # Bounded and retried by the helper; the step cap is the backstop
+        # (see tests/test_ci_reliability_contract.py).
+        timeout-minutes: 6
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends postgresql-16
+          scripts/ci-apt-install.sh postgresql-16
           test -x /usr/lib/postgresql/16/bin/postgres
           echo "CELLCTL_PG_BIN=/usr/lib/postgresql/16/bin" >> "$GITHUB_ENV"
       # The chart tests render infra/helm/platform, which needs the dependency
       # archives the chart step builds, so they run after it.
+      # `uv run --frozen` never rewrites the lockfile; this is what still
+      # fails the job when infra/cellctl/uv.lock drifts from pyproject.toml.
+      - name: Check the cellctl lockfile
+        working-directory: infra/cellctl
+        run: uv lock --check
       - name: Fast suite
         working-directory: infra/cellctl
         run: |
-          uv run --locked python -m pytest -q -p no:cacheprovider \
+          uv run --frozen python -m pytest -q -p no:cacheprovider \
             --ignore=tests/test_k3s_integration.py \
             --ignore=tests/test_platform_chart_headers.py
       - name: Pinned ruff
@@ -84,7 +91,7 @@ jobs:
         working-directory: infra/cellctl
         shell: bash
         run: |
-          uv run --locked python -m pytest -q -rs -p no:cacheprovider tests/test_platform_chart_headers.py \
+          uv run --frozen python -m pytest -q -rs -p no:cacheprovider tests/test_platform_chart_headers.py \
             | tee "${RUNNER_TEMP}/chart-tests.txt"
           if grep -q '^SKIPPED \[' "${RUNNER_TEMP}/chart-tests.txt"; then
             echo "::error::a platform chart test was skipped"
@@ -122,9 +129,11 @@ jobs:
           sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
           test "$(helm version --template '{{.Version}}')" = "v${HELM_VERSION}"
       - name: Install the PostgreSQL 16 server binaries the fixture runs
+        # Bounded and retried by the helper; the step cap is the backstop
+        # (see tests/test_ci_reliability_contract.py).
+        timeout-minutes: 6
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends postgresql-16
+          scripts/ci-apt-install.sh postgresql-16
           test -x /usr/lib/postgresql/16/bin/postgres
           echo "CELLCTL_PG_BIN=/usr/lib/postgresql/16/bin" >> "$GITHUB_ENV"
       - name: Build the platform chart dependencies the suite renders
@@ -142,7 +151,7 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: |
           HELM_BIN="$(command -v helm)" \
-          uv run --locked python -m pytest -q -s -rs -p no:cacheprovider tests/test_k3s_integration.py \
+          uv run --frozen python -m pytest -q -s -rs -p no:cacheprovider tests/test_k3s_integration.py \
             | tee "${RUNNER_TEMP}/live-k3s.txt"
           if grep -q '^SKIPPED \[' "${RUNNER_TEMP}/live-k3s.txt"; then
             echo "::error::the live K3s suite was skipped"

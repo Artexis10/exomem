@@ -14,6 +14,7 @@ import os
 import socket
 import subprocess
 import time
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,30 @@ import pytest
 FIXTURES = Path(__file__).parent / "fixtures"
 SCHEMA_SQL = (FIXTURES / "exomem_cloud_schema.sql").read_text(encoding="utf-8")
 GRANTS_SQL = (FIXTURES / "exomem_cloud_grants.sql").read_text(encoding="utf-8")
+
+# Migration 0056 references exomem_tenants(id), which an earlier Substrate
+# migration owns. The fixtures carry only the Cloud files, so the suite
+# creates the columns C1's foreign key and the grants script touch.
+TENANTS_STANDIN_SQL = """
+CREATE TABLE exomem_tenants (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  status text NOT NULL DEFAULT 'active'
+);
+"""
+
+_TENANT_NAMESPACE = uuid.UUID("5f0c1b1e-7d4a-4c2e-9a51-3c6b2f8e0d17")
+
+def tenant_uuid(label: str) -> uuid.UUID:
+    """A stable tenant id for a readable test label."""
+
+    return uuid.uuid5(_TENANT_NAMESPACE, label)
+
+
+async def insert_tenant(connection: asyncpg.Connection, label: str) -> uuid.UUID:
+    tenant_id = tenant_uuid(label)
+    await connection.execute("INSERT INTO exomem_tenants (id) VALUES ($1)", tenant_id)
+    return tenant_id
+
 
 ROLES = ("substrate_owner", "substrate_app", "exomem_cellctl", "exomem_gateway")
 
@@ -151,6 +176,7 @@ async def _create_cell_db(server: PostgresServer) -> str:
     owner_dsn = server.dsn(role="substrate_owner", database=name)
     owner_connection = await asyncpg.connect(owner_dsn)
     try:
+        await owner_connection.execute(TENANTS_STANDIN_SQL)
         await owner_connection.execute(SCHEMA_SQL)
         await owner_connection.execute(GRANTS_SQL)
     finally:

@@ -6,6 +6,7 @@ the decision logic itself.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -28,7 +29,9 @@ CANARY_PARKED = "CANARY_PARKED"
 @dataclass(frozen=True)
 class CellRow:
     cell_id: str
-    tenant_id: str
+    # C1's tenant_id is a uuid referencing exomem_tenants(id); asyncpg reads
+    # it as uuid.UUID. cellctl never renders or writes it.
+    tenant_id: uuid.UUID
     storage_gib: int
     rollout_priority: int
     desired_state: str
