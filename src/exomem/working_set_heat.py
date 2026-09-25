@@ -639,6 +639,7 @@ def view_digest(
     attribution: Attribution | None = None,
     *,
     marks: Mapping[str, SessionMark] | None = None,
+    continuity_passed: bool = False,
 ) -> str:
     """The digest of what THIS caller's packet is compiled from: the vault
     digest alone for a caller with no keys, else that plus its own session
@@ -661,7 +662,7 @@ def view_digest(
         for item in recent(profile, attribution=who, marks=marks, limit=_DIGEST_CONTACTS)
         if item.tier != TIER_VAULT
     ]
-    if not scoped and not contacts:
+    if not scoped and not contacts and not (continuity_passed and who.session):
         return profile.digest
     material = repr((profile.digest, scoped, contacts))
     return hashlib.sha256(material.encode("utf-8", "surrogatepass")).hexdigest()[:16]

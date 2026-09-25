@@ -1149,7 +1149,9 @@ def serve(
         except Exception:  # noqa: BLE001 - a thread that cannot be decided is not ranked
             log.warning("session thread visibility check failed; ranking none", exc_info=True)
             marks = {}
-        heat_digest = working_set_heat.view_digest(heat_profile, attribution, marks=marks)
+        heat_digest = working_set_heat.view_digest(
+            heat_profile, attribution, marks=marks, continuity_passed=continuity_passed
+        )
     key = cache_key(
         freshness_key=freshness_key,
         index_generation=index.generation(),

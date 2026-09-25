@@ -909,3 +909,37 @@ def test_a_users_edit_follows_its_page_through_a_move(heat_vault: Path) -> None:
     packet = _continue(heat_vault)
 
     assert _resolved(packet) == [LANTERN_MOVED], (packet.get("abstention"), packet["anchors"])
+
+
+
+# --------------------------------------------------------------------------- #
+# Round 2: a passed token never shares a cache entry across keyed and keyless
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("order", ["keyless-first", "keyed-first"])
+def test_a_token_is_never_served_across_keyed_and_keyless_callers(
+    heat_vault: Path, order: str
+) -> None:
+    """Review F5: with a continuity token, a keyed caller whose own tiers are
+    empty ranks the token in its session tier (only its own acts unseat it),
+    a keyless one in the vault tier (anyone's act does). Their packets differ,
+    so they must not share a cache entry, in either order."""
+    named = commands.op_activate_context(heat_vault, turn=SLED_TURN)
+    token = named["continuity"]
+    assert token and SLED in _resolved(named)
+    _edit(heat_vault, MARIT, "Freight coordinator", "Senior freight coordinator")
+
+    def keyless() -> list[str]:
+        return _resolved(_continue(heat_vault, continuity=token))
+
+    def keyed() -> list[str]:
+        return _resolved(_continue(heat_vault, continuity=token, session="fresh-conversation-k1"))
+
+    if order == "keyless-first":
+        plain, own = keyless(), keyed()
+    else:
+        own, plain = keyed(), keyless()
+
+    assert own == [SLED], own
+    assert plain == [MARIT], plain
