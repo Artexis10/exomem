@@ -40,11 +40,13 @@ from . import (
     index_paths,
     model_cache,
     recall_policy,
+    recall_space,
     runtime_resources,
     vecstore,
 )
 from .clip_index import CLIP_DIM, ClipIndex
-from .embedding_index import VECTOR_DIM, EmbeddingIndex
+from .embedding_index import VECTOR_DIM as VECTOR_DIM  # the legacy width, re-exported
+from .embedding_index import EmbeddingIndex
 from .vector_index_common import vec_gate as _vec_gate
 
 log = logging.getLogger(__name__)
@@ -1134,7 +1136,7 @@ def _encode_caller() -> str:
 
 def _embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     if not texts:
-        return np.zeros((0, VECTOR_DIM), dtype=np.float32)
+        return np.zeros((0, recall_space.current_dim()), dtype=np.float32)
     model = get_model()
     query_prefix, passage_prefix = _prefixes(model, MODEL_NAME)
     prefix = query_prefix if is_query else passage_prefix
@@ -1400,10 +1402,13 @@ def get_embedding_index(vault_root: Path) -> EmbeddingIndex:
     `EmbeddingIndex` directly to exercise the class in isolation.
     """
     key = str(Path(vault_root).resolve())
+    # The serving sidecar can change (a new vector space cut over), and the
+    # shared instance follows it: the old one and its matrix are dropped.
+    path = index_paths.sidecar_path(vault_root)
     with _INDEX_CACHE_LOCK:
         idx = _INDEX_CACHE.get(key)
-        if idx is None:
-            idx = EmbeddingIndex(vault_root)
+        if idx is None or idx.path != path:
+            idx = EmbeddingIndex(vault_root, path=path)
             _INDEX_CACHE[key] = idx
         return idx
 
@@ -1703,7 +1708,8 @@ def upsert_after_write_status(
         stored_chunks, stored_units = _stored_text_vectors(index, rel_path)
         if chunks:
             try:
-                vectors = _embed_live_chunks_reusing(chunks, stored_chunks)
+                with recall_space.encoding_for(index):
+                    vectors = _embed_live_chunks_reusing(chunks, stored_chunks)
                 if not still_current():
                     index.purge_paths_if_present([rel_path])
                     failure_code = failure_code or "embedding_input_drifted"
@@ -1741,9 +1747,10 @@ def upsert_after_write_status(
             state = semantic_index.current_parent_index_state(vault_root, md)
             units = [unit for unit in state.document.units if unit.unit_ref is not None]
             if units:
-                unit_vectors = _embed_live_chunks_reusing(
-                    [unit.content for unit in units], stored_units
-                )
+                with recall_space.encoding_for(index):
+                    unit_vectors = _embed_live_chunks_reusing(
+                        [unit.content for unit in units], stored_units
+                    )
                 if not still_current():
                     index.purge_paths_if_present([rel_path])
                     failure_code = failure_code or "embedding_input_drifted"
@@ -1895,7 +1902,7 @@ def remember_passage_vectors(
             if stamp != passage_memo_stamp():
                 return
             for key, row in zip(keys, rows, strict=True):
-                if row.shape != (VECTOR_DIM,):
+                if row.ndim != 1 or not row.size:
                     continue
                 row.setflags(write=False)
                 _PASSAGE_MEMO[key] = (stamp, row)
@@ -1979,7 +1986,7 @@ def _embed_live_chunks(chunks: list[str]) -> np.ndarray:
         for offset in range(0, len(chunks), limit)
     ]
     if not parts:
-        return np.zeros((0, VECTOR_DIM), dtype=np.float32)
+        return np.zeros((0, recall_space.current_dim()), dtype=np.float32)
     if len(parts) == 1:
         return np.asarray(parts[0], dtype=np.float32)
     return np.concatenate(parts, axis=0)
@@ -2014,7 +2021,7 @@ def published_generation_vectors(
     different generation and must not borrow the previous one's vectors.
     """
     if not chunks:
-        return np.zeros((0, VECTOR_DIM), dtype=np.float32)
+        return np.zeros((0, recall_space.current_dim()), dtype=np.float32)
     try:
         index = get_embedding_index(vault_root)
         metadata, matrix = index.all_vectors()
@@ -2094,7 +2101,8 @@ def prepare_generation_vectors(
             log.debug("generation vectors need a model that did not load: %s", e)
             return None
         try:
-            vectors, reused = _embed_live_chunks(chunks), False
+            with recall_space.encoding_for(get_embedding_index(vault_root)):
+                vectors, reused = _embed_live_chunks(chunks), False
         except Exception as e:  # noqa: BLE001 - one bad encode must not fail a worker
             log.debug("generation vectors could not be encoded for %s: %s", rel_path, e)
             return None
@@ -2306,7 +2314,8 @@ def index_incremental(
         flat: list[str] = []
         for _rp, chs, _m in group:
             flat.extend(chs)
-        vectors = embed_texts(flat, is_query=False)
+        with recall_space.encoding_for(index):
+            vectors = embed_texts(flat, is_query=False)
         offset = 0
         for rp, chs, m in group:
             n = len(chs)
@@ -2344,11 +2353,12 @@ def index_incremental(
             for unit in state.document.units
             if unit.unit_ref is not None
         ]
-        vectors = (
-            embed_texts(texts, is_query=False)
-            if texts
-            else np.zeros((0, VECTOR_DIM), dtype=np.float32)
-        )
+        with recall_space.encoding_for(index):
+            vectors = (
+                embed_texts(texts, is_query=False)
+                if texts
+                else np.zeros((0, index.dim), dtype=np.float32)
+            )
         offset = 0
         for state, mtime in group:
             count = sum(

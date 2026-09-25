@@ -159,6 +159,15 @@ class SqliteVecStore:
         non-vec-aware writers. Pure SQL — never re-embeds. The caller must have
         loaded the extension on `conn`.
         """
+        declared = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = ?", (self.vec_table,)
+        ).fetchone()
+        if declared is not None and f"float[{self.dim}]" not in (declared[0] or ""):
+            # The blobs moved to another vector width (a new model): the old
+            # column cannot hold them, so it is redeclared and refilled below.
+            log.info("vec sync: redeclaring %s at %d dimensions", self.vec_table, self.dim)
+            with conn:
+                self.drop(conn)
         conn.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS {self.vec_table} "
             f"USING vec0(embedding float[{self.dim}] distance_metric=cosine)"
@@ -215,6 +224,11 @@ class SqliteVecStore:
         conn.execute(self._insert_select(self.vec_table, False, where), params)
         if self._bin_exists(conn):
             conn.execute(self._insert_select(self.bin_table, True, where), params)
+
+    def drop(self, conn: sqlite3.Connection) -> None:
+        """Drop the vec tables (a change of vector space); the next sync recreates them."""
+        conn.execute(f"DROP TABLE IF EXISTS {self.vec_table}")
+        conn.execute(f"DROP TABLE IF EXISTS {self.bin_table}")
 
     def wipe(self, conn: sqlite3.Connection) -> None:
         """Empty the vec tables (rebuild_all's initial wipe)."""

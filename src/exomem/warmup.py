@@ -303,14 +303,13 @@ def warm_caches(
         def _warm_matrix() -> None:
             import numpy as np
 
-            from . import embeddings
+            from . import embeddings, recall_space
 
-            q = np.full(
-                embeddings.VECTOR_DIM,
-                1.0 / (embeddings.VECTOR_DIM**0.5),
-                dtype=np.float32,
-            )
-            embeddings.get_embedding_index(vault_root).search(q, k=1)
+            index = embeddings.get_embedding_index(vault_root)
+            # The sidecar's own width; an index adapter without one is the legacy width.
+            dim = int(getattr(index, "dim", recall_space.LEGACY_DIM))
+            q = np.full(dim, 1.0 / (dim**0.5), dtype=np.float32)
+            index.search(q, k=1)
 
         def _warm_clip() -> None:
             import numpy as np

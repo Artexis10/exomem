@@ -217,7 +217,16 @@ def collect_candidates(
     consume it. The keyword lane is excluded because it arrives from the
     caller's own provider already shadowed. Default None is a strict no-op.
     """
-    from . import bm25, embeddings, epistemic_graph, fusion, lexstore, readiness, runtime_resources
+    from . import (
+        bm25,
+        embeddings,
+        epistemic_graph,
+        fusion,
+        lexstore,
+        readiness,
+        recall_space,
+        runtime_resources,
+    )
 
     usage_map: dict[str, float] = {}
     if prefer_used:
@@ -271,11 +280,11 @@ def collect_candidates(
                 with _span(timings, "vector.index", source=find_types.SOURCE_INDEX):
                     idx = embeddings.get_embedding_index(vault_root)
                 with _span(timings, "vector.embed"):
-                    query_vec = (
-                        query_vector_provider()
-                        if query_vector_provider is not None
-                        else embeddings.embed_texts([query], is_query=True)[0]
-                    )
+                    if query_vector_provider is not None:
+                        query_vec = query_vector_provider()
+                    else:
+                        with recall_space.encoding_for(idx):
+                            query_vec = embeddings.embed_texts([query], is_query=True)[0]
                 with _span(timings, "vector.search"):
                     chunk_hits = idx.search(
                         query_vec,
@@ -316,6 +325,20 @@ def collect_candidates(
                 timings.error("vector", e)
         except runtime_resources.ModelBusyError:
             raise
+        except recall_space.VectorSpaceMismatch as e:
+            # The sidecar holds another encoder's vectors: the dense lane is
+            # absent until it is rebuilt in this space, and the others serve.
+            if capture_trace:
+                lane_statuses["vector"] = {
+                    "status": "unavailable",
+                    "reason": recall_space.VectorSpaceMismatch.reason,
+                    "model": embeddings.MODEL_NAME,
+                }
+            log.info("vector search unavailable (%s); ranking without the dense lane", e)
+            if timings is not None:
+                timings.skipped("vector")
+            if degraded_out is not None:
+                degraded_out.append("embeddings")
         except Exception as e:  # noqa: BLE001 - vector search is best-effort
             if capture_trace:
                 lane_statuses["vector"] = {

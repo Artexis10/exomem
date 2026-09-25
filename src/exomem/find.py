@@ -32,6 +32,7 @@ from . import (
     find_types,
     freshness,
     recall_policy,
+    recall_space,
     request_budget,
     runtime_resources,
     structured_filters,
@@ -1534,7 +1535,9 @@ def find(
         if not query_vector_ready:
             from . import embeddings
 
-            query_vector = embeddings.embed_texts([query], is_query=True)[0]
+            # Encoded for the serving sidecar, or refused before encoding.
+            with recall_space.encoding_for(embeddings.get_embedding_index(vault_root)):
+                query_vector = embeddings.embed_texts([query], is_query=True)[0]
             query_vector_ready = True
         return query_vector
 
@@ -2320,11 +2323,11 @@ def _vector_unit_candidates(
 
         index = embeddings.get_embedding_index(vault_root)
         with _span(timings, "vector.unit.embed"):
-            query_vector = (
-                query_vector_provider()
-                if query_vector_provider is not None
-                else embeddings.embed_texts([query], is_query=True)[0]
-            )
+            if query_vector_provider is not None:
+                query_vector = query_vector_provider()
+            else:
+                with recall_space.encoding_for(index):
+                    query_vector = embeddings.embed_texts([query], is_query=True)[0]
         hits = index.search_semantic_units(
             query_vector,
             k=candidate_limit,
@@ -2353,6 +2356,19 @@ def _vector_unit_candidates(
         )
     except runtime_resources.ModelBusyError:
         raise
+    except recall_space.VectorSpaceMismatch as error:
+        log.info("semantic-unit vector search unavailable (%s); using lexical ranking", error)
+        if degraded_out is not None:
+            degraded_out.append("embeddings")
+        return (
+            [],
+            {
+                "status": "unavailable",
+                "reason": recall_space.VectorSpaceMismatch.reason,
+                "model": model_name,
+            },
+            "kb",
+        )
     except Exception as error:  # noqa: BLE001 - vector lane soft-falls back
         log.warning("semantic-unit vector search failed: %s; using lexical ranking", error)
         _record_degradation("vector")
