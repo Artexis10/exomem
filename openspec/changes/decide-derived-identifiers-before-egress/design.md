@@ -27,7 +27,7 @@ The entry filter decides the listed fields and any key ending in `_path`, `_key`
 
 ### Writer links resolve over the writer's view
 
-`vault.writer_link_visibility` is the same predicate for writes. `normalize_wikilink` and the corpus resolution used by the capture sweep accept it and restrict stem, title and path matches to it. A path naming no file (the writer's pending page, a forward reference) is unaffected.
+`vault.writer_link_visibility` is the same predicate for writes. `normalize_wikilink` and the corpus resolution used by the capture sweep accept it and restrict stem, title and path matches to it. A path naming no file (the writer's pending page, a forward reference) is unaffected. The semantic contract judges a candidate page with the same predicate for that page's own relation targets (`SemanticCorpusContext.with_candidate`), so a relation only a withheld page answers is unresolved there too; every other page keeps its whole-vault resolution.
 
 ### Write doors decide their target first
 

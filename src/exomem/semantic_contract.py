@@ -1048,6 +1048,12 @@ class SemanticCorpusContext:
         )
 
     def with_candidate(self, state: SemanticPageState) -> SemanticCorpusContext:
+        # The written page's own links resolve over the writer's view, as its
+        # body links do when it is written: for a writer other than the owner
+        # a link only withheld pages answer is unresolved, exactly as without
+        # them. Every other page resolves as before.
+        visible = vault.writer_link_visibility(self.vault_root)
+        writer_view = None if visible is None else (state.path, visible)
         current = self.pages.get(state.path)
         if current is not None and (
             current.title,
@@ -1066,7 +1072,7 @@ class SemanticCorpusContext:
             state.language_registry_hash,
             state.relation_registry_hash,
         ):
-            return _context_with_stable_topology_candidate(self, state)
+            return _context_with_stable_topology_candidate(self, state, writer_view=writer_view)
         pages = dict(self.pages)
         pages[state.path] = state
         return _context_from_state_map(
@@ -1076,6 +1082,7 @@ class SemanticCorpusContext:
             self.identity_census.with_page(
                 state, casefold_paths=vault.vault_casefolds(self.vault_root)
             ),
+            writer_view=writer_view,
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -3089,11 +3096,15 @@ def _context_from_state_map(
     states: Mapping[str, SemanticPageState],
     registry: relation_registry.RelationRegistry,
     identity_census: StableIdentityCensus,
+    *,
+    writer_view: tuple[str, Callable[[str], bool]] | None = None,
 ) -> SemanticCorpusContext:
     ordered_pages = {path: states[path] for path in sorted(states)}
     entries = tuple((path, ordered_pages[path].title) for path in ordered_pages)
     resolver = vault.WikilinkResolver.from_entries(root, entries)
-    facts = _derive_relation_facts(root, ordered_pages, resolver, registry)
+    facts = _derive_relation_facts(
+        root, ordered_pages, resolver, registry, writer_view=writer_view
+    )
     return _context_from_resolved_state(
         root,
         ordered_pages,
@@ -3108,6 +3119,8 @@ def _context_from_state_map(
 def _context_with_stable_topology_candidate(
     context: SemanticCorpusContext,
     state: SemanticPageState,
+    *,
+    writer_view: tuple[str, Callable[[str], bool]] | None = None,
 ) -> SemanticCorpusContext:
     """Replace one page without re-resolving every authored corpus fact."""
     pages = dict(context.pages)
@@ -3119,6 +3132,7 @@ def _context_with_stable_topology_candidate(
         resolver,
         context.registry,
         target_states=pages,
+        writer_view=writer_view,
     )
     retained_facts = (fact for fact in context.relation_facts if fact.authored_path != state.path)
     facts = tuple(sorted((*retained_facts, *candidate_facts), key=lambda item: item.identity))
@@ -3247,10 +3261,13 @@ def _resolve_target(
     root: Path,
     raw_target: str,
     resolver: vault.WikilinkResolver,
+    visible: Callable[[str], bool] | None = None,
 ) -> tuple[str, str | None, str | None, str | None]:
     _, authored_anchor, alias = _target_parts(raw_target)
     try:
-        normalized, _ = vault.normalize_wikilink(raw_target, root, resolver=resolver, strict=True)
+        normalized, _ = vault.normalize_wikilink(
+            raw_target, root, resolver=resolver, strict=True, visible=visible
+        )
     except vault.AmbiguousWikilinkError:
         return "ambiguous", None, authored_anchor, alias
     except vault.UnresolvedWikilinkError:
@@ -3323,7 +3340,12 @@ def _derive_relation_facts(
     *,
     target_states: Mapping[str, SemanticPageState] | None = None,
     complete_authored_effects: bool = False,
+    writer_view: tuple[str, Callable[[str], bool]] | None = None,
 ) -> tuple[RelationFact, ...]:
+    """`writer_view` is `(page path, visible)`: that page's targets resolve
+    only over the pages `visible` admits (a writer's own view, see
+    `vault.writer_link_visibility`); every other page resolves over all.
+    """
     resolved_states = target_states if target_states is not None else states
     raw_facts: list[dict[str, Any]] = []
     for state in states.values():
@@ -3400,7 +3422,12 @@ def _derive_relation_facts(
     for raw in raw_facts:
         state = raw["authored"]
         target_status, resolved_target, target_anchor, target_alias = _resolve_target(
-            root, raw["raw_target"], resolver
+            root,
+            raw["raw_target"],
+            resolver,
+            writer_view[1]
+            if writer_view is not None and state.path == writer_view[0]
+            else None,
         )
         resolved_base = resolved_target.split("#", 1)[0] if resolved_target else None
         target_state = resolved_states.get(resolved_base or "")

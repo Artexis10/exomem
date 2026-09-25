@@ -46,12 +46,12 @@ For a caller other than the owner, a derived structure SHALL decide each candida
 
 ### Requirement: A restricted writer's links resolve over the pages it may see
 
-For a writer other than the owner under a governed policy, write-time wikilink resolution SHALL consider only pages the writer may see: stem, title and path matches in body links, `sources`, bridge sources, entity connections, draft relation suggestions and capture-sweep mentions. A link that matches only withheld pages SHALL resolve, warn and be reported exactly as it would if those pages were absent, and an ambiguity SHALL list only visible pages. A path that names no file SHALL be unaffected. The owner's resolution SHALL be unchanged.
+For a writer other than the owner under a governed policy, write-time wikilink resolution SHALL consider only pages the writer may see: stem, title and path matches in body links, `sources`, bridge sources, entity connections, draft relation suggestions, capture-sweep mentions, and the semantic contract's resolution of the written page's own relation targets. A link that matches only withheld pages SHALL resolve, warn and be reported exactly as it would if those pages were absent, and an ambiguity SHALL list only visible pages. A path that names no file SHALL be unaffected. The owner's resolution SHALL be unchanged.
 
 #### Scenario: A guess matches a withheld page
 
 - **WHEN** a restricted writer's page links a bare stem, a title, or a full path that only a withheld page matches
-- **THEN** the stored page, the warnings and the capture-sweep mentions are identical to the twin without that page
+- **THEN** the stored page, the warnings, the capture-sweep mentions and the contract's relation disposition are identical to the twin without that page
 
 ### Requirement: Write doors decide their target before acting
 

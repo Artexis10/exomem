@@ -608,6 +608,48 @@ def test_a_restricted_writer_resolves_links_as_if_the_withheld_page_were_absent(
     assert "[[Knowledge Base/Notes/beta]]" in written["B"]["body"]
 
 
+@pytest.mark.parametrize("detail", ["compact", "legacy"])
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_writers_relations_are_judged_over_its_view(
+    tmp_path: Path, audience: str, detail: str
+) -> None:
+    """The semantic contract resolves the written page's relation targets over
+    the pages the writer may see, as its body links are resolved."""
+    base = {**_filler(), f"{NOTES}/beta.md": _page("Beta", "Beta background.", type="insight")}
+    withheld = {
+        f"{WITHHELD_DIR}/secret.md": _page("Hidden Draft", "Withheld body text.", type="insight"),
+        f"{WITHHELD_DIR}/beta.md": _page("Hidden Beta", "Withheld body text.", type="insight"),
+    }
+    vaults = _twins(tmp_path, base, withheld, audience)
+    body = (
+        "Probe body.\n\n## Relations\n\n- supports [[secret]]\n- supports [[beta]]\n\n"
+        "## Observations\n\n- [finding] Retries stay bounded #reliability\n"
+        "  - relations: supports: [[secret]]\n"
+    )
+
+    answers = {
+        variant: _VOLATILE_TEXT.sub(
+            "<v>",
+            _text(
+                _call(
+                    vault,
+                    _principal(audience),
+                    "remember",
+                    content=body,
+                    title="Probe Page",
+                    note_type="insight",
+                    response_detail=detail,
+                )
+            ),
+        )
+        for variant, vault in vaults.items()
+    }
+
+    assert '"__error__"' not in answers["A"], answers["A"]
+    assert answers["A"] == answers["B"]
+    assert answers["C"] == answers["B"]
+
+
 def test_the_owner_writer_still_resolves_over_every_page(tmp_path: Path) -> None:
     base, withheld = _writer_fixture()
     vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")
@@ -1004,8 +1046,11 @@ def test_a_restricted_writer_deletes_no_folder(
     assert "__error__" not in deleted, deleted
 
 
+#: Run-specific values in a write's answer: request and receipt ids, hashes,
+#: and timestamps.
 _VOLATILE_TEXT = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,}"
+    r"|\d{4}-\d\d-\d\d[T ][\d:.+Z]+"
 )
 
 
