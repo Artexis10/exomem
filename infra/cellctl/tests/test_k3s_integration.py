@@ -1036,6 +1036,8 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
         "a nodeName": lambda pod: pod.update(nodeName="elsewhere"),
         "a runtimeClassName": lambda pod: pod.update(runtimeClassName="runc"),
         "hostAliases": lambda pod: pod.update(hostAliases=[{"ip": "10.0.0.1", "hostnames": ["object-storage"]}]),
+        "tolerations": lambda pod: pod.update(tolerations=[{"operator": "Exists"}]),
+        "a nodeSelector": lambda pod: pod.update(nodeSelector={"node-role.kubernetes.io/control-plane": "true"}),
     }.items():
         forged_pod = copy.deepcopy(stateful_set)
         mutate(forged_pod["spec"]["template"]["spec"])
@@ -1049,6 +1051,38 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
         )
         assert denied_write.returncode != 0, described
         assert "exomem-cellctl-scope" in denied_write.stderr, (described, denied_write.stderr)
+    # Security MEDIUM (recheck): a fresh cell namespace has no NetworkPolicy
+    # yet, so the isolation policy must keep any pod out of it until the
+    # deny-all default-deny exists.
+    print("[3.10] scenario: admission denies a Job in a fresh cell namespace with no default-deny")
+    fresh_namespace = namespace_name(_cell_id())
+    fresh = copy.deepcopy(forged_namespace)
+    fresh["metadata"]["name"] = fresh_namespace
+    _kubectl(k3s.name, ["create", "--filename=-", f"--as={cellctl_username}"], documents=[fresh])
+    fresh_job = {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {"name": "probe", "namespace": fresh_namespace},
+        "spec": {
+            "template": {
+                "spec": {
+                    "restartPolicy": "Never",
+                    "automountServiceAccountToken": False,
+                    "containers": [
+                        {"name": "probe", "image": good_image, "command": ["python3", "-c", "pass"]}
+                    ],
+                }
+            }
+        },
+    }
+    denied_fresh = _kubectl(
+        k3s.name, ["create", "--dry-run=server", "--filename=-", f"--as={cellctl_username}"],
+        documents=[fresh_job], check=False,
+    )
+    assert denied_fresh.returncode != 0
+    assert "exomem-cellctl-isolation" in denied_fresh.stderr, denied_fresh.stderr
+    _kubectl(k3s.name, ["delete", "namespace", fresh_namespace, "--wait=false"])
+
     print("[3.10] scenario: admission denies deleting default-deny")
     denied_delete = _kubectl(
         k3s.name,

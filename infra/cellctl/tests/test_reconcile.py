@@ -57,6 +57,8 @@ class FakeClusterGateway:
         self.observations: dict[str, ClusterObservation] = {}
         self.pv_claims: set[str] = set()  # namespaces a fake PV still claimRefs to
         self.admission_confined = True
+        self.admission_missing: set[str] = set()
+        self.admission_checks: list[tuple[str, str, str | None]] = []
         self.events: list[tuple] = []
 
     def observe(self, cell_id: str, namespace: str) -> ClusterObservation:
@@ -84,8 +86,9 @@ class FakeClusterGateway:
     def pv_absent_for_namespace(self, namespace: str) -> bool:
         return namespace not in self.pv_claims
 
-    def admission_policy_present(self, policy_name: str, binding_name: str) -> bool:
-        return self.admission_confined
+    def admission_policy_present(self, policy_name: str, binding_name: str, *, param_name: str | None = None) -> bool:
+        self.admission_checks.append((policy_name, binding_name, param_name))
+        return self.admission_confined and policy_name not in self.admission_missing
 
     def list_cell_namespaces(self) -> dict[str, str]:
         return {}
@@ -2243,28 +2246,81 @@ async def test_a_refused_backup_job_is_recorded_parked_and_retried_on_the_backof
 
 
 def test_a_failed_restore_stops_blocking_the_fleet_only_once_the_owner_resumes_the_rollout() -> None:
+    # Keyed on the hold's age, not its error code: a refusal inside the hold
+    # overwrites RESTORE_FAILED with MANIFEST_IMMUTABLE.
     from cellctl.rollout import select_upgrade_candidate
 
     owner, broken, tenant = "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc"
+    now = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    config = reconcile.DEFAULT_RECONCILE_CONFIG
+    old_hold = now - config.restore_bound - timedelta(minutes=1)
     rows = [
         _clean_row(owner, rollout_priority=0, observed_image=IMAGE_B),
-        _clean_row(broken, rollout_priority=1, observed_image=IMAGE_A, hold_kind="restore", last_error_code="RESTORE_FAILED"),
+        _clean_row(
+            broken, rollout_priority=1, observed_image=IMAGE_A, hold_kind="restore",
+            hold_started_at=old_hold, last_error_code="MANIFEST_IMMUTABLE",
+        ),
         _clean_row(tenant, rollout_priority=2, observed_image=IMAGE_A),
     ]
     observations = {
         owner: _served(owner, statefulset_image=IMAGE_B),
-        broken: _served(broken, statefulset_hold_kind="restore", pod_ready=False),
+        broken: _served(broken, statefulset_hold_kind="restore", statefulset_hold_started_at=old_hold, pod_ready=False),
         tenant: _served(tenant),
     }
-    now = datetime(2026, 1, 1, 12, tzinfo=UTC)
 
     def pick(rollout: RolloutRow) -> str | None:
-        restoring = any(reconcile._restore_blocks_upgrades(row, observations[row.cell_id], rollout) for row in rows)
+        restoring = any(
+            reconcile._restore_blocks_upgrades(row, observations[row.cell_id], rollout, now, config) for row in rows
+        )
         return select_upgrade_candidate(rows, observations, rollout, IMAGE_B, now=now, any_cell_already_upgrading=restoring)
 
-    assert reconcile._restore_blocks_upgrades(rows[1], observations[broken], RolloutRow(paused=True))
     assert pick(RolloutRow(paused=True)) is None
     assert pick(RolloutRow(paused=False)) == tenant
-    # A restore still in progress (no RESTORE_FAILED) blocks either way.
-    in_progress = dataclasses.replace(rows[1], last_error_code=None)
-    assert reconcile._restore_blocks_upgrades(in_progress, observations[broken], RolloutRow(paused=False))
+    # A restore hold still inside its bound blocks either way.
+    young = now - timedelta(minutes=5)
+    observations[broken] = dataclasses.replace(observations[broken], statefulset_hold_started_at=young)
+    assert reconcile._restore_blocks_upgrades(rows[1], observations[broken], RolloutRow(paused=False), now, config)
+
+
+async def test_an_unobserved_cell_does_not_stop_the_rest_of_the_fleets_backups(cell_db: CellDatabase) -> None:
+    due, broken = "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"
+    await _seed_cell(cell_db, due, "tenant-a")
+    await _seed_cell(cell_db, broken, "tenant-b")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = _ObserveFailsFor()
+    memory = reconcile.LoopMemory()
+    window = datetime(2026, 1, 2, 3, tzinfo=UTC)
+    try:
+        await _converge_all(connection, cluster, [due, broken], window - timedelta(hours=4), memory)
+        cluster.failing = {broken}
+        await _pass(connection, cluster, window, memory=memory)
+        statefulset = cluster.applied[(namespace_name(due), "StatefulSet", "cell")]
+        assert statefulset["metadata"]["annotations"].get("exomem.io/hold") == "backup"
+    finally:
+        await connection.close()
+
+
+def test_an_unobserved_cell_whose_row_holds_a_backup_still_occupies_its_slot() -> None:
+    due, broken = "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"
+    rows = [_clean_row(due)]
+    observations = {due: _served(due)}
+    now = datetime(2026, 1, 1, 3, tzinfo=UTC)
+    config = dataclasses.replace(reconcile.DEFAULT_RECONCILE_CONFIG, backup_concurrency=1)
+    held = [_clean_row(broken, hold_kind="backup")]
+    assert reconcile._select_backup_candidates(rows, observations, now, config) == {due}
+    assert reconcile._select_backup_candidates(rows, observations, now, config, unobserved=held) == set()
+
+
+async def test_the_pass_is_skipped_without_the_isolation_policy_too(cell_db: CellDatabase) -> None:
+    # A fresh cell namespace has no NetworkPolicy until cellctl applies one;
+    # the isolation policy is what keeps a pod out of it until then.
+    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    cluster.admission_missing = {"exomem-cellctl-isolation"}
+    try:
+        await _pass(connection, cluster, datetime(2026, 1, 1, 12, tzinfo=UTC))
+        assert cluster.applied == {}
+        assert ("exomem-cellctl-isolation", "exomem-cellctl-isolation", "default-deny") in cluster.admission_checks
+    finally:
+        await connection.close()

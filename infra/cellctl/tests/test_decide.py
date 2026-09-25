@@ -1976,3 +1976,24 @@ def test_a_restore_that_cannot_finish_within_its_bound_records_restore_failed_an
     )
     assert overdue.hold_kind == "restore"
     assert overdue.row_updates["last_error_code"] == RESTORE_FAILED
+
+
+
+def test_a_restore_hold_without_a_snapshot_pauses_the_rollout_once_so_a_resume_sticks() -> None:
+    observation = obs(
+        statefulset_exists=True,
+        statefulset_hold_kind="restore",
+        statefulset_hold_started_at=NOW,
+        statefulset_previous_image=IMAGE_A,
+    )
+    first = decide(
+        row(hold_kind="restore", hold_started_at=NOW, observed_image=IMAGE_A),
+        rollout(), observation, now=NOW, cell_image=IMAGE_B, start_upgrade=False, config=CONFIG,
+    )
+    assert first.rollout_updates["paused"] is True
+    after_resume = decide(
+        row(hold_kind="restore", hold_started_at=NOW, observed_image=IMAGE_A, last_error_code=RESTORE_FAILED),
+        rollout(), observation, now=NOW + timedelta(minutes=1), cell_image=IMAGE_B, start_upgrade=False, config=CONFIG,
+    )
+    assert after_resume.hold_kind == "restore"
+    assert after_resume.rollout_updates == {}

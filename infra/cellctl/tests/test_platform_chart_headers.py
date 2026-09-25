@@ -277,3 +277,30 @@ def test_cellctl_admission_policy_pins_every_object_cellctl_writes_to_what_it_re
     import json
 
     assert json.dumps(values["cells"]["jobEgressExcept"], separators=(",", ":")) in expressions
+
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cellctl_runs_a_pod_only_where_its_deny_all_default_deny_exists() -> None:
+    # Security MEDIUM (recheck): the scope policy pins NetworkPolicy writes,
+    # but a fresh cell namespace has none. The isolation policy takes the
+    # namespace's default-deny as its param, found in the request's own
+    # namespace, and denies when it is missing.
+    from cellctl.reconcile import (
+        DEFAULT_ISOLATION_BINDING_NAME,
+        DEFAULT_ISOLATION_POLICY_NAME,
+        ISOLATION_PARAM_NAME,
+    )
+
+    documents = _helm_template()
+    policy = _find(documents, "ValidatingAdmissionPolicy", DEFAULT_ISOLATION_POLICY_NAME)
+    assert policy["spec"]["failurePolicy"] == "Fail"
+    assert policy["spec"]["paramKind"] == {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy"}
+    (rule,) = policy["spec"]["matchConstraints"]["resourceRules"]
+    assert set(rule["resources"]) == {"statefulsets", "jobs"}
+    assert set(rule["operations"]) == {"CREATE", "UPDATE"}
+    binding = _find(documents, "ValidatingAdmissionPolicyBinding", DEFAULT_ISOLATION_BINDING_NAME)
+    assert binding["spec"]["policyName"] == DEFAULT_ISOLATION_POLICY_NAME
+    assert binding["spec"]["validationActions"] == ["Deny"]
+    assert binding["spec"]["paramRef"] == {"name": ISOLATION_PARAM_NAME, "parameterNotFoundAction": "Deny"}
+    assert "matchResources" not in binding["spec"]

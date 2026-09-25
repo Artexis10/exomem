@@ -120,7 +120,7 @@ class ClusterClient:
 
     # -- self-check (D4): confirm cellctl's own admission confinement exists --
 
-    def admission_policy_present(self, policy_name: str, binding_name: str) -> bool:
+    def admission_policy_present(self, policy_name: str, binding_name: str, *, param_name: str | None = None) -> bool:
         """True only when the policy fails closed and validates something,
         and its binding names it with a Deny action and no matchResources: a
         policy set to Ignore or stripped of its validations, a binding
@@ -138,6 +138,19 @@ class ClusterClient:
         if policy_spec is None or policy_spec.failure_policy != "Fail" or not policy_spec.validations:
             return False
         spec = binding.spec
+        if param_name is not None:
+            # The isolation binding: its param is `param_name`, looked up in
+            # the request's own namespace (no namespace, no selector), and a
+            # missing one denies.
+            param_ref = getattr(spec, "param_ref", None) if spec is not None else None
+            if (
+                param_ref is None
+                or param_ref.name != param_name
+                or param_ref.namespace
+                or param_ref.selector is not None
+                or param_ref.parameter_not_found_action != "Deny"
+            ):
+                return False
         return (
             spec is not None
             and spec.policy_name == policy_name

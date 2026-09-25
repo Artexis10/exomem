@@ -411,15 +411,17 @@ spec:
             v.projected.sources.all(s, has(s.configMap) || has(s.secret) || has(s.downwardAPI))))
       message: cellctl may run only pod templates whose volumes are persistentVolumeClaim, emptyDir, secret, configMap, downwardAPI or projected, with no CSI inline volume, and whose projected volume sources are configMap, secret or downwardAPI.
     # 4c. ...and none of them may pick its node, runtime or priority, or
-    # rewrite name resolution. A StatefulSet may not carry its own
+    # rewrite name resolution. cellctl renders no scheduling constraints. A StatefulSet may not carry its own
     # volumeClaimTemplates: the cell's one PVC is rendered separately.
     - expression: >-
         !(request.resource.resource in ['statefulsets', 'jobs']) || request.operation == 'DELETE' ||
         (!has(variables.podSpec.nodeName) && !has(variables.podSpec.runtimeClassName) &&
           !has(variables.podSpec.priorityClassName) && !has(variables.podSpec.hostAliases) &&
+          !has(variables.podSpec.tolerations) && !has(variables.podSpec.nodeSelector) &&
+          !has(variables.podSpec.affinity) &&
           (request.resource.resource != 'statefulsets' || !has(variables.target.spec.volumeClaimTemplates) ||
             size(variables.target.spec.volumeClaimTemplates) == 0))
-      message: cellctl may run only pod templates without nodeName, runtimeClassName, priorityClassName or hostAliases, and StatefulSets without volumeClaimTemplates.
+      message: cellctl may run only pod templates without nodeName, nodeSelector, affinity, tolerations, runtimeClassName, priorityClassName or hostAliases, and StatefulSets without volumeClaimTemplates.
     # 5. Every Service cellctl creates or updates must be ClusterIP with no
     # externalIPs.
     - expression: >-
@@ -537,4 +539,52 @@ metadata:
 spec:
   policyName: exomem-cellctl-scope
   validationActions: [Deny]
+---
+# D4: cellctl runs a pod only where the cell's deny-all default-deny
+# NetworkPolicy already exists. The policy above pins what a NetworkPolicy
+# write may say, but a fresh cell namespace has none, and a pod there would
+# have open ingress and egress. The binding's paramRef names default-deny
+# with no namespace, so the API server looks it up in the request's own
+# namespace, and a missing one denies. cellctl renders the NetworkPolicies
+# before the StatefulSet and never runs a Job before the StatefulSet exists.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-cellctl-isolation
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps", "batch"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["statefulsets", "jobs"]
+        scope: "Namespaced"
+  matchConditions:
+    - name: cellctl-service-account
+      expression: >-
+        request.userInfo.username ==
+        'system:serviceaccount:{{ .Values.cellctl.namespace }}:cellctl'
+  validations:
+    - expression: >-
+        params != null &&
+        params.spec.policyTypes == ['Ingress', 'Egress'] &&
+        !has(params.spec.podSelector.matchLabels) && !has(params.spec.podSelector.matchExpressions) &&
+        (!has(params.spec.ingress) || size(params.spec.ingress) == 0) &&
+        (!has(params.spec.egress) || size(params.spec.egress) == 0)
+      message: cellctl may run a pod only in a namespace whose default-deny NetworkPolicy denies all ingress and egress.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-cellctl-isolation
+spec:
+  policyName: exomem-cellctl-isolation
+  validationActions: [Deny]
+  paramRef:
+    name: default-deny
+    parameterNotFoundAction: Deny
 {{- end }}

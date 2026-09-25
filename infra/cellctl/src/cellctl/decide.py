@@ -724,7 +724,13 @@ def _restore_step(
             hold_started_at=hold_started_at,
             previous_image=previous_image,
             row_updates={"last_error_code": RESTORE_FAILED},
-            rollout_updates={"paused": True, "error_code": RESTORE_FAILED, "held_cell_id": row.cell_id},
+            # Paused once, when the row first records it, so an owner who
+            # has looked and resumes the rollout is not re-paused each pass.
+            rollout_updates=(
+                {}
+                if row.last_error_code == RESTORE_FAILED
+                else {"paused": True, "error_code": RESTORE_FAILED, "held_cell_id": row.cell_id}
+            ),
         )
 
     already_restored = observation.statefulset_restored_snapshot == snapshot

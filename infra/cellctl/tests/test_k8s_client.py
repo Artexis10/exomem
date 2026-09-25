@@ -318,8 +318,11 @@ class _Admission:
         match_resources=None,
         failure_policy: str | None = "Fail",
         validations: list | None = None,
+        param_ref=None,
     ) -> None:
-        self._binding = NS(spec=NS(policy_name=policy_name, validation_actions=actions, match_resources=match_resources))
+        self._binding = NS(
+            spec=NS(policy_name=policy_name, validation_actions=actions, match_resources=match_resources, param_ref=param_ref)
+        )
         self._policy_spec = NS(
             failure_policy=failure_policy,
             validations=[NS(expression="true")] if validations is None else validations,
@@ -395,3 +398,21 @@ def test_the_self_check_rejects_a_policy_that_fails_open_or_validates_nothing() 
     assert present() is True
     assert present(failure_policy="Ignore") is False
     assert present(validations=[]) is False
+
+
+
+def test_the_isolation_self_check_requires_a_param_ref_to_default_deny_in_the_request_namespace() -> None:
+    def present(param_ref) -> bool:
+        client = ClusterClient.__new__(ClusterClient)
+        client._admission = _Admission(policy_name="exomem-cellctl-isolation", actions=["Deny"], param_ref=param_ref)
+        return client.admission_policy_present(
+            "exomem-cellctl-isolation", "exomem-cellctl-isolation", param_name="default-deny"
+        )
+
+    good = dict(name="default-deny", namespace=None, selector=None, parameter_not_found_action="Deny")
+    assert present(NS(**good)) is True
+    assert present(None) is False
+    assert present(NS(**{**good, "parameter_not_found_action": "Allow"})) is False
+    assert present(NS(**{**good, "name": "something-else"})) is False
+    assert present(NS(**{**good, "namespace": "exomem-cloud"})) is False
+    assert present(NS(**{**good, "name": None, "selector": NS(match_labels={})})) is False

@@ -45,7 +45,6 @@ from .secrets import derive_cell_bearer, unwrap_secret, wrap_secret
 from .state import (
     CANARY_PARKED,
     MANIFEST_IMMUTABLE,
-    RESTORE_FAILED,
     TARGET_REJECTED,
     CellRow,
     ClusterObservation,
@@ -59,6 +58,11 @@ RECONNECT_BACKOFF_MAX_SECONDS = 30.0
 DEFAULT_HEARTBEAT_PATH = "/tmp/cellctl-heartbeat"
 DEFAULT_ADMISSION_POLICY_NAME = "exomem-cellctl-scope"
 DEFAULT_ADMISSION_BINDING_NAME = "exomem-cellctl-scope"
+# D4: the second policy, which admits a cellctl pod only where the cell's
+# deny-all default-deny NetworkPolicy exists (its binding's paramRef).
+DEFAULT_ISOLATION_POLICY_NAME = "exomem-cellctl-isolation"
+DEFAULT_ISOLATION_BINDING_NAME = "exomem-cellctl-isolation"
+ISOLATION_PARAM_NAME = "default-deny"
 
 # D4: an apply answered with a 4xx other than these is a refusal. These three
 # are transient and retried at the normal cadence, like a 5xx or a timeout.
@@ -260,6 +264,8 @@ class ClusterConfig:
     job_egress_except: tuple[str, ...] = ()
     admission_policy_name: str = DEFAULT_ADMISSION_POLICY_NAME
     admission_binding_name: str = DEFAULT_ADMISSION_BINDING_NAME
+    isolation_policy_name: str = DEFAULT_ISOLATION_POLICY_NAME
+    isolation_binding_name: str = DEFAULT_ISOLATION_BINDING_NAME
 
 
 class ClusterGateway:
@@ -273,7 +279,9 @@ class ClusterGateway:
     def run_job(self, manifest: dict) -> None: ...  # pragma: no cover
     def namespace_absent(self, name: str) -> bool: ...  # pragma: no cover
     def pv_absent_for_namespace(self, namespace: str) -> bool: ...  # pragma: no cover
-    def admission_policy_present(self, policy_name: str, binding_name: str) -> bool: ...  # pragma: no cover
+    def admission_policy_present(
+        self, policy_name: str, binding_name: str, *, param_name: str | None = None
+    ) -> bool: ...  # pragma: no cover
     def list_cell_namespaces(self) -> dict[str, str]: ...  # pragma: no cover
     def capacity_inputs(
         self, *, csi_driver: str
@@ -285,15 +293,21 @@ def _active_hold(row: CellRow, observation: ClusterObservation) -> str | None:
     return observation.statefulset_hold_kind if observation.statefulset_exists else row.hold_kind
 
 
-def _restore_blocks_upgrades(row: CellRow, observation: ClusterObservation, rollout) -> bool:
-    """D6: a restore hold blocks every new upgrade attempt. One that has
-    already failed (RESTORE_FAILED) stops blocking once the owner resumes
-    the rollout: the hold itself stays, fail-closed, but a single broken
-    restore never stalls the fleet's releases indefinitely."""
+def _restore_blocks_upgrades(
+    row: CellRow, observation: ClusterObservation, rollout, now: datetime, config: ReconcileConfig
+) -> bool:
+    """D6: a restore hold blocks every new upgrade attempt. One older than
+    the restore bound (so it has recorded RESTORE_FAILED) stops blocking
+    once the owner resumes the rollout: the hold itself stays, fail-closed,
+    but a single broken restore never stalls the fleet's releases
+    indefinitely. Keyed on the hold's age, since a refusal inside the hold
+    replaces the row's error code with MANIFEST_IMMUTABLE."""
 
     if _active_hold(row, observation) != "restore":
         return False
-    return rollout.paused or row.last_error_code != RESTORE_FAILED
+    hold_started_at = observation.statefulset_hold_started_at or row.hold_started_at
+    overdue = hold_started_at is not None and now - hold_started_at > config.restore_bound
+    return rollout.paused or not overdue
 
 
 def _hetzner_volume_absent(volume_id: str, volume_provider, now: datetime, memory: LoopMemory) -> bool:
@@ -497,6 +511,8 @@ def _select_backup_candidates(
     now: datetime,
     config: ReconcileConfig,
     statefulset_blocked: frozenset[str] = frozenset(),
+    *,
+    unobserved: list[CellRow] | tuple[CellRow, ...] = (),
 ) -> set[str]:
     """D8: at most `backup_concurrency` backup holds run at once. Due cells
     go oldest `last_backup_at` first, never-backed-up cells first of all.
@@ -510,6 +526,8 @@ def _select_backup_candidates(
         for row in rows
         if _active_hold(row, observations[row.cell_id]) == "backup" and row.cell_id not in statefulset_blocked
     )
+    # A row that could not be observed this pass counts by its hold column.
+    active += sum(1 for row in unobserved if row.hold_kind == "backup")
     slots = config.backup_concurrency - active
     if slots <= 0:
         return set()
@@ -606,15 +624,17 @@ async def reconcile_once(
     # D4 self-check: without cellctl's own admission confinement in place,
     # its ClusterRole is close to cluster-admin. Do nothing this pass rather
     # than act unconfined.
-    if not cluster.admission_policy_present(
-        cluster_config.admission_policy_name, cluster_config.admission_binding_name
+    for policy_name, binding_name, param_name in (
+        (cluster_config.admission_policy_name, cluster_config.admission_binding_name, None),
+        (cluster_config.isolation_policy_name, cluster_config.isolation_binding_name, ISOLATION_PARAM_NAME),
     ):
-        logger.error(
-            "cellctl admission policy/binding missing or not a Deny binding of that policy (%s/%s); skipping this pass",
-            cluster_config.admission_policy_name,
-            cluster_config.admission_binding_name,
-        )
-        return
+        if not cluster.admission_policy_present(policy_name, binding_name, param_name=param_name):
+            logger.error(
+                "cellctl admission policy/binding missing or not a Deny binding of that policy (%s/%s); skipping this pass",
+                policy_name,
+                binding_name,
+            )
+            return
 
     rows = await db.select_all_rows(connection)
     rollout = await db.read_rollout(connection)
@@ -631,17 +651,21 @@ async def reconcile_once(
         except Exception as error:  # noqa: BLE001
             logger.error("cellctl observe failed for cell %s: %s", row.cell_id, _describe_error(error))
     # A non-deleted row that could not be observed may be the owner's canary
-    # or hold an upgrade, restore or backup slot. Deciding fleet-wide without
-    # it could pick a tenant as canary or start a second upgrade, so this
-    # pass starts nothing fleet-wide; per-row work still runs.
-    fleet_unobserved = any(row.cell_id not in observations and row.desired_state != "deleted" for row in rows)
+    # or hold an upgrade or restore. Deciding a rollout without it could pick
+    # a tenant as canary or start a second upgrade, so this pass starts no
+    # upgrade or digest re-apply. Backups go on: its row's own backup hold
+    # still counts as an occupied slot.
+    unobserved_rows = [row for row in rows if row.cell_id not in observations and row.desired_state != "deleted"]
+    fleet_unobserved = bool(unobserved_rows)
     rows = [row for row in rows if row.cell_id in observations]
 
     non_deleted_rows = [row for row in rows if row.desired_state != "deleted"]
     # H1/H9: an upgrade or a restore hold blocks new candidates; a deleted
     # row never counts, whatever its stale annotations or row state say.
     any_upgrading = any(_active_hold(row, observations[row.cell_id]) == "upgrade" for row in non_deleted_rows)
-    any_restoring = any(_restore_blocks_upgrades(row, observations[row.cell_id], rollout) for row in non_deleted_rows)
+    any_restoring = any(
+        _restore_blocks_upgrades(row, observations[row.cell_id], rollout, now, config) for row in non_deleted_rows
+    )
     render_digests = {row.cell_id: _compute_render_digest(row, cluster_config, secrets_config) for row in rows}
 
     # D4 refusal parking. A row is refused while its last refusal's key is
@@ -666,8 +690,13 @@ async def reconcile_once(
     upgrade_candidate: str | None = None
     backup_candidates: set[str] = set()
     render_digest_candidate: str | None = None
+    backup_candidates = _select_backup_candidates(
+        non_deleted_rows, observations, now, config, statefulset_blocked, unobserved=unobserved_rows
+    )
     if fleet_unobserved:
-        logger.warning("cellctl: a cell could not be observed; no upgrade, backup or re-render starts this pass")
+        logger.error(
+            "cellctl: %d cell(s) could not be observed; no upgrade or re-render starts this pass", len(unobserved_rows)
+        )
     else:
         upgrade_candidate = select_upgrade_candidate(
             non_deleted_rows,
@@ -679,7 +708,6 @@ async def reconcile_once(
             refused=refused,
         )
         await _publish_parked_canary(connection, rollout, non_deleted_rows, observations, cell_image, refused)
-        backup_candidates = _select_backup_candidates(non_deleted_rows, observations, now, config, statefulset_blocked)
         render_digest_candidate = _select_render_digest_candidate(
             non_deleted_rows, observations, render_digests, now, config, parked, statefulset_blocked
         )
