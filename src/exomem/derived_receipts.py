@@ -61,6 +61,7 @@ _RETRYABLE_FAILURE_CODES = frozenset(
 _ADVISORY_FAILURE_CODES = frozenset(
     {
         "advisory_failed",
+        "advisory_unavailable",
         "embedding_unavailable",
         "generation_changed",
         "handler_unavailable",
@@ -1285,8 +1286,19 @@ def _activate_proven_batch(
     )
 
 
-def _supersede_batch(connection: sqlite3.Connection, batch_id: str, *, now: float) -> None:
-    """Retire a batch whose every path newer custody now owns."""
+def _supersede_batch(
+    connection: sqlite3.Connection,
+    batch_id: str,
+    *,
+    now: float,
+    advisory: bool = True,
+) -> None:
+    """Retire a batch whose every path newer custody now owns.
+
+    ``advisory=False`` retires receipt custody only and leaves the batch's
+    advisory result to the caller, which is reconcile's route: there the
+    target page may be exactly what the advisory describes.
+    """
     connection.execute(
         "UPDATE derived_batch_components SET state = 'superseded', "
         "claim_owner = NULL, claim_expires_at = NULL, updated_at = ? "
@@ -1305,11 +1317,52 @@ def _supersede_batch(connection: sqlite3.Connection, batch_id: str, *, now: floa
         "WHERE batch_id = ?",
         (now, batch_id),
     )
-    connection.execute(
-        "UPDATE write_advisory_results SET state = 'superseded', "
-        "updated_at = ? WHERE batch_id = ?",
-        (now, batch_id),
-    )
+    if advisory:
+        connection.execute(
+            "UPDATE write_advisory_results SET state = 'superseded', "
+            "updated_at = ? WHERE batch_id = ?",
+            (now, batch_id),
+        )
+
+
+def _settle_owed_advisory(
+    vault_root: Path,
+    connection: sqlite3.Connection,
+    batch_id: str,
+    *,
+    now: float,
+) -> None:
+    """Answer a stranded batch's advisory that never ran; leave a finished one.
+
+    A `ready` or `failed` result stays as published. A `pending` result over an
+    unchanged target is owed an answer the retired batch can no longer give,
+    so it fails as `advisory_unavailable`; one whose target moved describes
+    nothing current and is superseded.
+    """
+    from .deferred_write_advisory import _observe_fingerprint
+
+    for result_id, target_rel_path, target_fingerprint in connection.execute(
+        "SELECT result_id, target_rel_path, target_fingerprint "
+        "FROM write_advisory_results WHERE batch_id = ? AND state = 'pending'",
+        (batch_id,),
+    ).fetchall():
+        unchanged = target_rel_path is not None and (
+            _observe_fingerprint(vault_root, str(target_rel_path))
+            == str(target_fingerprint)
+        )
+        if unchanged:
+            connection.execute(
+                "UPDATE write_advisory_results SET state = 'failed', "
+                "failure_code = 'advisory_unavailable', updated_at = ? "
+                "WHERE result_id = ? AND state = 'pending'",
+                (now, result_id),
+            )
+        else:
+            connection.execute(
+                "UPDATE write_advisory_results SET state = 'superseded', "
+                "updated_at = ? WHERE result_id = ? AND state = 'pending'",
+                (now, result_id),
+            )
 
 
 def _prove_committed_guarded(
@@ -2367,11 +2420,13 @@ def reconcile_stranded_batches(
 
     For each batch in `reconcile_required`, ``converge`` runs the ordinary
     writer fan-out over what every one of its paths holds now. The batch is
-    then retired as `superseded` -- its pending rows and advisory result with
-    it -- once both recall lanes hold every path's current bytes, which is the
-    overlay's own retirement test and full reconciliation of the path and
-    component demand. A batch the lanes still lack stays stranded and is
-    counted in ``remaining``. The report is counts only.
+    then retired as `superseded` -- its pending rows with it -- once both recall
+    lanes hold every path's current bytes, which is the overlay's lane test and
+    full reconciliation of the path and component demand. Only receipt custody
+    is retired: a finished advisory result stays as published, and one that
+    never ran is settled by :func:`_settle_owed_advisory`. A batch the lanes
+    still lack stays stranded and is counted in ``remaining``. The report is
+    counts only.
     """
     stranded = stranded_batch_count(vault_root)
     if dry_run or not stranded or limit <= 0:
@@ -2442,7 +2497,10 @@ def reconcile_stranded_batches(
                         (batch_id,),
                     ).fetchone()
                     if still is not None:
-                        _supersede_batch(write, batch_id, now=retired_at)
+                        _supersede_batch(write, batch_id, now=retired_at, advisory=False)
+                        _settle_owed_advisory(
+                            vault_root, write, batch_id, now=retired_at
+                        )
                         retired += 1
                 except Exception:
                     write.rollback()

@@ -571,8 +571,12 @@ fast-acknowledged writes, but the pending overlay keeps reading durable custody,
 so a batch already held in `reconcile_required` stays until it is repaired.
 `doctor` reports it (`fast_ack_custody`, failing while any batch is stranded)
 and `maintain --reconcile` repairs it by converging its pages from current bytes
-and retiring it once both recall lanes hold them. The runbook entry is therefore
-"set the flag to 0, then reconcile".
+and retiring it once both recall lanes hold them. Reconcile retires receipt
+custody only: a batch stranded by a shared page can still own a page exactly as
+its advisory result describes it, so a `ready` or `failed` result stays as
+published; a result that never ran fails as `advisory_unavailable` over an
+unchanged target and is superseded over a moved one. The runbook entry is
+therefore "set the flag to 0, then reconcile".
 
 Rollback is mandatory on any stale post-write read, any acknowledged write with
 missing required custody, any cross-tenant/result authorization leak, two or

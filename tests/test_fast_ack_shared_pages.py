@@ -634,6 +634,118 @@ def test_reconcile_keeps_a_batch_stranded_while_the_lanes_lack_its_bytes(
     assert [state for _id, state, _paths in _batches(vault)] == ["reconcile_required"]
 
 
+def _advisory_state(root: Path, ref: str) -> tuple[str, str | None]:
+    stored = derived_receipts.read_advisory_result(root, ref)
+    assert stored is not None
+    return stored.state, stored.failure_code
+
+
+def _force_advisory_state(root: Path, ref: str, state: str) -> None:
+    """Stand in for a sweep that published (`ready`) or never ran (`pending`)."""
+    result_id = derived_receipts._parse_advisory_ref(ref)
+    connection = sqlite3.connect(deferred_index.store_path(root))
+    try:
+        connection.execute(
+            "DELETE FROM write_advisory_result_candidates WHERE result_id = ?",
+            (result_id,),
+        )
+        connection.execute(
+            "UPDATE write_advisory_results SET state = ?, failure_code = NULL "
+            "WHERE result_id = ?",
+            (state, result_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _strand_by_shared_page(tmp_path: Path, vault: Path) -> tuple[str, str]:
+    """A batch stranded by a hand edit of `log.md`; its own page is unchanged."""
+    terminal = _remember(tmp_path, vault, "Advisory survives probe")
+    ref = terminal.get("advisory_result_ref")
+    assert terminal.get("advisory_sync") == "pending" and ref, terminal
+    log_path = vault / "Knowledge Base/log.md"
+    log_path.write_bytes(log_path.read_bytes() + b"\n- appended by hand\n")
+    _drain_until_idle(vault)
+    assert [state for _id, state, _paths in _batches(vault)] == ["reconcile_required"]
+    return terminal["path"], ref
+
+
+@pytest.mark.parametrize("finished", ["ready", "failed"])
+def test_a_finished_advisory_survives_reconcile(
+    live_catalogue: Path, tmp_path: Path, finished: str
+) -> None:
+    """Reconcile retires receipt custody only; a finished advisory is left alone.
+
+    The batch was stranded by a shared page while its own page stayed in its
+    after-state, so the advisory result still describes the current page.
+    """
+    from exomem import deferred_write_advisory
+    from exomem import reconcile as reconcile_module
+
+    vault = live_catalogue
+    _page, ref = _strand_by_shared_page(tmp_path, vault)
+    _force_advisory_state(vault, ref, "ready")
+    if finished == "failed":
+        connection = sqlite3.connect(deferred_index.store_path(vault))
+        try:
+            connection.execute(
+                "UPDATE write_advisory_results SET state = 'failed', "
+                "failure_code = 'embedding_unavailable' WHERE result_id = ?",
+                (derived_receipts._parse_advisory_ref(ref),),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+    before = _advisory_state(vault, ref)
+
+    report = reconcile_module.reconcile(vault)
+
+    assert report.as_dict()["derived_batch_reconcile"]["retired"] == 1
+    assert _advisory_state(vault, ref) == before
+    resolved = deferred_write_advisory.resolve_result(vault, ref)
+    assert resolved["status"] == finished, resolved
+
+
+def test_a_pending_advisory_over_an_unchanged_page_fails_as_unavailable(
+    live_catalogue: Path, tmp_path: Path
+) -> None:
+    """A sweep that never ran is owed an answer, not `superseded`."""
+    from exomem import deferred_write_advisory
+    from exomem import reconcile as reconcile_module
+
+    vault = live_catalogue
+    _page, ref = _strand_by_shared_page(tmp_path, vault)
+    _force_advisory_state(vault, ref, "pending")
+
+    reconcile_module.reconcile(vault)
+
+    assert _advisory_state(vault, ref) == ("failed", "advisory_unavailable")
+    resolved = deferred_write_advisory.resolve_result(vault, ref)
+    assert resolved["status"] == "failed" and resolved["code"] == "advisory_unavailable"
+
+
+def test_a_pending_advisory_over_a_moved_page_is_superseded_by_reconcile(
+    live_catalogue: Path, tmp_path: Path
+) -> None:
+    """A pending advisory whose target moved describes nothing current."""
+    from exomem import reconcile as reconcile_module
+
+    vault = live_catalogue
+    terminal = _remember(tmp_path, vault, "Advisory moved probe")
+    ref = terminal.get("advisory_result_ref")
+    assert ref, terminal
+    target = vault / terminal["path"]
+    target.write_bytes(target.read_bytes() + b"\nEdited by hand, never indexed.\n")
+    _drain_until_idle(vault)
+    assert [state for _id, state, _paths in _batches(vault)] == ["reconcile_required"]
+    _force_advisory_state(vault, ref, "pending")
+
+    reconcile_module.reconcile(vault)
+
+    assert _advisory_state(vault, ref) == ("superseded", None)
+
+
 # --------------------------------------------------------------------------- #
 # Diagnosis (owner ruling R4): a committed-uncertain acknowledgement says why
 # --------------------------------------------------------------------------- #

@@ -217,10 +217,14 @@ pending-visibility outcome with its closed failure code. `doctor` SHALL fail
 while any batch is stranded and SHALL NOT mutate custody to compute the line.
 Operator reconciliation (`maintain --reconcile`) SHALL converge each stranded
 batch's paths from their current canonical bytes through the ordinary writer
-fan-out and SHALL retire the batch as `superseded`, with its pending rows and
-advisory result, once both recall lanes hold every path's current bytes; a
-batch the lanes still lack SHALL stay stranded and be counted as remaining.
-The reconcile report SHALL carry counts only.
+fan-out and SHALL retire the batch as `superseded`, with its pending rows,
+once both recall lanes hold every path's current bytes; a batch the lanes still
+lack SHALL stay stranded and be counted as remaining. Reconciliation SHALL
+retire receipt custody only: a `ready` or `failed` advisory result SHALL stay
+as published, and only an advisory result that never ran SHALL be settled -- as
+`failed` with code `advisory_unavailable` when its target page is unchanged, or
+`superseded` when the target moved. The reconcile report SHALL carry counts
+only.
 
 #### Scenario: Doctor names stranded custody
 
@@ -233,6 +237,12 @@ The reconcile report SHALL carry counts only.
 - **WHEN** an operator runs `maintain --reconcile` while a batch is stranded
 - **THEN** the batch's pages are converged from their current bytes and the batch is retired once both recall lanes hold them
 - **AND** managed recall is ready afterwards, and a dry run reports the same counts without changing custody
+
+#### Scenario: A ready advisory survives reconcile
+
+- **WHEN** a batch was stranded by a shared page while its own page stayed in its after-state, and its advisory result is `ready`
+- **THEN** reconciliation retires the batch and leaves the advisory result `ready`, so the warnings it carries still resolve
+- **AND** an advisory result for such a batch that never ran resolves as `failed` with code `advisory_unavailable` rather than `superseded`
 
 ### Requirement: Fast Acknowledgement Is Proven End To End
 
