@@ -36,7 +36,6 @@ With `--harness-check`, a failing step passes the check only when `known-finding
 - every target was met;
 - the run is valid;
 - no cross-lane defect was recorded;
-- no product overlay was applied (the lock-directory overlay or the gateway environment overlay);
 - no distinctive phrase reached a log;
 - every row's `ready` matches its pod.
 
@@ -94,7 +93,7 @@ A post-check scans the gateway, cellctl and cell logs for the run's distinctive 
 
 `schema: exomem-cloud-rehearsal-report-v1`. It records:
 - the pinned inputs and image digests;
-- every host adaptation and chart overlay;
+- every host adaptation and every rehearsal overlay on the chart (storage class, cellctl doubles);
 - each step's status, seconds, evidence and failure;
 - the 5.3 measurements against their targets;
 - the cross-lane defects found, with their owners.

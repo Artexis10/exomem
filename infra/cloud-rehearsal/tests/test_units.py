@@ -54,7 +54,6 @@ def test_a_report_gates_the_node_only_when_everything_passed() -> None:
         lambda r: r.single.update({"upgrade_seconds_per_cell": 60.0}),
         lambda r: setattr(r, "valid", False),
         lambda r: r.defects.append({"owner": "o"}),
-        lambda r: r.product_overlays.append("patched"),
         lambda r: r.stages["post_checks"].update({"phrases_leaked": 1}),
         lambda r: r.stages["post_checks"].update({"ready_matches_pod": False}),
         lambda r: r.stages.update({"harness": {"status": "failed"}}),
@@ -136,11 +135,10 @@ def test_the_consent_form_parser_reads_substrates_hidden_fields() -> None:
     assert parser.fields == {"nonce": "n1", "confirmation": "c1"}
 
 
-def test_the_gateway_overlay_adds_only_what_the_chart_omits() -> None:
-    container = {"env": [{"name": "DATABASE_URL", "valueFrom": {}}]}
-    added = platform.gateway_env_overlay(container, {"DATABASE_URL": "x", "EXOMEM_CLOUD_MCP_PATH": "/mcp"})
-    assert added == ["EXOMEM_CLOUD_MCP_PATH"]
-    assert [e["name"] for e in container["env"]] == ["DATABASE_URL", "EXOMEM_CLOUD_MCP_PATH"]
+def test_a_gateway_missing_required_environment_is_named_not_patched() -> None:
+    container = {"env": [{"name": name} for name in platform.GATEWAY_REQUIRED_ENV if name != "EXOMEM_CLOUD_MCP_PATH"]}
+    assert platform.missing_gateway_env(container) == ["EXOMEM_CLOUD_MCP_PATH"]
+    assert len(container["env"]) == len(platform.GATEWAY_REQUIRED_ENV) - 1
 
 
 def test_the_broken_canary_still_runs_cell_init() -> None:
@@ -197,24 +195,3 @@ def test_pki_verifies_under_strict_x509(tmp_path: Path) -> None:
             assert wrapped.version()
     thread.join(timeout=5)
     listener.close()
-
-
-def test_the_lock_dir_overlay_matches_the_runtime_exactly_once() -> None:
-    """The overlay's anchor must match the shipped check, or the build stops."""
-
-    from cloud_rehearsal import images
-
-    compile(build.LOCK_DIR_OVERLAY, "overlay.py", "exec")
-    compile(build.LOCK_DIR_PROBE, "probe.py", "exec")
-    source = (images.REPO_ROOT / "src/exomem/vault.py").read_text(encoding="utf-8")
-    if "S_ISGID" in source:
-        pytest.skip("the runtime fix is on this branch; the probe will skip the overlay")
-    assert source.count(build.LOCK_DIR_ANCHOR) == 1
-    compile(source.replace(build.LOCK_DIR_ANCHOR, build.LOCK_DIR_REPLACEMENT), "vault.py", "exec")
-
-
-def test_dist_info_is_matched_by_distribution_name() -> None:
-    from cloud_rehearsal.build import _dist_name
-
-    assert _dist_name("urllib3-2.5.0.dist-info") == _dist_name("urllib3-2.2.3.dist-info")
-    assert _dist_name("python_dateutil-2.9.0.dist-info") == "python-dateutil"

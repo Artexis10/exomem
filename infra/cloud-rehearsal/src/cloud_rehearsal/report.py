@@ -76,9 +76,6 @@ class Report:
     valid: bool = True
     invalid_reasons: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
-    # Overlays that change the product under test (not the rehearsal's own
-    # scaffolding): while any is present, the run cannot gate the node.
-    product_overlays: list[str] = field(default_factory=list)
     environment: dict[str, Any] = field(default_factory=dict)
     inputs: dict[str, Any] = field(default_factory=dict)
     adaptations: list[str] = field(default_factory=list)
@@ -120,8 +117,6 @@ class Report:
             blockers.append("not a valid rehearsal: " + "; ".join(self.invalid_reasons))
         if self.defects:
             blockers.append(f"{len(self.defects)} cross-lane defect(s) recorded")
-        if self.product_overlays:
-            blockers.append("the stack under test was patched: " + "; ".join(self.product_overlays))
         post = self.stages.get("post_checks") or {}
         if post.get("phrases_leaked"):
             blockers.append(f"{post['phrases_leaked']} distinctive phrase(s) reached a log")
@@ -152,7 +147,6 @@ class Report:
                 "gate_blockers": blockers,
                 "gates_node": passed and targets_met and not blockers,
             },
-            "product_overlays": self.product_overlays,
             "environment": self.environment,
             "inputs": self.inputs,
             "adaptations": self.adaptations,

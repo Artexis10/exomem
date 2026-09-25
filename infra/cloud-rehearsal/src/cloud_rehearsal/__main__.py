@@ -114,9 +114,7 @@ async def _run(args: argparse.Namespace) -> int:
             source = substrate.fetch_source(args.cache, args.substrate_commit)
             substrate.build_source(source)
         with _stage(report, "images"):
-            v1, v2, broken, cell_overlays = build.build_cell_images(run_id, workdir, prebuilt=args.cell_image)
-            report.overlays.extend(cell_overlays)
-            report.product_overlays.extend(o for o in cell_overlays if o.startswith("APPLIED"))
+            v1, v2, broken = build.build_cell_images(run_id, workdir, prebuilt=args.cell_image)
             gateway_tag = build.build_gateway_image(run_id, workdir, source, mode=args.gateway_build)
             cellctl_tag = build.build_cellctl_image(run_id, workdir, mode=args.cellctl_build)
         with _stage(report, "infrastructure"):
@@ -164,21 +162,12 @@ async def _run(args: argparse.Namespace) -> int:
                 ),
                 s3_access_key=stack.object_store.access_key,
                 s3_secret_key=stack.object_store.secret_key,
-                gateway_env=_gateway_env(),
-                gateway_secret_env={
-                    "EXOMEM_CONTROL_PLANE_KEY": control.secrets.control_plane_key,
-                    "EXOMEM_GATEWAY_TRUSTED_INGRESS_SOURCE_VALUE": control.secrets.ingress_source_value,
-                    "EXOMEM_CLOUD_CELL_TOKEN_KEY": control.secrets.cell_token_key.hex(),
-                },
                 cellctl_secrets=_cellctl_secrets(stack, control),
                 pki=pki,
                 ingress_source_value=control.secrets.ingress_source_value,
                 ingress_image=traefik,
             )
             report.overlays.extend(deployed.overlays)
-            for defect in deployed.chart_defects:
-                report.defects.append({"step": "platform", "cross_lane": True, "owner": "Artexis10/exomem#1368", **defect})
-                report.product_overlays.append(f"gateway environment overlay: {', '.join(defect['missing'])}")
             platform.wait_rollout(stack, platform.CLOUD_NAMESPACE, "cellctl")
             platform.wait_rollout(stack, platform.CLOUD_NAMESPACE, "exomem-cloud-gateway")
             platform.wait_rollout(stack, platform.PLATFORM_NAMESPACE, "rehearsal-traefik")
@@ -315,22 +304,6 @@ def _wait_json(resolver: Resolver, url: str, what: str) -> None:
             return response.status_code == 200 and isinstance(response.json(), dict)
 
     wait_for(probe, timeout=300, interval=3, description=f"{what} to answer {url}")
-
-
-def _gateway_env() -> dict[str, str]:
-    """What the pinned Substrate gateway requires that is not a secret."""
-
-    return {
-        "EXOMEM_PUBLIC_BASE_URL": substrate.PUBLIC_BASE_URL,
-        "EXOMEM_CLOUD_MCP_URL": substrate.MCP_URL,
-        "EXOMEM_CLOUD_MCP_PATH": substrate.MCP_PATH,
-        "EXOMEM_GATEWAY_TRUSTED_INGRESS_SOURCE_HEADER": platform.TRUSTED_INGRESS_HEADER,
-        # Required by validateGatewayEnvironment for the hosted path the same
-        # process still serves; values as the hosted runbook sets them.
-        "EXOMEM_CELL_PROTOCOL_VERSION": "1",
-        "EXOMEM_GATEWAY_CONTROL_HOSTNAME": tls.MCP_HOST,
-        "EXOMEM_GATEWAY_INTERNAL_ORIGIN": f"http://exomem-cloud-gateway.{platform.CLOUD_NAMESPACE}.svc.cluster.local:8080",
-    }
 
 
 def _cellctl_secrets(stack: infra.Stack, control: substrate.Substrate) -> dict[str, dict[str, str]]:

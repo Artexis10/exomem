@@ -4,15 +4,6 @@
     "3": {
       "match": "isPkceVerifier",
       "owner": "Substrate token endpoint PKCE grammar (substrate-systems/substrate, reported through the operator)"
-    },
-    "9": {
-      "match": "dropped to not-ready and stayed there",
-      "owner": "runtime: readiness after a read_only -> running recovery (reported on Artexis10/exomem#1368 and to the operator)"
-    },
-    "10": {
-      "match": "A-side cross-recall is unverified",
-      "each_problem": true,
-      "owner": "follows step 9: tenant A's cell answers 503 CELL_NOT_READY"
     }
   }
 }

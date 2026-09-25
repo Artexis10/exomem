@@ -39,54 +39,6 @@ PYTHON_IMAGE = "python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83
 CELLCTL_ROOT = images.REPO_ROOT / "infra/cellctl"
 ENTRY_MODULE = Path(__file__).with_name("cellctl_entry.py")
 
-# Orchestrator ruling, 2026-09-25: until the runtime fix (branch
-# fix/cell-lock-dir-setgid) is on main, the cell image carries exactly this
-# rule as a recorded overlay. When `exomem-locks-<uid>` is owned by the
-# current user, is a real directory, and its mode is exactly 0700 plus an
-# inherited S_ISGID (a Kubernetes fsGroup emptyDir makes /tmp 2777), chmod it
-# to 0700 and re-check; everything else still refuses. The overlay is applied
-# only when the image under test still refuses such a directory, so it drops
-# itself once the fix is in the image, and the report says which happened.
-LOCK_DIR_PROBE = """
-import os, stat, tempfile
-base = tempfile.mkdtemp(dir="/tmp")
-os.chmod(base, 0o2777)
-os.environ["TMPDIR"] = base
-tempfile.tempdir = None
-from exomem import vault
-try:
-    directory = vault._private_lock_directory()
-    print("accepted", oct(stat.S_IMODE(directory.lstat().st_mode)))
-except vault.VaultLockError:
-    print("refused")
-"""
-
-LOCK_DIR_ANCHOR = (
-    "    if owner is not None:\n"
-    "        if info.st_uid != owner or stat.S_IMODE(info.st_mode) != 0o700:\n"
-)
-LOCK_DIR_REPLACEMENT = (
-    "    if owner is not None:\n"
-    "        if (\n"
-    "            info.st_uid == owner\n"
-    "            and stat.S_ISDIR(info.st_mode)\n"
-    "            and stat.S_IMODE(info.st_mode) == (0o700 | stat.S_ISGID)\n"
-    "        ):\n"
-    "            os.chmod(directory, 0o700)\n"
-    "            info = directory.lstat()\n"
-    "        if info.st_uid != owner or stat.S_IMODE(info.st_mode) != 0o700:\n"
-)
-LOCK_DIR_OVERLAY = f"""
-import pathlib, sys
-import exomem.vault as vault
-path = pathlib.Path(vault.__file__)
-source = path.read_text(encoding="utf-8")
-old, new = {LOCK_DIR_ANCHOR!r}, {LOCK_DIR_REPLACEMENT!r}
-if source.count(old) != 1:
-    sys.exit("the lock-directory check has changed shape; the overlay no longer applies")
-path.write_text(source.replace(old, new), encoding="utf-8")
-"""
-
 BROKEN_SHIM = """#!/bin/sh
 # Forced canary failure: cell-init runs for real, the server never starts.
 if [ "$1" = "cell-init" ]; then exec "$0-real" "$@"; fi
@@ -109,7 +61,7 @@ def _now_iso() -> str:
     return dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def build_cell_images(run_id: str, workdir: Path, *, prebuilt: str | None) -> tuple[str, str, str, list[str]]:
+def build_cell_images(run_id: str, workdir: Path, *, prebuilt: str | None) -> tuple[str, str, str]:
     v1 = f"{CELL_REPOSITORY}:{run_id}-v1"
     v2 = f"{CELL_REPOSITORY}:{run_id}-v2"
     broken = f"{CELL_REPOSITORY}:{run_id}-broken"
@@ -127,25 +79,6 @@ def build_cell_images(run_id: str, workdir: Path, *, prebuilt: str | None) -> tu
                 ],
                 timeout=3600,
             )
-    overlays: list[str] = []
-    for tag in (v1, v2):
-        before = _probe_lock_dir(tag)
-        if not (before.startswith("refused") or before.startswith("accepted")):
-            raise RuntimeError(f"the lock-directory probe could not run in {tag}: {before}")
-        if before.startswith("refused"):
-            context = workdir / f"lock-dir-overlay-{tag.rsplit('-', 1)[1]}"
-            context.mkdir(parents=True, exist_ok=True)
-            (context / "overlay.py").write_text(LOCK_DIR_OVERLAY, encoding="utf-8")
-            _derive(context, tag, tag, "USER root\nCOPY overlay.py /tmp/overlay.py\nRUN python3 /tmp/overlay.py && rm /tmp/overlay.py\nUSER 10001:10001\n")
-            after = _probe_lock_dir(tag)
-            if not after.startswith("accepted 0o700"):
-                raise RuntimeError(f"the lock-directory overlay did not take effect on {tag}: {after}")
-            overlays.append(
-                f"APPLIED cell image {tag.rsplit(':', 1)[1]}: lock-directory setgid overlay (orchestrator ruling; "
-                f"runtime fix pending on fix/cell-lock-dir-setgid). Probe before: {before}; after: {after}"
-            )
-        else:
-            overlays.append(f"cell image {tag.rsplit(':', 1)[1]}: no lock-directory overlay needed ({before})")
     broken_dir = workdir / "cell-broken"
     broken_dir.mkdir(parents=True, exist_ok=True)
     (broken_dir / "exomem-shim").write_text(BROKEN_SHIM, encoding="utf-8")
@@ -159,15 +92,7 @@ def build_cell_images(run_id: str, workdir: Path, *, prebuilt: str | None) -> tu
         '&& ln -s /usr/local/lib/exomem-rehearsal-shim "$real"\n'
         "USER 10001:10001\n",
     )
-    return v1, v2, broken, overlays
-
-
-def _probe_lock_dir(tag: str) -> str:
-    result = run(
-        ["docker", "run", "--rm", "--read-only", "--tmpfs", "/tmp", "--entrypoint", "python3", tag, "-c", LOCK_DIR_PROBE],
-        check=False,
-    )
-    return (result.stdout.strip().splitlines() or [f"probe failed: {result.stderr.strip()[-300:]}"])[-1]
+    return v1, v2, broken
 
 
 def _derive(context: Path, base: str, tag: str, body: str) -> None:

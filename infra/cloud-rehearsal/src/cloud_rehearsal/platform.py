@@ -11,9 +11,11 @@ overlay is returned so the report lists it:
   provisioner, since there is no Hetzner CSI driver here;
 - the cellctl container runs `rehearsal_cellctl` (build.py), the real loop
   with B2 key management and Hetzner doubles, and gets the S3 double's
-  credential;
-- anything `gateway_env_overlay` adds, which exists only when the chart's
-  gateway environment does not satisfy the Substrate gateway it deploys.
+  credential.
+
+The gateway Deployment is applied exactly as rendered. If it omits any
+variable the pinned Substrate gateway requires at startup, the platform stage
+fails naming them: the chart is under test and is not patched.
 
 The chart's Traefik and cert-manager dependencies are replaced by one
 Traefik stand-in in `exomem-platform`, carrying the `exomem.io/ingress:
@@ -59,7 +61,6 @@ class PlatformConfig:
 class Platform:
     rendered: list[dict[str, Any]]
     overlays: list[str] = field(default_factory=list)
-    chart_defects: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _render(stack: Stack, config: PlatformConfig) -> list[dict[str, Any]]:
@@ -125,20 +126,29 @@ def _find(documents: list[dict[str, Any]], kind: str, name: str) -> dict[str, An
     return next(doc for doc in documents if doc["kind"] == kind and doc["metadata"]["name"] == name)
 
 
-def gateway_env_overlay(container: dict[str, Any], required: dict[str, str]) -> list[str]:
-    """Adds each variable the Substrate gateway requires that the chart omits."""
+# What the pinned Substrate gateway reads at startup (validateGatewayEnvironment
+# and loadExomemCloudConfig), beyond DATABASE_URL and the port.
+GATEWAY_REQUIRED_ENV = (
+    "EXOMEM_PUBLIC_BASE_URL",
+    "EXOMEM_CLOUD_MCP_URL",
+    "EXOMEM_CLOUD_MCP_PATH",
+    "EXOMEM_GATEWAY_TRUSTED_INGRESS_SOURCE_HEADER",
+    "EXOMEM_GATEWAY_TRUSTED_INGRESS_SOURCE_VALUE",
+    "EXOMEM_CELL_PROTOCOL_VERSION",
+    "EXOMEM_GATEWAY_CONTROL_HOSTNAME",
+    "EXOMEM_GATEWAY_INTERNAL_ORIGIN",
+    "EXOMEM_CONTROL_PLANE_KEY",
+    "EXOMEM_CLOUD_CELL_TOKEN_KEY",
+)
 
+
+def missing_gateway_env(container: dict[str, Any]) -> list[str]:
     present = {entry["name"] for entry in container.get("env", [])}
-    added = []
-    for name, value in required.items():
-        if name not in present:
-            container.setdefault("env", []).append({"name": name, "value": value})
-            added.append(name)
-    return added
+    return [name for name in GATEWAY_REQUIRED_ENV if name not in present]
 
 
 def apply(stack: Stack, config: PlatformConfig, *, s3_access_key: str, s3_secret_key: str,
-          gateway_env: dict[str, str], gateway_secret_env: dict[str, str], cellctl_secrets: dict[str, dict[str, str]],
+          cellctl_secrets: dict[str, dict[str, str]],
           pki: tls.RehearsalPki, ingress_source_value: str, ingress_image: str) -> Platform:
     documents = _render(stack, config)
     platform = Platform(rendered=copy.deepcopy(documents))
@@ -167,24 +177,12 @@ def apply(stack: Stack, config: PlatformConfig, *, s3_access_key: str, s3_secret
 
     gateway = _find(documents, "Deployment", "exomem-cloud-gateway")
     gateway_container = gateway["spec"]["template"]["spec"]["containers"][0]
-    added = gateway_env_overlay(gateway_container, gateway_env)
-    for name in gateway_secret_env:
-        if name not in {entry["name"] for entry in gateway_container["env"]}:
-            gateway_container["env"].append(
-                {"name": name, "valueFrom": {"secretKeyRef": {"name": "rehearsal-gateway-extra", "key": name}}}
-            )
-            added.append(name)
-    if added:
-        platform.chart_defects.append(
-            {
-                "component": "infra/helm/platform/templates/cloud-gateway.yaml",
-                "summary": "the rendered gateway Deployment omits environment the pinned Substrate gateway "
-                "requires at startup (validateGatewayEnvironment / loadExomemCloudConfig)",
-                "missing": sorted(added),
-                "rendered_env": sorted(entry["name"] for entry in platform_env(platform, "exomem-cloud-gateway")),
-            }
+    missing = missing_gateway_env(gateway_container)
+    if missing:
+        raise RuntimeError(
+            "infra/helm/platform/templates/cloud-gateway.yaml renders a gateway without environment the pinned "
+            f"Substrate gateway requires at startup: {', '.join(missing)}"
         )
-        platform.overlays.append(f"gateway Deployment: added {', '.join(sorted(added))} (chart defect, see report)")
 
     # Namespaces and the policy first, then Secrets, then workloads.
     order = {"Namespace": 0, "StorageClass": 1, "ServiceAccount": 2, "ClusterRole": 3, "ClusterRoleBinding": 4,
@@ -197,7 +195,6 @@ def apply(stack: Stack, config: PlatformConfig, *, s3_access_key: str, s3_secret
 
     secrets = [
         _secret(CLOUD_NAMESPACE, "rehearsal-s3", {"accessKey": s3_access_key, "secretKey": s3_secret_key}),
-        _secret(CLOUD_NAMESPACE, "rehearsal-gateway-extra", gateway_secret_env),
         *(_secret(CLOUD_NAMESPACE, name, data) for name, data in cellctl_secrets.items()),
     ]
     _kubectl_apply(stack, secrets)
