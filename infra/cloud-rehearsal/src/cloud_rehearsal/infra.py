@@ -92,6 +92,7 @@ class Stack:
     object_store: ObjectStore
     adaptations: list[str] = field(default_factory=list)
     containers: list[str] = field(default_factory=list)
+    networks: list[str] = field(default_factory=list)
 
 
 def _container_ip(name: str, network: str) -> str:
@@ -216,7 +217,17 @@ def _start_k3s(stack: Stack) -> K3s:
         "--kube-proxy-arg=oom-score-adj=0",
         # Secrets are encrypted at rest on the real node (design context).
         "--secrets-encryption",
+        # Every image here is imported, none can be re-pulled: image GC on a
+        # busy shared disk would delete them, and disk-pressure eviction
+        # would evict cells for the host's usage rather than the node's.
+        "--kubelet-arg=image-gc-high-threshold=100",
+        "--kubelet-arg=image-gc-low-threshold=99",
+        "--kubelet-arg=eviction-hard=imagefs.available<1%,nodefs.available<1%",
     ]
+    stack.adaptations.append(
+        "kubelet image GC off and disk eviction at 1%: imported images cannot be re-pulled, and the "
+        "node shares the host's disk"
+    )
     if cgroup_v1_host():
         args.append("--kubelet-arg=fail-cgroupv1=false")
         stack.adaptations.append("kubelet fail-cgroupv1=false: this host runs cgroup v1")
@@ -279,7 +290,8 @@ def teardown(stack: Stack | None, *, keep: bool) -> None:
         logs = run(["docker", "logs", "--tail", "400", name], check=False)
         (stack.workdir / f"{name}.log").write_text(logs.stdout + logs.stderr, encoding="utf-8")
         run(["docker", "rm", "--force", "--volumes", name], check=False)
-    run(["docker", "network", "rm", stack.network], check=False)
+    for network in [*stack.networks, stack.network]:
+        run(["docker", "network", "rm", network], check=False)
     s3_data = stack.workdir / "s3-data"
     if s3_data.exists():
         # versitygw writes as root inside its container.
