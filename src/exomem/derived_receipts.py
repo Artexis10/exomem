@@ -1136,6 +1136,12 @@ def _recall_lanes_hold_current(vault_root: Path, rel_path: str) -> bool:
     a hand edit in an editor is the ordinary case -- is visible once the lanes
     hold what is on disk now, and that is the right test for handing it on.
     Absence is held as proven absence. An unreadable path never is.
+
+    This is the overlay's lane test (lexical catalogue plus reference sidecar),
+    not its whole retirement test, which also waits for the batch's resolver,
+    semantic-purge and freshness components. A handed-on row therefore stops
+    shadowing vector and graph evidence before this batch's own components have
+    run; they still run over the path later, from its current bytes.
     """
     target = vault_root.joinpath(*rel_path.split("/"))
     try:

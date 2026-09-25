@@ -154,7 +154,9 @@ original request evaluates a prepared batch from source of truth:
   proven committed and keeps the stricter rule. A moved
   path that no batch covers -- a hand edit in the editor, which is ordinary in
   a personal vault -- is handed on once both recall lanes hold its current
-  bytes (ruling R2): that is the overlay's own retirement test, and until it
+  bytes (ruling R2): that is the overlay's lane test (lexical catalogue and
+  reference sidecar; the overlay's full retirement also waits for the batch's
+  resolver, semantic-purge and freshness components), and until it
   holds the batch stays `reconcile_required` rather than publishing anything;
 - every path equals the before state and the canonical attempt is known not to
   have committed → retire as `aborted`, retiring the batch's own pending

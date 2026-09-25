@@ -477,7 +477,9 @@ def _lanes_hold(vault_root: Path, expected: dict[str, str | None]) -> bool:
 def recall_lanes_hold(vault_root: Path, expected: dict[str, str | None]) -> bool:
     """Whether both persistent recall lanes hold exactly these identities.
 
-    The same test the overlay retires custody by; the receipt store asks it to
+    The overlay's lane test, the part of its retirement test that asks the
+    stores; retirement also waits for the batch's other components (see
+    :func:`_components_allow_retirement`). The receipt store asks only this to
     hand on a path whose current bytes no receipt covers.
     """
     return _lanes_hold(Path(vault_root), expected)
