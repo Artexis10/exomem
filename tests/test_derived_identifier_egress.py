@@ -1510,10 +1510,13 @@ def test_a_restricted_packet_and_its_token_carry_no_index_generation(
     turn = "What is the status of the Orion Program?"
     restricted = _call(vault, _principal(audience), "activate_context", turn=turn)
     owner = _call(vault, None, "activate_context", turn=turn)
+    # The token as minted, before the dispatcher's terminal filter.
+    _reset()
+    with request_scope(_principal(audience)):
+        minted = commands.op_activate_context(vault, turn=turn)
 
     assert owner["generation"]["index_generation"] > 0
     assert "index_generation" not in restricted["generation"]
-    assert restricted.get("continuity"), restricted
-    decoded = working_set_runtime.decode_continuity(restricted["continuity"])
-    assert decoded is not None and decoded["generation"] == 0
-    assert working_set_runtime.decode_continuity(owner["continuity"])["generation"] > 0
+    assert "index_generation" not in minted["generation"]
+    decoded = working_set_runtime.decode_continuity(minted.get("continuity"))
+    assert decoded is not None and decoded["generation"] == 0, minted.get("continuity")

@@ -12,7 +12,7 @@ A restricted caller's answer should read as if the pages withheld from it were a
 - Write doors decide their target before resolving or changing it. A target the writer may not see answers exactly as a missing one and is never read or changed.
 - For a reader other than the owner, links whose candidates include a withheld page resolve as a vault without it would resolve them, lazily and only where a request looks: graph context and context walks, inbound links and pack neighbours; the page provenance strip lists a bare link as the absent twin does.
 - Counts and ranks are computed after filtering. Whole-vault aggregates (audit, registries inferred from the corpus, activation and relation-queue coverage) are served to the owner only under a governed policy; other audiences receive `available: false` with `reason: "audience_restricted"`. Recall diagnostics computed before release decisions are not returned to a restricted caller, and its recall runs without the graph lane. Relation proposals, the relation queue and relation triage and acceptance are the owner's under a governed policy.
-- Activation resolves a restricted caller's turn over the anchors it may see, omits L0 material silently (abstaining as `unresolved`), and does not return the vault freshness key to it.
+- Activation resolves a restricted caller's turn over the anchors it may see, omits L0 material silently (abstaining as `unresolved`), and does not return the vault freshness key or index generation to it.
 
 ## Capabilities
 

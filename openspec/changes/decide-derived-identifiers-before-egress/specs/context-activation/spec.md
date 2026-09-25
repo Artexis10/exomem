@@ -13,9 +13,10 @@ characters cut only at a boundary that leaves no unclosed wikilink, lifecycle,
 updated, provenance), `pointers[]` (ref, title, why), `current_state[]` (anchor,
 source, as_of, `statement` of at most 200 characters stating the observed status in
 the source's own words), `missing[]` (role, reason), `ambiguity[]`,
-`budget {limit_chars, used_chars}`, `generation {index_generation, roles_hash}` (and,
-for the owner, `freshness_key`, which counts and digests every file in the vault and is
-therefore not returned to another audience) and `abstained`. `used_chars` SHALL count every prose field of the
+`budget {limit_chars, used_chars}`, `generation {roles_hash}` (and, for the owner,
+`index_generation`, which advances on every write, and `freshness_key`, which counts and
+digests every file in the vault; neither is returned to another audience, whose continuity
+token carries generation 0) and `abstained`. `used_chars` SHALL count every prose field of the
 packet (unit text, `current_state[].statement`, pointer title and why) and SHALL
 never exceed `max_chars`. Units SHALL be emitted before pages, pages beyond the
 budget SHALL become pointers, and a superseded unit SHALL be marked `superseded`
