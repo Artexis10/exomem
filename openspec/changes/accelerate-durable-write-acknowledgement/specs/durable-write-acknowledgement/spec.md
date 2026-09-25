@@ -41,7 +41,15 @@ only after exact canonical state proves, for every path, either the intended
 after-state or a later state that a newer exact receipt covers with live or
 retired pending custody for that path, or a later state whose current bytes
 both persistent recall lanes (the lexical catalogue and the reference sidecar)
-already hold. Rollback,
+already hold. A path back at its recorded before-bytes is not such a later
+state: it is covered only when a newer proven receipt, carrying live or retired
+pending custody for that path, recorded exactly those bytes (or that absence)
+as its after-state; or, for a page the receipt itself created, when the
+receipt was already proven committed (it is active, or it published its
+pending custody) and both recall lanes hold the page's absence. Plain newer
+coverage of the path, or the lanes holding before-bytes the receipt did not
+create, SHALL NOT cover it, since those bytes may be the receipt's own torn
+write. Rollback,
 partial state, or an unrelated later state MUST NOT activate it. The recorded
 canonical generation is lineage for ordering and supersession; proof SHALL NOT
 require it to equal the vault-wide checkpoint, which advances on every write to
@@ -81,6 +89,12 @@ dispatched, and at component completion.
 - **WHEN** a newer write re-renders a shared page exactly as it was before an older batch's write
 - **THEN** the older batch hands that page to the newer batch, whose proven after-state those bytes are
 - **AND** it converges its own paths instead of being held in `reconcile_required`
+
+#### Scenario: A path reverted by hand to its before-bytes stays owed
+
+- **WHEN** a path an older proven batch wrote is returned by a hand edit to that batch's before-bytes, and no newer proven batch recorded those bytes as its after-state
+- **THEN** the older batch is held in `reconcile_required`, even when a newer batch carries the path or both recall lanes hold the reverted bytes
+- **AND** `doctor` fails its custody check until `maintain --reconcile` converges the batch from current bytes
 
 #### Scenario: A coverer not yet proven heals on the next pass
 

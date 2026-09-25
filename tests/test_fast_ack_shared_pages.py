@@ -449,6 +449,13 @@ def test_before_bytes_no_newer_batch_wrote_stay_owed(live_catalogue: Path) -> No
     (vault / own_rel).parent.mkdir(parents=True, exist_ok=True)
     (vault / own_rel).write_bytes(own)
     shared.write_bytes(y)
+    # Proven committed at its own acknowledgement, as a fast-acked write is.
+    assert derived_receipts.prove_committed(
+        vault, older, current_generation=older.canonical_generation
+    ).outcome == "ready"
+    assert derived_receipts.publish_pending_visibility(
+        vault, older, publisher=pending_recall.publish
+    )
     newer = prepared("reverted-newer", [(shared_rel, y, z)])
     shared.write_bytes(z)
     assert derived_receipts.prove_committed(
@@ -458,10 +465,17 @@ def test_before_bytes_no_newer_batch_wrote_stay_owed(live_catalogue: Path) -> No
         vault, newer, publisher=pending_recall.publish
     )
     shared.write_bytes(x)
+    # Both recall lanes hold the reverted bytes: that is not enough for bytes
+    # the batch did not create, which could be its own torn write.
+    index_sync.upsert_after_write(vault, [shared], publish_corpus_change=True)
+    assert pending_recall.recall_lanes_hold(vault, {shared_rel: _digest(shared)})
 
     assert derived_receipts.prove_committed(
         vault, older, current_generation=older.canonical_generation
     ).outcome == "reconcile_required"
+    from exomem import doctor
+
+    assert doctor._check_fast_ack_custody(vault).status == "fail"
 
 
 def test_an_out_of_band_move_heals_once_the_recall_lanes_hold_it(
