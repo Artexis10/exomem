@@ -337,6 +337,14 @@ def test_uv_stderr_tail_stays_within_its_byte_bound_after_scrubbing() -> None:
         assert len(tail.encode("utf-8")) <= 4096
 
 
+def test_uv_stderr_tail_scrubs_token_only_url_userinfo() -> None:
+    from exomem import service_upgrade
+
+    tail = service_upgrade._uv_stderr_tail(b"error: https://hunter2hunter2@pypi.example.com/simple/")
+    assert "hunter2hunter2" not in tail
+    assert "pypi.example.com/simple/" in tail
+
+
 def test_runtime_symlink_is_refused_before_operator_lock_creation(tmp_path: Path) -> None:
     actual = tmp_path / "actual"
     actual.mkdir(mode=0o700)

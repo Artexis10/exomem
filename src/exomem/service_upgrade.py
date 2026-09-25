@@ -32,10 +32,10 @@ _UV_STDERR_TAIL_MAX_BYTES = 4 * 1024
 #: How much trailing stderr is scrubbed before the tail is clipped. Scrubbing
 #: runs on whole lines inside this window, never on a clipped fragment.
 _UV_STDERR_READ_WINDOW_BYTES = 64 * 1024
-#: The userinfo segment of a URL (`user:pass` before `@`). Not a shape the
-#: shared egress scrubber recognizes on its own, but exactly what a leaked
-#: package-index retry URL carries.
-_URL_USERINFO_RE = re.compile(r"(?<=://)[^/\s@]+:[^/\s@]+(?=@)")
+#: The whole userinfo segment of a URL (`user:pass` or a bare token before
+#: `@`). Not a shape the shared egress scrubber recognizes on its own, but
+#: exactly what a leaked package-index or git-source URL carries.
+_URL_USERINFO_RE = re.compile(r"(?<=://)[^/\s@]+(?=@)")
 PROFILES = {
     "lean": "",
     "onnx": "embeddings-onnx",
