@@ -23,6 +23,7 @@ addressed afterwards.
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
@@ -55,6 +56,9 @@ MAX_RESULT_CANDIDATES = 8
 DUPLICATE_TOP_N = 3
 OVERLAP_TOP_N = 3
 CLAIM_LEASE_SECONDS = 60.0
+#: The observation published for a deleted target. It is not a content digest,
+#: so it can never equal a stored fingerprint and always supersedes.
+_ABSENT_TARGET = "absent"
 
 #: One outcome for malformed, unknown, unauthorized and expired references, so
 #: a caller cannot separate "there is no such result" from "not for you". It
@@ -366,6 +370,20 @@ def execute_write_advisory(
         )
 
     observed = _observe_fingerprint(vault_root, stored.target_rel_path)
+    if observed is None and not os.path.lexists(
+        Path(vault_root).joinpath(*str(stored.target_rel_path).split("/"))
+    ):
+        # Deleted since the write, which a proven batch can hand on once both
+        # recall lanes hold the absence. The result describes nothing current:
+        # publishing the absence supersedes it, as a moved target's does.
+        return _publish(
+            vault_root,
+            claimed_status,
+            state="failed",
+            failure_code="target_unreadable",
+            observed=_ABSENT_TARGET,
+            now=now,
+        )
     if observed is None:
         # Nothing current to observe, so nothing may be published against it.
         # Proof and retirement own what happens to the batch from here.

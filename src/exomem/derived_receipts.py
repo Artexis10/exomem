@@ -1184,17 +1184,26 @@ def _handed_on(
     A moved path (`other`) is handed on when newer exact custody covers it
     (option A) or, failing that, when both recall lanes already hold its
     current bytes (R2). A path back at this batch's before-bytes is handed on
-    only when a newer proven batch recorded exactly those bytes as its own
+    when a newer proven batch recorded exactly those bytes as its own
     after-state; otherwise it may be this batch's torn write, and stays owed.
+    One before-state cannot be a torn write: a page this batch created is
+    absent again after the batch was proven committed, so someone deleted it
+    since. That absence goes through the same lanes test as a moved path.
     """
     if not moved and not returned:
         return frozenset()
     row = connection.execute(
-        "SELECT rowid FROM derived_batches WHERE batch_id = ?", (batch_id,)
+        "SELECT rowid, state, EXISTS (SELECT 1 FROM pending_recall_rows AS r "
+        "WHERE r.batch_id = b.batch_id AND r.state IN ('live', 'retired')) "
+        "FROM derived_batches AS b WHERE batch_id = ?",
+        (batch_id,),
     ).fetchone()
     if row is None:
         return frozenset()
     sequence = int(row[0])
+    # Proven committed once: the batch is active now, or it published custody
+    # before it stranded. A first proof or a crash-cut batch is neither.
+    proven = str(row[1]) in {"ready", "completed"} or bool(row[2])
     handed = {
         rel
         for rel in moved
@@ -1205,6 +1214,7 @@ def _handed_on(
         rel
         for rel, identity in returned
         if _newer_custody_wrote_bytes(connection, sequence, rel, identity)
+        or (identity is None and proven and _recall_lanes_hold_current(vault_root, rel))
     )
     return frozenset(handed)
 
@@ -1222,7 +1232,9 @@ def _delegated_paths(
     moved on past it (`other`) is proven when newer exact custody covers it, or
     when both recall lanes already hold its current bytes (R2). A path back at
     this batch's before-bytes is proven only when a newer proven batch wrote
-    exactly those bytes. A handed-on path's visibility is no longer this
+    exactly those bytes, or -- for a page this batch created, once the batch
+    was proven committed -- when both lanes hold its absence. A handed-on
+    path's visibility is no longer this
     batch's; its remaining paths still converge here. Any other path --
     unreadable, or not explained by newer custody or the lanes -- makes the
     whole batch unprovable, exactly as before.

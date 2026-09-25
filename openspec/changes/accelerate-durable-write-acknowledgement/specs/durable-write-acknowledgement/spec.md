@@ -94,6 +94,12 @@ dispatched, and at component completion.
 - **THEN** the batch is held in `reconcile_required` while either recall lane lacks the edited bytes
 - **AND** once both lanes hold them, recovery hands the page on and the batch converges its other paths, or is superseded when it owns none
 
+#### Scenario: A new page deleted by hand before it converges heals
+
+- **WHEN** a page a proven batch created is deleted outside any governed write before the batch converges
+- **THEN** the batch is held while either recall lane still holds the page, and once both hold its absence recovery hands the page on and the batch converges its other paths, with no operator step
+- **AND** managed recall is ready once the lanes hold the absence, and the page's advisory result is superseded
+
 #### Scenario: Multi-page burst keeps every batch provable
 
 - **WHEN** several governed pages are each written more than once in one burst

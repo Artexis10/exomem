@@ -490,6 +490,95 @@ def test_an_out_of_band_move_heals_once_the_recall_lanes_hold_it(
     _assert_converged(vault, [page])
 
 
+def test_a_new_page_deleted_by_hand_before_it_converges_heals_without_reconcile(
+    live_catalogue: Path, tmp_path: Path
+) -> None:
+    """A page the batch created, then deleted by hand, is back at its before-state.
+
+    Absence is the page's before-state, which on its own could be the batch's
+    own torn write. The batch was proven committed at its acknowledgement, so
+    it is not: once both recall lanes hold the absence -- the watcher's removal
+    fan-out makes them -- the path is handed on, the batch completes, and
+    managed recall stays ready with no operator step.
+    """
+    from exomem import doctor, memory_refs
+
+    vault = live_catalogue
+    # Both recall lanes built, as a running server has them.
+    memory_refs.ReferenceIndex(vault).rebuild_all()
+    terminal = _remember(tmp_path, vault, "Deleted by hand probe")
+    page = terminal["path"]
+    (vault / page).unlink()
+    index_sync.delete_after_remove(vault, [page])
+
+    _drain_until_idle(vault)
+
+    assert [state for _id, state, _paths in _batches(vault)] == ["completed"]
+    overlay = pending_recall.overlay(vault)
+    assert overlay.outcome == "ready", overlay.failure_code
+    assert not overlay.rows, sorted(overlay.rows)
+    assert doctor._check_fast_ack_custody(vault).status == "pass"
+    # The advisory describes a page that no longer exists.
+    assert _advisory_state(vault, terminal["advisory_result_ref"])[0] == "superseded"
+
+
+def test_a_new_page_deleted_by_hand_waits_until_the_lanes_lose_it(
+    live_catalogue: Path, tmp_path: Path
+) -> None:
+    """While a lane still holds the deleted page, its absence is not yet visible."""
+    vault = live_catalogue
+    page = _remember(tmp_path, vault, "Deleted before removal probe")["path"]
+    index_sync.upsert_after_write(vault, [vault / page], publish_corpus_change=True)
+    (vault / page).unlink()
+
+    _drain_until_idle(vault)
+
+    assert [state for _id, state, _paths in _batches(vault)] == ["reconcile_required"]
+
+    index_sync.delete_after_remove(vault, [page])
+    _drain_until_idle(vault)
+
+    assert [state for _id, state, _paths in _batches(vault)] == ["completed"]
+    assert pending_recall.overlay(vault).outcome == "ready"
+
+
+def test_a_crash_cut_batch_whose_new_page_is_absent_stays_owed(
+    live_catalogue: Path,
+) -> None:
+    """Never proven committed, an absent new page may be the batch's own torn write."""
+    vault = live_catalogue
+    rel = "Knowledge Base/Notes/Insights/torn-new-page-probe.md"
+    log_rel = "Knowledge Base/log.md"
+    log_path = vault / log_rel
+    log_before = log_path.read_bytes()
+    log_after = log_before + b"\n- torn write entry\n"
+    receipt = derived_receipts.prepare_batch(
+        vault,
+        batch_id="torn-new-page",
+        mutation_attempt_digest=hashlib.sha256(b"torn-new-page").hexdigest(),
+        canonical_generation="generation-torn",
+        checkpoint_id="checkpoint-torn",
+        paths=(
+            derived_receipts.DerivedBatchPath(
+                rel_path=log_rel,
+                before_hash=hashlib.sha256(log_before).hexdigest(),
+                after_hash=hashlib.sha256(log_after).hexdigest(),
+            ),
+            derived_receipts.DerivedBatchPath(
+                rel_path=rel,
+                before_hash=None,
+                after_hash=hashlib.sha256(b"never written").hexdigest(),
+            ),
+        ),
+        required_components=frozenset({DerivedComponent.LEXSTORE}),
+    )
+    log_path.write_bytes(log_after)
+
+    assert derived_receipts.prove_committed(
+        vault, receipt, current_generation=receipt.canonical_generation
+    ).outcome == "reconcile_required"
+
+
 def test_a_batch_whose_every_path_moved_out_of_band_retires(
     live_catalogue: Path, tmp_path: Path
 ) -> None:
