@@ -453,3 +453,147 @@ def test_validate_matches_across_mcp_cli_and_rest(
     code = main(cli_args)
     assert code == 0
     assert json.loads(capsys.readouterr().out) == {"success": True, "data": direct}
+
+
+# --------------------------------------------------------------------------- #
+# History and restore (close-memory-loop step 5, task B2): every governed save
+# leaves its why and both hashes in log.md and a snapshot of what it replaced,
+# and `history`/`restore` read and reinstate those versions.
+# --------------------------------------------------------------------------- #
+
+
+def _roles_proposal(cue: str) -> dict[str, object]:
+    return {"schema_version": 1, "roles": {"constraints": {"add_cues": [cue]}}}
+
+
+def _conventions_proposal(folder: str) -> dict[str, object]:
+    return {"schema_version": 1, "anchors": {"add_skip_folders": [folder]}}
+
+
+_SUBJECTS = {
+    "context-roles": ("save-roles", _roles_proposal, lambda root: _current_roles_hash(root)),
+    "activation-conventions": (
+        "save-conventions",
+        _conventions_proposal,
+        lambda root: ac.load_conventions(root).content_hash,
+    ),
+}
+
+
+def _governed_save(root: Path, subject: str, value: str, why: str) -> dict:
+    operation, proposal, current = _SUBJECTS[subject]
+    return commands.op_schema_memory(
+        root,
+        subject=subject,
+        operation=operation,
+        proposal=proposal(value),
+        why=why,
+        expected_hash=current(root),
+    )
+
+
+def _history(root: Path, subject: str) -> list[dict]:
+    return commands.op_schema_memory(root, subject=subject, operation="history")["versions"]
+
+
+@pytest.mark.parametrize("subject", sorted(_SUBJECTS))
+def test_a_governed_save_logs_its_why_and_hashes(vault: Path, subject: str) -> None:
+    context_roles.clear_cache()
+    ac.clear_cache()
+    before = _SUBJECTS[subject][2](vault)
+
+    result = _governed_save(vault, subject, "ceilingword", "the user names limits this way")
+
+    after = result["saved"]["content_hash"]
+    log_text = (vault / "Knowledge Base" / "log.md").read_text(encoding="utf-8")
+    operation = _SUBJECTS[subject][0]
+    assert (
+        f"schema_memory {operation}: the user names limits this way ({before[:8]} -> {after[:8]})"
+        in log_text
+    )
+    versions = _history(vault, subject)
+    assert versions[0]["why"] == "the user names limits this way"
+    assert versions[0]["before_hash"] == before[:8]
+    assert versions[0]["after_hash"] == after[:8]
+    snapshot = vault / versions[0]["path"]
+    assert snapshot.is_file()
+    assert snapshot.parent == vault / "Knowledge Base" / "_Schema" / "history" / snapshot.parent.name
+
+
+@pytest.mark.parametrize("subject", sorted(_SUBJECTS))
+def test_restore_returns_a_registry_to_a_previous_version(vault: Path, subject: str) -> None:
+    context_roles.clear_cache()
+    ac.clear_cache()
+    current = _SUBJECTS[subject][2]
+    _governed_save(vault, subject, "firstword", "first")
+    first_hash = current(vault)
+    _governed_save(vault, subject, "secondword", "second")
+    assert current(vault) != first_hash
+    # The newest version is the state the second save replaced: the first.
+    version = _history(vault, subject)[0]["version"]
+
+    restored = commands.op_schema_memory(
+        vault,
+        subject=subject,
+        operation="restore",
+        version=version,
+        why="the second change was wrong",
+        expected_hash=current(vault),
+    )
+
+    assert restored["valid"] is True
+    assert current(vault) == first_hash
+    # A restore is itself a governed save: history grows, nothing is lost.
+    history = _history(vault, subject)
+    assert history[0]["why"] == "the second change was wrong"
+    assert len(history) == 3
+
+
+def test_restore_refuses_a_stale_hash(bare_vault: Path) -> None:
+    _governed_save(bare_vault, "activation-conventions", "Vorlagen", "first")
+    version = _history(bare_vault, "activation-conventions")[0]["version"]
+    stale = ac.load_conventions(bare_vault).content_hash
+    _governed_save(bare_vault, "activation-conventions", "Modelle", "second")
+    on_disk = ac.override_path(bare_vault).read_bytes()
+
+    with pytest.raises(ValueError, match="STALE_ACTIVATION_CONVENTIONS_REGISTRY"):
+        commands.op_schema_memory(
+            bare_vault,
+            subject="activation-conventions",
+            operation="restore",
+            version=version,
+            why="undo",
+            expected_hash=stale,
+        )
+    assert ac.override_path(bare_vault).read_bytes() == on_disk
+
+
+def test_restore_requires_why_and_a_known_version(bare_vault: Path) -> None:
+    _governed_save(bare_vault, "context-roles", "ceilingword", "first")
+    current = _current_roles_hash(bare_vault)
+    with pytest.raises(ValueError, match="WHY_REQUIRED"):
+        commands.op_schema_memory(
+            bare_vault, subject="context-roles", operation="restore",
+            version=_history(bare_vault, "context-roles")[0]["version"], expected_hash=current,
+        )
+    with pytest.raises(ValueError, match="UNKNOWN_REGISTRY_VERSION"):
+        commands.op_schema_memory(
+            bare_vault, subject="context-roles", operation="restore",
+            version="../../etc/passwd", why="undo", expected_hash=current,
+        )
+
+
+def test_history_keeps_the_newest_twenty(bare_vault: Path) -> None:
+    for index in range(23):
+        _governed_save(bare_vault, "context-roles", f"cueword{index}", f"save {index}")
+
+    history = _history(bare_vault, "context-roles")
+    snapshots = sorted(
+        (bare_vault / "Knowledge Base" / "_Schema" / "history" / "context-roles").glob("*.yaml")
+    )
+    assert len(snapshots) == 20
+    assert len(history) == 20
+    assert history[0]["why"] == "save 22"
+    assert [item["version"] for item in history] == sorted(
+        (item["version"] for item in history), reverse=True
+    )
