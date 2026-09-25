@@ -460,6 +460,18 @@ def test_a_legacy_named_owner_binding_cannot_be_promoted_back_into_a_hosted_cell
     assert armed == []
 
 
+def test_a_hosted_cell_never_inherits_an_activation_model_choice(tmp_path: Path) -> None:
+    """A cell is sized for its one recall encoder. An inherited
+    `EXOMEM_ACTIVATION_MODEL`, or its legacy spelling that `promote_legacy`
+    would copy back, would load a second, larger encoder beside it."""
+    config = HostedCellConfig.from_env(_env(tmp_path), require_provisioned=False)
+    process_env = {"EXOMEM_ACTIVATION_MODEL": "BAAI/bge-m3", "KB_MCP_ACTIVATION_MODEL": "BAAI/bge-m3"}
+
+    config.apply_process_environment(process_env)
+
+    assert [name for name in ("EXOMEM_ACTIVATION_MODEL", "KB_MCP_ACTIVATION_MODEL") if name in process_env] == []
+
+
 def test_hosted_config_rejects_protocol_versions_not_implemented_by_this_release(
     tmp_path: Path,
 ) -> None:
