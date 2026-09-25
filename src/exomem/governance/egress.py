@@ -5663,6 +5663,24 @@ def owner_only_aggregate(
     return {"available": False, "reason": AUDIENCE_RESTRICTED}
 
 
+def governed_release_filter(
+    vault_root: Path,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> Any:
+    """`restricted_release_filter` under a governed policy only, else `None`.
+
+    For the write doors whose answers change for a caller other than the
+    owner (folder deletes, a move's report, an occupied entity's refusal):
+    on a vault with no policy they answer every caller as before, even when
+    an erased page's tombstone makes the release filter decide a path.
+    """
+    if owner_only_aggregate(vault_root, principal=principal) is None:
+        return None
+    return restricted_release_filter(vault_root, principal=principal, purpose=purpose)
+
+
 def write_target_withheld(
     vault_root: Path,
     rel_path: str,

@@ -1207,6 +1207,55 @@ def test_a_restricted_writer_deletes_no_folder(
     assert "__error__" not in deleted, deleted
 
 
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_tombstones_alone_leave_a_non_owners_writes_as_the_owners(
+    tmp_path: Path, audience: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write-door rulings hold under a governed policy only: on a vault
+    with no policy, an erased page's tombstone changes nothing for a caller
+    other than the owner, who may delete a folder."""
+    from exomem.governance import lifecycle
+
+    files = {
+        f"{NOTES}/alpha.md": _page("Alpha", "Alpha conclusions."),
+        f"{NOTES}/linker.md": _page("Linker", f"See [[{NOTES}/alpha]] and [[alpha]]."),
+        f"{NOTES}/Open/open.md": _page("Open", "Open text.", type="insight"),
+        f"{KB}/Entities/People/Wanda Grey.md": _page(
+            "Wanda Grey", "A person.", type="entity", entity_type="person", title="Wanda Grey"
+        ),
+    }
+    monkeypatch.setattr(
+        lifecycle, "tombstoned_paths", lambda _root: frozenset({f"{NOTES}/erased.md"})
+    )
+
+    def answers(name: str, principal: RequestPrincipal) -> list[str]:
+        vault = tmp_path / name / "vault"
+        for rel, text in files.items():
+            (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+            (vault / rel).write_text(text, encoding="utf-8")
+        _reset()
+        with library_scope():
+            epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+        moved = _call(
+            vault, principal, "manage_memory_file", operation="move",
+            old_path=f"{NOTES}/alpha.md", new_path=f"{NOTES}/alpha-moved.md",
+            response_detail="legacy",
+        )
+        entity = _call(
+            vault, principal, "connect_memory", operation="create-entity",
+            name="Wanda Grey", entity_type="person", summary="A person.",
+        )
+        deleted = _call(
+            vault, principal, "manage_memory_file", operation="delete",
+            path=f"{NOTES}/Open", confirm=True, recursive=True,
+        )
+        assert "__error__" not in deleted, deleted
+        assert not (vault / NOTES / "Open").exists()
+        return [_VOLATILE_TEXT.sub("<v>", _text(value)) for value in (moved, entity)]
+
+    assert answers("other", _principal(audience)) == answers("owner", owner_principal())
+
+
 #: Run-specific values in a write's answer: request and receipt ids, hashes,
 #: and timestamps.
 _VOLATILE_TEXT = re.compile(

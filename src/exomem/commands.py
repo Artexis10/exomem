@@ -5471,7 +5471,7 @@ def op_delete(
     # recursive delete is refused before anything is read. A folder holding
     # only pages withheld from the writer does not exist for it, as its
     # listing says, and is answered as a missing path.
-    keep = egress_module.restricted_release_filter(vault_root)
+    keep = egress_module.governed_release_filter(vault_root)
     restricted = keep is not None
     if restricted and recursive:
         raise ValueError(_FOLDER_DELETE_REFUSAL)

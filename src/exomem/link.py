@@ -100,7 +100,7 @@ def _entity_exists_reason(vault_root: Path, rel_entity: str) -> str:
     """
     from .governance import egress
 
-    if egress.restricted_release_filter(vault_root) is not None:
+    if egress.governed_release_filter(vault_root) is not None:
         return (
             "an entity page already exists at this name's path. Entities are "
             "create-only via `link`; use `replace` to supersede."

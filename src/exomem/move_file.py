@@ -443,7 +443,7 @@ def move_file(
     # the full figures.
     from .governance import egress
 
-    visible = egress.restricted_release_filter(vault_root)
+    visible = egress.governed_release_filter(vault_root)
     reported_touched: list[str] = []
     reported_updated = 0
 
@@ -962,7 +962,7 @@ def restricted_mover_terminal(vault_root: Path, result: Any) -> Any:
     """
     from .governance import egress
 
-    if not isinstance(result, Mapping) or egress.restricted_release_filter(vault_root) is None:
+    if not isinstance(result, Mapping) or egress.governed_release_filter(vault_root) is None:
         return result
 
     def _without(value: Mapping[str, Any]) -> dict[str, Any]:
