@@ -11,9 +11,10 @@ and its live pending row for the shared page became unprovable, which turned
 every managed recall in the vault into a warming answer.
 
 The rule now is per path. A path whose bytes moved on counts as proven when a
-newer exact batch carries it with live or retired pending custody; the older
-batch still converges the paths it owns. An out-of-band move that no batch
-covers stays `reconcile_required`.
+newer exact batch carries it with live or retired pending custody, or (R2) when
+both recall lanes already hold its current bytes; the older batch still
+converges the paths it owns. An out-of-band move that nothing covers or holds
+stays `reconcile_required`.
 
 Every node drives the production drain explicitly at a fixed clock.
 """
@@ -33,6 +34,7 @@ from exomem import (
     deferred_index,
     derived_drain,
     derived_receipts,
+    index_sync,
     lexstore,
     pending_recall,
     writer_lease,
@@ -330,10 +332,16 @@ def test_a_crash_cut_batch_whose_shared_page_moved_on_recovers(
     _assert_converged(vault, [page_rel, newer_page, log_rel])
 
 
-def test_an_out_of_band_move_that_no_batch_covers_stays_reconcile_required(
+def test_an_out_of_band_move_heals_once_the_recall_lanes_hold_it(
     live_catalogue: Path, tmp_path: Path
 ) -> None:
-    """A hand edit no receipt covers is not accepted by per-path supersession."""
+    """A hand edit no receipt covers is held until both recall lanes hold it.
+
+    Owner ruling R2: the owner edits pages by hand, so an out-of-band move is
+    ordinary. While neither lane holds the edited bytes the batch stays in
+    `reconcile_required`; once they do -- as the watcher or a reconcile makes
+    them -- recovery hands the path on and the batch converges the rest.
+    """
     vault = live_catalogue
     page = _remember(tmp_path, vault, "Out of band probe")["path"]
     target = vault / page
@@ -343,3 +351,57 @@ def test_an_out_of_band_move_that_no_batch_covers_stays_reconcile_required(
 
     assert [state for _id, state, _paths in _batches(vault)] == ["reconcile_required"]
     assert pending_recall.overlay(vault).outcome == "warming"
+
+    index_sync.upsert_after_write(vault, [target], publish_corpus_change=True)
+    _drain_until_idle(vault)
+
+    _assert_converged(vault, [page])
+
+
+def test_a_batch_whose_every_path_moved_out_of_band_retires(
+    live_catalogue: Path, tmp_path: Path
+) -> None:
+    """With nothing left to own, a batch the lanes cover is retired whole."""
+    vault = live_catalogue
+    rel = "Knowledge Base/Notes/Insights/hand-edited-only-page.md"
+    target = vault / rel
+    written = (
+        b"---\ntitle: Hand edited only page\ntype: insight\nstatus: draft\n"
+        b"updated: 2026-09-25\n---\n\n# Hand edited only page\n\nBody.\n"
+    )
+    receipt = derived_receipts.prepare_batch(
+        vault,
+        batch_id="hand-edited-only",
+        mutation_attempt_digest=hashlib.sha256(b"hand-edited-only").hexdigest(),
+        canonical_generation="generation-hand-edited",
+        checkpoint_id="checkpoint-hand-edited",
+        paths=(
+            derived_receipts.DerivedBatchPath(
+                rel_path=rel,
+                before_hash=None,
+                after_hash=hashlib.sha256(written).hexdigest(),
+            ),
+        ),
+        required_components=frozenset({DerivedComponent.LEXSTORE}),
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(written)
+    assert derived_receipts.prove_committed(
+        vault, receipt, current_generation=receipt.canonical_generation
+    ).outcome == "ready"
+    assert derived_receipts.publish_pending_visibility(
+        vault, receipt, publisher=pending_recall.publish
+    )
+    target.write_bytes(written + b"\nEdited by hand.\n")
+    assert derived_receipts.prove_committed(
+        vault, receipt, current_generation=receipt.canonical_generation
+    ).outcome == "reconcile_required"
+
+    index_sync.upsert_after_write(vault, [target], publish_corpus_change=True)
+    proof = derived_receipts.prove_committed(
+        vault, receipt, current_generation=receipt.canonical_generation
+    )
+
+    assert proof.outcome == "superseded"
+    assert _row_states(vault, receipt.batch_id) == {rel: "retired"}
+    _assert_converged(vault, [rel])

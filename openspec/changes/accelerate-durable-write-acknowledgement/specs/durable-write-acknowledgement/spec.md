@@ -39,7 +39,9 @@ or tombstones, and the required component set. The receipt MUST carry no
 arbitrary vault content. A prepared receipt SHALL authorize derived publication
 only after exact canonical state proves, for every path, either the intended
 after-state or a later state that a newer exact receipt covers with live or
-retired pending custody for that path. Rollback,
+retired pending custody for that path, or a later state whose current bytes
+both persistent recall lanes (the lexical catalogue and the reference sidecar)
+already hold. Rollback,
 partial state, or an unrelated later state MUST NOT activate it. The recorded
 canonical generation is lineage for ordering and supersession; proof SHALL NOT
 require it to equal the vault-wide checkpoint, which advances on every write to
@@ -79,6 +81,12 @@ dispatched, and at component completion.
 - **WHEN** an older batch is re-proven after a newer committed write moved one of its shared paths but before the newer batch's own proof
 - **THEN** the older batch is held in `reconcile_required`
 - **AND** the next recovery pass proves the newer batch and then the older one, which converges its own paths
+
+#### Scenario: An out-of-band edit heals once the recall lanes hold it
+
+- **WHEN** a page an unconverged batch wrote is edited outside any governed write
+- **THEN** the batch is held in `reconcile_required` while either recall lane lacks the edited bytes
+- **AND** once both lanes hold them, recovery hands the page on and the batch converges its other paths, or is superseded when it owns none
 
 #### Scenario: Multi-page burst keeps every batch provable
 

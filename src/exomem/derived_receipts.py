@@ -1116,20 +1116,72 @@ def _newer_custody_covers_path(
     )
 
 
+def _recall_lanes_hold_current(vault_root: Path, rel_path: str) -> bool:
+    """Whether both persistent recall lanes already hold this path's current bytes.
+
+    Owner ruling R2 (2026-09-25): a path moved by a write no receipt covers --
+    a hand edit in an editor is the ordinary case -- is visible once the lanes
+    hold what is on disk now, and that is the right test for handing it on.
+    Absence is held as proven absence. An unreadable path never is.
+    """
+    target = vault_root.joinpath(*rel_path.split("/"))
+    try:
+        if not os.path.lexists(target):
+            identity: str | None = None
+        elif target.is_symlink() or not target.is_file():
+            return False
+        else:
+            identity = _hash_file(target)
+    except OSError:
+        return False
+    from . import pending_recall
+
+    return pending_recall.recall_lanes_hold(vault_root, {rel_path: identity})
+
+
+def _handed_on(
+    vault_root: Path,
+    connection: sqlite3.Connection,
+    batch_id: str,
+    moved: Sequence[str],
+) -> frozenset[str]:
+    """The moved paths whose current bytes are someone else's to make visible.
+
+    A moved path is handed on when newer exact custody covers it (option A) or,
+    failing that, when both recall lanes already hold its current bytes (R2).
+    """
+    if not moved:
+        return frozenset()
+    row = connection.execute(
+        "SELECT rowid FROM derived_batches WHERE batch_id = ?", (batch_id,)
+    ).fetchone()
+    if row is None:
+        return frozenset()
+    sequence = int(row[0])
+    return frozenset(
+        rel
+        for rel in moved
+        if _newer_custody_covers_path(connection, sequence, rel)
+        or _recall_lanes_hold_current(vault_root, rel)
+    )
+
+
 def _delegated_paths(
+    vault_root: Path,
     connection: sqlite3.Connection,
     receipt: DerivedBatchReceipt,
     path_states: Sequence[str],
 ) -> frozenset[str] | None:
-    """The paths this batch hands to newer custody, or None if it cannot prove.
+    """The paths this batch hands on, or None if it cannot prove.
 
     Owner ruling on stranded batches (option A, 2026-09-25): proof is per path.
     A path in its intended after-state is this batch's own. A path whose bytes
     moved on past it (`other`, never `before`) is proven when newer exact
-    custody covers it, and this batch stops owning that path's visibility; its
-    remaining paths still converge here. Any path that is neither -- still in
-    its before-state, unreadable, or moved with nothing covering it -- makes the
-    whole batch unprovable, exactly as before.
+    custody covers it, or when both recall lanes already hold its current bytes
+    (R2), and this batch stops owning that path's visibility; its remaining
+    paths still converge here. Any path that is neither -- still in its
+    before-state, unreadable, or moved with nothing covering or holding it --
+    makes the whole batch unprovable, exactly as before.
     """
     if any(state not in {"after", "other"} for state in path_states):
         return None
@@ -1140,15 +1192,8 @@ def _delegated_paths(
     ]
     if not moved:
         return frozenset()
-    row = connection.execute(
-        "SELECT rowid FROM derived_batches WHERE batch_id = ?", (receipt.batch_id,)
-    ).fetchone()
-    if row is None:
-        return None
-    sequence = int(row[0])
-    if all(_newer_custody_covers_path(connection, sequence, rel) for rel in moved):
-        return frozenset(moved)
-    return None
+    handed_on = _handed_on(vault_root, connection, receipt.batch_id, moved)
+    return handed_on if len(handed_on) == len(moved) else None
 
 
 def _retire_delegated_rows(
@@ -1301,7 +1346,7 @@ def _prove_committed_guarded(
                 outcome = "superseded"
                 _supersede_batch(connection, current.batch_id, now=observed_at)
             elif (
-                delegated := _delegated_paths(connection, current, path_states)
+                delegated := _delegated_paths(vault_root, connection, current, path_states)
             ) is not None:
                 # Per-path proof (owner ruling, option A): every path is either
                 # this batch's exact after-state or has moved on under newer
@@ -1389,8 +1434,9 @@ def _publication_split(
 
     A path whose row the proof already retired belongs to newer custody. A path
     that moved on since the proof is handed on only if newer custody covers it
-    now; otherwise it stays owned, and the publisher's own exact proof refuses
-    it, exactly as before per-path proof existed.
+    now or the recall lanes already hold its current bytes; otherwise it stays
+    owned, and the publisher's own exact proof refuses it, exactly as before
+    per-path proof existed.
     """
     connection = _connect_receipt_read(vault_root)
     try:
@@ -1409,18 +1455,7 @@ def _publication_split(
             for p, state in zip(open_paths, states, strict=True)
             if state == "other"
         ]
-        handed_on: set[str] = set()
-        if moved:
-            row = connection.execute(
-                "SELECT rowid FROM derived_batches WHERE batch_id = ?",
-                (receipt.batch_id,),
-            ).fetchone()
-            if row is not None:
-                handed_on = {
-                    rel
-                    for rel in moved
-                    if _newer_custody_covers_path(connection, int(row[0]), rel)
-                }
+        handed_on = _handed_on(vault_root, connection, receipt.batch_id, moved)
     finally:
         connection.close()
     owned = tuple(p for p in open_paths if p.rel_path not in handed_on)
@@ -2397,7 +2432,7 @@ def complete_component(
                 )
                 # The same per-path predicate as the proof: every path is this
                 # batch's exact after-state or has moved on under newer custody.
-                if _delegated_paths(connection, receipt, path_states) is None:
+                if _delegated_paths(vault_root, connection, receipt, path_states) is None:
                     connection.rollback()
                     return False
                 changed = connection.execute(

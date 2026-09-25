@@ -474,6 +474,15 @@ def _lanes_hold(vault_root: Path, expected: dict[str, str | None]) -> bool:
     return all(catalogue.get(rel, False) for rel in expected)
 
 
+def recall_lanes_hold(vault_root: Path, expected: dict[str, str | None]) -> bool:
+    """Whether both persistent recall lanes hold exactly these identities.
+
+    The same test the overlay retires custody by; the receipt store asks it to
+    hand on a path whose current bytes no receipt covers.
+    """
+    return _lanes_hold(Path(vault_root), expected)
+
+
 def _retire_settled(
     vault_root: Path, batches: Sequence[object], projection: _Projection
 ) -> bool:

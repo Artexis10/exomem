@@ -138,7 +138,11 @@ original request evaluates a prepared batch from source of truth:
   burst in `reconcile_required` for good, and its unprovable live rows turned
   every managed recall into a warming answer (owner ruling, option A,
   2026-09-25). A moved path whose newer batch is committed but not yet proven
-  leaves the batch `reconcile_required` until recovery re-proves it;
+  leaves the batch `reconcile_required` until recovery re-proves it. A moved
+  path that no batch covers -- a hand edit in the editor, which is ordinary in
+  a personal vault -- is handed on once both recall lanes hold its current
+  bytes (ruling R2): that is the overlay's own retirement test, and until it
+  holds the batch stays `reconcile_required` rather than publishing anything;
 - every path equals the before state and the canonical attempt is known not to
   have committed → retire as `aborted`, retiring the batch's own pending
   rows in the same transition;
