@@ -92,6 +92,25 @@ class LinkError(Exception):
         return value
 
 
+def _entity_exists_reason(vault_root: Path, rel_entity: str) -> str:
+    """The occupied-destination refusal, naming no path to a restricted writer.
+
+    For a writer other than the owner the destination may be occupied by a
+    page it may not see; the refusal is then the same whatever occupies it.
+    """
+    from .governance import egress
+
+    if egress.restricted_release_filter(vault_root) is not None:
+        return (
+            "an entity page already exists at this name's path. Entities are "
+            "create-only via `link`; use `replace` to supersede."
+        )
+    return (
+        f"{rel_entity!r} already exists. Entities are create-only via `link`; "
+        "use `replace` to supersede."
+    )
+
+
 def _legacy_link(
     vault_root: Path,
     *,
@@ -183,9 +202,8 @@ def _legacy_link(
         raise LinkError(
             code="ENTITY_EXISTS",
             missing=["name"],
-            reason=(
-                f"{entity_path.relative_to(vault_root).as_posix()!r} already exists. "
-                "Entities are create-only via `link`; use `replace` to supersede."
+            reason=_entity_exists_reason(
+                vault_root, entity_path.relative_to(vault_root).as_posix()
             ),
         )
 
@@ -696,12 +714,7 @@ def link(
         vault_root, entity_path.relative_to(vault_root).as_posix()
     )
     if entity_path.exists():
-        raise LinkError(
-            "ENTITY_EXISTS",
-            ["name"],
-            f"{rel_entity!r} already exists. Entities are create-only via `link`; "
-            "use `replace` to supersede.",
-        )
+        raise LinkError("ENTITY_EXISTS", ["name"], _entity_exists_reason(vault_root, rel_entity))
     rel_entity_no_ext = rel_entity.removesuffix(".md")
     resolver = find_module.writer_resolver_snapshot(vault_root)
     resolver.add_pending(rel_entity_no_ext, title=display_name)

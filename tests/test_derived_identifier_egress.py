@@ -861,6 +861,92 @@ def test_a_write_door_answers_a_withheld_target_as_an_absent_one(
     assert {rel: (vaults["A"] / rel).read_bytes() for rel in withheld} == before
 
 
+_OCCUPANT = "occupied.md"
+_CREATION_DOORS: dict[str, tuple[str, dict[str, Any]]] = {
+    "create": (
+        "manage_memory_file",
+        {"operation": "create", "path": "{D}/" + _OCCUPANT, "content": "# New\n\nText.\n"},
+    ),
+    "create-overwrite": (
+        "manage_memory_file",
+        {
+            "operation": "create",
+            "path": "{D}/" + _OCCUPANT,
+            "content": "# New\n\nText.\n",
+            "overwrite": True,
+        },
+    ),
+    "create-folder": ("manage_memory_file", {"operation": "create", "path": "{D}", "kind": "folder"}),
+    "move-destination": (
+        "manage_memory_file",
+        {"operation": "move", "old_path": f"{NOTES}/alpha.md", "new_path": "{D}/" + _OCCUPANT},
+    ),
+}
+
+
+def _occupied_answer(vault: Path, principal: RequestPrincipal, door: str, folder: str) -> str:
+    command, kwargs = _CREATION_DOORS[door]
+    args = {k: v.replace("{D}", folder) if isinstance(v, str) else v for k, v in kwargs.items()}
+    return _text(_call(vault, principal, command, **args)).replace(folder, "{D}")
+
+
+@pytest.mark.parametrize("door", sorted(_CREATION_DOORS))
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_withheld_occupant_is_refused_as_any_occupied_path(
+    tmp_path: Path, audience: str, door: str
+) -> None:
+    """DOCUMENTED RESIDUAL: a creation door reveals that a path is occupied by
+    refusing it. The refusal for a withheld occupant is the door's ordinary
+    occupied-path refusal, and the withheld page is never changed."""
+    visible_dir = f"{NOTES}/Visible"
+    occupant = _page("Hidden Draft", "Withheld body text.", type="insight")
+    files = {
+        f"{NOTES}/alpha.md": _page("Alpha", "Alpha conclusions.", type="insight"),
+        f"{WITHHELD_DIR}/{_OCCUPANT}": occupant,
+        f"{visible_dir}/{_OCCUPANT}": _page("Open Draft", "Open body text.", type="insight"),
+    }
+    principal = _principal(audience)
+    withheld_vault = _materialize(tmp_path / "w" / "vault", files, audience)
+    visible_vault = _materialize(tmp_path / "v" / "vault", files, audience)
+    # The ordinary occupied-path refusal: without `overwrite` for the
+    # overwrite door, which succeeds on a visible occupant.
+    ordinary = "create" if door == "create-overwrite" else door
+
+    withheld = _occupied_answer(withheld_vault, principal, door, WITHHELD_DIR)
+    visible = _occupied_answer(visible_vault, principal, ordinary, visible_dir)
+
+    assert withheld == visible
+    assert '"__error__"' in withheld
+    assert (withheld_vault / WITHHELD_DIR / _OCCUPANT).read_text(encoding="utf-8") == occupant
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_an_entity_destination_a_withheld_entity_holds_is_refused_as_any_occupied_one(
+    tmp_path: Path, audience: str
+) -> None:
+    person = f"{KB}/Entities/People/Wanda Grey.md"
+    entity = _page("Wanda Grey", "A person.", type="entity", entity_type="person", title="Wanda Grey")
+    answers = {}
+    for which, scope, text in (
+        ("withheld", "Entities/People/**", entity),
+        ("visible", "Notes/Withheld/**", _page("Scratch", "Not an entity.", type="note")),
+    ):
+        vault = _materialize(tmp_path / which / "vault", {person: text}, audience, scope=scope)
+        answers[which] = _call(
+            vault,
+            _principal(audience),
+            "connect_memory",
+            operation="create-entity",
+            name="Wanda Grey",
+            entity_type="person",
+            summary="A person.",
+        )
+        assert (vault / person).read_text(encoding="utf-8") == text
+
+    assert answers["withheld"] == answers["visible"]
+    assert answers["withheld"]["message"].startswith("ENTITY_EXISTS")
+
+
 def test_the_owner_still_writes_to_a_page_withheld_from_others(tmp_path: Path) -> None:
     base, withheld = _write_door_fixture()
     vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external", scope=_WRITE_SCOPE)
