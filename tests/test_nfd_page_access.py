@@ -4,9 +4,13 @@ A vault synced from macOS keeps decomposed (NFD) file names on a byte-exact
 file system (Linux ext4): `cafe-e-nfd.md` on disk is not the same name as its
 NFKC (composed) spelling. `find_corpus`'s whole-vault walk already handles
 this (it opens the spelling it found, via `physical=True`), but the
-single-path doors -- `get`/`read_memory`, `edit`/`edit_memory`,
-`replace`/`replace_memory`, and `move_file`'s source -- opened only the NFKC
-spelling and reported the page missing. See `reserved_paths.resolve_physical_relative`.
+single-path doors -- `get`/`read_memory` and `move_file`'s source -- opened
+only the NFKC spelling and reported the page missing. See
+`reserved_paths.resolve_physical_relative`.
+
+`edit` and `replace` resolve a path before validation, authorization and any
+dry run, so they refuse an NFD-named page (`NON_CANONICAL_NAME`) rather than
+rename it as a side effect; `move_file` onto the same path canonicalizes it.
 """
 
 from __future__ import annotations
@@ -116,7 +120,7 @@ def _rest_client(vault: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return TestClient(mcp.http_app())
 
 
-# ---------------- readable + editable through op_* ----------------
+# ---------------- readable + movable through op_* ----------------
 
 
 def test_nfd_named_page_is_readable_via_op_get(vault: Path) -> None:
@@ -130,31 +134,6 @@ def test_nfd_named_page_is_readable_via_get_frontmatter(vault: Path) -> None:
     rel = _nfd_page(vault)
     out = commands.op_get(vault, path=rel, frontmatter_only=True)
     assert out["frontmatter"]["type"] == "insight"
-
-
-def test_nfd_named_page_is_editable_via_edit(vault: Path) -> None:
-    rel = _nfd_page(vault)
-    directory = vault.joinpath(*_DIRECTORY)
-
-    edit_module.edit(
-        vault,
-        path=rel,
-        why="NFD edit probe",
-        new_body=_page_text("edited body").split("---\n\n", 1)[1],
-        today=TODAY,
-    )
-
-    # A write canonicalizes the on-disk name to its NFKC spelling as part of
-    # the edit (every downstream write-side invariant -- the semantic index,
-    # the graph checkpoint -- keys on that canonical form), so the decomposed
-    # physical name is gone and the composed one now holds the edited content.
-    assert not (directory / _DECOMPOSED_NAME).exists()
-    on_disk = directory / _COMPOSED_NAME
-    assert on_disk.exists()
-    assert "edited body" in on_disk.read_text(encoding="utf-8")
-
-    out = commands.op_get(vault, path=rel)
-    assert "edited body" in out["body"]
 
 
 def test_nfd_named_page_is_movable_via_move_file(vault: Path) -> None:
@@ -173,33 +152,7 @@ def test_nfd_named_page_is_movable_via_move_file(vault: Path) -> None:
     assert "probe body" in (vault / dst_rel).read_text(encoding="utf-8")
 
 
-def test_nfd_named_page_is_replaceable_via_replace(vault: Path) -> None:
-    old_rel = _nfd_page(vault)
-    directory = vault.joinpath(*_DIRECTORY)
-    old_abs = directory / _DECOMPOSED_NAME
-    assert old_abs.exists()
-
-    result = replace_module.replace(
-        vault,
-        old_path=old_rel,
-        content=_page_text("revised body").split("---\n\n", 1)[1].replace(
-            "NFD probe", "NFD replace successor"
-        ),
-        note_type="insight",
-        title="NFD replace successor",
-        today=TODAY,
-    )
-
-    # The old page stays (never deleted), now marked superseded -- and, like
-    # `edit`, canonicalized to its NFKC spelling as part of the write.
-    canonical_abs = directory / _COMPOSED_NAME
-    assert not old_abs.exists()
-    assert canonical_abs.exists()
-    assert "superseded" in canonical_abs.read_text(encoding="utf-8")
-    assert (vault / result.new_path).exists()
-
-
-# ---------------- readable + editable through the REST door ----------------
+# ---------------- readable through the REST door ----------------
 
 
 def test_nfd_named_page_is_readable_via_rest_read_memory(
@@ -217,7 +170,7 @@ def test_nfd_named_page_is_readable_via_rest_read_memory(
     assert "probe body" in body["body"]
 
 
-def test_nfd_named_page_is_editable_via_rest_edit_memory(
+def test_nfd_named_page_edit_via_rest_is_refused_without_renaming(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     rel = _nfd_page(vault)
@@ -231,11 +184,12 @@ def test_nfd_named_page_is_editable_via_rest_edit_memory(
         },
         headers={"Authorization": "Bearer sekret"},
     )
-    assert r.status_code == 200, r.text
+    assert r.status_code != 200, r.text
+    assert "NON_CANONICAL_NAME" in r.text
 
     directory = vault.joinpath(*_DIRECTORY)
-    assert not (directory / _DECOMPOSED_NAME).exists()
-    assert "rest edited" in (directory / _COMPOSED_NAME).read_text(encoding="utf-8")
+    assert (directory / _DECOMPOSED_NAME).exists()
+    assert not (directory / _COMPOSED_NAME).exists()
 
 
 # ---------------- ambiguous collision is refused ----------------
@@ -309,3 +263,85 @@ def test_withheld_nfd_collision_reads_as_missing_to_restricted_caller(vault: Pat
         commands.op_get(vault, path=rel)
 
     assert str(withheld.value) == str(absent.value)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"new_body": _page_text("edited body").split("---\n\n", 1)[1]},
+        {"new_body": _page_text("edited body").split("---\n\n", 1)[1], "validate_only": True},
+        {"new_body": ""},
+    ],
+    ids=["commit", "validate-only", "semantic-refusal"],
+)
+def test_edit_never_renames_an_nfd_page_while_resolving_it(vault: Path, kwargs: dict) -> None:
+    """Resolving a path is not a write: no dry run, refused edit, or
+    unauthorized caller may leave the page renamed behind it."""
+    rel = _nfd_page(vault)
+    directory = vault.joinpath(*_DIRECTORY)
+    before = _snapshot(directory)
+
+    with pytest.raises(edit_module.EditError) as refused:
+        edit_module.edit(vault, path=rel, why="NFD edit probe", today=TODAY, **kwargs)
+
+    assert refused.value.code == "NON_CANONICAL_NAME"
+    assert "move_file" in refused.value.reason
+    assert _snapshot(directory) == before
+
+
+def test_edit_by_a_restricted_caller_never_renames_a_withheld_nfd_page(vault: Path) -> None:
+    rel = _nfd_page(vault)
+    _govern_deny(vault)
+    directory = vault.joinpath(*_DIRECTORY)
+    before = _snapshot(directory)
+
+    with request_scope(_external()), pytest.raises(edit_module.EditError) as withheld:
+        edit_module.edit(vault, path=rel, why="probe", new_body="\nbody\n", today=TODAY)
+    assert _snapshot(directory) == before
+
+    (directory / _DECOMPOSED_NAME).unlink()
+    with request_scope(_external()), pytest.raises(edit_module.EditError) as absent:
+        edit_module.edit(vault, path=rel, why="probe", new_body="\nbody\n", today=TODAY)
+    assert withheld.value.as_dict() == absent.value.as_dict()
+
+
+@pytest.mark.parametrize("validate_only", [False, True], ids=["commit", "validate-only"])
+def test_replace_never_renames_an_nfd_page_while_resolving_it(
+    vault: Path, validate_only: bool
+) -> None:
+    rel = _nfd_page(vault)
+    directory = vault.joinpath(*_DIRECTORY)
+    before = _snapshot(directory)
+
+    with pytest.raises(replace_module.ReplaceError) as refused:
+        replace_module.replace(
+            vault,
+            old_path=rel,
+            content="\n# NFD replace successor\n\n## Claim\n\nrevised\n",
+            note_type="insight",
+            title="NFD replace successor",
+            today=TODAY,
+            validate_only=validate_only,
+        )
+
+    assert refused.value.code == "NON_CANONICAL_NAME"
+    assert _snapshot(directory) == before
+
+
+def test_move_file_onto_its_own_name_canonicalizes_an_nfd_page(vault: Path) -> None:
+    """The governed way to fix an NFD name that edit and replace refuse."""
+    rel = _nfd_page(vault)
+    directory = vault.joinpath(*_DIRECTORY)
+
+    move_module.move_file(vault, old_path=rel, new_path=rel, today=TODAY, update_wikilinks=False)
+
+    assert not (directory / _DECOMPOSED_NAME).exists()
+    assert "probe body" in (directory / _COMPOSED_NAME).read_text(encoding="utf-8")
+    edit_module.edit(
+        vault,
+        path=rel,
+        why="edit after canonicalizing",
+        new_body=_page_text("edited body").split("---\n\n", 1)[1],
+        today=TODAY,
+    )
+    assert "edited body" in commands.op_get(vault, path=rel)["body"]

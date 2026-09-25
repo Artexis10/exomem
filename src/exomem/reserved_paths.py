@@ -1071,6 +1071,39 @@ def resolve_physical_relative(
                 )
 
 
+def physical_spelling_refusal(vault_root: Path, value: object) -> tuple[str, str] | None:
+    """Why a write door must not act on `value` as named, or ``None``.
+
+    `("AMBIGUOUS_PATH", reason)` when more than one physical name collapses to
+    `value`'s NFKC leaf, even if one of them is the NFKC-exact name, and
+    `("NON_CANONICAL_NAME", reason)` when the one physical name is not its own
+    NFKC form. Renaming it would be a write, and a door resolves its path
+    before validation, authorization and any dry run, so the door refuses and
+    `move_file` onto the same path is the governed way to canonicalize. Any
+    other lookup outcome is ``None``: the door's own resolution reports a
+    missing or refused path exactly as before.
+    """
+
+    try:
+        physical = resolve_physical_relative(vault_root, value)
+    except ReservedPathLeafError as error:
+        if error.code == "AMBIGUOUS_PATH":
+            return (
+                "AMBIGUOUS_PATH",
+                f"{value} matches more than one on-disk spelling; refusing to guess which",
+            )
+        return None
+    if physical == unicodedata.normalize("NFKC", physical):
+        return None
+    return (
+        "NON_CANONICAL_NAME",
+        (
+            f"{value} is stored under a non-canonical Unicode spelling; "
+            "move_file it onto this same path to canonicalize its name, then retry"
+        ),
+    )
+
+
 def read_generic_bytes(
     vault_root: Path,
     value: object,

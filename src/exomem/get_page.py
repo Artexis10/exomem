@@ -136,6 +136,17 @@ def _read_prepared_snapshot(target: Path) -> tuple[bytes, os.stat_result] | None
 NOT_UTF8_REASON = "file is not UTF-8 text"
 
 
+def path_withheld(vault_root: Path, relative: str) -> bool:
+    """Whether the current caller is denied `relative` by its path alone.
+
+    For a door that must answer a withheld path exactly like a missing one
+    before it has any bytes to decide on.
+    """
+    from .governance import egress
+
+    return egress.release_level_for_path_only(vault_root, relative) <= egress.LEVEL_NONE
+
+
 def unreadable_or_absent(
     vault_root: Path,
     relatives: tuple[str, ...],

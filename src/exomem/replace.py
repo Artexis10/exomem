@@ -22,7 +22,6 @@ import datetime as dt
 import hashlib
 import logging
 import re
-import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -66,9 +65,6 @@ def _read_replace_source(
     """Read one replacement source through the retained generic leaf."""
 
     try:
-        # `_resolve_kb_path` has already confirmed `relative` names the real
-        # on-disk file, canonicalizing it (renaming a non-canonical physical
-        # spelling) when needed, so an ordinary read finds it.
         snapshot = reserved_paths.read_generic_bytes(vault_root, relative)
     except reserved_paths.ReservedPathLeafError as error:
         if error.code == "MISSING":
@@ -328,47 +324,20 @@ def _resolve_kb_path(vault_root: Path, path: str) -> tuple[Path, str]:
     if not candidate.exists():
         # The literal (NFKC) spelling may simply be absent because the
         # on-disk name is a different Unicode normalization -- a macOS-origin
-        # NFD name on a byte-exact filesystem (Linux ext4). Refuse outright,
-        # rather than guess, if two physical spellings collide.
-        try:
-            physical_rel = reserved_paths.resolve_physical_relative(vault_root, rel)
-        except reserved_paths.ReservedPathLeafError as error:
-            if error.code == "AMBIGUOUS_PATH":
+        # NFD name on a byte-exact filesystem (Linux ext4). Resolving never
+        # renames it: see `reserved_paths.physical_spelling_refusal`.
+        refusal = reserved_paths.physical_spelling_refusal(vault_root, rel)
+        if refusal is not None:
+            from .get_page import path_withheld
+
+            if path_withheld(vault_root, rel):
+                # A withheld page answers exactly like a missing one.
                 raise ReplaceError(
-                    code="AMBIGUOUS_PATH",
+                    code="OLD_NOT_FOUND",
                     missing=["old_path"],
-                    reason=(
-                        f"{rel} matches more than one on-disk spelling; "
-                        "refusing to guess which"
-                    ),
-                ) from None
-        else:
-            canonical_rel = unicodedata.normalize("NFKC", rel)
-            if physical_rel != canonical_rel:
-                # Every downstream write keys its bookkeeping (the semantic
-                # index, the graph checkpoint) on the canonical (NFC/NFKC)
-                # path -- rightly: that is the one spelling every writer
-                # agrees on. Rather than let a non-canonical physical name
-                # leak into those invariants, normalize it now, in the same
-                # place the read side already tolerates it, so every write
-                # downstream of this point sees an ordinary canonically-named
-                # page and needs no special casing at all.
-                try:
-                    reserved_paths.move_generic_path(
-                        vault_root,
-                        physical_rel,
-                        canonical_rel,
-                        source_kind="file",
-                        physical=True,
-                    )
-                except reserved_paths.ReservedPathLeafError as error:
-                    raise ReplaceError(
-                        code="UNREADABLE",
-                        missing=["old_path"],
-                        reason="page could not be normalized to a canonical name",
-                    ) from error
-            rel = canonical_rel
-            candidate = vault_root / rel
+                    reason=f"file does not exist: {rel}",
+                )
+            raise ReplaceError(code=refusal[0], missing=["old_path"], reason=refusal[1])
     try:
         resolved = candidate.resolve()
         resolved.relative_to(kb_root(vault_root).resolve())
