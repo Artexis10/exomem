@@ -1,5 +1,9 @@
 cluster-init: true
 token: {{ k3s_server_token | to_json }}
+{% if k3s_agent_token | length > 0 %}
+# Agents join with this token only (add-cloud-node-provisioning N5).
+agent-token: {{ k3s_agent_token | to_json }}
+{% endif %}
 node-ip: {{ private_node_ip | to_json }}
 advertise-address: {{ private_node_ip | to_json }}
 flannel-iface: {{ k3s_resolved_private_interface | to_json }}

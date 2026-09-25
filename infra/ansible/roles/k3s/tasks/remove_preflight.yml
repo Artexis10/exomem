@@ -1,0 +1,84 @@
+---
+# add-cloud-node-provisioning N6: refuse a removal that would leave cellctl's
+# admission over-committed. Uses cellctl's own formula (D9):
+#   cell_slots(node) = allocatable - headroom - non-cell attachments
+# over the remaining Ready, schedulable nodes with a known CSI limit, and
+# counts cell PVCs rather than attachments, because stopped cells still own
+# their volumes. The target's own non-cell volumes must also move.
+#
+# Inputs (parsed `kubectl get -o json` documents): k3s_remove_nodes_doc,
+# k3s_remove_csinodes_doc, k3s_remove_attachments_doc, k3s_remove_pvs_doc,
+# k3s_remove_pvcs_doc, k3s_remove_statefulsets_doc; and k3s_remove_node.
+- name: Find cell maintenance holds in flight
+  ansible.builtin.set_fact:
+    k3s_remove_holds: >-
+      {{ k3s_remove_statefulsets_doc['items']
+         | selectattr('metadata.namespace', 'match', k3s_cell_namespace_prefix)
+         | selectattr('metadata.annotations', 'defined')
+         | selectattr('metadata.annotations', 'contains', 'exomem.io/hold')
+         | map(attribute='metadata.namespace') | list }}
+
+- name: Refuse a removal while a cell backup, restore or upgrade holds a cell
+  ansible.builtin.assert:
+    that:
+      - k3s_remove_holds | length == 0
+    fail_msg: >-
+      Cell maintenance is in flight ({{ k3s_remove_holds | join(', ') }}); a drain
+      would evict its Job. Retry once no exomem.io/hold annotation remains.
+
+- name: Classify attached volumes as cell or non-cell by their claim namespace
+  ansible.builtin.set_fact:
+    k3s_remove_attached: >-
+      {%- set claimed = {} -%}
+      {%- for pv in k3s_remove_pvs_doc['items'] -%}
+        {%- set _ = claimed.update({pv.metadata.name: pv.spec.claimRef.namespace | default('')
+                                    if pv.spec.claimRef is defined else ''}) -%}
+      {%- endfor -%}
+      {%- set attached = [] -%}
+      {%- for attachment in k3s_remove_attachments_doc['items']
+          if attachment.spec.attacher == k3s_csi_driver
+          and (attachment.status.attached | default(false)) -%}
+        {%- set namespace = claimed.get(attachment.spec.source.persistentVolumeName | default(''), '') -%}
+        {%- set _ = attached.append({'node': attachment.spec.nodeName,
+                                     'cell': namespace.startswith(k3s_cell_namespace_prefix)}) -%}
+      {%- endfor -%}
+      {{ attached }}
+
+- name: Measure the slots the remaining nodes would publish
+  ansible.builtin.set_fact:
+    k3s_remove_cell_volumes: >-
+      {{ k3s_remove_pvcs_doc['items']
+         | selectattr('metadata.namespace', 'match', k3s_cell_namespace_prefix) | list | length }}
+    k3s_remove_target_non_cell: >-
+      {{ k3s_remove_attached | selectattr('node', 'equalto', k3s_remove_node)
+         | rejectattr('cell') | list | length }}
+    k3s_remove_remaining_slots: >-
+      {%- set total = namespace(slots=0) -%}
+      {%- for node in k3s_remove_nodes_doc['items'] if node.metadata.name != k3s_remove_node
+          and not (node.spec.unschedulable | default(false))
+          and (node.status.conditions | default([]) | selectattr('type', 'equalto', 'Ready')
+               | map(attribute='status') | first | default('False')) == 'True' -%}
+        {%- set csinode = k3s_remove_csinodes_doc['items']
+              | selectattr('metadata.name', 'equalto', node.metadata.name) | first | default({}) -%}
+        {%- set drivers = (csinode.spec | default({})).drivers | default([], true)
+              | selectattr('name', 'equalto', k3s_csi_driver) | list -%}
+        {%- if drivers and (drivers[0].allocatable | default({})).count is defined -%}
+          {%- set non_cell = k3s_remove_attached | selectattr('node', 'equalto', node.metadata.name)
+                | rejectattr('cell') | list | length -%}
+          {%- set total.slots = total.slots
+                + ([drivers[0].allocatable.count | int - k3s_remove_headroom | int - non_cell, 0] | max) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ total.slots }}
+
+- name: Refuse a removal whose cells would not fit the remaining nodes
+  ansible.builtin.assert:
+    that:
+      - k3s_remove_cell_volumes | int <= k3s_remove_remaining_slots | int - k3s_remove_target_non_cell | int
+    fail_msg: >-
+      Removing {{ k3s_remove_node }} leaves {{ k3s_remove_remaining_slots }} cell slots
+      (net of {{ k3s_remove_target_non_cell }} non-cell volumes that must move) for
+      {{ k3s_remove_cell_volumes }} cell volumes. Add a node first.
+    success_msg: >-
+      {{ k3s_remove_cell_volumes }} cell volumes fit {{ k3s_remove_remaining_slots }}
+      remaining slots.

@@ -10,6 +10,7 @@
     "backup-restore": {"path": "docs/runbooks/hosted/backup-restore.md", "destructive": false, "approval_flag": ""},
     "deletion": {"path": "docs/runbooks/hosted/deletion.md", "destructive": true, "approval_flag": "--allow-destructive"},
     "node-replacement": {"path": "docs/runbooks/hosted/node-replacement.md", "destructive": true, "approval_flag": "--allow-destructive"},
+    "node-pool": {"path": "docs/runbooks/hosted/node-pool.md", "destructive": true, "approval_flag": "--allow-destructive"},
     "break-glass": {"path": "docs/runbooks/hosted/break-glass.md", "destructive": false, "approval_flag": ""}
   }
 }

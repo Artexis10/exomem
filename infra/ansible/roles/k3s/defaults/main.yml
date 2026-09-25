@@ -9,3 +9,42 @@ k3s_etcd_s3_region: ""
 k3s_etcd_s3_bucket: ""
 k3s_etcd_s3_access_key: ""
 k3s_etcd_s3_secret_key: ""
+
+# server: the one cluster-init server (hosted_nodes outside k3s_agents).
+# agent: a node in k3s_agents. Derived from group membership, so no play can
+# render the server configuration on an agent by forgetting to set it.
+k3s_node_role: "{{ 'agent' if inventory_hostname in (groups['k3s_agents'] | default([])) else 'server' }}"
+k3s_service_name: "{{ 'k3s-agent' if k3s_node_role == 'agent' else 'k3s' }}"
+
+# Agents join with this token only, never the server token, which is also
+# the passphrase for the cluster's bootstrap data. Mandatory once any agent
+# is inventoried; see tasks/validate.yml.
+k3s_agent_token: ""
+k3s_agent_node_label: exomem.io/node-pool=agent
+
+# A join completes only once the node's CSINode publishes an attachment
+# limit for this driver: that count is what cellctl turns into cell_slots.
+# Switch off only for a cluster without the Hetzner CSI driver.
+k3s_agent_require_csi_capacity: true
+k3s_csi_driver: csi.hetzner.cloud
+k3s_join_retries: 60
+k3s_join_delay: 5
+
+# Every K3s node in the inventory; the host firewall admits inter-node
+# traffic only from their declared private addresses.
+k3s_cluster_hosts: "{{ groups['hosted_nodes'] | default([]) }}"
+k3s_firewall_peer_ips: >-
+  {{ k3s_cluster_hosts | difference([inventory_hostname])
+     | map('extract', hostvars, 'private_node_ip') | select('defined') | list }}
+k3s_firewall_comment: Exomem K3s inter-node
+
+# Removal (remove-agent.yml). The headroom mirrors the platform chart's
+# capacity.headroom, so the preflight counts slots exactly as cellctl does.
+k3s_cell_namespace_prefix: exo-cell-
+k3s_remove_headroom: 5
+k3s_drain_timeout: 600s
+# Set only after verifying the agent's server is destroyed: it lets removal
+# delete the Node of an agent that can no longer be reached to stop it.
+k3s_remove_host_gone: false
+k3s_remove_pod_mount_pattern: ^/var/lib/kubelet/pods/
+k3s_remove_csi_mount_pattern: ^/var/lib/kubelet/plugins/kubernetes.io/csi/

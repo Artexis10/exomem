@@ -5,6 +5,9 @@ base_administrator_authorized_keys:
   - ssh-ed25519 replace-with-operator-public-key
 
 k3s_server_token: replace-with-high-entropy-cluster-token
+# Mandatory once k3s_agents has a host; distinct from k3s_server_token.
+# Secret: infra/secrets/ansible/k3s-agent-token.{version}.sops.json.
+k3s_agent_token: replace-with-a-different-high-entropy-agent-token
 k3s_etcd_s3_endpoint: s3.eu-central-003.backblazeb2.com
 k3s_etcd_s3_region: eu-central-003
 k3s_etcd_s3_bucket: replace-with-database-backup-bucket

@@ -1,0 +1,226 @@
+---
+# Remove one K3s agent (openspec add-cloud-node-provisioning N6):
+#   ansible-playbook remove-agent.yml -e k3s_remove_node=<inventory name>
+# Run it BEFORE removing the agent's entry from k3s_agent_nodes. Pass
+# -e k3s_remove_host_gone=true only after verifying the server is destroyed.
+- name: Guard, preflight, cordon and drain the agent
+  hosts: hosted_nodes:!k3s_agents
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+
+  tasks:
+    - name: Resolve the one K3s server
+      ansible.builtin.set_fact:
+        k3s_server_hosts: >-
+          {{ groups['hosted_nodes'] | default([]) | difference(groups['k3s_agents'] | default([])) }}
+
+    - name: Refuse anything but one inventoried agent
+      ansible.builtin.assert:
+        that:
+          - k3s_remove_node is defined
+          - k3s_remove_node in (groups['k3s_agents'] | default([]))
+          - k3s_remove_node not in k3s_server_hosts
+          - k3s_server_hosts | length == 1
+        fail_msg: k3s_remove_node must name exactly one host in k3s_agents, never the server.
+
+    - name: Look up the agent's Kubernetes node
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/k3s
+          - kubectl
+          - get
+          - node
+          - "{{ k3s_remove_node }}"
+          - --ignore-not-found
+          - -o
+          - json
+      register: k3s_remove_lookup
+      changed_when: false
+
+    - name: Record whether the node is present and Ready
+      ansible.builtin.set_fact:
+        k3s_remove_present: "{{ k3s_remove_lookup.stdout | length > 0 }}"
+        k3s_remove_node_doc: "{{ k3s_remove_lookup.stdout | from_json if k3s_remove_lookup.stdout | length > 0 else {} }}"
+
+    - name: Preflight, cordon and drain a present node
+      when: k3s_remove_present | bool
+      block:
+        - name: Refuse a node that is not an agent
+          ansible.builtin.assert:
+            that:
+              - (k3s_remove_node_doc.metadata.labels | default({}))['exomem.io/node-pool'] | default('') == 'agent'
+              - "'node-role.kubernetes.io/control-plane' not in (k3s_remove_node_doc.metadata.labels | default({}))"
+            fail_msg: "{{ k3s_remove_node }} is not labelled as an agent, or is a control-plane node."
+
+        - name: Read the cluster state the preflight measures
+          ansible.builtin.command:
+            argv: "{{ ['/usr/local/bin/k3s', 'kubectl', 'get'] + item.args + ['-o', 'json'] }}"
+          loop:
+            - {name: nodes, args: [nodes]}
+            - {name: csinodes, args: [csinodes]}
+            - {name: attachments, args: [volumeattachments]}
+            - {name: pvs, args: [persistentvolumes]}
+            - {name: pvcs, args: [persistentvolumeclaims, --all-namespaces]}
+            - {name: statefulsets, args: [statefulsets, --all-namespaces]}
+          loop_control:
+            label: "{{ item.name }}"
+          register: k3s_remove_reads
+          changed_when: false
+
+        - name: Parse the cluster state
+          ansible.builtin.set_fact:
+            k3s_remove_nodes_doc: "{{ k3s_remove_reads.results[0].stdout | from_json }}"
+            k3s_remove_csinodes_doc: "{{ k3s_remove_reads.results[1].stdout | from_json }}"
+            k3s_remove_attachments_doc: "{{ k3s_remove_reads.results[2].stdout | from_json }}"
+            k3s_remove_pvs_doc: "{{ k3s_remove_reads.results[3].stdout | from_json }}"
+            k3s_remove_pvcs_doc: "{{ k3s_remove_reads.results[4].stdout | from_json }}"
+            k3s_remove_statefulsets_doc: "{{ k3s_remove_reads.results[5].stdout | from_json }}"
+
+        - name: Refuse unless the cells fit the remaining nodes
+          ansible.builtin.include_role:
+            name: k3s
+            tasks_from: remove_preflight.yml
+
+        - name: Cordon the agent
+          ansible.builtin.command:
+            argv:
+              - /usr/local/bin/k3s
+              - kubectl
+              - cordon
+              - "{{ k3s_remove_node }}"
+          register: k3s_remove_cordon
+          changed_when: "'already cordoned' not in k3s_remove_cordon.stdout"
+
+        - name: Drain the agent without force
+          ansible.builtin.command:
+            argv:
+              - /usr/local/bin/k3s
+              - kubectl
+              - drain
+              - "{{ k3s_remove_node }}"
+              - --ignore-daemonsets
+              - --delete-emptydir-data
+              - "--timeout={{ k3s_drain_timeout }}"
+          register: k3s_remove_drain
+          changed_when: "'evicting pod' in (k3s_remove_drain.stdout ~ k3s_remove_drain.stderr)"
+          when: >-
+            (k3s_remove_node_doc.status.conditions | default([])
+             | selectattr('type', 'equalto', 'Ready') | map(attribute='status')
+             | first | default('False')) == 'True'
+
+- name: Stop K3s and every pod container on the agent
+  hosts: k3s_agents
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Stop the agent completely
+      ansible.builtin.include_role:
+        name: k3s
+        tasks_from: remove_stop.yml
+        apply:
+          ignore_unreachable: true
+      when: inventory_hostname == k3s_remove_node
+
+- name: Delete the stopped agent's node
+  hosts: hosted_nodes:!k3s_agents
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+
+  tasks:
+    - name: Require a confirmed stop before deleting a present node
+      ansible.builtin.assert:
+        that:
+          - >-
+            (k3s_remove_host_gone | bool)
+            or (hostvars[k3s_remove_node]['k3s_remove_stop_confirmed'] | default(false) | bool)
+        fail_msg: >-
+          {{ k3s_remove_node }} was not confirmed stopped (unreachable, or containers or
+          pod volume mounts survived). Fix that, or pass -e k3s_remove_host_gone=true only
+          after verifying its server is destroyed. The node was not deleted.
+      when: k3s_remove_present | bool
+
+    - name: Force the remaining pods and volumes off the stopped node
+      when: k3s_remove_present | bool
+      block:
+        - name: Taint the stopped node out of service
+          ansible.builtin.command:
+            argv:
+              - /usr/local/bin/k3s
+              - kubectl
+              - taint
+              - node
+              - "{{ k3s_remove_node }}"
+              - node.kubernetes.io/out-of-service=nodeshutdown:NoExecute
+              - --overwrite
+          register: k3s_remove_taint
+          changed_when: "'modified' in k3s_remove_taint.stdout or 'tainted' in k3s_remove_taint.stdout"
+
+        - name: Wait until no volume is attached to the node
+          ansible.builtin.command:
+            argv:
+              - /usr/local/bin/k3s
+              - kubectl
+              - get
+              - volumeattachments
+              - -o
+              - jsonpath={.items[*].spec.nodeName}
+          register: k3s_remove_attached_nodes
+          changed_when: false
+          retries: 60
+          delay: 5
+          until: k3s_remove_node not in k3s_remove_attached_nodes.stdout.split()
+
+    - name: Delete the node
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/k3s
+          - kubectl
+          - delete
+          - node
+          - "{{ k3s_remove_node }}"
+          - --ignore-not-found
+      register: k3s_remove_delete
+      changed_when: "'deleted' in k3s_remove_delete.stdout"
+
+    - name: Give a still-running agent time to re-register
+      ansible.builtin.wait_for:
+        timeout: 20
+      when: "'deleted' in k3s_remove_delete.stdout"
+
+    - name: Confirm the node stays absent
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/k3s
+          - kubectl
+          - get
+          - node
+          - "{{ k3s_remove_node }}"
+          - --ignore-not-found
+          - -o
+          - name
+      register: k3s_remove_recheck
+      changed_when: false
+      failed_when: k3s_remove_recheck.stdout | length > 0
+
+- name: Revoke the removed agent's inter-node firewall rules
+  hosts: hosted_nodes
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Gather the facts the firewall needs on the remaining nodes
+      ansible.builtin.setup:
+      when: inventory_hostname != k3s_remove_node
+
+    - name: Converge the inter-node firewall without the removed agent
+      ansible.builtin.include_role:
+        name: k3s
+        tasks_from: inter_node.yml
+      when: inventory_hostname != k3s_remove_node
+      vars:
+        k3s_firewall_peer_ips: >-
+          {{ groups['hosted_nodes'] | difference([inventory_hostname, k3s_remove_node])
+             | map('extract', hostvars, 'private_node_ip') | select('defined') | list }}

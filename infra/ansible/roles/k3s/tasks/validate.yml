@@ -1,0 +1,67 @@
+---
+- name: Resolve the one K3s server in the inventory
+  ansible.builtin.set_fact:
+    k3s_server_hosts: >-
+      {{ groups['hosted_nodes'] | default([]) | difference(groups['k3s_agents'] | default([])) }}
+  changed_when: false
+
+- name: Validate K3s and off-host snapshot inputs
+  ansible.builtin.assert:
+    that:
+      - ansible_architecture == "x86_64"
+      - k3s_server_hosts | length == 1
+      - k3s_server_token | length >= 32
+      - k3s_etcd_s3_endpoint | length > 0
+      - k3s_etcd_s3_region | length > 0
+      - k3s_etcd_s3_bucket | length > 0
+      - k3s_etcd_s3_access_key | length > 0
+      - k3s_etcd_s3_secret_key | length > 0
+      # Agents in the inventory make the dedicated agent token mandatory.
+      - groups['k3s_agents'] | default([]) | length == 0 or k3s_agent_token | length >= 32
+      - k3s_agent_token | length == 0 or (k3s_agent_token | length >= 32 and k3s_agent_token != k3s_server_token)
+    fail_msg: >-
+      Pinned x86 K3s, one server, complete encrypted snapshot credentials, and a
+      distinct agent token of at least 32 characters whenever agents exist are required.
+  no_log: true
+  when: k3s_node_role == 'server'
+
+- name: Validate K3s agent join inputs
+  ansible.builtin.assert:
+    that:
+      - ansible_architecture == "x86_64"
+      - k3s_server_hosts | length == 1
+      - inventory_hostname not in k3s_server_hosts
+      - hostvars[k3s_server_hosts[0]]['private_node_ip'] | default('') | length > 0
+      - k3s_agent_token | length >= 32
+      - k3s_agent_token != k3s_server_token
+    fail_msg: >-
+      An agent needs exactly one inventoried server with a private address and a
+      dedicated agent token of at least 32 characters that differs from the server token.
+  no_log: true
+  when: k3s_node_role == 'agent'
+
+- name: Look for the removal marker on the agent
+  ansible.builtin.stat:
+    path: /etc/rancher/k3s/removed
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  register: k3s_removed_marker
+  when: k3s_node_role == 'agent'
+
+- name: Refuse to rejoin an agent that remove-agent.yml removed
+  ansible.builtin.assert:
+    that:
+      - not k3s_removed_marker.stat.exists
+    fail_msg: >-
+      {{ inventory_hostname }} was removed by remove-agent.yml; destroy its server
+      (drop its k3s_agent_nodes entry) instead of rejoining it.
+  when: k3s_node_role == 'agent'
+
+# Recorded on every node: Ansible templates delegate_to before it evaluates
+# `when`, so even skipped agent tasks on the server need these defined.
+- name: Record the one K3s server
+  ansible.builtin.set_fact:
+    k3s_server_host: "{{ k3s_server_hosts[0] }}"
+    k3s_server_private_ip: "{{ hostvars[k3s_server_hosts[0]]['private_node_ip'] }}"
+  changed_when: false
