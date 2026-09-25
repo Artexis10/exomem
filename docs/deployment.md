@@ -830,6 +830,32 @@ release pinning, rollout, and rollback. Exomem deliberately has no cross-machine
 auto-updater, and the readiness contract is independent of Syncthing or any other
 replication product.
 
+## Recall model and re-embedding
+
+A personal server encodes recall with `BAAI/bge-m3`, served from a pinned int8
+ONNX artefact on CPU, and activation shares that one instance (about 0.65 GB
+resident). The first load builds the artefact from the pinned export: a 2.2 GB
+download and a quantisation that peaks near 9 GB in a child process. A hosted or
+cloud cell keeps `BAAI/bge-base-en-v1.5`. `EXOMEM_RECALL_MODEL` names the model
+explicitly.
+
+Every recall sidecar records the model, fingerprint and width of the vectors it
+holds, and nothing reads it with another encoder. When the recall model changes,
+the installed sidecar keeps serving with the model that wrote it while the
+service builds a sidecar for the new model beside it
+(`.embeddings.<16 hex>.sqlite` in the vault's state directory). The build runs
+in the background, one passage at a time, and resumes after a restart. Pages
+written meanwhile are picked up. When it finishes, the service switches
+`.embeddings.active` to the new sidecar in one atomic write and releases the old
+model; the old sidecar is deleted by the next start. Until then both models are
+resident.
+
+- Progress: `exomem doctor` (`embeddings.reembed`, read from disk) and
+  `exomem status` (`recall_reembed`: pages done, seconds per 1,000 chunks, ETA).
+- `EXOMEM_RECALL_REEMBED=off` builds nothing and keeps the old sidecar serving.
+- `exomem index` maintains whichever sidecar is serving, with its own model.
+- The sidecar for bge-m3 is about a third larger: 1,024 dimensions against 768.
+
 ## Reranking and languages
 
 The cross-encoder reranker reorders a query's top candidates. It runs on explicit

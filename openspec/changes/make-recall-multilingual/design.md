@@ -9,13 +9,15 @@ The lexical lanes all read one tokenizer, `bm25.tokenize`: the FTS5 catalogue (`
 - Working keyword recall for every script, with embeddings off, on any install.
 - Byte-identical tokens, index and scores for ASCII text, and for English text whose non-ASCII characters are punctuation, symbols, spaces or format characters. English tokens change only around non-ASCII letters and marks (é, full-width letters, ligatures) and numbers that NFKC turns into digits (², ½, Ⅳ).
 - No model and no new dependency in the lexical half.
+- Dense recall across languages with one multilingual encoder on a personal server, shared with activation, without losing the English golden gate, and a migration during which dense recall never goes dark.
 
 **Non-Goals:**
 
 - Language detection, dictionaries or word segmentation.
 - Stemming for Latin languages other than English. German, Estonian and Finnish inflections match only in their exact form here; the dense half covers morphology, and a vault-declared Latin stemmer is a later lever.
 - Activation's own index terms (`working_set_index.tokens_of`), which keep their rules.
-- The dense half, which follows in this change.
+- A multilingual encoder on hosted or cloud cells: they keep the English model until a node encoder serves them.
+- Language detection for the rerank gate (D12).
 
 ## Decisions
 
@@ -68,6 +70,74 @@ The version bump sends every install through a rebuild, and a killed rebuild lea
 
 LongMemEval is not part of this gate.
 
+
+### D7. One model: `BAAI/bge-m3` on ONNX Runtime int8
+
+A personal server encodes recall with `BAAI/bge-m3`, served from its pinned int8 artefact on CPU, one text per run, and activation shares the one resident instance. The model decision was taken on the golden set, the multilingual fixture and the Japanese-only vault, with bge-base as the control (2026-09-23, shared host):
+
+| Model / path | NDCG@10 | recall@10 | MRR | padded NDCG (Δ) | query p50/p95 ms (load) |
+|---|---|---|---|---|---|
+| bge-base (control) | 0.9326 | 0.9655 | 0.9241 | 0.9328 (+0.000) | 59/72 (14.0) |
+| bge-m3 ORT int8 | 0.9311 | 0.9483 | 0.9241 | 0.9316 (+0.001) | 42/57 (22.2) |
+
+bge-m3 int8 clears the English gate (NDCG@10 ≥ 0.897, recall@10 ≥ 0.9415, no query at recall 0, no query losing its best page) and every multilingual bar but the language-bias twins, which every model failed before the fusion rule in D11. The recall@10 drop is one query (see Risks). bge-base scored 0 on every cross-language row; bge-m3 scores 1.
+
+A hosted or cloud cell keeps `BAAI/bge-base-en-v1.5` until a node encoder serves it: about 0.6-0.7 GB per process is over the per-cell budget. `EXOMEM_RECALL_MODEL` names the model explicitly; CI's hosted timing gate pins the English model it certifies.
+
+### D8. A sidecar records its vector space
+
+Every recall store records the encoder that wrote it (`meta` keys `embedding_model`, `embedding_fingerprint`, `embedding_dim`): the model, the resident encoder's fingerprint (for a served model its revision, quantisation, file format and artefact digest), and the width. Fingerprints are compared exactly when both are known; a record without one (written before profiles, or by a test substitute) matches by model name, and its width must still match. A sidecar with rows and no record is `bge-base-en-v1.5` at 768 dimensions, the only encoder recall ever shipped, and its record is written by its next write.
+
+The width is read from the record everywhere: the matrix, vec0's column (redeclared when the width changes), stored-vector reuse, semantic units, claims, warm-up and the projected catalogue. Encoding for a sidecar happens inside `EmbeddingIndex.encoding()`, which checks the encoder against the record before anything is encoded; the vector lane is otherwise `unavailable` with `vector_space_mismatch` and the other lanes serve. Claims record their space too and re-encode under a new one.
+
+### D9. Blue/green re-embed
+
+The serving sidecar is named by an active pointer (`.embeddings.active`) beside it; without one `.embeddings.sqlite` serves, so a fresh install and a hosted cell keep the legacy name. A new space is built in `.embeddings.<16 hex>.sqlite`, named from the target fingerprint. Both names are reserved for the embedding index.
+
+While the build runs, the serving sidecar keeps serving with the encoder that wrote it: a second encoder, loaded by warm-up before writes are admitted or by the job, never by a request, released at the cutover and not reaped. A request that finds it cold reports the vector lane `warming`. A cell never runs a second encoder: a sidecar of another model is refused there.
+
+The job (`recall_migration`) runs beside the other service workers, never on a cell. It builds in committed batches through the live chunking seam, one text per encode (a shared int8 batch moves a vector by up to 0.02 cosine; one text per encode also bounds how long a query waits for the build to one passage). A page is done when its new rows carry its current mtime, so a restart re-encodes nothing built and a page written during the build is simply encoded again. The cutover runs catch-up passes, replaces the pointer in one atomic write, takes any write that landed in between and releases the old encoder. A failed cutover leaves the old sidecar serving. The old sidecar is removed only by a later start of the job, so a regretted cutover can fall back. `EXOMEM_RECALL_REEMBED=off` builds nothing.
+
+Doctor's `embeddings.reembed` check reads the sidecars on disk (serving space, pages built); `exomem status` reports the running job's rate and estimate. `observe_memory` in this product mutates semantic units and has no status surface, so the progress lives in those two.
+
+### D10. Chunks stay under the encoder's limit
+
+The 350-word cap stays, so English chunk boundaries are unchanged. A paragraph the word cap cannot bound (mostly unspaced text, more unspaced text than the cap allows, or a whitespace word longer than the character cap) splits into pieces of at most 500 characters: at a sentence end, else the last space, else the cap off any combining mark. No chunk exceeds 512 bge-m3 tokens.
+
+### D11. The dense-lead guard withholds by script
+
+When the vector lane's first candidate shares no content word with the query, the lexical lanes are blind to it, and reciprocal-rank fusion let a same-language page that matched one or two words outrank it. A lexical lane therefore withholds its vote from a partial match whose dominant letter script differs from the lead's. No count threshold: a same-script page never loses a vote, so English cannot move (0 of 29 golden top-10 lists changed on four harness corpora, and the synonym query that shares no word with its answer ranks as before). The guard reads only candidates that can reach the fused window, is timed as its own stage, and records every withheld vote and its reason in the explain trace and lane status. Governed projected recall applies it too.
+
+The German and Estonian twins share the English page's script, so the guard does not act there and the encoder decides. On the acceptance fixture (three twins per language) the English gold outranks the poison in every Russian and Japanese twin, in 2 of 3 German twins and in 1 of 3 Estonian twins, and every lost twin loses by exactly one rank. The bar, the gold winning most of a language's twins in at least three of four languages and never losing more than one rank, holds with German, Japanese and Russian; it is met by the script rule and the encoder, not by a tuned count.
+
+### D12. Rerank coverage by script, not language
+
+Each declared reranker states the scripts it reads and whether it reads across languages: `bge-reranker-base` {Latin, Han}, not cross-lingual; `bge-reranker-v2-m3` all scripts and cross-lingual, both assumptions from its model card, not measured here, as are its memory and latency estimates. A rerank is skipped when the query's dominant script is outside the declared set, or when fusion reports a crossing (votes withheld across scripts, or an unmatched query in another script than the lead) and the reranker is not cross-lingual. An undeclared reranker is not gated.
+
+The design asked for a language gate, because `bge-reranker-base` hurts cross-language German and Estonian queries. Telling German or Estonian from English needs a language-detection model; the script signal does not. So German and Estonian queries over an English lead are still reranked: a stated gap.
+
+### D13. Acceptance and measured cost
+
+`tests/test_recall_multilingual_embeddings.py` gates the switch in the embeddings job through `find` (hybrid, rerank off), on trees built by the product writers. Measured on a shared 16-core host at load average 8-9 (2026-09-25):
+
+| Arm | Measured | Bar |
+|---|---|---|
+| English golden NDCG@10 / recall@10 / MRR | 0.9312 / 0.9483 / 0.9241 | ≥ 0.897 / ≥ 0.9415 / — |
+| Golden padded with the multilingual and twin pages, NDCG@10 | 0.9312 (Δ +0.0000) | within 0.02 |
+| Same-language recall@5, de / et / ja / ru | 1.00 each | ≥ 0.90 |
+| Cross-language recall@10, et / ja / ru (gold rank 3 / 1 / 1) | 1.00 each | ≥ 0.80 |
+| Morphology recall@10, et / ru | 1.00 each | ≥ 0.80 |
+| Twins won (most of a language's three) | de, ja, ru | ≥ 3 of 4 languages, never more than one rank lost |
+| Japanese-only vault (27 queries), hybrid recall@10 | 1.00 | ≥ 0.95 |
+| Short-query encode p50 / p95 | 30 / 43 ms | p95 ≤ 250 ms |
+| The same during a one-text-at-a-time build | 75 / 178 ms | reported |
+| Build, seconds per 1,000 chunks (golden / padded / Japanese) | 69 / 60 / 54 | reported |
+| The one instance: load, max RSS added | 2.2 s, +588 MiB | reported |
+
+The same test on the English model's tree fails: cross-language recall 0 in every language and no language wins its twins. The fixture's cross-language set has no German row.
+
+LongMemEval is not part of any gate.
+
 ## Risks / Trade-offs
 
 - **Postings grow for unspaced text.** One token per character against about one per five for English, so a Japanese vault's catalogue grows about 5× per byte of text. FTS5 handles it; the rebuild time on a 3,000-page fixture is recorded in tasks.md.
@@ -77,3 +147,7 @@ LongMemEval is not part of this gate.
 - **No stemming for non-English Latin languages.** Accepted, as above.
 - **A CJK turn earns no lexical `retrieval` in activation.** One run is one unit, and a single run never corroborates. That is conservative, and semantic evidence is its second contact.
 - **The CJK carry stays off.** The carry reads rarity on the turn's surface forms and pairs two distinctive stems only from two different words, so an accented word and its folded variant never make a phrase with themselves, and the parts of a joined compound still pair. An unspaced run (Han, kana, Hangul, Thai and the like) contributes no pairable stem, so a turn in those scripts is never carried and runs no ranking query. This is a stated limit: two runs share particles and endings with every page in their script ("明日は、散歩です" carried a weather note on "日は" and "です"), the pair groups grow as the product of the two runs' bigrams (a 1,200-character Japanese turn took about a minute on a 1,600-page vault), and pairing them would need a position model over character offsets.
+- **One golden typed-graph neighbour leaves the top 10 under bge-m3.** For "advanced mode reveals information but does not change the safety model" the grade-3 page stays first, but its grade-1 `relates_to` neighbour ranks 12th in fusion. That one query is why golden recall@10 is 0.9483 against bge-base's 0.9655; every English bar holds. The graph lane still expands the edge and the neighbour still enters fusion, which the golden typed-graph tests pin. Lifting typed neighbours in fusion is a follow-up that needs its own English no-change check.
+- **A re-embed holds two encoders.** While a vault built by the English model migrates, the English encoder serves its sidecar beside the resident bge-m3, until the cutover releases it. On the owner's vault the build is estimated at 10-20 h of background CPU.
+- **The rerank gate reads scripts, not languages.** German and Estonian queries over an English lead are still reranked by `bge-reranker-base`, which hurts them (D12).
+- **Hosted keeps the English model.** About 0.6 GB per process is over the per-cell budget; hosted multilingual recall waits for the node encoder.

@@ -4,7 +4,8 @@
 
 `ask_memory` is the normal product command for recall. Underneath, `find` runs in
 **hybrid mode** by default: BM25 + local vector embeddings
-(BAAI/bge-base-en-v1.5, 768-dim) fused via reciprocal rank fusion.
+(a multilingual model on a personal server, `BAAI/bge-m3`, 1024-dim) fused via
+reciprocal rank fusion.
 Natural-language queries reach pages that don't contain the literal terms.
 
 Modes:
