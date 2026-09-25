@@ -428,6 +428,30 @@ def _wait_for_target(
     return result
 
 
+def _refresh_hooks_after_promotion(target: dict[str, Any]) -> dict[str, Any]:
+    """Refresh already-wired Claude Code hook profiles with the promoted release.
+
+    Runs once the staged target is confirmed active, using its own
+    `install-hook` so local profiles track the release that just went live
+    instead of going stale until an operator remembers to re-run it by hand.
+    Never allowed to fail or roll back an upgrade that already succeeded: any
+    problem here is reported alongside the upgrade result (and in `doctor`),
+    not raised.
+    """
+    from . import install_hook
+
+    try:
+        return install_hook.refresh_wired_profiles(str(target["python"]))
+    except Exception as error:  # noqa: BLE001 - must never fail a completed upgrade
+        return {
+            "skipped": False,
+            "reason": None,
+            "profiles": [],
+            "success": False,
+            "error": str(error),
+        }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-dir", type=Path, required=True)
@@ -475,6 +499,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 result = control(args.runtime_dir, {"command": "upgrade", "target": target})
                 result = _wait_for_target(args.runtime_dir, target, result)
+                result = {**result, "hook_refresh": _refresh_hooks_after_promotion(target)}
         print(json.dumps(result, sort_keys=True))
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:

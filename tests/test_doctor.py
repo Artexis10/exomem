@@ -194,6 +194,69 @@ def test_idempotency_store_check_warns_on_completed_outcome_unknown(
     assert "unknown-digest-secret" not in json.dumps(check.details)
 
 
+def test_managed_hook_refresh_check_passes_when_never_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import install_hook as hook_module
+
+    monkeypatch.setattr(hook_module, "read_last_upgrade_refresh", lambda home=None: None)
+    check = doctor_module._check_managed_hook_refresh()
+    assert check.status == "pass"
+
+
+def test_managed_hook_refresh_check_warns_on_a_failed_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import install_hook as hook_module
+
+    failed_settings = str(tmp_path / "profile-one" / "settings.json")
+    ok_settings = str(tmp_path / "profile-two" / "settings.json")
+    report = {
+        "skipped": False,
+        "success": False,
+        "profiles": [
+            {"settings_path": failed_settings, "success": False, "error": "boom"},
+            {"settings_path": ok_settings, "success": True, "error": None},
+        ],
+    }
+    monkeypatch.setattr(hook_module, "read_last_upgrade_refresh", lambda home=None: report)
+    check = doctor_module._check_managed_hook_refresh()
+    assert check.status == "warn"
+    assert failed_settings in check.message
+    assert ok_settings not in check.message
+    assert check.details == report
+
+
+def test_managed_hook_refresh_check_passes_when_all_profiles_refreshed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import install_hook as hook_module
+
+    report = {
+        "skipped": False,
+        "success": True,
+        "profiles": [
+            {"settings_path": str(tmp_path / "settings.json"), "success": True, "error": None}
+        ],
+    }
+    monkeypatch.setattr(hook_module, "read_last_upgrade_refresh", lambda home=None: report)
+    check = doctor_module._check_managed_hook_refresh()
+    assert check.status == "pass"
+
+
+def test_managed_hook_refresh_check_passes_when_opted_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import install_hook as hook_module
+
+    report = {
+        "skipped": True,
+        "reason": "EXOMEM_DISABLE_UPGRADE_HOOK_REFRESH is set",
+        "profiles": [],
+        "success": True,
+    }
+    monkeypatch.setattr(hook_module, "read_last_upgrade_refresh", lambda home=None: report)
+    check = doctor_module._check_managed_hook_refresh()
+    assert check.status == "pass"
+    assert "EXOMEM_DISABLE_UPGRADE_HOOK_REFRESH" in check.message
+
+
 def test_lexical_check_uses_escaped_immutable_query_only_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
