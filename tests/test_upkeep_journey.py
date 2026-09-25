@@ -291,3 +291,105 @@ def test_a_dismissed_pair_stays_held_when_the_row_cap_evicts_its_offered_directi
     assert not offered & {fx.CAVITATION, fx.INLET}, offered
     # The new pair is still offered: the hold is the dismissed pair's alone.
     assert offered, "the fresh pair was not offered"
+
+
+def test_a_stale_decision_on_an_evicted_twin_holds_only_until_it_is_proposed_again(
+    tmp_path: Path,
+) -> None:
+    """A direction dismissed at one fingerprint, re-proposed at another, then
+    evicted: its twin is held (conservatively) only until that direction's
+    page is proposed again and judged on its current fingerprint."""
+    vault = _journey_vault(tmp_path)
+    start = time.time()
+    _quiet(vault, start)
+    _quiet(vault, start + 2 * HOUR)
+    item = _session(vault)
+    assert item is not None and item["family"] == dreamer_families.LINK_FAMILY
+    offered_path = item["route"]["args"]["path"]
+    _tool(
+        vault,
+        "triage_memory",
+        ref=item["context_route"]["args"]["ref"],
+        action="dismiss",
+        why="false_positive: unrelated notes",
+        expected_fingerprint=item["fingerprint"],
+    )
+    # The evidence moves: the dismissed direction is proposed again at a new
+    # fingerprint the dismissal does not bind.
+    fx.edit(
+        vault,
+        offered_path,
+        fx.insight(
+            "Pump cavitation",
+            sources=["field-report-one"],
+            updated="2026-06-01",
+            observation="Cavitation now appears below 2 bar.",
+        ),
+    )
+    _quiet(vault, start + 3 * HOUR)
+    current = next(
+        row
+        for row in _open(vault)
+        if row["family"] == dreamer_families.LINK_FAMILY and row["subject_path"] == offered_path
+    )
+    assert current["fingerprint"] != item["fingerprint"]
+    # Its current row is evicted, as the family cap evicts the oldest eligible row.
+    store = dreamer_store.DreamerStore(vault)
+    conn = store.connect()
+    try:
+        with store.write(conn):
+            store._delete(conn, [current["id"]])
+    finally:
+        conn.close()
+    dreamer_store.clear_reader_memo()
+
+    # The twin is held by the stale decision, and the evicted direction's page
+    # is queued once for that page version, never again while it is unchanged.
+    twin = next(
+        row
+        for row in _open(vault)
+        if row["family"] == dreamer_families.LINK_FAMILY and row["subject_path"] != offered_path
+    )
+
+    def queued_after_hold() -> bool:
+        conn = store.connect()
+        ctx = dreamer_families.Context(vault_root=vault, store=store, conn=conn, now=start)
+        try:
+            with store.write(conn):
+                assert ctx.pair_held(twin)
+                queued = conn.execute(
+                    "SELECT 1 FROM pending WHERE path=?", (offered_path,)
+                ).fetchone()
+                conn.execute("DELETE FROM pending WHERE path=?", (offered_path,))
+        finally:
+            ctx.close()
+            conn.close()
+        return queued is not None
+
+    assert queued_after_hold()
+    assert not queued_after_hold()
+    # Put it back as a pass that saw the hold would have left it.
+    conn = store.connect()
+    try:
+        with store.write(conn):
+            store.pending_add(conn, [offered_path])
+    finally:
+        conn.close()
+
+    # The next pass queues that direction's page, the one after proposes it
+    # again, and it is offered once settled.
+    _quiet(vault, start + 6 * HOUR)
+    _quiet(vault, start + 7 * HOUR)
+    _quiet(vault, start + 9 * HOUR)
+    again = next(
+        (
+            row
+            for row in _open(vault)
+            if row["family"] == dreamer_families.LINK_FAMILY and row["subject_path"] == offered_path
+        ),
+        None,
+    )
+    assert again is not None and again["fingerprint"] == current["fingerprint"], again
+    view = dreamer_store.read_view(vault)
+    offered = {row["subject_path"] for row in upkeep.deliverable_rows(vault, view)}
+    assert offered_path in offered, offered

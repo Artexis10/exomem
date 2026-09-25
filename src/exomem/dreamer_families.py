@@ -182,8 +182,9 @@ class Context:
         A present twin is judged on its own `(id, fingerprint)`. An absent one
         (evicted, or never proposed from its page) is judged on every decision
         and delivery recorded for its id: its current fingerprint cannot be
-        known without reading its page, so any standing decision holds the
-        pair until that direction is proposed again.
+        known without reading its page. Any standing decision holds the pair,
+        and the twin's page is queued so that direction is proposed again and
+        judged on its current fingerprint.
         """
         twin = _twin_id(row)
         if twin is None:
@@ -195,7 +196,30 @@ class Context:
         )
         if present is not None and present.get("state") == "open":
             return self._held(twin, str(present["fingerprint"]))
-        return self._held_any(twin)
+        if not self._held_any(twin):
+            return False
+        self._requeue_twin(twin, str((row.get("measures") or {}).get("to") or ""))
+        return True
+
+    def _requeue_twin(self, twin: str, page: str) -> None:
+        """Queue an absent twin's page once per page version.
+
+        The page is queued again only when it changed since the last time, so a
+        page that no longer proposes that direction is not reprocessed forever.
+        """
+        if self.store is None or self.conn is None or not page:
+            return
+        seen = self.store.seen_get(self.conn, page)
+        memo = self.store.get_meta(self.conn, _REQUEUED_META)
+        memo = dict(memo) if isinstance(memo, dict) else {}
+        if twin in memo and memo[twin] == seen:
+            return
+        self.store.pending_add(self.conn, [page])
+        memo.pop(twin, None)
+        memo[twin] = seen
+        while len(memo) > _REQUEUED_LIMIT:
+            memo.pop(next(iter(memo)))
+        self.store.set_meta(self.conn, _REQUEUED_META, memo)
 
     def _deliveries(self) -> dict[tuple[str, str], int]:
         if "deliveries" not in self._review:
@@ -850,6 +874,12 @@ def review_state_token(vault_root: Path) -> str | None:
     except OSError:
         return None
     return f"{info.st_ino}:{info.st_mtime_ns}:{info.st_size}"
+
+
+#: Sidecar memo of absent twins whose page was queued: twin id -> the page's
+#: `seen` signature then. Bounded; the oldest entries go first.
+_REQUEUED_META = "requeued_twins"
+_REQUEUED_LIMIT = 256
 
 
 def _twin_id(row: dict[str, Any]) -> str | None:
