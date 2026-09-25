@@ -264,7 +264,7 @@ def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
             continue
         if _authored_between(ctx, page, target):
             continue
-        refs = relation_queue._hinted_candidate_refs(ctx.vault_root, candidate)
+        refs = relation_queue._hinted_candidate_refs(ctx.vault_root, candidate, snapshot=snapshot)
         if refs is None:
             raise Deferred("reference identity unavailable")
         reason, enriched = relation_queue._classify_candidate(
@@ -714,27 +714,41 @@ def family_for(name: str) -> Family | None:
     return next((family for family in REGISTRY if family.name == name), None)
 
 
-def process_page(ctx: Context, rel_path: str, *, exists: bool) -> None:
-    """Run every family over one changed page, then revalidate what it touches.
+def process_page(ctx: Context, rel_path: str, *, exists: bool, changed: bool = True) -> None:
+    """Run every family over one page, then queue what its change touches.
 
     `on_page`/`on_delete` own every proposal whose SUBJECT is this page: they
     recompute them and resolve the ones that no longer hold. A proposal that
-    merely cites this page as evidence belongs to another subject, so it is
-    revalidated from its own pages instead.
+    merely cites this page as evidence belongs to another subject: when this
+    page CHANGED, that subject is queued as a page of its own (once, however
+    many of its rows cite this one), so one page's work stays one page's. A
+    page processed only because it was queued changed nothing, and queues
+    nothing, so two pages that cite each other cannot requeue each other.
     """
-    cited_by = set(ctx.store.candidates_for_path(ctx.conn, rel_path))
+    cited_by = set(ctx.store.candidates_for_path(ctx.conn, rel_path)) if changed else set()
     for family in REGISTRY:
         if exists:
             family.on_page(ctx, rel_path)
         else:
             family.on_delete(ctx, rel_path)
+    live = _sig(ctx, rel_path) if exists else None
+    subjects: set[str] = set()
     for cid in sorted(cited_by):
         row = ctx.store.candidate(ctx.conn, cid)
-        if row is None or row.get("state") != "open" or row.get("subject_path") == rel_path:
+        if row is None or row.get("state") != "open":
             continue
-        family = family_for(str(row.get("family") or ""))
-        if family is not None:
-            family.revalidate(ctx, row)
+        subject = str(row.get("subject_path") or "")
+        if not subject or subject == rel_path or family_for(str(row.get("family") or "")) is None:
+            continue
+        # A row that already saw this page's current signature needs nothing:
+        # during a reseed its subject was processed after this page changed.
+        recorded = {
+            item.get("sig") for item in row.get("evidence") or () if item.get("path") == rel_path
+        }
+        if recorded != {live}:
+            subjects.add(subject)
+    if subjects:
+        ctx.store.pending_add(ctx.conn, sorted(subjects))
 
 
 # ----------------------------------------------------------------------

@@ -177,3 +177,78 @@ def test_decided_rows_leave_room_for_a_fresh_pair(
     _quiet(vault, now=LATER)
     listed = upkeep.review(vault, state="open", limit=50)
     assert any(item["dispose"]["args"].get("source_path") in fresh for item in listed["items"])
+
+
+# ----------------------------------------------------------------------
+# F5: one page's work is bounded; cited subjects are requeued, not redone inline
+# ----------------------------------------------------------------------
+
+
+def _pending(vault: Path) -> list[str]:
+    store = dreamer_store.DreamerStore(vault)
+    conn = store.connect()
+    try:
+        return [str(row[0]) for row in conn.execute("SELECT path FROM pending ORDER BY path")]
+    finally:
+        conn.close()
+
+
+def test_a_widely_cited_source_edit_requeues_its_subjects_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import epistemic_graph, relation_queue
+
+    vault = _cluster_vault(tmp_path, monkeypatch)
+    _quiet(vault)
+    citing = {
+        row["subject_path"]
+        for row in _rows(vault)
+        if any(item.get("path") == fx.SOURCE_ONE for item in row.get("evidence") or ())
+    }
+    assert len(citing) > 1
+    calls = {"page_candidates": 0, "snapshots": 0}
+    real_candidates = relation_queue._page_candidates
+    real_open = epistemic_graph.EpistemicGraphIndex._open_read_snapshot
+
+    def counted_candidates(*args, **kwargs):
+        calls["page_candidates"] += 1
+        return real_candidates(*args, **kwargs)
+
+    def counted_open(index):
+        calls["snapshots"] += 1
+        return real_open(index)
+
+    monkeypatch.setattr(relation_queue, "_page_candidates", counted_candidates)
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "_open_read_snapshot", counted_open)
+    fx.edit(vault, fx.SOURCE_ONE, fx.source("Field report one") + "\nMore raw notes.\n")
+    fx.warm_identity(vault, monkeypatch)
+    tick = dreamer.run_once(vault, budget=dreamer.Budget(pages=1))
+    assert tick.processed == (fx.SOURCE_ONE,), tick
+    # The Source's own page does no link work; its citing subjects wait their turn.
+    assert calls["page_candidates"] == 0
+    assert citing <= set(_pending(vault))
+    print(f"\nFANOUT source page cpu={tick.cpu:.3f}s wall={tick.wall:.3f}s")
+    assert tick.cpu < 1.0
+
+    # Each subject is then one page of its own: one neighbourhood, one snapshot.
+    calls.update(page_candidates=0, snapshots=0)
+    results = _quiet(vault)
+    processed = [rel for result in results for rel in result.processed]
+    assert len(processed) == len(set(processed))
+    assert calls["page_candidates"] == len([rel for rel in processed if rel in citing])
+    assert calls["snapshots"] <= len(processed)
+
+
+def test_a_requeued_subject_does_not_requeue_its_neighbours(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _cluster_vault(tmp_path, monkeypatch, count=4)
+    _quiet(vault)
+    fx.edit(vault, fx.SOURCE_ONE, fx.source("Field report one") + "\nMore raw notes.\n")
+    fx.warm_identity(vault, monkeypatch)
+    results = _quiet(vault)
+    processed = [rel for result in results for rel in result.processed]
+    # The Source, then each citing note once: an unchanged page requeues nothing.
+    assert processed[0] == fx.SOURCE_ONE
+    assert len(processed) == len(set(processed)) <= 5
+    assert _pending(vault) == []

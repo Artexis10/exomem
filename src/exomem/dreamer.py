@@ -437,7 +437,9 @@ def run_once(
                     break
                 processed.append(rel)
             else:
-                if work.remaining > len(processed):
+                # More pending than this tick took, or subjects a changed page
+                # just queued: the next tick continues rather than idling.
+                if work.remaining > len(processed) or (processed and store.pending_count(conn) > 0):
                     stop_reason = "pages"
             now = clock.time()
             delivered = _record_deliveries(store, conn)
@@ -502,7 +504,8 @@ def _process(
     ctx = dreamer_families.Context(vault_root=vault_root, store=store, conn=conn, now=now)
     try:
         with store.write(conn):
-            dreamer_families.process_page(ctx, rel, exists=signature is not None)
+            changed = dreamer_store.encode_sig(signature) != store.seen_get(conn, rel)
+            dreamer_families.process_page(ctx, rel, exists=signature is not None, changed=changed)
             dreamer_delta.mark_processed(store, conn, vault_root, rel, signature)
     finally:
         ctx.close()

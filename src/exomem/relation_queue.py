@@ -525,8 +525,14 @@ def _fallback_ref(rel_path: str) -> str:
 def _hinted_candidate_refs(
     vault_root: Path,
     candidate: dict[str, Any],
+    *,
+    snapshot: sqlite3.Connection | None = None,
 ) -> tuple[str, str] | None:
-    """Derive Lane B's exact refs without opening or repairing the refs sidecar."""
+    """Derive Lane B's exact refs without opening or repairing the refs sidecar.
+
+    `snapshot` is a validated graph read snapshot the caller already holds; it
+    is used as is and left open.
+    """
     from_path = epistemic_graph_module._with_md(str(candidate.get("from") or ""))
     to_path = epistemic_graph_module._with_md(str(candidate.get("to") or ""))
     paths = tuple(dict.fromkeys((from_path, to_path)))
@@ -536,7 +542,7 @@ def _hinted_candidate_refs(
         vault_root
     )
     index = epistemic_graph_module.EpistemicGraphIndex(vault_root)
-    connection = index._open_read_snapshot()
+    connection = snapshot if snapshot is not None else index._open_read_snapshot()
     if connection is None:
         return None
     try:
@@ -549,7 +555,8 @@ def _hinted_candidate_refs(
     except sqlite3.Error:
         return None
     finally:
-        connection.close()
+        if snapshot is None:
+            connection.close()
     identities = {str(path): exomem_id for path, exomem_id in rows}
     if set(identities) != set(paths):
         return None
