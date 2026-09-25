@@ -71,7 +71,7 @@
 ## 8. Deliver bounded consolidation and evaluate optional verifiers
 
 - [ ] 8.1 Add a default-off deterministic delta/idle consolidation worker under the existing service/resource lifecycle; verify pause/quiet controls, bounded work/time/memory, checkpointed continuation and no interactive dependency.
-- [ ] 8.2 Emit evidence-bound alias/anchor, convention/category, relation, hydration and profile review candidates; verify deduplication, source-version invalidation, active-agent adjudication and zero autonomous canonical writes.
+- [ ] 8.2 Emit evidence-bound alias/anchor, convention/category, relation, hydration, profile and episode-recap fold review candidates; verify deduplication, source-version invalidation, active-agent adjudication and zero autonomous canonical writes.
 - [ ] 8.3 Exercise quiet, failure and resource-pressure modes; verify capture/recall continue normally and integrity findings remain visible when optional proposals are quieted.
 - [ ] 8.4 Evaluate the optional frozen-verifier seam under the authority-and-effects contract, including the pre-existing claim-polarity seam; verify pinned model/label versions, CPU resource bounds, false positives, abstention and soft failure, and record a justified admit/re-lane/remove decision without requiring enablement or paid comparative arms.
 - [ ] 8.5 Connect eligible dreamer candidates to the existing bounded review/activation carrier; verify the next ordinary supported session receives and disposes of a candidate without a review reminder, while respecting quiet/defer settings and truthful tool-only initiation limits.

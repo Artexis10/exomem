@@ -38,6 +38,8 @@ The dreamer SHALL provide deterministic, delta-driven or idle-scheduled consolid
 
 Eligible proposals SHALL enter the existing bounded review/activation carrier at an ordinary supported lifecycle boundary without requiring an explicit review request. Delivery SHALL respect current quiet/defer settings and existing budgets. Tool-only clients SHALL expose the same proposals with best-effort initiation. Acceptance SHALL establish next-session delivery and authorized agent disposition, not only queue creation.
 
+The background worker SHALL write only its own disposable sidecar. It SHALL NOT write the vault, take the writer lease or mutation guard, enqueue graph debt, mark freshness pending, build or repair an index, or load or run a model. It SHALL run only while the service is idle and the graph owes no work, SHALL yield to any request between pages, and SHALL take its changed pages from the freshness registry's delta or a diff against its persisted page signatures, never from a filesystem walk or a whole-vault snapshot. A caller SHALL receive at most one proposal per session start.
+
 #### Scenario: An idle pass finds repeated disconnected knowledge
 
 - **WHEN** a bounded pass finds eligible evidence for a connection or stale entity facet
@@ -56,6 +58,64 @@ Eligible proposals SHALL enter the existing bounded review/activation carrier at
 - **THEN** online capture and recall continue under their normal contracts and optional work remains resumable
 - **AND** quieting proposals cannot hide non-quietable integrity failures
 
+#### Scenario: The dreamer is off by default
+
+- **WHEN** no operator setting enables it
+- **THEN** no worker thread starts, no sidecar is created, and activation, recall and capture are byte-identical to a build without it
+
+#### Scenario: Background work never creates write churn
+
+- **WHEN** the worker processes pages during an ordinary session
+- **THEN** it writes no vault file, takes no writer lease or mutation guard, raises no graph debt, marks no freshness pending, builds or repairs no index and loads no model
+- **AND** it starts no tick while writes are landing, and a write burst's latency, graph availability and drain outcomes match a run with it off
+
+#### Scenario: A restart resumes from recorded signatures without a walk
+
+- **WHEN** the service restarts with pages changed while it was down
+- **THEN** the worker finds them by diffing the live freshness map against its recorded signatures and enumerates no directory
+
+#### Scenario: An upkeep item arrives once at a caller's session start
+
+- **WHEN** a caller's first activation of a session occurs and a settled, egress-admitted proposal exists
+- **THEN** that packet carries at most one upkeep item with its evidence, route, review route and triage verbs
+- **AND** later activations in the same session carry none
+
+#### Scenario: A delivered item is disposed of through existing verbs without a whole-vault scan
+
+- **WHEN** the agent reviews, triages or follows the route of a delivered item
+- **THEN** the item and its context are revalidated from its own subject and evidence pages only, a triage decision binds to its current fingerprint, and the next worker pass resolves an item whose route was applied
+
+#### Scenario: An ignored item stops recurring until its evidence changes
+
+- **WHEN** an item is delivered twice without a disposition, or is dismissed
+- **THEN** no later session receives it again until its supporting evidence changes and the detector reproduces it
+- **AND** dismissing one direction of a proposed link holds the pair
+
+#### Scenario: A failing dreamer is visible
+
+- **WHEN** the worker fails repeatedly
+- **THEN** a session-start packet carries a status-only upkeep block naming when it began failing, and operator status reports it
+
+#### Scenario: Ambiguity is reported, never proposed over
+
+- **WHEN** a family meets an identity ambiguity
+- **THEN** it proposes nothing for it and reports the ambiguity under the existing audit category that owns the defect
+
+### Requirement: Upkeep rides the activation packet as an optional bounded block
+
+A caller-session-start activation packet MAY carry an `upkeep` block holding at most one proposal. The item SHALL be counted in the packet's `used_chars`, SHALL pass the same egress release decision as any unit so that a withheld page never appears in it nor in any count, SHALL be omitted whole rather than truncated, and SHALL be served only while every evidence signature equals the live one. The block SHALL NOT be `due_state` and SHALL NOT read or advance the due-state emission ledger. It SHALL be skipped when the request budget is spent, when structural suggestions are off, when the caller cannot be keyed, and on any error. A vault SHALL receive at most one item per 10 minutes across callers, a caller at most 3 per day, and one item at most two deliveries, the second at least a week after the first and to another caller.
+
+#### Scenario: Upkeep never makes a turn late or leaks
+
+- **WHEN** a session-start activation carries an upkeep item on a governed vault
+- **THEN** the request enumerates no directory and stays within the activation ceilings
+- **AND** an item whose subject is withheld from this audience is skipped with nothing about it in the packet
+
+#### Scenario: A missing or locked sidecar attaches nothing
+
+- **WHEN** the sidecar is absent, locked or unreadable at a session start
+- **THEN** the packet carries no upkeep item and the request does not wait
+
 ### Requirement: Frozen verifiers are optional review labels only
 
 Any frozen verifier SHALL obey the existing canonical `frozen-verifiers` admission and effects requirements, remain default-off, version-pinned, separately admitted and limited to review labels with abstention. It SHALL NOT author knowledge, select canonical identity, control retrieval/ranking, gate capture or define policy. Failure, abstention or resource pressure SHALL remove optional assistance without changing online semantics. CPU-first admission SHALL measure quality, false positives and resource interference; GPU use SHALL require separately verified co-tenant capacity. Programme acceptance SHALL include an admission decision with evidence, not mandatory model enablement.
@@ -65,3 +125,8 @@ Any frozen verifier SHALL obey the existing canonical `frozen-verifiers` admissi
 - **WHEN** optional verification abstains, fails or emits a disputed label
 - **THEN** the active agent can inspect original evidence and the ordinary governed workflow remains available
 - **AND** the label cannot directly change a canonical fact, authority decision or retrieval result
+
+#### Scenario: Verifier labels do not reach upkeep
+
+- **WHEN** an admitted verifier is enabled while upkeep proposals are produced and delivered
+- **THEN** no upkeep family, carrier or review surface calls the verifier, and upkeep output is identical to a run with it disabled
