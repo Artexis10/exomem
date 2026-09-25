@@ -985,6 +985,125 @@ def _leaf_spelling(value: object, *, physical: bool = False) -> tuple[str, str]:
     return parent, leaf
 
 
+def _physical_leaf_candidates(
+    filesystem: held_fs.HeldFilesystem,
+    parent: held_fs.HeldDirectory,
+    leaf: str,
+) -> tuple[str, ...]:
+    """Every physical file name under `parent` whose NFKC form is `leaf`.
+
+    A byte-exact filesystem (Linux ext4) stores a macOS-origin NFD name and its
+    NFKC form as different names, so the exact logical spelling and the actual
+    on-disk spelling can diverge -- and, rarer but real, two differently
+    normalized physical names can both collapse to the same logical spelling.
+    This enumerates the parent's immediate children once, through the same
+    alias-safe primitive an ordinary directory listing already uses, and
+    reports every physical name that collapses to `leaf`, so a caller can
+    require exactly one before trusting it.
+    """
+
+    children = filesystem.children(parent)
+    if not children.ok:
+        code = children.error.code if children.error is not None else "IO_REFUSED"
+        raise ReservedPathLeafError(code)
+    return tuple(
+        record.relative_path
+        for record in children.require()
+        if record.identity.kind == "file"
+        and unicodedata.normalize("NFKC", record.relative_path) == leaf
+    )
+
+
+def resolve_physical_relative(
+    vault_root: Path,
+    value: object,
+    *,
+    identities: IdentityCatalogue | None = None,
+) -> str:
+    """The vault-relative path that actually names `value`'s on-disk file.
+
+    `value` is ordinarily the NFKC spelling a caller supplied. On a byte-exact
+    filesystem that is a different name from a macOS-origin NFD file, so an
+    NFKC-only lookup reports MISSING for a page that demonstrably exists. This
+    looks in `value`'s parent directory for every physical name whose own NFKC
+    form matches `value`'s leaf -- including the leaf itself, when it happens
+    to already be the on-disk spelling -- and requires exactly one: refusing
+    (`AMBIGUOUS_PATH`) rather than guessing when two physical spellings of the
+    same logical name collide, even when one of them is the NFKC-exact name.
+
+    Returns the confirmed physical relative path. Open it downstream with
+    `physical=True` -- re-normalizing it to NFKC would undo this resolution.
+    This reads no bytes and decides no reserved/private-identity status beyond
+    the containing directory; the caller's own generic leaf operation (opened
+    against the string this returns) is what enforces that for the file
+    itself.
+    """
+
+    with _generic_identity_catalogue_scope(
+        vault_root, value, identities=identities
+    ) as current:
+        parent_path, leaf = _leaf_spelling(value)
+        acquired = held_fs.acquire(Path(vault_root))
+        if not acquired.ok:
+            raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
+        with acquired.require() as filesystem:
+            parent_result = filesystem.parent(parent_path)
+            if not parent_result.ok:
+                code = (
+                    parent_result.error.code
+                    if parent_result.error is not None
+                    else "IO_REFUSED"
+                )
+                raise ReservedPathLeafError(code)
+            with parent_result.require() as parent:
+                _refuse_private_identity(parent.identity, current)
+                _require_current_generic_directory(filesystem, parent)
+                matches = _physical_leaf_candidates(filesystem, parent, leaf)
+                if not matches:
+                    raise ReservedPathLeafError("MISSING")
+                if len(matches) > 1:
+                    raise ReservedPathLeafError("AMBIGUOUS_PATH")
+                physical_leaf = matches[0]
+                return (
+                    physical_leaf
+                    if parent_path in ("", ".")
+                    else f"{parent_path}/{physical_leaf}"
+                )
+
+
+def physical_spelling_refusal(vault_root: Path, value: object) -> tuple[str, str] | None:
+    """Why a write door must not act on `value` as named, or ``None``.
+
+    `("AMBIGUOUS_PATH", reason)` when more than one physical name collapses to
+    `value`'s NFKC leaf, even if one of them is the NFKC-exact name, and
+    `("NON_CANONICAL_NAME", reason)` when the one physical name is not its own
+    NFKC form. Renaming it would be a write, and a door resolves its path
+    before validation, authorization and any dry run, so the door refuses and
+    `move_file` onto the same path is the governed way to canonicalize. Any
+    other lookup outcome is ``None``: the door's own resolution reports a
+    missing or refused path exactly as before.
+    """
+
+    try:
+        physical = resolve_physical_relative(vault_root, value)
+    except ReservedPathLeafError as error:
+        if error.code == "AMBIGUOUS_PATH":
+            return (
+                "AMBIGUOUS_PATH",
+                f"{value} matches more than one on-disk spelling; refusing to guess which",
+            )
+        return None
+    if physical == unicodedata.normalize("NFKC", physical):
+        return None
+    return (
+        "NON_CANONICAL_NAME",
+        (
+            f"{value} is stored under a non-canonical Unicode spelling; "
+            "move_file it onto this same path to canonicalize its name, then retry"
+        ),
+    )
+
+
 def read_generic_bytes(
     vault_root: Path,
     value: object,
@@ -1062,13 +1181,21 @@ def inspect_generic_file(
     value: object,
     *,
     identities: IdentityCatalogue | None = None,
+    physical: bool = False,
 ) -> held_fs.StableIdentity:
-    """Acquire and classify one generic regular file without reading its bytes."""
+    """Acquire and classify one generic regular file without reading its bytes.
+
+    `physical=True` matches `read_generic_bytes`: it opens `value` exactly as
+    given rather than its NFKC form, for a spelling already confirmed physical
+    (typically via `resolve_physical_relative`).
+    """
 
     with _generic_identity_catalogue_scope(
         vault_root, value, identities=identities
     ) as current:
-        return _inspect_generic_file_held(vault_root, value, identities=current)
+        return _inspect_generic_file_held(
+            vault_root, value, identities=current, physical=physical
+        )
 
 
 def inspect_generic_path(
@@ -1222,9 +1349,10 @@ def _inspect_generic_file_held(
     value: object,
     *,
     identities: IdentityCatalogue,
+    physical: bool = False,
 ) -> held_fs.StableIdentity:
 
-    parent_path, leaf = _leaf_spelling(value)
+    parent_path, leaf = _leaf_spelling(value, physical=physical)
     acquired = held_fs.acquire(Path(vault_root))
     if not acquired.ok:
         raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
@@ -1352,8 +1480,16 @@ def move_generic_path(
     *,
     source_kind: str,
     identities: IdentityCatalogue | None = None,
+    physical: bool = False,
 ) -> None:
-    """Move one generic file or directory through retained source/destination handles."""
+    """Move one generic file or directory through retained source/destination handles.
+
+    `physical=True` opens the *source* exactly as given rather than its NFKC
+    form -- for a spelling already confirmed physical, typically via
+    `resolve_physical_relative` -- and never applies to `destination`: a move
+    target is a name being written, not looked up, so it always takes the
+    ordinary NFKC spelling.
+    """
 
     with _generic_identity_catalogue_scope(
         vault_root, source, destination, identities=identities
@@ -1364,6 +1500,7 @@ def move_generic_path(
             destination,
             source_kind=source_kind,
             identities=current,
+            physical=physical,
         )
 
 
@@ -1374,9 +1511,10 @@ def _move_generic_path_held(
     *,
     source_kind: str,
     identities: IdentityCatalogue,
+    physical: bool = False,
 ) -> None:
 
-    source_parent_path, source_leaf = _leaf_spelling(source)
+    source_parent_path, source_leaf = _leaf_spelling(source, physical=physical)
     destination_parent_path, destination_leaf = _leaf_spelling(destination)
     if source_kind not in {"file", "directory"}:
         raise ReservedPathLeafError("UNSAFE_PATH")

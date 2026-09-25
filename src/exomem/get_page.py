@@ -136,16 +136,33 @@ def _read_prepared_snapshot(target: Path) -> tuple[bytes, os.stat_result] | None
 NOT_UTF8_REASON = "file is not UTF-8 text"
 
 
+def path_withheld(vault_root: Path, relative: str) -> bool:
+    """Whether the current caller is denied `relative` by its path alone.
+
+    For a door that must answer a withheld path exactly like a missing one
+    before it has any bytes to decide on.
+    """
+    from .governance import egress
+
+    return egress.release_level_for_path_only(vault_root, relative) <= egress.LEVEL_NONE
+
+
 def unreadable_or_absent(
-    vault_root: Path, relatives: tuple[str, ...], missing_path: str, reason: str
+    vault_root: Path,
+    relatives: tuple[str, ...],
+    missing_path: str,
+    reason: str,
+    *,
+    code: str = "UNREADABLE",
 ) -> GetError:
-    """UNREADABLE where the caller may see the item, the absent refusal elsewhere.
+    """`code` where the caller may see the item, the absent refusal elsewhere.
 
     A file is known to be unreadable only once its bytes are in hand, and the
     full release decision needs the frontmatter those bytes failed to yield.
     Deciding by path first means a withheld file answers exactly like a
     missing one, whatever its bytes are; a scope that needs the frontmatter
-    to classify the path withholds it.
+    to classify the path withholds it. Any other refusal that reveals the
+    item exists (an ambiguous on-disk spelling) passes its own `code`.
     """
     from .governance import egress
 
@@ -156,7 +173,7 @@ def unreadable_or_absent(
             # outcome is an unreadable report, not a release.
             egress.release_level_for_path_only(vault_root, rel, receipt_decision="withheld")
             return GetError(code="NOT_FOUND", reason=f"file does not exist: {missing_path}")
-    return GetError(code="UNREADABLE", reason=reason)
+    return GetError(code=code, reason=reason)
 
 
 def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
@@ -209,12 +226,20 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
     try:
         # The resolver may have followed a stable in-vault alias. Read the
         # exact resolved target it classified, not the caller spelling that
-        # could be swapped after resolution.
-        expected_identity = reserved_paths.inspect_generic_file(
+        # could be swapped after resolution. `resolve_physical_relative` finds
+        # the on-disk spelling when it differs from the NFKC one this door
+        # otherwise assumes -- a macOS-origin NFD name on a byte-exact
+        # filesystem (Linux ext4) -- and refuses outright rather than guess
+        # if two physical spellings collide; `physical=True` below then opens
+        # exactly that confirmed spelling instead of re-normalizing it away.
+        physical_relative = reserved_paths.resolve_physical_relative(
             vault_root, resolution.resolved_relative
         )
+        expected_identity = reserved_paths.inspect_generic_file(
+            vault_root, physical_relative, physical=True
+        )
         snapshot = reserved_paths.read_generic_bytes(
-            vault_root, resolution.resolved_relative
+            vault_root, physical_relative, physical=True
         )
         if snapshot.identity != expected_identity:
             raise unreadable_or_absent(
@@ -224,6 +249,19 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
                 "file changed while being read",
             )
     except reserved_paths.ReservedPathLeafError as error:
+        if error.code == "AMBIGUOUS_PATH":
+            # Only a caller who may see the page learns it has two spellings;
+            # to anyone else a withheld collision is simply absent.
+            raise unreadable_or_absent(
+                vault_root,
+                (resolution.relative, resolution.resolved_relative),
+                missing_path,
+                (
+                    f"{missing_path} matches more than one on-disk spelling; "
+                    "refusing to guess which"
+                ),
+                code="AMBIGUOUS_PATH",
+            ) from None
         if error.code in {
             "CAPABILITY_UNAVAILABLE",
             "IDENTITY_CHANGED",

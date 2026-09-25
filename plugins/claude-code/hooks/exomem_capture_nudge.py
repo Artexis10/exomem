@@ -36,6 +36,24 @@ episode pending. When the ask is due it takes that Stop; on every other Stop the
 per-turn capture reminder behaves exactly as before. The hook never records
 anything itself — hooks trigger, agents author.
 
+Before an ask actually fires, the hook makes one read-only, bounded REST call —
+`episode_memory(action="inspect", episode=<the derived key>)` against the local
+door, using the same host/port/key resolution and bounded-timeout pattern the
+retrieve hook's REST rung uses — and compares the revision count it reports
+against the count last seen (`last_seen_revisions` in the per-session state
+file). A higher count means a recap was recorded through some other door (a
+client whose tool list predates `episode_memory`, the REST facade directly, a
+door this hook doesn't otherwise watch), which the transcript-only
+`_successful_episode_record` check can never see; the substantive-turn count
+resets and the ask is skipped. A record this hook saw itself leaves the
+baseline unknown, so the next read re-bases on it instead of counting it as
+another door's. `inspect` is scoped to one audience, so "any door" means any
+door acting as the same audience as the REST key; a recap recorded under a
+different principal is invisible here and the ask simply fires. Any failure
+of that call — the door unconfigured, a timeout, any error, or the episode
+simply not found yet — falls straight through to the transcript-only
+behaviour above.
+
 Contract (Claude Code / Codex Stop hook): read the event JSON on stdin; print
 `{"decision":"block","reason":...}` and exit 0 to block the stop and feed the
 reminder to the agent; exit 0 with no output to allow the stop. Never raises — a
@@ -49,7 +67,10 @@ import json
 import os
 import re
 import sys
+import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 # KB write tools — mixed tools include their operation selector so read-only
@@ -454,20 +475,31 @@ def _episode_state_path(session_id: str) -> Path:
     return _hook_home() / ".cache" / "exomem-nudge" / f"episode_{key}"
 
 
+_EPISODE_STATE_DEFAULT = {
+    "substantive_since_record": 0,
+    "last_ask_ts": 0.0,
+    "last_seen_revisions": 0,
+}
+#: `last_seen_revisions` after a record this hook saw itself: the door's count
+#: now includes that record, so the next read re-bases instead of comparing.
+_REVISIONS_UNKNOWN = -1
+
+
 def _read_episode_state(path: Path) -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001 — missing/corrupt state starts the count over
-        return {"substantive_since_record": 0, "last_ask_ts": 0.0}
+        return dict(_EPISODE_STATE_DEFAULT)
     if not isinstance(data, dict):
-        return {"substantive_since_record": 0, "last_ask_ts": 0.0}
+        return dict(_EPISODE_STATE_DEFAULT)
     try:
         return {
             "substantive_since_record": max(0, int(data.get("substantive_since_record") or 0)),
             "last_ask_ts": float(data.get("last_ask_ts") or 0.0),
+            "last_seen_revisions": max(-1, int(data.get("last_seen_revisions") or 0)),
         }
     except (TypeError, ValueError):
-        return {"substantive_since_record": 0, "last_ask_ts": 0.0}
+        return dict(_EPISODE_STATE_DEFAULT)
 
 
 def _write_episode_state(path: Path, state: dict) -> None:
@@ -478,6 +510,154 @@ def _write_episode_state(path: Path, state: dict) -> None:
         pass
 
 
+# --- episode door check: a revision recorded through any door still counts ---
+
+#: A key read from `service.env` is bound to loopback, mirroring the retrieve
+#: hook's own ladder: the hook must not become the primitive that posts a key
+#: it lifted off disk, plus a derived episode key, to a host named by
+#: `EXOMEM_HOST`. A key the user exported into the environment keeps today's
+#: behaviour — they placed both variables.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
+
+#: One bounded call, only on a Stop where the ask is otherwise about to fire —
+#: this is the Stop hook's own time budget, spent alongside the transcript
+#: work above it.
+_EPISODE_DOOR_TIMEOUT_SECONDS = 2.0
+
+
+def _rest_host() -> str:
+    """Mirror of the retrieve hook's `_rest_host` — this standalone script
+    cannot import it."""
+    return (os.environ.get("EXOMEM_HOST") or "").strip() or "127.0.0.1"
+
+
+def _rest_port() -> int | None:
+    """Mirror of the retrieve hook's `_rest_port`."""
+    value = os.environ.get("EXOMEM_REST_PORT", "").strip()
+    if not value:
+        return 8765
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    return port if 1 <= port <= 65535 else None
+
+
+def _service_env_path() -> Path | None:
+    """Mirror of the retrieve hook's `_service_env_path`: the managed
+    install's service EnvironmentFile, where `install-service.sh` persists
+    `EXOMEM_REST_API_KEY`. `EXOMEM_SERVICE_ENV` overrides the location;
+    Windows has no service env."""
+    explicit = os.environ.get("EXOMEM_SERVICE_ENV", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    if os.name == "nt":
+        return None
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Exomem" / "service.env"
+    base = os.environ.get("XDG_CONFIG_HOME", "").strip() or str(Path.home() / ".config")
+    return Path(base) / "exomem" / "service.env"
+
+
+def _resolve_rest_key() -> tuple[str, str]:
+    """Mirror of the retrieve hook's `_resolve_rest_key`: `(key, source)` —
+    from this env (`source="env"`), else the managed install's `service.env`
+    (`source="file"`), else `("", "")`. Never raises; the value is never
+    logged."""
+    from_env = os.environ.get("EXOMEM_REST_API_KEY", "").strip()
+    if from_env:
+        return from_env, "env"
+    path = _service_env_path()
+    if path is None:
+        return "", ""
+    try:
+        text = path.read_text(encoding="utf-8").lstrip("﻿")
+    except Exception:  # noqa: BLE001 — hook must never break a stop hook
+        return "", ""
+    for line in text.splitlines():
+        match = re.match(r"^\s*EXOMEM_REST_API_KEY\s*=\s*(.*)$", line)
+        if not match:
+            continue
+        value = match.group(1).strip()
+        if len(value) >= 2 and value[0] == value[-1] == '"':
+            value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+        elif len(value) >= 2 and value[0] == value[-1] == "'":
+            value = value[1:-1]
+        value = value.strip()
+        return (value, "file") if value else ("", "")
+    return "", ""
+
+
+def _bounded(call, budget: float):
+    """Mirror of the retrieve hook's `_bounded`: run `call()` on a daemon
+    thread and wait at most `budget` seconds for it. Returns its result, or
+    `None` when it has not finished in time (the thread is left to end with
+    the process; the hook exits right after)."""
+    box: list = []
+
+    def _run() -> None:
+        try:
+            box.append(call())
+        except Exception:  # noqa: BLE001 — hook must never break a stop hook
+            box.append(None)
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join(max(0.0, budget))
+    return box[0] if box else None
+
+
+def _episode_revision_count(key: str) -> int | None:
+    """This episode's revision count, via one bounded, read-only REST call —
+    `episode_memory(action="inspect", episode=key)` against the local door.
+
+    `None` on ANY failure: the door unconfigured (no key resolves), a bad or
+    unresolved port, a timeout, a non-200, a malformed body, or the episode
+    simply not found yet (a session's first ask, before anything was ever
+    recorded). The caller treats `None` exactly like "no new revision" —
+    today's ask-cadence behaviour, unchanged. Never raises.
+
+    Reads `_EPISODE_DOOR_TIMEOUT_SECONDS` fresh on every call rather than
+    binding it as a default parameter, so a test (or a future tuning knob)
+    that reassigns the module constant actually changes the bound used here.
+    """
+    timeout = _EPISODE_DOOR_TIMEOUT_SECONDS
+
+    def _call() -> int | None:
+        # Key resolution may read `service.env`, which can block (a FIFO, a
+        # stalled mount), so it runs inside the bound with the request.
+        api_key, source = _resolve_rest_key()
+        if not api_key or (source == "file" and _rest_host() not in _LOOPBACK_HOSTS):
+            return None
+        port = _rest_port()
+        if port is None:
+            return None
+        body = json.dumps({"action": "inspect", "episode": key}).encode("utf-8")
+        req = urllib.request.Request(
+            f"http://{_rest_host()}:{port}/api/episode_memory",
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.getcode() != 200:
+                    return None
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception:  # noqa: BLE001 — hook must never break a stop hook
+            return None
+        if not isinstance(payload, dict) or payload.get("success") is not True:
+            return None
+        data = payload.get("data")
+        revisions = data.get("revisions") if isinstance(data, dict) else None
+        return len(revisions) if isinstance(revisions, list) else None
+
+    return _bounded(_call, timeout)
+
+
 def _episode_ask(
     session_id: str, tools: list[dict], substantive: bool, level: str
 ) -> str | None:
@@ -486,6 +666,11 @@ def _episode_ask(
     Coverage is hook-local: covered through the last successful record,
     pending while substantive turns accrue after it. Asking never resets the
     count — only a record does — so an ignored ask repeats after its cooldown.
+
+    Before an ask that is otherwise due actually fires, one bounded REST
+    `inspect` call (`_episode_revision_count`) checks whether some other door
+    recorded a revision this hook hasn't seen. If so, the count resets there
+    too and the ask is skipped — module docstring has the full rationale.
     """
     preset = _EPISODE_ASK_PRESETS.get(level)
     if preset is None or not session_id:
@@ -496,21 +681,35 @@ def _episode_ask(
     state = _read_episode_state(path)
     if any(_successful_episode_record(tool) for tool in tools):
         state["substantive_since_record"] = 0
+        state["last_seen_revisions"] = _REVISIONS_UNKNOWN
     elif substantive:
         state["substantive_since_record"] += 1
     now = time.time()
-    due = (
+    client = _EPISODE_CLIENT_LABELS.get(_hook_client(), _hook_client())
+    key = episode_key(client, session_id)
+    about_due = (
         turns > 0
         and state["substantive_since_record"] >= turns
         and now - state["last_ask_ts"] >= cooldown
     )
+    if about_due:
+        revisions = _episode_revision_count(key)
+        if revisions is not None:
+            # Only a count above a known baseline is another door's record.
+            # An unknown baseline follows a record seen here, which the door
+            # now reports too; re-base on it rather than suppress.
+            baseline = state["last_seen_revisions"]
+            if baseline != _REVISIONS_UNKNOWN and revisions > baseline:
+                state["substantive_since_record"] = 0
+                about_due = False
+            state["last_seen_revisions"] = revisions
+    due = about_due
     if due:
         state["last_ask_ts"] = now
     _write_episode_state(path, state)
     if not due:
         return None
-    client = _EPISODE_CLIENT_LABELS.get(_hook_client(), _hook_client())
-    return EPISODE_ASK.replace("{key}", episode_key(client, session_id))
+    return EPISODE_ASK.replace("{key}", key)
 
 
 def _note_continuation_record(session_id: str, tools: list[dict]) -> None:
@@ -525,6 +724,7 @@ def _note_continuation_record(session_id: str, tools: list[dict]) -> None:
     path = _episode_state_path(session_id)
     state = _read_episode_state(path)
     state["substantive_since_record"] = 0
+    state["last_seen_revisions"] = _REVISIONS_UNKNOWN
     _write_episode_state(path, state)
 
 
