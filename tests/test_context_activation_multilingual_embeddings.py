@@ -71,6 +71,8 @@ class Measured:
     encode_ms: dict[str, float]
     semantic_ms: list[float]
     english: dict[str, dict[str, Any]]
+    english_packets: dict[str, dict[str, dict]]
+    english_key_to_path: dict[str, str]
     english_state: str
     english_vectors: int
     fingerprint: str
@@ -180,7 +182,17 @@ def _measure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Measured:
     english_state = english_packets["on"][english_set.FIXTURES[0].case_id]["generation"]["semantic_evidence"]
     monkeypatch.setattr(ranking_config, "DEFAULT_RANKING", shipped)
     return Measured(
-        manifest, packets, encode_ms, semantic_ms, english, english_state, english_vectors, fingerprint, dim
+        manifest,
+        packets,
+        encode_ms,
+        semantic_ms,
+        english,
+        english_packets,
+        dict(english_manifest.key_to_path),
+        english_state,
+        english_vectors,
+        fingerprint,
+        dim,
     )
 
 
@@ -309,13 +321,9 @@ def test_the_semantic_stage_meets_its_latency_bar(measured: Measured) -> None:
 def test_the_english_set_keeps_its_v1_verdicts_with_semantic_evidence_on(measured: Measured) -> None:
     """The E-arm: the 18 English fixtures, semantic on against semantic off,
     with the band actually running. No case's v1 verdict moves, no gold is
-    lost and no poison is gained.
-
-    Statuses may move, and at the lowered floor two do (measured 2026-09-24,
-    18 anchors): T4 reaches its expected `ambiguous`, and T6 resolves the
-    grill page its turn talks about, a twin the off arm already fails on that
-    same page. As shipped, this catalogue is under the floor and nothing
-    moves at all."""
+    lost and no poison is gained. Two statuses do move; they are pinned as
+    known limits below. As shipped, this 18-anchor catalogue is under the
+    band's floor and nothing moves at all."""
     assert measured.english_state == "ready"
     assert len(measured.english) == 18
     moved = {}
@@ -327,3 +335,43 @@ def test_the_english_set_keeps_its_v1_verdicts_with_semantic_evidence_on(measure
                 for arm, score in scores.items()
             }
     assert moved == {}
+
+
+def _english_anchors(measured: Measured, arm: str, case_id: str) -> dict[str, tuple[str, frozenset[str]]]:
+    return {
+        item["path"]: (item["status"], frozenset(item["evidence"]))
+        for item in measured.english_packets[arm][case_id]["anchors"]
+    }
+
+
+def test_known_limit_a_rare_word_plus_the_band_resolves_an_adjacent_turns_page(measured: Measured) -> None:
+    """KNOWN LIMIT (step-4 ruling, 2026-09-25). T6 asks to convert the grill's
+    target temperature, a turn about unit conversion that names the grill.
+    "grill" is a rare word naming the grill page and the turn clears the band
+    against it, so the page resolves on exactly the pair that resolves the
+    multilingual golds (M1-de, M1-ru, M5-ja): tightening the rule would cost
+    those. The off arm already hands out the same page as a partial. The agent
+    can discount it; step-5 learning from agent picks is the corrective."""
+    grill = measured.english_key_to_path["c2_grill_equipment_page"]
+    on = _english_anchors(measured, "on", "T6")
+    off = _english_anchors(measured, "off", "T6")
+    assert measured.english["T6"]["on"].observed_status == "resolved"
+    assert [path for path, (status, _e) in on.items() if status == "resolved"] == [grill], on
+    assert {"rare_term", "vector_band"} <= on[grill][1], on[grill]
+    assert off[grill][0] == "partial" and "vector_band" not in off[grill][1], off.get(grill)
+
+
+def test_known_limit_the_band_completes_an_ambiguity_between_two_named_senses(measured: Measured) -> None:
+    """KNOWN LIMIT (step-4 ruling, 2026-09-25). T4 names "Alex", whom two
+    entities share, beside a deployment issue. With the band, both senses
+    reach resolution and the packet reports them as `ambiguous`, which is
+    T4's own expected status; without it the turn abstains `unresolved`. The
+    band adds contact to senses the turn already named; it names none."""
+    on = measured.english_packets["on"]["T4"]
+    assert measured.english["T4"]["on"].observed_status == "ambiguous", on["anchors"]
+    assert measured.english["T4"]["off"].observed_status == "unresolved"
+    gold = {measured.english_key_to_path[key] for key in english_set.fixture_by_id("T4").gold}
+    ref_to_path = {item["ref"]: item["path"] for item in on["anchors"]}
+    senses = {ref_to_path.get(item["ref"], item["ref"]) for item in on["ambiguity"]}
+    assert senses == gold, (senses, gold)
+
