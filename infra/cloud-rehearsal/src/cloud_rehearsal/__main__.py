@@ -8,8 +8,10 @@ image; runs the twelve P3 steps in order; writes a JSON report with the
 Exit codes: 0 when the report gates the node (every step passed, every
 target met, a valid rehearsal); 1 when it recorded product findings; 2 when
 the rehearsal itself failed (a stage could not be stood up, or a step raised
-something other than a recorded finding). `--harness-check` turns 1 into 0,
-for pull-request CI, where the question is whether the harness works.
+something other than a recorded finding, or, with `--harness-check`, a
+step failed that the known-findings baseline does not name). `--harness-check`
+turns 1 into 0 for pull-request CI, where the question is whether the
+harness works.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ from pathlib import Path
 from . import build, images, infra, platform, substrate, tls
 from .http import Resolver
 from .report import Report, failure_record
-from .scenarios import Context, post_checks, ready_matches_pods, run_steps
+from .scenarios import Context, close_clients, post_checks, ready_matches_pods, run_steps
 from .shell import run, wait_for
 
 
@@ -51,6 +53,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("--steps", default=None, help="comma-separated step numbers to run (default: all)")
     run_parser.add_argument("--keep", action="store_true", help="leave the stack running for inspection")
+    run_parser.add_argument(
+        "--known-findings", type=Path, default=Path(__file__).resolve().parents[2] / "known-findings.json",
+        help="with --harness-check: the product findings each step is expected to record",
+    )
     run_parser.add_argument(
         "--harness-check", action="store_true",
         help="exit 0 whenever the rehearsal itself worked, even if it recorded product findings "
@@ -87,8 +93,11 @@ async def _run(args: argparse.Namespace) -> int:
         report.invalid_reasons.append(
             "the cell image was supplied with --cell-image instead of built from this checkout's Dockerfile"
         )
+    report.inputs["cellctl_image_source"] = (
+        "assembled by the rehearsal from infra/cellctl (the repository ships no cellctl image yet)"
+    )
     if not report.inputs["exomem_worktree_clean"]:
-        report.invalid_reasons.append("the exomem checkout had uncommitted changes (recorded, not disqualifying)")
+        report.notes.append("the exomem checkout had uncommitted changes")
     only = {int(part) for part in args.steps.split(",")} if args.steps else None
     if only is not None:
         report.valid = False
@@ -103,6 +112,7 @@ async def _run(args: argparse.Namespace) -> int:
         with _stage(report, "images"):
             v1, v2, broken, cell_overlays = build.build_cell_images(run_id, workdir, prebuilt=args.cell_image)
             report.overlays.extend(cell_overlays)
+            report.product_overlays.extend(o for o in cell_overlays if o.startswith("APPLIED"))
             gateway_tag = build.build_gateway_image(run_id, workdir, source, mode=args.gateway_build)
             cellctl_tag = build.build_cellctl_image(run_id, workdir)
         with _stage(report, "infrastructure"):
@@ -134,6 +144,8 @@ async def _run(args: argparse.Namespace) -> int:
             resolver = Resolver(pki.ca_path, {tls.SUBSTRATE_HOST: control.edge_host_port, tls.MCP_HOST: stack.k3s.ingress_host_port})
             _wait_json(resolver, f"{substrate.PUBLIC_BASE_URL}/.well-known/oauth-authorization-server/api/exomem/oauth", "Substrate")
             report.stages["substrate"]["egress_sealed"] = substrate.sealed_egress_refused(control)
+            if not report.stages["substrate"]["egress_sealed"]:
+                raise RuntimeError("Substrate's network is not sealed: a TEST-NET address did not fail with no route")
         with _stage(report, "platform"):
             hour = dt.datetime.now(dt.UTC).hour
             # Closed until step 11 opens it, so no nightly backup lands mid-scenario.
@@ -160,6 +172,7 @@ async def _run(args: argparse.Namespace) -> int:
             report.overlays.extend(deployed.overlays)
             for defect in deployed.chart_defects:
                 report.defects.append({"step": "platform", "cross_lane": True, "owner": "Artexis10/exomem#1368", **defect})
+                report.product_overlays.append(f"gateway environment overlay: {', '.join(defect['missing'])}")
             platform.wait_rollout(stack, platform.CLOUD_NAMESPACE, "cellctl")
             platform.wait_rollout(stack, platform.CLOUD_NAMESPACE, "exomem-cloud-gateway")
             platform.wait_rollout(stack, platform.PLATFORM_NAMESPACE, "rehearsal-traefik")
@@ -170,7 +183,10 @@ async def _run(args: argparse.Namespace) -> int:
             await ctx.admin_release({"cellImage": built.cell_v1})
             capacity = await ctx.fetchrow("SELECT sum(cell_slots) AS slots FROM exomem_cloud_capacity")
             report.stages["release"]["published_cell_slots"] = capacity and capacity["slots"]
-        await run_steps(ctx, only=only)
+        try:
+            await run_steps(ctx, only=only)
+        finally:
+            await close_clients(ctx)
         report.stages["post_checks"] = post_checks(ctx)
         mismatches = await ready_matches_pods(ctx)
         report.stages["post_checks"]["ready_matches_pod"] = not mismatches
@@ -184,10 +200,15 @@ async def _run(args: argparse.Namespace) -> int:
                     "evidence": mismatches,
                 }
             )
-        outcome = report.to_json()["outcome"]
         harness_errors = [step.number for step in report.steps if step.failure and "traceback" in step.failure]
-        report.stages["harness"] = {"status": "failed" if harness_errors else "passed", "steps_with_harness_errors": harness_errors}
-        if harness_errors:
+        harness: dict[str, object] = {"steps_with_harness_errors": harness_errors}
+        if args.harness_check:
+            harness.update(_compare_with_known_findings(report, args.known_findings, only))
+        failed = bool(harness_errors) or bool(harness.get("unexpected"))
+        harness["status"] = "failed" if failed else "passed"
+        report.stages["harness"] = harness
+        outcome = report.to_json()["outcome"]
+        if failed:
             code = 2
         elif outcome["gates_node"] or args.harness_check:
             code = 0
@@ -199,10 +220,12 @@ async def _run(args: argparse.Namespace) -> int:
         report.stages.setdefault("harness", {})["failure"] = failure_record(error)
         code = 2
     finally:
+        # Each cleanup stands alone, so one failing never strands the stack
+        # or loses the report.
         if stack is not None and not args.keep:
-            _collect_diagnostics(stack, workdir)
-        report.write(args.report)
-        infra.teardown(stack, keep=args.keep)
+            _guarded(report, "diagnostics", lambda: _collect_diagnostics(stack, workdir))
+        _guarded(report, "report", lambda: report.write(args.report))
+        _guarded(report, "teardown", lambda: infra.teardown(stack, keep=args.keep))
         if not args.keep:
             # This run's own image tags; base images stay cached.
             tags = run(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"], check=False).stdout.split()
@@ -217,6 +240,35 @@ async def _run(args: argparse.Namespace) -> int:
 
 class _StageFailed(Exception):
     pass
+
+
+def _guarded(report: Report, what: str, action) -> None:  # noqa: ANN001 - a zero-argument callable
+    try:
+        action()
+    except Exception as error:  # noqa: BLE001 - cleanup must continue
+        report.notes.append(f"cleanup step {what} failed: {type(error).__name__}: {str(error)[:300]}")
+        print(f"[rehearsal] cleanup {what} failed: {error}", flush=True)
+
+
+def _compare_with_known_findings(report: Report, path: Path, only: set[int] | None) -> dict[str, object]:
+    """Harness check: every failing or blocked step must be a known, owned finding.
+
+    The baseline names the product findings the rehearsal is expected to
+    record until their owners fix them. Anything else failing or blocked is
+    treated as a regression in the rehearsal. A known finding that now
+    passes is reported so the baseline gets pruned.
+    """
+
+    known = {int(number): reason for number, reason in json.loads(path.read_text(encoding="utf-8"))["steps"].items()}
+    unexpected, resolved = [], []
+    for step in report.steps:
+        if only is not None and step.number not in only:
+            continue
+        if step.status != "passed" and step.number not in known:
+            unexpected.append({"step": step.number, "status": step.status, "message": (step.failure or {}).get("message", "")[:300]})
+        if step.status == "passed" and step.number in known:
+            resolved.append({"step": step.number, "baseline": known[step.number]})
+    return {"known_findings": {str(k): v for k, v in known.items()}, "unexpected": unexpected, "resolved_known_findings": resolved}
 
 
 class _stage:  # noqa: N801 - used as a context manager

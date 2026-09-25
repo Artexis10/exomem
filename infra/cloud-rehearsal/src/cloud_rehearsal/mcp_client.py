@@ -223,6 +223,7 @@ class TenantClient:
             )
         )
         self._pending: asyncio.Future[tuple[str, str | None]] | None = None
+        self._http: httpx.AsyncClient | None = None
 
     async def _redirect(self, authorization_url: str) -> None:
         self.authorizations += 1
@@ -257,15 +258,25 @@ class TenantClient:
     def access_token(self) -> str | None:
         return self.storage.tokens.access_token if self.storage.tokens else None
 
+    def _http_client(self) -> httpx.AsyncClient:
+        """One client per connector, as a real connector keeps its connections."""
+
+        if self._http is None or self._http.is_closed:
+            self._http = self.resolver.async_client(auth=self._auth(), timeout=httpx.Timeout(120.0))
+        return self._http
+
+    async def aclose(self) -> None:
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
+
     @contextlib.asynccontextmanager
     async def mcp(self) -> AsyncIterator[MeasuredSession]:
-        http_client = self.resolver.async_client(auth=self._auth(), timeout=httpx.Timeout(120.0))
-        async with http_client:
-            async with streamable_http_client(MCP_URL, http_client=http_client) as (read, write, _):
-                async with ClientSession(read, write) as session:
-                    started = time.perf_counter()
-                    await session.initialize()
-                    yield MeasuredSession(session, initialize_seconds=time.perf_counter() - started)
+        async with streamable_http_client(MCP_URL, http_client=self._http_client()) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                started = time.perf_counter()
+                await session.initialize()
+                yield MeasuredSession(session, initialize_seconds=time.perf_counter() - started)
 
 
 @dataclass

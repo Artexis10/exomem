@@ -174,7 +174,11 @@
   11. backup and scratch restore, with a governed write;
   12. deletion with absence proofs.
   It writes a machine-readable report.
-- [ ] 5.3 Measure warm p95 initialize and list, capture and cited recall, provisioning time and per-cell upgrade time, and record them in the report
+- [ ] 5.3 Measure warm p95 initialize and list, capture and cited recall, provisioning time and per-cell upgrade time, and record them in the report. The targets that gate the node:
+  - warm p95 `initialize` and `tools/list` at most 500 ms each;
+  - p95 capture and cited recall at most 1 s each;
+  - provisioning under 3 minutes (5.2);
+  - an upgrade under 60 s per cell, including its pre-upgrade backup.
 
 ## 6. Node deployment and owner acceptance (P4)
 

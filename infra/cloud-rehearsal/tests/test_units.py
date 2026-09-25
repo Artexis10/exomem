@@ -20,29 +20,66 @@ def test_percentile_is_nearest_rank() -> None:
     assert report.percentile([0.1] * 18 + [4.0, 5.0], 0.95) == 4.0
 
 
-def test_targets_match_task_5_3() -> None:
+def test_targets_are_the_ones_tasks_5_2_and_5_3_state() -> None:
+    from cloud_rehearsal import images
+
     assert report.TARGETS == {
-        "initialize_warm_p95_seconds": 0.5,
-        "tools_list_warm_p95_seconds": 0.5,
-        "capture_p95_seconds": 1.0,
-        "cited_recall_p95_seconds": 1.0,
-        "provision_seconds": 180.0,
-        "upgrade_seconds_per_cell": 60.0,
+        "initialize_warm_p95_seconds": (0.5, False),
+        "tools_list_warm_p95_seconds": (0.5, False),
+        "capture_p95_seconds": (1.0, False),
+        "cited_recall_p95_seconds": (1.0, False),
+        "provision_seconds": (180.0, True),
+        "upgrade_seconds_per_cell": (60.0, True),
     }
+    tasks = (images.REPO_ROOT / "openspec/changes/adopt-exomem-cloud-plain-cells/tasks.md").read_text(encoding="utf-8")
+    section = tasks[tasks.index("## 5. Local rehearsal"):tasks.index("## 6.")]
+    for phrase in ("under 3 minutes", "500 ms", "at most 1 s", "under 60 s"):
+        assert phrase in section, phrase
 
 
-def test_a_report_gates_the_node_only_when_everything_passed() -> None:
+def _passing_report() -> report.Report:
     run = report.Report(run_id="x")
     run.steps = [report.StepRecord(number=n, name=str(n), status=report.PASSED) for n in range(1, 13)]
     for name in ("initialize_warm", "tools_list_warm", "capture", "cited_recall"):
         run.sample(name, 0.1)
     run.single.update({"provision_seconds": 60.0, "upgrade_seconds_per_cell": 30.0})
-    assert run.to_json()["outcome"]["gates_node"] is True
-    run.single["provision_seconds"] = 180.0  # the target is strictly under 3 minutes
-    assert run.to_json()["outcome"]["gates_node"] is False
-    run.single["provision_seconds"] = 60.0
-    run.valid = False
-    assert run.to_json()["outcome"]["gates_node"] is False
+    run.stages["post_checks"] = {"phrases_leaked": 0, "ready_matches_pod": True}
+    return run
+
+
+def test_a_report_gates_the_node_only_when_everything_passed() -> None:
+    assert _passing_report().to_json()["outcome"]["gates_node"] is True
+    for spoil in (
+        lambda r: r.single.update({"provision_seconds": 180.0}),
+        lambda r: r.single.update({"upgrade_seconds_per_cell": 60.0}),
+        lambda r: setattr(r, "valid", False),
+        lambda r: r.defects.append({"owner": "o"}),
+        lambda r: r.product_overlays.append("patched"),
+        lambda r: r.stages["post_checks"].update({"phrases_leaked": 1}),
+        lambda r: r.stages["post_checks"].update({"ready_matches_pod": False}),
+        lambda r: r.stages.update({"harness": {"status": "failed"}}),
+    ):
+        run = _passing_report()
+        spoil(run)
+        assert run.to_json()["outcome"]["gates_node"] is False
+
+
+def test_harness_check_fails_only_on_unknown_findings(tmp_path: Path) -> None:
+    from cloud_rehearsal.__main__ import _compare_with_known_findings
+
+    baseline = tmp_path / "known.json"
+    baseline.write_text(json.dumps({"steps": {"3": "known", "9": "known"}}), encoding="utf-8")
+    run = _passing_report()
+    run.steps[2].status = report.FAILED
+    run.steps[4].status = report.BLOCKED
+    result = _compare_with_known_findings(run, baseline, None)
+    assert [item["step"] for item in result["unexpected"]] == [5]
+    assert [item["step"] for item in result["resolved_known_findings"]] == [9]
+
+
+def test_the_shipped_baseline_parses() -> None:
+    shipped = Path(__file__).resolve().parents[1] / "known-findings.json"
+    assert all(int(step) in range(1, 13) for step in json.loads(shipped.read_text(encoding="utf-8"))["steps"])
 
 
 def test_a_cross_lane_failure_is_recorded_with_its_owner() -> None:

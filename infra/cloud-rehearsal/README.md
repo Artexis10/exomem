@@ -29,6 +29,19 @@ Exit codes:
 
 `--harness-check` turns 1 into 0. Pull-request CI uses it, because there the question is whether the harness works, and the findings are in the report and the job summary. A manual dispatch of the workflow is the strict node gate.
 
+With `--harness-check`, every failing or blocked step must be one that `known-findings.json` names, each with its owner. Any other failure is treated as a regression in the rehearsal and exits 2. A known finding whose step now passes is reported, so the baseline can be pruned.
+
+`gates_node` is true only when all of the following hold:
+- every step passed;
+- every target was met;
+- the run is valid;
+- no cross-lane defect was recorded;
+- no product overlay was applied (the lock-directory overlay or the gateway environment overlay);
+- no distinctive phrase reached a log;
+- every row's `ready` matches its pod.
+
+`outcome.gate_blockers` lists whichever of those conditions failed.
+
 ## What runs
 
 | Piece | How it runs |
@@ -87,6 +100,8 @@ A post-check scans the gateway, cellctl and cell logs for the run's distinctive 
 - the cross-lane defects found, with their owners.
 
 It never contains a secret.
+
+Logs are snapshotted after every step, so the content-free check also covers pods that later steps replace or delete.
 
 The run is marked not valid, and cannot gate the node, when the cell image was supplied with `--cell-image` or when only some steps ran (`--steps`).
 

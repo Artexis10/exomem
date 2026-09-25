@@ -263,17 +263,24 @@ def start(stack: Stack, source: Path, pki: tls.RehearsalPki, cell_image_reposito
 
 
 def sealed_egress_refused(substrate: Substrate) -> bool:
-    """Evidence that the web app cannot reach a real service."""
+    """Evidence that the web app cannot reach a real service.
+
+    Dials a TEST-NET-1 address (RFC 5737, never routed), so the probe itself
+    can reach nobody. Only an immediate "no route" counts as sealed: a
+    timeout could mean a route exists and the packet was merely dropped.
+    """
 
     probe = run(
         [
             "docker", "exec", substrate.app_container, "node", "-e",
-            "require('net').connect({host:'1.1.1.1',port:443,timeout:3000})"
-            ".on('connect',()=>process.exit(0)).on('error',()=>process.exit(1)).on('timeout',()=>process.exit(1))",
+            "require('net').connect({host:'192.0.2.1',port:443,timeout:3000})"
+            ".on('connect',()=>{console.log('connected');process.exit(0)})"
+            ".on('error',(e)=>{console.log(e.code);process.exit(0)})"
+            ".on('timeout',()=>{console.log('timeout');process.exit(0)})",
         ],
         check=False,
     )
-    return probe.returncode != 0
+    return probe.stdout.strip() in ("ENETUNREACH", "EHOSTUNREACH")
 
 
 # --- injected email and billing: what the email and Paddle paths would do ---

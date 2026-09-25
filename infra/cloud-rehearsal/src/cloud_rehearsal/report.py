@@ -20,14 +20,16 @@ from typing import Any
 
 SCHEMA = "exomem-cloud-rehearsal-report-v1"
 
-# design.md P3 and tasks 5.2/5.3.
-TARGETS = {
-    "initialize_warm_p95_seconds": 0.5,
-    "tools_list_warm_p95_seconds": 0.5,
-    "capture_p95_seconds": 1.0,
-    "cited_recall_p95_seconds": 1.0,
-    "provision_seconds": 180.0,
-    "upgrade_seconds_per_cell": 60.0,
+# tasks.md 5.2 (provisioning under 3 minutes) and 5.3 (the other targets).
+# Each entry is (target, strict): strict means the observed value must be
+# below the target, otherwise at or below it.
+TARGETS: dict[str, tuple[float, bool]] = {
+    "initialize_warm_p95_seconds": (0.5, False),
+    "tools_list_warm_p95_seconds": (0.5, False),
+    "capture_p95_seconds": (1.0, False),
+    "cited_recall_p95_seconds": (1.0, False),
+    "provision_seconds": (180.0, True),
+    "upgrade_seconds_per_cell": (60.0, True),
 }
 
 PASSED, FAILED, BLOCKED = "passed", "failed", "blocked"
@@ -73,6 +75,10 @@ class Report:
     finished_at: str | None = None
     valid: bool = True
     invalid_reasons: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    # Overlays that change the product under test (not the rehearsal's own
+    # scaffolding): while any is present, the run cannot gate the node.
+    product_overlays: list[str] = field(default_factory=list)
     environment: dict[str, Any] = field(default_factory=dict)
     inputs: dict[str, Any] = field(default_factory=dict)
     adaptations: list[str] = field(default_factory=list)
@@ -98,18 +104,39 @@ class Report:
         return {
             name: {
                 "observed": None if value is None else round(value, 4),
-                "target": TARGETS[name],
-                "comparison": "<" if name == "provision_seconds" else "<=",
-                "met": None if value is None else (value < TARGETS[name] if name == "provision_seconds" else value <= TARGETS[name]),
+                "target": TARGETS[name][0],
+                "comparison": "<" if TARGETS[name][1] else "<=",
+                "met": None if value is None else (value < TARGETS[name][0] if TARGETS[name][1] else value <= TARGETS[name][0]),
                 "samples": len(self.samples.get(_sample_key(name), [])) or (1 if value is not None else 0),
             }
             for name, value in observed.items()
         }
 
+    def gate_blockers(self) -> list[str]:
+        """Everything besides steps and targets that keeps a run from gating the node."""
+
+        blockers = []
+        if not self.valid:
+            blockers.append("not a valid rehearsal: " + "; ".join(self.invalid_reasons))
+        if self.defects:
+            blockers.append(f"{len(self.defects)} cross-lane defect(s) recorded")
+        if self.product_overlays:
+            blockers.append("the stack under test was patched: " + "; ".join(self.product_overlays))
+        post = self.stages.get("post_checks") or {}
+        if post.get("phrases_leaked"):
+            blockers.append(f"{post['phrases_leaked']} distinctive phrase(s) reached a log")
+        if post.get("ready_matches_pod") is False:
+            blockers.append("a row's ready disagreed with its pod")
+        if (self.stages.get("harness") or {}).get("status") == "failed":
+            blockers.append("the harness itself failed")
+        return blockers
+
     def to_json(self) -> dict[str, Any]:
         steps = [asdict(step) for step in self.steps]
         passed = all(step.status == PASSED for step in self.steps) and len(self.steps) == 12
         measurements = self.measurements()
+        blockers = self.gate_blockers()
+        targets_met = all(m["met"] for m in measurements.values())
         return {
             "schema": SCHEMA,
             "run_id": self.run_id,
@@ -117,12 +144,15 @@ class Report:
             "finished_at": self.finished_at,
             "valid_rehearsal": self.valid,
             "invalid_reasons": self.invalid_reasons,
+            "notes": self.notes,
             "outcome": {
                 "all_steps_passed": passed,
-                "all_targets_met": all(m["met"] for m in measurements.values()),
+                "all_targets_met": targets_met,
                 "steps": {status: sum(1 for s in self.steps if s.status == status) for status in (PASSED, FAILED, BLOCKED)},
-                "gates_node": passed and self.valid and all(m["met"] for m in measurements.values()),
+                "gate_blockers": blockers,
+                "gates_node": passed and targets_met and not blockers,
             },
+            "product_overlays": self.product_overlays,
             "environment": self.environment,
             "inputs": self.inputs,
             "adaptations": self.adaptations,

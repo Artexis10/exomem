@@ -137,6 +137,7 @@ class Context:
     a: Tenant = field(default_factory=lambda: Tenant("A", f"owner-{secrets.token_hex(3)}@rehearsal.test", paid=True))
     b: Tenant = field(default_factory=lambda: Tenant("B", f"friend-{secrets.token_hex(3)}@rehearsal.test", paid=False))
     browser: HeadlessBrowser = field(init=False)
+    log_snapshots: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.browser = HeadlessBrowser(self.resolver)
@@ -285,7 +286,8 @@ class Context:
         return boto3.client(
             "s3", endpoint_url=store.endpoint(from_host=True), aws_access_key_id=store.access_key,
             aws_secret_access_key=store.secret_key, region_name="us-east-1",
-            config=Config(s3={"addressing_style": "path"}),
+            # proxies={} keeps an ambient HTTP(S)_PROXY off the S3 double.
+            config=Config(s3={"addressing_style": "path"}, proxies={}),
         )
 
     def s3_keys(self, prefix: str) -> list[str]:
@@ -297,6 +299,10 @@ class Context:
     def set_backup_window(self, window: str) -> None:
         """A chart value change: cellctl's Deployment env, rolled with Recreate."""
 
+        self.report.overlays.append(
+            f"cellctl Deployment: CELLCTL_BACKUP_WINDOW={window} at step 11 (the chart value cells.backupWindow, "
+            "changed so a nightly backup falls inside the run)"
+        )
         self.kubectl("set", "env", "deployment/cellctl", "--namespace", CLOUD_NAMESPACE, f"CELLCTL_BACKUP_WINDOW={window}")
         self.kubectl("rollout", "status", "deployment/cellctl", "--namespace", CLOUD_NAMESPACE, "--timeout=180s")
 
@@ -358,6 +364,13 @@ async def first_session(client: TenantClient, record: StepRecord, *, timeout: fl
             await asyncio.sleep(1)
 
 
+def _require(condition: object) -> None:
+    """A step's precondition, left unmet by an earlier step's recorded failure."""
+
+    if not condition:
+        raise StepFailure("precondition not met: an earlier step did not leave the state this step needs")
+
+
 def _json_or_text(text: str) -> Any:
     try:
         return json.loads(text)
@@ -405,7 +418,7 @@ async def step_2_provision(ctx: Context, record: StepRecord) -> None:
     token = ctx.a.notes.pop(0)
     ctx.a.session = await ctx.browser.redeem_invite(token)
     await ctx.identify(ctx.a)
-    assert ctx.a.cell_id and ctx.a.tenant_id and ctx.a.user_id
+    _require(ctx.a.cell_id and ctx.a.tenant_id and ctx.a.user_id)
     # The owner's cell is the canary (D6): the lowest rollout_priority.
     await ctx.execute("UPDATE exomem_cloud_cells SET rollout_priority = 0 WHERE cell_id = $1", ctx.a.cell_id)
     admitted = await ctx.cell(ctx.a.cell_id)
@@ -451,7 +464,7 @@ async def step_2_provision(ctx: Context, record: StepRecord) -> None:
 
 
 async def step_3_oauth_mcp(ctx: Context, record: StepRecord) -> None:
-    assert ctx.a.session
+    _require(ctx.a.session)
     # First, a verifier using the whole RFC 7636 grammar, as the MCP SDKs
     # generate them. If Substrate refuses it, that is recorded as a defect and
     # the connector continues with the base64url subset (equally valid), so
@@ -494,7 +507,8 @@ async def step_3_oauth_mcp(ctx: Context, record: StepRecord) -> None:
     if exposed:
         raise StepFailure(f"cloud-excluded tools are served: {sorted(exposed)}")
     # 5.3: warm initialize and tools/list, each on a fresh MCP session over
-    # the connector's existing token and connection pool.
+    # the connector's existing token and its one HTTP client, so a sample
+    # measures the MCP exchange, not a new TCP or TLS handshake.
     for _ in range(WARM_ITERATIONS):
         async with ctx.a.client.mcp() as session:
             ctx.report.sample("initialize_warm", session.initialize_seconds)
@@ -507,7 +521,7 @@ async def step_3_oauth_mcp(ctx: Context, record: StepRecord) -> None:
 
 
 async def step_4_capture(ctx: Context, record: StepRecord) -> None:
-    assert ctx.a.client
+    _require(ctx.a.client)
     body = (
         f"Field notebook, day three. The {ctx.a.phrase} was seen wading at the estuary at dawn, "
         "stalking small fish in the shallows before the tide turned."
@@ -535,7 +549,7 @@ async def step_4_capture(ctx: Context, record: StepRecord) -> None:
 
 
 async def step_5_cited_recall(ctx: Context, record: StepRecord) -> None:
-    assert ctx.a.client
+    _require(ctx.a.client)
     query = "what long-legged wading bird was watched hunting fish near the river mouth early in the morning?"
     async with ctx.a.client.mcp() as session:
         answers = []
@@ -561,7 +575,7 @@ async def step_5_cited_recall(ctx: Context, record: StepRecord) -> None:
 
 
 async def step_6_write_after_pod_kill(ctx: Context, record: StepRecord) -> None:
-    assert ctx.a.client and ctx.a.cell_id
+    _require(ctx.a.client and ctx.a.cell_id)
     namespace = namespace_name(ctx.a.cell_id)
     pod = ctx.runtime_pod(ctx.a.cell_id)
     if pod is None:
@@ -611,13 +625,16 @@ async def step_6_write_after_pod_kill(ctx: Context, record: StepRecord) -> None:
             "owner_only_modes": json.loads(modes),
         }
     )
-    bad = {path: mode for path, mode in json.loads(modes).items() if mode != "0o700"}
+    observed_modes = json.loads(modes)
+    if len(observed_modes) != 3:
+        raise StepFailure(f"owner-only paths missing after pod replacement: found only {sorted(observed_modes)}")
+    bad = {path: mode for path, mode in observed_modes.items() if mode != "0o700"}
     if bad:
         raise StepFailure(f"owner-only modes lost after pod replacement: {bad}")
 
 
 async def step_7_upgrade(ctx: Context, record: StepRecord) -> None:
-    assert ctx.a.client and ctx.a.cell_id
+    _require(ctx.a.client and ctx.a.cell_id)
     before = await ctx.cell(ctx.a.cell_id)
     if before.get("observed_image") != ctx.images.cell_v1:
         raise StepFailure(f"tenant A is not on the release under test before the upgrade: {before.get('observed_image')}")
@@ -656,7 +673,7 @@ async def step_7_upgrade(ctx: Context, record: StepRecord) -> None:
 
 
 async def step_8_canary_failure(ctx: Context, record: StepRecord) -> None:
-    assert ctx.a.client and ctx.a.cell_id
+    _require(ctx.a.client and ctx.a.cell_id)
     marker = f"Pre-canary marker {secrets.token_hex(4)}"
     async with ctx.a.client.mcp() as session:
         write = await session.governed_write(
@@ -705,7 +722,7 @@ async def step_8_canary_failure(ctx: Context, record: StepRecord) -> None:
 
 
 async def step_9_read_only(ctx: Context, record: StepRecord) -> None:
-    assert ctx.a.client and ctx.a.cell_id and ctx.a.user_id and ctx.a.tenant_id
+    _require(ctx.a.client and ctx.a.cell_id and ctx.a.user_id and ctx.a.tenant_id)
     await ctx.paddle(
         substrate_mod.paddle_event(
             event_type="subscription.past_due", status="past_due", user_id=ctx.a.user_id, tenant_id=ctx.a.tenant_id,
@@ -774,12 +791,12 @@ async def step_10_second_tenant_denial(ctx: Context, record: StepRecord) -> None
 
 
 async def _step_10(ctx: Context, record: StepRecord) -> None:
-    assert ctx.a.client and ctx.a.cell_id
+    _require(ctx.a.client and ctx.a.cell_id)
     token = await substrate_mod.seed_invite(ctx.substrate, ctx.b.email, paid=False)
     started = time.monotonic()
     ctx.b.session = await ctx.browser.redeem_invite(token)
     await ctx.identify(ctx.b)
-    assert ctx.b.cell_id
+    _require(ctx.b.cell_id)
     await ctx.wait_cell(ctx.b.cell_id, _running_ready(), timeout=600, description="tenant B's cell to be running and ready")
     record.evidence["b_provision_seconds"] = round(time.monotonic() - started, 2)
     ctx.b.client = TenantClient(ctx.resolver, ctx.browser, ctx.b.session, ctx.substrate.redirect_uri)
@@ -844,7 +861,7 @@ async def _step_10(ctx: Context, record: StepRecord) -> None:
 
 
 async def step_11_backup_and_scratch_restore(ctx: Context, record: StepRecord) -> None:
-    assert ctx.b.cell_id and ctx.b.client
+    _require(ctx.b.cell_id and ctx.b.client)
     hour = dt.datetime.now(dt.UTC).hour
     window = f"{hour}-{(hour + 2) % 24}"
     ctx.set_backup_window(window)
@@ -888,6 +905,12 @@ async def step_11_backup_and_scratch_restore(ctx: Context, record: StepRecord) -
             document["metadata"]["labels"].pop("exomem.io/cloud-cell", None)
         else:
             document["metadata"]["namespace"] = scratch
+    ctx.report.overlays.append(
+        f"step 11 scratch restore: no operator export tool exists yet (task 3.6, deferred by ruling), so the "
+        f"rehearsal renders the cell with cellctl's render_cell_manifests and render_restore_job, moves every "
+        f"object into namespace {scratch} without the exomem.io/cloud-cell label, mints a scratch bearer, "
+        "excepts only the cluster's pod and service ranges from Job egress, and applies it as cluster-admin"
+    )
     payload = "\n---\n".join(json.dumps(doc) for doc in documents if doc["kind"] != "Job")
     ctx.kubectl("apply", "--server-side", "--field-manager=rehearsal-operator", "--filename=-", input_text=payload)
     job = next(doc for doc in documents if doc["kind"] == "Job")
@@ -925,7 +948,7 @@ async def step_11_backup_and_scratch_restore(ctx: Context, record: StepRecord) -
 
 
 async def step_12_deletion(ctx: Context, record: StepRecord) -> None:
-    assert ctx.a.cell_id and ctx.a.session and ctx.a.user_id and ctx.a.tenant_id and ctx.a.client
+    _require(ctx.a.cell_id and ctx.a.session and ctx.a.user_id and ctx.a.tenant_id and ctx.a.client)
     cell_id = ctx.a.cell_id
     namespace = namespace_name(cell_id)
     pv_names = [
@@ -933,6 +956,13 @@ async def step_12_deletion(ctx: Context, record: StepRecord) -> None:
         for pv in ctx.kube_json("get", "pv")["items"]
         if (pv["spec"].get("claimRef") or {}).get("namespace") == namespace
     ]
+    objects_before = len(ctx.s3_keys(f"cells/{cell_id}/"))
+    record.evidence["before_deletion"] = {"persistent_volumes": len(pv_names), "backup_objects": objects_before}
+    if not pv_names or objects_before == 0:
+        raise StepFailure(
+            "nothing to prove absent: the cell had no bound PersistentVolume or no backup objects before deletion "
+            f"({record.evidence['before_deletion']})"
+        )
     old_token = ctx.a.client.access_token
     # Cancel first, so the deletion finish needs no Paddle API call.
     await ctx.paddle(
@@ -1034,7 +1064,7 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
         # A failed step whose failure left its effect in place (e.g. slow
         # provisioning) does not block its dependants: only a failure that
         # left the precondition absent does, which the dependant finds itself.
-        hard = [n for n in unmet if outcome.get(n) == BLOCKED or (n in (1, 2, 3) and _precondition_absent(ctx, n))]
+        hard = [n for n in unmet if outcome.get(n) == BLOCKED or (n in (1, 2, 3, 10) and _precondition_absent(ctx, n))]
         if hard:
             record.failure = {"type": "Blocked", "message": f"depends on step(s) {hard}, which did not complete"}
             outcome[number] = BLOCKED
@@ -1054,8 +1084,15 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
                 ctx.report.defects.append({"step": number, **record.failure})
         record.seconds = round(time.monotonic() - started, 2)
         outcome[number] = record.status
+        snapshot_logs(ctx)
         detail = "" if record.status == PASSED else f" -- {record.failure.get('message', '')[:300]}"  # type: ignore[union-attr]
         print(f"[rehearsal] step {number} {name}: {record.status.upper()} in {record.seconds}s{detail}", flush=True)
+
+
+async def close_clients(ctx: Context) -> None:
+    for tenant in (ctx.a, ctx.b):
+        if tenant.client is not None:
+            await tenant.client.aclose()
 
 
 def _precondition_absent(ctx: Context, step: int) -> bool:
@@ -1065,26 +1102,40 @@ def _precondition_absent(ctx: Context, step: int) -> bool:
         return ctx.a.session is None or ctx.a.cell_id is None
     if step == 3:
         return ctx.a.client is None or ctx.a.client.access_token is None
+    if step == 10:
+        return ctx.b.client is None or ctx.b.cell_id is None
     return False
 
 
-def post_checks(ctx: Context) -> dict[str, Any]:
-    """Content-free logs: no distinctive phrase in any cell, gateway or cellctl log."""
+def snapshot_logs(ctx: Context) -> None:
+    """Keeps every workload's logs before a step can replace or delete it.
 
-    phrases = [ctx.a.phrase, ctx.b.phrase]
-    logs = []
+    Pod kills, upgrades, backup holds, the cellctl restart and the deletion
+    each discard a container's logs, so the content-free check reads these
+    snapshots, taken after every step, not only what survives to the end.
+    """
+
     for namespace, selector in [
         (CLOUD_NAMESPACE, "app.kubernetes.io/name=exomem-cloud-gateway"),
         (CLOUD_NAMESPACE, "app.kubernetes.io/name=cellctl"),
         *[(namespace_name(t.cell_id), "app.kubernetes.io/name=exomem-cell") for t in (ctx.a, ctx.b) if t.cell_id],
     ]:
-        result = run(
-            ["docker", "exec", ctx.stack.k3s.container, "kubectl", "logs", "--namespace", namespace,
-             f"--selector={selector}", "--all-containers", "--tail=-1", "--prefix"],
-            check=False,
-        )
-        logs.append(result.stdout)
-    haystack = "\n".join(logs)
+        for previous in ((), ("--previous",)):
+            result = run(
+                ["docker", "exec", ctx.stack.k3s.container, "kubectl", "logs", "--namespace", namespace,
+                 f"--selector={selector}", "--all-containers", "--tail=-1", "--prefix", *previous],
+                check=False,
+            )
+            if result.stdout:
+                ctx.log_snapshots.append(result.stdout)
+
+
+def post_checks(ctx: Context) -> dict[str, Any]:
+    """Content-free logs: no distinctive phrase in any cell, gateway or cellctl log."""
+
+    snapshot_logs(ctx)
+    phrases = [ctx.a.phrase, ctx.b.phrase]
+    haystack = "\n".join(ctx.log_snapshots)
     leaked = [phrase for phrase in phrases if phrase in haystack]
     return {"log_bytes_scanned": len(haystack), "phrases_checked": len(phrases), "phrases_leaked": len(leaked)}
 
@@ -1101,6 +1152,12 @@ async def ready_matches_pods(ctx: Context) -> list[dict[str, Any]]:
             continue
         pod_ready = ctx.pod_ready(tenant.cell_id)
         if bool(row["ready"]) != pod_ready:
+            # Resample after several cellctl passes: a pod caught mid-restart
+            # is not a finding; a mismatch that outlives the passes is.
+            await asyncio.sleep(20)
+            row = await ctx.fetchrow("SELECT ready, observed_state, observed_at FROM exomem_cloud_cells WHERE cell_id = $1", tenant.cell_id)
+            pod_ready = ctx.pod_ready(tenant.cell_id)
+        if row and bool(row["ready"]) != pod_ready:
             mismatches.append({"tenant": tenant.label, "row_ready": row["ready"], "pod_ready": pod_ready,
                                "row_observed_at": row["observed_at"].isoformat() if row["observed_at"] else None})
     return mismatches

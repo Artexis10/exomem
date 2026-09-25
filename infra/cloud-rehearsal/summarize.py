@@ -12,7 +12,15 @@ def main(path: str) -> None:
     outcome = report["outcome"]
     print("## Exomem Cloud P3 rehearsal\n")
     print(f"- valid rehearsal: **{report['valid_rehearsal']}** {'; '.join(report['invalid_reasons'])}")
-    print(f"- gates the node: **{outcome['gates_node']}** (steps {outcome['steps']})\n")
+    print(f"- gates the node: **{outcome['gates_node']}** (steps {outcome['steps']})")
+    for blocker in outcome.get("gate_blockers", []):
+        print(f"  - blocked by: {blocker}")
+    harness = report["stages"].get("harness") or {}
+    for item in harness.get("unexpected", []):
+        print(f"- **unexpected** step {item['step']} {item['status']}: {item['message']}")
+    for item in harness.get("resolved_known_findings", []):
+        print(f"- known finding now passes, prune the baseline: step {item['step']}")
+    print()
     print("| # | step | status | seconds | failure |\n|---|---|---|---|---|")
     for step in report["steps"]:
         failure = (step.get("failure") or {}).get("message", "").replace("|", "\\|").replace("\n", " ")[:200]

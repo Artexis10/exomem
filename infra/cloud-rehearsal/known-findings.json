@@ -1,0 +1,8 @@
+{
+  "description": "Product findings the rehearsal is expected to record on the real cell image until their owners fix them. --harness-check fails on any other failing or blocked step, and reports an entry here whose step now passes so it can be removed.",
+  "steps": {
+    "3": "Substrate: isPkceVerifier refuses RFC 7636 verifiers containing '.' or '~' (substrate-systems/substrate#181)",
+    "9": "runtime: after a read_only -> running recovery, the first governed write leaves /health/ready at retrieval_unavailable",
+    "10": "follows step 9: tenant A's cell answers 503 CELL_NOT_READY, so the A-side cross-recall is unverified"
+  }
+}

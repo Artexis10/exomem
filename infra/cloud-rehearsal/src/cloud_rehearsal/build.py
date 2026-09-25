@@ -129,6 +129,8 @@ def build_cell_images(run_id: str, workdir: Path, *, prebuilt: str | None) -> tu
     overlays: list[str] = []
     for tag in (v1, v2):
         before = _probe_lock_dir(tag)
+        if not (before.startswith("refused") or before.startswith("accepted")):
+            raise RuntimeError(f"the lock-directory probe could not run in {tag}: {before}")
         if before.startswith("refused"):
             context = workdir / f"lock-dir-overlay-{tag.rsplit('-', 1)[1]}"
             context.mkdir(parents=True, exist_ok=True)
@@ -138,7 +140,7 @@ def build_cell_images(run_id: str, workdir: Path, *, prebuilt: str | None) -> tu
             if not after.startswith("accepted 0o700"):
                 raise RuntimeError(f"the lock-directory overlay did not take effect on {tag}: {after}")
             overlays.append(
-                f"cell image {tag.rsplit(':', 1)[1]}: lock-directory setgid overlay (orchestrator ruling; "
+                f"APPLIED cell image {tag.rsplit(':', 1)[1]}: lock-directory setgid overlay (orchestrator ruling; "
                 f"runtime fix pending on fix/cell-lock-dir-setgid). Probe before: {before}; after: {after}"
             )
         else:
