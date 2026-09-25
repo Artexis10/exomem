@@ -24,7 +24,7 @@ from pathlib import Path
 from . import build, images, infra, platform, substrate, tls
 from .http import Resolver
 from .report import Report, failure_record
-from .scenarios import Context, post_checks, run_steps
+from .scenarios import Context, post_checks, ready_matches_pods, run_steps
 from .shell import run, wait_for
 
 
@@ -162,6 +162,18 @@ async def _run(args: argparse.Namespace) -> int:
             report.stages["release"]["published_cell_slots"] = capacity and capacity["slots"]
         await run_steps(ctx, only=only)
         report.stages["post_checks"] = post_checks(ctx)
+        mismatches = await ready_matches_pods(ctx)
+        report.stages["post_checks"]["ready_matches_pod"] = not mismatches
+        if mismatches:
+            report.defects.append(
+                {
+                    "step": "post_checks", "cross_lane": True, "owner": "Artexis10/exomem#1368",
+                    "component": "infra/cellctl reconcile._reconcile_row",
+                    "message": "a converged row's `ready` is not re-observed: a row that is not dirty gets only "
+                    "observed_at written, so a cell whose pod later turns NotReady keeps ready=true",
+                    "evidence": mismatches,
+                }
+            )
         outcome = report.to_json()["outcome"]
         code = 0 if outcome["gates_node"] else 1
     except _StageFailed:
@@ -174,6 +186,12 @@ async def _run(args: argparse.Namespace) -> int:
             _collect_diagnostics(stack, workdir)
         report.write(args.report)
         infra.teardown(stack, keep=args.keep)
+        if not args.keep:
+            # This run's own image tags; base images stay cached.
+            tags = run(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"], check=False).stdout.split()
+            mine = [tag for tag in tags if tag.endswith(f":{run_id}") or f":{run_id}-" in tag]
+            if mine:
+                run(["docker", "rmi", "--force", *mine], check=False)
         if not args.keep and args.workdir is None:
             shutil.rmtree(workdir, ignore_errors=True)
     _print_summary(report, args.report)

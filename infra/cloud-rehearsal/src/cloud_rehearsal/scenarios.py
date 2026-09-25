@@ -67,6 +67,21 @@ WARM_ITERATIONS = 20
 LATENCY_ITERATIONS = 10
 CELLCTL_REPO = "Artexis10/exomem#1368"
 
+# Runs inside a cell: its own readiness report, reduced to content-free fields.
+HEALTH_READY_PROBE = """
+import json, urllib.request
+try:
+    urllib.request.urlopen("http://127.0.0.1:8765/health/ready")
+    print(json.dumps({"status": "ready"}))
+except Exception as error:
+    report = json.loads(error.read())
+    print(json.dumps({
+        "status": report.get("status"),
+        "reasons": report.get("reasons"),
+        "components": (report.get("cutover") or {}).get("components"),
+    }))
+"""
+
 # Runs inside the scratch cell: its own bearer is in its own environment.
 SCRATCH_PROBE = """
 import asyncio, json, os, sys
@@ -233,6 +248,37 @@ class Context:
 
     def exec_in(self, namespace: str, pod: str, *command: str, check: bool = True):
         return self.kubectl("exec", "--namespace", namespace, pod, "--container", "exomem", "--", *command, check=check)
+
+    def health_ready(self, cell_id: str) -> dict[str, Any]:
+        """The cell's own readiness report, content-free (reasons and component states)."""
+
+        pod = self.runtime_pod(cell_id)
+        if pod is None:
+            return {"pod": None}
+        probe = self.exec_in(
+            namespace_name(cell_id), pod["metadata"]["name"], "python3", "-c", HEALTH_READY_PROBE,
+            check=False,
+        )
+        return _json_or_text(probe.stdout)
+
+    def pod_ready(self, cell_id: str) -> bool:
+        pod = self.runtime_pod(cell_id)
+        return bool(pod) and any(
+            c["type"] == "Ready" and c["status"] == "True" for c in pod["status"].get("conditions", [])  # type: ignore[index]
+        )
+
+    async def stays_ready(self, cell_id: str, *, seconds: float) -> dict[str, Any] | None:
+        """None when the cell's pod stayed Ready throughout, else what it reported."""
+
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if not self.pod_ready(cell_id):
+                await asyncio.sleep(5)
+                if not self.pod_ready(cell_id):
+                    row = await self.cell(cell_id)
+                    return {"health_ready": self.health_ready(cell_id), "row_ready": row.get("ready"), "row_observed_state": row.get("observed_state")}
+            await asyncio.sleep(3)
+        return None
 
     def s3(self):
         store = self.stack.object_store
@@ -705,9 +751,29 @@ async def step_9_read_only(ctx: Context, record: StepRecord) -> None:
     record.evidence["write_after_recovery"] = write.error_code or "committed"
     if write.error_code:
         raise StepFailure(f"writes did not recover after the subscription became active: {write.error_code}")
+    # The cell must stay serving after the recovery, not only answer once.
+    unready = await ctx.stays_ready(ctx.a.cell_id, seconds=60)
+    record.evidence["stays_ready_after_recovery"] = unready or "ready for 60s"
+    if unready:
+        raise StepFailure(
+            "after the read_only -> running recovery and one governed write, the cell's /health/ready "
+            f"dropped to not-ready and stayed there: {unready}"
+        )
 
 
 async def step_10_second_tenant_denial(ctx: Context, record: StepRecord) -> None:
+    try:
+        await _step_10(ctx, record)
+    except Exception:
+        # Which session failed, and what the gateway says to each tenant now.
+        for tenant in (ctx.a, ctx.b):
+            if tenant.client and tenant.client.access_token:
+                probe = await raw_mcp_post(ctx.resolver, token=tenant.client.access_token)
+                record.evidence[f"gateway_now_{tenant.label}"] = {"status": probe.status_code, "body": _safe_body(probe)}
+        raise
+
+
+async def _step_10(ctx: Context, record: StepRecord) -> None:
     assert ctx.a.client and ctx.a.cell_id
     token = await substrate_mod.seed_invite(ctx.substrate, ctx.b.email, paid=False)
     started = time.monotonic()
@@ -717,7 +783,9 @@ async def step_10_second_tenant_denial(ctx: Context, record: StepRecord) -> None
     await ctx.wait_cell(ctx.b.cell_id, _running_ready(), timeout=600, description="tenant B's cell to be running and ready")
     record.evidence["b_provision_seconds"] = round(time.monotonic() - started, 2)
     ctx.b.client = TenantClient(ctx.resolver, ctx.browser, ctx.b.session, ctx.substrate.redirect_uri)
+    record.evidence["phase"] = "B first session"
     await first_session(ctx.b.client, record)
+    record.evidence["phase"] = "B write and cross-recall"
     async with ctx.b.client.mcp() as session:
         write = await session.governed_write(
             {"title": f"Garden plan {ctx.b.phrase}", "content": f"Plant the {ctx.b.phrase} beans by the south fence.\n\n## Observations\n\n- [garden] beans by the south fence #garden\n", "status": "draft"}
@@ -725,8 +793,15 @@ async def step_10_second_tenant_denial(ctx: Context, record: StepRecord) -> None
         if write.error_code:
             raise StepFailure(f"tenant B's governed write failed: {write.error_code}")
         b_sees_a = await session.call("ask_memory", {"query": ctx.a.phrase})
-    async with ctx.a.client.mcp() as session:
-        a_sees_b = await session.call("ask_memory", {"query": ctx.b.phrase})
+    record.evidence["phase"] = "A cross-recall"
+    a_probe = await raw_mcp_post(ctx.resolver, token=ctx.a.client.access_token)
+    if a_probe.status_code == 503:
+        record.evidence["a_unavailable"] = {"status": 503, "body": _safe_body(a_probe), "health_ready": ctx.health_ready(ctx.a.cell_id)}
+        a_sees_b = None
+    else:
+        async with ctx.a.client.mcp() as session:
+            a_sees_b = await session.call("ask_memory", {"query": ctx.b.phrase})
+    record.evidence["phase"] = "denial probes"
     selector = await raw_mcp_post(ctx.resolver, token=ctx.b.client.access_token, headers={"x-cell-id": ctx.a.cell_id})
     forged = await raw_mcp_post(ctx.resolver, token=secrets.token_urlsafe(32))
     anonymous = await raw_mcp_post(ctx.resolver, token=None)
@@ -742,7 +817,7 @@ async def step_10_second_tenant_denial(ctx: Context, record: StepRecord) -> None
     record.evidence.update(
         {
             "b_recall_contains_a_phrase": ctx.a.phrase in b_sees_a.text(),
-            "a_recall_contains_b_phrase": ctx.b.phrase in a_sees_b.text(),
+            "a_recall_contains_b_phrase": None if a_sees_b is None else ctx.b.phrase in a_sees_b.text(),
             "selector_header_status": selector.status_code,
             "selector_header_code": _safe_body(selector),
             "forged_token_status": forged.status_code,
@@ -754,7 +829,9 @@ async def step_10_second_tenant_denial(ctx: Context, record: StepRecord) -> None
     problems = []
     if ctx.a.phrase in b_sees_a.text():
         problems.append("tenant B recalled tenant A's note")
-    if ctx.b.phrase in a_sees_b.text():
+    if a_sees_b is None:
+        problems.append("tenant A's cell answers 503 CELL_NOT_READY, so the A-side cross-recall is unverified (see step 9)")
+    elif ctx.b.phrase in a_sees_b.text():
         problems.append("tenant A recalled tenant B's note")
     if selector.status_code != 400:
         problems.append(f"a cell selector header was not refused (status {selector.status_code})")
@@ -1010,3 +1087,20 @@ def post_checks(ctx: Context) -> dict[str, Any]:
     haystack = "\n".join(logs)
     leaked = [phrase for phrase in phrases if phrase in haystack]
     return {"log_bytes_scanned": len(haystack), "phrases_checked": len(phrases), "phrases_leaked": len(leaked)}
+
+
+async def ready_matches_pods(ctx: Context) -> list[dict[str, Any]]:
+    """D4: a row's `ready` must be what its pod's Ready condition says."""
+
+    mismatches = []
+    for tenant in (ctx.a, ctx.b):
+        if not tenant.cell_id:
+            continue
+        row = await ctx.fetchrow("SELECT ready, observed_state, observed_at FROM exomem_cloud_cells WHERE cell_id = $1", tenant.cell_id)
+        if not row or row["observed_state"] in ("deleted", "deleting", "stopped"):
+            continue
+        pod_ready = ctx.pod_ready(tenant.cell_id)
+        if bool(row["ready"]) != pod_ready:
+            mismatches.append({"tenant": tenant.label, "row_ready": row["ready"], "pod_ready": pod_ready,
+                               "row_observed_at": row["observed_at"].isoformat() if row["observed_at"] else None})
+    return mismatches
