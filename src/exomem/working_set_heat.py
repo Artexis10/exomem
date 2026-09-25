@@ -906,6 +906,29 @@ def _drop(reason: str) -> None:
         pass
 
 
+def _rebuild_once(vault_root: Path) -> bool:
+    """Wipe the sidecar and its journal, once, and forget any cached profile
+    for it, so the next connect starts from an empty, freshly-schemed file.
+
+    Shared by `_connect` (a `DatabaseError` while preparing the schema) and
+    `load` / `_write` (a `DatabaseError` from data pages the schema itself
+    survives -- review R2-B): corruption confined to `heat_events` or
+    `heat_sessions` must recover exactly as a torn header does, rather than
+    read as `empty` forever."""
+    path = sidecar_path(vault_root)
+    log.warning("heat sidecar is corrupt; rebuilding it empty")
+    try:
+        for suffix in ("", "-wal", "-shm"):
+            path.with_name(path.name + suffix).unlink(missing_ok=True)
+    except OSError:
+        log.debug("heat sidecar could not be removed", exc_info=True)
+        return False
+    with _LOCK:
+        _PROFILES.pop(str(path), None)
+        _STATED.pop(str(path), None)
+    return True
+
+
 def _connect(vault_root: Path, *, rebuilt: bool = False) -> sqlite3.Connection | None:
     """One short-lived connection with the seam's busy timeout, or `None`
     under the kill switch or when the file cannot be opened.
@@ -940,16 +963,8 @@ def _connect(vault_root: Path, *, rebuilt: bool = False) -> sqlite3.Connection |
         if rebuilt:
             log.debug("heat sidecar still unreadable after a rebuild", exc_info=True)
             return None
-        log.warning("heat sidecar is corrupt; rebuilding it empty")
-        try:
-            for suffix in ("", "-wal", "-shm"):
-                path.with_name(path.name + suffix).unlink(missing_ok=True)
-        except OSError:
-            log.debug("heat sidecar could not be removed", exc_info=True)
+        if not _rebuild_once(vault_root):
             return None
-        with _LOCK:
-            _PROFILES.pop(str(path), None)
-            _STATED.pop(str(path), None)
         return _connect(vault_root, rebuilt=True)
     return conn
 
@@ -1028,23 +1043,32 @@ def _token(conn: sqlite3.Connection) -> tuple:
 
 def _write(vault_root: Path, work: Callable[[sqlite3.Connection], None], *, what: str) -> bool:
     """Run `work` in one write transaction that bumps the token. Never raises:
-    a busy or broken sidecar drops the write, counts it, and fails nothing."""
-    conn = _connect(vault_root)
-    if conn is None:
-        if not disabled():
-            _drop(what)
-        return False
-    try:
-        with conn:
-            work(conn)
-            _bump(conn)
-        return True
-    except sqlite3.Error:
-        log.debug("heat %s dropped", what, exc_info=True)
-        _drop(what)
-        return False
-    finally:
-        conn.close()
+    a busy or broken sidecar drops the write, counts it, and fails nothing.
+
+    A `DatabaseError` from the DATA pages `work` touches -- the schema itself
+    intact, so `_connect` handed back a connection -- gets one rebuild-and-
+    retry (review R2-B), the same recovery a torn header gets from
+    `_connect`. A persistently bad file costs at most one extra attempt: the
+    second failure, of either kind, just drops the write."""
+    for attempt in (False, True):
+        conn = _connect(vault_root)
+        if conn is None:
+            if not disabled():
+                _drop(what)
+            return False
+        try:
+            with conn:
+                work(conn)
+                _bump(conn)
+            return True
+        except sqlite3.Error as exc:
+            if attempt or type(exc) is not sqlite3.DatabaseError or not _rebuild_once(vault_root):
+                log.debug("heat %s dropped", what, exc_info=True)
+                _drop(what)
+                return False
+        finally:
+            conn.close()
+    return False
 
 
 def append(vault_root: Path, events: Iterable[HeatEvent]) -> bool:
@@ -1236,32 +1260,14 @@ def _read(conn: sqlite3.Connection) -> _Loaded:
     return _Loaded(token, events, tuple(sessions), meta)
 
 
-def load(vault_root: Path) -> HeatProfile:
-    """The persisted projection, aggregated once per sidecar token.
-
-    One token read when nothing moved; the ring and the sessions when it did.
-    Another process's writes move the token, so they are seen on the next
-    read. Never raises: an unreadable sidecar is an empty profile. The state
-    is `empty` or `partial` here; the fold decides the reported one
-    (`with_state`).
-    """
-    empty = build_profile((), state="empty")
-    conn = _connect(vault_root)
-    if conn is None:
-        return empty
-    try:
-        key = str(sidecar_path(vault_root))
-        token = _token(conn)
-        with _LOCK:
-            cached = _PROFILES.get(key)
-        if cached is not None and cached[0] == token:
-            return cached[1]
-        loaded = _read(conn)
-    except sqlite3.Error:
-        log.debug("heat sidecar unreadable", exc_info=True)
-        return empty
-    finally:
-        conn.close()
+def _load_once(vault_root: Path, conn: sqlite3.Connection) -> HeatProfile:
+    key = str(sidecar_path(vault_root))
+    token = _token(conn)
+    with _LOCK:
+        cached = _PROFILES.get(key)
+    if cached is not None and cached[0] == token:
+        return cached[1]
+    loaded = _read(conn)
     profile = build_profile(
         loaded.events,
         sessions=loaded.sessions,
@@ -1273,6 +1279,36 @@ def load(vault_root: Path) -> HeatProfile:
     with _LOCK:
         _PROFILES[key] = (loaded.token, profile)
     return profile
+
+
+def load(vault_root: Path) -> HeatProfile:
+    """The persisted projection, aggregated once per sidecar token.
+
+    One token read when nothing moved; the ring and the sessions when it did.
+    Another process's writes move the token, so they are seen on the next
+    read. Never raises: an unreadable sidecar is an empty profile. The state
+    is `empty` or `partial` here; the fold decides the reported one
+    (`with_state`).
+
+    A `DatabaseError` from the DATA pages `_read` walks -- the schema itself
+    intact, so `_connect` handed back a connection -- gets one rebuild-and-
+    retry (review R2-B), the same recovery a torn header gets from
+    `_connect`. A persistently bad file costs at most one extra attempt: the
+    second failure, of either kind, just reads as `empty`."""
+    empty = build_profile((), state="empty")
+    for attempt in (False, True):
+        conn = _connect(vault_root)
+        if conn is None:
+            return empty
+        try:
+            return _load_once(vault_root, conn)
+        except sqlite3.Error as exc:
+            if attempt or type(exc) is not sqlite3.DatabaseError or not _rebuild_once(vault_root):
+                log.debug("heat sidecar unreadable", exc_info=True)
+                return empty
+        finally:
+            conn.close()
+    return empty
 
 
 def with_state(profile: HeatProfile, state: str) -> HeatProfile:

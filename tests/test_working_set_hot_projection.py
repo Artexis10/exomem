@@ -1021,6 +1021,46 @@ def test_a_corrupt_sidecar_is_rebuilt_and_the_next_edit_leads(heat_vault: Path) 
     assert packet["generation"]["hot_profile"]["state"] == "current"
 
 
+def test_a_torn_sidecar_with_an_intact_header_is_rebuilt(heat_vault: Path) -> None:
+    """Round 2 recheck (R2-B): corruption confined to the ring's DATA pages,
+    with the file header and schema intact, used to be invisible to the
+    wipe-and-reseed path -- that ran only from `_connect` / `_ensure_schema`,
+    which reads schema pages fine here. `load` (through `_read`) and `_write`
+    instead swallowed the `sqlite3.DatabaseError` walking the corrupt rows
+    raised and reported `empty` forever, dropping the user's next edit. Heat
+    must recover from data-page corruption exactly as it does from a torn
+    header (the test above), and a governed edit made right after must
+    resolve."""
+    import sqlite3
+
+    _continue(heat_vault)  # the cold seed
+    ring = [
+        working_set_heat.HeatEvent(
+            1_700_000_000_000_000_000 + n, f"Knowledge Base/Notes/Ring/r-{n}.md", "read", "ring"
+        )
+        for n in range(3000)
+    ]
+    assert working_set_heat.append(heat_vault, ring)
+    side = working_set_heat.sidecar_path(heat_vault)
+    conn = sqlite3.connect(side)
+    conn.execute("PRAGMA wal_checkpoint")
+    conn.execute("PRAGMA journal_mode=DELETE")
+    conn.close()
+    data = bytearray(side.read_bytes())
+    for off in range(len(data) - 40960, len(data) - 4096):
+        data[off] = 0xA5
+    side.write_bytes(bytes(data))
+    working_set_heat.reset_for_tests()
+    working_set_runtime.reset_caches_for_tests()
+
+    _continue(heat_vault)
+    _edit(heat_vault, SLED, "A towed cargo sled", "A towed freight sled")
+    packet = _continue(heat_vault)
+
+    assert _resolved(packet) == [SLED], (packet.get("abstention"), packet["anchors"])
+    assert packet["generation"]["hot_profile"]["state"] == "current"
+
+
 # --------------------------------------------------------------------------- #
 # Round 2: withheld equals absent for heat
 # --------------------------------------------------------------------------- #
