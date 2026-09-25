@@ -345,3 +345,80 @@ def test_move_file_onto_its_own_name_canonicalizes_an_nfd_page(vault: Path) -> N
         today=TODAY,
     )
     assert "edited body" in commands.op_get(vault, path=rel)["body"]
+
+
+def test_edit_refuses_a_collision_even_when_the_nfkc_spelling_exists(vault: Path) -> None:
+    rel, directory = _collision(vault)
+    before = _snapshot(directory)
+
+    with pytest.raises(edit_module.EditError) as refused:
+        edit_module.edit(
+            vault,
+            path=rel,
+            why="collision probe",
+            new_body=_page_text("edited body").split("---\n\n", 1)[1],
+            today=TODAY,
+        )
+
+    assert refused.value.code == "AMBIGUOUS_PATH"
+    assert _snapshot(directory) == before
+
+
+def test_replace_refuses_a_collision_even_when_the_nfkc_spelling_exists(vault: Path) -> None:
+    rel, directory = _collision(vault)
+    before = _snapshot(directory)
+
+    with pytest.raises(replace_module.ReplaceError) as refused:
+        replace_module.replace(
+            vault,
+            old_path=rel,
+            content="\n# Collision successor\n\n## Claim\n\nrevised\n",
+            note_type="insight",
+            title="Collision successor",
+            today=TODAY,
+        )
+
+    assert refused.value.code == "AMBIGUOUS_PATH"
+    assert _snapshot(directory) == before
+
+
+def test_move_file_refuses_a_collision_even_when_the_nfkc_spelling_exists(vault: Path) -> None:
+    rel, directory = _collision(vault)
+    before = _snapshot(directory)
+
+    with pytest.raises(move_module.MoveFileError) as refused:
+        move_module.move_file(
+            vault,
+            old_path=rel,
+            new_path=f"{_DIRECTORY_REL}/moved-collision.md",
+            today=TODAY,
+            update_wikilinks=False,
+        )
+
+    assert refused.value.code == "AMBIGUOUS_PATH"
+    assert _snapshot(directory) == before
+    assert not (vault / _DIRECTORY_REL / "moved-collision.md").exists()
+
+
+def test_withheld_collision_is_absent_to_a_restricted_write_caller(vault: Path) -> None:
+    rel, directory = _collision(vault)
+    _govern_deny(vault)
+    new_rel = f"{_DIRECTORY_REL}/moved-collision.md"
+
+    def attempts() -> list[dict]:
+        outcomes = []
+        with request_scope(_external()):
+            with pytest.raises(edit_module.EditError) as edited:
+                edit_module.edit(vault, path=rel, why="probe", new_body="\nbody\n", today=TODAY)
+            outcomes.append(edited.value.as_dict())
+            with pytest.raises(move_module.MoveFileError) as moved:
+                move_module.move_file(
+                    vault, old_path=rel, new_path=new_rel, today=TODAY, update_wikilinks=False
+                )
+            outcomes.append({"code": moved.value.code, "reason": moved.value.reason})
+        return outcomes
+
+    withheld = attempts()
+    (directory / _COMPOSED_NAME).unlink()
+    (directory / _DECOMPOSED_NAME).unlink()
+    assert withheld == attempts()

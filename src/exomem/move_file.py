@@ -248,6 +248,28 @@ def move_file(
             )
         except VaultPathError as e2:
             raise MoveFileError(code=e2.code, reason=e2.reason) from e2
+    else:
+        # The NFKC spelling opened, but an NFD twin beside it would make the
+        # read door refuse this same path; refuse the move too rather than
+        # silently pick the NFKC file.
+        try:
+            reserved_paths.resolve_physical_relative(vault_root, old_rel)
+        except reserved_paths.ReservedPathLeafError as collision:
+            if collision.code == "AMBIGUOUS_PATH":
+                from .get_page import path_withheld
+
+                if path_withheld(vault_root, old_rel):
+                    # A withheld page answers exactly like a missing one.
+                    raise MoveFileError(
+                        code="NOT_FOUND", reason=f"path does not exist: {old_rel}"
+                    ) from None
+                raise MoveFileError(
+                    code="AMBIGUOUS_PATH",
+                    reason=(
+                        f"{old_path} matches more than one on-disk spelling; "
+                        "refusing to guess which"
+                    ),
+                ) from None
     try:
         reserved_paths.inspect_generic_file(vault_root, old_rel, physical=True)
     except reserved_paths.ReservedPathLeafError as error:
