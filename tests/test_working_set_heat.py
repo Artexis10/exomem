@@ -601,3 +601,176 @@ def test_a_session_keeps_its_thread_through_an_abstention_and_the_table_is_bound
             sidecar_vault, heat.SessionMark(f"s{index + 2}", "w", "", (MARIT,), T0, T0 + 10 * S + index)
         )
     assert sorted(heat.load(sidecar_vault).sessions) == ["s4", "s5", "s6"]
+
+
+# --------------------------------------------------------------------------- #
+# The governed seam: origin, not timing, says whose write it was
+# --------------------------------------------------------------------------- #
+
+INSIGHT = "Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization.md"
+PATTERN = "Knowledge Base/Notes/Patterns/retry-with-fixed-interval.md"
+
+
+def _command(name: str):
+    from exomem import commands
+
+    return next(command for command in commands.PRODUCT_COMMANDS if command.name == name)
+
+
+def _edit(vault, rel: str, old: str, new: str) -> dict:
+    from exomem import writer_lease
+
+    return writer_lease.invoke_command(
+        _command("edit_memory"),
+        vault,
+        path=rel,
+        why="heat seam test",
+        operation={"kind": "replace_string", "old_string": old, "new_string": new},
+    )
+
+
+def _work(vault) -> list[tuple[str, str]]:
+    return [(item.path, item.origin) for item in heat.load(vault).events if item.channel == "work"]
+
+
+def test_a_governed_work_write_records_one_work_event_per_page(vault) -> None:
+    from exomem import freshness
+
+    heat.reset_for_tests()
+    _edit(vault, INSIGHT, "is more robust than", "is steadier than")
+
+    # The same commit rewrote the activity log and the index: navigation, not work.
+    assert _work(vault) == [(INSIGHT, "edit_memory")]
+    # Our own commit's signature is kept, so the watcher's echo of it is known.
+    signatures = heat.attributed_signatures(vault, [INSIGHT])
+    assert signatures[INSIGHT] == tuple(freshness.stat_signature(vault / INSIGHT))
+    # A second commit is a second event at its own time, never a count.
+    _edit(vault, INSIGHT, "is steadier than", "is sturdier than")
+    events = [item for item in heat.load(vault).events if item.channel == "work"]
+    assert [item.path for item in events] == [INSIGHT, INSIGHT]
+    assert events[0].ts_ns < events[1].ts_ns
+    assert heat.load(vault).all_rows[INSIGHT].work_ns == events[1].ts_ns
+
+
+def test_maintain_memory_backfill_records_no_heat(vault) -> None:
+    from exomem import writer_lease
+
+    heat.reset_for_tests()
+    pages = sorted(
+        str(page.relative_to(vault)) for page in (vault / "Knowledge Base").rglob("*.md")
+    )
+    writer_lease.invoke_command(
+        _command("maintain_memory"), vault, mode="backfill-ids", dry_run=False
+    )
+
+    ours = heat.attributed_signatures(vault, pages)
+    assert len(ours) >= 3, "the batch must rewrite pages, or this proves nothing"
+    assert _work(vault) == []
+    assert heat.load(vault).events == ()
+
+
+def test_a_user_write_concurrent_with_a_batch_is_work(vault) -> None:
+    import threading
+
+    from exomem import due_state
+
+    heat.reset_for_tests()
+    entered, release = threading.Event(), threading.Event()
+    inside: list[bool] = []
+
+    def batch() -> None:
+        with due_state.batch_scope(vault):
+            inside.append(due_state.in_batch_scope())
+            entered.set()
+            release.wait(30)
+
+    worker = threading.Thread(target=batch)
+    worker.start()
+    try:
+        assert entered.wait(30)
+        # The process-wide flag says a batch is running; the request is not in it.
+        assert due_state.batch_active(vault)
+        assert not due_state.in_batch_scope()
+        _edit(vault, INSIGHT, "is more robust than", "is steadier than")
+    finally:
+        release.set()
+        worker.join(30)
+
+    assert inside == [True]
+    assert _work(vault) == [(INSIGHT, "edit_memory")]
+
+
+def test_a_write_without_a_mutation_trace_records_no_heat(vault) -> None:
+    from exomem import freshness, writer_lease
+    from exomem import vault as vault_module
+
+    heat.reset_for_tests()
+    target = vault / PATTERN
+    assert writer_lease.active_mutation_trace() is None
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(path=target, content=target.read_text() + "\nMore.\n")],
+        vault_root=vault,
+    )
+
+    assert _work(vault) == []
+    # Still ours: its echo must not come back as an external edit.
+    assert heat.attributed_signatures(vault, [PATTERN]) == {
+        PATTERN: tuple(freshness.stat_signature(target))
+    }
+
+
+def test_a_failed_commit_records_nothing(vault, monkeypatch) -> None:
+    from exomem import vault as vault_module
+
+    heat.reset_for_tests()
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("disk went away mid-batch")
+
+    monkeypatch.setattr(vault_module, "_batch_atomic_write_locked", refuse)
+    with pytest.raises(Exception):  # noqa: B017 - whatever the command maps it to
+        _edit(vault, INSIGHT, "is more robust than", "is steadier than")
+
+    assert heat.load(vault).events == ()
+    assert heat.attributed_signatures(vault, [INSIGHT]) == {}
+    assert heat.in_flight(vault) == frozenset()
+
+
+def _write_kwargs(name: str) -> dict:
+    """Arguments that put each write command on its writer path. Most need
+    none: an omitted required selector stays on the conservative path."""
+    return {
+        "edit_memory": {
+            "path": INSIGHT,
+            "operation": {"kind": "replace_string", "old_string": "a", "new_string": "b"},
+        },
+        "govern_memory": {"operation": "commit"},
+    }.get(name, {})
+
+
+def _write_commands() -> list[str]:
+    from exomem import commands
+
+    return sorted(command.name for command in commands.PRODUCT_COMMANDS if command.cli_writes)
+
+
+@pytest.mark.parametrize("name", _write_commands())
+def test_every_product_write_command_commits_under_a_trace(vault, name: str) -> None:
+    """A work command that lost its trace would lose its heat silently; this
+    fails loudly instead. Table-driven over every write-capable command, so a
+    new one is covered the day it is registered."""
+    import dataclasses
+
+    from exomem import writer_lease
+
+    seen: list[tuple[str, str, str] | None] = []
+
+    def leaf(*_args, **_kwargs):
+        seen.append(writer_lease.active_mutation_trace())
+        return {"ok": True}
+
+    spied = dataclasses.replace(_command(name), leaf=leaf)
+    writer_lease.invoke_command(spied, vault, **_write_kwargs(name))
+
+    assert len(seen) == 1, "the leaf must run on the writer path"
+    assert seen[0] is not None and seen[0][1] == name

@@ -5454,6 +5454,13 @@ def active_mutation_request_id() -> str | None:
     return trace[0] if trace is not None else None
 
 
+def active_mutation_trace() -> tuple[str, str, str] | None:
+    """`(request_id, command, receipt)` of the mutation this code runs inside,
+    or `None` outside one (a CLI helper, the watcher, a direct call). The heat
+    projection reads the command name as the origin of a governed commit."""
+    return _ACTIVE_MUTATION_TRACE.get()
+
+
 def active_mutation_committed() -> bool:
     """Whether this invocation's canonical writer already crossed its commit boundary.
 

@@ -1258,8 +1258,219 @@ def attribution_for(
     )
 
 
+# --------------------------------------------------------------------------- #
+# The governed-commit seam (`vault.batch_atomic_write`)
+# --------------------------------------------------------------------------- #
+
+#: `{vault root: {path: depth}}`: pages a commit is flipping right now. The
+#: fold defers them rather than classify a half-finished commit's echo.
+_IN_FLIGHT: dict[str, dict[str, int]] = {}
+#: `{vault root: {path: signature}}`: this process's own recent commits, known
+#: synchronously, before the sidecar row lands. Bounded like `attributed`.
+_OURS: dict[str, dict[str, tuple[int, int, int]]] = {}
+
+
+class Commit(NamedTuple):
+    root: Path
+    paths: tuple[str, ...]
+
+
+class ObservedCommit(NamedTuple):
+    root: Path
+    events: tuple[HeatEvent, ...]
+    signatures: Mapping[str, tuple[int, int, int]]
+    ts_ns: int
+
+
+def _root_key(vault_root: Path) -> str:
+    import os
+
+    return os.path.abspath(str(vault_root))
+
+
+def _kb_relative(vault_root: Path, target: object) -> str | None:
+    """The vault-relative POSIX path of a knowledge-base Markdown page, or
+    `None`. String work only: no resolve, no stat."""
+    import os
+
+    from .kbdir import kb_prefix
+
+    root = _root_key(vault_root)
+    text = os.path.abspath(os.fspath(target))  # type: ignore[arg-type]
+    if not text.startswith(root + os.sep) or not text.lower().endswith(".md"):
+        return None
+    rel = text[len(root) + 1 :].replace(os.sep, "/")
+    return rel if rel.startswith(kb_prefix()) else None
+
+
+def begin_commit(vault_root: Path | None, targets: Iterable[object]) -> Commit | None:
+    """Register a batch's knowledge-base pages as in flight, before any flip."""
+    if vault_root is None or disabled():
+        return None
+    try:
+        paths = tuple(
+            dict.fromkeys(
+                rel for target in targets if (rel := _kb_relative(vault_root, target)) is not None
+            )
+        )
+    except Exception:  # noqa: BLE001 - the seam never fails a commit
+        log.debug("heat commit registration failed", exc_info=True)
+        return None
+    if not paths:
+        return None
+    key = _root_key(vault_root)
+    with _LOCK:
+        flying = _IN_FLIGHT.setdefault(key, {})
+        for rel in paths:
+            flying[rel] = flying.get(rel, 0) + 1
+    return Commit(Path(vault_root), paths)
+
+
+def _land(commit: Commit) -> None:
+    key = _root_key(commit.root)
+    with _LOCK:
+        flying = _IN_FLIGHT.get(key)
+        if flying is None:
+            return
+        for rel in commit.paths:
+            left = flying.get(rel, 0) - 1
+            if left > 0:
+                flying[rel] = left
+            else:
+                flying.pop(rel, None)
+        if not flying:
+            _IN_FLIGHT.pop(key, None)
+
+
+def abandon_commit(commit: Commit | None) -> None:
+    """A commit that failed records nothing and stops being in flight."""
+    if commit is not None:
+        _land(commit)
+
+
+def in_flight(vault_root: Path) -> frozenset[str]:
+    with _LOCK:
+        return frozenset(_IN_FLIGHT.get(_root_key(vault_root), {}))
+
+
+def _observed_client() -> str:
+    try:
+        from . import command_surface
+
+        name = command_surface.mcp_caller_identity().get("client_name")
+    except Exception:  # noqa: BLE001 - attribution is never worth a failure
+        return ""
+    return client_label(str(name).strip().casefold()) if name else ""
+
+
+def _collection_dirs_on_disk(vault_root: Path, paths: Iterable[str]) -> frozenset[str]:
+    """Which parents and grandparents of `paths` hold a `_collection.md`: at
+    most two `stat`s per written page, on the write path, never the read path."""
+    dirs: set[str] = set()
+    for rel in paths:
+        parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
+        for candidate in (parent, parent.rsplit("/", 1)[0] if "/" in parent else ""):
+            if candidate and candidate not in dirs:
+                if (Path(vault_root) / candidate / "_collection.md").is_file():
+                    dirs.add(candidate)
+    return frozenset(dirs)
+
+
+def observe_commit(commit: Commit | None) -> ObservedCommit | None:
+    """After a successful commit, synchronously: the mutation trace, the
+    request's batch scope, each page's post-write signature, and the events a
+    traced, unbatched commit earns. Stops the pages being in flight. Never
+    raises."""
+    if commit is None:
+        return None
+    try:
+        import time
+
+        from . import due_state, freshness, working_set, writer_lease
+
+        trace = writer_lease.active_mutation_trace()
+        batch = due_state.in_batch_scope()
+        now = time.time_ns()
+        signatures: dict[str, tuple[int, int, int]] = {}
+        for rel in commit.paths:
+            try:
+                signatures[rel] = tuple(freshness.stat_signature(commit.root / rel))  # type: ignore[assignment]
+            except OSError:
+                continue
+        events: list[HeatEvent] = []
+        if trace is not None and not batch:
+            collections = _collection_dirs_on_disk(commit.root, signatures)
+            client = _observed_client()
+            for rel in signatures:
+                channel = classify_commit(
+                    rel,
+                    traced=True,
+                    in_batch=False,
+                    reason=working_set._recent_reason_for(rel, collections=collections),
+                )
+                if channel is not None:
+                    events.append(HeatEvent(now, rel, channel, origin=trace[1], client=client))
+        key = _root_key(commit.root)
+        with _LOCK:
+            ours = _OURS.setdefault(key, {})
+            for rel, signature in signatures.items():
+                ours.pop(rel, None)
+                ours[rel] = signature
+            while len(ours) > ATTRIBUTED_MAX:
+                ours.pop(next(iter(ours)))
+        return ObservedCommit(commit.root, tuple(events), signatures, now)
+    except Exception:  # noqa: BLE001 - the seam never fails a commit
+        log.debug("heat commit observation failed", exc_info=True)
+        return None
+    finally:
+        _land(commit)
+
+
+def persist_commit(observed: ObservedCommit | None) -> None:
+    """Persist an observed commit after its terminal is durable, or inline
+    when there is no mutation to defer to. Called with the commit lock
+    released. Never raises."""
+    if observed is None or (not observed.events and not observed.signatures):
+        return
+
+    def work() -> list[object]:
+        record_attributed(observed.root, observed.signatures, ts_ns=observed.ts_ns)
+        append(observed.root, observed.events)
+        return []
+
+    try:
+        from . import writer_lease
+
+        if writer_lease.defer_until_terminal_persisted(work):
+            return
+        work()
+    except Exception:  # noqa: BLE001 - heat never fails a commit
+        log.debug("heat commit persistence failed", exc_info=True)
+
+
+def recent_attributed(vault_root: Path, paths: Iterable[str]) -> dict[str, tuple[int, int, int]]:
+    """Our own commits' signatures among `paths`: this process's, known at
+    once, then the sidecar's, which another process's commits reach."""
+    wanted = list(dict.fromkeys(str(path) for path in paths))
+    with _LOCK:
+        ours = dict(_OURS.get(_root_key(vault_root), {}))
+    out = {path: ours[path] for path in wanted if path in ours}
+    missing = [path for path in wanted if path not in out]
+    if missing:
+        out.update(
+            {
+                path: signature
+                for path, signature in attributed_signatures(vault_root, missing).items()
+                if path not in out
+            }
+        )
+    return out
+
+
 def reset_for_tests() -> None:
     """Forget every cached profile and in-process fold state."""
     with _LOCK:
         _PROFILES.clear()
         _PARENTS.clear()
+        _IN_FLIGHT.clear()
+        _OURS.clear()
