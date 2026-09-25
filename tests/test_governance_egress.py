@@ -4120,10 +4120,12 @@ def test_traversal_that_escapes_the_root_is_still_rejected(vault: Path, value: s
 # --------------------------------------------------------------------------
 
 
-def test_outbound_links_do_not_name_a_withheld_page_by_stem(vault: Path) -> None:
-    """A wikilink field stores BARE stems, and the bare-word asymmetry that is
-    right for prose is wrong here: inside a reference list every entry is
-    definitionally a reference, so the stem must be compared."""
+def test_an_outbound_link_only_a_withheld_page_answers_is_listed_unresolved(
+    vault: Path,
+) -> None:
+    """`links.outbound` lists the stems the body links. A stem only a withheld
+    page answers is listed exactly as it is when no page answers it: the body
+    already shows it, and dropping it would mark the stem as a withheld page."""
     source = vault / "Knowledge Base" / "Notes" / "Insights" / "links-out.md"
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text(
@@ -4132,17 +4134,22 @@ def test_outbound_links_do_not_name_a_withheld_page_by_stem(vault: Path) -> None
     )
     write_scope(vault)
     write_rule(vault, ceiling=egress.LEVEL_NONE)
-    _reset_caches()
     from exomem.governance.principal import request_scope
 
-    with request_scope(_external()):
-        page = commands.op_read_memory(
-            vault, path="Knowledge Base/Notes/Insights/links-out.md", links=True
-        )
-    # Scoped to the STRUCTURED links field. The rendered body still quotes the
-    # wikilink, and body-text scanning of a released page is explicitly out of
-    # scope for this change — a released page's prose is its own content.
-    assert "kill-switch-for-risky-releases" not in json.dumps(page.get("links"), default=str)
+    def links() -> object:
+        _reset_caches()
+        with request_scope(_external()):
+            page = commands.op_read_memory(
+                vault, path="Knowledge Base/Notes/Insights/links-out.md", links=True
+            )
+        return page.get("links")
+
+    withheld = links()
+    (vault / "Knowledge Base" / "Notes" / "Patterns" / "kill-switch-for-risky-releases.md").unlink()
+    absent = links()
+
+    assert withheld == absent
+    assert "kill-switch-for-risky-releases" in json.dumps(withheld, default=str)
 
 
 def test_outbound_links_keep_permitted_stems(vault: Path) -> None:

@@ -1222,6 +1222,36 @@ def test_an_empty_provenance_list_stays_as_written(tmp_path: Path, audience: str
     assert _text(answers["A"]["frontmatter"]) == _text(answers["B"]["frontmatter"])
 
 
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_bare_link_only_a_withheld_page_answers_reads_as_unresolved(
+    tmp_path: Path, audience: str
+) -> None:
+    """The link is listed as an unresolved one is when the page is absent."""
+    base = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page(
+            "Alpha",
+            "See [[secret]] and [[beta]] for background.",
+            type="insight",
+            sources=["[[secret]]"],
+        ),
+        f"{NOTES}/beta.md": _page("Beta", "Beta rollout background.", type="insight"),
+    }
+    withheld = {f"{WITHHELD_DIR}/secret.md": _page("Hidden Draft", "Withheld body text.")}
+    vaults = _twins(tmp_path, base, withheld, audience)
+
+    answers = {
+        variant: _call(
+            vault, _principal(audience), "read_memory", path=f"{NOTES}/alpha.md", links=True
+        )
+        for variant, vault in vaults.items()
+    }
+
+    assert answers["B"]["links"]["outbound"] == ["secret", "beta"]
+    assert _text(answers["A"]) == _text(answers["B"])
+    assert _text(answers["C"]) == _text(answers["B"])
+
+
 def test_the_owner_still_resolves_links_over_every_page(tmp_path: Path) -> None:
     base, withheld = _stem_collision()
     vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")

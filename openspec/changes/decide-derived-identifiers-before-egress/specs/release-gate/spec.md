@@ -66,6 +66,11 @@ For a reader other than the owner, a derived answer that depends on how a visibl
 - **WHEN** a withheld page's stem or title collides with a visible link's target
 - **THEN** a restricted reader's graph context, context pack, links, inbound counts, relation proposals and relation queue are those of the twin without the withheld page
 
+#### Scenario: A bare link only a withheld page answers
+
+- **WHEN** a visible page links a bare name that only a withheld page answers
+- **THEN** a restricted reader's link list and provenance list it as an unresolved link, exactly as when no page answers it
+
 ### Requirement: Counts follow filtering and whole-vault aggregates go to the owner
 
 A count or rank a restricted caller receives SHALL be computed over the entries it receives, and retrieval diagnostics computed before release decisions SHALL NOT be returned to it. A whole-vault aggregate that a restricted view cannot recompute SHALL be served to the owner only under a governed policy, and SHALL answer other audiences with `available: false` and `reason: "audience_restricted"`, decided before anything is read.

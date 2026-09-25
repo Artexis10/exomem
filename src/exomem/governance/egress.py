@@ -3938,7 +3938,6 @@ def annotate_page(
     # sub-notice item (D3 applies the strip at EVERY level, not just below
     # full), so decide the items this page points at before answering.
     referenced: set[str] = set()
-    bare_stems: set[str] = set()
     frontmatter = page.get("frontmatter")
     if isinstance(frontmatter, Mapping):
         targets: set[str] = set()
@@ -3950,20 +3949,13 @@ def annotate_page(
             # wikilinks — so collecting only `.md`-suffixed strings decided
             # nothing for the form the vault actually stores.
             targets.update(_iter_reference_targets(value))
-            bare_stems.update(_iter_reference_stems(value))
         if targets:
             referenced.update(_resolve_reference_targets(vault_root, targets))
+    # A bare link (`links.outbound` stores the stems the body links) is not
+    # resolved here: the strip below never removes one, so there is nothing
+    # to decide for it. See `_strip_page_provenance`.
     for name in _PAGE_PROVENANCE_FIELDS:
         referenced.update(_iter_path_strings(page.get(name)))
-        # These fields store BARE stems (`links.outbound` is a wikilink list)
-        # and `_iter_path_strings` only yields `.md`-suffixed strings, so a
-        # stem never entered `referenced`, was never decided, and the strip
-        # below had nothing to match. Gathered across ALL fields and resolved
-        # ONCE — resolving per field meant five corpus walks per page.
-        bare_stems.update(_iter_reference_stems(page.get(name)))
-    stem_matches = _reference_stem_matches(vault_root, bare_stems) if bare_stems else {}
-    for matches in stem_matches.values():
-        referenced.update(matches)
 
     def _below_floor(rel: str) -> bool:
         ref_decision = _decide_path(
@@ -3979,11 +3971,6 @@ def annotate_page(
         return ref_decision is None or ref_decision.level < RELEASE_FLOOR
 
     withheld = frozenset(rel for rel in referenced if rel != rel_path and _below_floor(rel))
-    exempt_stems = (
-        _visibly_named_stems(vault_root, stem_matches, withheld, _below_floor)
-        if withheld and stem_matches
-        else frozenset()
-    )
     if level == LEVEL_EXCERPT:
         body = parsed.body if snapshot_content is not None else str(page.get("body") or "")
         body = redact_withheld_references(
@@ -4006,7 +3993,7 @@ def annotate_page(
             )
         return excerpt
 
-    out = _strip_page_provenance(dict(page), withheld, exempt_stems=exempt_stems)
+    out = _strip_page_provenance(dict(page), withheld)
     if decision.release_strip:
         out = bridges.strip_provenance(
             out,
@@ -4014,25 +4001,6 @@ def annotate_page(
             direct_page=True,
         )
     return _attach_raw_content(out, snapshot_content) if include_raw else out
-
-
-def _iter_reference_stems(value: Any) -> Iterable[str]:
-    """Bare, non-path strings inside a reference container.
-
-    Unwrapped first: a reference field stores `[[stem]]` at least as often as
-    a bare `stem`, and the bracketed form was compared against filename stems
-    with its brackets still attached, so it never matched anything.
-    """
-    if isinstance(value, str):
-        candidate, _ = _unwrap_reference(value)
-        if candidate and "/" not in candidate and not candidate.lower().endswith(".md"):
-            yield candidate
-    elif isinstance(value, Mapping):
-        for item in value.values():
-            yield from _iter_reference_stems(item)
-    elif isinstance(value, (list, tuple, set, frozenset)):
-        for item in value:
-            yield from _iter_reference_stems(item)
 
 
 def _iter_reference_targets(value: Any) -> Iterable[str]:
@@ -4078,68 +4046,17 @@ def _resolve_reference_targets(vault_root: Path, targets: Iterable[str]) -> set[
     return out
 
 
-def _resolve_reference_stems(vault_root: Path, stems: Iterable[str]) -> set[str]:
-    """Map bare wikilink stems onto the vault paths they name."""
-    return {
-        rel for matches in _reference_stem_matches(vault_root, stems).values() for rel in matches
-    }
-
-
-def _reference_stem_matches(vault_root: Path, stems: Iterable[str]) -> dict[str, set[str]]:
-    """Each bare wikilink stem (casefolded) and the vault paths sharing it."""
-    wanted = {s.casefold() for s in stems}
-    if not wanted:
-        return {}
-    found: dict[str, set[str]] = {}
-    for page in Path(vault_root).rglob("*.md"):
-        stem = page.stem.casefold()
-        if stem in wanted and page.is_file():
-            found.setdefault(stem, set()).add(
-                str(page.relative_to(Path(vault_root))).replace("\\", "/")
-            )
-    return found
-
-
-def _visibly_named_stems(
-    vault_root: Path,
-    stem_matches: Mapping[str, set[str]],
-    withheld: frozenset[str],
-    below_floor: Callable[[str], bool],
-) -> frozenset[str]:
-    """Bare stems that a page the reader may see also answers to.
-
-    A link resolves over the reader's view: when a page it may see shares a
-    stem with a withheld page, or holds that stem as its title, the stem names
-    that visible page, exactly as in a vault without the withheld one, and is
-    not a reference to the withheld page. Only stems a withheld page shares
-    are considered, and only their other candidates are decided.
-    """
-    exempt: set[str] = set()
-    titles: Mapping[str, list[str]] | None = None
-    for stem, matches in stem_matches.items():
-        if not matches & withheld:
-            continue
-        if any(rel not in withheld for rel in matches):
-            exempt.add(stem)
-            continue
-        if titles is None:
-            from .. import find as find_module
-
-            titles = find_module.recall_resolver_snapshot(Path(vault_root)).titles
-        if any(not below_floor(f"{no_ext}.md") for no_ext in titles.get(stem, ())):
-            exempt.add(stem)
-    return frozenset(exempt)
-
-
 def _strip_page_provenance(
     page: dict[str, Any],
     withheld_paths: frozenset[str],
-    *,
-    exempt_stems: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     if not withheld_paths:
         return page
-    names = functools.partial(_names_withheld, exempt_stems=exempt_stems)
+    # A bare link names no page by itself: it is listed exactly as the reader
+    # would see an unresolved one in a vault without the withheld page, and
+    # the page body already shows it. A path, or a link carrying a folder,
+    # names a location and is removed when that location is withheld.
+    names = functools.partial(_names_withheld, exempt_stems=_withheld_keys(withheld_paths)[1])
 
     frontmatter = page.get("frontmatter")
     if isinstance(frontmatter, Mapping):
