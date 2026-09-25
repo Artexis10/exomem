@@ -2853,6 +2853,10 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         "propose-relation": "structure",
         "save-relations": "mutation",
         "census": "structure",
+        "save-roles": "mutation",
+        "save-conventions": "mutation",
+        "history": "structure",
+        "restore": "mutation",
     }
     schema = product["schema_memory"]
     assert commands.invocation_is_read_only(schema, {"operation": "infer"})

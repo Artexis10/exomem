@@ -81,21 +81,28 @@ log = logging.getLogger(__name__)
 #: at all, "i'd" and "i’d" tokenised as different words, "well-known" and
 #: "well‑known" did too) and must rebuild rather than answer from those
 #: stale rows.
-#: v8 (fix/activation-competing-senses, correction round 1) adds words to
-#: `STOPWORDS`: "let" (C1) and the closed-class function words C3 adds
+#: v8 (fix/activation-competing-senses, correction round 1) added words to
+#: `STOPWORDS`: "let" (C1) and the closed-class function words C3 added
 #: (before/after/into/etc. — see that commit for the full list).
-#: `derived_short_name`'s stopwords-only rejection reads `STOPWORDS`
-#: directly and runs at index-build time (`_finalize_anchor_aliases`), so a
-#: v7 sidecar's derived short names were computed against the SMALLER word
-#: list and would otherwise survive unrebuilt: a title whose leading name is
-#: now entirely closed-class words (implausible for "let" alone, more
-#: plausible once C3's larger list lands) would keep a derived alias a fresh
-#: build would refuse to derive. `term_anchor_counts` is unaffected —
-#: `_title_alias_term_owners` never filters by `STOPWORDS` — but the bump
-#: covers both commits in this round since C3 needs one for the SAME table
-#: and a schema version is an all-or-nothing per-round bump, not a per-word
-#: one.
-SCHEMA_VERSION = 8
+#: `derived_short_name`'s stopwords-only rejection runs at index-build time
+#: (`_finalize_anchor_aliases`), so an older sidecar's derived short names
+#: were computed against the SMALLER word list and had to rebuild.
+#:
+#: v9 (`make-activation-conventions-vault-owned`) added the `meta` row
+#: `conventions_hash`, over the vault's EFFECTIVE activation-conventions
+#: registry (never the override file's bytes): anchor membership, the skip
+#: list and the stopword/rarity threshold moved from module constants to
+#: that registry, so an older sidecar's anchors, aliases and term counts were
+#: computed under rules this build no longer reads and must rebuild — this
+#: bump is the one-time migration; a later conventions EDIT rebuilds again
+#: through the `conventions_hash` mismatch check alone, with no further
+#: `SCHEMA_VERSION` bump. Both lines of work had moved to 8 independently;
+#: 9 is the version that carries both.
+#:
+#: v10 (close-memory-loop step 5) reads a page's `learned_aliases` into its
+#: activation aliases and stores `learned_alias_rejected` in `index_meta`: an
+#: older sidecar holds no learned names and must rebuild once to read them.
+SCHEMA_VERSION = 10
 SIDECAR_NAME = ".working-set.sqlite"
 DISABLE_ENV = "EXOMEM_DISABLE_WORKING_SET"
 _TRUE = frozenset({"1", "true", "yes", "on"})
@@ -122,7 +129,21 @@ LEDE_MAX_CHARS = 240
 
 _NAVIGATION_BASENAMES = frozenset({"index.md", "log.md", "readme.md"})
 #: Knowledge-base folders holding immutable raw material rather than anchors.
+#: Kept as the literal shipped-equivalence pin (`make-activation-conventions-
+#: vault-owned` tests compare it against `vault.APPEND_ONLY_KB_SUBPATHS`); the
+#: WALK itself now excludes what `vault.in_append_only_tree` matches, which is
+#: the product's own definition of the same two trees, not this copy.
 _RAW_MATERIAL_FOLDERS = frozenset({"Sources", "Evidence"})
+#: Governance trees: operational state the product itself defines
+#: (`find_corpus.EXCLUDED_DIR_NAMES`, `vault.VAULT_SCAN_SKIP_DIRS`), never an
+#: anchor whatever its tags or type, and never a vault-configurable skip
+#: folder — an owner cannot re-admit these by editing the conventions
+#: override. Deliberately not `_archive`: an archived anchor stays walked and
+#: resolvable, ranked down by lifecycle.
+_GOVERNANCE_TREES = frozenset({"_Schema", "_Governance", "_Adoption"})
+#: The index's OWN skip list, now the shipped default of the vault-owned
+#: `anchors.skip_folders` convention (kept as the literal shipped-equivalence
+#: pin; the walk itself reads the effective conventions' skip folders).
 _SKIP_DIR_NAMES = frozenset({"_trash", "_attachments", "_Staging", "Templates"})
 _WIKILINK = re.compile(r"\[\[([^\]|\n]+)(?:\|[^\]\n]*)?\]\]")
 _HEADING = re.compile(r"^#{2,3}\s+(.+?)\s*$", re.MULTILINE)
@@ -501,7 +522,7 @@ _TRAILING_PAREN = re.compile(r"^(?P<name>.+?)\s*\([^()]*\)\s*$")
 _TRAILING_DASH = re.compile(r"^(?P<name>.+?)\s+[-–—]\s+\S.*$")
 
 
-def derived_short_name(title: str) -> str | None:
+def derived_short_name(title: str, *, stopwords: frozenset[str] = STOPWORDS) -> str | None:
     """The leading name of a title carrying a trailing qualifier, or `None`.
 
     Structural extraction, not an inference: a title with no such qualifier
@@ -510,10 +531,17 @@ def derived_short_name(title: str) -> str | None:
     looks at one title, and decides only whether that title's own lead is a
     NAME at all, never whether it is anyone else's.
 
+    `stopwords` defaults to the shipped list; the real build passes the
+    vault's EFFECTIVE conventions stopwords (`make-activation-conventions-
+    vault-owned`), read once per build and threaded down from
+    `_finalize_anchor_aliases` — never re-read here, so every derived-name
+    decision in one build is measured against the same list a turn's own
+    words are.
+
     Nothing is derived when the lead: is a filename (contains `.`, or starts
     with `_` — a stray extension or a private note, never a name a turn would
     say); tokenises to nothing, to more than three words, to only stopwords
-    (the resolver's own list, `STOPWORDS`) or to only digits (a bare year is a
+    (the caller's own list) or to only digits (a bare year is a
     date, not a name); contains a word longer than 48 CODE POINTS (a script
     without word separators caps a "word count" of one at three TOKENS per
     the check above, never at any length, so an unbroken CJK run of a whole
@@ -548,7 +576,7 @@ def derived_short_name(title: str) -> str | None:
     # script without word separators takes — is refused.
     if max(len(token) for token in tokens) > 48:
         return None
-    if all(token in STOPWORDS for token in tokens):
+    if all(token in stopwords for token in tokens):
         return None
     if all(token.isdigit() for token in tokens):
         return None
@@ -619,6 +647,76 @@ class _Candidate:
     terms: tuple[str, ...]
     categories: tuple[str, ...]
     source_signature: str
+    #: `learned_aliases` entries the index skipped on this page (see
+    #: `learned_alias_verdicts`), summed into `index_meta` at write time.
+    learned_rejected: int = 0
+
+
+# --------------------------------------------------------------------------- #
+# Learned aliases (close-memory-loop step 5)
+# --------------------------------------------------------------------------- #
+
+#: The frontmatter list an agent's reasoned, hash-guarded edit writes a learned
+#: name to. Kept apart from `aliases`, which are the owner's identity names.
+LEARNED_ALIASES_FIELD = "learned_aliases"
+MAX_LEARNED_ALIASES = 8
+MAX_LEARNED_ALIAS_CHARS = 64
+#: A single all-ASCII-letter learned name must be at least this long: the
+#: rare-term floor (`working_set_resolve.RARE_TERM_MIN_CHARS`), restated here
+#: because this module has no dependency on the resolver.
+LEARNED_ALIAS_MIN_CHARS = 3
+
+
+def learned_alias_verdicts(
+    values: object,
+    *,
+    stopwords: frozenset[str] = STOPWORDS,
+    filler: frozenset[str] = frozenset(),
+) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """`(accepted, rejected)` for one page's `learned_aliases` list.
+
+    `accepted` are normalised names, in order. `rejected` pairs each skipped
+    entry with its reason. A learned name becomes an `exact_alias` spelling,
+    the resolver's strongest evidence, so it must be a NAME: at least one
+    token that is neither a stopword nor an effective referential filler word
+    ("the thing" or "it" would resolve every turn containing it), a single
+    all-ASCII-letter token at least `LEARNED_ALIAS_MIN_CHARS` long, at most
+    `MAX_LEARNED_ALIAS_CHARS` characters, and at most `MAX_LEARNED_ALIASES`
+    entries per page. The same rules run at write time for `edit_memory`'s
+    warning and at index build, so the two can never disagree.
+    """
+    if values is None:
+        return (), ()
+    items = list(values) if isinstance(values, (list, tuple)) else [values]
+    accepted: list[str] = []
+    rejected: list[tuple[str, str]] = []
+    for position, item in enumerate(items):
+        text = item.strip() if isinstance(item, str) else ""
+        if position >= MAX_LEARNED_ALIASES:
+            rejected.append((str(item), f"more than {MAX_LEARNED_ALIASES} entries"))
+            continue
+        if not text:
+            rejected.append((str(item), "not a name"))
+            continue
+        if len(text) > MAX_LEARNED_ALIAS_CHARS:
+            rejected.append((text, f"longer than {MAX_LEARNED_ALIAS_CHARS} characters"))
+            continue
+        key = normalize(text)
+        tokens = tokens_of(key)
+        if not any(token not in stopwords and token not in filler for token in tokens):
+            rejected.append((text, "only function or filler words"))
+            continue
+        if (
+            len(tokens) == 1
+            and tokens[0].isascii()
+            and tokens[0].isalpha()
+            and len(tokens[0]) < LEARNED_ALIAS_MIN_CHARS
+        ):
+            rejected.append((text, f"a single word shorter than {LEARNED_ALIAS_MIN_CHARS} letters"))
+            continue
+        if key not in accepted:
+            accepted.append(key)
+    return tuple(accepted), tuple(rejected)
 
 
 # --------------------------------------------------------------------------- #
@@ -656,9 +754,41 @@ def _signature(title: str, body: str, *, extra: Iterable[str] = ()) -> str:
     return "\n".join(part for part in parts if part)[:SIGNATURE_MAX_CHARS]
 
 
-def _categories(sections: Iterable[str], tags: Iterable[str]) -> tuple[str, ...]:
+def _categories(
+    sections: Iterable[str], tags: Iterable[str], *, semantic_registry: Any = None
+) -> tuple[str, ...]:
+    """A section/tag label's category: the semantic-language registry first,
+    the built-in `_CATEGORY_BY_LABEL` map second.
+
+    The product already owns this vocabulary, vault-overridably, in the
+    semantic-language registry's `category_aliases`; consulting it first
+    means a vault that heads its sections in another language earns
+    categories once its owner adds the aliases there, in the registry they
+    already use for semantic units. The registry's result is taken only
+    when its status names a genuine match (`core`, `alias`, `extension` or
+    `deprecated`) — never `unregistered`, `registry_invalid` or
+    `scope_violation`, each of which sets `resolved` to the raw label's own
+    key rather than to nothing, and would otherwise inject that key as a
+    fabricated "category" the moment a vault's own semantic-language
+    override happened to be broken. An excluded label falls through to the
+    built-in map rather than earning nothing, so a heading such as "Next
+    Steps" (which the shipped semantic-language registry does not itself
+    know) still maps to `action`. `semantic_registry` defaults to the
+    shipped registry with no vault override; the real build passes the
+    vault's own effective registry, loaded once per build.
+    """
+    from . import semantic_language_registry
+
+    registry = (
+        semantic_registry if semantic_registry is not None else semantic_language_registry.load_registry(None)
+    )
+    excluded_statuses = frozenset({"unregistered", "registry_invalid", "scope_violation"})
     found: dict[str, None] = {}
     for label in (*sections, *tags):
+        resolution = registry.resolve_category(label)
+        if resolution.status not in excluded_statuses and resolution.resolved:
+            found.setdefault(resolution.resolved, None)
+            continue
         category = _CATEGORY_BY_LABEL.get(normalize(label))
         if category is not None:
             found.setdefault(category, None)
@@ -691,7 +821,10 @@ def _page_ref(frontmatter: Mapping[str, Any]) -> str | None:
 # --------------------------------------------------------------------------- #
 
 
-def _walk_kb(vault_root: Path):
+def _walk_kb(vault_root: Path, *, skip_folders: frozenset[str] = _SKIP_DIR_NAMES):
+    """Walk the KB tree, skipping dot-directories and `skip_folders` (the
+    vault's effective `anchors.skip_folders` convention — case-sensitive,
+    exactly as this walk always compared its own skip list)."""
     root = Path(vault_root) / kb_dirname()
     if not root.is_dir():
         return
@@ -704,7 +837,7 @@ def _walk_kb(vault_root: Path):
             continue
         for entry in entries:
             name = entry.name
-            if name.startswith(".") or name in _SKIP_DIR_NAMES:
+            if name.startswith(".") or name in skip_folders:
                 continue
             if entry.is_dir():
                 stack.append(entry)
@@ -722,6 +855,8 @@ def _source_signature(path: Path) -> str:
 
 def _walk_page_entries(
     vault_root: Path,
+    *,
+    conventions: Any = None,
 ) -> tuple[
     list[dict[str, Any]],
     dict[str, tuple[str, ...]],
@@ -755,15 +890,23 @@ def _walk_page_entries(
     Raw material (`Sources/`, `Evidence/`) is excluded for the same reason it
     is excluded from being an anchor at all: it is evidence ABOUT a project,
     never the project's own current material.
+
+    `conventions` is the vault's effective activation-conventions registry
+    (`activation_conventions.Conventions`); `None` (the default, used by every
+    caller that has not already loaded one this build) loads it fresh for
+    this one vault — a cheap, memoised read, never a second vault walk.
     """
-    from . import recall_policy
+    from . import activation_conventions, recall_policy
+
+    if conventions is None:
+        conventions = activation_conventions.load_conventions(Path(vault_root)).conventions
 
     raw: list[dict[str, Any]] = []
     outbound: dict[str, tuple[str, ...]] = {}
     names: dict[str, list[str]] = {}
     project_members: dict[str, list[tuple[str, str]]] = {}
     kb = kb_dirname()
-    for path in _walk_kb(vault_root):
+    for path in _walk_kb(vault_root, skip_folders=conventions.skip_folders):
         rel = path.relative_to(vault_root).as_posix()
         if recall_policy.is_structured_only_path(vault_root, rel):
             continue
@@ -806,13 +949,26 @@ def _walk_page_entries(
         if head not in _RAW_MATERIAL_FOLDERS:
             for project_key in find_corpus.all_projects(frontmatter):
                 project_members.setdefault(project_key, []).append((rel, page.updated))
-        kind = _page_anchor_kind(rel, frontmatter, kb=kb)
+        kind = _page_anchor_kind(rel, frontmatter, kb=kb, conventions=conventions)
         if kind is None or path.name.casefold() in _NAVIGATION_BASENAMES:
             continue
         sections = _sections(page.body)
         tags = _strings(frontmatter.get("tags"))
+        # A learned name joins the anchor's activation aliases and never the
+        # `names` map above: it changes what a turn activates, not what a
+        # wikilink resolves to or what the egress guard matches.
+        learned, learned_rejected = learned_alias_verdicts(
+            frontmatter.get(LEARNED_ALIASES_FIELD),
+            stopwords=conventions.stopwords,
+            filler=conventions.referential_filler,
+        )
         aliases = tuple(
-            dict.fromkeys(normalize(alias) for alias in _strings(frontmatter.get("aliases")))
+            dict.fromkeys(
+                [
+                    *(normalize(alias) for alias in _strings(frontmatter.get("aliases"))),
+                    *learned,
+                ]
+            )
         )
         raw.append(
             {
@@ -827,6 +983,7 @@ def _walk_page_entries(
                 "tags": tags,
                 "body": page.body,
                 "source_signature": _source_signature(path),
+                "learned_rejected": len(learned_rejected),
             }
         )
     return raw, outbound, names, project_members
@@ -851,7 +1008,12 @@ def _title_alias_term_owners(
     return owners
 
 
-def _derived_name_is_rare(name: str, term_owners: Mapping[str, set[str]]) -> bool:
+def _derived_name_is_rare(
+    name: str,
+    term_owners: Mapping[str, set[str]],
+    *,
+    rare_term_max_anchors: int = RARE_TERM_MAX_ANCHORS,
+) -> bool:
     """Every term of a derived short name must be rare in the AUTHORED
     title/alias vocabulary, not merely textually unique.
 
@@ -860,19 +1022,24 @@ def _derived_name_is_rare(name: str, term_owners: Mapping[str, set[str]]) -> boo
     ... plus one titled "Orchard — Agentic Search" — derives "Orchard" as a
     name no other anchor's names literally include, yet the word identifies
     twenty anchors, not one. Measured the same way `rare_term` measures a shared
-    turn word's rarity (`RARE_TERM_MAX_ANCHORS`), over the SAME authored-only
-    counts, so a name is only ever admitted when it is genuinely rare by that
-    one shared yardstick.
+    turn word's rarity (`rare_term_max_anchors`, the vault's effective
+    conventions threshold — defaults to the shipped value), over the SAME
+    authored-only counts, so a name is only ever admitted when it is
+    genuinely rare by that one shared yardstick.
     """
     terms = frozenset(fold_plural(term) for term in tokens_of(name))
     if not terms:
         return False
-    return all(len(term_owners.get(term, ())) <= RARE_TERM_MAX_ANCHORS for term in terms)
+    return all(len(term_owners.get(term, ())) <= rare_term_max_anchors for term in terms)
 
 
 def _finalize_anchor_aliases(
     raw: Sequence[Mapping[str, Any]],
     other_candidates: Sequence[_Candidate] = (),
+    *,
+    stopwords: frozenset[str] = STOPWORDS,
+    rare_term_max_anchors: int = RARE_TERM_MAX_ANCHORS,
+    semantic_registry: Any = None,
 ) -> tuple[list[_Candidate], dict[str, set[str]]]:
     """Build every PAGE anchor's `_Candidate`, adding a derived short name as
     an alias only while BOTH hold: no other anchor's names — title, alias, or
@@ -923,7 +1090,7 @@ def _finalize_anchor_aliases(
 
     derived_key_by_anchor: dict[str, str] = {}
     for entry in raw:
-        derived = derived_short_name(entry["title"])
+        derived = derived_short_name(entry["title"], stopwords=stopwords)
         key = normalize(derived) if derived else ""
         if key:
             derived_key_by_anchor[entry["anchor_id"]] = key
@@ -936,7 +1103,7 @@ def _finalize_anchor_aliases(
         if (
             key is not None
             and name_owners.get(key) == {entry["anchor_id"]}
-            and _derived_name_is_rare(key, term_owners)
+            and _derived_name_is_rare(key, term_owners, rare_term_max_anchors=rare_term_max_anchors)
         ):
             aliases = (*aliases, key)
         title = str(entry["title"])
@@ -953,35 +1120,54 @@ def _finalize_anchor_aliases(
                 signature=_signature(title, entry["body"]),
                 aliases=aliases,
                 terms=terms_of(" ".join((title, *aliases, *sections, *tags))),
-                categories=_categories(sections, tags),
+                categories=_categories(sections, tags, semantic_registry=semantic_registry),
                 source_signature=entry["source_signature"],
+                learned_rejected=int(entry.get("learned_rejected") or 0),
             )
         )
     return candidates, term_owners
 
 
-def _page_anchor_kind(rel: str, frontmatter: Mapping[str, Any], *, kb: str) -> str | None:
+def _page_anchor_kind(
+    rel: str, frontmatter: Mapping[str, Any], *, kb: str, conventions: Any
+) -> str | None:
     """Which anchor kind a walked page is, or None when it is not an anchor.
 
     Deliberately narrow. A note is not an anchor: it is what a lane retrieves
     once an anchor resolves, and admitting every note would turn the catalogue
     into a second copy of the corpus.
+
+    `conventions` (an `activation_conventions.Conventions`) governs `resource`
+    and `hub` membership; the one caller (`_walk_page_entries`) loads it once
+    per build and passes it here for every page, so the effective registry
+    is never re-read per page. `entity` stays keyed on the hardcoded
+    `Entities` folder plus a `type: entity` frontmatter value — that kind is
+    not configurable through this registry (design.md decision 3).
     """
+    from . import activation_conventions, vault
+
     inside = rel.removeprefix(f"{kb}/")
     head = inside.split("/", 1)[0]
     if head == "Entities":
         return "entity" if normalize(frontmatter.get("type")) == "entity" else None
-    if head in {"Products", "Systems"}:
-        return "resource"
-    if head in _RAW_MATERIAL_FOLDERS:
-        # `Sources/` and `Evidence/` are immutable raw material. A captured
-        # article or a preserved receipt that happens to carry `tags: [hub]` is
-        # evidence ABOUT the world, not a durable anchor of the user's own
-        # structure, and admitting it would let raw material name itself as the
-        # subject of a turn.
+    # Append-only raw material (`Sources/`, `Evidence/`) and the governance
+    # trees (`_Schema`, `_Governance`, `_Adoption`) are never an anchor,
+    # whatever their tags or type — a captured article or a preserved receipt
+    # tagged `hub` is evidence ABOUT the world, not a durable anchor of the
+    # user's own structure, and a page of the product's own doctrine is
+    # operational state, not knowledge. Neither exclusion is configurable
+    # through the conventions override.
+    if head in _GOVERNANCE_TREES or vault.in_append_only_tree(inside) is not None:
         return None
-    if "hub" in {normalize(tag) for tag in _strings(frontmatter.get("tags"))}:
-        return "hub"
+    directory = inside.rsplit("/", 1)[0] if "/" in inside else ""
+    directory_segments = tuple(normalize(segment) for segment in directory.split("/")) if directory else ()
+    tags = tuple(normalize(tag) for tag in _strings(frontmatter.get("tags")))
+    type_value = normalize(frontmatter.get("type"))
+    for kind in ("resource", "hub"):
+        if activation_conventions.anchor_membership(
+            conventions, kind=kind, directory_segments=directory_segments, tags=tags, type_value=type_value
+        ):
+            return kind
     return None
 
 
@@ -1232,6 +1418,9 @@ def _resolve_links(
 
 _CACHE_LOCK = threading.Lock()
 _ROW_CACHE: dict[Path, tuple[tuple[int, int, int], tuple[AnchorRow, ...]]] = {}
+#: `index_meta.learned_alias_rejected`, read with the rows and on the same
+#: token, so reporting it costs the request nothing.
+_REJECTED_CACHE: dict[Path, tuple[tuple[int, int, int], int]] = {}
 
 
 # --------------------------------------------------------------------------- #
@@ -1653,6 +1842,31 @@ class WorkingSetIndex:
         elif int(stored[0]) != SCHEMA_VERSION:
             self._wipe(conn)
 
+        # A conventions edit is handled EXACTLY like a schema-version mismatch
+        # (`make-activation-conventions-vault-owned`, design.md decision 5):
+        # the digest is over the EFFECTIVE conventions, so a rule change alone
+        # — no vault file touched — still wipes and rebuilds every derived
+        # alias and term count measured against the old list.
+        from . import activation_conventions
+
+        conventions_hash = activation_conventions.load_conventions(self.vault_root).conventions_hash
+        stored_conventions = conn.execute(
+            "SELECT value FROM meta WHERE key = 'conventions_hash'"
+        ).fetchone()
+        if stored_conventions is None:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('conventions_hash', ?)",
+                (conventions_hash,),
+            )
+            conn.commit()
+        elif str(stored_conventions[0]) != conventions_hash:
+            self._wipe(conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('conventions_hash', ?)",
+                (conventions_hash,),
+            )
+            conn.commit()
+
     def _wipe(self, conn: sqlite3.Connection) -> None:
         """Scoped wipe: the derived rows go, the generation token keeps counting.
 
@@ -1768,9 +1982,24 @@ class WorkingSetIndex:
             if cached is not None and cached[0] == token:
                 return cached[1]
         rows = self._read_rows(conn)
+        try:
+            found = conn.execute(
+                "SELECT value FROM index_meta WHERE key = 'learned_alias_rejected'"
+            ).fetchone()
+            rejected = int(found[0]) if found else 0
+        except (sqlite3.Error, ValueError, TypeError):
+            rejected = 0
         with _CACHE_LOCK:
             _ROW_CACHE[self.path] = (token, rows)
+            _REJECTED_CACHE[self.path] = (token, rejected)
         return rows
+
+    def learned_aliases_rejected(self) -> int:
+        """How many `learned_aliases` entries the last build skipped, as of the
+        rows `anchors()` last served. No read of its own."""
+        with _CACHE_LOCK:
+            cached = _REJECTED_CACHE.get(self.path)
+        return cached[1] if cached is not None else 0
 
     def _read_rows(self, conn: sqlite3.Connection) -> tuple[AnchorRow, ...]:
         aliases: dict[str, list[str]] = {}
@@ -1988,6 +2217,11 @@ class WorkingSetIndex:
                     "('freshness_key', ?)",
                     (freshness_stamp,),
                 )
+            conn.execute(
+                "INSERT OR REPLACE INTO index_meta (key, value) VALUES "
+                "('learned_alias_rejected', ?)",
+                (str(sum(candidate.learned_rejected for candidate in candidates)),),
+            )
             generation = sidecar_store.bump_meta(conn, "generation")
             # The whole token, inside the same transaction that bumped it: the
             # registry is keyed on the sidecar that issued a generation, and
@@ -2058,8 +2292,20 @@ class WorkingSetIndex:
         page name must not duplicate a collection's own title, and the count
         `rare_term` and the derived-name rarity gate measure against must
         cover exactly the anchors this index actually holds, of every kind.
+
+        The effective activation-conventions registry is loaded ONCE here and
+        threaded through the whole build — anchor membership, the skip list
+        and the stopword/rarity threshold every derived-name decision in this
+        build is measured against are the same registry read (`make-
+        activation-conventions-vault-owned`).
         """
-        raw_pages, outbound, names, project_members = _walk_page_entries(self.vault_root)
+        from . import activation_conventions, semantic_language_registry
+
+        conventions = activation_conventions.load_conventions(self.vault_root).conventions
+        semantic_registry = semantic_language_registry.load_registry(self.vault_root)
+        raw_pages, outbound, names, project_members = _walk_page_entries(
+            self.vault_root, conventions=conventions
+        )
         records, plans = _collection_candidates(self.vault_root)
         projects, project_edges = _project_candidates(self.vault_root, project_members)
 
@@ -2086,7 +2332,13 @@ class WorkingSetIndex:
             c for c in (*records, *plans, *projects) if c.anchor_id in kept_ids
         ]
 
-        pages, term_owners = _finalize_anchor_aliases(raw_pages, other_candidates)
+        pages, term_owners = _finalize_anchor_aliases(
+            raw_pages,
+            other_candidates,
+            stopwords=conventions.stopwords,
+            rare_term_max_anchors=conventions.rare_term_max_anchors,
+            semantic_registry=semantic_registry,
+        )
         candidates = [*pages, *other_candidates]
         anchor_paths = {
             candidate.path: candidate.anchor_id

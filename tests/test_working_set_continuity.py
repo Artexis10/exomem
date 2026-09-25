@@ -46,6 +46,7 @@ NONSENSE_TURN = "zqxwvu plonktastic frobnitz quibblewhomp"
 IDENTITY = "0:12345"
 OTHER_IDENTITY = "0:99999"
 ROLES_HASH = "abc"
+CONVENTIONS_HASH = "conv0"
 
 
 # --------------------------------------------------------------------------- #
@@ -96,6 +97,7 @@ def _token(
     *,
     identity: str = IDENTITY,
     roles_hash: str = ROLES_HASH,
+    conventions_hash: str = CONVENTIONS_HASH,
     generation: int = 3,
     refs: tuple[str, ...] = ("a.md",),
     roles: tuple[str, ...] = ("resources",),
@@ -103,6 +105,7 @@ def _token(
     return runtime_module.encode_continuity(
         identity=identity,
         roles_hash=roles_hash,
+        conventions_hash=conventions_hash,
         generation=generation,
         refs=refs,
         roles=roles,
@@ -180,7 +183,7 @@ def test_the_token_is_opaque_base64_with_no_padding_or_whitespace() -> None:
 def test_an_absent_token_is_reported_absent() -> None:
     for absent in (None, ""):
         refs, state = runtime_module.read_continuity(
-            absent, identity=IDENTITY, roles_hash=ROLES_HASH
+            absent, identity=IDENTITY, roles_hash=ROLES_HASH, conventions_hash=CONVENTIONS_HASH
         )
         assert refs == frozenset()
         assert state == runtime_module.CONTINUITY_ABSENT
@@ -197,7 +200,7 @@ def test_an_absent_token_is_reported_absent() -> None:
 )
 def test_an_undecodable_token_is_stale(token: str) -> None:
     refs, state = runtime_module.read_continuity(
-        token, identity=IDENTITY, roles_hash=ROLES_HASH
+        token, identity=IDENTITY, roles_hash=ROLES_HASH, conventions_hash=CONVENTIONS_HASH
     )
 
     assert refs == frozenset()
@@ -220,7 +223,7 @@ def _raw_token(body: str) -> str:
 #: The identity and roles hash a forged token would carry to get past the two
 #: equality checks, so each shape below is refused by the DECODER rather than by
 #: happening not to match this vault.
-_FORGED_HEAD = f'"identity":"{IDENTITY}","roles_hash":"{ROLES_HASH}",'
+_FORGED_HEAD = f'"identity":"{IDENTITY}","roles_hash":"{ROLES_HASH}","conventions_hash":"{CONVENTIONS_HASH}",'
 
 
 def _forged(fields: str) -> str:
@@ -267,7 +270,7 @@ FORGED_TOKENS = {
 @pytest.mark.parametrize("token", FORGED_TOKENS.values(), ids=FORGED_TOKENS.keys())
 def test_a_forged_token_is_stale_and_never_raises(token: str) -> None:
     refs, state = runtime_module.read_continuity(
-        token, identity=IDENTITY, roles_hash=ROLES_HASH
+        token, identity=IDENTITY, roles_hash=ROLES_HASH, conventions_hash=CONVENTIONS_HASH
     )
 
     assert refs == frozenset()
@@ -346,7 +349,7 @@ def test_a_token_at_the_refs_ceiling_still_applies() -> None:
     refs = tuple(f"a{index}.md" for index in range(runtime_module.CONTINUITY_MAX_REFS))
 
     _kept, state = runtime_module.read_continuity(
-        _token(refs=refs), identity=IDENTITY, roles_hash=ROLES_HASH
+        _token(refs=refs), identity=IDENTITY, roles_hash=ROLES_HASH, conventions_hash=CONVENTIONS_HASH
     )
 
     assert state == runtime_module.CONTINUITY_APPLIED
@@ -355,7 +358,10 @@ def test_a_token_at_the_refs_ceiling_still_applies() -> None:
 
 def test_a_token_from_another_index_is_stale() -> None:
     refs, state = runtime_module.read_continuity(
-        _token(identity=OTHER_IDENTITY), identity=IDENTITY, roles_hash=ROLES_HASH
+        _token(identity=OTHER_IDENTITY),
+        identity=IDENTITY,
+        roles_hash=ROLES_HASH,
+        conventions_hash=CONVENTIONS_HASH,
     )
 
     assert refs == frozenset()
@@ -364,7 +370,25 @@ def test_a_token_from_another_index_is_stale() -> None:
 
 def test_a_token_under_another_roles_hash_is_stale() -> None:
     refs, state = runtime_module.read_continuity(
-        _token(roles_hash="different"), identity=IDENTITY, roles_hash=ROLES_HASH
+        _token(roles_hash="different"),
+        identity=IDENTITY,
+        roles_hash=ROLES_HASH,
+        conventions_hash=CONVENTIONS_HASH,
+    )
+
+    assert refs == frozenset()
+    assert state == runtime_module.CONTINUITY_STALE
+
+
+def test_a_token_minted_under_other_conventions_is_stale() -> None:
+    """`make-activation-conventions-vault-owned`: `conventions_hash` is
+    checked exactly like `roles_hash` — a token minted before a conventions
+    edit reports `stale` after it, and changes nothing."""
+    refs, state = runtime_module.read_continuity(
+        _token(conventions_hash="different"),
+        identity=IDENTITY,
+        roles_hash=ROLES_HASH,
+        conventions_hash=CONVENTIONS_HASH,
     )
 
     assert refs == frozenset()
@@ -379,6 +403,7 @@ def test_any_generation_of_the_same_index_stays_valid(generation: int) -> None:
         _token(generation=generation, refs=("a.md", "b.md")),
         identity=IDENTITY,
         roles_hash=ROLES_HASH,
+        conventions_hash=CONVENTIONS_HASH,
     )
 
     assert refs == frozenset({"a.md", "b.md"})
@@ -392,7 +417,7 @@ def test_an_unstamped_index_has_no_identity_and_never_applies_a_token() -> None:
     assert runtime_module.index_identity_from_token((0, 4, 0)) == ""
 
     refs, state = runtime_module.read_continuity(
-        _token(identity=""), identity="", roles_hash=ROLES_HASH
+        _token(identity=""), identity="", roles_hash=ROLES_HASH, conventions_hash=CONVENTIONS_HASH
     )
 
     assert refs == frozenset()
@@ -541,7 +566,12 @@ def test_the_override_of_an_unknown_ref_yields_no_candidate() -> None:
 
 def test_a_token_and_an_override_enter_the_packet_cache_key() -> None:
     base = dict(
-        freshness_key="k", index_generation=3, roles_hash="abc", turn="t", max_chars=4000
+        freshness_key="k",
+        index_generation=3,
+        roles_hash="abc",
+        conventions_hash=CONVENTIONS_HASH,
+        turn="t",
+        max_chars=4000,
     )
 
     plain = runtime_module.cache_key(**base)
@@ -552,6 +582,9 @@ def test_a_token_and_an_override_enter_the_packet_cache_key() -> None:
 
     assert len({plain, with_token, with_other, with_anchor, with_other_anchor}) == 5
     assert runtime_module.cache_key(**base, continuity=_token()) == with_token
+
+    other_conventions = dict(base, conventions_hash="different")
+    assert runtime_module.cache_key(**other_conventions) != plain
 
     signature = inspect.signature(runtime_module.cache_key)
     assert "purpose" not in signature.parameters
@@ -659,13 +692,14 @@ def test_a_surrogate_ref_round_trips_rather_than_being_dropped() -> None:
     token = runtime_module.encode_continuity(
         identity=IDENTITY,
         roles_hash=ROLES_HASH,
+        conventions_hash=CONVENTIONS_HASH,
         generation=1,
         refs=(SURROGATE_REF,),
         roles=("resources",),
     )
 
     refs, state = runtime_module.read_continuity(
-        token, identity=IDENTITY, roles_hash=ROLES_HASH
+        token, identity=IDENTITY, roles_hash=ROLES_HASH, conventions_hash=CONVENTIONS_HASH
     )
 
     assert state == runtime_module.CONTINUITY_APPLIED
@@ -678,6 +712,7 @@ def test_the_codec_is_symmetric_about_surrogates() -> None:
     token = runtime_module.encode_continuity(
         identity=IDENTITY,
         roles_hash=ROLES_HASH,
+        conventions_hash=CONVENTIONS_HASH,
         generation=1,
         refs=(SURROGATE_REF, "plain.md"),
         roles=(),
@@ -760,6 +795,7 @@ def test_a_valid_token_naming_nothing_is_reported_stale(
     nowhere = runtime_module.encode_continuity(
         identity=payload["identity"],
         roles_hash=payload["roles_hash"],
+        conventions_hash=payload["conventions_hash"],
         generation=payload["generation"],
         refs=["Knowledge Base/Notes/nowhere.md"],
         roles=payload["roles"],

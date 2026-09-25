@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    activation_conventions,
     context_roles,
     sidecar_store,
     working_set,
@@ -132,6 +133,7 @@ def cache_key(
     freshness_key: Any,
     index_generation: int,
     roles_hash: str,
+    conventions_hash: str,
     turn: str,
     max_chars: int,
     retrieval_paths: frozenset[str] | set[str] | None = None,
@@ -139,6 +141,7 @@ def cache_key(
     anchor: str | None = None,
     continuity_refs: frozenset[str] | set[str] = frozenset(),
     heat_digest: str = "",
+    conventions_turn_hash: str = "",
 ) -> tuple:
     """The packet identity.
 
@@ -157,6 +160,11 @@ def cache_key(
     (`visible_continuity_refs`), for the reason `retrieval_paths` is here: one
     token read by two audiences is two packets.
 
+    `conventions_hash` joins `roles_hash` for the same reason (`make-
+    activation-conventions-vault-owned`): a conventions edit changes anchor
+    membership, state fields, stopwords and the rarity threshold, so a packet
+    compiled under the previous conventions must never be served after it.
+
     `purpose` is deliberately not a parameter: it may widen or narrow what an
     audience sees, so a purpose-keyed cache would be a second, weaker copy of
     the release plane (design D7).
@@ -168,11 +176,18 @@ def cache_key(
     external burst, which record nothing, costs no cache hits. It carries the
     caller's own session and workspace tiers (ruling S5-1), so two parallel
     sessions asking "continue" are two packets.
+
+    `conventions_turn_hash` is the digest of the vault's referential
+    vocabulary (close-memory-loop step 5). A learned cue changes how a turn is
+    analysed and nothing the index holds, so it moves this key and neither the
+    index generation nor `conventions_hash`, which the continuity token
+    carries: a learned cue strands no conversation.
     """
     return (
         tuple(freshness_key) if isinstance(freshness_key, (list, tuple)) else str(freshness_key),
         int(index_generation),
         str(roles_hash),
+        str(conventions_hash),
         str(turn),
         int(max_chars),
         retrieval_digest(retrieval_paths),
@@ -181,6 +196,7 @@ def cache_key(
         str(anchor or ""),
         bool(os.environ.get("EXOMEM_DISABLE_EMBEDDINGS")),
         str(heat_digest),
+        str(conventions_turn_hash),
     )
 
 
@@ -251,6 +267,7 @@ def encode_continuity(
     *,
     identity: str,
     roles_hash: str,
+    conventions_hash: str,
     generation: int,
     refs: Iterable[str],
     roles: Iterable[str],
@@ -273,6 +290,7 @@ def encode_continuity(
         "v": CONTINUITY_VERSION,
         "identity": str(identity),
         "roles_hash": str(roles_hash),
+        "conventions_hash": str(conventions_hash),
         "generation": int(generation),
         "refs": sorted({str(ref) for ref in refs if str(ref)}),
         # RESERVED. The delta requires the selected roles in the token and they
@@ -331,9 +349,12 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
         return None
     identity = payload.get("identity")
     roles_hash = payload.get("roles_hash")
+    conventions_hash = payload.get("conventions_hash")
     refs = payload.get("refs")
     roles = payload.get("roles")
     if not isinstance(identity, str) or not isinstance(roles_hash, str):
+        return None
+    if not isinstance(conventions_hash, str):
         return None
     if not isinstance(refs, list) or not isinstance(roles, list):
         return None
@@ -351,6 +372,7 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
     return {
         "identity": identity,
         "roles_hash": roles_hash,
+        "conventions_hash": conventions_hash,
         "generation": generation,
         "refs": [ref for ref in refs if isinstance(ref, str) and ref],
         "roles": [role for role in roles if isinstance(role, str) and role],
@@ -370,7 +392,7 @@ def continuity_minted_ns(token: str | None) -> int | None:
 
 
 def read_continuity(
-    token: str | None, *, identity: str, roles_hash: str
+    token: str | None, *, identity: str, roles_hash: str, conventions_hash: str
 ) -> tuple[frozenset[str], str]:
     """`(refs to qualify, reported state)` for one inbound token.
 
@@ -379,6 +401,10 @@ def read_continuity(
     refs are re-validated later, by matching against the candidates this turn
     actually produced — a ref the vault has since retired matches nothing and is
     dropped without a word.
+
+    `conventions_hash` is checked exactly like `roles_hash`: a token minted
+    under other conventions reports `stale` (`make-activation-conventions-
+    vault-owned`).
     """
     if not str(token or "").strip():
         return frozenset(), CONTINUITY_ABSENT
@@ -397,6 +423,8 @@ def read_continuity(
     if not identity or payload["identity"] != identity:
         return frozenset(), CONTINUITY_STALE
     if payload["roles_hash"] != str(roles_hash):
+        return frozenset(), CONTINUITY_STALE
+    if payload["conventions_hash"] != str(conventions_hash):
         return frozenset(), CONTINUITY_STALE
     return frozenset(payload["refs"]), CONTINUITY_APPLIED
 
@@ -451,6 +479,7 @@ def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
         return encode_continuity(
             identity=identity,
             roles_hash=str(generation.get("roles_hash") or ""),
+            conventions_hash=str(generation.get("conventions_hash") or ""),
             generation=int(generation.get("index_generation") or 0),
             refs=refs,
             roles=[role for role in roles if role],
@@ -1084,6 +1113,7 @@ def serve(
     root = Path(vault_root)
     limit = working_set.clamp_budget(max_chars)
     registry = context_roles.load_roles(root)
+    conventions_registry = activation_conventions.load_conventions(root)
     stamp = _key_text(freshness_key)
     with working_set._span(timings, "working_set.index"):
         state, index, stale = ensure_index(root, freshness_stamp=stamp)
@@ -1097,6 +1127,7 @@ def serve(
                 "index_generation": 0,
                 "continuity": unevaluated_continuity(continuity),
                 **registry.generation_block(),
+                **conventions_registry.generation_block(),
             },
         )
 
@@ -1113,6 +1144,7 @@ def serve(
                 "lexical_evidence": "stale",
                 "continuity": unevaluated_continuity(continuity),
                 **registry.generation_block(),
+                **conventions_registry.generation_block(),
             },
         )
 
@@ -1130,6 +1162,7 @@ def serve(
             continuity,
             identity=index_identity(index),
             roles_hash=registry.roles_hash,
+            conventions_hash=conventions_registry.conventions_hash,
         )
     except Exception:  # noqa: BLE001 - the whole operation is additive and abstains
         log.warning("continuity evaluation failed; ignoring the token", exc_info=True)
@@ -1154,6 +1187,7 @@ def serve(
         freshness_key=freshness_key,
         index_generation=index.generation(),
         roles_hash=registry.roles_hash,
+        conventions_hash=conventions_registry.conventions_hash,
         turn=turn,
         max_chars=limit,
         retrieval_paths=retrieval_paths,
@@ -1161,6 +1195,7 @@ def serve(
         anchor=anchor,
         continuity_refs=continuity_refs,
         heat_digest=heat_digest,
+        conventions_turn_hash=conventions_registry.turn_hash,
     )
     cache_identity = (str(root.absolute()), key, lexical_state, index.token())
     with _CACHE_LOCK:
@@ -1181,6 +1216,7 @@ def serve(
                 # reported rather than the pre-index placeholder.
                 "continuity": continuity_state,
                 **registry.generation_block(),
+                **conventions_registry.generation_block(),
             },
         )
 

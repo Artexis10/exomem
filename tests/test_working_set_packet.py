@@ -1424,7 +1424,7 @@ def test_a_named_anchor_beats_the_hottest_page(stateful_vault: Path) -> None:
     # not referential at all (R-G): the named anchor wins by construction.
     # `resolve()`'s own guard for the case is pinned in the resolver tests.
     analysis = working_set_resolve.analyze_turn(turn)
-    assert "referential" in analysis.cues
+    assert working_set_resolve.analyze_turn("continue").referential
     assert not analysis.referential
 
     packet = working_set.compile_packet(stateful_vault, turn=turn, max_chars=4000)

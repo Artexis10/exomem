@@ -2188,6 +2188,7 @@ def _forged_token(vault: Path, ref: str) -> str:
     return working_set_runtime.encode_continuity(
         identity=payload["identity"],
         roles_hash=payload["roles_hash"],
+        conventions_hash=payload["conventions_hash"],
         generation=payload["generation"],
         refs=[ref],
         roles=[],

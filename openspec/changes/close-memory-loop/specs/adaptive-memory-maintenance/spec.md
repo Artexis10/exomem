@@ -8,11 +8,43 @@ Keep working context and knowledge organisation useful as the vault evolves thro
 
 Corrections and observed capture/activation misses SHALL produce reviewable evidence-bound candidates for registered roles, cues, aliases, conventions or other supported definitions. The active agent SHALL decide semantics under the applicable typed writer and authority, preserving the current context-role owner-authored override gate. Accepted changes SHALL be versioned, reversible and visible to fresh sessions. Product code SHALL NOT hardcode private entities, suppliers, domains or task phrases. Adaptation SHALL NOT change identity, provenance, authority or abstention invariants, or infer an unregistered authority action from an additive grant.
 
+The sensor for an activation correction SHALL be the agent's admitted `anchor` pick, classified from structure the request already holds and never parsed from the turn's language. A counted miss SHALL record a path, a class, a count and times, and SHALL NOT persist any word of the turn. At most one bounded advisory SHALL ride on the pick's response, after the guard admitted the choice; it SHALL name only existing typed writers and the hash guards they require, SHALL write nothing and grant nothing, SHALL NOT be cached or keyed, and SHALL honour the proactive-capture envelope, family quiet and off, per-item dismissal and snooze by fingerprint, and a per-target cooldown. A learned name SHALL live in the anchor page's `learned_aliases` and SHALL change activation only — never link resolution, egress name matching or identity. A learned referential cue or filler word SHALL live in the vault's activation conventions and SHALL change turn analysis only.
+
 #### Scenario: A correction improves the next session
 
 - **WHEN** an authorized correction revises an applicable context role or vault convention
 - **THEN** a fresh session consumes its current version and the previous version remains attributable and recoverable
 - **AND** the same operation without appropriate authority cannot silently edit the definition
+
+#### Scenario: A correction teaches a name the next session uses
+
+- **WHEN** a turn's words reach no anchor and the agent picks the page the user meant
+- **AND** the agent adds the user's word to that page's `learned_aliases` through `edit_memory` with the advisory's page hash
+- **THEN** a fresh session's turn containing the word resolves the page on `exact_alias`
+- **AND** removing the entry restores the earlier abstention
+
+#### Scenario: A cue is learned in another language
+
+- **WHEN** the agent saves a referential cue in the user's language through `schema_memory save-conventions` with the advisory's conventions hash
+- **THEN** a fresh session's turn made only of that cue resolves the hot referent on recency
+- **AND** no anchor sidecar is rebuilt and no continuity token is stranded
+- **AND** a turn that speaks the cue and names an anchor resolves the named anchor
+
+#### Scenario: A stale advisory is refused
+
+- **WHEN** the page or the conventions changed after the advisory was issued
+- **THEN** the write carrying the advisory's hash is refused by the writer's own guard
+
+#### Scenario: Learning grants nothing
+
+- **WHEN** a pick carries a learning advisory
+- **THEN** no vault file changes, the review state is not stamped, and the packet cache holds no advisory
+
+#### Scenario: A dismissed advisory stays quiet until new evidence
+
+- **WHEN** the agent dismisses an advisory by its ref and fingerprint
+- **THEN** further misses in the same miss bucket carry no advisory
+- **AND** a miss that moves the bucket carries a new one
 
 ### Requirement: Hot profiles remain bounded derived projections
 

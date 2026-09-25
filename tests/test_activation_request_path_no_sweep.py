@@ -1358,6 +1358,39 @@ def test_an_agent_picked_page_holds_the_same_ceilings(
     assert calls.unattributable == 0, calls.report()
 
 
+def test_an_agent_pick_that_fires_the_learning_sensor_holds_the_same_ceilings(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
+) -> None:
+    """Step 5's pick seam at work: a pick whose turn never named the anchor
+    counts a miss and builds the advisory. It adds at most the page read for
+    the writer's hash and the review-state read, and enumerates nothing."""
+    from exomem import capture_sweep
+
+    monkeypatch.setattr(capture_sweep, "_proactive_capture_permitted", lambda: True)
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _write_collection(vault)
+    _warm_activation(vault, warm_managed_cell)
+    _drain_background_walks()
+
+    scheduled = _no_background_walks(monkeypatch)
+    calls = _FilesystemCalls(vault)
+    calls.install(monkeypatch)
+
+    packet = commands.op_activate_context(
+        vault,
+        turn="wie geht es dem Schlitten",
+        anchor="Knowledge Base/Products/Cargo Sled.md",
+    )
+
+    assert scheduled == [], scheduled
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert packet["learning"]["observed"]["class"] == "naming", "the sensor must fire"
+    assert calls.enumerations <= WARM_REQUEST_ENUMERATION_CEILING, calls.report()
+    assert calls.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, calls.report()
+    assert calls.unattributable == 0, calls.report()
+
+
 def test_a_referential_turn_with_a_full_heat_ring_holds_the_same_ceilings(
     vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
 ) -> None:
