@@ -460,32 +460,51 @@ def test_a_legacy_named_owner_binding_cannot_be_promoted_back_into_a_hosted_cell
     assert armed == []
 
 
-def test_every_cleared_setting_clears_its_legacy_alias() -> None:
-    """Every `EXOMEM_*` name hosted mode clears must also clear the `KB_MCP_*`
-    spelling `env_compat.promote_legacy()` would otherwise promote back onto
-    it. This guards the mechanical derivation in `hosted_runtime`: a future
-    addition to `_HOSTED_CLEARED_SETTINGS` cannot silently skip its alias."""
+def _promote_legacy_into(monkeypatch: pytest.MonkeyPatch, process_env: dict[str, str]) -> None:
+    """Run the real `env_compat.promote_legacy()` against `process_env`, the way
+    a child process's own `import exomem` runs it over its inherited env."""
+    from types import SimpleNamespace
+
     from exomem import env_compat
 
-    cleared = set(hosted_runtime._HOSTED_CLEARED_ENV)
-    for name in cleared:
-        if not name.startswith(env_compat.CANONICAL_PREFIX):
-            continue
-        legacy = env_compat.LEGACY_PREFIX + name[len(env_compat.CANONICAL_PREFIX):]
-        assert legacy in cleared, f"{name} is cleared but its legacy alias {legacy} is not"
+    monkeypatch.setattr(env_compat, "os", SimpleNamespace(environ=process_env))
+    env_compat.promote_legacy()
 
 
-@pytest.mark.parametrize(
-    "legacy_alias",
-    sorted(name for name in hosted_runtime._HOSTED_CLEARED_ENV if name.startswith("KB_MCP_")),
+# A literal list, deliberately not derived from `hosted_runtime`: a derivation
+# that dropped an alias must fail here, not silently shrink the parameter set.
+_CLEARED_CANONICAL_SETTINGS = (
+    "EXOMEM_BASE_URL",
+    "EXOMEM_CF_ACCESS_AUD",
+    "EXOMEM_CF_ACCESS_TEAM_DOMAIN",
+    "EXOMEM_GITHUB_USERNAME",
+    "EXOMEM_HOSTED_SERVICE_CREDENTIAL",
+    "EXOMEM_LARGE_UPLOAD_BASE_URL",
+    "EXOMEM_OWNER_OAUTH_SUBJECT",
+    "EXOMEM_REST_API_KEY",
+    "EXOMEM_UPLOAD_TOKEN",
+    "EXOMEM_WRITER_LEASE_PREFERRED",
+    "EXOMEM_WRITER_LEASE_REPLICA_ID",
+    "EXOMEM_WRITER_LEASE_TIMEOUT",
+    "EXOMEM_WRITER_LEASE_TOKEN",
+    "EXOMEM_WRITER_LEASE_TTL",
+    "EXOMEM_WRITER_LEASE_URL",
+    "EXOMEM_WRITER_LEASE_VAULT_ID",
 )
-def test_hosted_mode_clears_every_legacy_alias(tmp_path: Path, legacy_alias: str) -> None:
-    """Set each legacy alias, apply hosted mode's process environment, and
-    confirm the legacy spelling is gone (not merely absent to begin with)."""
+
+
+@pytest.mark.parametrize("canonical", _CLEARED_CANONICAL_SETTINGS)
+def test_a_cleared_setting_cannot_be_re_armed_by_its_legacy_spelling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, canonical: str
+) -> None:
+    """Put only the legacy spelling into the inherited env, apply hosted mode,
+    then promote as a child process would: the canonical name stays absent."""
     config = HostedCellConfig.from_env(_env(tmp_path), require_provisioned=False)
-    process_env = {legacy_alias: "legacy-value-sentinel"}
+    legacy = "KB_MCP_" + canonical[len("EXOMEM_"):]
+    process_env = {legacy: "legacy-value-sentinel"}
     config.apply_process_environment(process_env)
-    assert legacy_alias not in process_env
+    _promote_legacy_into(monkeypatch, process_env)
+    assert canonical not in process_env
 
 
 def test_hosted_config_rejects_protocol_versions_not_implemented_by_this_release(
