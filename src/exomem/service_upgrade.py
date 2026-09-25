@@ -36,6 +36,9 @@ _UV_STDERR_READ_WINDOW_BYTES = 64 * 1024
 #: `@`). Not a shape the shared egress scrubber recognizes on its own, but
 #: exactly what a leaked package-index or git-source URL carries.
 _URL_USERINFO_RE = re.compile(r"(?<=://)[^/\s@]+(?=@)")
+#: The value of a labelled secret assignment such as `UV_INDEX_PASSWORD=...`,
+#: whose value may be too low-entropy for the shared scrubber to recognize.
+_LABELLED_SECRET_RE = re.compile(r"(?i)(password|token|secret)(\s*[=:]\s*)\S+")
 PROFILES = {
     "lean": "",
     "onnx": "embeddings-onnx",
@@ -321,6 +324,7 @@ def _uv_stderr_tail(data: bytes) -> str:
         # remainder of a credential whose prefix was cut. Never emit it.
         data = data.partition(b"\n")[2]
     text = _URL_USERINFO_RE.sub(NOTICE, data.decode("utf-8", errors="replace"))
+    text = _LABELLED_SECRET_RE.sub(lambda match: match.group(1) + match.group(2) + NOTICE, text)
     text, _ = scrub_text(text)
     tail = "\n".join(text.splitlines()[-_UV_STDERR_TAIL_MAX_LINES:]).strip()
     tail_bytes = tail.encode("utf-8")

@@ -345,6 +345,14 @@ def test_uv_stderr_tail_scrubs_token_only_url_userinfo() -> None:
     assert "pypi.example.com/simple/" in tail
 
 
+def test_uv_stderr_tail_scrubs_labelled_password_assignments() -> None:
+    from exomem import service_upgrade
+
+    tail = service_upgrade._uv_stderr_tail(b"UV_INDEX_PASSWORD=S3cr3tTok3n9876 failed")
+    assert "S3cr3tTok3n9876" not in tail
+    assert "failed" in tail
+
+
 def test_runtime_symlink_is_refused_before_operator_lock_creation(tmp_path: Path) -> None:
     actual = tmp_path / "actual"
     actual.mkdir(mode=0o700)
