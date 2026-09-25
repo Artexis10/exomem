@@ -352,7 +352,13 @@ def test_a_superseded_or_retired_hot_page_is_never_offered(heat_vault: Path) -> 
     assert _resolved(packet) == [SLED], (packet.get("abstention"), packet["anchors"])
 
 
-def test_a_withheld_hot_page_abstains_withheld_without_a_runner_up(heat_vault: Path) -> None:
+def test_a_withheld_hot_page_is_absent_for_a_guest(heat_vault: Path) -> None:
+    """Re-based by the round-2 egress ruling (withheld equals absent for
+    heat): the owner's newest work is a page this guest may not see. It used
+    to abstain `withheld` with no runner-up, which told the guest that some
+    page it cannot see was worked on last. The guest's heat now ranks only
+    pages released to it, so its "continue" is answered exactly as if that
+    page had never been touched: from the owner's work it may see."""
     _traced_commit(heat_vault, [SLED])
     _traced_commit(heat_vault, [CARRY_PAGE])
     write_scope(heat_vault, paths="Knowledge Base/Notes/Research/*", name="Research")
@@ -363,10 +369,11 @@ def test_a_withheld_hot_page_abstains_withheld_without_a_runner_up(heat_vault: P
     with request_scope(_external()):
         packet = _continue(heat_vault)
 
-    assert packet["abstained"] is True
-    assert packet["abstention"] == {"reason": "withheld"}
-    assert packet["anchors"] == [], "no runner-up: Cargo Sled was never the referent"
-    assert CARRY_PAGE not in {entry["path"] for entry in packet["recent_context"]}
+    assert packet.get("abstention") != {"reason": "withheld"}, packet.get("abstention")
+    assert _resolved(packet) == [SLED], (packet.get("abstention"), packet["anchors"])
+    served = {item.get("path") for item in packet["anchors"]}
+    served |= {entry["path"] for entry in packet["recent_context"]}
+    assert CARRY_PAGE not in served
 
 
 def test_a_named_rare_anchor_wins_over_the_hottest_page(heat_vault: Path) -> None:
@@ -1012,4 +1019,64 @@ def test_a_corrupt_sidecar_is_rebuilt_and_the_next_edit_leads(heat_vault: Path) 
 
     assert _resolved(packet) == [SLED], (packet.get("abstention"), packet["anchors"])
     assert packet["generation"]["hot_profile"]["state"] == "current"
+
+
+# --------------------------------------------------------------------------- #
+# Round 2: withheld equals absent for heat
+# --------------------------------------------------------------------------- #
+
+_HOUR_NS = 3600 * 1_000_000_000
+
+
+def _guest_continue(vault: Path) -> dict:
+    """A guest's "continue", compiled fresh, less the per-request fields."""
+    working_set_runtime.reset_caches_for_tests()
+    with request_scope(_external()):
+        packet = _continue(vault)
+    return {key: value for key, value in packet.items() if key not in ("continuity", "timings")}
+
+
+def test_a_withheld_page_leaves_no_trace_in_a_guests_packet(heat_vault: Path) -> None:
+    """Review F2 (the twin): the owner worked on nine visible pages in two
+    stretches nine hours apart, and on a withheld page between them, which
+    bridged the gap and moved the reported session start. The guest's packet,
+    `generation` included, is now the same whether or not the withheld page
+    was ever touched."""
+    from exomem import working_set
+
+    _continue(heat_vault)  # the cold seed
+    visible = [
+        rel
+        for rel in (str(page.relative_to(heat_vault)) for page in _pages(heat_vault))
+        if "/Notes/Research/" not in rel
+        and "_collection" not in rel
+        and "/Planning/" not in rel
+        and working_set._recent_reason_for(rel) == "edited"
+    ][:9]
+    assert len(visible) == 9, visible
+    now = time.time_ns()
+    events = [
+        working_set_heat.HeatEvent(now - 50 * _HOUR_NS, visible[0], "work", origin="edit_memory")
+    ]
+    events += [
+        working_set_heat.HeatEvent(now - 41 * _HOUR_NS + n, rel, "work", origin="edit_memory")
+        for n, rel in enumerate(visible[1:])
+    ]
+    assert working_set_heat.append(heat_vault, events)
+    write_scope(heat_vault, paths="Knowledge Base/Notes/Research/*", name="Research")
+    write_rule(heat_vault, ceiling=0)
+    _reset_caches()
+
+    absent = _guest_continue(heat_vault)
+    assert working_set_heat.append(
+        heat_vault,
+        [working_set_heat.HeatEvent(now - 45 * _HOUR_NS, CARRY_PAGE, "work", origin="edit_memory")],
+    )
+    withheld = _guest_continue(heat_vault)
+
+    assert withheld == absent
+    # The owner, who may see the page, does see the work on it.
+    working_set_runtime.reset_caches_for_tests()
+    owner = _continue(heat_vault)
+    assert owner["generation"]["hot_profile"] != absent["generation"]["hot_profile"]
 

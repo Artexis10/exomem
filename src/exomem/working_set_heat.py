@@ -2068,6 +2068,53 @@ def _state(profile: HeatProfile, watcher: str) -> str:
     return "current"
 
 
+#: The released pages a non-owner caller's heat is ranked over, newest
+#: first: far more than any reader needs (a referent's groups, the eight
+#: recent-context slots, the digest's contacts), and a bound on the release
+#: decisions one request can cost.
+RELEASED_PATHS_MAX = 128
+
+
+def released_view(
+    profile: HeatProfile,
+    released: Callable[[str], bool],
+    *,
+    limit: int = RELEASED_PATHS_MAX,
+) -> HeatProfile:
+    """`profile` as a caller who may see only `released` pages ranks it
+    (review F2, withheld equals absent for heat): the newest `limit` released
+    pages' events. A withheld page is skipped without being counted, so every ranking, the
+    session start, the state and the digest are exactly what they would be
+    had the withheld page never been touched."""
+    latest = sorted(
+        (
+            (max(row.deliberate_ns, row.selection_ns, row.contact_ns, row.episode_ns), path)
+            for path, row in profile.all_rows.items()
+        ),
+        key=lambda item: (-item[0], item[1]),
+    )
+    kept: set[str] = set()
+    for _stamp, path in latest:
+        if len(kept) >= limit:
+            break
+        if released(path):
+            kept.add(path)
+    # Served threads are not cut here: every reader ranks them only through
+    # the caller's own `marks`, which `working_set_runtime.visible_marks`
+    # cuts to released pages with the same decision.
+    view = build_profile(
+        (event for event in profile.events if event.path in kept),
+        sessions=profile.sessions,
+        state=profile.state,
+        salt=profile.salt,
+        token=profile.token,
+        tombstones=profile.tombstones,
+        meta=profile.meta,
+    )
+    watcher = profile.state if profile.state in ("partial", "behind") else "current"
+    return with_state(view, _state(view, watcher))
+
+
 def reset_for_tests() -> None:
     """Forget every cached profile and in-process fold state."""
     with _LOCK:

@@ -43,7 +43,7 @@ import sqlite3
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -516,12 +516,31 @@ def visible_continuity_refs(
 VISIBLE_WORKSPACE_MARKS = 8
 
 
+#: `visible_marks` was handed no release decision and takes its own.
+_UNDECIDED = object()
+
+
+def _heat_release_filter(
+    vault_root: Path, *, purpose: str | None = None
+) -> Callable[[str], bool] | None:
+    """The request's one release decision for heat, or `None` when every page
+    is released (a vault that withholds nothing)."""
+    from .governance import egress
+
+    try:
+        return egress.page_release_filter(vault_root, purpose=purpose)
+    except Exception:  # noqa: BLE001 - undecidable is not released
+        log.warning("heat release decision unavailable; releasing nothing", exc_info=True)
+        return lambda _path: False
+
+
 def visible_marks(
     vault_root: Path,
     profile: working_set_heat.HeatProfile,
     attribution: working_set_heat.Attribution | None,
     *,
     purpose: str | None = None,
+    released: Callable[[str], bool] | None | object = _UNDECIDED,
 ) -> dict[str, working_set_heat.SessionMark]:
     """The served threads this caller's tiers may rank, each page of them one
     this audience may see (ruling S5-1).
@@ -531,8 +550,11 @@ def visible_marks(
     principal, so a visibility decision made inside a compiled packet would be
     served to the next audience. A withheld page and a missing one reach the
     ranking as the same nothing. Only the caller's own session and the
-    workspace's newest `VISIBLE_WORKSPACE_MARKS` sessions are looked at; a
-    caller with no keys ranks no thread at all.
+    workspace's newest `VISIBLE_WORKSPACE_MARKS` sessions are looked at, and
+    at most `CONTINUITY_MAX_REFS` pages of each; a caller with no keys ranks
+    no thread at all. `released` is the request's one release decision
+    (`egress.page_release_filter`, `None` when every page is released): the
+    policy is loaded once for every page, never once per page (review F7).
     """
     who = attribution or working_set_heat.Attribution()
     if not who.session and not who.workspace:
@@ -547,14 +569,16 @@ def visible_marks(
             ),
             key=lambda mark: (-mark.seen_ns, mark.session),
         )[:VISIBLE_WORKSPACE_MARKS]
-    from .governance import egress
+    if released is _UNDECIDED:
+        from .governance import egress
 
+        released = egress.page_release_filter(vault_root, purpose=purpose) if wanted else None
     out: dict[str, working_set_heat.SessionMark] = {}
     for mark in wanted:
         kept = tuple(
             path
-            for path in mark.paths
-            if egress.quick_page_visible(vault_root, path, purpose=purpose)
+            for path in mark.paths[:CONTINUITY_MAX_REFS]
+            if released is None or released(path)  # type: ignore[operator]
         )
         out[mark.session] = mark._replace(paths=kept)
     return out
@@ -1144,8 +1168,25 @@ def serve(
         continuity_refs = frozenset()
     with working_set._span(timings, "working_set.heat"):
         heat_profile = working_set_heat.profile(root)
+        owner = working_set_heat._owner_request()
+        keyed = attribution is not None and bool(attribution.session or attribution.workspace)
+        released = (
+            _heat_release_filter(root, purpose=purpose) if keyed or not owner else None
+        )
+        if released is not None and not owner:
+            # Withheld equals absent for heat (review F2): a caller other than
+            # the owner ranks only the pages released to it, so another
+            # audience's work on a page it may not see leaves no trace in its
+            # packet, `generation` included.
+            try:
+                heat_profile = working_set_heat.released_view(heat_profile, released)
+            except Exception:  # noqa: BLE001 - an undecidable view ranks nothing
+                log.warning("heat release view failed; ranking none", exc_info=True)
+                heat_profile = working_set_heat.build_profile((), state="empty")
         try:
-            marks = visible_marks(root, heat_profile, attribution, purpose=purpose)
+            marks = visible_marks(
+                root, heat_profile, attribution, purpose=purpose, released=released
+            )
         except Exception:  # noqa: BLE001 - a thread that cannot be decided is not ranked
             log.warning("session thread visibility check failed; ranking none", exc_info=True)
             marks = {}

@@ -1467,6 +1467,92 @@ def _write_episodes(vault: Path, count: int, *, start: int = 0) -> list[Path]:
     return written
 
 
+def _governance_enumerations(calls: _FilesystemCalls) -> int:
+    return sum(1 for path in calls.enumerated if "/_Governance" in path.replace(os.sep, "/"))
+
+
+def test_a_keyed_turn_on_a_governed_vault_pays_nothing_for_its_threads(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
+) -> None:
+    """Review F7: a keyed caller whose workspace holds nine other sessions'
+    threads, on a governed vault, re-loaded the policy for every thread page
+    (186 enumerations of the governance tree, 1,296 calls). The release
+    decision is taken once per request now, and a thread is cut at
+    `CONTINUITY_MAX_REFS` pages.
+
+    Governed activation already enumerates the governance tree on 0.93.0
+    (12 enumerations for a named turn, 18 for "continue", before any heat
+    existed): that pre-existing cost is not this test's subject. What is: the
+    keyed call pays no more of it than the keyless one, nothing else in the
+    vault is enumerated, and the calls stay under the ceiling."""
+    from test_governance_egress import write_rule, write_scope
+
+    from exomem import working_set_heat
+
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _write_collection(vault)
+    write_scope(vault, paths="Knowledge Base/Notes/Research/*", name="Research")
+    write_rule(vault, ceiling=0)
+    now = time.time()
+    pages = sorted((vault / "Knowledge Base").rglob("*.md"))
+    for index, page in enumerate(pages):
+        os.utime(page, (now - 10_000 - index * 2, now - 10_000 - index * 2))
+    _warm_activation(vault, warm_managed_cell)
+    commands.op_activate_context(vault, turn=TURN)
+    _drain_background_walks()
+    rels = [page.relative_to(vault).as_posix() for page in pages]
+    working_pages = [rel for rel in rels if "/_" not in rel and "index" not in rel][:45]
+    now_ns = time.time_ns()
+    assert working_set_heat.append(
+        vault,
+        [
+            working_set_heat.HeatEvent(
+                now_ns - 3_600 * 10**9 + index * 10**6,
+                rels[index % len(rels)],
+                "read" if index % 3 else "work",
+                origin="ring",
+            )
+            for index in range(working_set_heat.RING_MAX)
+        ],
+    )
+    for n in range(9):
+        other = working_set_heat.attribution_for(
+            vault, session=f"other-conversation-{n}", workspace="shared-project"
+        )
+        working_set_heat.note_session(
+            vault,
+            working_set_heat.SessionMark(
+                session=other.session,
+                workspace=other.workspace,
+                client="claude-code",
+                paths=tuple(working_pages[n * 5 : (n + 1) * 5]),
+                minted_ns=now_ns - n,
+                seen_ns=now_ns - n,
+            ),
+        )
+
+    def measure(**keys: str) -> _FilesystemCalls:
+        with monkeypatch.context() as patch:
+            scheduled = _no_background_walks(patch)
+            calls = _FilesystemCalls(vault)
+            calls.install(patch)
+            commands.op_activate_context(vault, turn="continue", **keys)
+        assert scheduled == [], scheduled
+        return calls
+
+    keyless = measure()
+    keyed = measure(session="own-conversation", workspace="shared-project", client="claude-code")
+
+    assert _governance_enumerations(keyed) <= _governance_enumerations(keyless), (
+        keyless.report(),
+        keyed.report(),
+    )
+    assert keyed.enumerations - _governance_enumerations(keyed) == 0, keyed.report()
+    assert keyed.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, keyed.report()
+    assert keyed.unattributable == 0, keyed.report()
+
+
 def _fresh_projection(vault: Path) -> None:
     """Seed the heat projection from the registry the warm-up just built, as a
     cell first serving this vault state does.
