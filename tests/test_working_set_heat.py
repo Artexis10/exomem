@@ -535,6 +535,33 @@ def test_a_corrupt_sidecar_is_wiped_once_and_rebuilt(sidecar_vault) -> None:
     assert "seeded_at_ns" not in rebuilt.meta, "a rebuilt sidecar asks to be seeded again"
 
 
+def test_an_integrity_error_racing_schema_creation_is_not_wiped(
+    sidecar_vault, monkeypatch
+) -> None:
+    """Round 2 recheck (R2-C): `sqlite3.IntegrityError` is a `DatabaseError`
+    subclass two processes can race into while both create the schema on a
+    fresh sidecar -- it is not corruption, and wiping on it would destroy a
+    fresh sidecar's rows for no reason. Only the EXACT type
+    `sqlite3.DatabaseError`, never a subclass, rebuilds (above)."""
+    import sqlite3
+
+    heat.append(sidecar_vault, [ev(T0, SLED, "work")])
+    side = heat.sidecar_path(sidecar_vault)
+    before = side.read_bytes()
+
+    def _raise(conn: sqlite3.Connection) -> None:
+        raise sqlite3.IntegrityError("racing schema creation")
+
+    with monkeypatch.context() as m:
+        m.setattr(heat, "_ensure_schema", _raise)
+        heat.reset_for_tests()
+        assert heat.append(sidecar_vault, [ev(T0 + S, MARIT, "work")]) is False
+
+    assert side.read_bytes() == before, "an IntegrityError must never wipe the sidecar"
+    heat.reset_for_tests()
+    assert [item.path for item in heat.load(sidecar_vault).events] == [SLED]
+
+
 def test_deleting_the_sidecar_costs_only_a_reseed(sidecar_vault) -> None:
     heat.append(sidecar_vault, [ev(T0, SLED, "work")])
     assert heat.load(sidecar_vault).events

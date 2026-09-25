@@ -933,10 +933,14 @@ def _connect(vault_root: Path, *, rebuilt: bool = False) -> sqlite3.Connection |
     """One short-lived connection with the seam's busy timeout, or `None`
     under the kill switch or when the file cannot be opened.
 
-    A file that is not a database (`DatabaseError` that is not the busy
-    `OperationalError`) is derived state gone bad: it is removed with its
-    journal, once, and rebuilt empty, which asks for a reseed. A busy one is
-    only skipped: the caller drops its event and fails nothing."""
+    A file that is not a database (`type(exc) is sqlite3.DatabaseError`,
+    never a subclass) is derived state gone bad: it is removed with its
+    journal, once, and rebuilt empty, which asks for a reseed. A busy one
+    (`OperationalError`) is only skipped: the caller drops its event and
+    fails nothing. Neither is any OTHER `DatabaseError` subclass --
+    `IntegrityError` from two processes racing to create the schema on a
+    fresh sidecar is not corruption, and wiping on it would destroy a fresh
+    sidecar's rows for no reason (review R2-C)."""
     if disabled():
         return None
     try:
@@ -958,8 +962,11 @@ def _connect(vault_root: Path, *, rebuilt: bool = False) -> sqlite3.Connection |
         log.debug("heat sidecar busy", exc_info=True)
         conn.close()
         return None
-    except sqlite3.DatabaseError:
+    except sqlite3.DatabaseError as exc:
         conn.close()
+        if type(exc) is not sqlite3.DatabaseError:
+            log.debug("heat sidecar schema error (not corruption)", exc_info=True)
+            return None
         if rebuilt:
             log.debug("heat sidecar still unreadable after a rebuild", exc_info=True)
             return None
