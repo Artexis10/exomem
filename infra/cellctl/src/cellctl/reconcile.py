@@ -568,6 +568,11 @@ async def reconcile_once(
             observations[row.cell_id] = cluster.observe(row.cell_id, namespace_name(row.cell_id))
         except Exception as error:  # noqa: BLE001
             logger.error("cellctl observe failed for cell %s: %s", row.cell_id, _describe_error(error))
+    # A non-deleted row that could not be observed may be the owner's canary
+    # or hold an upgrade, restore or backup slot. Deciding fleet-wide without
+    # it could pick a tenant as canary or start a second upgrade, so this
+    # pass starts nothing fleet-wide; per-row work still runs.
+    fleet_unobserved = any(row.cell_id not in observations and row.desired_state != "deleted" for row in rows)
     rows = [row for row in rows if row.cell_id in observations]
 
     non_deleted_rows = [row for row in rows if row.desired_state != "deleted"]
@@ -596,20 +601,26 @@ async def reconcile_once(
     parked = frozenset(cell_id for cell_id, record in refusal_records.items() if now < record.retry_at)
     statefulset_blocked = frozenset(cell_id for cell_id in parked if refusal_records[cell_id].statefulset_blocked)
 
-    upgrade_candidate = select_upgrade_candidate(
-        non_deleted_rows,
-        observations,
-        rollout,
-        cell_image,
-        now=now,
-        any_cell_already_upgrading=any_upgrading or any_restoring,
-        refused=refused,
-    )
-    await _publish_parked_canary(connection, rollout, non_deleted_rows, observations, cell_image, refused)
-    backup_candidates = _select_backup_candidates(non_deleted_rows, observations, now, config, statefulset_blocked)
-    render_digest_candidate = _select_render_digest_candidate(
-        non_deleted_rows, observations, render_digests, now, config, parked, statefulset_blocked
-    )
+    upgrade_candidate: str | None = None
+    backup_candidates: set[str] = set()
+    render_digest_candidate: str | None = None
+    if fleet_unobserved:
+        logger.warning("cellctl: a cell could not be observed; no upgrade, backup or re-render starts this pass")
+    else:
+        upgrade_candidate = select_upgrade_candidate(
+            non_deleted_rows,
+            observations,
+            rollout,
+            cell_image,
+            now=now,
+            any_cell_already_upgrading=any_upgrading or any_restoring,
+            refused=refused,
+        )
+        await _publish_parked_canary(connection, rollout, non_deleted_rows, observations, cell_image, refused)
+        backup_candidates = _select_backup_candidates(non_deleted_rows, observations, now, config, statefulset_blocked)
+        render_digest_candidate = _select_render_digest_candidate(
+            non_deleted_rows, observations, render_digests, now, config, parked, statefulset_blocked
+        )
 
     for row in rows:
         try:

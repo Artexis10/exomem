@@ -2054,3 +2054,78 @@ async def test_a_failing_pass_logs_only_the_exception_class(cell_db: CellDatabas
     text = _rendered(caplog)
     assert any("pass failed" in line and "RuntimeError" in line for line in text.splitlines()), text
     assert _LEAK_SENTINEL not in text, text
+
+
+# --- a row that fails to observe freezes fleet-wide selection -------------------
+
+
+class _ObserveFailsFor(FakeClusterGateway):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failing: set[str] = set()
+
+    def observe(self, cell_id: str, namespace: str) -> ClusterObservation:
+        if cell_id in self.failing:
+            raise RuntimeError("simulated observe() failure")
+        return super().observe(cell_id, namespace)
+
+
+async def test_an_owner_that_fails_to_observe_never_lets_a_tenant_become_the_canary(cell_db: CellDatabase) -> None:
+    # Dropping the owner's row made the lowest remaining priority the owner,
+    # so a tenant started an upgrade on an untested image.
+    owner, tenant = "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"
+    await _seed_cell(cell_db, owner, "tenant-a")
+    await _seed_cell(cell_db, tenant, "tenant-b")
+    admin = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
+    try:
+        await admin.execute("UPDATE exomem_cloud_cells SET rollout_priority = 0 WHERE cell_id = $1", owner)
+    finally:
+        await admin.close()
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = _ObserveFailsFor()
+    memory = reconcile.LoopMemory()
+    now = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    try:
+        await _converge_all(connection, cluster, [owner, tenant], now, memory)
+        await _set_cell_image(cell_db, IMAGE_B)
+        cluster.failing = {owner}
+        for step in range(3):
+            await _pass(connection, cluster, now + timedelta(seconds=5 * (step + 1)), memory=memory)
+            cluster.observations[tenant] = _observed_from_applied(cluster, tenant)
+        rows = {row.cell_id: row for row in await db.select_all_rows(connection)}
+        assert rows[tenant].hold_kind is None
+        statefulset = cluster.applied[(namespace_name(tenant), "StatefulSet", "cell")]
+        assert statefulset["metadata"]["annotations"].get("exomem.io/hold") is None
+    finally:
+        await connection.close()
+
+
+async def test_a_held_cell_that_fails_to_observe_blocks_a_second_upgrade(cell_db: CellDatabase) -> None:
+    # One upgrade at a time: the owner's hold must still count while its
+    # observation is failing.
+    owner, tenant = "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"
+    await _seed_cell(cell_db, owner, "tenant-a")
+    await _seed_cell(cell_db, tenant, "tenant-b")
+    admin = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
+    try:
+        await admin.execute("UPDATE exomem_cloud_cells SET rollout_priority = 0 WHERE cell_id = $1", owner)
+    finally:
+        await admin.close()
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = _ObserveFailsFor()
+    memory = reconcile.LoopMemory()
+    now = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    try:
+        await _converge_all(connection, cluster, [owner, tenant], now, memory)
+        await _set_cell_image(cell_db, IMAGE_B)
+        await _pass(connection, cluster, now + timedelta(seconds=5), memory=memory)
+        rows = {row.cell_id: row for row in await db.select_all_rows(connection)}
+        assert rows[owner].hold_kind == "upgrade"
+        cluster.failing = {owner}
+        for step in range(3):
+            await _pass(connection, cluster, now + timedelta(seconds=10 + 5 * step), memory=memory)
+            cluster.observations[tenant] = _observed_from_applied(cluster, tenant)
+        rows = {row.cell_id: row for row in await db.select_all_rows(connection)}
+        assert rows[tenant].hold_kind is None
+    finally:
+        await connection.close()
