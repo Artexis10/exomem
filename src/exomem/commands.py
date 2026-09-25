@@ -67,6 +67,8 @@ from . import edit_operations as edit_operations_module
 from . import entity_candidates as entity_candidates_module
 from . import entity_types as entity_types_module
 from . import envelope as envelope_module
+from . import episode_memory as episode_memory_module
+from . import episode_nudge as episode_nudge_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
 from . import find as find_module
@@ -2817,6 +2819,29 @@ def _resolve_memory_identifier(vault_root: Path, value: str) -> str:
     return resolved
 
 
+def _refuse_withheld_page_seed(vault_root: Path, path: str) -> None:
+    """Answer a withheld seed page exactly as an absent one, as `op_get` does.
+
+    A context seeded from a page is assembled from that page, so whether it
+    assembles at all is a fact about the page. An absent page already raises
+    here, through the same read `op_get` takes.
+    """
+    try:
+        page = get_page_module.get_page(vault_root, path=path)
+    except get_page_module.GetError as e:
+        raise ValueError(f"{e.code}: {e.reason}") from e
+    released = egress_module.annotate_page(
+        vault_root,
+        page.as_dict(include_raw=False),
+        snapshot_content=page.content,
+        stable_ref=_snapshot_memory_ref(vault_root, page.path, page.frontmatter),
+    )
+    if released is None:
+        raise ValueError(
+            f"NOT_FOUND: file does not exist: {get_page_module.missing_path_for(path)}"
+        )
+
+
 def _snapshot_memory_ref(vault_root: Path, path: str, frontmatter: Mapping[str, Any]) -> str | None:
     """A canonical ref only when the index agrees with this exact snapshot."""
     normalized = memory_refs_module.normalize_id(frontmatter.get("exomem_id"))
@@ -3233,11 +3258,19 @@ def op_graph_context(
     """
     if path:
         path = _resolve_memory_identifier(vault_root, path)
+    # A unit seed is a fact about its parent page: resolved against a withheld
+    # parent it answers as a unit of an absent page does (see
+    # `egress.unit_parent_withheld`).
+    graph_unit_ref = unit_ref
+    if unit_ref is not None and egress_module.unit_parent_withheld(
+        vault_root, unit_ref, purpose=purpose
+    ):
+        graph_unit_ref = egress_module.UNRESOLVABLE_UNIT_REF
     context = epistemic_graph_module.graph_context(
         vault_root,
         path=path,
         query=query,
-        unit_ref=unit_ref,
+        unit_ref=graph_unit_ref,
         categories=categories,
         kinds=kinds,
         depth=depth,
@@ -5600,8 +5633,15 @@ def _release_permits_link_target(vault_root: Path, target: object) -> bool:
     clean = target.strip().replace("\\", "/").strip("/")
     if "/" in clean:
         for candidate in {clean, f"{clean}.md"} if not clean.lower().endswith(".md") else {clean}:
-            if (Path(vault_root) / candidate).is_file():
-                return _permits(candidate)
+            try:
+                candidate_abs, confined = resolve_under_vault(vault_root, candidate)
+            except VaultPathError:
+                # Undecidable the same way a candidate that doesn't resolve
+                # under the vault at all is: not the release plane's
+                # business, and never stat'd or read to get there.
+                continue
+            if candidate_abs.is_file():
+                return _permits(confined)
         return True
     # Bare basename: resolve it the way the matcher does — by filename across
     # the vault. Ambiguity fails closed; a name that matches nothing is simply
@@ -5920,6 +5960,8 @@ def op_activate_context(
     continuity: str | None = None,
     anchor: str | None = None,
     include_timings: bool = False,
+    client: str | None = None,
+    session: str | None = None,
 ) -> dict:
     """Compile durable context for a raw conversational turn, without a query.
 
@@ -5932,10 +5974,12 @@ def op_activate_context(
     current state of any resource whose collection records one.
 
     Every packet leads with `recent_context`: up to eight pages this vault has
-    recently been worked on — edited, read, captured as a session, or left open
-    in Planning — each with its title, why it is recent, the date of that
-    contact and, where the page carries one, its own authored `status` or
-    `summary` line. That line is the page's, not a current-state reading: these
+    recently been worked on — edited, read, captured as a session, recorded as a
+    conversation recap, or left open in Planning — each with its title, why it
+    is recent, the date of that contact and, where the page carries one, its own
+    authored `status` or `summary` line. A recap entry (`why: "episode"`) is the
+    newest revision of one conversation's `episode_memory` record and carries
+    that conversation's `episode` key; follow it with `read_memory`. That line is the page's, not a current-state reading: these
     pages are chosen by recency rather than by the turn, so the block never
     queries a Records collection the turn did not name. `current_state[]`
     remains the carrier for the resolved anchors' governed state.
@@ -5971,6 +6015,11 @@ def op_activate_context(
     ref you mean — an ordinary compiled page takes it exactly as a page reached
     by `retrieval_carried` above does — and that page's own units are served.
 
+    On the MCP door a packet may also carry `episode_due`: after several
+    activations with no `episode_memory` record from this caller, it asks you to
+    record one at the conversation's next decision or stopping point. It is
+    advice, at most once per half hour, and absent when proactive capture is off.
+
     Use `ask_memory` instead when you already know what you are looking for; use
     this when you do not, and follow it with `read_memory` on whatever ref the
     packet points at.
@@ -6005,10 +6054,17 @@ def op_activate_context(
             eligible this way, or one this audience may not see, is refused
             identically and no packet is built.
         include_timings: Include per-stage timings for diagnostics.
+        client: Optional lowercase label for the calling client, e.g.
+            `claude-code`, `codex` or `chatgpt`. Recorded in a host-local
+            activation log only; an invalid label is ignored, never refused.
+        session: Optional opaque conversation identifier, at most 256
+            characters, such as the `episode` key an `episode_memory` record
+            returned. Only a vault-keyed hash of it is recorded. Neither
+            argument ever changes the packet.
 
     Returns: {recent_context, anchors, roles, units, pointers, current_state,
              missing, ambiguity, budget, generation, abstained, abstention?,
-             continuity?}. `recent_context` is first and is present on an
+             continuity?, episode_due?}. `recent_context` is first and is present on an
              abstained packet too. An abstained packet always empties
              `roles`, `units`, `pointers` and `current_state` — no material
              about an anchor that did not resolve — but `anchors` (a
@@ -6048,6 +6104,11 @@ def op_activate_context(
     # remembered at all. It has to cover the abstention paths too: a request
     # that abstains still resolved placement several times on its way there,
     # and the abstention paths are the ones a struggling server takes most.
+    #
+    # `client` and `session` stop HERE: they are recorded by the activation
+    # log after the packet exists and never reach resolution, the packet, its
+    # cache key or the continuity token.
+    started = time.perf_counter()
     with state_paths_module.resolution_scope():
         bound_token = None
         if readiness_module.runtime_managed() and request_budget_module.current() is None:
@@ -6057,7 +6118,7 @@ def op_activate_context(
                 )
             )
         try:
-            return _op_activate_context_body(
+            packet = _op_activate_context_body(
                 vault_root,
                 turn,
                 max_chars,
@@ -6066,9 +6127,28 @@ def op_activate_context(
                 anchor=anchor,
                 include_timings=include_timings,
             )
+        except Exception as error:
+            query_log.log_activation_call(
+                vault_root,
+                packet=None,
+                client=client,
+                session=session,
+                outcome="refused" if isinstance(error, ValueError) else "error",
+                error_code=type(error).__name__,
+                duration_ms=round((time.perf_counter() - started) * 1000, 3),
+            )
+            raise
         finally:
             if bound_token is not None:
                 request_budget_module.reset_current(bound_token)
+    query_log.log_activation_call(
+        vault_root,
+        packet=packet,
+        client=client,
+        session=session,
+        duration_ms=round((time.perf_counter() - started) * 1000, 3),
+    )
+    return packet
 
 
 def _op_activate_context_body(
@@ -6441,6 +6521,11 @@ def _op_activate_context_body(
     )
     if token:
         packet["continuity"] = token
+    # After the guard and never cached: advice to this caller about recording
+    # its conversation, not material about the vault, and it names no page.
+    episode_due = episode_nudge_module.on_activation(vault_root)
+    if episode_due is not None:
+        packet["episode_due"] = episode_due
     if timings is not None:
         packet["timings"] = timings.as_dict()
     # Deliberately NOT `_with_due_state`. That helper consults the emission
@@ -6507,9 +6592,39 @@ def op_read_memory(
             )
         resolved_path = _resolve_memory_identifier(vault_root, path)
         try:
-            page = get_page_module.get_page(vault_root, path=resolved_path)
+            prepared = get_page_module.prepare_page_read(vault_root, path=resolved_path)
         except get_page_module.GetError as e:
             raise ValueError(f"{e.code}: {e.reason}") from e
+        _refuse_policy_tree_read(
+            prepared.resolved_relative,
+            missing_path=prepared.missing_path,
+        )
+        try:
+            page = get_page_module.get_page(vault_root, path=resolved_path, _prepared=prepared)
+        except get_page_module.GetError as e:
+            raise ValueError(f"{e.code}: {e.reason}") from e
+        # The page decision `op_get` takes, taken BEFORE any unit is resolved.
+        # A unit, its parent citation and its surrounding Markdown are the
+        # page's own contents, and whether a reference resolves is itself a
+        # fact about the page. A unit is served only from a page released in
+        # full: its span and context are offsets into the raw body, and below
+        # L6 the released body is a projection no window of which is that
+        # span. Anything less answers exactly as an absent page does.
+        released = egress_module.annotate_page(
+            vault_root,
+            page.as_dict(include_raw=False),
+            snapshot_content=page.content,
+            stable_ref=_snapshot_memory_ref(vault_root, page.path, page.frontmatter),
+        )
+        if (
+            released is None
+            or released.get("body") != page.body
+            or released.get("content_hash") != page.content_hash
+        ):
+            raise ValueError(
+                "NOT_FOUND: file does not exist: "
+                f"{get_page_module.missing_path_for(resolved_path)}"
+            )
         query_log.log_get_call(
             read_path=page.path,
             frontmatter_only=False,
@@ -6519,6 +6634,7 @@ def op_read_memory(
             vault_root,
             page=page,
             unit_ref=unit_ref,
+            frontmatter=released.get("frontmatter"),
         ).as_dict()
     return op_get(
         vault_root,
@@ -7148,6 +7264,81 @@ def op_capture_source(
     return out
 
 
+def op_episode_memory(
+    vault_root: Path,
+    source_schema: object,
+    action: Literal["record", "inspect"],
+    episode: str | None = None,
+    subject: str | None = None,
+    summary: str | None = None,
+    worked_on: list[str] | None = None,
+    decided: list[str] | None = None,
+    open: list[str] | None = None,  # noqa: A002 - the recap's own field name
+    said: list[str] | None = None,
+    about: list[str] | None = None,
+    client: str | None = None,
+) -> dict:
+    """Record what a conversation worked on, decided and left open, for the next session on any client.
+
+    Call `record` once when a conversation reaches a decision or a stopping
+    point, and skip it when nothing durable happened. You write the recap:
+    short one-line items, never a transcript. It is kept as a bounded Source
+    under `Sources/Episodes/`, and the newest recap of each conversation leads
+    the `recent_context` block `activate_context` serves on every client.
+    Recording again under the same `episode` with changed content adds a
+    revision and retires the previous one; an identical retry writes nothing.
+
+    Args:
+        action: `record` writes a recap revision; `inspect` reads this
+            episode's revision history back.
+        episode: The `ep-` key a previous record returned, or the one a hook
+            named. Omit it on a conversation's first record and reuse the
+            returned key for the rest of that conversation. Required for
+            `inspect`.
+        subject: What the conversation was about, one line, at most 120
+            characters.
+        summary: One line on where it stands, at most 180 characters.
+        worked_on: Up to 5 one-line items, 200 characters each.
+        decided: Up to 5 one-line items, 200 characters each.
+        open: Up to 5 one-line items left open, 200 characters each. At least
+            one of `worked_on`, `decided` or `open` is required.
+        said: Up to 3 verbatim user statements worth keeping, 300 characters
+            each.
+        about: Up to 3 `exomem://` refs of pages the conversation concerned.
+            Refs you cannot see are dropped and counted in `about_skipped`.
+        client: Optional lowercase client label, e.g. `claude-code` or
+            `chatgpt`.
+
+    Returns: record -> {episode, revision, source: {ref, path, title},
+        idempotent, recovery, ledger, about_skipped}; inspect -> {episode,
+        revisions: [{revision, recovery}], latest_source_ref,
+        coverage_current}. Newlines, credential-shaped text and anything over
+        a cap are refused with nothing written.
+    """
+    if action == "inspect":
+        if any(
+            value is not None
+            for value in (subject, summary, worked_on, decided, open, said, about, client)
+        ):
+            raise ValueError("EPISODE_INVALID: inspect takes only an episode key")
+        return episode_memory_module.inspect(vault_root, episode=episode)
+    if action != "record":
+        raise ValueError("EPISODE_INVALID: action must be record or inspect")
+    return episode_memory_module.record(
+        vault_root,
+        source_schema,
+        episode=episode,
+        subject=subject,
+        summary=summary,
+        worked_on=worked_on,
+        decided=decided,
+        open=open,
+        said=said,
+        about=about,
+        client=client,
+    )
+
+
 def op_compile_source(
     vault_root: Path,
     sources: list[str],
@@ -7279,12 +7470,18 @@ def op_transfer_artifact(
     secret = os.environ.get("EXOMEM_UPLOAD_TOKEN", "").strip() or None
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     large_base_url = os.environ.get("EXOMEM_LARGE_UPLOAD_BASE_URL", "").strip().rstrip("/") or None
+    # `/download` decides every path under the audience the token carries, so
+    # it carries the caller's: the secret that signs it is the owner's, the
+    # caller need not be. An unresolved caller binds the fail-closed floor.
+    who = principal_module.effective_principal()
+    audience = who.audience_id if who.resolved else principal_module.MOST_RESTRICTIVE_AUDIENCE
     handoff = upload_tokens.mint_for_endpoint(
         secret,
         base_url,
         scope=operation,
         large_base_url=large_base_url if operation == "upload" else None,
         lane=lane if operation == "upload" else None,
+        audience=audience if operation == "download" else None,
     )
     if operation == "upload":
         handoff.update(handoff_status="handoff_prepared", committed=False)
@@ -8772,6 +8969,8 @@ def op_connect_memory(
             limit=limit,
         )
     if operation in ("context", "graph-context"):
+        if path:
+            _refuse_withheld_page_seed(vault_root, path)
         return memory_context_module.assemble_context(
             vault_root,
             path=path,
@@ -11070,6 +11269,7 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
             "compile_source",
             "preserve_artifacts",
             "process_media",
+            "episode_memory",
         ],
     },
     "review": {
@@ -11180,6 +11380,7 @@ _PRODUCT_METADATA: dict[str, dict] = {
         "first_run_safe": False,
     },
     "activate_context": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
+    "episode_memory": {"surface": "primary", "actions": ("save",), "first_run_safe": False},
 }
 _MCRC = frozenset({"mcp", "rest", "cli"})
 _RC = frozenset({"rest", "cli"})
@@ -11230,6 +11431,7 @@ _SPEC: tuple[tuple, ...] = (
     ("plan_memory", plan_memory_module.plan_memory, 1, True, False, None, _MCRC),
     ("get_video_frames", op_get_video_frames, 2, False, False, None, _M),
     ("activate_context", op_activate_context, 1, False, False, "turn", _MCRC),
+    ("episode_memory", op_episode_memory, 1, True, True, None, _MCRC),
 )
 
 
@@ -11400,6 +11602,17 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("add", "propose_compilation"),
+        {"surface": "primary", "actions": ("save",), "first_run_safe": False},
+    ),
+    (
+        "episode_memory",
+        op_episode_memory,
+        1,
+        True,
+        True,
+        None,
+        _MCRC,
+        ("episode_memory",),
         {"surface": "primary", "actions": ("save",), "first_run_safe": False},
     ),
     (
@@ -11825,6 +12038,20 @@ HOSTED_SURFACE_EXCLUSIONS = MappingProxyType(
                 lifted_when=(
                     "a new hosted profile admits the context compiler and carries its "
                     "own command-surface digest and candidate definition"
+                ),
+            ),
+            HostedSurfaceExclusion(
+                command="episode_memory",
+                reason=(
+                    "The hosted profiles pin their ordered command membership, and v5 "
+                    "retains v4's. Publishing this tool on hosted would move both "
+                    "profiles' command_surface_sha256 under an unchanged profile ID. Its "
+                    "reader, activate_context, is itself excluded from hosted, so a "
+                    "hosted recap would be written where no hosted client reads it back."
+                ),
+                lifted_when=(
+                    "a new hosted profile admits the context compiler together with "
+                    "episode recording and carries its own command-surface digest"
                 ),
             ),
             HostedSurfaceExclusion(

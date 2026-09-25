@@ -913,6 +913,7 @@ def test_built_in_vocabulary_is_pinned_so_additions_stay_reviewable() -> None:
         "contract-legal-document",
         "correspondence",
         "dataset-export",
+        "episode",
         "invoice-receipt",
         "manual-documentation",
         "official-guidance",

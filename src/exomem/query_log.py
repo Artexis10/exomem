@@ -8,6 +8,8 @@ stays on the box at the same trust boundary as `exomem.log`):
 
 - `logs/queries.jsonl` : one object per find() call (query + ranking signals)
 - `logs/writes.jsonl`  : one object per note/add/replace write (path + citations)
+- `logs/activations.jsonl` : one object per activate_context call (door, client,
+  outcome, counts) -- never the turn, and read by nothing in `usage`
 
 These feed the offline feedback loop (`scripts/derive_relevance_pairs.py`), which
 mines weak `(query -> cited_path)` relevance labels to grow the eval golden set.
@@ -32,9 +34,12 @@ Each file rotates at `EXOMEM_JSONL_MAX_MB` (default 64MB), keeping exactly one
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import logging
 import os
+import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +63,14 @@ _LOG_DIR = resolve_log_dir()
 QUERIES_PATH = _LOG_DIR / "queries.jsonl"
 WRITES_PATH = _LOG_DIR / "writes.jsonl"
 READS_PATH = _LOG_DIR / "reads.jsonl"
+ACTIVATIONS_PATH = _LOG_DIR / "activations.jsonl"
+
+#: A declared client label: software, not a person, and short enough to be one.
+CLIENT_LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
+SESSION_MAX_CHARS = 256
+_ACTIVATION_ANCHORS_MAX = 8
+#: The most of the activation log `hook_activation_seen` reads: its tail only.
+_ACTIVATION_TAIL_BYTES = 256 * 1024
 
 _DEFAULT_JSONL_MAX_MB = 64.0
 # In-memory running size estimate per path, updated cheaply on every append;
@@ -284,3 +297,161 @@ def log_get_call(
         )
     except Exception as e:  # noqa: BLE001
         log.debug("log_get_call failed: %s", e)
+
+
+def declared_client(value: object) -> str | None:
+    """A declared client label as recorded: the label, `"invalid"`, or `None`.
+
+    Invalid means ignored, never refused -- a turn is never failed over
+    attribution -- and never echoed, so a caller cannot write arbitrary text
+    into the log through it.
+    """
+    if value is None or value == "":
+        return None
+    return value if isinstance(value, str) and CLIENT_LABEL_RE.fullmatch(value) else "invalid"
+
+
+def _vault_identity(vault_root: Path) -> str:
+    """The vault's activation-sidecar identity, or its resolved path."""
+    from . import working_set_runtime
+
+    try:
+        identity = working_set_runtime.identity_for(Path(vault_root))
+    except Exception:  # noqa: BLE001 - attribution never fails the call
+        identity = ""
+    return identity or str(Path(vault_root).resolve())
+
+
+def _vault_hash(vault_root: Path) -> str:
+    """Which vault a row belongs to, without naming it."""
+    material = f"exomem-activation-vault-v1\0{_vault_identity(vault_root)}"
+    return hashlib.sha256(material.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def _session_hash(vault_root: Path, session: object) -> str | None:
+    """Stable per vault, unlinkable across vaults, and never the raw value.
+
+    Keyed by the vault's activation-sidecar identity, or its resolved path
+    when there is no sidecar, so the same conversation key hashes differently
+    in two vaults.
+    """
+    if session is None or session == "":
+        return None
+    if not isinstance(session, str) or len(session) > SESSION_MAX_CHARS:
+        return "invalid"
+    identity = _vault_identity(vault_root)
+    return hashlib.sha256(f"{identity}\0{session}".encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def hook_activation_seen(vault_root: Path, client: str, *, within_seconds: float) -> bool:
+    """Whether this vault served `client`'s hook within the last `within_seconds`.
+
+    A hook activation is a row with no MCP transport (the REST or CLI door
+    the retrieve hook uses) that declares `client`. Bounded: one read of at
+    most the log's last `_ACTIVATION_TAIL_BYTES`, newest row first, stopping
+    at the first row older than the window. A rotated-away or unreadable log
+    answers False, which costs at most a second ask. Never raises.
+    """
+    try:
+        path = _target(ACTIVATIONS_PATH, "activations.jsonl")
+        with path.open("rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, size - _ACTIVATION_TAIL_BYTES))
+            tail = handle.read().decode("utf-8", "replace")
+        if size > _ACTIVATION_TAIL_BYTES:
+            tail = tail.partition("\n")[2]  # drop the partial first line
+        cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=within_seconds)
+        vault = _vault_hash(vault_root)
+        for line in reversed(tail.splitlines()):
+            try:
+                row = json.loads(line)
+                stamp = dt.datetime.fromisoformat(str(row["ts_utc"]))
+            except (ValueError, KeyError, TypeError):
+                continue
+            if stamp < cutoff:
+                return False
+            if (
+                row.get("transport") is None
+                and row.get("client_declared") == client
+                and row.get("vault_hash") == vault
+            ):
+                return True
+    except Exception as e:  # noqa: BLE001 - an unreadable log is no evidence
+        log.debug("hook_activation_seen failed: %s", e)
+    return False
+
+
+def log_activation_call(
+    vault_root: Path,
+    *,
+    packet: Mapping[str, Any] | None,
+    client: object = None,
+    session: object = None,
+    outcome: str | None = None,
+    error_code: str | None = None,
+    duration_ms: float | None = None,
+) -> None:
+    """Append one host-local row for an activate_context call. Best-effort.
+
+    Recorded: the door, the observed MCP client (which wins for any use) and
+    the declared label, the transport, a vault-keyed session hash, a vault
+    hash, a principal hash and the principal's kind (`owner`, `owner-oauth`,
+    `principal` or `unresolved`), the outcome and abstention reason, how the packet was carried, the
+    resolved anchor refs (omitted in content-private hosted mode), the recent
+    entries counted per reason, continuity, and whether `episode_due` rode
+    along. Never recorded: the turn or any hash of it, unit, statement or
+    title text, the continuity token, the raw session, or any identity beyond
+    a hash. Nothing in `usage` reads this file.
+    """
+    if _disabled():
+        return
+    try:
+        from . import command_surface, privacy_log
+        from .governance.principal import OWNER_AUDIENCE, effective_principal
+
+        principal = effective_principal()
+        audience = str(principal.audience_id or "")
+        observed = command_surface.mcp_caller_identity()
+        declared = declared_client(client)
+        body = packet if isinstance(packet, Mapping) else {}
+        generation = body.get("generation") if isinstance(body.get("generation"), Mapping) else {}
+        abstention = body.get("abstention") if isinstance(body.get("abstention"), Mapping) else {}
+        recent: dict[str, int] = {}
+        for entry in body.get("recent_context") or ():
+            if isinstance(entry, Mapping):
+                why = str(entry.get("why") or "")
+                recent[why] = recent.get(why, 0) + 1
+        if outcome is None:
+            outcome = "abstained" if body.get("abstained") else "served"
+        record: dict[str, Any] = {
+            "ts": _now_iso(),
+            **_correlation_fields(outcome=outcome, error_code=error_code, duration_ms=duration_ms),
+            "door": principal.surface,
+            "client": observed.get("client_name")
+            or (declared if declared not in (None, "invalid") else None),
+            "client_observed": observed.get("client_name"),
+            "client_declared": declared,
+            "transport": observed.get("transport"),
+            "session_hash": _session_hash(vault_root, session),
+            "vault_hash": _vault_hash(vault_root),
+            "principal_hash": (
+                "owner"
+                if audience == OWNER_AUDIENCE
+                else hashlib.sha256(audience.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+            ),
+            "principal_kind": principal.principal_kind,
+            "abstention_reason": abstention.get("reason") if body.get("abstained") else None,
+            "carried_by": generation.get("carried_by"),
+            "recent": recent,
+            "continuity": generation.get("continuity"),
+            "episode_due": "episode_due" in body,
+        }
+        if not privacy_log.content_private_logging_enabled():
+            record["anchors"] = [
+                str(anchor.get("ref") or "")
+                for anchor in (body.get("anchors") or ())
+                if isinstance(anchor, Mapping) and anchor.get("status") == "resolved"
+            ][:_ACTIVATION_ANCHORS_MAX]
+        _append(_target(ACTIVATIONS_PATH, "activations.jsonl"), record)
+    except Exception as e:  # noqa: BLE001
+        log.debug("log_activation_call failed: %s", e)

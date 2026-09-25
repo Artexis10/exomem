@@ -452,8 +452,9 @@ def create_app(
         if not bearer_token:
             return True
         header = request.headers.get("authorization", "")
+        # Bytes: `compare_digest` raises on a non-ASCII str.
         return header.startswith("Bearer ") and secrets.compare_digest(
-            header[7:].strip(), bearer_token
+            header[7:].strip().encode(), bearer_token.encode()
         )
 
     def operator_authorized(request: Request) -> bool:
@@ -461,7 +462,7 @@ def create_app(
             return False
         header = request.headers.get("authorization", "")
         return header.startswith("Bearer ") and secrets.compare_digest(
-            header[7:].strip(), operator_token
+            header[7:].strip().encode(), operator_token.encode()
         )
 
     async def lease(request: Request) -> JSONResponse:

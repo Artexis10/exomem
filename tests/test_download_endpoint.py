@@ -34,7 +34,7 @@ def test_download_disabled_without_token(vault, monkeypatch: pytest.MonkeyPatch)
 
 def test_download_streams_file_with_minted_token(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     c = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sek")
-    tok = upload_tokens.mint("sek", scope="download")
+    tok = upload_tokens.mint_bound("sek", audience="owner")
     r = _get(c, "Knowledge Base/index.md", tok)
     assert r.status_code == 200, r.text
     assert r.content == (vault / "Knowledge Base" / "index.md").read_bytes()
@@ -55,7 +55,7 @@ def test_upload_scoped_token_rejected_on_download(vault, monkeypatch: pytest.Mon
 def test_download_scoped_token_rejected_on_upload(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     # scope isolation, other direction: a download token must not write
     c = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sek")
-    dl_tok = upload_tokens.mint("sek", scope="download")
+    dl_tok = upload_tokens.mint_bound("sek", audience="owner")
     r = c.post(
         "/upload",
         files={"file": ("a.bin", b"x", "application/octet-stream")},
@@ -67,19 +67,19 @@ def test_download_scoped_token_rejected_on_upload(vault, monkeypatch: pytest.Mon
 
 def test_download_path_traversal_rejected(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     c = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sek")
-    tok = upload_tokens.mint("sek", scope="download")
+    tok = upload_tokens.mint_bound("sek", audience="owner")
     assert _get(c, "../../../../etc/passwd", tok).status_code == 400
 
 
 def test_download_missing_path(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     c = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sek")
-    tok = upload_tokens.mint("sek", scope="download")
+    tok = upload_tokens.mint_bound("sek", audience="owner")
     assert c.get("/download", headers={"Authorization": f"Bearer {tok}"}).status_code == 400
 
 
 def test_download_nonexistent_file(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     c = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sek")
-    tok = upload_tokens.mint("sek", scope="download")
+    tok = upload_tokens.mint_bound("sek", audience="owner")
     assert _get(c, "Knowledge Base/nope-does-not-exist.md", tok).status_code == 404
 
 
@@ -94,7 +94,7 @@ def test_download_hides_private_state_hardlink_before_release(vault, monkeypatch
         pytest.skip("hard links are unavailable")
 
     client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sek")
-    token = upload_tokens.mint("sek", scope="download")
+    token = upload_tokens.mint_bound("sek", audience="owner")
     hidden = _get(client, "Knowledge Base/Notes/ordinary-looking.bin", token)
     alias.unlink()
     missing = _get(client, "Knowledge Base/Notes/ordinary-looking.bin", token)

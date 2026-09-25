@@ -455,6 +455,19 @@ _HOOK_PRESETS: dict[str, dict[str, str]] = {
 }
 
 
+#: The Stop hook's episode-ask cadence per level: (substantive turns since the
+#: session's last `episode_memory` record, seconds between asks), or None for
+#: never. Hooks trigger and agents author: the ask names the session's key and
+#: only a successful record resets the count. Mirrored in
+#: `_hooks/exomem_capture_nudge.py`, which cannot import this module.
+EPISODE_ASK_PRESETS: dict[str, tuple[int, int] | None] = {
+    "off": None,
+    "light": (12, 3600),
+    "balanced": (6, 1200),
+    "maximal": (3, 600),
+}
+
+
 def normalize(value: str | None) -> str | None:
     """Canonical level for a raw string (accepting aliases), or None if unknown."""
     if value is None:

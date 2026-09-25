@@ -18,7 +18,7 @@ import datetime as dt
 import hashlib
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,11 +34,15 @@ from . import (
 from .kbdir import kb_prefix
 from .vault import (
     MISSING_CONTENT_HASH,
+    ContentHashMismatchError,
     InvalidSlugError,
     PlannedWrite,
     PreparedBinaryContent,
     batch_atomic_write,
+    content_hash,
     kb_root,
+    parse_frontmatter,
+    render_wikilink_target,
     resolve_filename_slug,
     unique_path,
     yaml_scalar,
@@ -67,6 +71,22 @@ def folder_descriptions(vault_root: Path) -> dict[str, str]:
     description without a code change.
     """
     return source_taxonomy.load_taxonomy(vault_root).category_descriptions()
+
+
+#: The closed frontmatter an `episode` Source carries beyond every Source's
+#: own, in render order: (field, required). Nothing else may be added through
+#: `extra_frontmatter`, and no other kind may carry any of it, so a recap is
+#: always a bounded, attributable record and never a free-form frontmatter
+#: channel. Semantic bounds (lengths, credential refusal) are the recording
+#: operation's (`episode_capture`); this module only keeps the shape closed.
+#: The refs a recap concerns are deliberately not here: every audience that may
+#: read the page would learn them, so they live in the recorder's own ledger.
+EPISODE_FRONTMATTER_FIELDS: tuple[tuple[str, bool], ...] = (
+    ("summary", True),
+    ("episode", True),
+    ("episode_digest", True),
+    ("client", False),
+)
 
 
 @dataclass
@@ -186,6 +206,8 @@ def add(
     today: dt.date | None = None,
     artifact: SourceArtifact | None = None,
     adoption_seed: Mapping[str, object] | None = None,
+    extra_frontmatter: Mapping[str, object] | None = None,
+    supersede: Sequence[tuple[str, str]] = (),
 ) -> AddResult:
     """Capture a raw source into the KB and update indexes/log atomically.
 
@@ -194,6 +216,16 @@ def add(
     stored. All three resolve through `source_taxonomy`/`project_keys`, so a
     meaningful value this code has never seen is accepted and registers itself as
     part of this capture's atomic batch.
+
+    `extra_frontmatter` and `supersede` exist for the `episode` kind only, and
+    that kind requires the first (`EPISODE_FRONTMATTER_FIELDS`). `supersede`
+    names earlier revisions of the same recap as `(vault-relative path, content
+    hash the caller read)`, inside the episode folder: each gets `status:
+    superseded` and a `superseded_by` link in THIS batch, frontmatter only, so
+    the new revision and the retirement of the old one land together or not at
+    all and a Source body is never rewritten. A revision whose text no longer
+    matches the caller's hash fails the whole call with
+    `ContentHashMismatchError`; one that is already superseded is left alone.
 
     `today` is dependency-injectable for tests; defaults to dt.date.today().
     """
@@ -236,6 +268,8 @@ def add(
             reason=str(e),
         ) from e
 
+    episode_lines = _episode_frontmatter_lines(kind.key, extra_frontmatter, supersede)
+
     err = schema.validate_source(
         source_schema,
         content=content,
@@ -258,7 +292,9 @@ def add(
     # are disabled so the fast suite and existing add() tests are unaffected.
     duplicate_candidates: list[corpus_aware.DupCandidate] = []
     contradiction_candidates: list[corpus_aware.DupCandidate] = []
-    if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+    # A recap revision near-duplicates the revision it supersedes by
+    # construction, so the embedding pass could only ever report that.
+    if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS") and episode_lines is None:
         try:
             # One embedding pass: dups (vs other sources) + contradictions (vs
             # active compiled conclusions). Restricting contradiction candidates
@@ -305,6 +341,7 @@ def add(
     project_keys_clean = list(dict.fromkeys(projects or ()))
     project_plan = project_keys.plan_project_keys(vault_root, project_keys_clean)
 
+    supersede_targets = _supersede_targets(vault_root, folder_path, supersede)
     stem = f"{date_iso}-{filename_slug}"
     folder_path.mkdir(parents=True, exist_ok=True)
     if artifact is None:
@@ -360,6 +397,10 @@ def add(
         artifact_digest=artifact_digest,
         artifact_size=artifact_size,
         adoption_receipt=adoption_receipt,
+        extra_lines=episode_lines or (),
+    )
+    supersede_writes = _supersede_writes(
+        vault_root, supersede_targets, new_path=source_path, stamp_iso=stamp_iso
     )
 
     # Plan the source file write so the counts in compute_updates() are
@@ -430,6 +471,7 @@ def add(
     writes.extend(sub_writes)
     writes.extend(taxonomy_plan.writes)
     writes.extend(project_plan.writes)
+    writes.extend(supersede_writes)
 
     warnings: list[str] = list(slug_warnings)
     # Vocabulary notices are plain per-write warnings, not dismissible advisories:
@@ -638,6 +680,132 @@ def _compute_updates_with_counts(
         indexes._count_sources = original  # type: ignore[assignment]
 
 
+def _episode_frontmatter_lines(
+    kind_key: str,
+    fields: Mapping[str, object] | None,
+    supersede: Sequence[tuple[str, str]],
+) -> tuple[str, ...] | None:
+    """The episode kind's extra frontmatter lines, or `None` for any other kind.
+
+    Refuses before anything is planned: the kind without its fields (a plain
+    capture filed as a recap nobody bound), the fields or `supersede` on any
+    other kind, an unknown or missing field, and a value that is not one line.
+    """
+    is_episode = kind_key == source_taxonomy.EPISODE_KIND
+    if not is_episode:
+        if fields is not None or supersede:
+            raise AddError(
+                code="INVALID_SOURCE",
+                missing=["extra_frontmatter"],
+                reason=f"episode fields apply to the {source_taxonomy.EPISODE_KIND!r} kind only",
+            )
+        return None
+    if fields is None:
+        raise AddError(
+            code="EPISODE_KIND_RESERVED",
+            missing=["extra_frontmatter"],
+            reason=(
+                f"the {source_taxonomy.EPISODE_KIND!r} kind is reserved for "
+                "conversation recaps; record one with episode_memory"
+            ),
+        )
+    allowed = {name for name, _required in EPISODE_FRONTMATTER_FIELDS}
+    unknown = sorted(set(fields) - allowed)
+    missing = [
+        name
+        for name, required in EPISODE_FRONTMATTER_FIELDS
+        if required and fields.get(name) in (None, "")
+    ]
+    if unknown or missing:
+        raise AddError(
+            code="INVALID_SOURCE",
+            missing=missing or unknown,
+            reason="episode frontmatter is a closed set: "
+            + ", ".join(name for name, _required in EPISODE_FRONTMATTER_FIELDS),
+        )
+
+    def _line(value: object, name: str) -> str:
+        if not isinstance(value, str) or not value.strip() or value != " ".join(value.split()):
+            raise AddError(
+                code="INVALID_SOURCE",
+                missing=[name],
+                reason=f"episode {name} must be one non-empty line",
+            )
+        return value
+
+    lines: list[str] = []
+    for name, _required in EPISODE_FRONTMATTER_FIELDS:
+        value = fields.get(name)
+        if value in (None, "", [], ()):
+            continue
+        lines.append(f"{name}: {yaml_scalar(_line(value, name))}")
+    return tuple(lines)
+
+
+def _supersede_targets(
+    vault_root: Path, folder_path: Path, pairs: Sequence[tuple[str, str]]
+) -> tuple[tuple[Path, str], ...]:
+    """The earlier revisions `supersede` names, confined to the episode folder,
+    each with the content hash its caller read.
+
+    Checked before anything is created, so a refused call leaves no folder.
+    """
+    targets: dict[Path, str] = {}
+    for pair in pairs:
+        rel, expected = pair if isinstance(pair, tuple) and len(pair) == 2 else (None, None)
+        target = (Path(vault_root) / rel).resolve() if isinstance(rel, str) else None
+        if (
+            target is None
+            or not isinstance(expected, str)
+            or target.parent != folder_path.resolve()
+            or target.suffix != ".md"
+            or not target.is_file()
+        ):
+            raise AddError(
+                code="INVALID_SOURCE",
+                missing=["supersede"],
+                reason="only an earlier recap revision in the episode folder can be superseded",
+            )
+        targets.setdefault(target, expected)
+    return tuple(targets.items())
+
+
+def _supersede_writes(
+    vault_root: Path,
+    targets: Sequence[tuple[Path, str]],
+    *,
+    new_path: Path,
+    stamp_iso: str,
+) -> list[PlannedWrite]:
+    """Frontmatter-only supersession of earlier recap revisions, as CAS writes.
+
+    Guarded by the hash the CALLER read, not by this read: a revision another
+    writer changed after the caller listed it (a concurrent record retiring it,
+    say) fails the whole call here, and the batch carries the same hash, so a
+    change landing after this read fails it at commit. A revision already
+    superseded is not marked a second time.
+    """
+    if not targets:
+        return []
+    from .replace import _mark_superseded
+
+    rel_new = new_path.relative_to(vault_root).with_suffix("").as_posix()
+    link = render_wikilink_target(rel_new, vault_root)
+    writes: list[PlannedWrite] = []
+    for target, expected in targets:
+        text = target.read_text(encoding="utf-8")
+        actual = content_hash(text)
+        if actual != expected:
+            raise ContentHashMismatchError(target, expected, actual)
+        frontmatter, _body, _raw = parse_frontmatter(text)
+        if str(frontmatter.get("status") or "").casefold() == "superseded":
+            continue
+        updated = _mark_superseded(text, link, stamp_iso)
+        if updated != text:
+            writes.append(PlannedWrite(path=target, content=updated, expected_hash=expected))
+    return writes
+
+
 def _clean_tags(tags: list[str] | None) -> list[str]:
     if not tags:
         return []
@@ -674,6 +842,7 @@ def _render_source(
     artifact_digest: str | None = None,
     artifact_size: int | None = None,
     adoption_receipt: Mapping[str, object] | None = None,
+    extra_lines: Sequence[str] = (),
 ) -> str:
     """Emit the source page markdown matching frontmatter.md's example shape.
 
@@ -696,6 +865,7 @@ def _render_source(
     if projects:
         lines.append("projects: [" + ", ".join(projects) + "]")
     lines.append(f"captured: {date_iso}")
+    lines.extend(extra_lines)
     if artifact_rel:
         media_type = _media_type_for(artifact_name or artifact_rel)
         if media_type:

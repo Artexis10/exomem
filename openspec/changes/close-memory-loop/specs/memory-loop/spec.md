@@ -54,6 +54,18 @@ The recent-context block SHALL judge recent work by the hot profile's own rules:
 - **THEN** the system preserves its historical timing and applies the supported correction when presenting current state
 - **AND** the fresh write timestamp does not make the old event new or the superseded claim current
 
+#### Scenario: A conversation that saved nothing else reaches the next session on another client
+
+- **WHEN** a session records only an episode recap of what it worked on, decided and left open, and a later session on a different supported client sends a turn that names nothing
+- **THEN** that later session's recent-context block carries the recap's title, summary and episode reference with the reason `episode`
+- **AND** the entry crosses the same release plane as every other recent-context item
+
+#### Scenario: Two revisions of one episode appear once
+
+- **WHEN** an episode's recap has been revised, so one revision is superseded and one is live
+- **THEN** the recent-context block shows that episode once, from its newest revision
+- **AND** the recaps hold their bounded share of the block, and the block pays no extra enumeration for them
+
 ### Requirement: Canonical ownership and provenance survive routing
 
 Stable identity/facets SHALL belong to entities, mutable state/events to Records or appropriate domain stores, and original provenance to Sources/Evidence. Hubs SHALL be navigation/projections. Markdown semantic units and supported structured collections SHALL remain canonical; graph/search/profile stores SHALL be rebuildable with explicit currency. Routing SHALL preserve direct verification, reported claims, user hypotheses, attributed interpretations, inferences and uncertainty distinctly and SHALL NOT invent user Planning commitments. A durable user hypothesis or interpretation SHALL retain speaker or source attribution and uncertainty and SHALL NOT be silently omitted or represented as a direct fact.
@@ -175,6 +187,12 @@ MCP, CLI and REST SHALL expose the same core semantics and versioned capabilitie
 - **WHEN** an ordinary answer cites a memory result and the client would display its opaque reference
 - **THEN** the answer follows the existing title-first presentation contract with a plain readable title and an optional human-readable disambiguator
 - **AND** stable identity remains available internally without becoming the default visible label
+
+#### Scenario: A tool-only client is asked at a boundary and never forced
+
+- **WHEN** a client without lifecycle hooks has activated context for several turns in a conversation without recording its episode
+- **THEN** the server asks, at most once in a bounded interval, for a recap at the next decision or stopping point, and only while proactive capture is permitted
+- **AND** nothing is recorded unless the agent authors and submits the recap, and the client's capability report still says best-effort initiation
 
 ### Requirement: Canonical vocabulary precedes destination projection
 
@@ -301,10 +319,13 @@ its paths become evidence, SHALL NOT rebuild or apply a foreground delta, and
 SHALL NOT fall back to an in-process corpus scan. Its readiness result SHALL be
 reported as `generation.lexical_evidence`; incomplete publication SHALL remain
 non-cacheable. Title/alias overlap alone SHALL NOT be relabelled as retrieval.
-Lexical corroboration SHALL match at least two distinct content stems from the
+Lexical corroboration SHALL match at least two distinct content units from the
 turn after the shared stopword filter, with that predicate applied before the
-ranked result limit. Repeated or inflected forms of one stem SHALL NOT provide
-the second match. This restriction SHALL NOT change ordinary recall.
+ranked result limit. A unit is one word or one unspaced run (a CJK sentence
+written without spaces); its stems, such as an accented word's folded variant
+or a run's character bigrams, count once, and a run counts only when most of
+its content bigrams match. Repeated or inflected forms of one stem SHALL NOT
+provide the second match. This restriction SHALL NOT change ordinary recall.
 Categorical lexical-overlap evidence SHALL additionally require genuine name
 contact: two or more of the shared broad terms among the anchor's own
 authored title/alias terms. A single shared authored term SHALL NOT by
@@ -497,8 +518,16 @@ measured as a document frequency at or below `max(3, ceil(0.5% of the indexed
 pages in scope))` over the same catalogue the ranking uses, navigation pages not
 counted toward a stem's frequency, and raw-material pages counted neither toward
 a stem's frequency nor among the indexed pages. A hit SHALL additionally satisfy a proximity
-condition: two of its matched distinctive stems occur within a declared token
-window of each other, within one sentence of the turn. Distance SHALL be
+condition: two of its matched distinctive stems from two different words occur
+within a declared token window of each other, within one sentence of the turn.
+The stems of one word SHALL NOT pair with each other, and rarity SHALL be read
+on the turn's surface forms; the parts of a joined compound (`girvan-slot`) are
+separate words and pair at distance zero. An unspaced run (a script indexed as
+bigrams: Han, kana, Hangul, Thai and the like) SHALL contribute no pairable
+stem, so a turn written in those scripts is never carried and SHALL NOT run the
+ranking query. This is a stated limit: two runs share particles and endings
+with every page in their script, and pairing them would need a position model
+over character offsets. Distance SHALL be
 measured over the turn's own tokens, function words included; sentence-ending
 punctuation and line breaks SHALL end a window and a comma SHALL NOT. A
 number of distinctive stems occurring anywhere in the turn SHALL NOT by
@@ -569,8 +598,17 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
 - **WHEN** a turn that resolves no anchor shares exactly two distinctive
   stems with a page and says them further apart than the declared window
 - **THEN** that page is not a candidate and the turn abstains `unresolved`
-- **AND** the same two stems said as a phrase DO make it a candidate, as do
-  three of that page's distinctive stems sitting anywhere in the turn
+- **AND** the same two stems said as a phrase DO make it a candidate
+
+#### Scenario: One word is not a phrase, and an unspaced run never pairs
+
+- **WHEN** a turn is a single accented word that appears on exactly one page
+  of a measurable corpus
+- **THEN** no page is carried: the word and its folded variant are one word
+  and never pair with each other
+- **AND** a turn written in an unspaced script carries no page, whether it is
+  one Japanese run or two runs ("明日は、散歩です", "오늘은 회의입니다")
+  sharing only particles and endings with a page, and it runs no ranking query
 
 #### Scenario: A stub sharing only ordinary words is not named
 

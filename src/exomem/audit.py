@@ -2527,6 +2527,11 @@ def _check_unprocessed_sources(
     for page in pages:
         if page.frontmatter.get("type") != "source":
             continue
+        # A conversation recap is not a backlog item: every conversation writes
+        # one, and the recap with its episode ledger is already the coverage
+        # record, so a finding per conversation would only be noise.
+        if page.frontmatter.get("source_type") == "episode":
+            continue
         ingested = page.frontmatter.get("ingested_into")
         if not (ingested is None or (isinstance(ingested, list) and len(ingested) == 0)):
             continue

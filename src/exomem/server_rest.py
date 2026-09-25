@@ -263,7 +263,8 @@ def register_rest_facade(
             header = request.headers.get("authorization", "")
             if header.startswith("Bearer "):
                 presented = header[len("Bearer ") :].strip()
-                if secrets.compare_digest(presented, rest_api_key):
+                # Bytes: `compare_digest` raises on a non-ASCII str.
+                if secrets.compare_digest(presented.encode(), rest_api_key.encode()):
                     return True, None
                 if upload_tokens.verify(presented, rest_api_key, scope="rest"):
                     return True, None
