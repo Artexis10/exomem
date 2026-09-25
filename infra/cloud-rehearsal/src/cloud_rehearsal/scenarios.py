@@ -70,19 +70,26 @@ CELLCTL_REPO = "Artexis10/exomem#1368"
 # Runs inside the scratch cell: its own bearer is in its own environment.
 SCRATCH_PROBE = """
 import asyncio, json, os, sys
+import httpx
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 
 NOTE = "Written in the scratch restore." + chr(10) * 2 + "## Observations" + chr(10) * 2 + "- [rehearsal] scratch write #rehearsal" + chr(10)
 
 async def main():
     headers = {"Authorization": "Bearer " + os.environ["EXOMEM_CLOUD_CELL_TOKEN"]}
-    async with streamablehttp_client("http://127.0.0.1:8765/mcp", headers=headers) as (read, write, _):
-        async with ClientSession(read, write) as session:
+    async with httpx.AsyncClient(headers=headers, timeout=120) as http, streamable_http_client(
+        "http://127.0.0.1:8765/mcp", http_client=http
+    ) as streams:
+        # Older SDKs yield (read, write, session_id), newer (read, write).
+        async with ClientSession(streams[0], streams[1]) as session:
             await session.initialize()
             recall = await session.call_tool("ask_memory", {"query": sys.argv[1]})
             written = await session.call_tool("remember", {"title": "Scratch restore write", "content": NOTE, "status": "draft"})
-            print(json.dumps({"recall": json.dumps(recall.structuredContent), "write_error": (written.structuredContent or {}).get("error")}))
+            def structured(result):
+                return getattr(result, "structuredContent", None) or getattr(result, "structured_content", None) or {}
+
+            print(json.dumps({"recall": json.dumps(structured(recall)), "write_error": structured(written).get("error")}))
 
 asyncio.run(main())
 """
@@ -303,6 +310,13 @@ async def first_session(client: TenantClient, record: StepRecord, *, timeout: fl
                 raise
             refusals += 1
             await asyncio.sleep(1)
+
+
+def _json_or_text(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text.strip()[-300:]
 
 
 def _flatten(error: BaseException) -> str:
@@ -808,9 +822,15 @@ async def step_11_backup_and_scratch_restore(ctx: Context, record: StepRecord) -
     scratch_result = json.loads(
         ctx.exec_in(scratch, "cell-0", "python3", "-c", SCRATCH_PROBE, ctx.b.phrase).stdout.strip().splitlines()[-1]
     )
+    # Compared whole: exit code and content-free JSON. A fresh standalone
+    # vault reports a stable refusal code here, and the restore must report
+    # exactly what its source does.
     status_cmd = ("exomem", "governance-schema", "status", "--vault", "/data/vault", "--json")
-    source_status = json.loads(ctx.exec_in(namespace_name(ctx.b.cell_id), source_pod["metadata"]["name"], *status_cmd).stdout)  # type: ignore[index]
-    scratch_status = json.loads(ctx.exec_in(scratch, "cell-0", *status_cmd).stdout)
+    source_run = ctx.exec_in(namespace_name(ctx.b.cell_id), source_pod["metadata"]["name"], *status_cmd, check=False)  # type: ignore[index]
+    scratch_run = ctx.exec_in(scratch, "cell-0", *status_cmd, check=False)
+    source_status = (source_run.returncode, _json_or_text(source_run.stdout))
+    scratch_status = (scratch_run.returncode, _json_or_text(scratch_run.stdout))
+    record.evidence["governance_schema_status"] = {"source": source_status, "scratch": scratch_status}
     record.evidence["scratch_restore"] = {
         "namespace": scratch,
         "snapshot": "pre-image nightly snapshot of tenant B",
