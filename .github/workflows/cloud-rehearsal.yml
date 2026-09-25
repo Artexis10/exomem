@@ -66,11 +66,16 @@ jobs:
       - name: Run the rehearsal
         working-directory: infra/cloud-rehearsal
         timeout-minutes: 140
+        # On a pull request the question is whether the harness works: product
+        # findings are in the report and the step summary, and exit 1 is the
+        # node-gate verdict a manual dispatch enforces. A stage that cannot be
+        # stood up, or a step that fails for any other reason, still fails here.
         env:
           PYTHONUNBUFFERED: "1"
           REHEARSAL_DIAGNOSTICS_DIR: ${{ runner.temp }}/rehearsal-diagnostics
+          HARNESS_CHECK: ${{ github.event_name == 'pull_request' && '--harness-check' || '' }}
         run: |
-          uv run --frozen exomem-cloud-rehearsal run --report "${RUNNER_TEMP}/cloud-rehearsal-report.json"
+          uv run --frozen exomem-cloud-rehearsal run ${HARNESS_CHECK} --report "${RUNNER_TEMP}/cloud-rehearsal-report.json"
       - name: Summarize the report
         if: always()
         run: |

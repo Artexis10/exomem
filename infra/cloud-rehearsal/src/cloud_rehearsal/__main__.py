@@ -3,8 +3,13 @@
 One command stands up disposable K3s, PostgreSQL with Substrate's real
 migrations and grants, Substrate, its gateway, cellctl and the real cell
 image; runs the twelve P3 steps in order; writes a JSON report with the
-5.3 measurements; and tears everything down. It exits 0 only when every
-step passed, every target was met and the run is a valid rehearsal.
+5.3 measurements; and tears everything down.
+
+Exit codes: 0 when the report gates the node (every step passed, every
+target met, a valid rehearsal); 1 when it recorded product findings; 2 when
+the rehearsal itself failed (a stage could not be stood up, or a step raised
+something other than a recorded finding). `--harness-check` turns 1 into 0,
+for pull-request CI, where the question is whether the harness works.
 """
 
 from __future__ import annotations
@@ -46,6 +51,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("--steps", default=None, help="comma-separated step numbers to run (default: all)")
     run_parser.add_argument("--keep", action="store_true", help="leave the stack running for inspection")
+    run_parser.add_argument(
+        "--harness-check", action="store_true",
+        help="exit 0 whenever the rehearsal itself worked, even if it recorded product findings "
+        "(pull-request CI); without it, only a report that gates the node exits 0",
+    )
     return parser
 
 
@@ -175,7 +185,14 @@ async def _run(args: argparse.Namespace) -> int:
                 }
             )
         outcome = report.to_json()["outcome"]
-        code = 0 if outcome["gates_node"] else 1
+        harness_errors = [step.number for step in report.steps if step.failure and "traceback" in step.failure]
+        report.stages["harness"] = {"status": "failed" if harness_errors else "passed", "steps_with_harness_errors": harness_errors}
+        if harness_errors:
+            code = 2
+        elif outcome["gates_node"] or args.harness_check:
+            code = 0
+        else:
+            code = 1
     except _StageFailed:
         code = 2
     except Exception as error:  # noqa: BLE001 - recorded in the report
