@@ -15,6 +15,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 import zipfile
@@ -387,11 +388,16 @@ def stage(
         [uv, "venv", "--python", str(launcher), str(environment)],
         [uv, "pip", "install", "--refresh-package", "exomem", "--python", str(target_python), requirement],
     ):
-        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=900)
-        if result.returncode:
-            tail = _uv_stderr_tail(result.stderr or b"")
-            detail = f"; uv stderr: {tail}" if tail else ""
-            raise RuntimeError(f"release staging failed (uv exit {result.returncode}){detail}")
+        # stderr goes to a file, not a pipe, so a long run is never held in
+        # memory; only the bounded window the tail needs is read back. One
+        # byte past the window tells the tail that its first line was cut.
+        with tempfile.TemporaryFile() as stderr:
+            result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=stderr, timeout=900)
+            if result.returncode:
+                stderr.seek(max(0, stderr.seek(0, os.SEEK_END) - _UV_STDERR_READ_WINDOW_BYTES - 1))
+                tail = _uv_stderr_tail(stderr.read())
+                detail = f"; uv stderr: {tail}" if tail else ""
+                raise RuntimeError(f"release staging failed (uv exit {result.returncode}){detail}")
     identity = _staged_identity(target_python, wheel=snapshot is not None)
     version = identity["version"]
     if not version or (package_version and version != package_version):
