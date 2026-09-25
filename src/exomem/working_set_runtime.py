@@ -141,6 +141,7 @@ def cache_key(
     anchor: str | None = None,
     continuity_refs: frozenset[str] | set[str] = frozenset(),
     heat_digest: str = "",
+    conventions_turn_hash: str = "",
 ) -> tuple:
     """The packet identity.
 
@@ -175,6 +176,12 @@ def cache_key(
     external burst, which record nothing, costs no cache hits. It carries the
     caller's own session and workspace tiers (ruling S5-1), so two parallel
     sessions asking "continue" are two packets.
+
+    `conventions_turn_hash` is the digest of the vault's referential
+    vocabulary (close-memory-loop step 5). A learned cue changes how a turn is
+    analysed and nothing the index holds, so it moves this key and neither the
+    index generation nor `conventions_hash`, which the continuity token
+    carries: a learned cue strands no conversation.
     """
     return (
         tuple(freshness_key) if isinstance(freshness_key, (list, tuple)) else str(freshness_key),
@@ -189,6 +196,7 @@ def cache_key(
         str(anchor or ""),
         bool(os.environ.get("EXOMEM_DISABLE_EMBEDDINGS")),
         str(heat_digest),
+        str(conventions_turn_hash),
     )
 
 
@@ -1187,6 +1195,7 @@ def serve(
         anchor=anchor,
         continuity_refs=continuity_refs,
         heat_digest=heat_digest,
+        conventions_turn_hash=conventions_registry.turn_hash,
     )
     cache_identity = (str(root.absolute()), key, lexical_state, index.token())
     with _CACHE_LOCK:

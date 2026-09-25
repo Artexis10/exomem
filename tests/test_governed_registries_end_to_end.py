@@ -54,7 +54,7 @@ def test_end_to_end_on_a_vault_with_no_products_or_systems_folder(
 
     # An agent saves a conventions override: its own resource folder, its own
     # state field, and an added stopword -- through the tool entry point.
-    conventions_before = ac.load_conventions(root).conventions_hash
+    conventions_before = ac.load_conventions(root).content_hash
     conventions_saved = commands.op_schema_memory(
         root,
         subject="activation-conventions",

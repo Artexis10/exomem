@@ -1709,7 +1709,7 @@ def compile_packet(
         # for, and `context_roles.select_roles` below reads `analysis.text` for its
         # `turn_cue` sources. Deleting it here as unused on the override path would
         # silently narrow an overridden packet to the anchor kind's default roles.
-        analysis = working_set_resolve.analyze_turn(turn)
+        analysis = working_set_resolve.analyze_turn(turn, vocabulary=conventions.referential)
         rows = working_set_resolve.facts_from_rows(index.anchors())
         # Whether a valid token was passed at all, which is not the same as
         # whether any of its refs survived: the caller drops every ref the

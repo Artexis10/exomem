@@ -1777,10 +1777,10 @@ def test_a_cue_word_with_anything_else_said_is_not_referential(turn: str) -> Non
 
 
 def test_the_filler_set_is_closed_and_declared() -> None:
-    assert "work" in resolve_module.REFERENTIAL_FILLER
-    assert "resume" not in resolve_module.REFERENTIAL_FILLER
-    assert "report" not in resolve_module.REFERENTIAL_FILLER
-    assert len(resolve_module.REFERENTIAL_FILLER) == 33
+    assert "work" in resolve_module.shipped_vocabulary().filler
+    assert "resume" not in resolve_module.shipped_vocabulary().filler
+    assert "report" not in resolve_module.shipped_vocabulary().filler
+    assert len(resolve_module.shipped_vocabulary().filler) == 33
 
 
 # --------------------------------------------------------------------------- #

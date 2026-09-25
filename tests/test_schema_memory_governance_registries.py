@@ -41,7 +41,7 @@ def _current_roles_hash(vault_root: Path) -> str:
 
 
 def _current_conventions_hash(vault_root: Path) -> str:
-    return ac.load_conventions(vault_root).conventions_hash
+    return ac.load_conventions(vault_root).content_hash
 
 
 def _valid_roles_proposal() -> dict[str, object]:

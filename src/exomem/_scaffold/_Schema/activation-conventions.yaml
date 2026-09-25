@@ -39,6 +39,23 @@
 #     add: [der, die, das, zusammenfassung, verbindungen]
 #   resolution:
 #     rare_term_max_anchors: 2                     # may only be tightened, 1..3
+#   referential:
+#     # Words that make a turn point back at recent work ("continue", "where
+#     # were we") in YOUR language. A turn is referential only when it speaks
+#     # a cue and says nothing else besides stopwords and filler words, so a
+#     # turn that also names something is never answered by recency.
+#     add_cues:
+#       - weiter
+#       - {value: "on reprend", why: "the user resumes in French", at: "2026-01-15"}
+#     drop_cues: [status]                          # must name a shipped cue
+#     add_filler: [bitte]                          # exactly one word each
+#     drop_filler: []
+#
+# An added cue needs one word of its own that is neither a stopword nor a
+# filler word, entries are at most 64 characters, and a vault may add at
+# most 64 cues and 128 filler words. A cue change only changes how a turn is
+# read: it rebuilds nothing and keeps every conversation's continuity.
+#
 # A folder rule cannot claim raw material (`Sources/`, `Evidence/`), a
 # Planning or Records collection tree, the entity folder, or anything
 # beginning with the knowledge-base folder's own name — those rules are
@@ -95,3 +112,31 @@ stopwords:
 resolution:
   rare_term_max_anchors: 3
 
+# The shipped referential seed: what makes a turn point back at recent work.
+# A cue is matched on whole words, never inside a longer one. The filler
+# words are the closed set a pointing-back turn may also say. "on" and "off"
+# are quoted for the YAML 1.1 reason above.
+referential:
+  cues:
+    - continue
+    - where were we
+    - where did we leave
+    - what were we doing
+    - carry on
+    - status
+    - status update
+    - status report
+    - "what's next"
+    - whats next
+    - what is next
+    - same as before
+    - as before
+    - pick up where
+    - resume
+  filler:
+    [
+      ok, okay, so, now, "let's", lets, please,
+      work, task, thing, things, stuff, it, this, that,
+      pending, left, "off", up, from, where, what, "what's", whats,
+      here, today, yesterday, last, stopped, doing, "on", with, again,
+    ]

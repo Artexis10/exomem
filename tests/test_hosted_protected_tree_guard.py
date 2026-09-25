@@ -1484,7 +1484,7 @@ def test_the_governed_save_writes_only_the_override_file_a_hosted_cell_would_see
     assert saved_roles["valid"] is True
     assert context_roles_module.override_path(root).is_file()
 
-    conventions_before = activation_conventions_module.load_conventions(root).conventions_hash
+    conventions_before = activation_conventions_module.load_conventions(root).content_hash
     saved_conventions = commands_module.op_schema_memory(
         root,
         subject="activation-conventions",

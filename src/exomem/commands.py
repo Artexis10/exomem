@@ -10665,11 +10665,14 @@ def _governed_registry_schema_operation(
     else:
         load_fn = activation_conventions_module.load_conventions
         save_fn = activation_conventions_module.save_conventions
-        hash_attribute = "conventions_hash"
+        # The whole registry's identity: the index digest alone would let a
+        # stale proposal overwrite a concurrent change to the referential
+        # vocabulary, which only the turn digest records.
+        hash_attribute = "content_hash"
         save_operation = "save-conventions"
 
         def as_named_dict(registry: Any) -> dict[str, Any]:
-            return activation_conventions_module.conventions_payload(registry.conventions)
+            return activation_conventions_module.registry_payload(registry.conventions)
 
     if operation == "infer":
         raise ValueError(

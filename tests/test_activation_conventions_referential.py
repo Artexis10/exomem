@@ -17,18 +17,16 @@ from pathlib import Path
 
 import pytest
 import yaml
-from test_working_set_hot_projection import (
-    SLED,
-    _edit,
-    _resolved,
-    heat_vault,  # noqa: F401 - fixture
-)
+from test_governance_egress import _reset_caches
+from test_working_set_carry import _seed_carry_pages
+from test_working_set_hot_projection import SLED, _edit, _live, _one_old_tick, _resolved
+from test_working_set_index import _seed_planning, _seed_structure
 
-from exomem import (
-    activation_conventions as ac,
-)
+from exomem import activation_conventions as ac
 from exomem import (
     commands,
+    lexstore,
+    working_set_heat,
     working_set_index,
     working_set_resolve,
     working_set_runtime,
@@ -84,6 +82,25 @@ def _validate(referential: dict) -> list[dict]:
         proposal={"schema_version": 1, "referential": referential},
     )
     return result["findings"]
+
+
+@pytest.fixture
+def heat_vault(vault: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Local copy of `test_working_set_hot_projection.heat_vault` (a
+    cross-file fixture import reads as a redefinition to ruff F811): a warm
+    vault whose every page was written once, long ago, with a live registry."""
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _seed_carry_pages(vault)
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    _reset_caches()
+    _one_old_tick(vault)
+    _live(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_heat.reset_for_tests()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    return vault
 
 
 @pytest.fixture(autouse=True)

@@ -68,6 +68,11 @@ MAX_STATE_FIELDS = 24
 MAX_DATE_FIELDS = 12
 MAX_STOPWORDS = 2000
 MAX_ENTRY_CHARS = 64
+#: The `referential` section's caps (close-memory-loop step 5): what a vault
+#: may ADD to the shipped seed. Drops are uncapped, since each must name a
+#: shipped entry and narrowing is always safer.
+MAX_ADDED_CUES = 64
+MAX_ADDED_FILLER = 128
 
 #: `rare_term_max_anchors` may only be tightened, never loosened past the
 #: shipped ceiling (design.md decision 2a).
@@ -86,7 +91,14 @@ _ANCHOR_KIND_FIELDS = frozenset(
 _STATE_FIELDS_ALLOWED = frozenset({"prefer_state_fields", "drop_state_fields"})
 _STOPWORDS_FIELDS_ALLOWED = frozenset({"add"})
 _RESOLUTION_FIELDS_ALLOWED = frozenset({"rare_term_max_anchors"})
-_TOP_LEVEL_FIELDS = frozenset({"schema_version", "anchors", "state", "stopwords", "resolution"})
+_REFERENTIAL_FIELDS_ALLOWED = frozenset({"add_cues", "drop_cues", "add_filler", "drop_filler"})
+#: What a provenance mapping on an added cue or filler word may carry: the
+#: entry itself, the reason, the day it was learned and the advisory that
+#: proposed it. Nothing else, so the file never grows a free-form record.
+_PROVENANCE_KEYS = frozenset({"value", "why", "at", "evidence"})
+_TOP_LEVEL_FIELDS = frozenset(
+    {"schema_version", "anchors", "state", "stopwords", "resolution", "referential"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +131,37 @@ class Conventions:
     #: `working_set_index.normalize` / `tokens_of` already produce.
     stopwords: frozenset[str] = frozenset()
     rare_term_max_anchors: int = RARE_TERM_MAX
+    #: The effective referential vocabulary (close-memory-loop step 5): the
+    #: shipped seed, extended by `referential.add_*` and narrowed by
+    #: `referential.drop_*`. Cues keep their authored spelling and order;
+    #: filler words are single normalised tokens.
+    referential_cues: tuple[str, ...] = ()
+    referential_filler: frozenset[str] = frozenset()
+    #: One mapping per ADDED entry, in file order: `field`, `value`, and any
+    #: of `why`, `at` and `evidence` the owner's agent recorded.
+    referential_provenance: tuple[Mapping[str, str], ...] = ()
+
+    @property
+    def referential(self) -> Any:
+        """The vocabulary `working_set_resolve.analyze_turn` reads, built once
+        per distinct cue and filler set."""
+        return _vocabulary(self.referential_cues, self.referential_filler)
+
+
+def _vocabulary(cues: tuple[str, ...], filler: frozenset[str]) -> Any:
+    key = (cues, filler)
+    cached = _VOCABULARIES.get(key)
+    if cached is None:
+        from .working_set_resolve import ReferentialVocabulary
+
+        cached = ReferentialVocabulary.of(cues, filler)
+        if len(_VOCABULARIES) > 64:
+            _VOCABULARIES.clear()
+        _VOCABULARIES[key] = cached
+    return cached
+
+
+_VOCABULARIES: dict[tuple[tuple[str, ...], frozenset[str]], Any] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,13 +170,28 @@ class ConventionsRegistry:
 
     conventions: Conventions
     source: str
+    #: The INDEX digest: anchors, skip folders, state, stopwords and the
+    #: rarity threshold — everything the anchor sidecar is built from. A
+    #: mismatch wipes the sidecar, and the continuity token carries it.
     conventions_hash: str
     findings: tuple[dict[str, str], ...] = field(default_factory=tuple)
+    #: The TURN digest: the referential vocabulary, which changes only how a
+    #: turn is analysed. It joins the packet cache key and nothing else, so a
+    #: learned cue costs no rebuild and strands no conversation.
+    turn_hash: str = ""
+
+    @property
+    def content_hash(self) -> str:
+        """The whole registry's identity, both digests together: what a
+        governed save's `expected_hash` is checked against, so a concurrent
+        change to either half refuses a stale proposal."""
+        return _hash(f"{self.conventions_hash}:{self.turn_hash}")
 
     def generation_block(self) -> dict[str, Any]:
         """What the packet's `generation` block reports about conventions."""
         block: dict[str, Any] = {
             "conventions_hash": self.conventions_hash,
+            "conventions_turn_hash": self.turn_hash,
             "conventions_source": self.source,
         }
         if self.findings:
@@ -177,6 +235,36 @@ def conventions_payload(conventions: Conventions) -> dict[str, Any]:
     }
 
 
+def turn_payload(conventions: Conventions) -> dict[str, Any]:
+    """The JSON-safe view of the referential vocabulary the turn digest reads."""
+    return {
+        "cues": sorted(conventions.referential_cues),
+        "filler": sorted(conventions.referential_filler),
+    }
+
+
+def registry_payload(conventions: Conventions) -> dict[str, Any]:
+    """Everything a `diff` compares: the index values and the vocabulary."""
+    return {**conventions_payload(conventions), "referential": turn_payload(conventions)}
+
+
+def _turn_digest(conventions: Conventions) -> str:
+    raw = json.dumps(turn_payload(conventions), sort_keys=True, separators=(",", ":"))
+    return _hash(raw)
+
+
+def _registry(
+    conventions: Conventions, *, source: str, findings: Sequence[dict[str, str]] = ()
+) -> ConventionsRegistry:
+    return ConventionsRegistry(
+        conventions=conventions,
+        source=source,
+        conventions_hash=_conventions_digest(conventions),
+        findings=tuple(findings),
+        turn_hash=_turn_digest(conventions),
+    )
+
+
 def _conventions_digest(conventions: Conventions) -> str:
     """The digest of record: over EFFECTIVE values, never file bytes.
 
@@ -216,9 +304,7 @@ def shipped_conventions() -> ConventionsRegistry:
         if findings:
             # A broken SHIPPED registry is a build defect, not a runtime state.
             raise RuntimeError(f"packaged activation-conventions registry is invalid: {findings[0]}")
-        _SHIPPED = ConventionsRegistry(
-            conventions=conventions, source="shipped", conventions_hash=_conventions_digest(conventions)
-        )
+        _SHIPPED = _registry(conventions, source="shipped")
     return _SHIPPED
 
 
@@ -285,7 +371,7 @@ def save_conventions(vault_root: Path, proposal: Any, *, expected_hash: str) -> 
     is defence in depth, matching `context_roles.save_roles`.
     """
     current = load_conventions(vault_root)
-    if current.conventions_hash != expected_hash:
+    if current.content_hash != expected_hash:
         raise ValueError(
             "STALE_ACTIVATION_CONVENTIONS_REGISTRY: expected_hash does not match current hash"
         )
@@ -304,8 +390,8 @@ def save_conventions(vault_root: Path, proposal: Any, *, expected_hash: str) -> 
     _CACHE.pop(path, None)
     return {
         "path": path.relative_to(vault_root).as_posix(),
-        "content_hash": candidate.conventions_hash,
-        "previous_hash": current.conventions_hash,
+        "content_hash": candidate.content_hash,
+        "previous_hash": current.content_hash,
         "created": current.source == "shipped",
     }
 
@@ -366,6 +452,14 @@ def _parse_shipped(data: Any) -> tuple[Conventions, tuple[dict[str, str], ...]]:
     if not isinstance(rare_term_max_anchors, int) or isinstance(rare_term_max_anchors, bool):
         findings.append(_finding("invalid_threshold", "resolution.rare_term_max_anchors", "must be an integer"))
         rare_term_max_anchors = RARE_TERM_MAX
+    referential_raw = data.get("referential")
+    referential_raw = referential_raw if isinstance(referential_raw, Mapping) else {}
+    referential_cues = tuple(dict.fromkeys(_shipped_strings(referential_raw.get("cues"))))
+    referential_filler = frozenset(
+        normalize(word) for word in _shipped_strings(referential_raw.get("filler"))
+    )
+    if not referential_cues:
+        findings.append(_finding("invalid_referential", "referential.cues", "must list the seed cues"))
     conventions = Conventions(
         anchors=anchors,
         skip_folders=skip_folders,
@@ -373,6 +467,8 @@ def _parse_shipped(data: Any) -> tuple[Conventions, tuple[dict[str, str], ...]]:
         date_fields=date_fields,
         stopwords=stopwords,
         rare_term_max_anchors=int(rare_term_max_anchors),
+        referential_cues=referential_cues,
+        referential_filler=referential_filler,
     )
     return conventions, tuple(findings)
 
@@ -650,18 +746,181 @@ def _merge_resolution(
     return int(value)
 
 
+def _referential_entries(
+    value: object, *, field_name: str, findings: list[dict[str, str]]
+) -> list[tuple[str, dict[str, str]]]:
+    """`(text, provenance)` per well-formed entry of one `add_*` list. An
+    entry is a string, or a mapping carrying `value` and at most `why`, `at`
+    and `evidence`; anything else is a finding and is skipped."""
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        findings.append(_finding("invalid_referential", field_name, "must be a list"))
+        return []
+    entries: list[tuple[str, dict[str, str]]] = []
+    for item in value:
+        record: dict[str, str] = {"field": field_name.rsplit(".", 1)[-1]}
+        if isinstance(item, Mapping):
+            unknown = sorted(str(key) for key in set(item) - _PROVENANCE_KEYS)
+            text = item.get("value")
+            if unknown or not isinstance(text, str):
+                findings.append(
+                    _finding(
+                        "invalid_provenance",
+                        field_name,
+                        "a provenance entry carries a string value and only why, at and evidence",
+                    )
+                )
+                continue
+            for key in ("why", "at", "evidence"):
+                if item.get(key) is not None:
+                    raw = item[key]
+                    record[key] = raw.isoformat() if hasattr(raw, "isoformat") else str(raw)
+        elif isinstance(item, str):
+            text = item
+        else:
+            findings.append(_finding("invalid_referential", field_name, "entries are strings"))
+            continue
+        text = text.strip()
+        if not text:
+            continue
+        if len(text) > MAX_ENTRY_CHARS:
+            findings.append(
+                _finding("entry_too_long", field_name, f"entry exceeds {MAX_ENTRY_CHARS} characters: {text!r}")
+            )
+            continue
+        entries.append((text, {"field": record.pop("field"), "value": text, **record}))
+    return entries
+
+
+def _merge_referential(
+    shipped: Conventions,
+    raw: Any,
+    *,
+    stopwords: frozenset[str],
+    findings: list[dict[str, str]],
+) -> tuple[tuple[str, ...], frozenset[str], tuple[dict[str, str], ...]]:
+    """Extend or narrow the shipped referential seed (close-memory-loop step 5).
+
+    Narrowing is always allowed and always safer: fewer turns become
+    referential. Additions widen, so each must be sound on its own: a filler
+    word is exactly one token, and an added cue must carry at least one token
+    that is neither a stopword nor an effective filler word — otherwise it
+    adds nothing a filler word does not, and a cue of only "it" would point
+    every turn that says it back at recent work. A `drop_*` entry must name a
+    shipped entry, so a typo is a finding and not a silent no-op.
+    """
+    base_cues, base_filler = shipped.referential_cues, shipped.referential_filler
+    if raw is None:
+        return base_cues, base_filler, ()
+    if not isinstance(raw, Mapping):
+        findings.append(_finding("invalid_referential", "referential", "must be a mapping"))
+        return base_cues, base_filler, ()
+    for key in sorted(set(raw) - _REFERENTIAL_FIELDS_ALLOWED):
+        findings.append(_finding("unknown_field", f"referential.{key}", "unknown override field"))
+    from .working_set_index import normalize, tokens_of
+
+    def drops(field_name: str, shipped_entries: Sequence[str], fold: Any) -> set[str]:
+        value = raw.get(field_name)
+        if value is None:
+            return set()
+        if not isinstance(value, (list, tuple)):
+            findings.append(_finding("invalid_referential", f"referential.{field_name}", "must be a list"))
+            return set()
+        known = {fold(entry) for entry in shipped_entries}
+        dropped: set[str] = set()
+        for item in value:
+            if not isinstance(item, str) or fold(item) not in known:
+                findings.append(
+                    _finding(
+                        "drop_not_shipped",
+                        f"referential.{field_name}",
+                        f"names no shipped entry: {item!r}",
+                    )
+                )
+                continue
+            dropped.add(fold(item))
+        return dropped
+
+    def cue_key(text: str) -> str:
+        return " ".join(tokens_of(normalize(text)))
+
+    def filler_key(text: str) -> str:
+        return normalize(text).strip()
+
+    provenance: list[dict[str, str]] = []
+    dropped_filler = drops("drop_filler", sorted(base_filler), filler_key)
+    added_filler: list[str] = []
+    for text, record in _referential_entries(
+        raw.get("add_filler"), field_name="referential.add_filler", findings=findings
+    ):
+        tokens = tokens_of(normalize(text))
+        if len(tokens) != 1:
+            findings.append(
+                _finding(
+                    "filler_not_one_token",
+                    "referential.add_filler",
+                    f"a filler word is exactly one token: {text!r}",
+                )
+            )
+            continue
+        added_filler.append(tokens[0])
+        provenance.append(record)
+    if len(dict.fromkeys(added_filler)) > MAX_ADDED_FILLER:
+        findings.append(
+            _finding(
+                "cap_exceeded",
+                "referential.add_filler",
+                f"{len(dict.fromkeys(added_filler)) - MAX_ADDED_FILLER} entry(ies) past the "
+                f"{MAX_ADDED_FILLER} cap ignored",
+            )
+        )
+    added_filler = list(dict.fromkeys(added_filler))[:MAX_ADDED_FILLER]
+    filler = frozenset(
+        {word for word in base_filler if word not in dropped_filler} | set(added_filler)
+    )
+
+    dropped_cues = drops("drop_cues", base_cues, cue_key)
+    added_cues: list[str] = []
+    for text, record in _referential_entries(
+        raw.get("add_cues"), field_name="referential.add_cues", findings=findings
+    ):
+        tokens = tokens_of(normalize(text))
+        if not any(token not in stopwords and token not in filler for token in tokens):
+            findings.append(
+                _finding(
+                    "cue_without_content",
+                    "referential.add_cues",
+                    f"a cue needs a word that is neither a stopword nor filler: {text!r}",
+                )
+            )
+            continue
+        added_cues.append(text)
+        provenance.append(record)
+    unique_added = list(dict.fromkeys(added_cues))
+    if len(unique_added) > MAX_ADDED_CUES:
+        findings.append(
+            _finding(
+                "cap_exceeded",
+                "referential.add_cues",
+                f"{len(unique_added) - MAX_ADDED_CUES} entry(ies) past the {MAX_ADDED_CUES} cap ignored",
+            )
+        )
+    unique_added = unique_added[:MAX_ADDED_CUES]
+    cues = tuple(
+        dict.fromkeys(
+            [cue for cue in base_cues if cue_key(cue) not in dropped_cues] + unique_added
+        )
+    )
+    return cues, filler, tuple(provenance)
+
+
 def _merge(shipped: Conventions, data: Any) -> ConventionsRegistry:
     """Apply a vault override: add or narrow, never remove past the shipped floor."""
     findings: list[dict[str, str]] = []
     if not isinstance(data, Mapping):
-        conventions = shipped
         findings.append(_finding("invalid_registry", "conventions", "override must be a mapping"))
-        return ConventionsRegistry(
-            conventions=conventions,
-            source="shipped",
-            conventions_hash=_conventions_digest(conventions),
-            findings=tuple(findings),
-        )
+        return _registry(shipped, source="shipped", findings=findings)
     if data.get("schema_version") != SCHEMA_VERSION:
         findings.append(_finding("invalid_version", "schema_version", f"must be {SCHEMA_VERSION}"))
     unknown = sorted(set(data) - _TOP_LEVEL_FIELDS)
@@ -672,6 +931,9 @@ def _merge(shipped: Conventions, data: Any) -> ConventionsRegistry:
     state_fields = _merge_state(shipped, data.get("state"), findings)
     stopwords = _merge_stopwords(shipped, data.get("stopwords"), findings)
     rare_term_max_anchors = _merge_resolution(shipped, data.get("resolution"), findings)
+    cues, filler, provenance = _merge_referential(
+        shipped, data.get("referential"), stopwords=stopwords, findings=findings
+    )
 
     conventions = Conventions(
         anchors=anchors,
@@ -680,14 +942,11 @@ def _merge(shipped: Conventions, data: Any) -> ConventionsRegistry:
         date_fields=shipped.date_fields,
         stopwords=stopwords,
         rare_term_max_anchors=rare_term_max_anchors,
+        referential_cues=cues,
+        referential_filler=filler,
+        referential_provenance=provenance,
     )
-    source = "vault"
-    return ConventionsRegistry(
-        conventions=conventions,
-        source=source,
-        conventions_hash=_conventions_digest(conventions),
-        findings=tuple(findings),
-    )
+    return _registry(conventions, source="vault", findings=findings)
 
 
 def _folder_prefix_matches(rule_folders: Sequence[str], directory_segments: Sequence[str]) -> bool:
