@@ -175,6 +175,49 @@ returned; an identical retry writes nothing. A Stop hook's episode check or an
 durable happened. At `off`, record only when the user asks; at `light`, also
 when a hook's episode check asks.
 
+## Activation conventions and learning from corrections
+
+Every activation packet's `generation` says which registries shaped it:
+`conventions_source` and `conventions_hash` (anchor folders, skip folders,
+state fields, stopwords, rarity), `conventions_turn_hash` (the referential
+cues), `roles_source`, and any `conventions_findings` or
+`learned_aliases_rejected`. When a turn abstains although the page exists,
+check those first: an anchor folder the conventions do not cover, or a word
+this vault uses that the registry does not know, is the usual cause. Propose a
+fix to the user; never save one they have not agreed to, unless it is the
+learning advisory below.
+
+**Correct the packet with a pick.** When the user says which page they meant,
+call `activate_context` again with the same turn and `anchor` set to that
+page. If the turn's words never reached it, the packet may carry one
+`learning` advisory: the user's own words (`turn_terms`), the target, how
+often this happened, and the writers that would teach the vault, each with the
+`expected_hash` it must carry. It writes nothing.
+
+- **A name** (`family: "name"`): `edit_memory` with
+  `{kind: "patch_frontmatter", field: "learned_aliases", value: [...current,
+  "<the user's name for it>"], expected_hash}` and a `why`. The list replaces
+  the field, so keep `current`. A learned name changes what activates only:
+  never a link, an owner alias or who the page is. It needs a word of its
+  own (not a stopword or filler), a single ASCII word needs three letters,
+  at most eight per page and 64 characters each; `edit_memory` warns about one
+  the index will skip.
+- **A referential cue** (`family: "referential_cue"`): the words this user
+  says to mean "continue". `schema_memory(subject="activation-conventions",
+  operation="validate", proposal=...)` and `diff` first, then
+  `save-conventions` with `why` and the advisory's `expected_hash`. Add under
+  `referential.add_cues` or `referential.add_filler` (one word), optionally as
+  `{value, why, at, evidence}` with the advisory's `review` ref as evidence.
+- **Neither**: the words were a one-off. `triage_memory` with the `review`
+  ref, `action="dismiss"`, a `why` and the `fingerprint`; it stays quiet until
+  new misses arrive. `review/family/activation-naming` quiets the kind.
+
+A stale hash refuses the write: re-read and decide again. To undo a learned
+name, edit it out of `learned_aliases`. To undo a registry change,
+`schema_memory(operation="history")` lists the kept versions with their
+reasons, and `restore` takes a `version`, a `why` and the current
+`expected_hash`.
+
 ## Generated artifact adoption
 
 Generated drafts stay ephemeral. Generation, preview, filename, MIME type,

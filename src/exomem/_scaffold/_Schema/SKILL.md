@@ -114,7 +114,7 @@ conversation's decision or stopping point, record one bounded recap with
 
 At `balanced` or `maximal`:
 
-Call `activate_context` with the user's turn verbatim before answering a substantive turn that has no prior context; resolve an `ambiguous` packet by calling again with `anchor` set.
+Call `activate_context` with the user's turn verbatim before answering a substantive turn that has no prior context; resolve an `ambiguous` packet by calling again with `anchor` set. When the user corrects which page they meant, call again with `anchor` set to it; a `learning` advisory on that packet is handled in [engagement](references/engagement.md).
 
 What comes back is bounded working memory, or an abstention with its reason; an
 `ambiguous` packet names the competing senses and runs no lane, so choosing one

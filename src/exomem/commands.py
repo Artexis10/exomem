@@ -6074,7 +6074,9 @@ def op_activate_context(
             is then treated as resolved on your choice alone, its roles run,
             and any competing senses are omitted. A ref that names nothing
             eligible this way, or one this audience may not see, is refused
-            identically and no packet is built.
+            identically and no packet is built. When the user corrects which
+            page they meant, call again with the same turn and `anchor` set
+            to it.
         include_timings: Include per-stage timings for diagnostics.
         client: Optional lowercase label for the calling client, e.g.
             `claude-code`, `codex` or `chatgpt`. Recorded host-locally only; an
@@ -6095,7 +6097,7 @@ def op_activate_context(
 
     Returns: {recent_context, anchors, roles, units, pointers, current_state,
              missing, ambiguity, budget, generation, abstained, abstention?,
-             continuity?, episode_due?}. `recent_context` is first and is present on an
+             continuity?, episode_due?, learning?}. `recent_context` is first and is present on an
              abstained packet too. An abstained packet always empties
              `roles`, `units`, `pointers` and `current_state` — no material
              about an anchor that did not resolve — but `anchors` (a
@@ -6106,6 +6108,15 @@ def op_activate_context(
              the recent-work projection's `state` (`current`, `partial`,
              `seeded`, `behind` or `empty`) and `session_start`, the date
              its current working session began.
+             `learning` may ride on an `anchor` call whose turn never named
+             the page you chose: one advisory naming the writer that would
+             teach the vault the user's words — `edit_memory` adding to the
+             page's `learned_aliases`, or `schema_memory save-conventions`
+             adding a referential cue — each with the `expected_hash` it must
+             carry, plus `turn_terms`, the user's own words. It writes
+             nothing. Act on it only if those words should reach that page
+             next time; otherwise dismiss its `review` ref with
+             `triage_memory`.
     """
     # `RequestBudget` is bound in exactly one place, the MCP dispatch
     # middleware: `request_budget.current()` is always None on the REST and
