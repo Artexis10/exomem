@@ -475,6 +475,9 @@ _EPISODE_STATE_DEFAULT = {
     "last_ask_ts": 0.0,
     "last_seen_revisions": 0,
 }
+#: `last_seen_revisions` after a record this hook saw itself: the door's count
+#: now includes that record, so the next read re-bases instead of comparing.
+_REVISIONS_UNKNOWN = -1
 
 
 def _read_episode_state(path: Path) -> dict:
@@ -488,7 +491,7 @@ def _read_episode_state(path: Path) -> dict:
         return {
             "substantive_since_record": max(0, int(data.get("substantive_since_record") or 0)),
             "last_ask_ts": float(data.get("last_ask_ts") or 0.0),
-            "last_seen_revisions": max(0, int(data.get("last_seen_revisions") or 0)),
+            "last_seen_revisions": max(-1, int(data.get("last_seen_revisions") or 0)),
         }
     except (TypeError, ValueError):
         return dict(_EPISODE_STATE_DEFAULT)
@@ -671,6 +674,7 @@ def _episode_ask(
     state = _read_episode_state(path)
     if any(_successful_episode_record(tool) for tool in tools):
         state["substantive_since_record"] = 0
+        state["last_seen_revisions"] = _REVISIONS_UNKNOWN
     elif substantive:
         state["substantive_since_record"] += 1
     now = time.time()
@@ -684,10 +688,14 @@ def _episode_ask(
     if about_due:
         revisions = _episode_revision_count(key)
         if revisions is not None:
-            if revisions > state["last_seen_revisions"]:
+            # Only a count above a known baseline is another door's record.
+            # An unknown baseline follows a record seen here, which the door
+            # now reports too; re-base on it rather than suppress.
+            baseline = state["last_seen_revisions"]
+            if baseline != _REVISIONS_UNKNOWN and revisions > baseline:
                 state["substantive_since_record"] = 0
                 about_due = False
-            state["last_seen_revisions"] = max(state["last_seen_revisions"], revisions)
+            state["last_seen_revisions"] = max(baseline, revisions)
     due = about_due
     if due:
         state["last_ask_ts"] = now
@@ -709,6 +717,7 @@ def _note_continuation_record(session_id: str, tools: list[dict]) -> None:
     path = _episode_state_path(session_id)
     state = _read_episode_state(path)
     state["substantive_since_record"] = 0
+    state["last_seen_revisions"] = _REVISIONS_UNKNOWN
     _write_episode_state(path, state)
 
 

@@ -451,6 +451,49 @@ def test_a_transcript_record_still_counts_without_consulting_the_door(
     assert not _is_episode_ask(_stop(monkeypatch, capsys, recorded))
 
 
+def _counting_door(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """A door whose reported revision count the test moves by hand."""
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "test-key")
+    count = {"n": 0}
+
+    def fake_urlopen(request, timeout):
+        return _RestResponse(_inspect_payload(count["n"]))
+
+    monkeypatch.setattr(hook.urllib.request, "urlopen", fake_urlopen)
+    return count
+
+
+def _recorded_transcript(tmp_path: Path, name: str) -> Path:
+    return _transcript(
+        tmp_path,
+        SUBSTANTIVE,
+        tool="mcp__exomem__episode_memory",
+        tool_input={"action": "record", "subject": "Harbor Lamp purchase"},
+        name=name,
+    )
+
+
+@pytest.mark.parametrize("continuation", [False, True], ids=["turn", "continuation"])
+def test_a_record_the_hook_saw_does_not_swallow_the_next_due_ask(
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    continuation: bool,
+) -> None:
+    """The door later reports the very record the transcript already showed.
+    That is not a new revision from another door, so it must not suppress the
+    next ask and stretch the cadence to 2K turns."""
+    count = _counting_door(monkeypatch)
+    _stop(monkeypatch, capsys, _recorded_transcript(tmp_path, "rec.jsonl"), active=continuation)
+    count["n"] = 1  # that record is now in the ledger
+
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    results = _stops(monkeypatch, capsys, tmp_path, k)
+    assert not any(_is_episode_ask(result) for result in results[:-1])
+    assert _is_episode_ask(results[-1])
+
+
 # --- the retrieve hook sends attribution with every packet request ------------
 
 
