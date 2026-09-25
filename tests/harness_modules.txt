@@ -134,6 +134,8 @@ tests/test_protocol_schema_conformance.py
 tests/test_protocol_schema_drift.py
 tests/test_protocol_update_probe_matching.py
 tests/test_protocol_validity.py
+tests/test_recall_multilingual_fixtures.py
+tests/test_recall_multilingual_lexical.py
 tests/test_records_recall_reconcile.py
 tests/test_report_offline.py
 tests/test_retrieve_nudge_journey.py
