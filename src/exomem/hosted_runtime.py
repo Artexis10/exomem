@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from . import env_compat
 from . import init as init_module
 from .governance.authorization_serving_membership import (
     ServingMembershipReadiness,
@@ -44,7 +45,7 @@ _CREDENTIAL_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _TRUE = frozenset({"1", "true", "yes", "on"})
 _FALSE = frozenset({"", "0", "false", "no", "off"})
 _KNOWN_FEATURES = frozenset({"diarization", "embeddings", "file-watcher", "media", "vision"})
-_HOSTED_CLEARED_ENV = (
+_HOSTED_CLEARED_SETTINGS = (
     "EXOMEM_BASE_URL",
     "EXOMEM_CF_ACCESS_AUD",
     "EXOMEM_CF_ACCESS_TEAM_DOMAIN",
@@ -63,9 +64,30 @@ _HOSTED_CLEARED_ENV = (
     "EXOMEM_WRITER_LEASE_VAULT_ID",
     "GITHUB_CLIENT_ID",
     "GITHUB_CLIENT_SECRET",
-    # The legacy spelling too: `env_compat.promote_legacy()` runs again after
-    # this clearing and would otherwise copy it back to the canonical name.
-    "KB_MCP_OWNER_OAUTH_SUBJECT",
+)
+
+
+def _legacy_alias(setting: str) -> str | None:
+    """Return the `KB_MCP_*` spelling that `env_compat.promote_legacy()` would
+    promote into `setting`, or ``None`` when `setting` is not a canonical
+    `EXOMEM_*` name (and so has no legacy spelling to promote from)."""
+    if not setting.startswith(env_compat.CANONICAL_PREFIX):
+        return None
+    return env_compat.LEGACY_PREFIX + setting[len(env_compat.CANONICAL_PREFIX):]
+
+
+# Every cleared setting's legacy `KB_MCP_*` spelling must be cleared too:
+# `env_compat.promote_legacy()` runs again after this clearing and would
+# otherwise copy a surviving legacy value back onto the canonical name. This
+# is derived mechanically from `env_compat`'s own prefix constants rather than
+# hand-listed, so no future addition to `_HOSTED_CLEARED_SETTINGS` can miss it.
+_HOSTED_CLEARED_ENV = tuple(
+    dict.fromkeys(
+        name
+        for setting in _HOSTED_CLEARED_SETTINGS
+        for name in (setting, _legacy_alias(setting))
+        if name is not None
+    )
 )
 
 _DEFAULT_STORAGE_LIMIT_BYTES = 5 * 1024 * 1024 * 1024
