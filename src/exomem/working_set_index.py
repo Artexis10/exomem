@@ -2126,9 +2126,12 @@ class WorkingSetIndex:
         A stored vector is reused when its anchor's signature digest is
         unchanged and the encoder in use made it. Without a resident encoder
         (and no leave to load one) nothing is encoded: unchanged anchors keep
-        their vectors and changed ones lose theirs. A different resident encoder
-        replaces every vector, a bounded number per inline pass. None when
-        embeddings are off, which leaves no vectors at all.
+        their vectors and changed ones lose theirs. A resident encoder other
+        than the one the vectors were made with is treated the same way on an
+        inline pass: it never starts its own vector space there, because a
+        bounded inline pass would leave a partial population for the band to
+        calibrate on. Only a background pass re-embeds everything under it.
+        None when embeddings are off, which leaves no vectors at all.
         """
         if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
             return None
@@ -2164,6 +2167,12 @@ class WorkingSetIndex:
                 if anchor_id in stored and stored[anchor_id][0] == digest
             }
 
+        if not load_encoder and fingerprint is not None and stored_fingerprint not in (None, fingerprint):
+            keep = reusable(stored_fingerprint)
+            space = stored_fingerprint if keep else None
+            return _VectorPlan(
+                rows=keep, fingerprint=space, changed=keep != stored or space != stored_fingerprint
+            )
         keep = reusable(fingerprint or stored_fingerprint)
         missing = [c for c in candidates if c.signature and c.anchor_id not in keep]
         new: dict[str, tuple[str, bytes]] = {}

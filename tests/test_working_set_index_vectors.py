@@ -366,3 +366,64 @@ def test_the_fingerprint_and_the_rows_are_read_in_one_snapshot(encoder, monkeypa
 
 def _signatures(index: working_set_index.WorkingSetIndex) -> dict[str, str]:
     return {row.anchor_id: _signature_of(index, row.anchor_id) for row in index.anchors()}
+
+
+def test_an_inline_pass_never_starts_another_encoders_vector_space(encoder) -> None:
+    """After the resident encoder changes, an inline pass encodes nothing: the
+    stored rows stay under the fingerprint they were made with, and semantic
+    evidence reads `absent` until the background pass re-embeds them all. A
+    partial population under the new encoder would calibrate the band on a
+    sample."""
+    vault, fake = encoder
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild()
+    first = fake.fingerprint
+    stored, _ = index.vector_matrix(first)
+    fake.fingerprint = "fake-model|cls|l2|bbbb"
+    fake.encoded.clear()
+    _write(vault / "Knowledge Base/Products/Tern Wagon.md", "---\ntype: note\nstatus: active\n---\n# Tern Wagon\n\nNew.\n")
+
+    for _ in range(3):
+        index.update()
+
+    assert fake.encoded == []
+    assert set(index.vector_matrix(first)[0]) == set(stored)
+    assert index.vector_matrix(fake.fingerprint) == ((), None)
+    assert working_set.signature_evidence(index, "Could the sled cope?") == ({}, "absent")
+
+
+def test_a_managed_runtime_re_embeds_once_after_the_encoder_changes(encoder, monkeypatch) -> None:
+    """A vault that does not change still gets its vectors re-embedded when the
+    resident encoder changes: the managed runtime schedules one background
+    build, and after it every row is under the new fingerprint. No request
+    thread ever encoded a signature."""
+    from exomem import reserved_paths
+
+    vault, fake = encoder
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild(freshness_stamp="stamp-1", load_encoder=True)
+    index.close()
+    monkeypatch.setattr(working_set_runtime, "_managed", lambda: True)
+    monkeypatch.setattr(reserved_paths, "identity_catalogue_ready", lambda root: True)
+    scheduled: list[str] = []
+    monkeypatch.setattr(
+        working_set_runtime, "_schedule_build", lambda root, freshness_stamp="": scheduled.append(freshness_stamp)
+    )
+    fake.fingerprint = "fake-model|cls|l2|bbbb"
+    fake.encoded.clear()
+
+    for _ in range(5):
+        status, served, stale = working_set_runtime.ensure_index(vault, freshness_stamp="stamp-1")
+        assert (status, stale) == (working_set_runtime.READY, False)
+        assert working_set.signature_evidence(served, "Could the sled cope?")[1] == "absent"
+
+    assert scheduled == ["stamp-1"], "exactly one background build"
+    assert fake.encoded == [], "no request thread encoded a signature"
+
+    working_set_index.WorkingSetIndex(vault).update(freshness_stamp="stamp-1", load_encoder=True)
+
+    after = working_set_index.WorkingSetIndex(vault)
+    ids, matrix = after.vector_matrix(fake.fingerprint)
+    assert matrix is not None and len(ids) == len(after.anchors())
+    status, served, _stale = working_set_runtime.ensure_index(vault, freshness_stamp="stamp-1")
+    assert scheduled == ["stamp-1"], "nothing more to schedule once the vectors match"

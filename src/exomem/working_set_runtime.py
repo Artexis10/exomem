@@ -498,6 +498,7 @@ def reset_caches_for_tests() -> None:
     with _CACHE_LOCK:
         _PACKET_CACHE.clear()
         _BUILDS.clear()
+        _REEMBED_SCHEDULED.clear()
         _INLINE_LOCKS.clear()
     working_set_index.reset_collection_manifests_for_tests()
 
@@ -550,7 +551,43 @@ def ensure_index(
     if freshness_stamp and index.freshness_stamp() != freshness_stamp:
         refreshed = refresh_index(index, freshness_stamp=freshness_stamp)
         return READY, index, not refreshed
+    if _managed():
+        _schedule_reembed(root, index, freshness_stamp=freshness_stamp)
     return READY, index, False
+
+
+#: (vault, fingerprint) pairs a re-embed was already scheduled for in this process.
+_REEMBED_SCHEDULED: set[tuple[str, str]] = set()
+
+
+def _schedule_reembed(
+    root: Path, index: working_set_index.WorkingSetIndex, *, freshness_stamp: str = ""
+) -> None:
+    """Schedule one background build when the resident activation encoder has
+    no vectors in the index: it changed, or its first build found it cold.
+
+    The vault may not change for days, and an inline pass never re-embeds
+    under a new encoder, so without this the semantic evidence would read
+    `absent` until the next write. Once per vault and fingerprint per process:
+    a build that cannot embed is not retried on every request.
+    """
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return
+    try:
+        from . import embeddings
+
+        resident = embeddings.activation_fingerprint()
+        if resident is None or index.vector_fingerprint() == resident:
+            return
+    except Exception:  # noqa: BLE001 - the vector lane is optional by contract
+        log.debug("activation encoder state unavailable", exc_info=True)
+        return
+    key = (str(root.absolute()), resident)
+    with _CACHE_LOCK:
+        if key in _REEMBED_SCHEDULED:
+            return
+        _REEMBED_SCHEDULED.add(key)
+    _schedule_build(root, freshness_stamp=freshness_stamp)
 
 
 def lexical_evidence(
