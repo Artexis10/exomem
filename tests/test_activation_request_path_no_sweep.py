@@ -1383,12 +1383,31 @@ def _write_episodes(vault: Path, count: int, *, start: int = 0) -> list[Path]:
     return written
 
 
+def _fresh_projection(vault: Path) -> None:
+    """Seed the heat projection from the registry the warm-up just built, as a
+    cell first serving this vault state does.
+
+    Re-based for the projection: the warm-up re-seeds the freshness registry,
+    which a live projection meets as a restart (its reconcile runs in the
+    background on a managed cell, and its watermark by design does not take a
+    page backdated to before it as new work). A test that builds two vault
+    states in one vault gives each its own projection rather than measuring
+    that restart."""
+    from exomem import working_set_heat
+
+    working_set_heat.reset_for_tests()
+    sidecar = working_set_heat.sidecar_path(vault)
+    for suffix in ("", "-wal", "-shm"):
+        sidecar.with_name(sidecar.name + suffix).unlink(missing_ok=True)
+    working_set_heat.profile(vault)
+
+
 def test_episode_recaps_hold_the_ceilings_at_ten_and_at_five_hundred(
     vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
 ) -> None:
-    """Episode entries come off the freshness map the block already copies and
-    the at-most-eight cached reads it already makes: a vault with fifty times
-    the recaps pays the same enumerations and a flat number of calls."""
+    """Episode entries come off the heat projection the block already ranks
+    and the at-most-eight cached reads it already makes: a vault with fifty
+    times the recaps pays the same enumerations and a flat number of calls."""
     _seed_structure(vault)
     _seed_planning(vault)
     _write_collection(vault)
@@ -1402,6 +1421,7 @@ def test_episode_recaps_hold_the_ceilings_at_ten_and_at_five_hundred(
         os.utime(newest, (now - 60, now - 60))
         _warm_activation(vault, warm_managed_cell)
         _drain_background_walks()
+        _fresh_projection(vault)
         with monkeypatch.context() as patch:
             scheduled = _no_background_walks(patch)
             calls = _FilesystemCalls(vault)

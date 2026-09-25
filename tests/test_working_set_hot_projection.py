@@ -537,3 +537,93 @@ def test_no_raw_session_id_or_cwd_is_persisted(
         assert secret not in stored, secret
         assert secret not in written, secret
     assert "quokka" not in stored and "quokka" not in written
+
+
+# --------------------------------------------------------------------------- #
+# The recent-context block reads the projection
+# --------------------------------------------------------------------------- #
+
+
+def _recent(packet: dict, why: str | None = None) -> list[str]:
+    return [
+        entry["path"] for entry in packet["recent_context"] if why is None or entry["why"] == why
+    ]
+
+
+def test_recent_context_omits_batch_written_pages(heat_vault: Path) -> None:
+    """Batch review a2: seven of eight entries were pages a batch wrote. A
+    batch records no event, so the block offers what the user worked on."""
+    _edit(heat_vault, SLED, "A towed cargo sled", "A towed freight sled")
+    _backfill(heat_vault)
+    _watcher_saw_everything(heat_vault)
+
+    packet = commands.op_activate_context(heat_vault, turn=NONSENSE_TURN)
+
+    assert _recent(packet, "edited") == [SLED], packet["recent_context"]
+
+
+def test_recent_context_offers_reads_beside_edits(heat_vault: Path) -> None:
+    """Every channel competes on its own time: a read made after nine edits
+    is offered first, where it used to be starved by the edits' mtimes."""
+    notes = sorted(
+        str(page.relative_to(heat_vault))
+        for page in (heat_vault / "Knowledge Base" / "Notes" / "Journal").glob("*.md")
+    )[:9]
+    for rel in notes:
+        _traced_commit(heat_vault, [rel])
+    commands.op_read_memory(heat_vault, path=HUB)
+
+    packet = commands.op_activate_context(heat_vault, turn=NONSENSE_TURN)
+
+    assert packet["recent_context"][0]["path"] == HUB
+    assert packet["recent_context"][0]["why"] == "activated"
+    assert _recent(packet, "edited")[:3] == list(reversed(notes))[:3]
+
+
+def test_recent_context_reads_no_freshness_map_after_the_seed(
+    heat_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The map is copied once per sidecar, by the cold seed. Watched at the
+    copy itself (`freshness.live_entries`), since a copy anywhere on the
+    request path is the O(N) cost the projection exists to remove."""
+    _traced_commit(heat_vault, [SLED])
+    assert _recent(commands.op_activate_context(heat_vault, turn=NONSENSE_TURN)), "seeded"
+
+    copies: list[str] = []
+    real = freshness.live_entries
+
+    def watched(vault_root, scope):
+        copies.append(scope)
+        return real(vault_root, scope)
+
+    monkeypatch.setattr(freshness, "live_entries", watched)
+    _traced_commit(heat_vault, [MARIT])
+    working_set_runtime.reset_caches_for_tests()
+
+    packet = commands.op_activate_context(heat_vault, turn=NONSENSE_TURN)
+
+    assert copies == [], "the freshness map was copied on the request path"
+    assert _recent(packet)[:2] == [MARIT, SLED], packet["recent_context"]
+
+
+def test_recent_context_leads_with_the_callers_own_thread(heat_vault: Path) -> None:
+    """Ruling S5-1 in the block: the calling session's own pages first, then
+    its workspace's, then the vault's, each list filled in that order."""
+    commands.op_activate_context(heat_vault, turn=SLED_TURN, **S1)
+    commands.op_activate_context(heat_vault, turn=MARIT_TURN, **S2)
+    _edit(heat_vault, DEPOT, "The ledger that tracks", "The ledger which tracks")
+
+    first = commands.op_activate_context(heat_vault, turn=NONSENSE_TURN, **S1)
+    second = commands.op_activate_context(heat_vault, turn=NONSENSE_TURN, **S2)
+    fresh = commands.op_activate_context(
+        heat_vault, turn=NONSENSE_TURN, **{**S1, "session": "ep-" + "c3" * 16}
+    )
+    keyless = commands.op_activate_context(heat_vault, turn=NONSENSE_TURN)
+
+    assert _recent(first)[0] == SLED, first["recent_context"]
+    assert _recent(second)[0] == MARIT, second["recent_context"]
+    assert _recent(fresh)[0] == SLED, fresh["recent_context"]
+    # Filled from below: the vault's newest work is still offered after it.
+    assert DEPOT in _recent(first) and DEPOT in _recent(second)
+    # A caller with no keys gets the vault's order: the newest contact first.
+    assert _recent(keyless)[0] == DEPOT, keyless["recent_context"]

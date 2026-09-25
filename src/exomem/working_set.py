@@ -1707,9 +1707,6 @@ def compile_packet(
         # silently narrow an overridden packet to the anchor kind's default roles.
         analysis = working_set_resolve.analyze_turn(turn)
         rows = working_set_resolve.facts_from_rows(index.anchors())
-        # Copied once per request for the recent-context block after
-        # resolution. The hot profile reads the heat projection instead.
-        mtimes = _recent_mtimes(root)
         # Whether a valid token was passed at all, which is not the same as
         # whether any of its refs survived: the caller drops every ref the
         # audience may not see (`working_set_runtime.visible_continuity_refs`),
@@ -1801,12 +1798,14 @@ def compile_packet(
     # shifts the documented pre-lane call count that
     # `test_budget_exhausted_between_two_role_lanes_discards_the_first_lanes_
     # work` pins. What makes that safe is that the block is bounded work
-    # between two boundaries that already gate the request — it reads a dict,
-    # sorts it, and touches at most `RECENT_CONTEXT_MAX_ENTRIES` cached pages
-    # — and an exhausted budget raises at `working_set.roles` immediately
-    # below.
+    # between two boundaries that already gate the request — it ranks the
+    # heat projection's rows, and touches at most `RECENT_CONTEXT_MAX_ENTRIES`
+    # cached pages for statements — and an exhausted budget raises at
+    # `working_set.roles` immediately below.
     with _span(timings, "working_set.recent"):
-        recent: tuple[dict[str, Any], ...] = _recent_context(root, rows=rows, mtimes=mtimes)
+        recent: tuple[dict[str, Any], ...] = _recent_context(
+            root, rows=rows, profile=heat, attribution=attribution, marks=marks
+        )
 
     # Design D3, and ONLY here: the turn reached no anchor at all. An
     # `ambiguous` turn is untouched (it reached two, and picking between them
@@ -2247,42 +2246,30 @@ def _burst_paths(edited: Mapping[str, int]) -> frozenset[str]:
     return working_set_heat.burst_paths(edited)
 
 
-def _activation_snapshot() -> Mapping[str, float]:
-    """The memoized ACT-R activation map, or an empty one.
-
-    Optional by construction, like every other source the working-continuity
-    block reads: a vault with no usage log is not a vault with no recent work.
-    """
-    try:
-        from . import ranking_config, usage
-
-        return usage.activation_map(ranking_config.DEFAULT_RANKING) or {}
-    except Exception:  # noqa: BLE001 - the usage snapshot is optional by construction
-        log.debug("recent context: usage activation unavailable", exc_info=True)
-        return {}
-
-
 def _recent_context(
     vault_root: Path,
     *,
     rows: Sequence[Any],
     limit: int = RECENT_CONTEXT_MAX_ENTRIES,
-    mtimes: Mapping[str, int] | None = None,
+    profile: working_set_heat.HeatProfile | None = None,
+    attribution: working_set_heat.Attribution | None = None,
+    marks: Mapping[str, working_set_heat.SessionMark] | None = None,
 ) -> tuple[dict[str, Any], ...]:
     """What was recently worked on — the block a turn that resolved nothing
     still carries.
 
-    Four sources, none of which enumerates a directory or walks the vault:
+    Three sources, none of which enumerates a directory, walks the vault or
+    copies the freshness map:
 
-    * the freshness registry's per-path mtimes, which the watcher maintains and
-      this reads as a dict (`edited`, `captured` for a captured session, or
-      `episode` for a conversation's newest recap, one entry per episode);
-    * the memoized ACT-R activation snapshot `_used_paths` already reuses, for
-      pages this vault has actually been reading (`activated`);
+    * the heat projection's contacts (`working_set_heat.recent`), each page
+      under the channel that last touched it: work is `edited`, a captured
+      session `captured`, an episode recap `episode` (one entry per
+      conversation, its newest revision), and a pick, read, citation or
+      served thread `activated`;
     * the activation index's own planning rows, for open commitments the
-      recent edits did not already surface (`planning`);
+      contacts did not already surface (`planning`);
     * and, for the CHOSEN entries only, each page's own authored
-      `status`/`summary` frontmatter, for the one-line statement.
+      `summary`/`status` frontmatter, for the one-line statement.
 
     The statement is deliberately NOT the current-state resolver, though that
     is where `current_state[]` gets its own. The block's pages are chosen by
@@ -2294,13 +2281,14 @@ def _recent_context(
     Frontmatter is the same authored value that resolver's own second tier
     reads, and it costs one cached page read.
 
-    Ranked most recent first, deduped by path — a page that was both edited and
-    read appears once, under the reason that offered it first — and capped at
-    `limit`. A page offered for its reads has no recent edit to rank by, so
-    it ranks after the timed entries, by its reads. The edit, read and
-    retirement rules are the hot profile's own (`hot_profile`). `as_of` dates the CONTACT, never the event the page describes: a
-    note edited today about a decision taken in March is recent work on an old
-    decision, and `why` is what says which.
+    Ranked as ruling S5-1 orders the contacts: the caller's own session
+    first, then its workspace, then the vault, newest first within each.
+    Every channel competes on its own time, so a read is no longer starved by
+    edits, and a batch records no event, so the pages it wrote never appear.
+    Deduped by path and capped at `limit`. Retired pages are never offered,
+    as the hot profile never offers them. `as_of` dates the CONTACT, never the
+    event the page describes: a note edited today about a decision taken in
+    March is recent work on an old decision, and `why` is what says which.
 
     Best-effort by construction. Every source is optional and every failure
     costs the block its entries, never the packet.
@@ -2311,30 +2299,44 @@ def _recent_context(
         path = str(getattr(row, "path", "") or "")
         if path and path not in by_path:
             by_path[path] = row
-    mtimes = _recent_mtimes(root) if mtimes is None else mtimes
-    # From the index's rows AS WELL AS the freshness map. Without a watcher the
-    # map is empty, but the other two sources still run off the rows — so
-    # deriving the collection directories from the map alone left the exclusion
-    # inert on exactly the cold path where those sources are all there is.
-    collections = _recent_collection_dirs((*by_path, *mtimes))
-    offered = _recent_edits(mtimes, limit=limit, collections=collections)
-    # Read pages rank by how much they were read, not by their last edit:
-    # an edit time says nothing about a read, and ranking by it let any
-    # eight fresher edits cut every read page from the block.
-    activated = {
-        rel: order
-        for order, rel in enumerate(
-            _recently_activated(by_path, mtimes, limit=limit, collections=collections)
-        )
-    }
-    for rel in activated:
-        offered.setdefault(rel, "activated")
-    for rel in _recent_planning(by_path, mtimes, limit=limit, collections=collections):
+    heat = working_set_heat.profile(root) if profile is None else profile
+    contacts = working_set_heat.recent(
+        heat, attribution=attribution, marks=marks, limit=working_set_heat.RING_MAX
+    )
+    # From the index's rows AS WELL AS the projection: without a watcher the
+    # projection holds governed activity only, and the planning rows still
+    # run off the index — deriving the collection directories from one alone
+    # left the exclusion inert on exactly the path where the other is all
+    # there is.
+    collections = _recent_collection_dirs((*by_path, *heat.all_rows))
+    order = {contact.path: position for position, contact in enumerate(contacts)}
+    times = {contact.path: contact.ts_ns for contact in contacts}
+    offered: dict[str, str] = {}
+    taken = {"edited": 0, "activated": 0}
+    episode_times: dict[str, int] = {}
+    for contact in contacts:
+        kind = _recent_reason_for(contact.path, collections=collections)
+        if not kind:
+            continue
+        if kind == "episode":
+            episode_times[contact.path] = contact.ts_ns
+            continue
+        # A captured session stays `captured` whoever touched it last: its
+        # body is raw material, and an `activated` entry would read a
+        # statement out of it.
+        why = "captured" if kind == "captured" else contact.reason
+        if why not in RECENT_CONTEXT_REASONS:
+            continue
+        bucket = "activated" if why == "activated" else "edited"
+        if taken[bucket] >= limit:
+            continue
+        taken[bucket] += 1
+        offered[contact.path] = why
+    for rel in _recent_planning(by_path, times, limit=limit, collections=collections):
         offered.setdefault(rel, "planning")
     # An episode is offered once per conversation, its newest revision, never
-    # per file, and like a captured session it is exempt from the burst
-    # cutoff: it is the record of what was spoken about, not a batch edit.
-    for rel in _recent_episodes(mtimes, limit=RECENT_EPISODES_MAX):
+    # per file.
+    for rel in _recent_episodes(episode_times, limit=RECENT_EPISODES_MAX):
         offered[rel] = "episode"
     # Retired state is never offered, as the hot profile never offers it: a
     # retired status or a `superseded_by` pointer, read from the request's
@@ -2346,12 +2348,13 @@ def _recent_context(
         for rel, why in offered.items()
         if why == "captured" or _is_current_page(root, rel)
     }
+    unranked = len(contacts)
 
-    def _rank(item: tuple[str, str]) -> tuple[int, int, int, str]:
+    def _rank(item: tuple[str, str]) -> tuple[int, int, str]:
         path, why = item
-        if why == "activated":
-            return (0, RECENT_CONTEXT_REASONS.index(why), activated.get(path, 0), path)
-        return (-mtimes.get(path, 0), RECENT_CONTEXT_REASONS.index(why), 0, path)
+        # The contacts' own order (tier, then newest first); an open plan
+        # nobody has touched lately has no contact and ranks after them.
+        return (order.get(path, unranked), RECENT_CONTEXT_REASONS.index(why), path)
 
     # One slot is RESERVED for the newest open Planning item. Ranking the
     # whole block by recency buried it every time: an open commitment nobody
@@ -2364,10 +2367,9 @@ def _recent_context(
     #
     # The newest episode is reserved a slot for the same reason: once work
     # has resumed, the last conversation is older than the edits it led to,
-    # and it is what a resumed session most needs. The most-read page is
-    # reserved one on the same terms: a read page has no fresh edit by
-    # definition (a fresh edit would have offered it as `edited`), so eight
-    # fresh edits cut it every time.
+    # and it is what a resumed session most needs. The newest read page is
+    # reserved one on the same terms: a burst of edits must not cut every
+    # page the user only read.
     reserved = [
         min(group, key=_rank)
         for group in (
@@ -2406,7 +2408,7 @@ def _recent_context(
                 "title": str(getattr(row, "title", "") or "") or Path(path).stem,
                 "kind": kind,
                 "why": why,
-                "as_of": _recent_as_of(mtimes.get(path)),
+                "as_of": _recent_as_of(times.get(path)),
             }
         )
 
@@ -2428,108 +2430,15 @@ def _recent_context(
     return _without_collection_echoes(entries, collections)
 
 
-def _recent_edits(
-    mtimes: Mapping[str, int],
-    *,
-    limit: int,
-    collections: frozenset[str] = frozenset(),
-) -> dict[str, str]:
-    """`{path: why}` for the newest `limit` pages that are working context
-    (`edited`, or `captured` for a captured session), newest first, less any
-    edit at or before the latest write burst. A captured session is never cut.
-
-    That is the hot profile's own edit rule (`hot_profile`): a last edit
-    inside a write burst is a batch nobody chose, and one older than the
-    latest burst may have lost the user's own page to it. An edit after the
-    burst is work again.
-
-    Only the LATEST burst matters, and only whether it reaches back over the
-    offers, so neither the registry nor every burst is sorted: a heap hands
-    the entries over newest first, the first chain that reaches
-    `HOT_PROFILE_BURST_PAGES` is the latest burst (`_burst_paths`' own chain
-    rule, read from the other end), and the scan stops once the offers are
-    full and no chain still open could reach back over them. The answer is
-    the one the full sort gives.
-    """
-    import heapq
-
-    if limit <= 0:
-        return {}
-    heap = [(-int(mtime), rel) for rel, mtime in mtimes.items()]
-    heapq.heapify(heap)
-    offers: list[tuple[int, str, str]] = []
-    after_burst: int | None = None
-    # The open chain: its newest edit, its oldest so far, and its length.
-    top = last = size = 0
-    while heap:
-        negative, rel = heapq.heappop(heap)
-        mtime = -negative
-        if len(offers) >= limit:
-            if after_burst is not None:
-                break
-            oldest = offers[-1][0] if offers else 0
-            if mtime < oldest and (not size or top < oldest):
-                break
-        else:
-            why = _recent_reason_for(rel, collections=collections)
-            # An episode is offered once per conversation, by
-            # `_recent_episodes`, never per file.
-            if why and why != "episode":
-                offers.append((mtime, rel, why))
-        if after_burst is None and mtime > 0 and _counts_toward_burst(rel):
-            if size and last - mtime <= HOT_PROFILE_BURST_GAP_NS:
-                size += 1
-            else:
-                top, size = mtime, 1
-            last = mtime
-            if size >= HOT_PROFILE_BURST_PAGES:
-                after_burst = top
-    cutoff = after_burst or 0
-    # A captured session is exempt: it is the record of what was spoken
-    # about, not an edit a batch made, so a save written after it (three
-    # pages a second apart is a burst) must not cut it from the block.
-    return {rel: why for mtime, rel, why in offers if why == "captured" or mtime > cutoff}
-
-
-def _recent_mtimes(vault_root: Path) -> dict[str, int]:
-    """`{vault-relative path: mtime_ns}` from the live freshness registry.
-
-    A dict copy, not a walk: the watcher (or the 300 s reconcile) already
-    maintains this map, which is precisely why the lexical heal reads it
-    instead of re-statting the corpus. A scope that is not live — no watcher,
-    or the kill switch — yields nothing, and the block falls back to the
-    sources that need no mtime rather than walking to fill it.
-    """
-    try:
-        from . import freshness
-
-        entries = freshness.live_entries(vault_root, "kb")
-    except Exception:  # noqa: BLE001 - the registry is optional by construction
-        log.debug("recent context: freshness registry unavailable", exc_info=True)
-        return {}
-    if not entries:
-        return {}
-    prefix = f"{vault_root}{os.sep}"
-    out: dict[str, int] = {}
-    for key, signature in entries.items():
-        if not key.startswith(prefix) or not key.lower().endswith(".md"):
-            continue
-        rel = key[len(prefix) :].replace(os.sep, "/")
-        try:
-            out[rel] = int(signature[0])
-        except (IndexError, TypeError, ValueError):
-            continue
-    return out
-
-
 def _recent_collection_dirs(paths: Iterable[str]) -> frozenset[str]:
     """Every directory that holds a `_collection.md`, from the paths in hand.
 
-    Derived from the paths this request already holds — the freshness map and
-    the index's anchor rows — rather than by asking the filesystem whether a
-    sibling manifest exists: between them they name every page the block can
-    offer, so this is string work on the request path. Both sources matter:
-    without a watcher the map is empty and the rows are all there is.
+    Derived from the paths this request already holds — the heat projection's
+    rows and the index's anchor rows — rather than by asking the filesystem
+    whether a sibling manifest exists: between them they name every page the
+    block can offer, so this is string work on the request path. Both sources
+    matter: without a watcher the projection holds governed activity only and
+    the rows are what is left.
     """
     marker = "/_collection.md"
     return frozenset(rel[: -len(marker)] for rel in paths if rel.endswith(marker))
@@ -2637,52 +2546,19 @@ def _without_collection_echoes(
     return tuple(out)
 
 
-def _recently_activated(
-    by_path: Mapping[str, Any],
-    mtimes: Mapping[str, int],
-    *,
-    limit: int,
-    collections: frozenset[str] = frozenset(),
-) -> tuple[str, ...]:
-    """The most-activated known pages, from the memoized usage snapshot.
-
-    The candidate set is the paths this request ALREADY holds — the index's
-    anchor rows and the freshness map — so the activation map is read as a
-    lookup table and never as a list of paths to go and find. A page that has
-    been read a lot but is in neither is simply not offered, which is the
-    bounded-work price of never walking.
-    """
-    from . import usage
-
-    activations = _activation_snapshot()
-    if not activations:
-        return ()
-    scored: list[tuple[float, str]] = []
-    for rel in dict.fromkeys((*by_path, *mtimes)):
-        # An episode is offered by `_recent_episodes`, newest revision only; a
-        # read of a retired revision must not bring it back beside the newest.
-        if _recent_reason_for(rel, collections=collections) in ("", "episode"):
-            continue
-        activation = activations.get(usage.canon(rel), activations.get(rel))
-        if activation is None:
-            continue
-        scored.append((-float(activation), rel))
-    scored.sort()
-    return tuple(rel for _activation, rel in scored[:limit])
-
-
 def _recent_planning(
     by_path: Mapping[str, Any],
-    mtimes: Mapping[str, int],
+    times: Mapping[str, int],
     *,
     limit: int,
     collections: frozenset[str] = frozenset(),
 ) -> tuple[str, ...]:
-    """Open Planning items, newest first — the same rows `_planning_lane` reads.
+    """Open Planning items, most recently contacted first — the same rows
+    `_planning_lane` reads, `times` being each page's latest heat contact.
 
     Read from the anchor rows this request already has, so an open commitment
     is carried without a second query. An item recently edited is offered by
-    the edit source first and keeps that reason; what this adds is the open
+    the contact source first and keeps that reason; what this adds is the open
     item nobody has touched lately, which is exactly the one a resumed session
     forgets.
     """
@@ -2693,14 +2569,14 @@ def _recent_planning(
         and str(getattr(row, "lifecycle", "active") or "active") == "active"
         and _recent_reason_for(path, collections=collections)
     ]
-    plans.sort(key=lambda path: (-mtimes.get(path, 0), path))
+    plans.sort(key=lambda path: (-times.get(path, 0), path))
     return tuple(plans[:limit])
 
 
-def _recent_episodes(mtimes: Mapping[str, int], *, limit: int) -> tuple[str, ...]:
+def _recent_episodes(times: Mapping[str, int], *, limit: int) -> tuple[str, ...]:
     """The newest revision of each of the most recent episodes, newest first.
 
-    String work over the freshness map the block already copied: no read, no
+    String work over the recap pages' heat contacts (`times`): no read, no
     walk. Revisions of one episode share the filename's group token and are
     ordered by its recording-time token, never by mtime — retiring an older
     revision rewrites its frontmatter, so the retired file is often the
@@ -2711,14 +2587,14 @@ def _recent_episodes(mtimes: Mapping[str, int], *, limit: int) -> tuple[str, ...
     from . import episode_capture
 
     newest: dict[str, tuple[str, str]] = {}
-    for rel in mtimes:
+    for rel in times:
         if _recent_reason_for(rel) != "episode":
             continue
         parts = episode_capture.filename_parts(rel.rsplit("/", 1)[-1])
         group, order = (parts[0], parts[1]) if parts is not None else (rel, "")
         if group not in newest or (order, rel) > newest[group]:
             newest[group] = (order, rel)
-    chosen = sorted((rel for _order, rel in newest.values()), key=lambda rel: (-mtimes[rel], rel))
+    chosen = sorted((rel for _order, rel in newest.values()), key=lambda rel: (-times[rel], rel))
     return tuple(chosen[:limit])
 
 
