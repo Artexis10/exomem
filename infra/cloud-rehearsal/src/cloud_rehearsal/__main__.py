@@ -51,6 +51,10 @@ def _parser() -> argparse.ArgumentParser:
         "--gateway-build", choices=("dockerfile", "host"), default="dockerfile",
         help="build the gateway from Substrate's Dockerfile (default), or assemble its final stage from a host build",
     )
+    run_parser.add_argument(
+        "--cellctl-build", choices=("dockerfile", "host"), default="dockerfile",
+        help="build cellctl from infra/cellctl/Dockerfile (default), or assemble its venv from a host resolution",
+    )
     run_parser.add_argument("--steps", default=None, help="comma-separated step numbers to run (default: all)")
     run_parser.add_argument("--keep", action="store_true", help="leave the stack running for inspection")
     run_parser.add_argument(
@@ -94,8 +98,8 @@ async def _run(args: argparse.Namespace) -> int:
             "the cell image was supplied with --cell-image instead of built from this checkout's Dockerfile"
         )
     report.inputs["cellctl_image_source"] = (
-        "assembled by the rehearsal from infra/cellctl (the repository ships no cellctl image yet)"
-    )
+        "infra/cellctl/Dockerfile" if args.cellctl_build == "dockerfile" else "host-assembled venv on the pinned Python base"
+    ) + ", plus a layer adding the rehearsal entry module and boto3"
     if not report.inputs["exomem_worktree_clean"]:
         report.notes.append("the exomem checkout had uncommitted changes")
     only = {int(part) for part in args.steps.split(",")} if args.steps else None
@@ -114,7 +118,7 @@ async def _run(args: argparse.Namespace) -> int:
             report.overlays.extend(cell_overlays)
             report.product_overlays.extend(o for o in cell_overlays if o.startswith("APPLIED"))
             gateway_tag = build.build_gateway_image(run_id, workdir, source, mode=args.gateway_build)
-            cellctl_tag = build.build_cellctl_image(run_id, workdir)
+            cellctl_tag = build.build_cellctl_image(run_id, workdir, mode=args.cellctl_build)
         with _stage(report, "infrastructure"):
             stack = infra.create_stack(run_id, workdir)
             report.adaptations.extend(stack.adaptations)
@@ -155,6 +159,8 @@ async def _run(args: argparse.Namespace) -> int:
                 platform.PlatformConfig(
                     cellctl_image=built.cellctl, gateway_image=built.gateway,
                     cell_repository=build.CELL_REPOSITORY, backup_window=closed_window,
+                    public_base_url=substrate.PUBLIC_BASE_URL, mcp_path=substrate.MCP_PATH,
+                    trusted_ingress_source_value=control.secrets.ingress_source_value,
                 ),
                 s3_access_key=stack.object_store.access_key,
                 s3_secret_key=stack.object_store.secret_key,
@@ -328,7 +334,9 @@ def _cellctl_secrets(stack: infra.Stack, control: substrate.Substrate) -> dict[s
     return {
         "exomem-cellctl-database-dsn": {"dsn": stack.postgres.dsn("exomem_cellctl", from_host=False)},
         "exomem-cloud-gateway-database": {"url": stack.postgres.dsn("exomem_gateway", from_host=False)},
-        "exomem-cloud-cell-token-key": {"current": base64.b64encode(key).decode(), "currentVersion": "1"},
+        # D7: 64 hex characters, read by both cellctl and the gateway.
+        "exomem-cloud-cell-token-key": {"current": key.hex(), "currentVersion": "1"},
+        "exomem-cloud-gateway-control-plane-key": {"key": control.secrets.control_plane_key},
         "exomem-cloud-backup-master-key": {
             "keys": json.dumps({"1": base64.b64encode(secrets.token_bytes(32)).decode()}),
             "currentVersion": "1",

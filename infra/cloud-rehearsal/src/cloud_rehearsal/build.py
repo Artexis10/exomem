@@ -219,30 +219,52 @@ def _node_image_from(substrate_source: Path) -> str:
     return finals[-1]
 
 
-def build_cellctl_image(run_id: str, workdir: Path) -> str:
+def build_cellctl_image(run_id: str, workdir: Path, *, mode: str) -> str:
+    """cellctl's own image plus one layer: the rehearsal entry module and boto3.
+
+    `dockerfile` builds infra/cellctl/Dockerfile unchanged and adds the layer
+    with no network step: boto3 is resolved on the host for the image's
+    Python and copied into its venv. `host` assembles the same venv layout on
+    the pinned Python base from a host resolution, for machines whose `docker
+    build` cannot reach PyPI with a trusted CA; the report records which ran.
+    """
+
     tag = f"{CELLCTL_REPOSITORY}:{run_id}"
     context = workdir / "cellctl-image"
     if context.exists():
         shutil.rmtree(context)
-    site = context / "site"
-    site.mkdir(parents=True)
+    extra = context / "extra"
+    extra.mkdir(parents=True)
+    packages = ["boto3>=1.35,<2"] if mode == "dockerfile" else [str(CELLCTL_ROOT), "boto3>=1.35,<2"]
     run(
         [
-            "uv", "pip", "install", "--quiet", "--target", str(site),
+            "uv", "pip", "install", "--quiet", "--target", str(extra),
             "--python-version", "3.12", "--python-platform", "x86_64-manylinux_2_28",
-            "--no-cache", str(CELLCTL_ROOT), "boto3>=1.35,<2",
+            "--no-cache", *packages,
         ],
         timeout=900,
     )
-    shutil.copy(ENTRY_MODULE, site / "rehearsal_cellctl.py")
-    (context / "Dockerfile").write_text(
-        f"FROM {PYTHON_IMAGE}\n"
-        "COPY site /opt/cellctl\n"
-        "ENV PYTHONPATH=/opt/cellctl PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1\n"
-        "USER 1000:1000\n"
-        'CMD ["python3", "-m", "rehearsal_cellctl"]\n',
-        encoding="utf-8",
-    )
+    shutil.copy(ENTRY_MODULE, extra / "rehearsal_cellctl.py")
+    site = "/opt/cellctl/lib/python3.12/site-packages"
+    if mode == "dockerfile":
+        base = f"{CELLCTL_REPOSITORY}:{run_id}-base"
+        run(["docker", "build", "--tag", base, str(CELLCTL_ROOT)], timeout=1800)
+        # Only packages the base venv lacks, so nothing cellctl locks is replaced.
+        present = set(
+            run(["docker", "run", "--rm", "--entrypoint", "ls", base, site]).stdout.split()
+        )
+        for entry in list(extra.iterdir()):
+            if entry.name in present:
+                shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
+        dockerfile = f"FROM {base}\nCOPY extra {site}\n"
+    else:
+        dockerfile = (
+            f"FROM {PYTHON_IMAGE}\n"
+            f"COPY extra {site}\n"
+            f"ENV PATH=/usr/local/bin:$PATH PYTHONPATH={site} PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1\n"
+            "USER 1000:1000\n"
+        )
+    (context / "Dockerfile").write_text(dockerfile, encoding="utf-8")
     run(["docker", "build", "--tag", tag, str(context)], timeout=900)
     return tag
 

@@ -49,6 +49,9 @@ class PlatformConfig:
     gateway_image: str
     cell_repository: str
     backup_window: str
+    public_base_url: str
+    mcp_path: str
+    trusted_ingress_source_value: str
     attachments_limit_fallback: int = 20
 
 
@@ -91,6 +94,10 @@ def _render(stack: Stack, config: PlatformConfig) -> list[dict[str, Any]]:
             "enabled": True,
             "image": config.gateway_image,
             "hostname": tls.MCP_HOST,
+            "publicBaseUrl": config.public_base_url,
+            "mcpPath": config.mcp_path,
+            "trustedIngressSourceHeader": TRUSTED_INGRESS_HEADER,
+            "trustedIngressSourceValue": config.trusted_ingress_source_value,
             "databaseEgressCidrs": [pg_cidr],
         },
         "cloudIngress": {"enabled": False},
