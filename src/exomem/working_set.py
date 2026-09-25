@@ -1046,6 +1046,32 @@ def budget_exhausted(stage: str, *, reserve: float | None = None) -> bool:
     return True
 
 
+def band_audience_allowed(vault_root: Path) -> bool:
+    """Whether this request's principal may have semantic band evidence.
+
+    The band is an aggregate over the whole anchor catalogue: its population,
+    floor, median, spread and width rule all count every anchor, withheld ones
+    included. For a caller who may not see some anchor it would be a channel,
+    since whether an anchor bands, whether the catalogue calibrates and whether
+    a band is too wide can each turn on the withheld page. So under a non-empty
+    governed policy only an owner-bound principal gets the band. What it costs:
+    other callers on governed vaults fall back to lexical contact, and none
+    exist on personal hosts today. An ungoverned vault bands for everyone, and
+    a policy that cannot be read is treated as governed.
+    """
+    try:
+        from .governance import policy as policy_module
+        from .governance import principal as principal_module
+
+        if policy_module.load(Path(vault_root)).empty:
+            return True
+        who = principal_module.effective_principal()
+        return bool(who.resolved and who.audience_id == principal_module.OWNER_AUDIENCE)
+    except Exception:  # noqa: BLE001 - an undecidable audience gets no band
+        log.debug("band audience undecidable; semantic evidence withheld", exc_info=True)
+        return False
+
+
 def signature_evidence(
     index: working_set_index.WorkingSetIndex, turn: str
 ) -> tuple[dict[str, bool], str]:
@@ -1064,6 +1090,10 @@ def signature_evidence(
     """
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return {}, "disabled"
+    # Before any vector is read or any turn encoded: a caller the band could
+    # tell about a withheld anchor gets none of it.
+    if not band_audience_allowed(index.vault_root):
+        return {}, "audience_restricted"
     try:
         from . import embeddings, ranking_config, readiness, runtime_resources
 

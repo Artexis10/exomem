@@ -1169,7 +1169,15 @@ def serve(
         anchor=anchor,
         continuity_refs=continuity_refs,
     )
-    cache_identity = (str(root.absolute()), key, lexical_state, index.token())
+    # The band depends on the audience under a governed policy, so one audience's
+    # banded packet is never served to another (`working_set.band_audience_allowed`).
+    cache_identity = (
+        str(root.absolute()),
+        key,
+        lexical_state,
+        index.token(),
+        working_set.band_audience_allowed(root),
+    )
     with _CACHE_LOCK:
         cached = _PACKET_CACHE.get(cache_identity)
         if cached is not None:

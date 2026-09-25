@@ -309,7 +309,11 @@ In a script written without spaces, an anchor name of at least two characters,
 wholly in the script of the turn's unspaced run, contained in that run and rare
 by the anchor-name yardstick MAY grant rare-term evidence, never exact-alias
 evidence; a name whose every occurrence lies inside a longer contained name
-SHALL be consumed by it.
+SHALL be consumed by it. Because the band is an aggregate over the whole anchor
+catalogue, withheld anchors included, under a non-empty governed policy it SHALL
+run only for owner-bound principals: every other principal SHALL receive
+semantic evidence `audience_restricted` and no `vector_band` contact, decided
+before any similarity is computed.
 
 Lean activation SHALL retain bounded own-page lexical retrieval evidence from
 the maintained full-page FTS catalogue restricted to anchor paths. Anchor
@@ -364,7 +368,8 @@ foreground repair. Managed-service warm latency and offline cold filesystem
 proof SHALL be reported separately.
 
 Packet generation metadata SHALL identify semantic evidence as ready, disabled,
-absent, uncalibrated, warming, busy, unavailable or unnecessary for an explicit
+absent, uncalibrated, audience_restricted, warming, busy, unavailable or
+unnecessary for an explicit
 agent choice. Every state other than ready and that agent choice SHALL serve the
 same anchors, statuses, evidence and recent-context block as disabled semantic
 evidence.
@@ -435,6 +440,16 @@ fast abstention or compiler-only timing.
 - **WHEN** a Russian turn is about an English-authored page and the catalogue
   holds an unrelated Russian-authored anchor
 - **THEN** that anchor earns no `vector_band` for sharing the turn's language
+
+#### Scenario: A restricted caller learns nothing from the band about a withheld anchor
+
+- **WHEN** a vault under a governed policy holds an anchor withheld from a
+  non-owner caller, and that anchor would change the band's population, floor,
+  median or width for the caller's turn
+- **THEN** the caller's semantic evidence is `audience_restricted`, no anchor
+  earns `vector_band`, and its packet is identical to the one it would receive
+  from the same vault without the withheld anchor
+- **AND** the owner, or any caller of an ungoverned vault, still receives the band
 
 #### Scenario: Semantic evidence never reorders the recent block
 
