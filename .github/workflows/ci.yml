@@ -317,7 +317,10 @@ jobs:
     name: retrieval quality (golden gate, embeddings)
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # A cold cache fetches bge-m3 and, until its artefact is published, builds
+    # the int8 artefact on the runner (minutes, ~9 GB peak) before the
+    # multilingual activation acceptance runs; a warm cache needs neither.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
