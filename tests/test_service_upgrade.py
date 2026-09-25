@@ -325,6 +325,18 @@ def test_uv_stderr_tail_drops_a_leading_partial_line_from_the_read_window() -> N
     assert tail == "error: stale package index"
 
 
+def test_uv_stderr_tail_stays_within_its_byte_bound_after_scrubbing() -> None:
+    from exomem import service_upgrade
+
+    for data in (
+        b"https://u:p@h " * 400,
+        b"\n".join([b"https://a:b@h/" * 30] * 30),
+    ):
+        tail = service_upgrade._uv_stderr_tail(data)
+        assert "u:p@" not in tail and "a:b@" not in tail
+        assert len(tail.encode("utf-8")) <= 4096
+
+
 def test_runtime_symlink_is_refused_before_operator_lock_creation(tmp_path: Path) -> None:
     actual = tmp_path / "actual"
     actual.mkdir(mode=0o700)
