@@ -22,7 +22,7 @@ report:
   under /data/host) is built and imported into the cluster, plus a second,
   deliberately-never-ready variant used only to force a canary failure. It
   implements no MCP protocol.
-- Object storage: a real MinIO container (quay.io/minio/minio) stands in for
+- Object storage: a real MinIO container (Chainguard's build) stands in for
   B2's S3-compatible endpoint per the D8 amendment, so the backup/restore
   Jobs' restic calls are genuinely live. B2's own application-key management
   (create/delete/list, prefix restriction) stays on the already-tested
@@ -95,7 +95,13 @@ HELM = os.environ.get("HELM_BIN") or shutil.which("helm")
 K3S_IMAGE = json.loads(K3S_GATE.read_text(encoding="utf-8"))["k3sImage"]
 STANDIN_REPOSITORY = "cellctl-standin.test/exomem-cell"
 NAMESPACE_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
-MINIO_IMAGE = "quay.io/minio/minio:latest"
+# MinIO's own community images (quay.io/minio/minio, minio/minio) are no
+# longer pullable; Chainguard's digest-pinned build stands in. It runs as
+# root here on a named volume: the image's non-root user cannot write the
+# container's /data, and MinIO refuses the overlay root filesystem ("Rename
+# across devices"). The volume also keeps the bucket across the outage
+# scenario's docker stop/start.
+MINIO_IMAGE = "chainguard/minio@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1"
 MINIO_ACCESS_KEY = "cellctltest"
 MINIO_SECRET_KEY = "cellctltestsecret1"
 BUCKET_NAME = "exomem-cloud-backups"
@@ -278,6 +284,7 @@ def k3s(tmp_path_factory: pytest.TempPathFactory) -> Iterator[K3sCluster]:
     name = f"cellctl-k3s-{suffix}"
     network = f"cellctl-net-{suffix}"
     minio_name = f"cellctl-minio-{suffix}"
+    minio_volume = f"cellctl-minio-data-{suffix}"
     work = tmp_path_factory.mktemp("cellctl-k3s")
 
     _run(["docker", "network", "create", network])
@@ -309,6 +316,8 @@ def k3s(tmp_path_factory: pytest.TempPathFactory) -> Iterator[K3sCluster]:
             [
                 "docker", "run", "--detach", "--name", minio_name,
                 "--network", network,
+                "--user", "0:0",
+                "--mount", f"type=volume,src={minio_volume},dst=/data",
                 "-e", f"MINIO_ROOT_USER={MINIO_ACCESS_KEY}",
                 "-e", f"MINIO_ROOT_PASSWORD={MINIO_SECRET_KEY}",
                 MINIO_IMAGE, "server", "/data", "--address", ":443",
@@ -350,6 +359,7 @@ def k3s(tmp_path_factory: pytest.TempPathFactory) -> Iterator[K3sCluster]:
             (work / "minio.log").write_text(minio_logs.stdout + minio_logs.stderr, encoding="utf-8")
             _run(["docker", "rm", "--force", name], check=False)
             _run(["docker", "rm", "--force", minio_name], check=False)
+            _run(["docker", "volume", "rm", "--force", minio_volume], check=False)
     finally:
         _run(["docker", "network", "rm", network], check=False)
 
