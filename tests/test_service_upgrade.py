@@ -193,16 +193,107 @@ def test_operator_lock_refuses_symlink_without_touching_target(tmp_path: Path) -
     assert outside.stat().st_mode & 0o777 == 0o644
 
 
-def test_stage_failure_does_not_echo_package_manager_output(tmp_path: Path) -> None:
+def test_stage_failure_surfaces_diagnostic_tail_but_scrubs_credentials(tmp_path: Path) -> None:
+    """uv's stderr now helps diagnose staging failures (e.g. a stale index),
+
+    but anything credential-shaped in that output must still never reach the
+    operator's own stderr.
+    """
     requests, thread = _control(tmp_path, count=1)
     fake_uv = tmp_path / "uv"
-    fake_uv.write_text("#!/bin/sh\necho private-registry-credential >&2\nexit 2\n", encoding="utf-8")
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        "echo 'stale package index: exomem 0.2.0 not found (HTTP 404)' >&2\n"
+        "echo 'retry url: https://deploy:S3cr3tTok3n9876@pypi.example.com/simple/exomem/' >&2\n"
+        "exit 2\n",
+        encoding="utf-8",
+    )
     fake_uv.chmod(0o700)
     result = _operator(tmp_path, env={"EXOMEM_UV": str(fake_uv)})
     thread.join(3)
     assert result.returncode != 0
     assert requests == [{"command": "status"}]
-    assert "private-registry-credential" not in result.stderr
+    assert "stale package index" in result.stderr
+    assert "S3cr3tTok3n9876" not in result.stderr
+    assert "deploy:" not in result.stderr
+
+
+def test_stage_failure_truncates_large_uv_stderr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import service_upgrade
+
+    fake_uv = tmp_path / "uv"
+    fake_uv.write_text(
+        f"#!/bin/sh\n{sys.executable} -c \"import sys; sys.stderr.write('x' * (1024 * 1024))\"\nexit 2\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o700)
+    monkeypatch.setenv("EXOMEM_UV", str(fake_uv))
+    with pytest.raises(RuntimeError) as excinfo:
+        service_upgrade.stage(tmp_path / "managed", sys.executable, "lean", "0.2.0")
+    message = str(excinfo.value)
+    tail = message.split("uv stderr: ", 1)[1]
+    assert len(tail.encode("utf-8")) <= 4096
+
+
+def test_stage_failure_scrubs_url_userinfo_credential(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import service_upgrade
+
+    fake_uv = tmp_path / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        "echo 'retry url: https://deploy:S3cr3tTok3n9876@pypi.example.com/simple/exomem/' >&2\n"
+        "exit 2\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o700)
+    monkeypatch.setenv("EXOMEM_UV", str(fake_uv))
+    with pytest.raises(RuntimeError) as excinfo:
+        service_upgrade.stage(tmp_path / "managed", sys.executable, "lean", "0.2.0")
+    message = str(excinfo.value)
+    assert "S3cr3tTok3n9876" not in message
+    assert "deploy:" not in message
+    assert "pypi.example.com" in message
+
+
+def test_stage_failure_surfaces_uv_stderr_tail_from_fake_uv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import service_upgrade
+
+    fake_uv = tmp_path / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\necho 'stale package index: exomem 0.2.0 not found (HTTP 404)' >&2\nexit 2\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o700)
+    monkeypatch.setenv("EXOMEM_UV", str(fake_uv))
+    with pytest.raises(RuntimeError, match="stale package index"):
+        service_upgrade.stage(tmp_path / "managed", sys.executable, "lean", "0.2.0")
+
+
+def test_stage_success_is_unchanged_when_uv_writes_to_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import service_upgrade
+
+    fake_uv = tmp_path / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = venv ]; then\n"
+        "  mkdir -p \"$4/bin\"\n"
+        "  cat > \"$4/bin/python\" <<'STUB'\n"
+        "#!/bin/sh\n"
+        "echo '{\"version\": \"0.2.0\", \"state_descriptors\": []}'\n"
+        "STUB\n"
+        "  chmod +x \"$4/bin/python\"\n"
+        "fi\n"
+        "echo 'noise on stderr that must not affect success' >&2\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o700)
+    monkeypatch.setenv("EXOMEM_UV", str(fake_uv))
+    target = service_upgrade.stage(tmp_path / "managed", sys.executable, "lean", "0.2.0")
+    assert target["version"] == "0.2.0"
 
 
 def test_runtime_symlink_is_refused_before_operator_lock_creation(tmp_path: Path) -> None:
