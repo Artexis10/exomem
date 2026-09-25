@@ -276,6 +276,10 @@ def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
         target = ctx.page(target_rel)
         if target is None or _status(target) in _INACTIVE_STATUSES:
             continue
+        # Only a governed page is a link target: never raw evidence, a Source,
+        # an episode recap or a navigation page.
+        if not activation.is_eligible_governed_page(ctx.vault_root, target):
+            continue
         if _authored_between(ctx, page, target):
             continue
         refs = relation_queue._hinted_candidate_refs(ctx.vault_root, candidate, snapshot=snapshot)

@@ -284,3 +284,47 @@ def test_a_symmetric_pair_is_delivered_once(tmp_path: Path) -> None:
     rows = _rows(vault)
     assert _pair(rows, fx.CAVITATION, fx.INLET)["deliverable"] is True
     assert _pair(rows, fx.INLET, fx.CAVITATION)["deliverable"] is False
+
+
+def _governed(title: str, page_type: str) -> str:
+    return (
+        "---\n"
+        f"title: {title}\n"
+        f"type: {page_type}\n"
+        "status: active\n"
+        "created: 2026-04-02\n"
+        "updated: 2026-05-05\n"
+        'sources:\n  - "[[Sources/field-report-one]]"\n'
+        "---\n\n"
+        f"# {title}\n\nBody.\n"
+    )
+
+
+def test_a_link_targets_only_governed_pages(tmp_path: Path) -> None:
+    """Raw evidence, Sources, episode recaps and navigation pages are never targets."""
+    vault = fx.build(tmp_path, with_graph=False)
+    excluded = {
+        f"{fx.KB}/Evidence/pump-trace.md": _governed("Pump trace", "evidence"),
+        f"{fx.KB}/Sources/derived-digest.md": _governed("Derived digest", "source"),
+        f"{fx.KB}/Sources/Episodes/chat-recap.md": _governed("Chat recap", "episode"),
+        f"{fx.KB}/Notes/Insights/index.md": _governed("Insights index", "insight"),
+        f"{fx.KB}/Notes/Insights/old-take.md": _governed("Old take", "insight").replace(
+            "status: active", "status: archived"
+        ),
+    }
+    for rel, text in excluded.items():
+        fx.write(vault, rel, text)
+    freshness.clear()
+    fx.seed(vault)
+    fx.publish_graph(vault)
+    results = fx.run_to_quiet(vault)
+    assert all(result.stop_reason != "error" for result in results), results
+    pairs = {
+        (row["subject_path"], epistemic_graph._with_md(str(row["measures"].get("to") or "")))
+        for row in _rows(vault)
+    }
+    targets = {target for _subject, target in pairs}
+    subjects = {subject for subject, _target in pairs}
+    assert not (targets | subjects) & set(excluded), pairs
+    # The governed pair still stands.
+    assert (fx.CAVITATION, fx.INLET) in pairs or (fx.INLET, fx.CAVITATION) in pairs, pairs
