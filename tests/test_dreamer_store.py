@@ -324,3 +324,40 @@ def test_the_delivery_ledger_keeps_evicted_rows_and_stays_bounded(vault: Path) -
         assert {cid for cid, _fp, _caller, _at in store.deliveries(conn)} == {live, "e" * 24}
     finally:
         conn.close()
+
+
+def test_the_row_cap_evicts_both_directions_of_a_held_pair(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = dreamer_store.DreamerStore(vault)
+    conn = store.connect()
+    try:
+        link = {"family": "upkeep_link", "kind": "relation.accept"}
+        a, b = "Knowledge Base/Notes/a.md", "Knowledge Base/Notes/b.md"
+        forward = _propose(
+            store,
+            conn,
+            subject="a",
+            measures={"to": b, "relation_type": "r", "method": "m"},
+            **link,
+        )
+        backward = _propose(
+            store,
+            conn,
+            subject="b",
+            measures={"to": a, "relation_type": "r", "method": "m"},
+            now=NOW + 1,
+            **link,
+        )
+        conn.execute("UPDATE candidates SET subject_path=? WHERE id=?", (a, forward))
+        conn.execute("UPDATE candidates SET subject_path=? WHERE id=?", (b, backward))
+        fresh = _propose(store, conn, subject="Other", now=NOW + 2)
+        monkeypatch.setattr(dreamer_store, "MAX_ROWS", 2)
+        held = {forward, backward}
+        with store.write(conn):
+            store._enforce_row_cap(conn, NOW + 3, parked=lambda cid, _fp: cid in held)
+        left = {str(row[0]) for row in conn.execute("SELECT id FROM candidates")}
+    finally:
+        conn.close()
+    # One row over the cap, and the held pair goes whole.
+    assert left == {fresh}

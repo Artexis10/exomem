@@ -225,3 +225,69 @@ def test_the_hook_line_names_a_ref_its_own_advice_accepts(tmp_path: Path) -> Non
         expected_fingerprint=item["fingerprint"],
     )
     assert triaged["family"] == dreamer_families.LINK_FAMILY, triaged
+
+
+def test_a_dismissed_pair_stays_held_when_the_row_cap_evicts_its_offered_direction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dismissing the offered direction of a link pair holds the pair, even
+    after the row cap evicts that direction: its twin is never offered."""
+    vault = _journey_vault(tmp_path)
+    start = time.time()
+    _quiet(vault, start)
+    _quiet(vault, start + 2 * HOUR)
+    item = _session(vault)
+    assert item is not None and item["family"] == dreamer_families.LINK_FAMILY
+    _tool(
+        vault,
+        "triage_memory",
+        ref=item["context_route"]["args"]["ref"],
+        action="dismiss",
+        why="false_positive: unrelated notes",
+        expected_fingerprint=item["fingerprint"],
+    )
+    _quiet(vault, start + 3 * HOUR)
+    links = [row for row in _open(vault) if row["family"] == dreamer_families.LINK_FAMILY]
+    assert {row["subject_path"] for row in links} == {fx.CAVITATION, fx.INLET}
+    # The twin of a dismissed row is parked too: it holds no family-cap slot.
+    ctx = dreamer_families.Context(
+        vault_root=vault,
+        store=dreamer_store.DreamerStore(vault),
+        conn=dreamer_store.DreamerStore(vault).connect(),
+        now=start + 3 * HOUR,
+    )
+    try:
+        assert all(ctx.parked(str(row["id"]), str(row["fingerprint"])) for row in links)
+    finally:
+        ctx.conn.close()
+        ctx.close()
+
+    # One more proposal elsewhere reaches the row cap.
+    monkeypatch.setattr(
+        dreamer_store, "MAX_ROWS", len(dreamer_store.read_view(vault).candidates) + 1
+    )
+    for rel, title in (
+        (f"{fx.KB}/Notes/Insights/valve-a.md", "Valve a"),
+        (f"{fx.KB}/Notes/Insights/valve-b.md", "Valve b"),
+    ):
+        fx.edit(
+            vault,
+            rel,
+            fx.insight(
+                title,
+                sources=["field-report-three"],
+                updated="2026-05-04",
+                observation=f"{title} sticks when cold.",
+            ),
+        )
+    _quiet(vault, start + 4 * HOUR)
+    _quiet(vault, start + 6 * HOUR)
+    view = dreamer_store.read_view(vault)
+    offered = {
+        row["subject_path"]
+        for row in upkeep.deliverable_rows(vault, view)
+        if row["family"] == dreamer_families.LINK_FAMILY
+    }
+    assert not offered & {fx.CAVITATION, fx.INLET}, offered
+    # The new pair is still offered: the hold is the dismissed pair's alone.
+    assert offered, "the fresh pair was not offered"

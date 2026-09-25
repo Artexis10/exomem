@@ -679,17 +679,33 @@ class DreamerStore:
         if excess <= 0:
             return
         rows = conn.execute(
-            "SELECT id, fingerprint, state, resolved_at, evidence_count, created_at FROM candidates"
+            "SELECT id, fingerprint, state, resolved_at, evidence_count, created_at, "
+            "subject_path, measures_json FROM candidates"
         ).fetchall()
+        held = {
+            str(row[0])
+            for row in rows
+            if row[2] == "open" and parked is not None and parked(str(row[0]), str(row[1]))
+        }
 
         def rank(row) -> tuple:
             if row[2] != "open":
                 return (0, float(row[3] or 0.0), 0, 0.0, str(row[0]))
-            held = parked is not None and parked(str(row[0]), str(row[1]))
-            return (1 if held else 2, 0.0, int(row[4] or 0), float(row[5] or 0.0), str(row[0]))
+            tier = 1 if str(row[0]) in held else 2
+            return (tier, 0.0, int(row[4] or 0), float(row[5] or 0.0), str(row[0]))
 
-        victims = [str(row[0]) for row in sorted(rows, key=rank)[:excess]]
-        self._delete(conn, victims)
+        victims = {str(row[0]) for row in sorted(rows, key=rank)[:excess]}
+        # The two directions of a held link pair go together: a pair is one
+        # proposal, and a lone survivor would hold a slot it can never use.
+        groups: dict[tuple[str, ...], set[str]] = {}
+        for row in rows:
+            group = _pair_group(str(row[6] or ""), row[7])
+            if group is not None and str(row[0]) in held:
+                groups.setdefault(group, set()).add(str(row[0]))
+        for members in groups.values():
+            if members & victims:
+                victims |= members
+        self._delete(conn, sorted(victims))
 
     @staticmethod
     def _delete(conn: sqlite3.Connection, ids: list[str]) -> None:
@@ -755,6 +771,22 @@ class DreamerStore:
             "DELETE FROM integrity WHERE category=? AND path_set=?",
             (category, _dumps(sorted(set(paths)))),
         )
+
+
+def _pair_group(subject: str, measures_json: Any) -> tuple[str, ...] | None:
+    """Both directions of one link pair share this key; other rows have none."""
+    try:
+        measures = json.loads(measures_json) if isinstance(measures_json, str) else {}
+    except ValueError:
+        return None
+    target = str((measures or {}).get("to") or "") if isinstance(measures, dict) else ""
+    if not subject or not target:
+        return None
+    return (
+        *sorted((subject, target)),
+        str(measures.get("relation_type") or ""),
+        str(measures.get("method") or ""),
+    )
 
 
 def _row_dict(row: sqlite3.Row) -> dict[str, Any]:

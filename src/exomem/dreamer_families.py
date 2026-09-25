@@ -160,8 +160,52 @@ class Context:
         return self._review["store"]
 
     def parked(self, cid: str, fingerprint: str) -> bool:
-        """True when a candidate is decided in the review state or held after
-        its deliveries: it no longer competes for the family cap."""
+        """True when a candidate no longer competes for the family cap: it is
+        decided in the review state, held after its deliveries, or the other
+        direction of a link pair that is (see `pair_held`)."""
+        memo = self._review.setdefault("parked", {})
+        key = (cid, fingerprint)
+        if key not in memo:
+            held = self._held(cid, fingerprint)
+            if not held and self.store is not None and self.conn is not None:
+                row = self.store.candidate(self.conn, cid)
+                held = row is not None and self.pair_held(row)
+            memo[key] = held
+        return memo[key]
+
+    def pair_held(self, row: dict[str, Any]) -> bool:
+        """True when the other direction of this link row's pair is decided or
+        held, whether or not its row is still in the sidecar.
+
+        A present twin is judged on its own `(id, fingerprint)`. An absent one
+        (evicted, or never proposed from its page) is judged on every decision
+        and delivery recorded for its id: its current fingerprint cannot be
+        known without reading its page, so any standing decision holds the
+        pair until that direction is proposed again.
+        """
+        twin = _twin_id(row)
+        if twin is None:
+            return False
+        present = (
+            self.store.candidate(self.conn, twin)
+            if self.store is not None and self.conn is not None
+            else None
+        )
+        if present is not None and present.get("state") == "open":
+            return self._held(twin, str(present["fingerprint"]))
+        return self._held_any(twin)
+
+    def _deliveries(self) -> dict[tuple[str, str], int]:
+        if "deliveries" not in self._review:
+            counts: dict[tuple[str, str], int] = {}
+            if self.store is not None and self.conn is not None:
+                for rid, fp, _caller, _at in self.store.deliveries(self.conn):
+                    counts[(rid, fp)] = counts.get((rid, fp), 0) + 1
+            self._review["deliveries"] = counts
+        return self._review["deliveries"]
+
+    def _held(self, cid: str, fingerprint: str) -> bool:
+        """Decided in the review state, or delivered as often as allowed."""
         payload = self.review_payload()
         if payload is not None:
             state, _decision = self.review_store().effective_state(
@@ -169,13 +213,20 @@ class Context:
             )
             if state != "open":
                 return True
-        if "deliveries" not in self._review:
-            counts: dict[tuple[str, str], int] = {}
-            if self.store is not None and self.conn is not None:
-                for rid, fp, _caller, _at in self.store.deliveries(self.conn):
-                    counts[(rid, fp)] = counts.get((rid, fp), 0) + 1
-            self._review["deliveries"] = counts
-        return self._review["deliveries"].get((cid, fingerprint), 0) >= MAX_DELIVERIES
+        return self._deliveries().get((cid, fingerprint), 0) >= MAX_DELIVERIES
+
+    def _held_any(self, cid: str) -> bool:
+        """`_held` for any fingerprint recorded against `cid`."""
+        if "by_id" not in self._review:
+            by_id: dict[str, set[str]] = {}
+            payload = self.review_payload()
+            for key in (payload or {}).get("records") or {}:
+                rid, _sep, fp = str(key).partition(":")
+                by_id.setdefault(rid, set()).add(fp)
+            for rid, fp in self._deliveries():
+                by_id.setdefault(rid, set()).add(fp)
+            self._review["by_id"] = by_id
+        return any(self._held(cid, fp) for fp in sorted(self._review["by_id"].get(cid, ())))
 
 
 @dataclass(frozen=True)
@@ -799,6 +850,26 @@ def review_state_token(vault_root: Path) -> str | None:
     return f"{info.st_ino}:{info.st_mtime_ns}:{info.st_size}"
 
 
+def _twin_id(row: dict[str, Any]) -> str | None:
+    """The relation id of a link row's other direction, or None."""
+    if row.get("family") != LINK_FAMILY:
+        return None
+    from . import relation_queue
+
+    measures = row.get("measures") or {}
+    subject, target = str(row.get("subject_path") or ""), str(measures.get("to") or "")
+    if not subject or not target:
+        return None
+    return relation_queue._candidate_identity(
+        {
+            "from": target,
+            "to": subject,
+            "relation_type": str(measures.get("relation_type") or ""),
+            "method": str(measures.get("method") or ""),
+        }
+    )
+
+
 def _pair_key(row: dict[str, Any]) -> tuple[str, ...] | None:
     if row.get("family") != LINK_FAMILY:
         return None
@@ -842,10 +913,12 @@ def precompute_deliverable(ctx: Context, *, extra_deliveries=()) -> float | None
             state == "open"
             and review_state.disposition_for(family, payload=payload) == "normal"
             and counts.get((cid, str(row["fingerprint"])), 0) < MAX_DELIVERIES
+            # A decision on either direction of a link pair holds the pair,
+            # whether or not that direction's row is still stored.
+            and not ctx.pair_held(row)
         )
     # The pair's offered direction is chosen among its open rows, not its
-    # eligible ones: a decision on that direction (a dismissal, a snooze, two
-    # deliveries) holds the pair, rather than promoting the other direction.
+    # eligible ones, so the other direction is never promoted in its place.
     pairs: dict[tuple[str, ...], list[dict[str, Any]]] = {}
     for row in rows:
         key = _pair_key(row)
