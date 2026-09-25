@@ -39,7 +39,14 @@ from . import substrate as substrate_mod
 from .build import BuiltImages
 from .http import Resolver
 from .infra import BACKUP_BUCKET, Stack
-from .mcp_client import BrowserSession, HeadlessBrowser, TenantClient, raw_mcp_post
+from .mcp_client import (
+    PKCE_FULL_GRAMMAR,
+    BrowserSession,
+    HeadlessBrowser,
+    TenantClient,
+    pkce_grammar,
+    raw_mcp_post,
+)
 from .platform import CLOUD_NAMESPACE
 from .report import (
     BLOCKED,
@@ -272,6 +279,14 @@ def _running_ready(image: str | None = None) -> Callable[[dict[str, Any]], bool]
     return check
 
 
+def _flatten(error: BaseException) -> str:
+    """The messages of an exception and, for a task group, every sub-exception."""
+
+    if isinstance(error, BaseExceptionGroup):
+        return "; ".join(_flatten(inner) for inner in error.exceptions)
+    return f"{type(error).__name__}: {error}"
+
+
 def _cited(result_text: str, needles: list[str]) -> bool:
     return any(needle and needle in result_text for needle in needles)
 
@@ -351,9 +366,32 @@ async def step_2_provision(ctx: Context, record: StepRecord) -> None:
 
 async def step_3_oauth_mcp(ctx: Context, record: StepRecord) -> None:
     assert ctx.a.session
+    # First, a verifier using the whole RFC 7636 grammar, as the MCP SDKs
+    # generate them. If Substrate refuses it, that is recorded as a defect and
+    # the connector continues with the base64url subset (equally valid), so
+    # the later steps still run.
+    pkce_defect: CrossLaneDefect | None = None
     ctx.a.client = TenantClient(ctx.resolver, ctx.browser, ctx.a.session, ctx.substrate.redirect_uri)
-    async with ctx.a.client.mcp() as session:
-        tools, _ = await session.list_tools()
+    try:
+        with pkce_grammar(PKCE_FULL_GRAMMAR):
+            async with ctx.a.client.mcp() as session:
+                tools, _ = await session.list_tools()
+        record.evidence["pkce_full_rfc7636_grammar"] = "accepted"
+    except Exception as error:  # noqa: BLE001 - classified below
+        detail = _flatten(error)
+        record.evidence["pkce_full_rfc7636_grammar"] = f"refused: {detail[:300]}"
+        if "invalid_grant" not in detail:
+            raise
+        pkce_defect = CrossLaneDefect(
+            "Substrate's token endpoint refuses an RFC 7636-valid PKCE verifier containing '.' or '~' "
+            "(isPkceVerifier: /^[A-Za-z0-9_-]{43,128}$/); the MCP Python SDK draws verifiers from the full "
+            "unreserved set, so its token exchange fails on ~98% of attempts",
+            component="Substrate src/lib/exomem-hosted/oauth.ts PKCE_VALUE", owner=SUBSTRATE_REPO,
+            evidence={"token_response": "400 invalid_grant", "substrate_log": "exomem_oauth_token_rejection stage=code_shape verifier_wellformed=false"},
+        )
+        ctx.a.client = TenantClient(ctx.resolver, ctx.browser, ctx.a.session, ctx.substrate.redirect_uri)
+        async with ctx.a.client.mcp() as session:
+            tools, _ = await session.list_tools()
     if ctx.a.client.authorizations != 1 or not ctx.a.client.access_token:
         raise StepFailure("the connector did not complete exactly one OAuth authorization")
     exposed = CLOUD_EXCLUSIONS & set(tools)
@@ -380,6 +418,8 @@ async def step_3_oauth_mcp(ctx: Context, record: StepRecord) -> None:
             ctx.report.sample("tools_list_warm", seconds)
     if ctx.a.client.authorizations != 1:
         raise StepFailure("warm sessions re-ran the authorization instead of reusing the token")
+    if pkce_defect is not None:
+        raise pkce_defect
 
 
 async def step_4_capture(ctx: Context, record: StepRecord) -> None:
@@ -426,7 +466,10 @@ async def step_5_cited_recall(ctx: Context, record: StepRecord) -> None:
         {
             "query_is_paraphrase": ctx.a.phrase not in query,
             "cites_the_capture": ctx.a.phrase in text,
-            "citation_fields_present": [key for key in ("citations", "results", "sources", "hits") if key in answers[0].structured],
+            "cited_paths": [
+                hit.get("path") for hit in (answers[0].structured.get("result") or {}).get("hits", [])[:5]
+                if isinstance(hit, dict)
+            ],
         }
     )
     if ctx.a.phrase not in text:

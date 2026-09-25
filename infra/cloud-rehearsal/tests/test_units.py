@@ -106,3 +106,34 @@ def test_repository_inputs_exist(path: str) -> None:
     from cloud_rehearsal import images
 
     assert (images.REPO_ROOT / path).exists()
+
+
+def test_pki_verifies_under_strict_x509(tmp_path: Path) -> None:
+    import socket
+    import ssl
+    import threading
+
+    pki = tls.make_pki(tmp_path)
+    leaf = pki.leaves[tls.MCP_HOST]
+    (tmp_path / "leaf.pem").write_text(leaf.cert_pem + leaf.key_pem, encoding="utf-8")
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.load_cert_chain(tmp_path / "leaf.pem")
+    client_context = ssl.create_default_context(cafile=str(pki.ca_path))
+    client_context.verify_flags |= ssl.VERIFY_X509_STRICT
+    listener = socket.create_server(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+
+    def serve() -> None:
+        connection, _ = listener.accept()
+        try:
+            server_context.wrap_socket(connection, server_side=True).close()
+        except ssl.SSLError:
+            connection.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    with socket.create_connection(("127.0.0.1", port)) as raw:
+        with client_context.wrap_socket(raw, server_hostname=tls.MCP_HOST) as wrapped:
+            assert wrapped.version()
+    thread.join(timeout=5)
+    listener.close()

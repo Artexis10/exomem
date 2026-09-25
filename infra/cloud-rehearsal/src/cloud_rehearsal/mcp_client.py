@@ -22,13 +22,14 @@ import html.parser
 import json
 import time
 import urllib.parse
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 from mcp import ClientSession
 from mcp.client.auth import OAuthClientProvider
+from mcp.client.auth import oauth2 as sdk_oauth2
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
 
@@ -36,6 +37,41 @@ from .http import Resolver
 from .substrate import MCP_URL, OAUTH_CLIENT_ID, PUBLIC_BASE_URL
 
 SCOPES = "exomem.read exomem.write"
+
+# RFC 7636 section 4.1: a verifier is 43-128 of ALPHA / DIGIT / "-" / "." /
+# "_" / "~". The SDK draws from that whole set at random. The rehearsal
+# pins which subset a flow uses, so a server that accepts only part of the
+# grammar fails deterministically, not on 98% of attempts.
+PKCE_FULL_GRAMMAR = "full-rfc7636"
+PKCE_BASE64URL = "base64url-subset"
+_pkce_mode = PKCE_BASE64URL
+
+
+def _generate_pkce() -> sdk_oauth2.PKCEParameters:
+    import base64
+    import hashlib
+    import secrets as _secrets
+
+    if _pkce_mode == PKCE_FULL_GRAMMAR:
+        body = _secrets.token_urlsafe(90)[:120]
+        verifier = f"{body[:40]}.{body[40:80]}~{body[80:]}-_"
+    else:
+        verifier = _secrets.token_urlsafe(96)[:128]
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    return sdk_oauth2.PKCEParameters(code_verifier=verifier, code_challenge=challenge)
+
+
+sdk_oauth2.PKCEParameters.generate = staticmethod(_generate_pkce)  # type: ignore[method-assign]
+
+
+@contextlib.contextmanager
+def pkce_grammar(mode: str) -> Iterator[None]:
+    global _pkce_mode
+    previous, _pkce_mode = _pkce_mode, mode
+    try:
+        yield
+    finally:
+        _pkce_mode = previous
 
 
 class _HiddenInputs(html.parser.HTMLParser):

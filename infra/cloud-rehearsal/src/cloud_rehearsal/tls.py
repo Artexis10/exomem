@@ -52,6 +52,9 @@ def make_pki(workdir: Path, hostnames: tuple[str, ...] = (SUBSTRATE_HOST, MCP_HO
         .not_valid_before(now - dt.timedelta(minutes=5))
         .not_valid_after(now + dt.timedelta(days=2))
         .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        # Python 3.13 verifies strictly (VERIFY_X509_STRICT): key identifiers
+        # on the CA and the leaves are required, as a public CA issues them.
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False)
         .add_extension(
             x509.KeyUsage(
                 digital_signature=True, key_cert_sign=True, crl_sign=True, content_commitment=False,
@@ -75,6 +78,10 @@ def make_pki(workdir: Path, hostnames: tuple[str, ...] = (SUBSTRATE_HOST, MCP_HO
             .not_valid_after(now + dt.timedelta(days=1))
             .add_extension(x509.SubjectAlternativeName([x509.DNSName(hostname)]), critical=False)
             .add_extension(x509.ExtendedKeyUsage([x509.oid.ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False
+            )
             .sign(ca_key, hashes.SHA256())
         )
         leaves[hostname] = LeafCertificate(
