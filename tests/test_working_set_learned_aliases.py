@@ -154,14 +154,35 @@ def test_edit_memory_warns_about_a_learned_alias_the_index_will_skip(anchor_vaul
 
 
 def test_a_learned_alias_shared_by_two_anchors_is_ambiguous(anchor_vault: Path) -> None:
+    """Never one of them. Two unlinked anchors of one kind sharing a learned
+    name are competing senses; the agent picks."""
+    plough = "Knowledge Base/Products/Snow Plough.md"
+    (anchor_vault / plough).write_text(
+        "---\ntype: note\nstatus: active\n---\n\n# Snow Plough\n\n## Summary\n\n"
+        "A blade for the depot yard.\n",
+        encoding="utf-8",
+    )
+    _update(anchor_vault)
+    _learn(anchor_vault, SLED, ["Vorratsding"])
+    _learn(anchor_vault, plough, ["Vorratsding"])
+    _update(anchor_vault)
+
+    packet = commands.op_activate_context(anchor_vault, turn="was ist mit dem Vorratsding")
+    assert packet["abstained"] is True
+    assert packet["abstention"]["reason"] == "ambiguous"
+    assert {item["title"] for item in packet["ambiguity"]} == {"Cargo Sled", "Snow Plough"}
+
+
+def test_a_learned_alias_shared_by_two_linked_anchors_serves_both(anchor_vault: Path) -> None:
+    """The Depot Ledger links to the Cargo Sled, so the two are complementary
+    under the resolver's ordinary rule, exactly as a shared owner alias
+    would be: both are served, never one of them."""
     _learn(anchor_vault, SLED, ["Vorratsding"])
     _learn(anchor_vault, LEDGER, ["Vorratsding"])
     _update(anchor_vault)
 
     packet = commands.op_activate_context(anchor_vault, turn="was ist mit dem Vorratsding")
-    assert _resolved(packet) == []
-    assert packet["abstained"] is True
-    assert packet["abstention"]["reason"] == "ambiguous"
+    assert sorted(_resolved(packet)) == sorted([SLED, LEDGER])
 
 
 @pytest.mark.parametrize(

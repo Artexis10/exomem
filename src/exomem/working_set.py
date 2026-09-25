@@ -1711,6 +1711,10 @@ def compile_packet(
         # silently narrow an overridden packet to the anchor kind's default roles.
         analysis = working_set_resolve.analyze_turn(turn, vocabulary=conventions.referential)
         rows = working_set_resolve.facts_from_rows(index.anchors())
+        # Reported only when non-zero: a learned name the index skipped is
+        # something the agent that wrote it should hear about.
+        if rejected := index.learned_aliases_rejected():
+            generation["learned_aliases_rejected"] = rejected
         # Whether a valid token was passed at all, which is not the same as
         # whether any of its refs survived: the caller drops every ref the
         # audience may not see (`working_set_runtime.visible_continuity_refs`),

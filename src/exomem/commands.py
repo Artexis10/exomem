@@ -6987,7 +6987,37 @@ def op_edit_memory(
     if validate_only:
         arguments["validate_only"] = True
     normalized = edit_operations_module.normalize_edit_arguments(arguments)
-    return op_edit(vault_root, **normalized)
+    result = op_edit(vault_root, **normalized)
+    if normalized.get("field") == working_set_index_module.LEARNED_ALIASES_FIELD:
+        _warn_on_skipped_learned_aliases(vault_root, normalized.get("value"), result)
+    return result
+
+
+def _warn_on_skipped_learned_aliases(vault_root: Path, value: Any, result: Any) -> None:
+    """Tell the agent now about a `learned_aliases` entry the activation index
+    will skip, with the index's own rules (`learned_alias_verdicts`). Never
+    blocks: the page write stands, the entry simply does nothing."""
+    if not isinstance(result, dict):
+        return
+    try:
+        conventions = activation_conventions_module.load_conventions(vault_root).conventions
+        _accepted, rejected = working_set_index_module.learned_alias_verdicts(
+            value, stopwords=conventions.stopwords, filler=conventions.referential_filler
+        )
+    except Exception:  # noqa: BLE001 - advice about a write must never fail it
+        log.debug("learned_aliases verdict unavailable", exc_info=True)
+        return
+    if not rejected:
+        return
+    warnings = result.get("warnings")
+    if not isinstance(warnings, list):
+        warnings = list(warnings or ())
+        result["warnings"] = warnings
+    skipped = "; ".join(f"{entry!r} ({reason})" for entry, reason in rejected)
+    warnings.append(
+        f"learned_aliases: the activation index will skip {skipped}. "
+        "A learned name needs a word of its own that is not a function or filler word."
+    )
 
 
 def op_observe_memory(

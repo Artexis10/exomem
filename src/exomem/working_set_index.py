@@ -98,7 +98,11 @@ log = logging.getLogger(__name__)
 #: through the `conventions_hash` mismatch check alone, with no further
 #: `SCHEMA_VERSION` bump. Both lines of work had moved to 8 independently;
 #: 9 is the version that carries both.
-SCHEMA_VERSION = 9
+#:
+#: v10 (close-memory-loop step 5) reads a page's `learned_aliases` into its
+#: activation aliases and stores `learned_alias_rejected` in `index_meta`: an
+#: older sidecar holds no learned names and must rebuild once to read them.
+SCHEMA_VERSION = 10
 SIDECAR_NAME = ".working-set.sqlite"
 DISABLE_ENV = "EXOMEM_DISABLE_WORKING_SET"
 _TRUE = frozenset({"1", "true", "yes", "on"})
@@ -643,6 +647,76 @@ class _Candidate:
     terms: tuple[str, ...]
     categories: tuple[str, ...]
     source_signature: str
+    #: `learned_aliases` entries the index skipped on this page (see
+    #: `learned_alias_verdicts`), summed into `index_meta` at write time.
+    learned_rejected: int = 0
+
+
+# --------------------------------------------------------------------------- #
+# Learned aliases (close-memory-loop step 5)
+# --------------------------------------------------------------------------- #
+
+#: The frontmatter list an agent's reasoned, hash-guarded edit writes a learned
+#: name to. Kept apart from `aliases`, which are the owner's identity names.
+LEARNED_ALIASES_FIELD = "learned_aliases"
+MAX_LEARNED_ALIASES = 8
+MAX_LEARNED_ALIAS_CHARS = 64
+#: A single all-ASCII-letter learned name must be at least this long: the
+#: rare-term floor (`working_set_resolve.RARE_TERM_MIN_CHARS`), restated here
+#: because this module has no dependency on the resolver.
+LEARNED_ALIAS_MIN_CHARS = 3
+
+
+def learned_alias_verdicts(
+    values: object,
+    *,
+    stopwords: frozenset[str] = STOPWORDS,
+    filler: frozenset[str] = frozenset(),
+) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """`(accepted, rejected)` for one page's `learned_aliases` list.
+
+    `accepted` are normalised names, in order. `rejected` pairs each skipped
+    entry with its reason. A learned name becomes an `exact_alias` spelling,
+    the resolver's strongest evidence, so it must be a NAME: at least one
+    token that is neither a stopword nor an effective referential filler word
+    ("the thing" or "it" would resolve every turn containing it), a single
+    all-ASCII-letter token at least `LEARNED_ALIAS_MIN_CHARS` long, at most
+    `MAX_LEARNED_ALIAS_CHARS` characters, and at most `MAX_LEARNED_ALIASES`
+    entries per page. The same rules run at write time for `edit_memory`'s
+    warning and at index build, so the two can never disagree.
+    """
+    if values is None:
+        return (), ()
+    items = list(values) if isinstance(values, (list, tuple)) else [values]
+    accepted: list[str] = []
+    rejected: list[tuple[str, str]] = []
+    for position, item in enumerate(items):
+        text = item.strip() if isinstance(item, str) else ""
+        if position >= MAX_LEARNED_ALIASES:
+            rejected.append((str(item), f"more than {MAX_LEARNED_ALIASES} entries"))
+            continue
+        if not text:
+            rejected.append((str(item), "not a name"))
+            continue
+        if len(text) > MAX_LEARNED_ALIAS_CHARS:
+            rejected.append((text, f"longer than {MAX_LEARNED_ALIAS_CHARS} characters"))
+            continue
+        key = normalize(text)
+        tokens = tokens_of(key)
+        if not any(token not in stopwords and token not in filler for token in tokens):
+            rejected.append((text, "only function or filler words"))
+            continue
+        if (
+            len(tokens) == 1
+            and tokens[0].isascii()
+            and tokens[0].isalpha()
+            and len(tokens[0]) < LEARNED_ALIAS_MIN_CHARS
+        ):
+            rejected.append((text, f"a single word shorter than {LEARNED_ALIAS_MIN_CHARS} letters"))
+            continue
+        if key not in accepted:
+            accepted.append(key)
+    return tuple(accepted), tuple(rejected)
 
 
 # --------------------------------------------------------------------------- #
@@ -880,8 +954,21 @@ def _walk_page_entries(
             continue
         sections = _sections(page.body)
         tags = _strings(frontmatter.get("tags"))
+        # A learned name joins the anchor's activation aliases and never the
+        # `names` map above: it changes what a turn activates, not what a
+        # wikilink resolves to or what the egress guard matches.
+        learned, learned_rejected = learned_alias_verdicts(
+            frontmatter.get(LEARNED_ALIASES_FIELD),
+            stopwords=conventions.stopwords,
+            filler=conventions.referential_filler,
+        )
         aliases = tuple(
-            dict.fromkeys(normalize(alias) for alias in _strings(frontmatter.get("aliases")))
+            dict.fromkeys(
+                [
+                    *(normalize(alias) for alias in _strings(frontmatter.get("aliases"))),
+                    *learned,
+                ]
+            )
         )
         raw.append(
             {
@@ -896,6 +983,7 @@ def _walk_page_entries(
                 "tags": tags,
                 "body": page.body,
                 "source_signature": _source_signature(path),
+                "learned_rejected": len(learned_rejected),
             }
         )
     return raw, outbound, names, project_members
@@ -1034,6 +1122,7 @@ def _finalize_anchor_aliases(
                 terms=terms_of(" ".join((title, *aliases, *sections, *tags))),
                 categories=_categories(sections, tags, semantic_registry=semantic_registry),
                 source_signature=entry["source_signature"],
+                learned_rejected=int(entry.get("learned_rejected") or 0),
             )
         )
     return candidates, term_owners
@@ -1329,6 +1418,9 @@ def _resolve_links(
 
 _CACHE_LOCK = threading.Lock()
 _ROW_CACHE: dict[Path, tuple[tuple[int, int, int], tuple[AnchorRow, ...]]] = {}
+#: `index_meta.learned_alias_rejected`, read with the rows and on the same
+#: token, so reporting it costs the request nothing.
+_REJECTED_CACHE: dict[Path, tuple[tuple[int, int, int], int]] = {}
 
 
 # --------------------------------------------------------------------------- #
@@ -1890,9 +1982,24 @@ class WorkingSetIndex:
             if cached is not None and cached[0] == token:
                 return cached[1]
         rows = self._read_rows(conn)
+        try:
+            found = conn.execute(
+                "SELECT value FROM index_meta WHERE key = 'learned_alias_rejected'"
+            ).fetchone()
+            rejected = int(found[0]) if found else 0
+        except (sqlite3.Error, ValueError, TypeError):
+            rejected = 0
         with _CACHE_LOCK:
             _ROW_CACHE[self.path] = (token, rows)
+            _REJECTED_CACHE[self.path] = (token, rejected)
         return rows
+
+    def learned_aliases_rejected(self) -> int:
+        """How many `learned_aliases` entries the last build skipped, as of the
+        rows `anchors()` last served. No read of its own."""
+        with _CACHE_LOCK:
+            cached = _REJECTED_CACHE.get(self.path)
+        return cached[1] if cached is not None else 0
 
     def _read_rows(self, conn: sqlite3.Connection) -> tuple[AnchorRow, ...]:
         aliases: dict[str, list[str]] = {}
@@ -2110,6 +2217,11 @@ class WorkingSetIndex:
                     "('freshness_key', ?)",
                     (freshness_stamp,),
                 )
+            conn.execute(
+                "INSERT OR REPLACE INTO index_meta (key, value) VALUES "
+                "('learned_alias_rejected', ?)",
+                (str(sum(candidate.learned_rejected for candidate in candidates)),),
+            )
             generation = sidecar_store.bump_meta(conn, "generation")
             # The whole token, inside the same transaction that bumped it: the
             # registry is keyed on the sidecar that issued a generation, and
