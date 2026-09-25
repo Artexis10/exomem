@@ -521,7 +521,31 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         log.info("model preloads skipped (%s); models lazy-load on first use", reason)
         readiness.mark_ready("reranker")
         readiness.mark_ready("clip")
-        drained = readiness.mark_ready("embeddings")
+        from . import embedding_backend
+
+        served = None
+        if not disabled:
+            from . import embeddings
+
+            served = embedding_backend.served_artifact(embeddings.MODEL_NAME)
+        if served is not None and mode_name != "quiet":
+            # A served model's first load may download or build its artefact, which
+            # takes minutes; it belongs here, not in whichever request comes first.
+            # Embeddings stay not-ready until it is resident, so requests meanwhile
+            # defer to the lexical lanes instead of waiting on the load.
+            log.info("preloading the served embedding model %s", embeddings.MODEL_NAME)
+            if _preload("model_bge", embeddings.get_model, lambda m: m.encode(["warm"])):
+                drained = readiness.mark_ready("embeddings")
+            else:
+                drained = readiness.drain_deferred("embeddings")
+        else:
+            if served is not None:
+                # Quiet mode loads no model at boot, but the artefact a later load
+                # needs is still fetched or built now, off the request path.
+                _model_step(
+                    "model_artifact", lambda: embedding_backend.ensure_served_artifact(embeddings.MODEL_NAME)
+                )
+            drained = readiness.mark_ready("embeddings")
         # Quiet mode: embeddings ARE available (just lazy), so replay any write
         # parked during the brief lexical warm — mirror the real-preload branch so
         # those edits aren't stranded. Under DISABLE_EMBEDDINGS there's nothing to

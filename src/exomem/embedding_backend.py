@@ -19,6 +19,7 @@ and CLIP, so only the hosted lane — which withholds both — can drop it.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -27,7 +28,10 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
+import time
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +70,30 @@ ORT_DYNAMIC_INT8 = "ort-dynamic-int8"
 ONNX_EXTERNAL_DATA = "onnx-external-data"
 _ARTIFACT_FILES = ("model.onnx", "model.onnx.data")
 _ARTIFACT_MANIFEST = "artifact.json"
+#: Where a served model's published artefact is downloaded from: a base URL the
+#: asset name (`artifact_asset_name`) is appended to. Empty or ``off`` disables
+#: the download, and so does `HF_HUB_OFFLINE`; the host then builds locally.
+ARTIFACT_URL_ENV = "EXOMEM_MODEL_ARTIFACT_URL"
+DEFAULT_ARTIFACT_URL = "https://github.com/Artexis10/exomem/releases/download/served-models"
+_URL_OFF = {"", "0", "off", "none", "false", "no"}
+#: A published asset is bounded; a response past this is not an artefact.
+_MAX_ASSET_BYTES = 2 << 30
+#: The most an asset's members may unpack to, summed: the asset's own cap, since
+#: a plain tar of regular files is never smaller than what it holds.
+_MAX_UNPACKED_BYTES = _MAX_ASSET_BYTES
+#: How long a failed acquisition (no download, no build) is remembered before
+#: a load in the same process tries again: a day, so a host that cannot build
+#: does not start the 8.7 GB build every few minutes. A restart tries at once.
+ACQUIRE_RETRY_SECONDS = 24 * 3600.0
+_ACQUIRE_FAILED: dict[tuple[str, str], tuple[float, str]] = {}
+#: The memory a local build must find available before it starts: the quantiser
+#: peaks at about 8.7 GB for bge-m3. Below it the kernel kills the child, after
+#: the 2.2 GB export was downloaded and copied for nothing.
+BUILD_MIN_AVAILABLE_BYTES = 10 << 30
+_MEMINFO = Path("/proc/meminfo")
+#: Intra-op threads a served model's session uses while `EXOMEM_CPU_THREADS` is
+#: unset: the 40-token turn's p95 was 132 ms at two against 304 at one.
+SERVED_DEFAULT_THREADS = 2
 
 
 class ModelFilesUnavailable(RuntimeError):
@@ -159,6 +187,19 @@ _DECLARED: dict[str, tuple[str, str, str, str]] = {
     "BAAI/bge-m3": ("", "", _POOLING_CLS, "<pad>"),
 }
 _UNDECLARED = ("", "", _POOLING_CLS, "[PAD]")
+#: Models with a sentencepiece (XLM-R) tokenizer, whose own normaliser strips and
+#: collapses whitespace where the exported `tokenizer.json` does not: the ONNX
+#: lane collapses it for them. A BERT tokenizer is left alone. It deletes control
+#: characters (U+001C-U+001F, U+0085) and joins the words either side, where a
+#: collapse would part them: on bge-base-en that gives different token ids.
+_COLLAPSES_WHITESPACE = frozenset(
+    {
+        "intfloat/multilingual-e5-small",
+        "intfloat/multilingual-e5-base",
+        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        "BAAI/bge-m3",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -175,6 +216,12 @@ class ServedArtifact:
     source: tuple[str, ...]
     quantization: str
     file_format: str
+    #: sha256 of the published artefact's bytes (`artifact_sha256`); None when
+    #: nothing is published and every host builds its own.
+    digest: str | None = None
+    #: sha256 of the packed release asset itself, checked before it is unpacked;
+    #: None when there is no asset to fetch.
+    asset_digest: str | None = None
 
 
 #: The one model a personal server serves for activation and recall alike, at
@@ -186,6 +233,8 @@ _SERVED: dict[str, ServedArtifact] = {
         source=("onnx/model.onnx", "onnx/model.onnx_data", "onnx/Constant_7_attr__value"),
         quantization=ORT_DYNAMIC_INT8,
         file_format=ONNX_EXTERNAL_DATA,
+        digest="7b9a0b3b0b292643752db19f9ae29113d632ac30393c9a56b97d4b075dc81c44",
+        asset_digest="71e5f90fa019c2de0471b158e408da6ca7f43c93188308095242dfe46525ef76",
     ),
 }
 
@@ -219,6 +268,10 @@ class EncoderProfile:
     quantization: str | None = None
     file_format: str | None = None
     artifact_digest: str | None = None
+    #: Whether the ONNX lane collapses whitespace before tokenizing
+    #: (`_COLLAPSES_WHITESPACE`). How a runtime reproduces the model's own
+    #: tokenizer, not which vector it computes, so not in the fingerprint.
+    collapse_whitespace: bool = False
 
     def fingerprint(self) -> str:
         """Identity of the vector space: model, pooling, prefixes, limit, L2,
@@ -294,6 +347,7 @@ def read_profile(model_name: str) -> EncoderProfile:
         revision=served.revision if served else None,
         quantization=served.quantization if served else None,
         file_format=served.file_format if served else None,
+        collapse_whitespace=model_name in _COLLAPSES_WHITESPACE,
     )
 
 
@@ -322,6 +376,7 @@ def profile_from_sentence_transformer(model_name: str, model) -> EncoderProfile:
         passage_prefix=passage,
         max_seq=min(int(max_seq), SERVED_MAX_SEQ) if isinstance(max_seq, int) and max_seq > 0 else _DEFAULT_MAX_SEQ,
         pad_token=str(tokenizer_pad) if isinstance(tokenizer_pad, str) and tokenizer_pad else pad,
+        collapse_whitespace=model_name in _COLLAPSES_WHITESPACE,
     )
 
 
@@ -371,11 +426,13 @@ class _TorchEncoder:
     concurrent_encodes = False
 
     def __init__(self, model_name: str, device: str, half: bool) -> None:
+        # The tokenizer guard is the first thing a load does, before any import
+        # that a lean install may not have.
+        require_tokenizer(model_name)
         # Heavy import stays local — keyword-mode and a lean install must not pay it.
         runtime_resources.configure_torch()
         from sentence_transformers import SentenceTransformer
 
-        require_tokenizer(model_name)
         model = model_cache.load_offline_first(
             model_name,
             lambda **kw: SentenceTransformer(model_name, device=device, **kw),
@@ -427,11 +484,13 @@ class _OnnxEncoder:
     concurrent_encodes = True
 
     def __init__(self, model_name: str, device: str) -> None:
+        # The tokenizer guard is the first thing a load does, before any import
+        # that a lean install may not have.
+        tokenizer_path = require_tokenizer(model_name)
         import onnxruntime as ort
         from tokenizers import Tokenizer
 
         self.profile = read_profile(model_name)
-        tokenizer_path = require_tokenizer(model_name)
         served = served_artifact(model_name)
         if served is None:
             onnx_path = _model_file(model_name, self.profile.onnx_file)
@@ -451,7 +510,10 @@ class _OnnxEncoder:
 
         options = ort.SessionOptions()
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        runtime_resources.configure_onnx_session_options(options)
+        if served is None:
+            runtime_resources.configure_onnx_session_options(options)
+        else:
+            runtime_resources.configure_onnx_session_options(options, default_threads=SERVED_DEFAULT_THREADS)
         self._session = ort.InferenceSession(onnx_path, sess_options=options, providers=providers)
         self._inputs = {spec.name for spec in self._session.get_inputs()}
         self.device = device
@@ -480,13 +542,14 @@ class _OnnxEncoder:
         return np.vstack(out)
 
     def _encode_batch(self, batch: list[str], normalize: bool, max_tokens: int | None = None) -> np.ndarray:
-        # Collapse whitespace first. A sentencepiece tokenizer (XLM-R: e5, MiniLM)
-        # strips and collapses it in its own normaliser, which the exported
-        # `tokenizer.json` does not reproduce: a trailing space became an extra
-        # word-boundary token and moved e5's vector to cosine 0.96 against torch.
-        # A BERT tokenizer uses whitespace only as a separator, so for bge this
-        # changes no token id.
-        encodings = self._tokenizer.encode_batch([" ".join(text.split()) for text in batch])
+        # Collapse whitespace first where the profile declares it. A sentencepiece
+        # tokenizer (XLM-R: e5, MiniLM, bge-m3) strips and collapses it in its own
+        # normaliser, which the exported `tokenizer.json` does not reproduce: a
+        # trailing space became an extra word-boundary token and moved e5's vector
+        # to cosine 0.96 against torch. A BERT tokenizer gets the text as is:
+        # `str.split` parts words at U+001C-U+001F and U+0085, which BERT deletes.
+        texts = [" ".join(text.split()) for text in batch] if self.profile.collapse_whitespace else batch
+        encodings = self._tokenizer.encode_batch(texts)
         if max_tokens is not None:
             feed = self._capped_feed(encodings, max_tokens)
         else:
@@ -590,8 +653,9 @@ def artifact_dir(model_name: str, served: ServedArtifact) -> Path:
     return root / model_cache.snapshot_dirname(model_name) / served.revision / served.quantization
 
 
-def _artifact_digest(target: Path) -> str | None:
-    """The digest of the artefact's bytes, or None when a file is missing."""
+def artifact_sha256(target: Path) -> str | None:
+    """sha256 over the artefact's file names and bytes, or None when a file is
+    missing. Its first 16 hex digits are the digest the fingerprint names."""
     digest = hashlib.sha256()
     try:
         for name in _ARTIFACT_FILES:
@@ -601,7 +665,50 @@ def _artifact_digest(target: Path) -> str | None:
                     digest.update(chunk)
     except OSError:
         return None
-    return digest.hexdigest()[:16]
+    return digest.hexdigest()
+
+
+def _artifact_digest(target: Path) -> str | None:
+    full = artifact_sha256(target)
+    return full[:16] if full else None
+
+
+def artifact_asset_name(model_name: str, served: ServedArtifact, digest: str | None = None) -> str:
+    """The release asset's file name, e.g. ``bge-m3-int8-7b9a0b3b.onnx.tar``."""
+    quant = "int8" if served.quantization == ORT_DYNAMIC_INT8 else served.quantization
+    return f"{model_name.rsplit('/', 1)[-1].lower()}-{quant}-{(digest or served.digest or '')[:8]}.onnx.tar"
+
+
+def artifact_url(model_name: str, served: ServedArtifact) -> str | None:
+    """The published artefact's URL, or None when there is none to fetch."""
+    if not served.digest or not served.asset_digest:
+        return None
+    if model_cache._truthy(os.environ.get(model_cache.HF_OFFLINE_ENV)):
+        return None
+    base = os.environ.get(ARTIFACT_URL_ENV)
+    base = DEFAULT_ARTIFACT_URL if base is None else base.strip()
+    if base.lower() in _URL_OFF:
+        return None
+    return f"{base.rstrip('/')}/{artifact_asset_name(model_name, served)}"
+
+
+def write_artifact_asset(model_name: str, served: ServedArtifact, out_dir: Path) -> Path:
+    """Pack the built artefact as its release asset, byte for byte reproducible:
+    two regular files, fixed order, zero owner and time, no extended headers."""
+    source = artifact_dir(model_name, served)
+    digest = artifact_sha256(source)
+    if digest is None:
+        raise ModelFilesUnavailable(f"{model_name}: no built artefact at {source}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    asset = out_dir / artifact_asset_name(model_name, served, digest)
+    with tarfile.open(asset, "w", format=tarfile.USTAR_FORMAT) as tar:
+        for name in _ARTIFACT_FILES:
+            info = tarfile.TarInfo(name)
+            info.size = (source / name).stat().st_size
+            info.mode = 0o644
+            with open(source / name, "rb") as fh:
+                tar.addfile(info, fh)
+    return asset
 
 
 def _read_manifest(target: Path) -> dict:
@@ -619,26 +726,217 @@ def ensure_artifact(model_name: str, served: ServedArtifact) -> tuple[str, str]:
     fingerprint names what actually runs. Bytes that no longer match the digest
     they were built with are rebuilt; the build is deterministic, so a repaired
     artefact has its old digest back and nothing stored under it is re-embedded.
+
+    Acquiring it happens under a lock beside it (`_acquisition_lock`), so two
+    loads, in one process or in two, never fetch or build it at once: the second
+    waits, then finds the first one's artefact. A failure is not tried again in
+    this process for `ACQUIRE_RETRY_SECONDS`.
     """
     target = artifact_dir(model_name, served)
-    digest = _artifact_digest(target)
-    manifest = _read_manifest(target)
     expected = {
         "model": model_name,
         "revision": served.revision,
         "quantization": served.quantization,
         "file_format": served.file_format,
     }
-    if digest is None or manifest.get("digest") != digest or any(manifest.get(k) != v for k, v in expected.items()):
-        log.info("building %s %s artefact at %s", model_name, served.quantization, target)
-        _build_artifact(model_name, served, target)
+    digest = _installed_digest(target, expected)
+    if digest is not None:
+        return str(target / _ARTIFACT_FILES[0]), digest
+    key = (model_name, served.revision)
+    _refuse_while_cooling(key)
+    with _acquisition_lock(target):
+        # Whoever held the lock before may have installed it meanwhile.
+        digest = _installed_digest(target, expected)
+        if digest is not None:
+            return str(target / _ARTIFACT_FILES[0]), digest
+        _refuse_while_cooling(key)
+        _sweep_stages(target)
+        try:
+            if not _fetch_artifact(model_name, served, target):
+                log.info("building %s %s artefact at %s", model_name, served.quantization, target)
+                _build_artifact(model_name, served, target)
+        except ModelFilesUnavailable as error:
+            _ACQUIRE_FAILED[key] = (time.monotonic(), str(error))
+            raise
+        _ACQUIRE_FAILED.pop(key, None)
         digest = _artifact_digest(target)
         if digest is None:
             raise ModelFilesUnavailable(f"{model_name}: the built artefact at {target} is incomplete")
+        if served.digest and not served.digest.startswith(digest):
+            log.info("%s: the local build's digest %s differs from the published one", model_name, digest)
         (target / _ARTIFACT_MANIFEST).write_text(
             json.dumps({**expected, "digest": digest}, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
     return str(target / _ARTIFACT_FILES[0]), digest
+
+
+def _installed_digest(target: Path, expected: dict[str, str]) -> str | None:
+    """The installed artefact's digest when its manifest vouches for exactly these bytes."""
+    digest = _artifact_digest(target)
+    manifest = _read_manifest(target)
+    if digest is None or manifest.get("digest") != digest or any(manifest.get(k) != v for k, v in expected.items()):
+        return None
+    return digest
+
+
+def _refuse_while_cooling(key: tuple[str, str]) -> None:
+    failed = _ACQUIRE_FAILED.get(key)
+    if failed is not None and time.monotonic() - failed[0] < ACQUIRE_RETRY_SECONDS:
+        raise ModelFilesUnavailable(
+            f"{failed[1]} (not tried again until the process restarts or {int(ACQUIRE_RETRY_SECONDS // 3600)} h pass)"
+        )
+
+
+@contextlib.contextmanager
+def _acquisition_lock(target: Path):
+    """Hold the lock that makes acquiring `target` one caller's work at a time.
+
+    `.<name>.lock` beside `target`, taken with `flock` (a byte-range lock on
+    Windows) on its own open file, so it excludes threads of one process as
+    well as other processes. The kernel releases it when its holder dies, so a
+    killed build never leaves it held. The file stays: removing a lock file
+    races with the next waiter.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with open(target.parent / f".{target.name}.lock", "a+b") as handle:
+        if sys.platform == "win32":  # pragma: no cover - exercised on Windows hosts
+            import msvcrt
+
+            while True:
+                handle.seek(0)
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.5)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _sweep_stages(target: Path) -> None:
+    """Remove the stages a killed fetch or build of `target` left beside it.
+
+    Called only under `target`'s acquisition lock, when no live fetch or build
+    of it can exist, so every stage found belongs to a dead one: up to 2.2 GB of
+    copied export each, which nothing else would ever reclaim. Another target's
+    stages have their own lock and are left alone.
+    """
+    for pattern in (f".{target.name}-fetch-*", f".{target.name}-build-*"):
+        for stage in target.parent.glob(pattern):
+            if stage.is_dir():
+                log.info("removing the stale stage %s a killed acquisition left", stage)
+                shutil.rmtree(stage, ignore_errors=True)
+
+
+def _available_memory() -> int | None:
+    """Bytes of memory a new process can have, or None when the host does not say.
+
+    `MemAvailable` where the kernel reports it (Linux); elsewhere the free
+    physical pages, which leave out reclaimable cache and so read low.
+    """
+    try:
+        with open(_MEMINFO, encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, ValueError, OSError):
+        return None
+
+
+def ensure_served_artifact(model_name: str) -> None:
+    """Fetch or build a served model's artefact without loading it: the quiet-mode
+    warm-up, and a load's first step outside the model slot. The tokenizer guard
+    comes first, so a model that could never load acquires nothing."""
+    served = served_artifact(model_name)
+    if served is not None:
+        require_tokenizer(model_name)
+        ensure_artifact(model_name, served)
+
+
+def _fetch_artifact(model_name: str, served: ServedArtifact, target: Path) -> bool:
+    """Install the published artefact into `target` when it is the pinned one.
+
+    False, and nothing installed, when there is none to fetch, the download
+    fails, or the asset is not exactly the pinned artefact. The downloaded file
+    must hash to `served.asset_digest` before it is opened at all; then it is
+    read as a plain tar (no decompression) of exactly two regular files whose
+    sizes sum within the cap, and what they unpack to must hash to
+    `served.digest`. The caller then builds locally, which is always correct
+    and only costs memory and time.
+    """
+    url = artifact_url(model_name, served)
+    if url is None:
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=f".{target.name}-fetch-", dir=target.parent))
+    try:
+        asset = stage / "asset.tar"
+        received_digest = hashlib.sha256()
+        try:
+            with urllib.request.urlopen(url, timeout=60) as response, open(asset, "wb") as out:  # noqa: S310 — https or an operator's mirror
+                received = 0
+                while chunk := response.read(8 << 20):
+                    received += len(chunk)
+                    if received > _MAX_ASSET_BYTES:
+                        log.warning("%s: %s is larger than any artefact; building locally", model_name, url)
+                        return False
+                    received_digest.update(chunk)
+                    out.write(chunk)
+        except (OSError, ValueError) as error:
+            log.info("%s: no published artefact at %s (%s); building locally", model_name, url, error)
+            return False
+        if received_digest.hexdigest() != served.asset_digest:
+            log.warning("%s: %s is not the pinned asset; refused unopened, building locally", model_name, url)
+            return False
+        out_dir = stage / "out"
+        out_dir.mkdir()
+        try:
+            # "r:" reads a plain tar only: a compressed stream is refused, never
+            # inflated. Regular members only, so a sparse member cannot unpack
+            # to more than it occupies.
+            with tarfile.open(asset, "r:") as tar:
+                members = tar.getmembers()
+                if (
+                    sorted(m.name for m in members) != sorted(_ARTIFACT_FILES)
+                    or not all(m.type in (tarfile.REGTYPE, tarfile.AREGTYPE) for m in members)
+                    or sum(m.size for m in members) > _MAX_UNPACKED_BYTES
+                ):
+                    log.warning("%s: %s holds other files than the artefact; refused", model_name, url)
+                    return False
+                for member in members:
+                    src = tar.extractfile(member)
+                    if src is None:
+                        return False
+                    with src, open(out_dir / member.name, "wb") as dst:
+                        shutil.copyfileobj(src, dst, 8 << 20)
+        except (OSError, tarfile.TarError) as error:
+            log.warning("%s: %s is not a readable artefact (%s); refused", model_name, url, error)
+            return False
+        if artifact_sha256(out_dir) != served.digest:
+            log.warning("%s: %s does not match the pinned digest; refused, building locally", model_name, url)
+            return False
+        target.mkdir(parents=True, exist_ok=True)
+        for name in reversed(_ARTIFACT_FILES):
+            os.replace(out_dir / name, target / name)
+        log.info("installed the published %s artefact from %s", model_name, url)
+        return True
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
 
 
 def _build_artifact(model_name: str, served: ServedArtifact, target: Path) -> None:
@@ -649,7 +947,27 @@ def _build_artifact(model_name: str, served: ServedArtifact, target: Path) -> No
     are copied into the stage first. Files move into `target` data first, so a
     graph never names data that is not there.
     """
-    sources = [Path(_resolve(model_name, name, served.revision)).resolve() for name in served.source]
+    # Before the export is downloaded or copied: a build the host cannot hold
+    # ends with the child killed, and the published artefact is the way out.
+    # What this costs when it misreads a host: no build there, and semantic
+    # evidence stays off until the artefact arrives. An unmeasurable host builds.
+    available = _available_memory()
+    if available is not None and available < BUILD_MIN_AVAILABLE_BYTES:
+        raise ModelFilesUnavailable(
+            f"{model_name}: not building the int8 model here: {available / (1 << 30):.1f} GiB of memory "
+            f"is available and the build needs {BUILD_MIN_AVAILABLE_BYTES >> 30} GiB. Use the published "
+            f"artefact {artifact_asset_name(model_name, served)} instead: it downloads from "
+            f"{ARTIFACT_URL_ENV} (default {DEFAULT_ARTIFACT_URL}), which must be reachable and not off"
+        )
+    try:
+        sources = [Path(_resolve(model_name, name, served.revision)).resolve() for name in served.source]
+    except Exception as error:  # noqa: BLE001 — every hub failure is the same refusal
+        # `LocalEntryNotFoundError` offline, the hub's not-found errors online:
+        # each is a failed acquisition, remembered so no load retries it at once.
+        raise ModelFilesUnavailable(
+            f"{model_name}: the export to build from is neither in the model cache nor fetchable "
+            f"({type(error).__name__})"
+        ) from error
     target.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=f".{target.name}-build-", dir=target.parent))
     try:
@@ -693,6 +1011,12 @@ def _quantize(served: ServedArtifact, source: str, out: str) -> None:
         text=True,
         check=False,
     )
+    if result.returncode < 0:
+        # A signal, and on a build this size almost always the kernel's OOM killer.
+        raise ModelFilesUnavailable(
+            f"building the int8 model was killed by signal {-result.returncode} "
+            "(likely out of memory: the build peaks near 9 GB)"
+        )
     if result.returncode != 0:
         detail = (result.stderr or "").strip().splitlines()[-1:] or [f"exit {result.returncode}"]
         raise ModelFilesUnavailable(

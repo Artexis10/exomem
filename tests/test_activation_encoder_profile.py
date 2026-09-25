@@ -16,10 +16,15 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import io
 import json
 import re
+import shutil
+import subprocess
 import sys
+import tarfile
 import threading
+import time
 import types
 from pathlib import Path
 
@@ -39,6 +44,8 @@ from exomem import (
 
 E5 = "intfloat/multilingual-e5-small"
 M3 = "BAAI/bge-m3"
+#: The real memory reading, before `_clean` stands a large host in for it.
+_REAL_AVAILABLE_MEMORY = getattr(embedding_backend, "_available_memory", None)
 
 
 @pytest.fixture(autouse=True)
@@ -48,6 +55,13 @@ def _clean(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(embeddings, "_MODEL", None)
     monkeypatch.setattr(embeddings, "_ACTIVATION_MODEL", None)
     monkeypatch.setenv(embedding_backend.ARTIFACT_DIR_ENV, str(tmp_path / "artifacts"))
+    # No test reaches a network: a published artefact is fetched from a local
+    # directory that is empty unless a test publishes into it.
+    monkeypatch.setenv("EXOMEM_MODEL_ARTIFACT_URL", (tmp_path / "no-assets").as_uri())
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.setattr(embedding_backend, "_ACQUIRE_FAILED", {}, raising=False)
+    # The tiny test builds need no 10 GiB; the tests of that gate set their own.
+    monkeypatch.setattr(embedding_backend, "_available_memory", lambda: 64 << 30, raising=False)
     yield
 
 
@@ -728,7 +742,9 @@ def test_the_served_artifact_is_built_once_at_the_pinned_revision_and_reused(
     assert len(quantized) == 1
     assert {revision for _file, revision in asked} == {TINY_REVISION}
     assert sorted(path.name for path in target.iterdir()) == ["artifact.json", "model.onnx", "model.onnx.data"]
-    assert [path.name for path in target.parent.iterdir()] == [target.name], "a build leaves no stage behind"
+    assert sorted(path.name for path in target.parent.iterdir()) == sorted(
+        [target.name, f".{target.name}.lock"]
+    ), "a build leaves no stage behind, only its lock"
     assert re.fullmatch(r"[0-9a-f]{16}", first.profile.artifact_digest or "")
     assert manifest["digest"] == first.profile.artifact_digest
     assert (manifest["model"], manifest["revision"], manifest["quantization"], manifest["file_format"]) == (
@@ -792,7 +808,7 @@ def test_a_failed_build_refuses_the_load_and_leaves_nothing_behind(
         embedding_backend.load_encoder(TINY)
 
     target = embedding_backend.artifact_dir(TINY, served)
-    assert not [path for path in target.parent.rglob("*") if path.is_file()]
+    assert not [path for path in target.parent.rglob("*") if path.is_file() and path.name != f".{target.name}.lock"]
 
 
 def test_a_damaged_artifact_is_rebuilt_to_the_same_digest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -829,6 +845,696 @@ def test_a_capped_encode_reads_the_turn_s_head_and_leaves_the_shared_tokenizer_a
 # --------------------------------------------------------------------------- #
 # One model, one resident instance
 # --------------------------------------------------------------------------- #
+
+
+# --------------------------------------------------------------------------- #
+# T6c: a host downloads the published artefact before it ever builds one
+# --------------------------------------------------------------------------- #
+
+
+def _publish(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, served):
+    """What a maintainer does with the release script: build the artefact once,
+    pin its digest, and publish it as a release asset in a directory the host's
+    download URL points at. The host then starts with an empty artefact dir."""
+    monkeypatch.setenv(embedding_backend.ARTIFACT_DIR_ENV, str(tmp_path / "maintainer"))
+    embedding_backend.load_encoder(TINY)
+    digest = embedding_backend.artifact_sha256(embedding_backend.artifact_dir(TINY, served))
+    assets = tmp_path / "assets"
+    asset = embedding_backend.write_artifact_asset(TINY, dataclasses.replace(served, digest=digest), assets)
+    pinned = dataclasses.replace(
+        served, digest=digest, asset_digest=hashlib.sha256(asset.read_bytes()).hexdigest()
+    )
+    monkeypatch.setitem(embedding_backend._SERVED, TINY, pinned)
+    monkeypatch.setenv(embedding_backend.ARTIFACT_DIR_ENV, str(tmp_path / "host"))
+    monkeypatch.setenv(embedding_backend.ARTIFACT_URL_ENV, assets.as_uri())
+    return pinned, asset
+
+
+def _rewrite_asset(asset: Path, members: dict[str, bytes]) -> None:
+    with tarfile.open(asset, "w", format=tarfile.USTAR_FORMAT) as tar:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+
+def test_a_host_downloads_the_published_artifact_instead_of_building_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The build peaks at 8.7 GB for bge-m3 and needs about 2.8 GB of disk; a
+    download verified against the pinned digest needs neither."""
+    _asked, served = _tiny_served_repo(tmp_path, monkeypatch)
+    pinned, asset = _publish(tmp_path, monkeypatch, served)
+    monkeypatch.setattr(embedding_backend, "_quantize", lambda *_a: pytest.fail("a verified download is not rebuilt"))
+
+    encoder = embedding_backend.load_encoder(TINY)
+
+    target = embedding_backend.artifact_dir(TINY, pinned)
+    assert asset.name == f"tiny-served-int8-{pinned.digest[:8]}.onnx.tar"
+    assert encoder.profile.artifact_digest == pinned.digest[:16]
+    assert embedding_backend.artifact_sha256(target) == pinned.digest
+    assert sorted(path.name for path in target.iterdir()) == ["artifact.json", "model.onnx", "model.onnx.data"]
+    assert sorted(path.name for path in target.parent.iterdir()) == sorted(
+        [target.name, f".{target.name}.lock"]
+    ), "a download leaves no stage behind, only its lock"
+    assert encoder.encode(["w1 w2"], batch_size=8).shape == (1, TINY_WIDTH)
+
+
+@pytest.mark.parametrize("damage", ["other bytes", "an extra member", "a path outside the directory"])
+def test_a_download_that_is_not_the_pinned_artifact_is_refused_and_built_locally(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    _asked, served = _tiny_served_repo(tmp_path, monkeypatch)
+    pinned, asset = _publish(tmp_path, monkeypatch, served)
+    with tarfile.open(asset) as tar:
+        members = {member.name: tar.extractfile(member).read() for member in tar}
+    if damage == "other bytes":
+        data = bytearray(members["model.onnx.data"])
+        data[len(data) // 2] ^= 0xFF
+        members["model.onnx.data"] = bytes(data)
+    elif damage == "an extra member":
+        members["run-me.sh"] = b"echo hello"
+    else:
+        members["../outside.txt"] = b"escaped"
+    _rewrite_asset(asset, members)
+    built: list[tuple] = []
+    real_quantize = embedding_backend._quantize
+    monkeypatch.setattr(embedding_backend, "_quantize", lambda *args: built.append(args) or real_quantize(*args))
+
+    encoder = embedding_backend.load_encoder(TINY)
+
+    assert len(built) == 1, "a refused download falls back to the local build"
+    assert encoder.profile.artifact_digest == pinned.digest[:16], "the local build is deterministic"
+    assert not list(tmp_path.rglob("outside.txt")) and not list(tmp_path.rglob("run-me.sh"))
+
+
+def _hostile_asset(kind: str, path: Path) -> None:
+    """The reviewer's bombs, small on the wire and large unpacked: a GNU sparse
+    member that claims 4 GiB, and an xz-compressed regular member. A compressed
+    stream is refused whatever it holds, so the xz one holds 64 MiB (the
+    reviewer's held 6 GiB, which takes half a minute to write)."""
+    if kind == "sparse":
+        tar_cli = shutil.which("tar")
+        if tar_cli is None:
+            pytest.skip("GNU tar writes the sparse member")
+        work = path.parent / "work"
+        work.mkdir()
+        (work / "model.onnx").write_bytes(b"x" * 10)
+        with open(work / "model.onnx.data", "wb") as fh:
+            fh.seek((4 << 30) - 1)  # a hole: one byte is written
+            fh.write(b"\0")
+        subprocess.run(
+            [tar_cli, "--format=gnu", "-S", "-cf", str(path), "-C", str(work), "model.onnx", "model.onnx.data"],
+            check=True,
+        )
+        shutil.rmtree(work)
+        return
+
+    class Zeros(io.RawIOBase):
+        def __init__(self, left: int) -> None:
+            self.left = left
+
+        def readable(self) -> bool:
+            return True
+
+        def readinto(self, buffer) -> int:
+            size = min(len(buffer), self.left)
+            buffer[:size] = bytes(size)
+            self.left -= size
+            return size
+
+    with tarfile.open(path, "w:xz", preset=0) as tar:
+        graph = tarfile.TarInfo("model.onnx")
+        graph.size = 10
+        tar.addfile(graph, io.BytesIO(b"x" * 10))
+        data = tarfile.TarInfo("model.onnx.data")
+        data.size = 64 << 20
+        tar.addfile(data, io.BufferedReader(Zeros(data.size), 8 << 20))
+
+
+@pytest.mark.parametrize("kind", ["sparse", "xz"])
+@pytest.mark.parametrize("pinned_to_it", [False, True], ids=["other-asset", "pin-matches"])
+def test_a_hostile_asset_is_refused_before_a_byte_is_unpacked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, pinned_to_it: bool
+) -> None:
+    """The download is checked against the packed asset's own pinned sha256
+    before `tarfile` ever opens it. Should a pin ever name a hostile asset, the
+    member check still refuses a sparse member, a compressed stream, or a size
+    beyond the cap, before anything is written."""
+    served = dataclasses.replace(
+        embedding_backend.served_artifact(M3), revision="f" * 40, asset_digest="0" * 64
+    )
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    asset = assets / embedding_backend.artifact_asset_name(M3, served)
+    _hostile_asset(kind, asset)
+    if pinned_to_it:
+        served = dataclasses.replace(served, asset_digest=hashlib.sha256(asset.read_bytes()).hexdigest())
+    monkeypatch.setenv(embedding_backend.ARTIFACT_DIR_ENV, str(tmp_path / "host"))
+    monkeypatch.setenv(embedding_backend.ARTIFACT_URL_ENV, assets.as_uri())
+    opened: list[str] = []
+    real_open = tarfile.open
+    monkeypatch.setattr(
+        embedding_backend.tarfile, "open", lambda *a, **k: opened.append(str(a[1:] or k)) or real_open(*a, **k)
+    )
+    written: list[int] = []
+    monkeypatch.setattr(
+        embedding_backend.shutil, "copyfileobj", lambda *_a, **_k: written.append(1) or pytest.fail("unpacked")
+    )
+    target = embedding_backend.artifact_dir(M3, served)
+
+    assert embedding_backend._fetch_artifact(M3, served, target) is False
+
+    assert written == []
+    assert opened == (["('r:',)"] if pinned_to_it else []), opened
+    assert not target.exists()
+    assert [path.name for path in target.parent.iterdir()] == [], "no stage is left behind"
+
+
+def test_the_member_sizes_are_capped_before_anything_is_unpacked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    served = dataclasses.replace(embedding_backend.served_artifact(M3), revision="e" * 40)
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    asset = assets / embedding_backend.artifact_asset_name(M3, served)
+    _rewrite_asset(asset, {"model.onnx": b"g" * 600, "model.onnx.data": b"d" * 600})
+    served = dataclasses.replace(served, asset_digest=hashlib.sha256(asset.read_bytes()).hexdigest())
+    monkeypatch.setenv(embedding_backend.ARTIFACT_DIR_ENV, str(tmp_path / "host"))
+    monkeypatch.setenv(embedding_backend.ARTIFACT_URL_ENV, assets.as_uri())
+    monkeypatch.setattr(embedding_backend, "_MAX_UNPACKED_BYTES", 1000)
+    monkeypatch.setattr(
+        embedding_backend.shutil, "copyfileobj", lambda *_a, **_k: pytest.fail("unpacked past the cap")
+    )
+
+    assert embedding_backend._fetch_artifact(M3, served, embedding_backend.artifact_dir(M3, served)) is False
+
+
+def test_the_bge_m3_release_asset_is_pinned_by_its_own_sha256() -> None:
+    """Reproduced by the build script and by an independent reviewer."""
+    served = embedding_backend.served_artifact(M3)
+    assert served.asset_digest == "71e5f90fa019c2de0471b158e408da6ca7f43c93188308095242dfe46525ef76"
+
+
+def test_an_unavailable_download_falls_back_to_the_local_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _asked, served = _tiny_served_repo(tmp_path, monkeypatch)
+    monkeypatch.setitem(embedding_backend._SERVED, TINY, dataclasses.replace(served, digest="0" * 64))
+    built: list[tuple] = []
+    real_quantize = embedding_backend._quantize
+    monkeypatch.setattr(embedding_backend, "_quantize", lambda *args: built.append(args) or real_quantize(*args))
+
+    encoder = embedding_backend.load_encoder(TINY)
+
+    assert len(built) == 1
+    assert re.fullmatch(r"[0-9a-f]{16}", encoder.profile.artifact_digest or "")
+
+
+def test_the_published_bge_m3_artifact_is_a_github_release_asset(monkeypatch: pytest.MonkeyPatch) -> None:
+    served = embedding_backend.served_artifact(M3)
+    monkeypatch.delenv(embedding_backend.ARTIFACT_URL_ENV, raising=False)
+
+    assert served is not None and re.fullmatch(r"[0-9a-f]{64}", served.digest or "")
+    assert served.digest.startswith("7b9a0b3b0b292643"), "the digest T6b's fingerprint names"
+    assert embedding_backend.artifact_url(M3, served) == (
+        "https://github.com/Artexis10/exomem/releases/download/served-models/bge-m3-int8-7b9a0b3b.onnx.tar"
+    )
+    for off in ("", "off", "0", "none"):
+        monkeypatch.setenv(embedding_backend.ARTIFACT_URL_ENV, off)
+        assert embedding_backend.artifact_url(M3, served) is None, off
+    monkeypatch.delenv(embedding_backend.ARTIFACT_URL_ENV)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    assert embedding_backend.artifact_url(M3, served) is None, "an offline host never downloads"
+    assert embedding_backend.artifact_url(M3, dataclasses.replace(served, digest=None)) is None
+    assert embedding_backend.artifact_url(M3, dataclasses.replace(served, asset_digest=None)) is None
+
+
+def test_a_failed_acquisition_is_not_retried_on_every_load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A host that cannot download and cannot build would otherwise start the
+    8.7 GB build again on every write that asks for the model."""
+    _tiny_served_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(embedding_backend, "_QUANTIZE_CHILD", "raise SystemExit('no memory for the quantiser')")
+    attempts: list[int] = []
+    real_build = embedding_backend._build_artifact
+    monkeypatch.setattr(embedding_backend, "_build_artifact", lambda *a: attempts.append(1) or real_build(*a))
+    clock = [1000.0]
+    monkeypatch.setattr(embedding_backend.time, "monotonic", lambda: clock[0])
+
+    with pytest.raises(embedding_backend.ModelFilesUnavailable, match="no memory for the quantiser"):
+        embedding_backend.load_encoder(TINY)
+    with pytest.raises(embedding_backend.ModelFilesUnavailable, match="until the process restarts"):
+        embedding_backend.load_encoder(TINY)
+    assert attempts == [1]
+
+    clock[0] += embedding_backend.ACQUIRE_RETRY_SECONDS + 1
+    with pytest.raises(embedding_backend.ModelFilesUnavailable, match="no memory for the quantiser"):
+        embedding_backend.load_encoder(TINY)
+    assert attempts == [1, 1]
+
+
+# --------------------------------------------------------------------------- #
+# R8: acquisition is safe to run twice and fails well on a small host
+# --------------------------------------------------------------------------- #
+
+
+def _fake_m3_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """bge-m3's served entry with its export stood in for by small files, and
+    nothing published (the reviewer's probes p2 and p13). Returns the export
+    files asked for, so a test can see whether the 2.2 GB download started."""
+    src = tmp_path / "src"
+    src.mkdir()
+    for name in embedding_backend.served_artifact(M3).source:
+        (src / Path(name).name).write_bytes(b"source-" + name.encode() * 1000)
+    resolved: list[str] = []
+    monkeypatch.setattr(
+        embedding_backend,
+        "_resolve",
+        lambda _model, name, revision=None: resolved.append(name) or str(src / Path(name).name),
+    )
+    monkeypatch.setenv(embedding_backend.ARTIFACT_URL_ENV, "off")
+    return resolved
+
+
+def _fake_quantize(sleep: float = 0.0, live: dict[str, int] | None = None):
+    counting = threading.Lock()
+
+    def quantize(_served, _source: str, out: str) -> None:
+        if live is not None:
+            with counting:
+                live["now"] += 1
+                live["calls"] += 1
+                live["max"] = max(live["max"], live["now"])
+        time.sleep(sleep)
+        Path(out).write_bytes(b"graph")
+        Path(out + ".data").write_bytes(b"weights")
+        if live is not None:
+            with counting:
+                live["now"] -= 1
+
+    return quantize
+
+
+def test_two_loads_at_once_acquire_the_artifact_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Probe p2: two loads race on a host with nothing published. The second
+    waits on the lock beside the artefact, then finds the first one's, instead
+    of running a second 8.7 GB build beside it."""
+    _fake_m3_sources(tmp_path, monkeypatch)
+    live = {"now": 0, "max": 0, "calls": 0}
+    monkeypatch.setattr(embedding_backend, "_quantize", _fake_quantize(sleep=1.0, live=live))
+    served = embedding_backend.served_artifact(M3)
+    results: list[tuple[str, str]] = []
+    threads = [
+        threading.Thread(target=lambda: results.append(embedding_backend.ensure_artifact(M3, served)))
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    assert (live["calls"], live["max"]) == (1, 1)
+    assert len(results) == 2 and results[0] == results[1]
+
+
+_KILLED_BUILD_CHILD = """
+import sys, time
+from pathlib import Path
+from exomem import embedding_backend as eb
+
+src = Path(sys.argv[1])
+eb._resolve = lambda _model, name, revision=None: str(src / Path(name).name)
+eb._available_memory = lambda: 64 << 30
+
+def quantize(_served, _source, _out):
+    print("building", flush=True)
+    time.sleep(300)
+
+eb._quantize = quantize
+eb.ensure_artifact("BAAI/bge-m3", eb.served_artifact("BAAI/bge-m3"))
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGKILL is POSIX")
+def test_a_killed_acquisition_holds_no_lock_and_its_stage_is_swept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Probe p2, killed: a build killed mid-way, as the OOM killer kills it,
+    leaves its stage with the copied export in it. The next acquisition finds
+    the lock free, since the kernel dropped it with its dead holder, and sweeps
+    the stage before it builds."""
+    _fake_m3_sources(tmp_path, monkeypatch)
+    served = embedding_backend.served_artifact(M3)
+    target = embedding_backend.artifact_dir(M3, served)
+    child = subprocess.Popen(
+        [sys.executable, "-c", _KILLED_BUILD_CHILD, str(tmp_path / "src")], stdout=subprocess.PIPE, text=True
+    )
+    try:
+        assert child.stdout is not None and child.stdout.readline().strip() == "building"
+    finally:
+        child.kill()
+        child.wait(timeout=60)
+    assert list(target.parent.glob(f".{target.name}-build-*")), "the killed build left its stage"
+
+    monkeypatch.setattr(embedding_backend, "_quantize", _fake_quantize())
+    path, _digest = embedding_backend.ensure_artifact(M3, served)
+
+    assert Path(path).is_file()
+    assert sorted(p.name for p in target.parent.iterdir()) == sorted([target.name, f".{target.name}.lock"])
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGKILL is POSIX")
+def test_a_build_the_kernel_kills_reads_as_out_of_memory_and_waits_a_day(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Probe p13: the quantiser child is killed as the OOM killer kills it. The
+    failure names the likely cause, not a missing package, and the next attempt
+    in this process waits a day, never 15 minutes."""
+    _fake_m3_sources(tmp_path, monkeypatch)
+    monkeypatch.setattr(embedding_backend, "_QUANTIZE_CHILD", "import os, signal\nos.kill(os.getpid(), signal.SIGKILL)\n")
+    spawns: list[int] = []
+    real_run = subprocess.run
+    monkeypatch.setattr(embedding_backend.subprocess, "run", lambda *a, **k: spawns.append(1) or real_run(*a, **k))
+    clock = [1000.0]
+    monkeypatch.setattr(embedding_backend.time, "monotonic", lambda: clock[0])
+    served = embedding_backend.served_artifact(M3)
+
+    with pytest.raises(embedding_backend.ModelFilesUnavailable, match=r"killed by signal 9 \(likely out of memory"):
+        embedding_backend.ensure_artifact(M3, served)
+    for advance in (60, 900, 23 * 3600):
+        clock[0] += advance
+        with pytest.raises(embedding_backend.ModelFilesUnavailable, match="until the process restarts or 24 h pass"):
+            embedding_backend.ensure_artifact(M3, served)
+    assert spawns == [1]
+
+    clock[0] += 3600
+    with pytest.raises(embedding_backend.ModelFilesUnavailable, match="likely out of memory"):
+        embedding_backend.ensure_artifact(M3, served)
+    assert spawns == [1, 1]
+
+
+def test_a_host_short_of_memory_starts_no_build_and_is_told_where_the_artifact_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Below 10 GiB available nothing is downloaded, copied or spawned: the
+    refusal names the published artefact and the variable that fetches it."""
+    resolved = _fake_m3_sources(tmp_path, monkeypatch)
+    built: list[int] = []
+    monkeypatch.setattr(embedding_backend, "_quantize", lambda *_a: built.append(1))
+    monkeypatch.setattr(embedding_backend, "_available_memory", lambda: 6 << 30)
+    served = embedding_backend.served_artifact(M3)
+
+    with pytest.raises(embedding_backend.ModelFilesUnavailable) as refused:
+        embedding_backend.ensure_artifact(M3, served)
+
+    message = str(refused.value)
+    assert embedding_backend.BUILD_MIN_AVAILABLE_BYTES == 10 << 30
+    assert (built, resolved) == ([], []), "no build started and no export fetched"
+    assert "6.0 GiB" in message and "10 GiB" in message
+    assert "bge-m3-int8-7b9a0b3b.onnx.tar" in message and "EXOMEM_MODEL_ARTIFACT_URL" in message
+    with pytest.raises(embedding_backend.ModelFilesUnavailable, match="until the process restarts"):
+        embedding_backend.ensure_artifact(M3, served)
+
+
+@pytest.mark.parametrize("available", [None, 12 << 30], ids=["unmeasured", "enough"])
+def test_a_host_with_memory_or_no_reading_builds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, available: int | None
+) -> None:
+    _fake_m3_sources(tmp_path, monkeypatch)
+    monkeypatch.setattr(embedding_backend, "_quantize", _fake_quantize())
+    monkeypatch.setattr(embedding_backend, "_available_memory", lambda: available)
+
+    path, _digest = embedding_backend.ensure_artifact(M3, embedding_backend.served_artifact(M3))
+
+    assert Path(path).is_file()
+
+
+@pytest.mark.parametrize("error_name", ["LocalEntryNotFoundError", "RevisionNotFoundError", "OSError"])
+def test_a_hub_failure_is_remembered_like_a_failed_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_name: str
+) -> None:
+    """Offline with the export uncached, or a revision the hub no longer has:
+    the load is refused as unavailable and not retried on the next write."""
+    hub_errors = pytest.importorskip("huggingface_hub.errors")
+    _fake_m3_sources(tmp_path, monkeypatch)
+    asked: list[str] = []
+
+    def missing(_model: str, name: str, revision: str | None = None) -> str:
+        asked.append(name)
+        if error_name == "OSError":
+            raise OSError("connection refused")
+        if error_name == "RevisionNotFoundError":
+            import httpx
+
+            not_found = httpx.Response(404, request=httpx.Request("GET", "https://hub.invalid/revision"))
+            raise hub_errors.RevisionNotFoundError("no such revision", response=not_found)
+        raise hub_errors.LocalEntryNotFoundError("offline and not cached")
+
+    monkeypatch.setattr(embedding_backend, "_resolve", missing)
+    served = embedding_backend.served_artifact(M3)
+
+    with pytest.raises(embedding_backend.ModelFilesUnavailable, match="neither in the model cache nor fetchable"):
+        embedding_backend.ensure_artifact(M3, served)
+    with pytest.raises(embedding_backend.ModelFilesUnavailable, match="until the process restarts"):
+        embedding_backend.ensure_artifact(M3, served)
+    assert len(asked) == 1
+
+
+def test_available_memory_reads_memavailable_or_else_the_free_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _REAL_AVAILABLE_MEMORY is not None
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text(
+        "MemTotal:       16384000 kB\nMemFree:         1024000 kB\nMemAvailable:    7340032 kB\n", encoding="ascii"
+    )
+    monkeypatch.setattr(embedding_backend, "_MEMINFO", meminfo)
+    assert _REAL_AVAILABLE_MEMORY() == 7 << 30
+
+    monkeypatch.setattr(embedding_backend, "_MEMINFO", tmp_path / "absent")
+    pages = {"SC_AVPHYS_PAGES": 1000, "SC_PAGE_SIZE": 4096}
+    monkeypatch.setattr(embedding_backend.os, "sysconf", lambda name: pages[name], raising=False)
+    assert _REAL_AVAILABLE_MEMORY() == 4096 * 1000
+
+    def unknown(name: str) -> int:
+        raise ValueError(name)
+
+    monkeypatch.setattr(embedding_backend.os, "sysconf", unknown, raising=False)
+    assert _REAL_AVAILABLE_MEMORY() is None
+
+
+@pytest.mark.parametrize("lane", ["recall", "activation"])
+def test_a_served_model_is_acquired_outside_the_model_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lane: str
+) -> None:
+    """A first load that downloads or builds holds no model slot meanwhile: every
+    other encode on that slot runs, and the slot is taken only for the load."""
+    _tiny_served_repo(tmp_path, monkeypatch)
+    if lane == "recall":
+        monkeypatch.setattr(embeddings, "MODEL_NAME", TINY)
+        load, slot = embeddings.get_model, runtime_resources.model_execution
+    else:
+        monkeypatch.setenv(embeddings.ACTIVATION_MODEL_ENV, TINY)
+        load, slot = embeddings.get_activation_model, embeddings.activation_execution
+    free_while_building: list[bool] = []
+    real_build = embedding_backend._build_artifact
+
+    def build_and_probe(*args) -> None:
+        def probe() -> None:
+            try:
+                with slot(wait=False):
+                    free_while_building.append(True)
+            except runtime_resources.ModelBusyError:
+                free_while_building.append(False)
+
+        other = threading.Thread(target=probe)
+        other.start()
+        other.join(timeout=30)
+        real_build(*args)
+
+    monkeypatch.setattr(embedding_backend, "_build_artifact", build_and_probe)
+
+    model = load()
+
+    assert free_while_building == [True]
+    assert model.backend == embedding_backend.ONNX
+
+
+def test_a_served_model_without_its_tokenizer_acquires_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _asked, served = _tiny_served_repo(tmp_path, monkeypatch)
+    real_resolve = embedding_backend._resolve
+
+    def no_tokenizer(model: str, name: str, revision: str | None = None) -> str:
+        if name == "tokenizer.json":
+            raise FileNotFoundError(name)
+        return real_resolve(model, name, revision)
+
+    monkeypatch.setattr(embedding_backend, "_resolve", no_tokenizer)
+    monkeypatch.setattr(embedding_backend, "ensure_artifact", lambda *_a: pytest.fail("nothing is acquired"))
+
+    with pytest.raises(embedding_backend.ModelFilesUnavailable, match="tokenizer.json"):
+        embedding_backend.ensure_served_artifact(TINY)
+
+
+@pytest.mark.parametrize("declared", [False, True], ids=["bert-like", "sentencepiece"])
+def test_only_a_profile_that_declares_it_collapses_whitespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: bool
+) -> None:
+    """Measured on bge-base-en's tokenizer: `alpha\\x1cbeta` is one word to BERT,
+    which deletes the control character, and two after a collapse. U+2028,
+    U+2029, NBSP, tab and newlines gave the same ids either way. So only the
+    sentencepiece profiles, whose own normaliser collapses, do it."""
+    _tiny_served_repo(tmp_path, monkeypatch)
+    if declared:
+        monkeypatch.setattr(embedding_backend, "_COLLAPSES_WHITESPACE", frozenset({TINY}))
+    encoder = embedding_backend.load_encoder(TINY)
+
+    glued = encoder.encode(["w1\x1cw2"], batch_size=8)
+    parted = encoder.encode(["w1 w2"], batch_size=8)
+
+    assert encoder.profile.collapse_whitespace is declared
+    assert bool(np.allclose(glued, parted, atol=1e-6)) is declared
+
+
+def test_the_collapse_is_declared_for_the_sentencepiece_models_only() -> None:
+    assert embedding_backend._COLLAPSES_WHITESPACE == {
+        E5,
+        "intfloat/multilingual-e5-base",
+        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        M3,
+    }
+
+
+def test_the_release_asset_is_byte_for_byte_reproducible(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _asked, served = _tiny_served_repo(tmp_path, monkeypatch)
+    embedding_backend.load_encoder(TINY)
+
+    first = embedding_backend.write_artifact_asset(TINY, served, tmp_path / "first")
+    second = embedding_backend.write_artifact_asset(TINY, served, tmp_path / "second")
+
+    assert first.read_bytes() == second.read_bytes()
+    with tarfile.open(first) as tar:
+        members = [(m.name, m.isreg(), m.mtime, m.uid, m.gid, m.mode) for m in tar]
+    assert members == [
+        ("model.onnx", True, 0, 0, 0, 0o644),
+        ("model.onnx.data", True, 0, 0, 0, 0o644),
+    ]
+    digest = embedding_backend.artifact_sha256(embedding_backend.artifact_dir(TINY, served))
+    assert first.name == f"tiny-served-int8-{digest[:8]}.onnx.tar"
+
+
+def _release_script():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "build_served_model_asset.py"
+    spec = importlib.util.spec_from_file_location("build_served_model_asset", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_release_script_publishes_only_the_pinned_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _asked, served = _tiny_served_repo(tmp_path, monkeypatch)
+    script = _release_script()
+
+    assert script.main(["--model", TINY, "--out", str(tmp_path / "unpinned")]) == 0
+    printed = capsys.readouterr().out
+    digest = re.search(r"artefact sha256: ([0-9a-f]{64})", printed).group(1)
+    monkeypatch.setitem(embedding_backend._SERVED, TINY, dataclasses.replace(served, digest=digest))
+    assert script.main(["--model", TINY, "--out", str(tmp_path / "pinned")]) == 0
+    assert sorted(path.name for path in (tmp_path / "pinned").iterdir()) == [f"tiny-served-int8-{digest[:8]}.onnx.tar"]
+    assert "served-models/tiny-served-int8-" in capsys.readouterr().out
+
+    monkeypatch.setitem(embedding_backend._SERVED, TINY, dataclasses.replace(served, digest="f" * 64))
+    assert script.main(["--model", TINY, "--out", str(tmp_path / "wrong")]) == 1
+    assert not [path for path in (tmp_path / "wrong").iterdir() if path.suffix == ".tar"]
+
+
+def test_the_release_script_never_repackages_an_artifact_already_on_the_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The reviewer packaged a fetched artefact in 3.2 s without a build: the
+    script reused whatever `ensure_artifact` found. It builds its own, always."""
+    _asked, served = _tiny_served_repo(tmp_path, monkeypatch)
+    host = embedding_backend.load_encoder(TINY)  # an artefact already on this host
+    before = embedding_backend.artifact_sha256(embedding_backend.artifact_dir(TINY, served))
+    built: list[tuple] = []
+    real_quantize = embedding_backend._quantize
+    monkeypatch.setattr(embedding_backend, "_quantize", lambda *args: built.append(args) or real_quantize(*args))
+
+    assert _release_script().main(["--model", TINY, "--out", str(tmp_path / "release")]) == 0
+
+    assert len(built) == 1, "the script built the artefact it publishes"
+    assert all(str(tmp_path / "release") in out for _served, _source, out in built)
+    assert f"artefact sha256: {before}" in capsys.readouterr().out, "the build is deterministic"
+    assert [path.suffix for path in (tmp_path / "release").iterdir()] == [".tar"], "the build dir is removed"
+    assert host.profile.artifact_digest == before[:16]
+
+
+def test_the_served_encoder_runs_two_threads_unless_the_budget_is_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _tiny_served_repo(tmp_path, monkeypatch)
+    seen: list[dict] = []
+    real = runtime_resources.configure_onnx_session_options
+    monkeypatch.setattr(
+        runtime_resources,
+        "configure_onnx_session_options",
+        lambda options, **kw: seen.append(kw) or real(options, **kw),
+    )
+
+    embedding_backend.load_encoder(TINY)
+
+    assert embedding_backend.SERVED_DEFAULT_THREADS == 2
+    assert seen == [{"default_threads": embedding_backend.SERVED_DEFAULT_THREADS}]
+
+
+@pytest.mark.parametrize(
+    "mode_name, recall_model, loads, ensured",
+    [
+        ("normal", M3, ["recall"], []),
+        ("quiet", M3, [], [M3]),
+        ("normal", "BAAI/bge-base-en-v1.5", [], []),
+    ],
+)
+def test_warm_up_readies_a_served_recall_model_off_the_request_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode_name: str,
+    recall_model: str,
+    loads: list[str],
+    ensured: list[str],
+) -> None:
+    """A served model's first load may download or build it; that belongs to the
+    warm-up, never to whichever request comes first. Normal mode preloads the
+    one shared instance; quiet mode, which loads no model at boot, still fetches
+    the artefact; a hub-file model keeps its lazy load."""
+    monkeypatch.setattr(embeddings, "MODEL_NAME", recall_model)
+    monkeypatch.setenv("EXOMEM_MODE", mode_name)
+    monkeypatch.delenv("EXOMEM_PRELOAD_MODELS", raising=False)
+    monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
+    readiness.reset()
+    calls: list[str] = []
+    ensured_calls: list[str] = []
+    monkeypatch.setattr(warmup, "warm_retrieval_catalog", lambda _root: True, raising=False)
+    monkeypatch.setattr(warmup, "warm_caches", lambda _root, **_kw: {})
+    monkeypatch.setattr("exomem.semantic_contract.build_corpus_context", lambda _root: None)
+    monkeypatch.setattr(
+        embeddings, "get_model", lambda: calls.append("recall") or types.SimpleNamespace(encode=lambda _t: None)
+    )
+    monkeypatch.setattr(embeddings, "get_reranker", lambda: pytest.fail("the reranker stays lazy"))
+    monkeypatch.setattr(embeddings, "get_clip_model", lambda: pytest.fail("CLIP stays lazy"))
+    monkeypatch.setattr(embedding_backend, "ensure_served_artifact", lambda name: ensured_calls.append(name))
+
+    try:
+        warmup.warm_all(tmp_path)
+        ready = readiness.is_ready("embeddings")
+    finally:
+        readiness.reset()
+
+    assert (calls, ensured_calls, ready) == (loads, ensured, True)
 
 
 def test_equal_served_profiles_share_one_resident_instance(monkeypatch: pytest.MonkeyPatch) -> None:

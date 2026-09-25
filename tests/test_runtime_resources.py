@@ -387,6 +387,28 @@ def test_the_process_gate_admits_a_bulk_encode_once(monkeypatch: pytest.MonkeyPa
     assert gate.admitted_count() == 0
 
 
+def test_a_default_thread_count_applies_only_while_the_budget_is_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The served encoder asks for two intra-op threads; an explicit
+    EXOMEM_CPU_THREADS still wins, and a one-CPU host is never oversubscribed."""
+
+    def configured(**kwargs) -> tuple[int, int]:
+        options = types.SimpleNamespace()
+        runtime_resources.configure_onnx_session_options(options, **kwargs)
+        return options.intra_op_num_threads, options.inter_op_num_threads
+
+    monkeypatch.delenv("EXOMEM_CPU_THREADS", raising=False)
+    monkeypatch.setattr(runtime_resources, "effective_online_cpus", lambda: 16)
+    assert configured(default_threads=2) == (2, 1)
+    assert configured() == (1, 1)
+    monkeypatch.setattr(runtime_resources, "effective_online_cpus", lambda: 1)
+    assert configured(default_threads=2) == (1, 1)
+    monkeypatch.setattr(runtime_resources, "effective_online_cpus", lambda: 16)
+    monkeypatch.setenv("EXOMEM_CPU_THREADS", "1")
+    assert configured(default_threads=2) == (1, 1)
+    monkeypatch.setenv("EXOMEM_CPU_THREADS", "3")
+    assert configured(default_threads=2) == (3, 1)
+
+
 def test_cold_product_getters_reserve_sync_status_capacity(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

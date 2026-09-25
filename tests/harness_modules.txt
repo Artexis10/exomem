@@ -6,7 +6,9 @@ tests/test_benchmark_capabilities.py
 tests/test_capture_sweep_journey.py
 tests/test_context_activation_audit.py
 tests/test_context_activation_fixtures.py
+tests/test_context_activation_multilingual_embeddings.py
 tests/test_context_activation_multilingual_fixtures.py
+tests/test_context_activation_multilingual_product.py
 tests/test_context_activation_product_corpus.py
 tests/test_context_activation_resolver_soundness.py
 tests/test_continuation_checkpoint.py

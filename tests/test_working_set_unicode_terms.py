@@ -463,3 +463,115 @@ def test_a_two_letter_ascii_term_is_still_refused() -> None:
     )
 
     assert candidates == ()
+
+
+# --------------------------------------------------------------------------- #
+# CJK containment contact (step 4, T5; design §6.3)
+# --------------------------------------------------------------------------- #
+#
+# Japanese, Chinese and Thai write words without spaces, so a whole run is one
+# turn token and an anchor's name inside it is never a token of its own. An
+# anchor whose name is a contiguous substring of such a run earns `rare_term`,
+# the weak worded kind, which resolves only with a second, independent contact.
+
+_HUT = "白樺"
+_TURN = "来月の合宿、山小屋の白樺をまた借りられるか確認してくれる？"
+_COMPOUND_TURN = "駅前の白樺並木、今年は紅葉がきれいだったね。"
+
+
+def _evidence(turn: str, rows, *, counts=None, bands=None) -> dict[str, frozenset[str]]:
+    rows = tuple(rows)
+    counts = counts if counts is not None else _counts(rows)
+    candidates = resolve_module.candidates_for(
+        resolve_module.analyze_turn(turn), rows, term_anchor_counts=counts, bands=bands
+    )
+    return {candidate.anchor_id: candidate.evidence for candidate in candidates}
+
+
+def _counts(rows) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        for term in set(row.terms):
+            counts[term] = counts.get(term, 0) + 1
+    return counts
+
+
+def test_a_cjk_name_inside_a_run_earns_rare_term_never_exact_alias() -> None:
+    evidence = _evidence(_TURN, [_row("hut.md", _HUT)])
+
+    assert evidence == {"hut.md": frozenset({"rare_term"})}
+
+
+def test_containment_resolves_only_with_a_second_contact() -> None:
+    rows = (_row("hut.md", _HUT),)
+    alone = resolve_module.candidates_for(
+        resolve_module.analyze_turn(_TURN), rows, term_anchor_counts=_counts(rows)
+    )
+    banded = resolve_module.candidates_for(
+        resolve_module.analyze_turn(_TURN), rows, term_anchor_counts=_counts(rows), bands={"hut.md": True}
+    )
+    tokens = resolve_module.analyze_turn(_TURN).tokens
+
+    assert resolve_module.resolve(alone, turn_tokens=tokens).anchors[0].status == "partial"
+    assert resolve_module.resolve(banded, turn_tokens=tokens).anchors[0].status == "resolved"
+
+
+def test_the_name_inside_an_unrelated_compound_stays_partial() -> None:
+    """Twin 5: 白樺並木 (a birch avenue) contains the hut's name. Containment is
+    real contact, but without the band it cannot resolve."""
+    rows = (_row("hut.md", _HUT),)
+    candidates = resolve_module.candidates_for(
+        resolve_module.analyze_turn(_COMPOUND_TURN), rows, term_anchor_counts=_counts(rows), bands={"hut.md": False}
+    )
+
+    assert {c.anchor_id: c.evidence for c in candidates} == {"hut.md": frozenset({"rare_term"})}
+    tokens = resolve_module.analyze_turn(_COMPOUND_TURN).tokens
+    assert resolve_module.resolve(candidates, turn_tokens=tokens).anchors[0].status == "partial"
+
+
+def test_a_name_inside_a_longer_contained_name_is_consumed() -> None:
+    """The turn names the avenue (白樺並木); the hut's shorter name inside it is
+    part of spelling the avenue, not a lead to the hut."""
+    rows = (_row("hut.md", _HUT), _row("avenue.md", "白樺並木"))
+
+    evidence = _evidence(_COMPOUND_TURN, rows)
+
+    assert evidence == {"avenue.md": frozenset({"rare_term"})}
+
+
+def test_a_name_used_by_more_than_three_anchors_is_not_rare() -> None:
+    rows = [_row(f"hut-{i}.md", _HUT) for i in range(4)]
+
+    assert _evidence(_TURN, rows) == {}
+
+
+def test_a_one_code_point_name_never_qualifies() -> None:
+    assert _evidence(_TURN, [_row("mountain.md", "山")]) == {}
+
+
+def test_a_name_must_share_the_run_s_script() -> None:
+    """Hangul and Latin names are words of their own and are never contained;
+    a Thai name inside a Thai run is."""
+    assert _evidence(_TURN, [_row("latin.md", "Cedar")]) == {}
+    thai = "ริมทะเล"
+    assert _evidence("จองโรงแรมริมทะเลให้หน่อย", [_row("thai.md", thai)]) == {"thai.md": frozenset({"rare_term"})}
+    assert _evidence("백화점에 가자", [_row("korean.md", "백화")]) == {}
+
+
+def test_a_cjk_name_inside_a_token_that_mixes_scripts_is_contained() -> None:
+    """A Latin word glued to a Japanese phrase is one turn token. Its Japanese
+    run is read like any other: 予算 sits inside `quillmereの予算を確認`, and a
+    run that is exactly the name still counts, since the token is not the name.
+    The Latin part stays a fragment, never a name."""
+    budget = [_row("budget.md", "予算")]
+
+    assert _evidence("quillmereの予算を確認して", budget) == {"budget.md": frozenset({"rare_term"})}
+    assert _evidence("quillmere予算", budget) == {"budget.md": frozenset({"rare_term"})}
+    assert _evidence("quillmereの予算を確認して", [_row("latin.md", "Quill")]) == {}
+
+
+def test_latin_and_cyrillic_tokens_are_unaffected() -> None:
+    """A Latin or Cyrillic name inside a longer word is a fragment, not a name."""
+    assert _evidence("the cedarwood trailer", [_row("cedar.md", "Cedar")]) == {}
+    assert _evidence("медведица", [_row("bear.md", "Медведь")]) == {}
+    assert _evidence("медведица", [_row("bear.md", "медв")]) == {}

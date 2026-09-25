@@ -1358,6 +1358,62 @@ def test_an_agent_picked_page_holds_the_same_ceilings(
     assert calls.unattributable == 0, calls.report()
 
 
+def test_the_semantic_lane_holds_the_same_ceilings(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
+) -> None:
+    """Step 4: with a resident activation encoder, a catalogue large enough to
+    calibrate the band and a turn that bands its anchor, a warm request pays
+    the same ceilings. The signature matrix is read from the index the request
+    already holds, once per write, and the turn is one call into a model that
+    is already resident: nothing is enumerated and no page is read for it."""
+    from test_activation_signature_evidence import (
+        FINGERPRINT,
+        QUERY,
+        _plant_background,
+        _PlantedEncoder,
+    )
+
+    from exomem import embeddings
+
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _write_collection(vault)
+    _plant_background(vault)
+    warm_managed_cell(vault)
+    reserved_paths._baseline_identity_catalogue(vault)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    refused: list[str] = []
+    for name in ("get_model", "embed_texts", "get_activation_model"):
+        monkeypatch.setattr(embeddings, name, lambda *_a, _name=name, **_k: refused.append(_name))
+    monkeypatch.setattr(embeddings, "embed_activation_passages", _PlantedEncoder().passages)
+    monkeypatch.setattr(embeddings, "activation_fingerprint", lambda: FINGERPRINT)
+    monkeypatch.setattr(embeddings, "embed_activation_query_if_loaded", lambda _text: QUERY)
+    # The background pass embeds the signatures, as `_schedule_build` does.
+    stamp = working_set_runtime._key_text(
+        find_module.FreshnessSnapshot(vault).projection_key("kb")
+    )
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild(freshness_stamp=stamp, load_encoder=True)
+    _drain_background_walks()
+
+    scheduled = _no_background_walks(monkeypatch)
+    calls = _FilesystemCalls(vault)
+    calls.install(monkeypatch)
+
+    packet = commands.op_activate_context(vault, turn=TURN)
+
+    assert scheduled == [], scheduled
+    assert packet["generation"]["semantic_evidence"] == "ready"
+    sled = next(item for item in packet["anchors"] if item["title"] == "Cargo Sled")
+    assert "vector_band" in sled["evidence"], "the band must actually run, or this proves nothing"
+    assert refused == []
+    assert calls.enumerations <= WARM_REQUEST_ENUMERATION_CEILING, calls.report()
+    assert calls.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, calls.report()
+    assert calls.unattributable == 0, calls.report()
+    assert WARM_REQUEST_ENUMERATION_CEILING == 8
+    assert WARM_REQUEST_FILESYSTEM_CALL_CEILING == 1200
+
+
 def _write_episodes(vault: Path, count: int, *, start: int = 0) -> list[Path]:
     """`count` recaps of distinct conversations, oldest first, a second apart."""
     from exomem import episode_capture

@@ -1076,6 +1076,52 @@ def test_sidecar_present_but_probe_raises_fails(
     assert "probe failed" in check.message
 
 
+def test_sidecar_probe_reports_the_resident_encoder_s_fingerprint(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A served model's fingerprint names the bytes it runs (revision,
+    quantisation, artefact digest); doctor reports that one, never the bare
+    `model|cls|l2` a served model's vectors are not stored under."""
+    import numpy as np
+
+    from exomem import embedding_backend
+    from exomem import embeddings as embeddings_module
+
+    _sidecar(vault)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(doctor_module, "_module_available", lambda _m: True)
+    monkeypatch.setattr(doctor_module, "_model_cached", lambda _hub, _dir: True)
+    profile = embedding_backend.EncoderProfile(
+        model="BAAI/bge-m3",
+        pooling="cls",
+        query_prefix="",
+        passage_prefix="",
+        max_seq=512,
+        pad_token="<pad>",
+        revision="0123456789abcdef0123456789abcdef01234567",
+        quantization=embedding_backend.ORT_DYNAMIC_INT8,
+        file_format=embedding_backend.ONNX_EXTERNAL_DATA,
+        artifact_digest="7b9a0b3b0b292643",
+    )
+    monkeypatch.setattr(embeddings_module, "_MODEL", SimpleNamespace(profile=profile))
+
+    class Index:
+        def search(self, _vector, k: int = 1):
+            return [("Notes/probe.md", 0.9)][:k]
+
+        def all_vectors(self):
+            return [{"path": "Notes/probe.md"}], np.zeros((1, 4), dtype=np.float32)
+
+    monkeypatch.setattr(embeddings_module, "get_embedding_index", lambda _root: Index())
+    monkeypatch.setattr(embeddings_module, "embed_texts", lambda *_a, **_k: np.zeros((1, 4), dtype=np.float32))
+
+    check = doctor_module._check_embedding_sidecar(vault)
+
+    assert check.status == "pass", check.message
+    assert check.details["fingerprint"] == profile.fingerprint()
+    assert profile.fingerprint() in check.message
+
+
 @pytest.mark.embeddings
 def test_sidecar_live_probe_passes_on_built_sidecar(
     vault: Path, monkeypatch: pytest.MonkeyPatch

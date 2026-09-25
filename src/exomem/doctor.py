@@ -2068,6 +2068,11 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
     try:
         with recall_space.encoding_for(index, load=True):
             query_vec = embeddings.embed_texts(["knowledge"], is_query=True)[0]
+            # The resident encoder's own fingerprint, which for a served model
+            # names the exact bytes it runs; the probe just loaded it. Read
+            # inside the block so a sidecar still served by its previous
+            # encoder reports that encoder's space.
+            fingerprint = embeddings._vector_space()
         hits = index.search(query_vec, k=1)
     except Exception as e:  # noqa: BLE001 — diagnostic boundary
         return _check(
@@ -2089,14 +2094,6 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
     # identifies the vector space. A benchmark contender is disqualified when it
     # cannot show it is serving semantically (docs/benchmark-fairness-contract.md),
     # and until now an ONNX install had no way to show that from doctor.
-    from . import embedding_backend
-
-    identity = index.identity
-    fingerprint = (
-        identity.fingerprint
-        if identity is not None and identity.fingerprint
-        else embedding_backend.fingerprint(model)
-    )
     try:
         metadata, _matrix = index.all_vectors()
         vector_count: int | None = len(metadata)
@@ -2113,7 +2110,7 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
             "vector_count": vector_count,
             "fingerprint": fingerprint,
             "model": model,
-            "dim": identity.dim if identity is not None else None,
+            "dim": getattr(getattr(index, "identity", None), "dim", None),
         },
     )
 

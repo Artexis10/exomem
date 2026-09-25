@@ -285,6 +285,10 @@ def get_model():
     for the same reason this function did — a lean install must not pay it.
     """
     global _MODEL, _MODEL_GENERATION
+    if _MODEL is None:
+        # A served model's artefact can take minutes to download or build; the
+        # process-wide model slot is taken only to load the finished bytes.
+        embedding_backend.ensure_served_artifact(MODEL_NAME)
     with runtime_resources.model_execution():
         if _MODEL is not None:
             return _MODEL
@@ -308,12 +312,13 @@ def get_reranker():
         with _RERANKER_LOCK:
             if _RERANKER is not None:
                 return _RERANKER
+            # The tokenizer guard first, before any import a lean install lacks.
+            embedding_backend.require_tokenizer(RERANKER_NAME)
             runtime_resources.configure_torch()
             from sentence_transformers import CrossEncoder
 
             device = accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
             log.info("loading reranker %s on %s", RERANKER_NAME, device)
-            embedding_backend.require_tokenizer(RERANKER_NAME)
             _RERANKER = model_cache.load_offline_first(
                 RERANKER_NAME,
                 lambda **kw: CrossEncoder(RERANKER_NAME, device=device, **kw),
@@ -1274,6 +1279,19 @@ def activation_encoder_is_shared() -> bool:
     return activation_model_name() == MODEL_NAME
 
 
+def activation_fingerprint() -> str | None:
+    """The vector space the resident activation encoder produces, or None when
+    it is cold. Activation vectors are stored under it and read only by it."""
+    shared = activation_encoder_is_shared()
+    model = _MODEL if shared else _ACTIVATION_MODEL
+    if model is None:
+        return None
+    profile = getattr(model, "profile", None)
+    if isinstance(profile, embedding_backend.EncoderProfile):
+        return profile.fingerprint()
+    return embedding_backend.fingerprint(MODEL_NAME if shared else activation_model_name())
+
+
 def _activation_gate() -> runtime_resources.ModelAdmissionGate:
     global _ACTIVATION_GATE
     with _ACTIVATION_GATE_LOCK:
@@ -1312,6 +1330,8 @@ def get_activation_model():
     global _ACTIVATION_MODEL
     if activation_encoder_is_shared():
         return get_model()
+    if _ACTIVATION_MODEL is None:
+        embedding_backend.ensure_served_artifact(activation_model_name())
     with activation_execution():
         if _ACTIVATION_MODEL is not None:
             return _ACTIVATION_MODEL
@@ -1359,6 +1379,38 @@ def embed_activation_query_if_loaded(text: str) -> np.ndarray | None:
                 max_tokens=ACTIVATION_TURN_MAX_TOKENS,
             )
         return np.asarray(vecs, dtype=np.float32)[0]
+
+
+def embed_activation_passages_if_loaded(texts: list[str]) -> np.ndarray | None:
+    """Encode activation signatures only with an encoder already resident.
+
+    The request thread's index pass uses this: it holds the model's lock and its
+    guard while it takes the model, exactly as `embed_query_if_loaded` does, so
+    a reaper that unloads it in the meantime leaves None, never a load. None
+    also when the model is busy; the background pass encodes what is left.
+    """
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS") or not texts:
+        return None
+    shared = activation_encoder_is_shared()
+    lock = _MODEL_LOCK if shared else _ACTIVATION_MODEL_LOCK
+    guard = BGE_GUARD if shared else ACTIVATION_GUARD
+    if not lock.acquire(blocking=False):
+        return None
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(guard.active())
+            model = _MODEL if shared else _ACTIVATION_MODEL
+        finally:
+            lock.release()
+        if model is None:
+            return None
+        _query_prefix, passage_prefix = _prefixes(model, MODEL_NAME if shared else activation_model_name())
+        return _encode_in_turns(
+            model,
+            [passage_prefix + text for text in texts],
+            admission=_activation_admission,
+            execution=activation_execution,
+        )
 
 
 def embed_activation_passages(texts: list[str]) -> np.ndarray:

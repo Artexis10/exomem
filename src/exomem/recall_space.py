@@ -292,6 +292,9 @@ def previous_encoder(model: str) -> Any:
     with _PREVIOUS_LOCK:
         if _PREVIOUS is not None and _PREVIOUS[0] == model:
             return _PREVIOUS[1]
+    # A served model's artefact is fetched or built before the load, as the
+    # recall and activation singletons do (tokenizer guard first).
+    embedding_backend.ensure_served_artifact(model)
     encoder = embedding_backend.load_encoder(model)
     with _PREVIOUS_LOCK:
         if _PREVIOUS is not None and _PREVIOUS[0] == model:
