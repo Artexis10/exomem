@@ -456,6 +456,51 @@ def test_delivered_twice_then_held_until_the_fingerprint_changes(
     assert again[0]["fingerprint"] != first[0]["fingerprint"]
 
 
+def _stored_deliveries(vault: Path) -> list[tuple[str, str, str, float]]:
+    store = dreamer_store.DreamerStore(vault)
+    conn = store.connect()
+    try:
+        return store.deliveries(conn)
+    finally:
+        conn.close()
+
+
+def test_a_paused_worker_still_records_what_it_delivered(
+    tmp_path: Path, clock: _Clock, serving: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Paused never ticks, but it still delivers: the ledger is written by the
+    loop whether or not a tick runs, and when the worker stops."""
+    vault = _ready(tmp_path)
+    monkeypatch.setenv("EXOMEM_DREAMER", "paused")
+    item = _items(_carry(vault, session="one"))[0]
+    assert upkeep.pending_deliveries()
+    dreamer._loop_once(vault, dreamer.Clock())
+    stored = _stored_deliveries(vault)
+    assert [(cid, fp) for cid, fp, _caller, _at in stored] == [
+        (item["ref"].rsplit("/", 1)[-1], item["fingerprint"])
+    ]
+    assert upkeep.pending_deliveries() == []
+
+
+def test_a_delivery_count_survives_its_row_being_evicted(tmp_path: Path) -> None:
+    """A row evicted under the cap and later re-created with the same identity
+    and fingerprint keeps the deliveries it already had."""
+    vault = _ready(tmp_path)
+    store = dreamer_store.DreamerStore(vault)
+    conn = store.connect()
+    try:
+        row = next(row for row in dreamer_store.read_view(vault).candidates)
+        with store.write(conn):
+            store.record_deliveries(conn, [(row["id"], row["fingerprint"], "caller", 1.0)])
+            conn.execute("DELETE FROM candidates WHERE id=?", (row["id"],))
+        with store.write(conn):
+            store.record_deliveries(conn, [("0" * 24, "f" * 24, "caller", 2.0)])
+        kept = {(cid, fp) for cid, fp, _caller, _at in store.deliveries(conn)}
+    finally:
+        conn.close()
+    assert (row["id"], row["fingerprint"]) in kept
+
+
 def test_failed_worker_status_block_on_session_start_only(
     tmp_path: Path, clock: _Clock, serving: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -271,6 +271,8 @@ def _run(vault_root: Path) -> None:
             sleep = policy.POLL_SECONDS
         if _stop.wait(sleep):
             break
+    # What this process delivered since the last write outlives the thread.
+    _flush_deliveries(vault_root)
 
 
 def _loop_once(vault_root: Path, clock: Clock) -> float:
@@ -281,6 +283,8 @@ def _loop_once(vault_root: Path, clock: Clock) -> float:
         _STATE.setting = signals.setting
     if not decision.run:
         _note_waiting(decision.reason, clock)
+        # No tick will record the carrier's deliveries (paused delivers too).
+        _flush_deliveries(vault_root)
         sleep = decision.sleep_s
     else:
         with _LOCK:
@@ -534,6 +538,27 @@ def _process(
             dreamer_delta.mark_processed(store, conn, vault_root, rel, signature)
     finally:
         ctx.close()
+
+
+def _flush_deliveries(vault_root: Path) -> None:
+    """Record the carrier's deliveries outside a tick. Never raises.
+
+    Opens the sidecar only when there is something to record.
+    """
+    from . import upkeep
+
+    if not upkeep.pending_deliveries():
+        return
+    store = dreamer_store.DreamerStore(vault_root)
+    conn = None
+    try:
+        conn = store.connect()
+        _record_deliveries(store, conn)
+    except Exception:  # noqa: BLE001 - the next tick or loop retries the flush
+        log.debug("dreamer: deliveries not recorded", exc_info=True)
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _record_deliveries(store: dreamer_store.DreamerStore, conn: Any) -> bool:

@@ -292,3 +292,35 @@ def test_health_never_stores_a_path(vault: Path) -> None:
     assert health["last_error_code"] == "UNKNOWN"
     assert "path" not in health and "detail" not in health
     conn.close()
+
+
+def test_the_delivery_ledger_keeps_evicted_rows_and_stays_bounded(vault: Path) -> None:
+    store = dreamer_store.DreamerStore(vault)
+    conn = store.connect()
+    try:
+        live = _propose(store, conn)
+        fingerprint = conn.execute(
+            "SELECT fingerprint FROM candidates WHERE id=?", (live,)
+        ).fetchone()[0]
+        with store.write(conn):
+            store.record_deliveries(conn, [(live, fingerprint, "caller", NOW)])
+        orphans = [
+            (f"{index:024x}", "f" * 24, "caller", NOW + index)
+            for index in range(1, dreamer_store.MAX_DELIVERY_ROWS + 10)
+        ]
+        with store.write(conn):
+            store.record_deliveries(conn, orphans)
+        kept = store.deliveries(conn)
+        assert len(kept) == dreamer_store.MAX_DELIVERY_ROWS
+        # A live row's delivery is never the one dropped; the oldest orphans go.
+        assert (live, fingerprint) in {(cid, fp) for cid, fp, _caller, _at in kept}
+        assert min(at for cid, _fp, _caller, at in kept if cid != live) > NOW + 10
+        # Orphans past the resolved-row retention go too.
+        later = (
+            NOW + dreamer_store.RESOLVED_RETENTION_SECONDS + 10 * dreamer_store.MAX_DELIVERY_ROWS
+        )
+        with store.write(conn):
+            store.record_deliveries(conn, [("e" * 24, "f" * 24, "caller", later)])
+        assert {cid for cid, _fp, _caller, _at in store.deliveries(conn)} == {live, "e" * 24}
+    finally:
+        conn.close()

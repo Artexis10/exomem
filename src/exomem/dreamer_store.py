@@ -53,6 +53,9 @@ EVIDENCE_CAP = 8
 
 #: Resolved and abstained history is pruned after this long.
 RESOLVED_RETENTION_SECONDS = 30 * 86400.0
+#: The delivery ledger's bound: deliveries are rate-limited per vault, so this
+#: holds weeks of them, including those of rows evicted since.
+MAX_DELIVERY_ROWS = 4 * MAX_ROWS
 
 #: Families that need vault-wide counts, and so stop at the size cap.
 GLOBAL_FAMILIES = frozenset({"upkeep_alias", "upkeep_convention"})
@@ -707,8 +710,26 @@ class DreamerStore:
             "VALUES (?, ?, ?, ?)",
             rows,
         )
-        # Bounded by the candidates: a delivery outlives its row by nothing.
-        conn.execute("DELETE FROM deliveries WHERE id NOT IN (SELECT id FROM candidates)")
+        # A delivery outlives an evicted row, so a row re-created with the same
+        # identity and fingerprint keeps its count. Bounded: rows no candidate
+        # holds are kept for the resolved-row retention, and at most
+        # MAX_DELIVERY_ROWS rows are kept in all, the oldest orphans going first.
+        latest = conn.execute("SELECT max(delivered_at) FROM deliveries").fetchone()[0]
+        newest = float(latest) if latest is not None else 0.0
+        conn.execute(
+            "DELETE FROM deliveries WHERE id NOT IN (SELECT id FROM candidates) "
+            "AND delivered_at < ?",
+            (newest - RESOLVED_RETENTION_SECONDS,),
+        )
+        excess = int(conn.execute("SELECT count(*) FROM deliveries").fetchone()[0]) - (
+            MAX_DELIVERY_ROWS
+        )
+        if excess > 0:
+            conn.execute(
+                "DELETE FROM deliveries WHERE rowid IN (SELECT d.rowid FROM deliveries AS d "
+                "ORDER BY d.id IN (SELECT id FROM candidates), d.delivered_at, d.rowid LIMIT ?)",
+                (excess,),
+            )
 
     @staticmethod
     def deliveries(conn: sqlite3.Connection) -> list[tuple[str, str, str, float]]:
