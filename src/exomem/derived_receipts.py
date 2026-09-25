@@ -2222,22 +2222,186 @@ def recover_prepared_batches(
     return recovered
 
 
+_RECOVERING_BATCHES_SQL: Final = (
+    "SELECT count(*) FROM derived_batches AS b WHERE "
+    "b.state = 'prepared' OR ("
+    "b.state = 'ready' AND EXISTS ("
+    "SELECT 1 FROM pending_recall_rows AS p "
+    "WHERE p.batch_id = b.batch_id AND p.state = 'prepared'))"
+)
+_STRANDED_BATCHES_SQL: Final = (
+    "SELECT count(*) FROM derived_batches WHERE state = 'reconcile_required'"
+)
+
+#: How many stranded batches one operator reconcile converges.
+STRANDED_RECONCILE_LIMIT: Final = 256
+
+
 def recoverable_batch_count(vault_root: Path) -> int:
+    """Crash-cut custody a drain pass will prove and publish on its own.
+
+    A committed batch whose writer never proved it, or whose pending rows were
+    never published. A stranded (`reconcile_required`) batch is not counted:
+    no pass finishes it until newer custody or the recall lanes cover what
+    moved, so it is reported apart by :func:`stranded_batch_count`.
+    """
     if not deferred_index.store_path(vault_root).exists():
         return 0
-    connection = deferred_index._connect(vault_root, create=False)
+    connection = _connect_receipt_read(vault_root)
     try:
-        return int(
-            connection.execute(
-                "SELECT count(*) FROM derived_batches AS b WHERE "
-                "b.state IN ('prepared', 'reconcile_required') OR ("
-                "b.state = 'ready' AND EXISTS ("
-                "SELECT 1 FROM pending_recall_rows AS p "
-                "WHERE p.batch_id = b.batch_id AND p.state = 'prepared'))"
-            ).fetchone()[0]
+        return int(connection.execute(_RECOVERING_BATCHES_SQL).fetchone()[0])
+    finally:
+        connection.close()
+
+
+def stranded_batch_count(vault_root: Path) -> int:
+    """Batches held in `reconcile_required`: proven neither way, owed a repair."""
+    if not deferred_index.store_path(vault_root).exists():
+        return 0
+    connection = _connect_receipt_read(vault_root)
+    try:
+        return int(connection.execute(_STRANDED_BATCHES_SQL).fetchone()[0])
+    finally:
+        connection.close()
+
+
+def custody_census(vault_root: Path, *, now: float | None = None) -> dict[str, Any]:
+    """Content-free counts and one age for operators: never a path or an id."""
+    census: dict[str, Any] = {
+        "due_components": 0,
+        "oldest_due_age_seconds": None,
+        "recovering_batches": 0,
+        "stranded_batches": 0,
+    }
+    if not deferred_index.store_path(vault_root).exists():
+        return census
+    current = _timestamp(now)
+    connection = _connect_receipt_read(vault_root)
+    try:
+        due, oldest = connection.execute(
+            "SELECT count(*), MIN(b.created_at) FROM derived_batch_components AS c "
+            "JOIN derived_batches AS b ON b.batch_id = c.batch_id "
+            "WHERE b.state = 'ready' AND (c.state = 'ready' OR "
+            "(c.state = 'retryable' AND c.next_attempt_at <= ?) OR "
+            "(c.state = 'claimed' AND c.claim_expires_at <= ?)) "
+            "AND NOT EXISTS (SELECT 1 FROM pending_recall_rows AS p "
+            "WHERE p.batch_id = c.batch_id AND p.state = 'prepared')",
+            (current, current),
+        ).fetchone()
+        census["due_components"] = int(due or 0)
+        if oldest is not None:
+            census["oldest_due_age_seconds"] = round(max(0.0, current - float(oldest)), 1)
+        census["recovering_batches"] = int(
+            connection.execute(_RECOVERING_BATCHES_SQL).fetchone()[0]
+        )
+        census["stranded_batches"] = int(
+            connection.execute(_STRANDED_BATCHES_SQL).fetchone()[0]
         )
     finally:
         connection.close()
+    return census
+
+
+def reconcile_stranded_batches(
+    vault_root: Path,
+    *,
+    converge: Callable[[Path, Sequence[str], Sequence[str]], bool],
+    dry_run: bool = False,
+    limit: int = STRANDED_RECONCILE_LIMIT,
+    now: float | None = None,
+) -> dict[str, int]:
+    """Operator repair (owner ruling R3): converge stranded batches from current bytes.
+
+    For each batch in `reconcile_required`, ``converge`` runs the ordinary
+    writer fan-out over what every one of its paths holds now. The batch is
+    then retired as `superseded` -- its pending rows and advisory result with
+    it -- once both recall lanes hold every path's current bytes, which is the
+    overlay's own retirement test and full reconciliation of the path and
+    component demand. A batch the lanes still lack stays stranded and is
+    counted in ``remaining``. The report is counts only.
+    """
+    stranded = stranded_batch_count(vault_root)
+    if dry_run or not stranded or limit <= 0:
+        return {"stranded": stranded, "retired": 0, "remaining": stranded}
+    connection = _connect_receipt_read(vault_root)
+    try:
+        batch_ids = tuple(
+            str(row[0])
+            for row in connection.execute(
+                "SELECT batch_id FROM derived_batches WHERE state = 'reconcile_required' "
+                "ORDER BY rowid LIMIT ?",
+                (int(limit),),
+            )
+        )
+    finally:
+        connection.close()
+    retired = 0
+    from . import pending_recall
+    from .writer_lease import active_manager
+
+    for batch_id in batch_ids:
+        receipt = _load_receipt(vault_root, batch_id)
+        present = [
+            path.rel_path
+            for path in receipt.paths
+            if vault_root.joinpath(*path.rel_path.split("/")).is_file()
+        ]
+        created = [
+            path.rel_path
+            for path in receipt.paths
+            if path.before_hash is None and path.rel_path in present
+        ]
+        try:
+            if not converge(vault_root, present, created):
+                continue
+        except Exception:  # noqa: BLE001 - one batch's fan-out cannot stop the rest
+            continue
+        retired_at = _timestamp(now)
+        with active_manager().consistency_guard(
+            vault_root,
+            operation="derived_receipt_reconcile",
+            holder_kind="derived-worker",
+        ):
+            expected: dict[str, str | None] = {}
+            readable = True
+            for path in receipt.paths:
+                target = vault_root.joinpath(*path.rel_path.split("/"))
+                try:
+                    if not os.path.lexists(target):
+                        expected[path.rel_path] = None
+                    elif target.is_symlink() or not target.is_file():
+                        readable = False
+                        break
+                    else:
+                        expected[path.rel_path] = _hash_file(target)
+                except OSError:
+                    readable = False
+                    break
+            if not readable or not pending_recall.recall_lanes_hold(vault_root, expected):
+                continue
+            write = deferred_index._connect(vault_root, create=True)
+            try:
+                write.execute("BEGIN IMMEDIATE")
+                try:
+                    still = write.execute(
+                        "SELECT 1 FROM derived_batches WHERE batch_id = ? "
+                        "AND state = 'reconcile_required'",
+                        (batch_id,),
+                    ).fetchone()
+                    if still is not None:
+                        _supersede_batch(write, batch_id, now=retired_at)
+                        retired += 1
+                except Exception:
+                    write.rollback()
+                    raise
+                write.commit()
+            finally:
+                write.close()
+    return {
+        "stranded": stranded,
+        "retired": retired,
+        "remaining": stranded_batch_count(vault_root),
+    }
 
 
 def claim_ready_components(

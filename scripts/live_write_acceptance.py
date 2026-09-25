@@ -236,7 +236,7 @@ def _reconciliation_demanded(vault_root: Path) -> int:
     writes producing one is a real acceptance failure, and reporting it as
     "still converging" would let it look like slowness.
     """
-    return derived_receipts.recoverable_batch_count(vault_root)
+    return derived_receipts.stranded_batch_count(vault_root)
 
 
 #: A component this many attempts deep has stopped being a transient retry.

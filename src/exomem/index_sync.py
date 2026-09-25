@@ -27,7 +27,7 @@ import gc
 import logging
 import threading
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
@@ -2037,6 +2037,35 @@ def reset_derived_fanout_memo() -> None:
     """Drop every memoized batch fan-out. Durable custody is untouched."""
     with _derived_fanout_lock:
         _derived_fanout_memo.clear()
+
+
+def converge_paths_from_current_bytes(
+    vault_root: Path,
+    rel_paths: Sequence[str],
+    created_rel_paths: Sequence[str] = (),
+) -> bool:
+    """The writer fan-out over whatever these paths hold now (operator repair).
+
+    A stranded receipt's recorded after-state may be gone, so the repair indexes
+    the current canonical bytes instead -- the same ``upsert_after_write`` the
+    write path and the receipt-owned drain call. Returns whether the fan-out
+    proved itself (no reconcile-required component).
+    """
+    root = Path(vault_root)
+    written = [root.joinpath(*rel.split("/")) for rel in rel_paths]
+    if not written:
+        return True
+    created = [root.joinpath(*rel.split("/")) for rel in created_rel_paths]
+    from . import graph_sync
+
+    with graph_sync.standalone_join_waived():
+        report = upsert_after_write(
+            root,
+            written,
+            created_paths=created,
+            publish_corpus_change=True,
+        )
+    return not report.reconcile_required
 
 
 def converge_derived_component(

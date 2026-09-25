@@ -904,6 +904,70 @@ def _check_deferred_index_backlog(vault_root: Path | None) -> DoctorCheck:
     )
 
 
+def _check_fast_ack_custody(vault_root: Path | None) -> DoctorCheck:
+    """Fast durable acknowledgement's derived custody, in one content-free line.
+
+    Read-only and out of process: counts and one age from the receipt store,
+    the pending overlay's outcome recomputed without retiring anything, and
+    this process's view of EXOMEM_FAST_DURABLE_ACK (the service's own value is
+    in its environment). A stranded batch fails the check: no drain pass
+    finishes it, and while one of its pending rows cannot prove, every managed
+    recall answers warming.
+    """
+    from . import derived_receipts, pending_recall, writer_lease
+
+    active = "active" if writer_lease.fast_durable_ack_active() else "inactive"
+    details: dict[str, object] = {"fast_ack": active}
+    if vault_root is None:
+        return _check(
+            "fast_ack_custody",
+            "pass",
+            "No vault configured; derived custody was not inspected.",
+            details=details,
+        )
+    try:
+        census = derived_receipts.custody_census(vault_root)
+        visibility, code = pending_recall.readonly_visibility(vault_root)
+    except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
+        return _check(
+            "fast_ack_custody",
+            "warn",
+            f"fast ack {active}; derived custody could not be read.",
+            details=details,
+        )
+    details.update(census)
+    details["pending_visibility"] = visibility
+    details["pending_visibility_code"] = code
+    oldest = census["oldest_due_age_seconds"]
+    shown = visibility if code is None else f"{visibility}({code})"
+    message = (
+        f"fast ack {active}; due components {census['due_components']} "
+        f"(oldest {'-' if oldest is None else f'{oldest:.0f}s'}); "
+        f"stranded batches {census['stranded_batches']}; "
+        f"recovering {census['recovering_batches']}; pending visibility {shown}"
+    )
+    if census["stranded_batches"]:
+        return _check(
+            "fast_ack_custody",
+            "fail",
+            message,
+            'Run `exomem maintain --reconcile` (maintain_memory mode="reconcile") to '
+            "re-converge stranded batches from their current bytes. Setting "
+            "EXOMEM_FAST_DURABLE_ACK=0 stops new ones but does not repair these.",
+            details=details,
+        )
+    if visibility != "ready":
+        return _check(
+            "fast_ack_custody",
+            "warn",
+            message,
+            "Managed recall answers warming until pending visibility proves. If it "
+            "persists, run `exomem maintain --reconcile`.",
+            details=details,
+        )
+    return _check("fast_ack_custody", "pass", message, details=details)
+
+
 def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
     """graph_sync epoch health: whether the derived graph is servable.
 
@@ -3407,6 +3471,7 @@ def doctor(
         _check_state_placement(vault_root),
         _check_rebuild_temp_orphans(vault_root),
         _check_write_path_env_flags(vault_root),
+        _check_fast_ack_custody(vault_root),
         _check_frozen_verifier(),
         check_graph_recovery_age(vault_root),
         _check_relation_census(vault_root),

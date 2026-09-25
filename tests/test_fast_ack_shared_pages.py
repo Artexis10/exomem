@@ -108,11 +108,16 @@ def _one_pass(root: Path) -> int:
 
 
 def _drain_until_idle(root: Path, *, passes: int = 6) -> None:
-    """Pass until nothing is due or recoverable, within a fixed bound."""
+    """Pass until nothing is due, recoverable or stranded, within a fixed bound.
+
+    Stranded batches keep the service drain's cadence too: recovery re-proves
+    them every pass.
+    """
     for _ in range(passes):
         if not (
             derived_receipts.due_component_count(root, now=time.time() + 3600)
             or derived_receipts.recoverable_batch_count(root)
+            or derived_receipts.stranded_batch_count(root)
         ):
             return
         _one_pass(root)
@@ -405,3 +410,98 @@ def test_a_batch_whose_every_path_moved_out_of_band_retires(
     assert proof.outcome == "superseded"
     assert _row_states(vault, receipt.batch_id) == {rel: "retired"}
     _assert_converged(vault, [rel])
+
+
+# --------------------------------------------------------------------------- #
+# Operator path (owner ruling R3): a stranded batch is visible and repairable
+# --------------------------------------------------------------------------- #
+
+
+def _strand_one(tmp_path: Path, vault: Path) -> tuple[str, Path]:
+    """One batch held in `reconcile_required` by a hand edit the lanes lack."""
+    page = _remember(tmp_path, vault, "Stranded operator probe")["path"]
+    target = vault / page
+    target.write_bytes(target.read_bytes() + b"\nEdited by hand, never indexed.\n")
+    _drain_until_idle(vault)
+    assert [state for _id, state, _paths in _batches(vault)] == ["reconcile_required"]
+    return page, target
+
+
+def test_a_stranded_batch_is_counted_apart_from_crash_cut_recovery(
+    live_catalogue: Path, tmp_path: Path
+) -> None:
+    """A stranded batch is not crash-cut work that a drain pass will finish."""
+    vault = live_catalogue
+    _strand_one(tmp_path, vault)
+
+    assert derived_receipts.stranded_batch_count(vault) == 1
+    assert derived_receipts.recoverable_batch_count(vault) == 0
+    census = derived_receipts.custody_census(vault)
+    assert census["stranded_batches"] == 1
+    assert census["recovering_batches"] == 0
+
+
+def test_doctor_names_stranded_custody_in_one_content_free_line(
+    live_catalogue: Path, tmp_path: Path
+) -> None:
+    from exomem import doctor
+
+    vault = live_catalogue
+    page, _target = _strand_one(tmp_path, vault)
+
+    check = doctor._check_fast_ack_custody(vault)
+
+    assert check.status == "fail"
+    assert "stranded batches 1" in check.message
+    assert "pending visibility warming(pending_visibility_unprovable)" in check.message
+    assert "maintain --reconcile" in (check.remediation or "")
+    rendered = f"{check.message} {check.remediation} {check.details}"
+    assert page not in rendered and "Stranded operator probe" not in rendered
+
+
+def test_reconcile_reconverges_a_stranded_batch_and_retires_it(
+    live_catalogue: Path, tmp_path: Path
+) -> None:
+    """`maintain --reconcile` converges the batch's pages from current bytes."""
+    from exomem import doctor
+    from exomem import reconcile as reconcile_module
+
+    vault = live_catalogue
+    page, _target = _strand_one(tmp_path, vault)
+
+    preview = reconcile_module.reconcile(vault, dry_run=True)
+    assert preview.as_dict()["derived_batch_reconcile"] == {
+        "stranded": 1,
+        "retired": 0,
+        "remaining": 1,
+    }
+    assert derived_receipts.stranded_batch_count(vault) == 1
+
+    report = reconcile_module.reconcile(vault)
+
+    assert report.as_dict()["derived_batch_reconcile"] == {
+        "stranded": 1,
+        "retired": 1,
+        "remaining": 0,
+    }
+    assert derived_receipts.stranded_batch_count(vault) == 0
+    _assert_converged(vault, [page])
+    assert doctor._check_fast_ack_custody(vault).status == "pass"
+
+
+def test_reconcile_keeps_a_batch_stranded_while_the_lanes_lack_its_bytes(
+    live_catalogue: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retirement waits for the lanes: a fan-out that proved nothing retires nothing."""
+    vault = live_catalogue
+    _strand_one(tmp_path, vault)
+    monkeypatch.setattr(
+        index_sync,
+        "converge_paths_from_current_bytes",
+        lambda _root, _paths, _created=(): True,
+    )
+
+    assert derived_receipts.reconcile_stranded_batches(
+        vault, converge=index_sync.converge_paths_from_current_bytes
+    ) == {"stranded": 1, "retired": 0, "remaining": 1}
+    assert [state for _id, state, _paths in _batches(vault)] == ["reconcile_required"]

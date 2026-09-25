@@ -86,6 +86,7 @@ class ReconcileReport:
     )
     remaining_drift: list[dict] = field(default_factory=list)
     receipt_reconcile: dict = field(default_factory=dict)
+    derived_batch_reconcile: dict = field(default_factory=dict)
     dry_run: bool = False
     graph_rebuild_requested: bool = False
     graph_rebuild_applicable: bool = False
@@ -139,6 +140,7 @@ class ReconcileReport:
             ),
             "remaining_drift": self.remaining_drift,
             "receipt_reconcile": self.receipt_reconcile,
+            "derived_batch_reconcile": self.derived_batch_reconcile,
             "dry_run": self.dry_run,
             "graph_rebuild_requested": self.graph_rebuild_requested,
             "graph_rebuild_applicable": self.graph_rebuild_applicable,
@@ -721,6 +723,18 @@ def reconcile(
         report.semantic_unit_indexes_status = "repaired"
     else:
         report.semantic_unit_indexes_status = "current"
+
+    # ---- 3b. Stranded derived receipts ----
+    # A fast-acknowledged batch held in `reconcile_required` owns pages that no
+    # drain pass will finish. Converge them from their current bytes and retire
+    # the batch once both recall lanes hold those bytes (owner ruling R3).
+    from . import derived_receipts, index_sync
+
+    report.derived_batch_reconcile = derived_receipts.reconcile_stranded_batches(
+        vault_root,
+        converge=index_sync.converge_paths_from_current_bytes,
+        dry_run=dry_run,
+    )
 
     # ---- 4. Remaining drift report ----
     post = audit_module.audit(

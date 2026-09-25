@@ -200,6 +200,34 @@ its inline sweep and takes no advisory custody.
 - **THEN** both consumers use that exact generation's vectors
 - **AND** the advisory does not invoke a second encode of the same chunks
 
+### Requirement: Stranded Derived Receipts Are Visible And Repairable
+
+A derived batch held in `reconcile_required` SHALL be reported apart from
+crash-cut recovery work: the store SHALL count stranded batches separately from
+batches a drain pass will prove on its own, and `doctor` SHALL report, in one
+content-free line, whether fast acknowledgement is active, the due component
+count and its oldest age, the stranded and recovering batch counts, and the
+pending-visibility outcome with its closed failure code. `doctor` SHALL fail
+while any batch is stranded and SHALL NOT mutate custody to compute the line.
+Operator reconciliation (`maintain --reconcile`) SHALL converge each stranded
+batch's paths from their current canonical bytes through the ordinary writer
+fan-out and SHALL retire the batch as `superseded`, with its pending rows and
+advisory result, once both recall lanes hold every path's current bytes; a
+batch the lanes still lack SHALL stay stranded and be counted as remaining.
+The reconcile report SHALL carry counts only.
+
+#### Scenario: Doctor names stranded custody
+
+- **WHEN** a batch is held in `reconcile_required`
+- **THEN** `doctor` fails its fast-acknowledgement custody check with a line that carries counts, one age and closed codes, and no path, title or identifier
+- **AND** the remediation names `maintain --reconcile`
+
+#### Scenario: Reconcile retires a stranded batch from current bytes
+
+- **WHEN** an operator runs `maintain --reconcile` while a batch is stranded
+- **THEN** the batch's pages are converged from their current bytes and the batch is retired once both recall lanes hold them
+- **AND** managed recall is ready afterwards, and a dry run reports the same counts without changing custody
+
 ### Requirement: Fast Acknowledgement Is Proven End To End
 
 The performance gate SHALL measure the complete default product mutation from

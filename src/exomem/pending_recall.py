@@ -495,6 +495,17 @@ def _retire_settled(
     and the clearing itself goes through the frozen exact-batch CAS.
     """
     retired = False
+    for batch in _settled_batches(vault_root, batches, projection):
+        if derived_receipts.retire_pending_visibility(vault_root, batch).outcome == "retired":
+            retired = True
+    return retired
+
+
+def _settled_batches(
+    vault_root: Path, batches: Sequence[object], projection: _Projection
+) -> list[object]:
+    """The batches whose custody both recall lanes have published (no mutation)."""
+    settled = []
     for batch in batches:
         expected: dict[str, str | None] = {}
         blocked = False
@@ -514,9 +525,39 @@ def _retire_settled(
             continue
         if not _lanes_hold(vault_root, expected):
             continue
-        if derived_receipts.retire_pending_visibility(vault_root, batch).outcome == "retired":
-            retired = True
-    return retired
+        settled.append(batch)
+    return settled
+
+
+def readonly_visibility(vault_root: Path) -> tuple[str, str | None]:
+    """The overlay outcome a managed reader would get, without retiring anything.
+
+    Doctor runs out of process and must not mutate custody. This hydrates and
+    proves the durable rows exactly as :func:`overlay` does, and treats a batch
+    the overlay's retirement pass would clear as cleared, but never runs that
+    pass. Returns ``("ready", None)`` or ``("warming", <closed code>)``.
+    """
+    root = Path(vault_root)
+    try:
+        snapshot = derived_receipts.snapshot_pending_visibility(
+            root, limit=PENDING_HYDRATION_LIMIT
+        )
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return "warming", "pending_visibility_unprovable"
+    if snapshot.outcome != "complete":
+        return "warming", snapshot.failure_code or f"pending_visibility_{snapshot.outcome}"
+    projection = _project_batches(root, snapshot.batches)
+    if projection.unprovable:
+        cleared = {
+            batch.receipt.batch_id
+            for batch in _settled_batches(root, snapshot.batches, projection)
+        }
+        remaining = [
+            batch for batch in snapshot.batches if batch.receipt.batch_id not in cleared
+        ]
+        if _project_batches(root, remaining).unprovable:
+            return "warming", "pending_visibility_unprovable"
+    return "ready", None
 
 
 def _warming(failure_code: str, generation: int = 0) -> PendingOverlay:

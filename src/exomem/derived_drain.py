@@ -491,9 +491,14 @@ class DerivedDrain:
                         now=current,
                         owner=self._owner,
                     )
-                    pending = derived_receipts.due_component_count(
-                        self.vault_root, now=current
-                    ) + derived_receipts.recoverable_batch_count(self.vault_root)
+                    # Stranded batches keep the cadence too: recovery re-proves
+                    # them each pass, and one heals once the recall lanes hold
+                    # what moved under it.
+                    pending = (
+                        derived_receipts.due_component_count(self.vault_root, now=current)
+                        + derived_receipts.recoverable_batch_count(self.vault_root)
+                        + derived_receipts.stranded_batch_count(self.vault_root)
+                    )
                 except Exception:  # noqa: BLE001 - one bad pass cannot kill ownership
                     processed = 0
                     pending = 1

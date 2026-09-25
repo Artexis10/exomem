@@ -561,6 +561,14 @@ not eligible for review.
    extension of the enabled path's fixed 2.0-second budget. Additive tables remain
    inert and are not deleted by rollback.
 
+A stranded batch is not rollback-able state: the kill switch stops new
+fast-acknowledged writes, but the pending overlay keeps reading durable custody,
+so a batch already held in `reconcile_required` stays until it is repaired.
+`doctor` reports it (`fast_ack_custody`, failing while any batch is stranded)
+and `maintain --reconcile` repairs it by converging its pages from current bytes
+and retiring it once both recall lanes hold them. The runbook entry is therefore
+"set the flag to 0, then reconcile".
+
 Rollback is mandatory on any stale post-write read, any acknowledged write with
 missing required custody, any cross-tenant/result authorization leak, two or
 more new committed-uncertain outcomes in 15 minutes above a zero-event canary

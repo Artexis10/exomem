@@ -410,7 +410,10 @@ def _drain_derived_custody(vault_root: Path, *, passes: int = 64) -> None:
         now += derived_drain.MAX_RETRY_SECONDS + 1.0
         if not derived_receipts.due_component_count(
             vault_root, now=now
-        ) and not derived_receipts.recoverable_batch_count(vault_root):
+        ) and not (
+            derived_receipts.recoverable_batch_count(vault_root)
+            or derived_receipts.stranded_batch_count(vault_root)
+        ):
             return
 
 
