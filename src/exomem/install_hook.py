@@ -45,6 +45,7 @@ import os
 import re
 import secrets
 import stat
+import subprocess
 import time
 from pathlib import Path
 
@@ -1419,6 +1420,195 @@ def install_all_hooks(*, wire: bool = True, timeout: int = 10) -> dict:
                 }
             )
     return {"success": all(row["success"] for row in reports), "clients": reports}
+
+
+#: Marks a `UserPromptSubmit` entry as the retrieve nudge, for deciding whether
+#: a profile already wires hooks at all -- narrower than `_MARKERS`, which also
+#: matches the capture/continuation hooks a profile could have without this one.
+_RETRIEVE_HOOK_MARKERS = ("exomem-retrieve-nudge", "exomem_retrieve_nudge")
+
+
+def _candidate_claude_profiles(home: Path) -> list[Path]:
+    """Every local Claude Code profile a managed upgrade should consider.
+
+    The default `~/.claude` plus any sibling `~/.claude-*` profile directory --
+    multiple named Claude Code profiles under one home is an ordinary setup,
+    not something this project invented.
+    """
+    candidates = [home / ".claude"]
+    try:
+        candidates.extend(sorted(p for p in home.glob(".claude-*") if p.is_dir()))
+    except OSError:
+        pass
+    return candidates
+
+
+def _resolve_profile_settings(profile_dir: Path) -> Path:
+    """The real file a profile's `settings.json` names, symlink or not.
+
+    The installer's own secure file operations refuse to follow a symlink at
+    the final path component -- correct hardening against a swapped target in
+    a shared directory -- so a profile whose `settings.json` is itself a
+    symlink (a yadm-managed dotfile is the common case) must be handed the
+    resolved path, or a refresh would refuse every such profile outright.
+    """
+    settings = profile_dir / "settings.json"
+    if settings.is_symlink():
+        try:
+            return settings.resolve(strict=True)
+        except OSError:
+            return settings
+    return settings
+
+
+def _profile_wires_retrieve_hook(settings_path: Path) -> bool:
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    return any(
+        _contains_any(hook, _RETRIEVE_HOOK_MARKERS)
+        for hook in _commands_for_event(data, "UserPromptSubmit")
+    )
+
+
+def discover_wired_profiles(home: Path | None = None) -> list[dict]:
+    """Local Claude Code profiles already wired to the retrieve nudge hook.
+
+    Only a profile whose settings already point at `exomem-retrieve-nudge.sh`
+    is returned: a managed upgrade refreshes hooks a profile already wired,
+    never one that never asked for them.
+    """
+    try:
+        resolved_home = Path(home).expanduser() if home is not None else Path.home()
+    except RuntimeError:
+        return []
+    wired: list[dict] = []
+    for profile_dir in _candidate_claude_profiles(resolved_home):
+        settings_path = _resolve_profile_settings(profile_dir)
+        if not settings_path.exists() or not _profile_wires_retrieve_hook(settings_path):
+            continue
+        wired.append({"hook_dir": profile_dir / "hooks", "settings_path": settings_path})
+    return wired
+
+
+def _upgrade_refresh_report_path(home: Path) -> Path:
+    return home / ".claude" / ".cache" / "exomem-nudge" / "upgrade-refresh.json"
+
+
+def _write_upgrade_refresh_report(home: Path, report: dict) -> None:
+    """Best-effort: a report that fails to persist costs `doctor` a stale view
+    of the last refresh, never the managed upgrade that triggered it."""
+    path = _upgrade_refresh_report_path(home)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(report), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def refresh_wired_profiles(
+    python_executable: str,
+    *,
+    home: Path | None = None,
+    timeout: float = 60.0,
+) -> dict:
+    """Re-run `install-hook` for every already-wired Claude Code profile.
+
+    Called after a managed upgrade promotes a new release, using the NEW
+    release's own `install-hook` (*python_executable* is the staged target's
+    interpreter) so a profile's hooks track the release that just went live
+    instead of going stale behind it. Skips any profile that never wired the
+    retrieve hook, and never raises: a per-profile failure -- a
+    group-writable config the installer refuses, for instance -- is reported
+    and does not stop the remaining profiles or fail the upgrade that
+    triggered this. Set `EXOMEM_DISABLE_UPGRADE_HOOK_REFRESH` to opt out.
+    """
+    if os.environ.get("EXOMEM_DISABLE_UPGRADE_HOOK_REFRESH"):
+        report = {
+            "skipped": True,
+            "reason": "EXOMEM_DISABLE_UPGRADE_HOOK_REFRESH is set",
+            "profiles": [],
+            "success": True,
+        }
+        try:
+            resolved_home = Path(home).expanduser() if home is not None else Path.home()
+        except RuntimeError:
+            return report
+        _write_upgrade_refresh_report(resolved_home, report)
+        return report
+
+    try:
+        resolved_home = Path(home).expanduser() if home is not None else Path.home()
+    except RuntimeError:
+        return {"skipped": True, "reason": "no home directory", "profiles": [], "success": True}
+
+    reports: list[dict] = []
+    for profile in discover_wired_profiles(resolved_home):
+        entry: dict = {
+            "hook_dir": str(profile["hook_dir"]),
+            "settings_path": str(profile["settings_path"]),
+            "success": False,
+            "error": None,
+        }
+        try:
+            result = subprocess.run(
+                [
+                    python_executable,
+                    "-m",
+                    "exomem",
+                    "install-hook",
+                    "--client",
+                    "claude",
+                    "--hook-dir",
+                    str(profile["hook_dir"]),
+                    "--settings",
+                    str(profile["settings_path"]),
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            entry["error"] = str(error)
+        else:
+            if result.returncode == 0:
+                entry["success"] = True
+            else:
+                entry["error"] = (
+                    result.stderr.strip() or result.stdout.strip() or f"install-hook exited {result.returncode}"
+                )[-2000:]
+        reports.append(entry)
+
+    report = {
+        "skipped": False,
+        "reason": None,
+        "profiles": reports,
+        "success": all(p["success"] for p in reports),
+    }
+    _write_upgrade_refresh_report(resolved_home, report)
+    return report
+
+
+def read_last_upgrade_refresh(home: Path | None = None) -> dict | None:
+    """The persisted outcome of the most recent managed-upgrade hook refresh.
+
+    Read-only, for `doctor`. Returns `None` when no managed upgrade has ever
+    refreshed hooks on this machine (nothing to report, not a failure).
+    """
+    try:
+        resolved_home = Path(home).expanduser() if home is not None else Path.home()
+    except RuntimeError:
+        return None
+    try:
+        data = json.loads(_upgrade_refresh_report_path(resolved_home).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 # Every file name install-hook has ever deployed, current and legacy. Uninstall

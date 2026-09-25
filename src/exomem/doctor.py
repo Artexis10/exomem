@@ -3323,6 +3323,56 @@ def _check_idempotency_store() -> DoctorCheck:
     )
 
 
+def _check_managed_hook_refresh() -> DoctorCheck:
+    """Surface the outcome of the last managed-upgrade Claude Code hook refresh.
+
+    Read-only: never runs `install-hook` itself, just reports what a managed
+    upgrade (if any has ever run on this machine) recorded when it last
+    refreshed already-wired profiles.
+    """
+    from . import install_hook
+
+    report = install_hook.read_last_upgrade_refresh()
+    if report is None:
+        return _check(
+            "upgrade.hook_refresh",
+            "pass",
+            "no managed upgrade has refreshed Claude Code hooks yet",
+        )
+    if report.get("skipped"):
+        return _check(
+            "upgrade.hook_refresh",
+            "pass",
+            f"the last managed upgrade skipped the hook refresh ({report.get('reason')})",
+        )
+    profiles = report.get("profiles")
+    failed = (
+        [p for p in profiles if isinstance(p, dict) and not p.get("success")]
+        if isinstance(profiles, list)
+        else []
+    )
+    if failed:
+        names = ", ".join(str(p.get("settings_path")) for p in failed)
+        return _check(
+            "upgrade.hook_refresh",
+            "warn",
+            f"the last managed upgrade could not refresh Claude Code hooks for: {names}",
+            "Re-run `exomem install-hook` for the listed profile(s).",
+            details=report,
+        )
+    if profiles:
+        return _check(
+            "upgrade.hook_refresh",
+            "pass",
+            "the last managed upgrade refreshed all wired Claude Code hook profiles",
+        )
+    return _check(
+        "upgrade.hook_refresh",
+        "pass",
+        "the last managed upgrade found no wired Claude Code hook profiles to refresh",
+    )
+
+
 def _check_edge_ingress(*, probe: bool) -> list[DoctorCheck]:
     """Doctor's `edge-ingress` section (design.md Decision 3): verifies the public
     apex is fronted by the HA edge worker rather than tunnel-direct. Skipped
@@ -3484,6 +3534,7 @@ def doctor(
     checks.append(_check_observability())
     checks.append(_check_latency())
     checks.append(_check_idempotency_store())
+    checks.append(_check_managed_hook_refresh())
 
     return DoctorReport(profile=profile, checks=checks)
 
