@@ -1353,15 +1353,37 @@ def test_the_release_script_publishes_only_the_pinned_artifact(
     script = _release_script()
 
     assert script.main(["--model", TINY, "--out", str(tmp_path / "unpinned")]) == 0
-    digest = embedding_backend.artifact_sha256(embedding_backend.artifact_dir(TINY, served))
+    printed = capsys.readouterr().out
+    digest = re.search(r"artefact sha256: ([0-9a-f]{64})", printed).group(1)
     monkeypatch.setitem(embedding_backend._SERVED, TINY, dataclasses.replace(served, digest=digest))
     assert script.main(["--model", TINY, "--out", str(tmp_path / "pinned")]) == 0
-    assert (tmp_path / "pinned" / f"tiny-served-int8-{digest[:8]}.onnx.tar").is_file()
+    assert sorted(path.name for path in (tmp_path / "pinned").iterdir()) == [f"tiny-served-int8-{digest[:8]}.onnx.tar"]
     assert "served-models/tiny-served-int8-" in capsys.readouterr().out
 
     monkeypatch.setitem(embedding_backend._SERVED, TINY, dataclasses.replace(served, digest="f" * 64))
     assert script.main(["--model", TINY, "--out", str(tmp_path / "wrong")]) == 1
-    assert not (tmp_path / "wrong").exists()
+    assert not [path for path in (tmp_path / "wrong").iterdir() if path.suffix == ".tar"]
+
+
+def test_the_release_script_never_repackages_an_artifact_already_on_the_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The reviewer packaged a fetched artefact in 3.2 s without a build: the
+    script reused whatever `ensure_artifact` found. It builds its own, always."""
+    _asked, served = _tiny_served_repo(tmp_path, monkeypatch)
+    host = embedding_backend.load_encoder(TINY)  # an artefact already on this host
+    before = embedding_backend.artifact_sha256(embedding_backend.artifact_dir(TINY, served))
+    built: list[tuple] = []
+    real_quantize = embedding_backend._quantize
+    monkeypatch.setattr(embedding_backend, "_quantize", lambda *args: built.append(args) or real_quantize(*args))
+
+    assert _release_script().main(["--model", TINY, "--out", str(tmp_path / "release")]) == 0
+
+    assert len(built) == 1, "the script built the artefact it publishes"
+    assert all(str(tmp_path / "release") in out for _served, _source, out in built)
+    assert f"artefact sha256: {before}" in capsys.readouterr().out, "the build is deterministic"
+    assert [path.suffix for path in (tmp_path / "release").iterdir()] == [".tar"], "the build dir is removed"
+    assert host.profile.artifact_digest == before[:16]
 
 
 def test_the_served_encoder_runs_two_threads_unless_the_budget_is_set(
