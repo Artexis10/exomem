@@ -21,9 +21,13 @@ one. The token's anchors SHALL also be the first tier of the recency hot profile
 (memory-loop: "A turn that names nothing MAY resolve to the hottest recent anchor"), so
 on a REFERENTIAL turn that names nothing they MAY supply the referent and resolve on
 `recency`; on any other turn the token SHALL only qualify anchors the turn reached.
-That tier SHALL lead only while it is the latest thing that happened: once an anchor
-outside the token's refs has a last edit, not in a write burst, later than the time the
-token was served, the token's anchors SHALL be ranked like any other anchor. A token
+A token MAY name a compiled page that is not an anchor — one the agent picked or recall
+carried — by its path. That tier SHALL lead only while it is the latest thing that
+happened: once a deliberate act — work, an admitted pick or a recorded episode — on a
+page outside the token's refs is later than the time the token was served, the token's
+refs SHALL be ranked like any other; a read does not move a conversation on. Where the
+caller supplies a session key, only that session's own deliberate acts SHALL end its
+token's lead. A token
 that does not say when it was served, or says it unreadably, SHALL lead as before and
 SHALL NOT be reported `stale` for that reason. A
 token whose index identity
@@ -38,7 +42,12 @@ or a page a referential turn resumed. A valid token whose refs qualified nothing
 naming nothing, naming only what this audience may not see, or naming a row or page
 this turn neither reached nor resumed — SHALL be reported `stale`. A request that
 carries a token or an `anchor` override SHALL never be served another request's cached
-packet. The server SHALL keep no per-conversation state.
+packet. The server SHALL keep no per-conversation state beyond the bounded,
+machine-local heat projection: for a caller that supplies a session key, the refs of the
+last packet that session was served, under a salted derivation of the key, never served
+back and never part of a packet, so a session that lost its token still continues its own
+thread (memory-loop: "A turn that names nothing MAY resolve to the hottest recent
+anchor").
 
 #### Scenario: Continuity strengthens but does not resolve
 - **WHEN** a turn carries one contact kind for an anchor the previous packet resolved
@@ -68,6 +77,18 @@ packet. The server SHALL keep no per-conversation state.
 - **WHEN** a referential turn passes the token of an earlier packet, and since that
   packet was served the user edited a different anchor on its own
 - **THEN** that edited anchor is the referent, not the token's anchors
+
+#### Scenario: A read or another session's work does not end a token's lead
+- **WHEN** a referential turn passes a session key and the token of an earlier
+  packet, and since then the user only read another page, or another session
+  worked elsewhere
+- **THEN** the token's refs are still the referent
+
+#### Scenario: A token names a page
+- **WHEN** the previous packet carried a compiled page that is not an anchor and a
+  referential turn passes its token
+- **THEN** the token names that page by its path and the page is resumed, reported
+  `resolved` on `continuity` and `recency`
 
 #### Scenario: A token from another index is ignored
 - **WHEN** a token was minted by a different vault's index, or under a different

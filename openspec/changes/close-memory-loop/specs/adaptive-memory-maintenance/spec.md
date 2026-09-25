@@ -16,12 +16,32 @@ Corrections and observed capture/activation misses SHALL produce reviewable evid
 
 ### Requirement: Hot profiles remain bounded derived projections
 
-The system SHALL provide a compact hot profile derived from authorized canonical knowledge with source provenance, explicit budgets and currency. Corrections, expiry, deletion, supersession and access changes SHALL invalidate affected profile material. Missing or stale profiles SHALL report their state and SHALL NOT become an alternate canonical store or bypass disclosure checks.
+The system SHALL provide a compact hot profile derived from authorized canonical knowledge with source provenance, explicit budgets and currency. Its sources SHALL be typed events recorded by origin where each act happens — governed work outside any batch, admitted picks, recorded episodes, reads, citations, and external edits judged by the write-burst rule — held in a bounded, machine-local, disposable ring, carrying the caller's attribution only as salted, audience-scoped derivations, and never re-derived from file times. Its budgets SHALL be declared: a bounded ring, a bounded external fold per request, a bounded seed, and at most a declared few page reads per request. It SHALL decay by displacement and by the working-session window, never by a clock. Corrections, expiry, deletion, supersession and access changes SHALL invalidate affected profile material. Missing or stale profiles SHALL report their state — `current`, `partial`, `seeded`, `behind` or `empty` — and SHALL NOT become an alternate canonical store or bypass disclosure checks: the profile is never served, and every referent or entry drawn from it SHALL cross the reader's guard per request.
 
 #### Scenario: A profiled preference is corrected or hidden
 
 - **WHEN** its canonical source changes or current access no longer permits disclosure
 - **THEN** subsequent packets omit or refresh the affected profile entry and never serve the stale value as current
+
+#### Scenario: A pick corrects the referent
+
+- **WHEN** a referential turn resolved one anchor and the agent then picks another page for the same conversation
+- **THEN** the next referential turn resolves the picked page, the pick being the latest deliberate act
+
+#### Scenario: A session ends and its heat expires
+
+- **WHEN** the latest act is older than the working-session gap and the user then reads a page
+- **THEN** the older work no longer supplies the referent, the new session does, and nothing was removed by a clock
+
+#### Scenario: A deleted or superseded page leaves the profile
+
+- **WHEN** the hottest page is deleted, archived or superseded
+- **THEN** it is never offered as a referent or a recent-context entry, and the next eligible page leads
+
+#### Scenario: Access to the hottest page is withdrawn
+
+- **WHEN** the caller may no longer read the page that leads the profile
+- **THEN** the turn abstains `withheld` with no runner-up rather than serving the next page, and the page is not listed in the recent-context block
 
 ### Requirement: Priors cannot override grounded resolution
 
@@ -31,6 +51,11 @@ Activation priors SHALL be bounded derived ranking signals with provenance, vers
 
 - **WHEN** a high-frequency prior conflicts with a resolved explicit task anchor
 - **THEN** grounded task relevance wins and irrelevant history cannot consume the entire context budget
+
+#### Scenario: A page read many times is not hotter for it
+
+- **WHEN** one page has been read many times and another was worked on once, more recently
+- **THEN** the page worked on leads the referent, because the profile ranks the latest act and counts nothing, and repeated serving of a packet adds no heat
 
 ### Requirement: Dreamer proposes bounded consolidation off the interactive path
 

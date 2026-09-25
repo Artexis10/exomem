@@ -5991,7 +5991,19 @@ def op_activate_context(
     remains the carrier for the resolved anchors' governed state.
     It is served whether or not the turn resolved anything, so a fresh session
     opening on "continue" receives the thread it is picking up. `as_of` dates
-    the CONTACT, not the event the page describes.
+    the CONTACT, not the event the page describes. With `session` or
+    `workspace` passed, this conversation's own pages come first.
+
+    A turn that names nothing ("continue", "where were we") is answered from
+    recent work: the thread your `continuity` token names, else what was last
+    worked on, picked with `anchor`, or named by a recorded episode, in this
+    conversation first, then its workspace, then the vault. Reads rank below
+    any of those, and a maintenance batch counts as nobody's work. An anchor
+    reached this way resolves with `recency` in its evidence. A single
+    ordinary page reached this way is served as `kind: "page"`, `status:
+    "resolved"`, evidence `["recency"]` and `generation.carried_by:
+    "recency"`; a page tied with anything else abstains `ambiguous`, listing
+    both, for you to pick with `anchor`.
 
     Read-only and abstaining by construction. It writes nothing, changes no
     `ask_memory`/`find` result, runs no model beyond the retrieval scorers recall
@@ -6086,7 +6098,10 @@ def op_activate_context(
              `partial`, `retrieval_named` or competing `ambiguity` candidate),
              `ambiguity` and `missing` may still be populated.
              `generation.continuity` reports whether a token you passed was
-             `applied`, `stale` or `absent`.
+             `applied`, `stale` or `absent`. `generation.hot_profile` reports
+             the recent-work projection's `state` (`current`, `partial`,
+             `seeded`, `behind` or `empty`) and `session_start`, the date
+             its current working session began.
     """
     # `RequestBudget` is bound in exactly one place, the MCP dispatch
     # middleware: `request_budget.current()` is always None on the REST and
@@ -7383,6 +7398,8 @@ def op_episode_memory(
         said: Up to 3 verbatim user statements worth keeping, 300 characters
             each.
         about: Up to 3 `exomem://` refs of pages the conversation concerned.
+            Recording marks them as this conversation's latest work, so a
+            following "continue" resumes them.
             Refs you cannot see are dropped and counted in `about_skipped`.
         client: Optional lowercase client label, e.g. `claude-code` or
             `chatgpt`.

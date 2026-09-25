@@ -20,7 +20,7 @@ Activation and episode recovery SHALL reconnect a resumed topic with relevant re
 
 Where evidence supplies them, event occurrence, knowledge acquisition and claim validity SHALL remain distinguishable. Missing times or validity SHALL remain unknown. Capture time, file modification time, repetition and recent retrieval SHALL NOT independently establish event recency, continuing validity or task relevance. Corrections and supersession SHALL qualify current claims, while an older relevant dependency SHALL remain eligible beside recent developments.
 
-The recent-context block SHALL judge recent work by the hot profile's own rules: a last edit inside a write burst, or older than the latest such burst, SHALL NOT make a page recent work, except a captured session, which records what was spoken about rather than an edit and SHALL keep its place; a page offered for its reads SHALL be ranked by its reads and not by its last edit, and the most-read such page SHALL keep a place in the block however many pages were edited more recently; and a retired or superseded page SHALL NOT be offered. An entry's one-line statement SHALL be the page's authored summary where it has one, and SHALL NOT be a lifecycle status such as `active` or `draft`.
+The recent-context block SHALL read the hot profile's own projection and SHALL NOT copy the freshness registry on the request path: each page SHALL be offered for the latest contact the projection recorded for it and under the reason of the act that made it (work is `edited`, a pick, read, citation or served thread is `activated`, a captured session `captured`, an episode recap `episode`), every act competing on its own time, so a page the user read is not ranked behind every edit, and the newest such page SHALL keep a place in the block however many pages were edited more recently. A page a maintenance batch wrote SHALL NOT be offered for that write, because a batch records no act; a captured session records what was spoken about rather than an edit and SHALL keep its place. Where the caller supplies a session or workspace key, the block SHALL list the caller's own session's contacts first, then its workspace's, then the vault's, and fill the remaining slots in that order, the reserved planning and episode places kept. A retired or superseded page SHALL NOT be offered. An entry's one-line statement SHALL be the page's authored summary where it has one, and SHALL NOT be a lifecycle status such as `active` or `draft`.
 
 #### Scenario: A topic resumes after an intervening development
 
@@ -41,12 +41,20 @@ The recent-context block SHALL judge recent work by the hot profile's own rules:
 - **WHEN** a maintenance batch rewrote several pages after the user's last edit,
   the vault holds a retired and a superseded page edited more recently than
   anything else, and pages the user reads often were last edited long ago
-- **THEN** the block offers neither the batch, nor any edit older than it, nor
-  the retired or superseded page, and offers an edit made after the batch
-- **AND** the most-read page appears in the block although many pages were
-  edited more recently
-- **AND** a session captured before a batch smaller than the block still
-  appears; a batch that fills the block can push it out
+- **THEN** the block offers neither the pages the batch wrote nor the retired
+  or superseded page, offers the user's own edits before and after the batch,
+  and offers a page the user read with the time of that read
+- **AND** the page read most recently appears in the block although many pages
+  were edited more recently
+- **AND** a captured session keeps its place however many pages the batch wrote
+
+#### Scenario: Parallel sessions each see their own recent work first
+
+- **WHEN** two sessions with different session keys work on unrelated pages at
+  the same time, and a third page was the vault's newest edit
+- **THEN** each session's recent-context block leads with its own page and
+  still offers the vault's newest edit after it
+- **AND** a caller that passes no key receives the vault's order, newest first
 
 #### Scenario: Old information is saved again after a correction
 
@@ -633,8 +641,9 @@ this way, exactly as it is for any other packet.
 
 A recency prior SHALL NOT resolve an anchor, except for a REFERENTIAL turn — one
 whose own words are the reference and name nothing. This is the only case in
-which a file modification time, a read count or a previous packet's own answer
-may establish task relevance, and it SHALL be bounded by every condition below.
+which a recorded act — an edit, a read, a pick, a citation or an episode — or a
+previous packet's own answer may establish task relevance, and it SHALL be
+bounded by every condition below.
 
 A turn SHALL be referential only when it speaks one of the declared referential
 cues, matched on whole tokens rather than as a substring of a longer word, AND
@@ -650,15 +659,42 @@ contact kind, SHALL NOT count toward the two-kinds rule for any other kind, and
 SHALL NOT be a tie-break between candidates the turn named. It SHALL be reported
 in a resolved anchor's evidence so a reader can see why that anchor was served.
 
-The hot profile SHALL be a bounded, deterministic projection over the anchor rows
-the request already holds — a previous packet's continuity references, the
-freshness registry's own last-edit times, and the maintained usage activation
-snapshot — ranked in a single declared order, ties broken by a stable identity.
-A previous packet's continuity references SHALL rank first and SHALL form one
-tier taken whole: that packet already resolved them together — but only while
-no anchor outside them has a last edit, not in a write burst, later than the
-time that packet was served. While that tier leads, the profile SHALL NOT fall
-through to the edit or read tiers: where the references name a compiled page
+The hot profile SHALL be a bounded, deterministic projection over a machine-local
+ring of typed events recorded by origin where each act happens, never re-derived
+from file modification times. The deliberate acts SHALL be a governed write made
+outside any batch scope, an agent's admitted pick, and a page a recorded episode
+is about; selection SHALL be a successful read and a citation by a governed
+write; a captured session and an episode recap SHALL be contact only, read by the
+recent-context block and never a referent. A write inside a batch scope, a write
+no command traced, and a served packet SHALL record nothing, and the watcher's
+copy of the server's own commit SHALL be recognised by its signature and
+dropped. Only an edit made outside the server SHALL be judged by timing: a
+change that fell in a write burst — a chain of a declared number of pages or
+more, navigation pages and episode recaps not counted, each changed within a
+declared interval of the next — SHALL record no event, because a batch rewrites
+pages nobody chose. The first projection of a vault, which has no history,
+SHALL be seeded once from the freshness registry under the same burst rule and
+SHALL also give no edit signal to an edit older than the latest burst, and SHALL
+report itself `seeded`.
+
+The profile SHALL rank the rows of the latest working session only — a gap of
+a declared length with no event starts a new one — by their latest deliberate
+act, then their latest selection, ties broken by a stable identity, with no
+frequency term: a newer act displaces an older one, and nothing expires on a
+clock. The events SHALL carry the caller's opaque attribution — a client label,
+a session key and a workspace key — stored only as salted derivations scoped to
+the caller's audience, never as the values supplied. Where the caller supplies a
+session key, its own session's thread and acts SHALL rank first, where it
+supplies a workspace key its workspace's next, and the vault's last; a higher
+tier SHALL lead only while it holds a deliberate act or a thread its session was
+served, and selection alone SHALL NOT lift a tier over a deliberate act in a
+lower one. A thread SHALL be a previous packet's continuity references, or,
+for a session that passed none, the references of the last packet that
+session was served, and SHALL form one tier taken whole: that packet already
+resolved them together — but only while no deliberate act of that session
+outside them, or of anyone when the caller supplies no session key, is later
+than the time that packet was served. While that tier leads, the profile SHALL
+NOT fall through to another tier: where the references name a compiled page
 that is not an anchor — one the agent picked or recall carried — that single
 page SHALL be resumed from its own units, reported `resolved` on `continuity`
 and `recency` and marked `generation.carried_by = "continuity"`; where they
@@ -668,21 +704,23 @@ audience may not see SHALL be treated exactly as one naming nothing, before
 anything is derived from it: the response — its status, its abstention
 reason and its `generation` block — SHALL be identical to the one a reference
 naming a page that does not exist receives, so that continuity cannot be used
-to learn whether a withheld page exists. A last-edit time
-that fell in a write burst — a chain of a declared number of pages or more,
-navigation pages not counted, each edited within a declared interval of the
-next, so that one stall inside a batch does not split it —
-SHALL carry no edit signal, because a batch rewrites pages nobody chose, and
-neither SHALL a last-edit time older than the latest such burst, because the
-batch may have rewritten the page the user was working on; such an anchor
-SHALL be ordered by its reads alone, and with no reads either the profile
-SHALL be empty rather than a menu or the freshest survivor. The profile SHALL
-be computed only for a referential turn. It SHALL NOT enumerate directories or
+to learn whether a withheld page exists. An agent's pick SHALL be dated at the
+time the packet that carries it was served, so it never displaces its own
+thread. Where the leading tier's single top row is a compiled page that is not
+an anchor, that page SHALL be carried on recency (`generation.carried_by =
+"recency"`); where the top rows tie and any of them is such a page, the turn
+SHALL report them all as ambiguity and SHALL NOT choose. The profile SHALL be
+computed only for a referential turn. It SHALL NOT enumerate directories or
 raise any declared request-path ceiling, and SHALL read no page except, from the
 request's own page cache, the bounded few at its top, to exclude one that another
 page supersedes. A retired anchor SHALL NOT be in it. Recency evidence SHALL be
 earned by the anchors at the TOP of that ranking only, and the number of anchors
-that may tie at the top SHALL be bounded.
+that may tie at the top SHALL be bounded. The projection's output, as the caller
+ranks it, SHALL be part of the packet cache key, a packet SHALL be compiled
+against the projection it was keyed on, and `generation.hot_profile` SHALL
+report the projection's state: `current`, `partial` (no live freshness
+registry: governed activity only), `seeded`, `behind` (a reconcile pending) or
+`empty`.
 
 Recency SHALL resolve an anchor only where the turn is referential AND no
 candidate anywhere in the same resolution carries a worded contact kind. Where
@@ -771,9 +809,72 @@ from recent work and not from the turn's own words.
   few seconds
 - **THEN** a referential turn resolves neither the page the batch wrote last
   nor the freshest page the batch left alone, however old
-- **AND** it resolves the anchor the usage snapshot shows was read, or
-  abstains `unresolved` when nothing was read, its recent-context block
-  offering neither the batch nor the edits before it
+- **AND** it resolves the anchor the user last worked on through an attributed
+  write, or abstains with its recent-context block when the latest session
+  holds no work, the block not offering the pages the batch wrote
+
+#### Scenario: An edit just after a batch is still work
+
+- **WHEN** a maintenance batch finishes and the user edits one page a fraction
+  of a second later
+- **THEN** a referential turn resolves that page, because the batch recorded
+  no act and the edit is work by its origin, whatever its timing
+
+#### Scenario: A read changes the next referential packet
+
+- **WHEN** in a session with no edits the user reads one anchor, a referential
+  turn resolves it, and the user then reads a second anchor
+- **THEN** the next referential turn resolves the second anchor and is not
+  served the first turn's cached packet
+- **AND** its recent-context block lists the second anchor first
+
+#### Scenario: A picked page is continued without its token
+
+- **WHEN** the agent picked a compiled page that is not an anchor, and a later
+  referential turn passes no token
+- **THEN** the picked page, the latest deliberate act, is carried on recency
+  with its units served
+
+#### Scenario: A hot page that is not an anchor is carried on recency
+
+- **WHEN** the latest deliberate act was work on a compiled page that is not an
+  anchor, and a referential turn names nothing
+- **THEN** that page is served with evidence `recency` and
+  `generation.carried_by = "recency"`
+- **AND** where that page ties with an anchor at the top of the profile, the
+  turn reports both as ambiguity and serves neither
+
+#### Scenario: An old edit yields to the latest session
+
+- **WHEN** the user worked on one anchor, nothing happened for longer than the
+  session gap, and the user then read a second anchor
+- **THEN** a referential turn resolves the second anchor, from the latest
+  session, and not the older work
+
+#### Scenario: Two parallel sessions each continue their own thread
+
+- **WHEN** two sessions with different session keys work on unrelated pages,
+  their turns interleaved
+- **THEN** "continue" from each resolves its own page, whichever was touched
+  last, and each session's recent-context block leads with its own page
+- **AND** reads in one session never outrank the other session's own work
+
+#### Scenario: A fresh session continues its workspace's thread
+
+- **WHEN** a new session starts in the same workspace as an earlier session and
+  its first turn names nothing
+- **THEN** it resolves the thread the earlier session in that workspace was
+  last served, not the vault's newest page from another project
+- **AND** a caller that passes no key is ranked over the whole vault, as before
+
+#### Scenario: A recorded episode's page leads until newer work
+
+- **WHEN** a session records an episode recap about a page, and a referential
+  turn follows
+- **THEN** that page resolves, the recording being the latest deliberate act,
+  and in the recording session ahead of any other session's work
+- **AND** once newer work is recorded, that work leads instead, and a token
+  minted before the recording no longer leads
 
 #### Scenario: A previous packet's answer is resumed whole
 
