@@ -301,7 +301,11 @@ Vector evidence SHALL be a corpus-relative band. An anchor's signature SHALL
 earn `vector_band` only when its similarity to the turn is an outlier against
 the turn's own similarities to the whole catalogue: at or above the median plus
 a robust spread multiplied by the level the largest of that many unrelated
-similarities exceeds at a declared chance rate. When more anchors clear than the
+similarities exceeds at a declared chance rate. That rate is nominal: the
+measured share of turns banding an unrelated anchor was 3-4% with independent
+Gaussian nulls at 50-80 anchors, 8.5-12.7% with the served encoder at 60-200
+anchors and about 6% at 1,000-2,000, and none for content-free turns, so a band
+alone SHALL NOT resolve an anchor. When more anchors clear than the
 rare-term anchor cap, none SHALL band. A catalogue below a declared population
 floor, or one whose similarities have no spread, SHALL yield no band and SHALL
 NOT be encoded against. Similarity SHALL NOT reorder the recent-context block.
