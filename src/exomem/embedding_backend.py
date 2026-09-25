@@ -77,6 +77,9 @@ DEFAULT_ARTIFACT_URL = "https://github.com/Artexis10/exomem/releases/download/se
 _URL_OFF = {"", "0", "off", "none", "false", "no"}
 #: A published asset is bounded; a response past this is not an artefact.
 _MAX_ASSET_BYTES = 2 << 30
+#: The most an asset's members may unpack to, summed: the asset's own cap, since
+#: a plain tar of regular files is never smaller than what it holds.
+_MAX_UNPACKED_BYTES = _MAX_ASSET_BYTES
 #: How long a failed acquisition (no download, no build) is remembered before
 #: a load tries again, so a host that cannot build does not start the build on
 #: every write that asks for the model.
@@ -197,6 +200,9 @@ class ServedArtifact:
     #: sha256 of the published artefact's bytes (`artifact_sha256`); None when
     #: nothing is published and every host builds its own.
     digest: str | None = None
+    #: sha256 of the packed release asset itself, checked before it is unpacked;
+    #: None when there is no asset to fetch.
+    asset_digest: str | None = None
 
 
 #: The one model a personal server serves for activation and recall alike, at
@@ -209,6 +215,7 @@ _SERVED: dict[str, ServedArtifact] = {
         quantization=ORT_DYNAMIC_INT8,
         file_format=ONNX_EXTERNAL_DATA,
         digest="7b9a0b3b0b292643752db19f9ae29113d632ac30393c9a56b97d4b075dc81c44",
+        asset_digest="71e5f90fa019c2de0471b158e408da6ca7f43c93188308095242dfe46525ef76",
     ),
 }
 
@@ -648,7 +655,9 @@ def artifact_asset_name(model_name: str, served: ServedArtifact, digest: str | N
 
 def artifact_url(model_name: str, served: ServedArtifact) -> str | None:
     """The published artefact's URL, or None when there is none to fetch."""
-    if not served.digest or model_cache._truthy(os.environ.get(model_cache.HF_OFFLINE_ENV)):
+    if not served.digest or not served.asset_digest:
+        return None
+    if model_cache._truthy(os.environ.get(model_cache.HF_OFFLINE_ENV)):
         return None
     base = os.environ.get(ARTIFACT_URL_ENV)
     base = DEFAULT_ARTIFACT_URL if base is None else base.strip()
@@ -736,9 +745,12 @@ def _fetch_artifact(model_name: str, served: ServedArtifact, target: Path) -> bo
     """Install the published artefact into `target` when it is the pinned one.
 
     False, and nothing installed, when there is none to fetch, the download
-    fails, or the asset is not exactly the pinned artefact: two regular files
-    whose bytes hash to `served.digest`. The caller then builds locally, which
-    is always correct and only costs memory and time.
+    fails, or the asset is not exactly the pinned artefact. The downloaded file
+    must hash to `served.asset_digest` before it is opened at all; then it is
+    read as a plain tar (no decompression) of exactly two regular files whose
+    sizes sum within the cap, and what they unpack to must hash to
+    `served.digest`. The caller then builds locally, which is always correct
+    and only costs memory and time.
     """
     url = artifact_url(model_name, served)
     if url is None:
@@ -747,6 +759,7 @@ def _fetch_artifact(model_name: str, served: ServedArtifact, target: Path) -> bo
     stage = Path(tempfile.mkdtemp(prefix=f".{target.name}-fetch-", dir=target.parent))
     try:
         asset = stage / "asset.tar"
+        received_digest = hashlib.sha256()
         try:
             with urllib.request.urlopen(url, timeout=60) as response, open(asset, "wb") as out:  # noqa: S310 — https or an operator's mirror
                 received = 0
@@ -755,20 +768,34 @@ def _fetch_artifact(model_name: str, served: ServedArtifact, target: Path) -> bo
                     if received > _MAX_ASSET_BYTES:
                         log.warning("%s: %s is larger than any artefact; building locally", model_name, url)
                         return False
+                    received_digest.update(chunk)
                     out.write(chunk)
         except (OSError, ValueError) as error:
             log.info("%s: no published artefact at %s (%s); building locally", model_name, url, error)
             return False
+        if received_digest.hexdigest() != served.asset_digest:
+            log.warning("%s: %s is not the pinned asset; refused unopened, building locally", model_name, url)
+            return False
         out_dir = stage / "out"
         out_dir.mkdir()
         try:
-            with tarfile.open(asset) as tar:
+            # "r:" reads a plain tar only: a compressed stream is refused, never
+            # inflated. Regular members only, so a sparse member cannot unpack
+            # to more than it occupies.
+            with tarfile.open(asset, "r:") as tar:
                 members = tar.getmembers()
-                if sorted(m.name for m in members) != sorted(_ARTIFACT_FILES) or not all(m.isreg() for m in members):
+                if (
+                    sorted(m.name for m in members) != sorted(_ARTIFACT_FILES)
+                    or not all(m.type in (tarfile.REGTYPE, tarfile.AREGTYPE) for m in members)
+                    or sum(m.size for m in members) > _MAX_UNPACKED_BYTES
+                ):
                     log.warning("%s: %s holds other files than the artefact; refused", model_name, url)
                     return False
                 for member in members:
-                    with tar.extractfile(member) as src, open(out_dir / member.name, "wb") as dst:
+                    src = tar.extractfile(member)
+                    if src is None:
+                        return False
+                    with src, open(out_dir / member.name, "wb") as dst:
                         shutil.copyfileobj(src, dst, 8 << 20)
         except (OSError, tarfile.TarError) as error:
             log.warning("%s: %s is not a readable artefact (%s); refused", model_name, url, error)

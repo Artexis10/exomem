@@ -19,6 +19,8 @@ import hashlib
 import io
 import json
 import re
+import shutil
+import subprocess
 import sys
 import tarfile
 import threading
@@ -847,10 +849,12 @@ def _publish(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, served):
     monkeypatch.setenv(embedding_backend.ARTIFACT_DIR_ENV, str(tmp_path / "maintainer"))
     embedding_backend.load_encoder(TINY)
     digest = embedding_backend.artifact_sha256(embedding_backend.artifact_dir(TINY, served))
-    pinned = dataclasses.replace(served, digest=digest)
-    monkeypatch.setitem(embedding_backend._SERVED, TINY, pinned)
     assets = tmp_path / "assets"
-    asset = embedding_backend.write_artifact_asset(TINY, pinned, assets)
+    asset = embedding_backend.write_artifact_asset(TINY, dataclasses.replace(served, digest=digest), assets)
+    pinned = dataclasses.replace(
+        served, digest=digest, asset_digest=hashlib.sha256(asset.read_bytes()).hexdigest()
+    )
+    monkeypatch.setitem(embedding_backend._SERVED, TINY, pinned)
     monkeypatch.setenv(embedding_backend.ARTIFACT_DIR_ENV, str(tmp_path / "host"))
     monkeypatch.setenv(embedding_backend.ARTIFACT_URL_ENV, assets.as_uri())
     return pinned, asset
@@ -912,6 +916,114 @@ def test_a_download_that_is_not_the_pinned_artifact_is_refused_and_built_locally
     assert not list(tmp_path.rglob("outside.txt")) and not list(tmp_path.rglob("run-me.sh"))
 
 
+def _hostile_asset(kind: str, path: Path) -> None:
+    """The reviewer's bombs, small on the wire and large unpacked: a GNU sparse
+    member that claims 4 GiB, and an xz-compressed regular member. A compressed
+    stream is refused whatever it holds, so the xz one holds 64 MiB (the
+    reviewer's held 6 GiB, which takes half a minute to write)."""
+    if kind == "sparse":
+        tar_cli = shutil.which("tar")
+        if tar_cli is None:
+            pytest.skip("GNU tar writes the sparse member")
+        work = path.parent / "work"
+        work.mkdir()
+        (work / "model.onnx").write_bytes(b"x" * 10)
+        with open(work / "model.onnx.data", "wb") as fh:
+            fh.seek((4 << 30) - 1)  # a hole: one byte is written
+            fh.write(b"\0")
+        subprocess.run(
+            [tar_cli, "--format=gnu", "-S", "-cf", str(path), "-C", str(work), "model.onnx", "model.onnx.data"],
+            check=True,
+        )
+        shutil.rmtree(work)
+        return
+
+    class Zeros(io.RawIOBase):
+        def __init__(self, left: int) -> None:
+            self.left = left
+
+        def readable(self) -> bool:
+            return True
+
+        def readinto(self, buffer) -> int:
+            size = min(len(buffer), self.left)
+            buffer[:size] = bytes(size)
+            self.left -= size
+            return size
+
+    with tarfile.open(path, "w:xz", preset=0) as tar:
+        graph = tarfile.TarInfo("model.onnx")
+        graph.size = 10
+        tar.addfile(graph, io.BytesIO(b"x" * 10))
+        data = tarfile.TarInfo("model.onnx.data")
+        data.size = 64 << 20
+        tar.addfile(data, io.BufferedReader(Zeros(data.size), 8 << 20))
+
+
+@pytest.mark.parametrize("kind", ["sparse", "xz"])
+@pytest.mark.parametrize("pinned_to_it", [False, True], ids=["other-asset", "pin-matches"])
+def test_a_hostile_asset_is_refused_before_a_byte_is_unpacked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, pinned_to_it: bool
+) -> None:
+    """The download is checked against the packed asset's own pinned sha256
+    before `tarfile` ever opens it. Should a pin ever name a hostile asset, the
+    member check still refuses a sparse member, a compressed stream, or a size
+    beyond the cap, before anything is written."""
+    served = dataclasses.replace(
+        embedding_backend.served_artifact(M3), revision="f" * 40, asset_digest="0" * 64
+    )
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    asset = assets / embedding_backend.artifact_asset_name(M3, served)
+    _hostile_asset(kind, asset)
+    if pinned_to_it:
+        served = dataclasses.replace(served, asset_digest=hashlib.sha256(asset.read_bytes()).hexdigest())
+    monkeypatch.setenv(embedding_backend.ARTIFACT_DIR_ENV, str(tmp_path / "host"))
+    monkeypatch.setenv(embedding_backend.ARTIFACT_URL_ENV, assets.as_uri())
+    opened: list[str] = []
+    real_open = tarfile.open
+    monkeypatch.setattr(
+        embedding_backend.tarfile, "open", lambda *a, **k: opened.append(str(a[1:] or k)) or real_open(*a, **k)
+    )
+    written: list[int] = []
+    monkeypatch.setattr(
+        embedding_backend.shutil, "copyfileobj", lambda *_a, **_k: written.append(1) or pytest.fail("unpacked")
+    )
+    target = embedding_backend.artifact_dir(M3, served)
+
+    assert embedding_backend._fetch_artifact(M3, served, target) is False
+
+    assert written == []
+    assert opened == (["('r:',)"] if pinned_to_it else []), opened
+    assert not target.exists()
+    assert [path.name for path in target.parent.iterdir()] == [], "no stage is left behind"
+
+
+def test_the_member_sizes_are_capped_before_anything_is_unpacked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    served = dataclasses.replace(embedding_backend.served_artifact(M3), revision="e" * 40)
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    asset = assets / embedding_backend.artifact_asset_name(M3, served)
+    _rewrite_asset(asset, {"model.onnx": b"g" * 600, "model.onnx.data": b"d" * 600})
+    served = dataclasses.replace(served, asset_digest=hashlib.sha256(asset.read_bytes()).hexdigest())
+    monkeypatch.setenv(embedding_backend.ARTIFACT_DIR_ENV, str(tmp_path / "host"))
+    monkeypatch.setenv(embedding_backend.ARTIFACT_URL_ENV, assets.as_uri())
+    monkeypatch.setattr(embedding_backend, "_MAX_UNPACKED_BYTES", 1000)
+    monkeypatch.setattr(
+        embedding_backend.shutil, "copyfileobj", lambda *_a, **_k: pytest.fail("unpacked past the cap")
+    )
+
+    assert embedding_backend._fetch_artifact(M3, served, embedding_backend.artifact_dir(M3, served)) is False
+
+
+def test_the_bge_m3_release_asset_is_pinned_by_its_own_sha256() -> None:
+    """Reproduced by the build script and by an independent reviewer."""
+    served = embedding_backend.served_artifact(M3)
+    assert served.asset_digest == "71e5f90fa019c2de0471b158e408da6ca7f43c93188308095242dfe46525ef76"
+
+
 def test_an_unavailable_download_falls_back_to_the_local_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _asked, served = _tiny_served_repo(tmp_path, monkeypatch)
     monkeypatch.setitem(embedding_backend._SERVED, TINY, dataclasses.replace(served, digest="0" * 64))
@@ -941,6 +1053,7 @@ def test_the_published_bge_m3_artifact_is_a_github_release_asset(monkeypatch: py
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     assert embedding_backend.artifact_url(M3, served) is None, "an offline host never downloads"
     assert embedding_backend.artifact_url(M3, dataclasses.replace(served, digest=None)) is None
+    assert embedding_backend.artifact_url(M3, dataclasses.replace(served, asset_digest=None)) is None
 
 
 def test_a_failed_acquisition_is_not_retried_on_every_load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
