@@ -694,6 +694,33 @@ def test_hybrid_retention_drops_weak_bm25_only_projection(tmp_path):
     assert [hit.path for hit in result.hits] == [strong.item_identity]
 
 
+def test_hybrid_retention_reads_cjk_runs_and_accent_folded_words(tmp_path):
+    tower = _variant("Knowledge Base/tower.md", "5" * 64, "東京タワーの高さは三百メートル")
+    weather = _variant("Knowledge Base/weather.md", "6" * 64, "東京の天気")
+    name = _variant("Knowledge Base/name.md", "9" * 64, "Zölvarn prüft die Lieferung")
+    tea = _variant("Knowledge Base/tea.md", "a" * 64, "抹茶と和菓子は講師が用意します")
+    runtime = _runtime((_item(tower), _item(weather), _item(name), _item(tea)))
+
+    def paths(query: str) -> list[str]:
+        result = projection_runtime.find_projected_hits(
+            tmp_path,
+            runtime,
+            query=query,
+            limit=4,
+            mode="hybrid",
+            graph=False,
+            rerank=False,
+            principal=principal.owner_principal(surface="library"),
+            purpose=None,
+        )
+        return [hit.path for hit in result.hits]
+
+    assert paths("東京タワーの高さは何メートル") == [tower.item_identity]
+    assert paths("zolvarn lieferung") == [name.item_identity]
+    # 抹茶 and 用意 are the content of 抹茶の用意; の is grammar.
+    assert paths("抹茶の用意") == [tea.item_identity]
+
+
 def test_projected_rank_policy_applies_type_and_status_multipliers(tmp_path):
     stale_source = _variant(
         "Knowledge Base/a-source.md",
