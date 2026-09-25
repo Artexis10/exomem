@@ -224,9 +224,15 @@ _ADVERSARIAL = {
 def test_no_character_capped_chunk_exceeds_the_encoder_limit(case: str) -> None:
     tokenizers = pytest.importorskip("tokenizers")
     huggingface_hub = pytest.importorskip("huggingface_hub")
-    path = huggingface_hub.try_to_load_from_cache("BAAI/bge-m3", "tokenizer.json")
-    if not isinstance(path, str):
-        pytest.skip("the bge-m3 tokenizer is not in the local model cache")
+    from exomem import embedding_backend
+
+    # The embeddings job fetches the pinned tokenizer; a cold, offline cache
+    # fails here instead of skipping, so the bound is never silently unchecked.
+    path = huggingface_hub.hf_hub_download(
+        "BAAI/bge-m3",
+        "tokenizer.json",
+        revision=embedding_backend.served_artifact("BAAI/bge-m3").revision,
+    )
     tokenizer = tokenizers.Tokenizer.from_file(path)
     title, body = _ADVERSARIAL[case]
     for chunk in embeddings.chunk_text(title, body):
