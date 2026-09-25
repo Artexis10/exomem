@@ -484,8 +484,9 @@ def deliverable_rows(vault_root: Path, view: dreamer_store.StoreView) -> list[di
     The worker precomputed `deliverable`; this re-checks the two things that
     can move between its passes. A disposition made in this process stops
     delivery at once. A review-state file newer than the worker's precompute
-    (another process decided something) is re-read once, and each candidate's
-    decision is re-checked against it.
+    (another process decided something) is re-read once per file generation,
+    not once per session start, and each candidate's decision is re-checked
+    against it.
     """
     from . import dreamer
 
@@ -501,7 +502,7 @@ def deliverable_rows(vault_root: Path, view: dreamer_store.StoreView) -> list[di
             continue
         if row.get("deliverable_token") != token:
             if not loaded:
-                payload = _payload(Path(vault_root))
+                payload = _carrier_payload(Path(vault_root), token)
                 loaded = True
             if payload is None:
                 return []
@@ -543,6 +544,9 @@ _LAST_SEEN: OrderedDict[tuple[str, ...], float] = OrderedDict()
 _VAULT_LAST: dict[str, float] = {}
 _KEY_DAY: dict[tuple[str, ...], tuple[str, int]] = {}
 _PENDING: list[tuple[str, str, str, float]] = []
+#: vault -> (review-state token, payload): the carrier's one read per generation.
+_PAYLOADS: dict[str, tuple[str, dict[str, Any]]] = {}
+_PAYLOAD_MEMO_LIMIT = 8
 
 
 def reset_delivery_state() -> None:
@@ -551,6 +555,29 @@ def reset_delivery_state() -> None:
         _VAULT_LAST.clear()
         _KEY_DAY.clear()
         _PENDING.clear()
+        _PAYLOADS.clear()
+
+
+def _carrier_payload(vault_root: Path, token: str | None) -> dict[str, Any] | None:
+    """The review state for `token`'s file generation, read once per generation.
+
+    Read only, never mutated by the carrier. No token (no file, or no stat)
+    reads fresh every time.
+    """
+    vault = str(vault_root)
+    if token is not None:
+        with _DELIVERY_LOCK:
+            memo = _PAYLOADS.get(vault)
+        if memo is not None and memo[0] == token:
+            return memo[1]
+    payload = _payload(vault_root)
+    if token is not None and payload is not None:
+        with _DELIVERY_LOCK:
+            _PAYLOADS.pop(vault, None)
+            _PAYLOADS[vault] = (token, payload)
+            while len(_PAYLOADS) > _PAYLOAD_MEMO_LIMIT:
+                _PAYLOADS.pop(next(iter(_PAYLOADS)))
+    return payload
 
 
 def delivery_key(vault_root: Path, session: str | None) -> tuple[str, ...] | None:

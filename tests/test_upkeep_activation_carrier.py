@@ -30,6 +30,7 @@ from exomem import (
     dreamer_store,
     envelope,
     freshness,
+    review_state,
     upkeep,
     working_set,
 )
@@ -241,6 +242,36 @@ def test_a_session_string_is_bound_to_the_principal_that_sends_it(
     # B's own first activation of that session is still a session start.
     as_principal("b")
     assert _items(_carry(vault, session="session-of-b"))
+
+
+def test_the_carrier_reloads_review_state_once_per_generation(
+    tmp_path: Path, clock: _Clock, serving: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Session starts after another process decided something re-read the
+    review state once for that state, not once per session start."""
+    vault = _ready(tmp_path)
+    # A decision made elsewhere since the worker's precompute moves the token.
+    review_state.ReviewStateStore(vault).apply("0" * 24, "f" * 24, action="dismiss")
+    loads = []
+    real_load = review_state.ReviewStateStore.load
+
+    def counted(store, *args, **kwargs):
+        loads.append(1)
+        return real_load(store, *args, **kwargs)
+
+    monkeypatch.setattr(review_state.ReviewStateStore, "load", counted)
+    view = dreamer_store.read_view(vault)
+    first = upkeep.deliverable_rows(vault, view)
+    second = upkeep.deliverable_rows(vault, view)
+    assert [row["id"] for row in first] == [row["id"] for row in second]
+    assert len(loads) == 1, loads
+    # A new decision is a new generation: read once more.
+    monkeypatch.setattr(review_state.ReviewStateStore, "load", real_load)
+    review_state.ReviewStateStore(vault).apply("1" * 24, "f" * 24, action="dismiss")
+    monkeypatch.setattr(review_state.ReviewStateStore, "load", counted)
+    upkeep.deliverable_rows(vault, view)
+    upkeep.deliverable_rows(vault, view)
+    assert len(loads) == 2, loads
 
 
 def test_unkeyable_stateless_http_is_never_pushed(
