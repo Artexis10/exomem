@@ -271,11 +271,27 @@ Activation SHALL use the derived anchor signature vectors for optional semantic
 corroboration instead of unconditionally invoking ordinary full-vault hybrid
 recall. It SHALL NOT load full note-chunk or multimodal vector matrices on the
 activation path. Ordinary recall behaviour SHALL remain unchanged. One query
-encode MAY use the configured resident encoder only under nonblocking model
-admission; activation SHALL NOT load a cold model or wait behind another model
-operation. Existing categorical evidence and ambiguity rules SHALL apply to
-all candidates, including competitors of an exact match. Vector evidence alone
-SHALL NOT resolve an anchor.
+encode MAY use the resident activation encoder, identified by a recorded
+fingerprint, only under nonblocking model admission; activation SHALL NOT load a
+cold model or wait behind another model operation. Signature vectors made under
+another fingerprint SHALL NOT be compared with the turn, and an index update on
+a request thread SHALL NOT load a model. Existing categorical evidence and
+ambiguity rules SHALL apply to all candidates, including competitors of an
+exact match. Vector evidence alone SHALL NOT resolve an anchor.
+
+Vector evidence SHALL be a corpus-relative band. An anchor's signature SHALL
+earn `vector_band` only when its similarity to the turn is an outlier against
+the turn's own similarities to the whole catalogue: at or above the median plus
+a robust spread multiplied by the level the largest of that many unrelated
+similarities exceeds at a declared chance rate. When more anchors clear than the
+rare-term anchor cap, none SHALL band. A catalogue below a declared population
+floor, or one whose similarities have no spread, SHALL yield no band and SHALL
+NOT be encoded against. Similarity SHALL NOT reorder the recent-context block.
+In a script written without spaces, an anchor name of at least two characters,
+wholly in the script of the turn's unspaced run, contained in that run and rare
+by the anchor-name yardstick MAY grant rare-term evidence, never exact-alias
+evidence; a name whose every occurrence lies inside a longer contained name
+SHALL be consumed by it.
 
 Lean activation SHALL retain bounded own-page lexical retrieval evidence from
 the maintained full-page FTS catalogue restricted to anchor paths. Anchor
@@ -327,7 +343,10 @@ foreground repair. Managed-service warm latency and offline cold filesystem
 proof SHALL be reported separately.
 
 Packet generation metadata SHALL identify semantic evidence as ready, disabled,
-absent, warming, busy, unavailable or unnecessary for an explicit agent choice.
+absent, uncalibrated, warming, busy, unavailable or unnecessary for an explicit
+agent choice. Every state other than ready and that agent choice SHALL serve the
+same anchors, statuses, evidence and recent-context block as disabled semantic
+evidence.
 Transiently incomplete evidence SHALL NOT create a reusable packet cache entry.
 Every packet SHALL still cross the current governance release plane, including
 cached packets and packets without semantic evidence. End-to-end latency
@@ -353,6 +372,55 @@ fast abstention or compiler-only timing.
 - **WHEN** a signature is semantically similar but has no independently deciding
   worded evidence or valid continuity qualification
 - **THEN** it remains partial and supplies no context-role material
+
+#### Scenario: A turn in another language names an anchor's rare name
+
+- **WHEN** a German or Russian turn contains the invented name of an
+  English-authored anchor and is about that anchor
+- **THEN** the anchor earns `rare_term` and `vector_band` and resolves
+- **AND** with semantic evidence off the same turn leaves it partial
+
+#### Scenario: A turn similar to many anchors earns no band
+
+- **WHEN** more anchors clear the band for one turn than the rare-term anchor
+  cap
+- **THEN** no anchor earns `vector_band` from that turn
+
+#### Scenario: A catalogue too small to calibrate yields no band
+
+- **WHEN** the catalogue holds fewer signatures than the population floor
+- **THEN** semantic evidence is `uncalibrated`, the turn is not encoded and no
+  anchor earns `vector_band`
+
+#### Scenario: A changed encoder never compares two vector spaces
+
+- **WHEN** the resident activation encoder's fingerprint differs from the one
+  the stored signature vectors were made under
+- **THEN** semantic evidence is `absent` and no stored vector is compared with
+  the turn
+- **AND** only a background pass re-embeds the catalogue; a request never loads
+  a model to do it
+
+#### Scenario: A CJK turn contains an anchor's name
+
+- **WHEN** a Japanese turn written without spaces contains a rare anchor's
+  two-character name
+- **THEN** the anchor earns `rare_term`, never `exact_alias`, and resolves with
+  a band and stays partial without one
+- **AND** the same name inside an unrelated compound, with no band, stays partial
+
+#### Scenario: A same-language unrelated anchor earns no band
+
+- **WHEN** a Russian turn is about an English-authored page and the catalogue
+  holds an unrelated Russian-authored anchor
+- **THEN** that anchor earns no `vector_band` for sharing the turn's language
+
+#### Scenario: Semantic evidence never reorders the recent block
+
+- **WHEN** a turn is similar to a recent page below the recency menu, or is a
+  content-free turn in another language
+- **THEN** `recent_context` is the recency block, identical with semantic
+  evidence on, off or degraded
 
 #### Scenario: A lean installation reaches a resource through its contents
 
