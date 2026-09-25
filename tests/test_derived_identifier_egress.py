@@ -1306,6 +1306,44 @@ def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
     assert f"[[{INSIGHTS}/gamma-x]]" in (vaults["A"] / hidden).read_text(encoding="utf-8")
 
 
+_HIDDEN_LINKERS = {
+    "append-only": (
+        f"{KB}/Sources/Withheld/capture.md",
+        _page("Capture", f"Captured text linking [[{INSIGHTS}/beta]].", type="source"),
+    ),
+    "contract": (
+        f"{WITHHELD_DIR}/legacy-linker.md",
+        _page("Legacy", f"Links [[{INSIGHTS}/beta]].", type="insight"),
+    ),
+}
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_withheld_linker_refuses_a_restricted_move_with_one_generic_answer(
+    tmp_path: Path, audience: str
+) -> None:
+    """That such a refusal exists is a documented residual; it names no
+    finding, type, tree or path, and reads the same whatever refused."""
+    scope = "Notes/Withheld/**, Sources/Withheld/**"
+    answers = {}
+    for label, (path, text) in _HIDDEN_LINKERS.items():
+        vault = _materialize(
+            tmp_path / label / "vault", {**_semantic_move_fixture(), path: text}, audience,
+            scope=scope,
+        )
+        answers[label] = _call(
+            vault, _principal(audience), "manage_memory_file", operation="move",
+            old_path=f"{INSIGHTS}/beta.md", new_path=f"{INSIGHTS}/beta-x.md",
+        )
+        assert (vault / INSIGHTS / "beta.md").is_file(), label
+
+    assert answers["append-only"] == answers["contract"], answers
+    message = answers["contract"].get("message", "")
+    assert answers["contract"].get("__error__"), answers
+    for detail in ("COMPILED", "SEMANTIC", "insight", "Sources", "Withheld", "withheld", "legacy"):
+        assert detail not in message, (detail, message)
+
+
 def test_the_owner_still_writes_to_a_page_withheld_from_others(tmp_path: Path) -> None:
     base, withheld = _write_door_fixture()
     vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external", scope=_WRITE_SCOPE)

@@ -69,6 +69,17 @@ class MoveFileResult:
         }
 
 
+#: What a mover other than the owner is told when rewriting the links of a
+#: page withheld from it would be refused, whatever refuses it (an
+#: append-only tree or that page's semantic contract). That such a refusal
+#: exists is a documented residual; it names no finding, type, tree or path.
+_LINK_REWRITE_REFUSAL = (
+    "LINK_REWRITE_REFUSED",
+    "updating inbound wikilinks would rewrite a linking page this move may not change. "
+    "Retry with `update_wikilinks=false`.",
+)
+
+
 @dataclass
 class MoveFileError(Exception):
     code: str
@@ -465,6 +476,8 @@ def move_file(
                 # the opposite of what the guard is for.
                 if rel.rsplit("/", 1)[-1] == "index.md":
                     append_tree = None
+                if append_tree and visible is not None and not visible(rel):
+                    raise MoveFileError(*_LINK_REWRITE_REFUSAL)
                 if append_tree:
                     raise MoveFileError(
                         code="APPEND_ONLY",
@@ -721,6 +734,11 @@ def move_file(
                         ) from error
                     raise
 
+            if visible is not None and any(
+                item.contract_result.should_block and not visible(item.after.path)
+                for item in preflight.evaluations
+            ):
+                raise MoveFileError(*_LINK_REWRITE_REFUSAL)
             committed = semantic_writes.commit_move(
                 vault_root, preflight=preflight, mutate=mutate
             )
