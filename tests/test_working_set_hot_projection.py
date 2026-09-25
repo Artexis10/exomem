@@ -818,3 +818,94 @@ def test_an_episode_leads_only_the_session_that_recorded_it(heat_vault: Path) ->
 
     assert _resolved(_continue(heat_vault, **S1)) == [MARIT]
     assert _resolved(_continue(heat_vault, **S2)) == [SLED]
+
+
+
+# --------------------------------------------------------------------------- #
+# Round 2: a governed move heats the moved page only
+# --------------------------------------------------------------------------- #
+
+LANTERN = "Knowledge Base/Notes/Insights/lantern-route.md"
+LANTERN_MOVED = "Knowledge Base/Notes/Insights/lantern-route-renamed.md"
+WAYPOINTS = [f"Knowledge Base/Notes/Insights/lantern-waypoint-{n}.md" for n in range(6)]
+
+
+def _plain_page(vault: Path, rel: str, body: str) -> None:
+    """A draft insight with one decision unit, so it has material."""
+    page = vault / rel
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\ntype: insight\nstatus: draft\ntags: []\n---\n\n"
+        f"# {page.stem}\n\n## Summary\n\n{body}\n\n"
+        f"- [decision] {body} ^{page.stem}-decision\n",
+        encoding="utf-8",
+    )
+
+
+def _move(vault: Path, old: str, new: str) -> dict:
+    """A governed move that rewrites every page linking to the moved one."""
+    return writer_lease.invoke_command(
+        _command("manage_memory_file"),
+        vault,
+        operation="move",
+        old_path=old,
+        new_path=new,
+        update_wikilinks=True,
+        reason="hot projection test",
+    )
+
+
+def test_a_move_heats_the_moved_page_and_none_of_its_backlinkers(heat_vault: Path) -> None:
+    """Review F1: a move rewrote six backlinking pages, each earned a `work`
+    event, and "continue" abstained over the backlinkers while they flooded
+    the block. The link rewrites are the move's bookkeeping, nobody's work:
+    the moved page alone is work, on its new path, at the move's time."""
+    _plain_page(heat_vault, LANTERN, "The lantern route crosses the northern pass.")
+    for rel in WAYPOINTS:
+        _plain_page(heat_vault, rel, "See [[lantern-route]] for the path.")
+    _one_old_tick(heat_vault)
+    _live(heat_vault)
+    working_set_heat.reset_for_tests()
+    _continue(heat_vault)  # the cold seed
+    _edit(heat_vault, SLED, "A towed cargo sled", "A towed freight sled")
+
+    moved = _move(heat_vault, LANTERN, LANTERN_MOVED)
+    assert (heat_vault / LANTERN_MOVED).exists(), moved
+    assert "[[lantern-route-renamed]]" in (heat_vault / WAYPOINTS[0]).read_text(encoding="utf-8")
+    _watcher_saw_everything(heat_vault)
+    lexstore.ensure_fresh(heat_vault)  # the catalogue holds the new path, as live
+
+    events = [
+        (event.path, event.channel)
+        for event in working_set_heat.profile(heat_vault).events
+        if event.origin != "seed"
+    ]
+    assert not {path for path, _channel in events} & set(WAYPOINTS), events
+    assert (LANTERN_MOVED, "work") in events and LANTERN not in {path for path, _ in events}
+    packet = _continue(heat_vault)
+    # The move is the latest work, so it is the referent, and the user's own
+    # earlier edit keeps its place in the block beside it.
+    assert _resolved(packet) == [LANTERN_MOVED], (packet.get("abstention"), packet["anchors"])
+    offered = [entry["path"] for entry in packet["recent_context"]]
+    assert not set(offered) & set(WAYPOINTS), offered
+    assert SLED in offered, offered
+
+
+def test_a_users_edit_follows_its_page_through_a_move(heat_vault: Path) -> None:
+    """The user edited a page, then moved it: "continue" resumes that page at
+    its new path, never one of the pages the move rewrote."""
+    _plain_page(heat_vault, LANTERN, "The lantern route crosses the northern pass.")
+    for rel in WAYPOINTS:
+        _plain_page(heat_vault, rel, "See [[lantern-route]] for the path.")
+    _one_old_tick(heat_vault)
+    _live(heat_vault)
+    working_set_heat.reset_for_tests()
+    _continue(heat_vault)
+    _traced_commit(heat_vault, [LANTERN])
+    _move(heat_vault, LANTERN, LANTERN_MOVED)
+    _watcher_saw_everything(heat_vault)
+    lexstore.ensure_fresh(heat_vault)
+
+    packet = _continue(heat_vault)
+
+    assert _resolved(packet) == [LANTERN_MOVED], (packet.get("abstention"), packet["anchors"])

@@ -41,7 +41,9 @@ import logging
 import secrets
 import sqlite3
 import threading
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NamedTuple
@@ -1308,6 +1310,23 @@ _IN_FLIGHT: dict[str, dict[str, int]] = {}
 _OURS: dict[str, dict[str, tuple[int, int, int]]] = {}
 
 
+#: While set, the only pages a traced, unbatched commit may heat. A move
+#: sets it empty around its link rewrites, which are bookkeeping, and heats
+#: the moved page itself through its own commit (`move_file`).
+_PRIMARY: ContextVar[frozenset[str] | None] = ContextVar("exomem_heat_primary", default=None)
+
+
+@contextmanager
+def primary_paths(paths: Iterable[str]) -> Iterator[None]:
+    """Inside this block a governed commit heats only `paths` (vault-relative);
+    every other page it writes is recorded as our own echo and earns nothing."""
+    token = _PRIMARY.set(frozenset(str(path) for path in paths))
+    try:
+        yield
+    finally:
+        _PRIMARY.reset(token)
+
+
 class Commit(NamedTuple):
     root: Path
     paths: tuple[str, ...]
@@ -1436,10 +1455,13 @@ def observe_commit(commit: Commit | None) -> ObservedCommit | None:
             except OSError:
                 continue
         events: list[HeatEvent] = []
+        primary = _PRIMARY.get()
         if trace is not None and not batch:
             collections = _collection_dirs_on_disk(commit.root, signatures)
             client = _observed_client()
             for rel in signatures:
+                if primary is not None and rel not in primary:
+                    continue
                 channel = classify_commit(
                     rel,
                     traced=True,
