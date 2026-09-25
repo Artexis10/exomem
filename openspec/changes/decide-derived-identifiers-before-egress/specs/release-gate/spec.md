@@ -21,13 +21,18 @@ The terminal entry filter SHALL decide every field of a result entry that names 
 
 ### Requirement: Derived structures decide their candidates before assembly
 
-For a caller other than the owner, a derived structure SHALL decide each candidate page before it assembles, caps, ranks or counts it, so that its answer reads as if the pages withheld from the caller were absent. This SHALL hold for `connect_memory` `context` and `graph-context` (seeds, packed pages, the graph walk, edge endpoints and edge authors, contradictions), relation proposals and the relation queue (targets and the pages their evidence rests on, queue source pages), evolution timelines (anchors, heads and chain members), entity identity (`resolve-entity` status and `create-entity` duplicate refusal), and directory listings and overview folder totals. A reference that names no file SHALL be kept, since the absent case keeps it too. A requested page the caller may not see SHALL be refused exactly as a missing page. The owner's assembly SHALL be unchanged.
+For a caller other than the owner, a derived structure SHALL decide each candidate page before it assembles, caps, ranks or counts it, so that its answer reads as if the pages withheld from the caller were absent. This SHALL hold for `connect_memory` `context` and `graph-context` (seeds, packed pages, the graph walk, edge endpoints and edge authors, contradictions), evolution timelines (anchors, heads and chain members), entity identity (`resolve-entity` status and `create-entity` duplicate refusal), and directory listings and overview folder totals. A reference that names no file SHALL be kept, since the absent case keeps it too. A requested page the caller may not see SHALL be refused exactly as a missing page. Under a governed policy, relation proposals, the relation queue, and triage or acceptance of a relation candidate SHALL be served to the owner only: another audience SHALL receive `available: false` with `reason: "audience_restricted"`, or the `AUDIENCE_RESTRICTED` refusal for an action, decided before any page or candidate is read. The owner's assembly SHALL be unchanged.
 
 #### Scenario: Twin vaults give the same restricted answer
 
 - **WHEN** one vault holds no withheld page, a twin holds one withheld page that collides with or links to visible pages, and a third holds one unrelated withheld page
-- **THEN** a restricted caller's context, graph context, relation proposals, relation queue, evolution timelines, entity lookups and listings are byte-identical across the three
+- **THEN** a restricted caller's context, graph context, evolution timelines, entity lookups and listings are byte-identical across the three
 - **AND** this holds for the `external` audience and for a verified principal named by the rule
+
+#### Scenario: Relation review under a governed policy
+
+- **WHEN** a caller other than the owner asks for the relation queue or relation proposals, or triages or accepts a relation candidate, under a governed policy
+- **THEN** it receives the `audience_restricted` refusal whatever page or reference it names, and the owner's queue, proposals and decisions are unchanged
 
 #### Scenario: An identity only a withheld entity holds
 
@@ -64,7 +69,7 @@ For a reader other than the owner, a derived answer that depends on how a visibl
 #### Scenario: A withheld page shares a visible link's stem
 
 - **WHEN** a withheld page's stem or title collides with a visible link's target
-- **THEN** a restricted reader's graph context, context pack, links, inbound counts, relation proposals and relation queue are those of the twin without the withheld page
+- **THEN** a restricted reader's graph context, context pack, links and inbound counts are those of the twin without the withheld page
 
 #### Scenario: A bare link only a withheld page answers
 

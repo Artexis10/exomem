@@ -23,7 +23,7 @@ The entry filter decides the listed fields and any key ending in `_path`, `_key`
 
 ### Decide before assembly, for callers other than the owner
 
-`restricted_release_filter` returns `None` for the owner and on an ungoverned vault, and the per-page release predicate otherwise. Derived structures take it and apply it where they choose candidates: a graph walk treats a withheld page as excluded (never a seed, hop, endpoint or edge author), relation generators decide targets and evidence pages before per-method caps, the queue decides source pages in priority order before its cap, timelines treat a pointer to a withheld page as a pointer to nothing, entity lookups decide matches before the status, and listings collapse a folder that holds only withheld files. `visible_page_filter` keeps a reference that names no file (an unresolved link, a placeholder), because nothing can be withheld there and the absent twin keeps it too. The owner's calls keep their original shape.
+`restricted_release_filter` returns `None` for the owner and on an ungoverned vault, and the per-page release predicate otherwise. Derived structures take it and apply it where they choose candidates: a graph walk treats a withheld page as excluded (never a seed, hop, endpoint or edge author), timelines treat a pointer to a withheld page as a pointer to nothing, entity lookups decide matches before the status, and listings collapse a folder that holds only withheld files. `visible_page_filter` keeps a reference that names no file (an unresolved link, a placeholder), because nothing can be withheld there and the absent twin keeps it too. The owner's calls keep their original shape.
 
 ### Writer links resolve over the writer's view
 
@@ -37,7 +37,7 @@ The entry filter decides the listed fields and any key ending in `_path`, `_key`
 
 The graph resolves each wikilink once, over the whole vault, and stores only the result. No stored-schema change is needed to re-resolve it: the dependency index already records every page's raw link targets and their lookup keys. For a reader other than the owner, a per-request view re-resolves lazily and only where a request looks: for each page a graph walk touches, and for each page whose recorded targets name one of those pages, a target whose whole-vault candidates (full path, stem, title) include a page the reader may not see is resolved again with those candidates removed, and that page's link edges are re-derived over the reader's view. Only those candidates are decided. The owner never builds a view.
 
-The same view applies where a read surface resolves links itself: inbound links count a bare link when the target's basename is unique among visible pages, pack neighbours resolve and are decided before ranking and the cap, and relation proposals and the relation queue resolve body links over the view, both when the queue is assembled and when a reviewer acts on one of its items. The page provenance strip never removes a bare link: whether a visible page, a withheld page or no page answers it, it is listed as the reader would see it in a vault without the withheld pages, and the page body already shows it. A path, or a link that carries a folder, names a location and is still removed when that location is withheld.
+The same view applies where a read surface resolves links itself: inbound links count a bare link when the target's basename is unique among visible pages, and pack neighbours resolve and are decided before ranking and the cap. The page provenance strip never removes a bare link: whether a visible page, a withheld page or no page answers it, it is listed as the reader would see it in a vault without the withheld pages, and the page body already shows it. A path, or a link that carries a folder, names a location and is still removed when that location is withheld.
 
 ### Activation resolves over the caller's view
 
@@ -47,7 +47,11 @@ The guard omits L0 material silently, as `LEVEL_NONE` defines: a `withheld` mark
 
 ### Counts and ranks follow filtering; whole-vault aggregates are the owner's
 
-Review queues (attention, activation, relation debt, stale, contradiction) decide each finding's page and related pages before fusion, so ranks, scores, totals and summaries are computed over what the caller receives. `inbound-links` counts the links it lists after deciding their source pages. The relation queue counts the source pages it decided; when more visible pages exist than its cap it reports truncation without an unscanned count.
+Review queues (attention, activation, relation debt, stale, contradiction) decide each finding's page and related pages before fusion, so ranks, scores, totals and summaries are computed over what the caller receives. `inbound-links` counts the links it lists after deciding their source pages.
+
+### Relation review is the owner's under a governed policy
+
+Relation proposals pair pages over link resolution and unit relations across the whole vault, and the relation queue ranks and counts them across every eligible page. Under a governed policy `suggest-relations`, the relation queue, and triage or acceptance of a relation candidate are served to the owner only; another audience receives the `audience_restricted` refusal (`AUDIENCE_RESTRICTED` for an action), decided from the principal and the policy before any page or candidate is read, so the answer is the same whatever page or reference is named. The per-reader candidate decisions built for these generators stay in place for the owner/remote audience split and are not reached by another audience. What it prevents: proposals, ranks and totals that move with pages the caller may not see. Cost when it fires wrongly: a restricted caller cannot review relations, which is owner work; that caller pays, and the owner never does.
 
 A whole-vault aggregate cannot be recomputed from a filtered result: an audit, a registry inferred from the corpus (directly, or as the corpus side of a diff), the activation coverage block and the relation queue's coverage block. Under a governed policy these are served to the owner only, as the relation census is (`egress.owner_only_aggregate`); every other bound audience receives `available: false` and `reason: "audience_restricted"`, decided from the principal and the policy before anything is read.
 
@@ -67,5 +71,4 @@ Recall runs without the graph lane and graph enrichment for such a caller (`ask_
 
 ## Risks / Trade-offs
 
-- Typed relations written on a semantic unit, and the targets two pages both answer, are still paired over whole-vault resolution in relation proposals and the relation queue. Their target is decided before it is shown; re-resolving them per reader is left for a ruling.
 - A folder delete by a restricted writer that holds both visible and withheld files, and a create whose path collides with a withheld file, cannot answer exactly as the absent case without either changing the withheld page or changing the contract. They are left for a ruling.

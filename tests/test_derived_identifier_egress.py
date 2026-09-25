@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from pathlib import Path
 from typing import Any
 
@@ -485,7 +484,9 @@ def test_a_guessed_relation_ref_to_a_withheld_page_reads_as_absent(
     }
 
     assert _text(answers["A"]) == _text(answers["B"])
-    assert answers["B"]["message"].startswith("REVIEW_REFRESH_REQUIRED")
+    # Relation review is the owner's under a governed policy: refused before
+    # the reference is resolved, whatever it names.
+    assert answers["B"]["message"].startswith("AUDIENCE_RESTRICTED")
 
 
 # ---------------------------------------------------------------------------
@@ -980,25 +981,20 @@ def test_whole_vault_aggregates_are_served_to_the_owner_only(
     assert all(answer.get("available") is not False for answer in owner.values())
 
 
-_QUEUE_COUNT_FIELDS = (*_QUEUE_FIELDS, "pages_scanned", "pages_truncated", "pages_unscanned", "coverage")
-
-
 @pytest.mark.parametrize("audience", AUDIENCES)
-def test_relation_queue_counts_read_as_if_the_withheld_page_were_absent(
+def test_relation_queue_totals_are_the_owners_under_a_governed_policy(
     tmp_path: Path, audience: str
 ) -> None:
     base, withheld = _inbound_linker()
     vaults = _twins(tmp_path, base, withheld, audience)
     principal = _principal(audience)
 
-    answers = {}
-    for variant, vault in vaults.items():
-        queue = _call(vault, principal, "review_memory", mode="relation-queue")
-        answers[variant] = {field: queue.get(field) for field in _QUEUE_COUNT_FIELDS}
+    answers = {
+        variant: _call(vault, principal, "review_memory", mode="relation-queue")
+        for variant, vault in vaults.items()
+    }
 
-    assert answers["A"]["coverage"] == _RESTRICTED
-    assert _text(answers["A"]) == _text(answers["B"])
-    assert _text(answers["C"]) == _text(answers["B"])
+    assert answers["A"] == answers["B"] == answers["C"] == _RESTRICTED
     owner = _call(vaults["A"], None, "review_memory", mode="relation-queue")
     assert owner["coverage"]["eligible_pages"] > 0
 
@@ -1164,40 +1160,6 @@ def test_restricted_link_resolution_reads_as_if_the_withheld_page_were_absent(
         assert _text(answers["C"][label]) == _text(answers["B"][label]), label
     edges = answers["A"]["graph-context-alpha"]["graph"]["edges"]
     assert any(edge["dst_key"] == f"file:{target}" for edge in edges), edges
-
-
-@pytest.mark.parametrize("audience", AUDIENCES)
-def test_a_restricted_reviewer_can_act_on_a_link_its_view_resolved(
-    tmp_path: Path, audience: str
-) -> None:
-    base, withheld = _stem_collision()
-    vaults = _twins(tmp_path, base, withheld, audience)
-    principal = _principal(audience)
-
-    answers = {}
-    for variant, vault in vaults.items():
-        queue = _call(vault, principal, "review_memory", mode="relation-queue")
-        (item,) = [
-            item
-            for group in queue["groups"]
-            for item in group["items"]
-            if item["method"] == "wikilink"
-        ]
-        answer = _call(
-            vault,
-            principal,
-            "triage_memory",
-            ref=item["ref"],
-            action="dismiss",
-            source_path=item["source_path"],
-        )
-        # The decision's own timestamp differs between any two runs.
-        stamped = re.sub(r'"updated_at": "[^"]*"', '"updated_at": ""', _text(answer))
-        answers[variant] = json.loads(stamped)
-
-    assert "__error__" not in answers["A"], answers["A"]
-    assert _text(answers["A"]) == _text(answers["B"])
-    assert _text(answers["C"]) == _text(answers["B"])
 
 
 @pytest.mark.parametrize("audience", AUDIENCES)
