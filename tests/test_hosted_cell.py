@@ -507,6 +507,44 @@ def test_a_cleared_setting_cannot_be_re_armed_by_its_legacy_spelling(
     assert canonical not in process_env
 
 
+@pytest.mark.parametrize(
+    ("grants", "canonical"),
+    [
+        ("", "EXOMEM_DIARIZE"),
+        ("diarization,embeddings,media,vision", "EXOMEM_DIARIZE"),
+        ("", "EXOMEM_VISION_CAPTION"),
+        ("embeddings", "EXOMEM_DISABLE_EMBEDDINGS"),
+        ("media", "EXOMEM_DISABLE_MEDIA_EXTRACTION"),
+        ("embeddings,media,vision", "EXOMEM_DISABLE_CLIP"),
+        ("file-watcher", "EXOMEM_DISABLE_FILE_WATCHER"),
+    ],
+)
+def test_a_gate_the_hosted_env_pops_cannot_be_re_armed_by_its_legacy_spelling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, grants: str, canonical: str
+) -> None:
+    """Diarization and captioning are denied without a grant, and a granted
+    feature's disable switch is popped; a child's promotion of an inherited
+    `KB_MCP_*` spelling must not turn either back on."""
+    values = {**_env(tmp_path, grants=grants), "EXOMEM_HOSTED_WORKER_LIMIT": "1"}
+    config = HostedCellConfig.from_env(values, require_provisioned=False)
+    legacy = "KB_MCP_" + canonical[len("EXOMEM_"):]
+    process_env = {legacy: "1"}
+    config.apply_process_environment(process_env)
+    assert canonical not in process_env
+    _promote_legacy_into(monkeypatch, process_env)
+    assert canonical not in process_env
+
+
+def test_a_set_hosted_path_keeps_no_legacy_spelling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = HostedCellConfig.from_env(_env(tmp_path), require_provisioned=False)
+    process_env = {"KB_MCP_VAULT_PATH": str(tmp_path / "elsewhere")}
+    config.apply_process_environment(process_env)
+    assert "KB_MCP_VAULT_PATH" not in process_env
+    assert process_env["EXOMEM_VAULT_PATH"] == str(config.vault_root)
+
+
 def test_hosted_config_rejects_protocol_versions_not_implemented_by_this_release(
     tmp_path: Path,
 ) -> None:

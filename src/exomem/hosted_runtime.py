@@ -76,20 +76,6 @@ def _legacy_alias(setting: str) -> str | None:
     return env_compat.LEGACY_PREFIX + setting[len(env_compat.CANONICAL_PREFIX):]
 
 
-# Every cleared setting's legacy `KB_MCP_*` spelling must be cleared too:
-# `env_compat.promote_legacy()` runs again after this clearing and would
-# otherwise copy a surviving legacy value back onto the canonical name. This
-# is derived mechanically from `env_compat`'s own prefix constants rather than
-# hand-listed, so no future addition to `_HOSTED_CLEARED_SETTINGS` can miss it.
-_HOSTED_CLEARED_ENV = tuple(
-    dict.fromkeys(
-        name
-        for setting in _HOSTED_CLEARED_SETTINGS
-        for name in (setting, _legacy_alias(setting))
-        if name is not None
-    )
-)
-
 _DEFAULT_STORAGE_LIMIT_BYTES = 5 * 1024 * 1024 * 1024
 _DEFAULT_UPLOAD_LIMIT_BYTES = 90 * 1024 * 1024
 _DEFAULT_WORKER_LIMIT = 0
@@ -491,18 +477,18 @@ class HostedCellConfig:
         startup.  Callers may pass a private mapping for planning/tests.
         """
         target = os.environ if env is None else env
-        target["EXOMEM_VAULT_PATH"] = str(self.vault_root)
-        target["EXOMEM_HOSTED_STATE_ROOT"] = str(self.state_root)
-        target["EXOMEM_STATE_ROOT"] = str(self.state_root / "vault-state")
-        target["EXOMEM_WRITER_LEASE_STATE_DIR"] = str(self.state_root)
-        target["EXOMEM_LOG_DIR"] = str(self.log_root)
-        target["EXOMEM_UPLOAD_MAX_BYTES"] = str(self.resource_limits.upload_bytes)
-        target["TMPDIR"] = str(self.state_root / "tmp" / "runtime")
-        target["EXOMEM_DISABLE_QUERY_LOG"] = "1"
-        target["EXOMEM_DISABLE_USAGE_BOOST"] = "1"
-        target["EXOMEM_DISABLE_RELEVANCE_CHECK"] = "1"
-        for inherited_setting in _HOSTED_CLEARED_ENV:
-            target.pop(inherited_setting, None)
+        _set_setting(target, "EXOMEM_VAULT_PATH", str(self.vault_root))
+        _set_setting(target, "EXOMEM_HOSTED_STATE_ROOT", str(self.state_root))
+        _set_setting(target, "EXOMEM_STATE_ROOT", str(self.state_root / "vault-state"))
+        _set_setting(target, "EXOMEM_WRITER_LEASE_STATE_DIR", str(self.state_root))
+        _set_setting(target, "EXOMEM_LOG_DIR", str(self.log_root))
+        _set_setting(target, "EXOMEM_UPLOAD_MAX_BYTES", str(self.resource_limits.upload_bytes))
+        _set_setting(target, "TMPDIR", str(self.state_root / "tmp" / "runtime"))
+        _set_setting(target, "EXOMEM_DISABLE_QUERY_LOG", "1")
+        _set_setting(target, "EXOMEM_DISABLE_USAGE_BOOST", "1")
+        _set_setting(target, "EXOMEM_DISABLE_RELEVANCE_CHECK", "1")
+        for inherited_setting in _HOSTED_CLEARED_SETTINGS:
+            _clear_setting(target, inherited_setting)
 
         workers_enabled = self.resource_limits.worker_count > 0
         _apply_disable_gate(
@@ -1451,18 +1437,39 @@ def _normalize_feature(feature: str) -> str:
     return str(feature).strip().lower().replace("_", "-")
 
 
+def _set_setting(target: MutableMapping[str, str], variable: str, value: str) -> None:
+    target[variable] = value
+    _drop_legacy_alias(target, variable)
+
+
+def _clear_setting(target: MutableMapping[str, str], variable: str) -> None:
+    target.pop(variable, None)
+    _drop_legacy_alias(target, variable)
+
+
+def _drop_legacy_alias(target: MutableMapping[str, str], variable: str) -> None:
+    # A child process inherits this environment and its own `import exomem`
+    # runs `env_compat.promote_legacy()` again, which would copy a surviving
+    # `KB_MCP_*` value back onto a name hosted mode just cleared. Every name
+    # this boundary sets or clears therefore drops its legacy spelling too,
+    # so the outcome never depends on whether the canonical name is present.
+    alias = _legacy_alias(variable)
+    if alias is not None:
+        target.pop(alias, None)
+
+
 def _apply_disable_gate(target: MutableMapping[str, str], enabled: bool, variable: str) -> None:
     if enabled:
-        target.pop(variable, None)
+        _clear_setting(target, variable)
     else:
-        target[variable] = "1"
+        _set_setting(target, variable, "1")
 
 
 def _apply_truthy_gate(target: MutableMapping[str, str], enabled: bool, variable: str) -> None:
     if enabled:
-        target[variable] = "1"
+        _set_setting(target, variable, "1")
     else:
-        target.pop(variable, None)
+        _clear_setting(target, variable)
 
 
 def _staging_root(config: HostedCellConfig) -> Path:
