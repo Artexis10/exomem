@@ -9,7 +9,10 @@ uses (`scripts/eval_retrieval.py`), and asserts the measured hybrid ranking
 clears hard floors — mean NDCG@10 / MRR / recall@10 with margin, plus a
 per-query guard that no golden query silently drops to recall@10 == 0.
 
-Heavy: loads BAAI/bge-base-en-v1.5. It runs only in the dedicated `retrieval-eval`
+Heavy: loads the recall encoder, `BAAI/bge-m3` on a personal host (the baseline
+below was measured on the English model it replaced; the switch's own bars
+against that baseline are in tests/test_recall_multilingual_embeddings.py).
+It runs only in the dedicated `retrieval-eval`
 CI job (`pytest -m embeddings`, embeddings extra installed) and locally. The
 module is import-skipped where torch / sentence-transformers are absent, so the
 lean 3-version matrix collects nothing here.
