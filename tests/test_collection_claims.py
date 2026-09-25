@@ -266,6 +266,47 @@ def test_route_stays_silent_on_a_tie_or_miss() -> None:
     assert route(["billing"], [left]) is None
 
 
+def _generic_overlap_corpus() -> tuple[RoutingTarget, RoutingTarget, RoutingTarget, RoutingTarget]:
+    metrics = _target(
+        "Knowledge Base/Records/Metrics/_collection.md",
+        {"capture", "release", "review", "dashboard"},
+    )
+    standups = _target(
+        "Knowledge Base/Records/Standups/_collection.md", {"capture", "release"}
+    )
+    retros = _target("Knowledge Base/Records/Retros/_collection.md", {"review", "capture"})
+    okrs = _target("Knowledge Base/Records/OKRs/_collection.md", {"release", "review"})
+    return metrics, standups, retros, okrs
+
+
+def test_route_stays_silent_on_generic_term_overlap_alone() -> None:
+    """"capture", "release" and "review" are each declared by most of these
+    invented collections, so their corpus-wide document frequency is high --
+    a strict raw-count winner on those terms alone still gets no suggestion."""
+    metrics, standups, retros, okrs = _generic_overlap_corpus()
+
+    assert route(["capture", "release", "review"], [metrics, standups, retros, okrs]) is None
+
+
+def test_route_still_fires_on_a_collection_distinctive_term() -> None:
+    """The same generic overlap, plus one term ("dashboard") only Metrics
+    declares, gives a real subject signal and still routes."""
+    metrics, standups, retros, okrs = _generic_overlap_corpus()
+
+    advisory = route(
+        ["capture", "release", "review", "dashboard"],
+        [metrics, standups, retros, okrs],
+    )
+
+    assert advisory == {
+        "collection": metrics.collection,
+        "title": "Metrics",
+        "matched_terms": ["capture", "dashboard", "release", "review"],
+        "natural_key": ["account", "effective_on"],
+        "strength": "moderate",
+    }
+
+
 def test_claim_routing_normalizes_nfkc_for_authored_and_declared_terms(
     tmp_path: Path,
 ) -> None:
