@@ -1102,15 +1102,19 @@ def _newer_custody_covers_path(
     pending row for it -- so the path's newer bytes are visible or already
     published, never in a gap.
     """
+    # Driven by the store sequence, not by the path: a shared page such as the
+    # knowledge base log rides in every batch ever written, while only the
+    # batches after this one can cover it.
     return (
         connection.execute(
             "SELECT 1 FROM derived_batches AS b "
-            "JOIN derived_batch_paths AS p ON p.batch_id = b.batch_id "
-            "JOIN pending_recall_rows AS r ON r.batch_id = b.batch_id "
-            "AND r.rel_path = p.rel_path "
             "WHERE b.rowid > ? AND b.state IN ('ready', 'completed', 'superseded') "
-            "AND p.rel_path = ? AND r.state IN ('live', 'retired') LIMIT 1",
-            (batch_sequence, rel_path),
+            "AND EXISTS (SELECT 1 FROM derived_batch_paths AS p "
+            "WHERE p.batch_id = b.batch_id AND p.rel_path = ?) "
+            "AND EXISTS (SELECT 1 FROM pending_recall_rows AS r "
+            "WHERE r.batch_id = b.batch_id AND r.rel_path = ? "
+            "AND r.state IN ('live', 'retired')) LIMIT 1",
+            (batch_sequence, rel_path, rel_path),
         ).fetchone()
         is not None
     )
@@ -1155,13 +1159,13 @@ def _newer_custody_wrote_bytes(
     return (
         connection.execute(
             "SELECT 1 FROM derived_batches AS b "
-            "JOIN derived_batch_paths AS p ON p.batch_id = b.batch_id "
-            "JOIN pending_recall_rows AS r ON r.batch_id = b.batch_id "
-            "AND r.rel_path = p.rel_path "
             "WHERE b.rowid > ? AND b.state IN ('ready', 'completed', 'superseded') "
-            "AND p.rel_path = ? AND p.after_hash IS ? "
-            "AND r.state IN ('live', 'retired') LIMIT 1",
-            (batch_sequence, rel_path, identity),
+            "AND EXISTS (SELECT 1 FROM derived_batch_paths AS p "
+            "WHERE p.batch_id = b.batch_id AND p.rel_path = ? AND p.after_hash IS ?) "
+            "AND EXISTS (SELECT 1 FROM pending_recall_rows AS r "
+            "WHERE r.batch_id = b.batch_id AND r.rel_path = ? "
+            "AND r.state IN ('live', 'retired')) LIMIT 1",
+            (batch_sequence, rel_path, identity, rel_path),
         ).fetchone()
         is not None
     )
