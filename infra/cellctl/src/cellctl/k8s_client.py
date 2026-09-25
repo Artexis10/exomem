@@ -121,18 +121,22 @@ class ClusterClient:
     # -- self-check (D4): confirm cellctl's own admission confinement exists --
 
     def admission_policy_present(self, policy_name: str, binding_name: str) -> bool:
-        """True only when the policy exists and its binding names it with a
-        Deny action and no matchResources: a binding downgraded to Audit
-        confines nothing, and one narrowed by matchResources confines less
-        than the policy says (D4)."""
+        """True only when the policy fails closed and validates something,
+        and its binding names it with a Deny action and no matchResources: a
+        policy set to Ignore or stripped of its validations, a binding
+        downgraded to Audit, or one narrowed by matchResources all confine
+        less than the policy says (D4)."""
 
         try:
-            self._admission.read_validating_admission_policy(policy_name)
+            policy = self._admission.read_validating_admission_policy(policy_name)
             binding = self._admission.read_validating_admission_policy_binding(binding_name)
         except ApiException as error:
             if _not_found(error):
                 return False
             raise
+        policy_spec = policy.spec
+        if policy_spec is None or policy_spec.failure_policy != "Fail" or not policy_spec.validations:
+            return False
         spec = binding.spec
         return (
             spec is not None

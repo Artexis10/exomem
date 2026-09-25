@@ -310,11 +310,23 @@ def test_list_cell_namespaces_selects_by_the_cell_label() -> None:
 
 
 class _Admission:
-    def __init__(self, *, policy_name: str, actions: list[str] | None, match_resources=None) -> None:
+    def __init__(
+        self,
+        *,
+        policy_name: str,
+        actions: list[str] | None,
+        match_resources=None,
+        failure_policy: str | None = "Fail",
+        validations: list | None = None,
+    ) -> None:
         self._binding = NS(spec=NS(policy_name=policy_name, validation_actions=actions, match_resources=match_resources))
+        self._policy_spec = NS(
+            failure_policy=failure_policy,
+            validations=[NS(expression="true")] if validations is None else validations,
+        )
 
     def read_validating_admission_policy(self, name):
-        return NS(metadata=NS(name=name))
+        return NS(metadata=NS(name=name), spec=self._policy_spec)
 
     def read_validating_admission_policy_binding(self, name):
         return self._binding
@@ -372,3 +384,14 @@ def test_every_kubernetes_call_carries_a_request_timeout() -> None:
     with pytest.raises(_Stop):
         core.read_namespace("exo-cell-" + CELL_ID, _request_timeout=3)
     assert seen == [API_REQUEST_TIMEOUT, API_REQUEST_TIMEOUT, 3]
+
+
+def test_the_self_check_rejects_a_policy_that_fails_open_or_validates_nothing() -> None:
+    def present(**policy) -> bool:
+        client = ClusterClient.__new__(ClusterClient)
+        client._admission = _Admission(policy_name="exomem-cellctl-scope", actions=["Deny"], **policy)
+        return client.admission_policy_present("exomem-cellctl-scope", "exomem-cellctl-scope")
+
+    assert present() is True
+    assert present(failure_policy="Ignore") is False
+    assert present(validations=[]) is False

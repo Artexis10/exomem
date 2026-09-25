@@ -233,3 +233,47 @@ def test_the_gateway_egresses_on_8765_only_to_cell_pods_in_cell_namespaces() -> 
     assert _selects(peer["podSelector"], cell_pod)
     assert not _selects(peer["podSelector"], job_pod)
     assert not _selects(peer["podSelector"], {"app.kubernetes.io/name": "exomem-cloud-gateway"})
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cellctl_admission_policy_pins_every_object_cellctl_writes_to_what_it_renders() -> None:
+    # Security MED-1: the policy pins NetworkPolicies, the Secret, the PVC,
+    # the quota and pod-template placement to cellctl's own renderer, and
+    # cellctl deletes only namespaces and Jobs. Its literals must match the
+    # renderer's constants, or every cell's apply would be refused.
+    from cellctl.manifests import (
+        CELL_PORT,
+        GATEWAY_NAMESPACE,
+        GATEWAY_POD_LABEL,
+        GATEWAY_POD_LABEL_VALUE,
+        JOB_KIND_LABEL,
+        STORAGE_CLASS,
+        CellManifestSpec,
+    )
+
+    documents = _helm_template()
+    policy = _find(documents, "ValidatingAdmissionPolicy", "exomem-cellctl-scope")
+    expressions = "\n".join(v["expression"] for v in policy["spec"]["validations"])
+    spec = CellManifestSpec(cell_id="a" * 16, image="i", replicas=1, read_only=False)
+    for literal in (
+        f"'{spec.secret_name}'",
+        f"'{spec.pvc_name}'",
+        f"'{STORAGE_CLASS}'",
+        f"'{JOB_KIND_LABEL}'",
+        f"{{'kubernetes.io/metadata.name': '{GATEWAY_NAMESPACE}'}}",
+        f"{{'{GATEWAY_POD_LABEL}': '{GATEWAY_POD_LABEL_VALUE}'}}",
+        f"port == {CELL_PORT}",
+        "'cell-quota'",
+        "['default-deny', 'runtime-ingress', 'job-egress']",
+        "request.resource.resource in ['namespaces', 'jobs']",
+        "variables.target.type == 'Opaque'",
+        "!has(variables.target.spec.dataSource)",
+        "has(v.persistentVolumeClaim) || has(v.emptyDir)",
+        "!has(variables.podSpec.nodeName)",
+        "!has(variables.podSpec.runtimeClassName)",
+    ):
+        assert literal in expressions, literal
+    values = yaml.safe_load((PLATFORM_CHART / "values.yaml").read_text(encoding="utf-8"))
+    import json
+
+    assert json.dumps(values["cells"]["jobEgressExcept"], separators=(",", ":")) in expressions

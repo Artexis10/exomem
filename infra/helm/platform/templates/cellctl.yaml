@@ -354,6 +354,12 @@ spec:
     - name: labels
       expression: >-
         has(variables.target.metadata.labels) ? variables.target.metadata.labels : {}
+    - name: podSpec
+      expression: >-
+        variables.target.spec.template.spec
+    - name: np
+      expression: >-
+        variables.target.spec
   validations:
     # 1. Every write cellctl makes must land inside a namespace named
     # exo-cell-<16 lowercase base32> (D4, D5's namespace_name convention).
@@ -386,19 +392,34 @@ spec:
         variables.target.spec.template.spec.automountServiceAccountToken == false
       message: cellctl may run only pod templates with automountServiceAccountToken false.
     # 4b. ...and none of them may mount a credential through a volume
-    # instead, which automountServiceAccountToken does not cover. Projected
-    # sources are an allowlist (configMap, secret, downwardAPI), so a
-    # serviceAccountToken, clusterTrustBundle or podCertificate source -- or
-    # any source a later Kubernetes adds -- is denied, and so is a CSI
-    # inline volume, which the restricted Pod Security profile allows.
+    # instead, which automountServiceAccountToken does not cover. Volume
+    # types are an allowlist (persistentVolumeClaim, emptyDir, secret,
+    # configMap, downwardAPI, projected), so a CSI inline, ephemeral or image
+    # volume -- which the restricted Pod Security profile allows -- is
+    # denied, and so is any type a later Kubernetes adds. Projected sources
+    # are an allowlist too (configMap, secret, downwardAPI), so a
+    # serviceAccountToken, clusterTrustBundle or podCertificate source is
+    # denied.
     - expression: >-
         !(request.resource.resource in ['statefulsets', 'jobs']) || request.operation == 'DELETE' ||
-        !has(variables.target.spec.template.spec.volumes) ||
-        variables.target.spec.template.spec.volumes.all(v,
+        !has(variables.podSpec.volumes) ||
+        variables.podSpec.volumes.all(v,
           !has(v.csi) &&
+          (has(v.persistentVolumeClaim) || has(v.emptyDir) || has(v.secret) || has(v.configMap) ||
+            has(v.downwardAPI) || has(v.projected)) &&
           (!has(v.projected) || !has(v.projected.sources) ||
             v.projected.sources.all(s, has(s.configMap) || has(s.secret) || has(s.downwardAPI))))
-      message: cellctl may run only pod templates with no CSI inline volume, whose projected volume sources are configMap, secret or downwardAPI.
+      message: cellctl may run only pod templates whose volumes are persistentVolumeClaim, emptyDir, secret, configMap, downwardAPI or projected, with no CSI inline volume, and whose projected volume sources are configMap, secret or downwardAPI.
+    # 4c. ...and none of them may pick its node, runtime or priority, or
+    # rewrite name resolution. A StatefulSet may not carry its own
+    # volumeClaimTemplates: the cell's one PVC is rendered separately.
+    - expression: >-
+        !(request.resource.resource in ['statefulsets', 'jobs']) || request.operation == 'DELETE' ||
+        (!has(variables.podSpec.nodeName) && !has(variables.podSpec.runtimeClassName) &&
+          !has(variables.podSpec.priorityClassName) && !has(variables.podSpec.hostAliases) &&
+          (request.resource.resource != 'statefulsets' || !has(variables.target.spec.volumeClaimTemplates) ||
+            size(variables.target.spec.volumeClaimTemplates) == 0))
+      message: cellctl may run only pod templates without nodeName, runtimeClassName, priorityClassName or hostAliases, and StatefulSets without volumeClaimTemplates.
     # 5. Every Service cellctl creates or updates must be ClusterIP with no
     # externalIPs.
     - expression: >-
@@ -406,6 +427,108 @@ spec:
         (variables.target.spec.type == 'ClusterIP' &&
           (!has(variables.target.spec.externalIPs) || variables.target.spec.externalIPs.size() == 0))
       message: cellctl may create or update a Service only as ClusterIP with no externalIPs.
+    # 6. cellctl deletes only namespaces (D10) and hold Jobs (D8). Every
+    # other object, a NetworkPolicy above all, goes only with its namespace.
+    - expression: >-
+        request.operation != 'DELETE' || request.resource.resource in ['namespaces', 'jobs']
+      message: cellctl may delete only a cell namespace or a Job.
+    # 7. The Secret is the cell's own Opaque credentials Secret, never a
+    # service-account-token Secret the token controller would fill in.
+    - expression: >-
+        request.resource.resource != 'secrets' || request.operation == 'DELETE' ||
+        (variables.target.metadata.name == 'cell-credentials' &&
+          (!has(variables.target.type) || variables.target.type == 'Opaque'))
+      message: cellctl may write only the Opaque Secret cell-credentials.
+    # 8. The PVC is the cell's one encrypted volume, provisioned fresh: no
+    # other storage class, no data source and no pre-bound volume.
+    - expression: >-
+        request.resource.resource != 'persistentvolumeclaims' || request.operation == 'DELETE' ||
+        (variables.target.metadata.name == 'cell-data' &&
+          variables.target.spec.storageClassName == 'exomem-cloud-encrypted' &&
+          !has(variables.target.spec.dataSource) && !has(variables.target.spec.dataSourceRef) &&
+          (!has(variables.target.spec.volumeName) ||
+            (request.operation == 'UPDATE' && has(oldObject.spec.volumeName) &&
+              oldObject.spec.volumeName == variables.target.spec.volumeName)))
+      message: cellctl may write only the PVC cell-data, on exomem-cloud-encrypted, with no data source or pre-bound volume.
+    # 9. The ResourceQuota is the cell's own, with one PVC and two pods and
+    # no other kind of limit.
+    - expression: >-
+        request.resource.resource != 'resourcequotas' || request.operation == 'DELETE' ||
+        (variables.target.metadata.name == 'cell-quota' &&
+          !has(variables.target.spec.scopes) && !has(variables.target.spec.scopeSelector) &&
+          variables.target.spec.hard.all(k, k in ['persistentvolumeclaims', 'requests.storage', 'pods',
+            'requests.cpu', 'requests.memory', 'limits.cpu', 'limits.memory']) &&
+          variables.target.spec.hard['persistentvolumeclaims'] == '1' &&
+          variables.target.spec.hard['pods'] == '2')
+      message: cellctl may write only the ResourceQuota cell-quota, with one PVC and two pods.
+    # 10. NetworkPolicies are exactly the three cellctl renders (D5, D11),
+    # each pinned to its rendered shape, so a policy can never open egress
+    # or ingress. The cell id in runtime-ingress's selector is the one the
+    # namespace name carries.
+    - expression: >-
+        request.resource.resource != 'networkpolicies' || request.operation == 'DELETE' ||
+        variables.target.metadata.name in ['default-deny', 'runtime-ingress', 'job-egress']
+      message: cellctl may write only the NetworkPolicies default-deny, runtime-ingress and job-egress.
+    - expression: >-
+        request.resource.resource != 'networkpolicies' || request.operation == 'DELETE' ||
+        variables.target.metadata.name != 'default-deny' ||
+        (variables.np.policyTypes == ['Ingress', 'Egress'] &&
+          !has(variables.np.podSelector.matchLabels) && !has(variables.np.podSelector.matchExpressions) &&
+          (!has(variables.np.ingress) || size(variables.np.ingress) == 0) &&
+          (!has(variables.np.egress) || size(variables.np.egress) == 0))
+      message: cellctl may write default-deny only as a deny-all policy for every pod.
+    - expression: >-
+        request.resource.resource != 'networkpolicies' || request.operation == 'DELETE' ||
+        variables.target.metadata.name != 'runtime-ingress' ||
+        (variables.np.policyTypes == ['Ingress', 'Egress'] &&
+          variables.np.podSelector.matchLabels ==
+            {'app.kubernetes.io/name': 'exomem-cell', 'exomem.io/cell': variables.namespaceName.substring(9)} &&
+          !has(variables.np.podSelector.matchExpressions) &&
+          (!has(variables.np.egress) || size(variables.np.egress) == 0) &&
+          size(variables.np.ingress) == 1 &&
+          size(variables.np.ingress[0].from) == 1 &&
+          !has(variables.np.ingress[0].from[0].ipBlock) &&
+          variables.np.ingress[0].from[0].namespaceSelector.matchLabels ==
+            {'kubernetes.io/metadata.name': 'exomem-cloud'} &&
+          !has(variables.np.ingress[0].from[0].namespaceSelector.matchExpressions) &&
+          variables.np.ingress[0].from[0].podSelector.matchLabels ==
+            {'app.kubernetes.io/name': 'exomem-cloud-gateway'} &&
+          !has(variables.np.ingress[0].from[0].podSelector.matchExpressions) &&
+          size(variables.np.ingress[0].ports) == 1 &&
+          variables.np.ingress[0].ports[0].protocol == 'TCP' &&
+          variables.np.ingress[0].ports[0].port == 8765 &&
+          !has(variables.np.ingress[0].ports[0].endPort))
+      message: cellctl may write runtime-ingress only as gateway-to-cell ingress on TCP 8765 with no egress.
+    - expression: >-
+        request.resource.resource != 'networkpolicies' || request.operation == 'DELETE' ||
+        variables.target.metadata.name != 'job-egress' ||
+        (variables.np.policyTypes == ['Egress'] &&
+          !has(variables.np.podSelector.matchLabels) &&
+          size(variables.np.podSelector.matchExpressions) == 1 &&
+          variables.np.podSelector.matchExpressions[0].key == 'exomem.io/cell-job' &&
+          variables.np.podSelector.matchExpressions[0].operator == 'Exists' &&
+          (!has(variables.np.ingress) || size(variables.np.ingress) == 0) &&
+          size(variables.np.egress) == 2 &&
+          size(variables.np.egress[0].to) == 1 &&
+          has(variables.np.egress[0].to[0].ipBlock) &&
+          !has(variables.np.egress[0].to[0].namespaceSelector) &&
+          !has(variables.np.egress[0].to[0].podSelector) &&
+          variables.np.egress[0].to[0].ipBlock.cidr == '0.0.0.0/0' &&
+          {{ .Values.cells.jobEgressExcept | default list | toJson }}.all(c,
+            has(variables.np.egress[0].to[0].ipBlock.except) && c in variables.np.egress[0].to[0].ipBlock.except) &&
+          size(variables.np.egress[0].ports) == 1 &&
+          variables.np.egress[0].ports[0].protocol == 'TCP' &&
+          variables.np.egress[0].ports[0].port == 443 &&
+          !has(variables.np.egress[0].ports[0].endPort) &&
+          size(variables.np.egress[1].to) == 1 &&
+          !has(variables.np.egress[1].to[0].ipBlock) &&
+          variables.np.egress[1].to[0].namespaceSelector.matchLabels == {'kubernetes.io/metadata.name': 'kube-system'} &&
+          !has(variables.np.egress[1].to[0].namespaceSelector.matchExpressions) &&
+          variables.np.egress[1].to[0].podSelector.matchLabels == {'k8s-app': 'kube-dns'} &&
+          !has(variables.np.egress[1].to[0].podSelector.matchExpressions) &&
+          size(variables.np.egress[1].ports) == 2 &&
+          variables.np.egress[1].ports.all(p, p.protocol in ['UDP', 'TCP'] && p.port == 53 && !has(p.endPort)))
+      message: cellctl may write job-egress only as Job egress to TCP 443 outside the excepted ranges, plus kube-dns.
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

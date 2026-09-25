@@ -391,6 +391,10 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
             "--namespace", "exomem-platform",
             "--values", str(PLATFORM_CHART / "values.validation.yaml"),
             "--set", f"cellctl.cellImageRepository={repository}",
+            # This cellctl renders job-egress with no except list, so MinIO on
+            # the docker network stays reachable; the admission policy pins
+            # job-egress to the chart's list, which must match.
+            "--set-json", "cells.jobEgressExcept=[]",
             "--set", "cloudGateway.enabled=false",
             "--set", "cloudIngress.enabled=false",
             "--set", "cert-manager.enabled=false",
@@ -421,6 +425,10 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
             "--namespace", "exomem-platform",
             "--values", str(PLATFORM_CHART / "values.validation.yaml"),
             "--set", f"cellctl.cellImageRepository={repository}",
+            # This cellctl renders job-egress with no except list, so MinIO on
+            # the docker network stays reachable; the admission policy pins
+            # job-egress to the chart's list, which must match.
+            "--set-json", "cells.jobEgressExcept=[]",
             "--set", "cloudIngress.enabled=false",
             "--set", "cert-manager.enabled=false",
             "--show-only", "templates/cloud-gateway.yaml",
@@ -973,6 +981,82 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
         assert "projected volume sources are configMap, secret or downwardAPI" in denied_mount.stderr, (
             described, denied_mount.stderr
         )
+
+    # Security MED-1: with a stolen cellctl token, a NetworkPolicy that
+    # opens egress, a service-account-token Secret, a PVC off the encrypted
+    # class, a widened quota, an ephemeral volume or a pod that picks its
+    # node or runtime must all be denied, and so must deleting default-deny.
+    def _live(kind: str, name: str) -> dict[str, Any]:
+        live = json.loads(_kubectl(k3s.name, ["get", kind, name, "--namespace", namespace, "--output=json"]).stdout)
+        return {
+            "apiVersion": live["apiVersion"],
+            "kind": live["kind"],
+            "metadata": {"name": live["metadata"]["name"], "namespace": namespace},
+            "spec": live["spec"],
+        }
+
+    forged_writes: dict[str, dict[str, Any]] = {}
+    allow_all = _live("networkpolicy", "job-egress")
+    allow_all["metadata"]["name"] = "allow-all"
+    allow_all["spec"] = {"podSelector": {}, "policyTypes": ["Egress"], "egress": [{}]}
+    forged_writes["an extra allow-all NetworkPolicy"] = allow_all
+    open_default = _live("networkpolicy", "default-deny")
+    open_default["spec"] = {"podSelector": {}, "policyTypes": ["Egress"], "egress": [{}]}
+    forged_writes["default-deny rewritten to allow egress"] = open_default
+    job_open = _live("networkpolicy", "job-egress")
+    job_open["spec"]["egress"][0]["ports"] = [{"protocol": "TCP", "port": 5432}]
+    forged_writes["job-egress widened to 5432"] = job_open
+    ingress_from_all = _live("networkpolicy", "runtime-ingress")
+    ingress_from_all["spec"]["ingress"][0]["from"] = [{"namespaceSelector": {}}]
+    forged_writes["runtime-ingress from every namespace"] = ingress_from_all
+    forged_writes["a service-account-token Secret"] = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": "stolen-token",
+            "namespace": namespace,
+            "annotations": {"kubernetes.io/service-account.name": "default"},
+        },
+        "type": "kubernetes.io/service-account-token",
+    }
+    quota = _live("resourcequota", "cell-quota")
+    quota["spec"]["hard"]["pods"] = "50"
+    forged_writes["a quota with 50 pods"] = quota
+    for described, mutate in {
+        "an ephemeral volume": lambda pod: pod.setdefault("volumes", []).append(
+            {
+                "name": "eph",
+                "ephemeral": {
+                    "volumeClaimTemplate": {
+                        "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": "1Gi"}}}
+                    }
+                },
+            }
+        ),
+        "a nodeName": lambda pod: pod.update(nodeName="elsewhere"),
+        "a runtimeClassName": lambda pod: pod.update(runtimeClassName="runc"),
+        "hostAliases": lambda pod: pod.update(hostAliases=[{"ip": "10.0.0.1", "hostnames": ["object-storage"]}]),
+    }.items():
+        forged_pod = copy.deepcopy(stateful_set)
+        mutate(forged_pod["spec"]["template"]["spec"])
+        forged_writes[f"a StatefulSet with {described}"] = forged_pod
+    for described, document in forged_writes.items():
+        print(f"[3.10] scenario: admission denies {described}")
+        verb = "create" if document["kind"] == "Secret" else "apply"
+        denied_write = _kubectl(
+            k3s.name, [verb, "--dry-run=server", "--filename=-", f"--as={cellctl_username}"],
+            documents=[document], check=False,
+        )
+        assert denied_write.returncode != 0, described
+        assert "exomem-cellctl-scope" in denied_write.stderr, (described, denied_write.stderr)
+    print("[3.10] scenario: admission denies deleting default-deny")
+    denied_delete = _kubectl(
+        k3s.name,
+        ["delete", "networkpolicy", "default-deny", "--namespace", namespace, "--dry-run=server", f"--as={cellctl_username}"],
+        check=False,
+    )
+    assert denied_delete.returncode != 0
+    assert "exomem-cellctl-scope" in denied_delete.stderr, denied_delete.stderr
 
     # === scenario: live NetworkPolicy enforcement (not just admission). ===
 
