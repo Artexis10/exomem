@@ -196,3 +196,32 @@ def test_b_a_false_positive_is_held_until_the_evidence_changes(tmp_path: Path) -
     assert again is not None and again["family"] == dreamer_families.LINK_FAMILY
     assert again["ref"] == item["ref"]
     assert again["fingerprint"] != first_fingerprint
+
+
+def test_the_hook_line_names_a_ref_its_own_advice_accepts(tmp_path: Path) -> None:
+    """The session-start line says "Review with review_item_context" and ends in
+    a ref: that ref must resolve there, and dispose of the item through triage."""
+    import re
+
+    from exomem._hooks import exomem_retrieve_nudge as hook
+
+    vault = _journey_vault(tmp_path)
+    start = time.time()
+    _quiet(vault, start)
+    _quiet(vault, start + 2 * HOUR)
+    item = _session(vault)
+    assert item is not None and item["family"] == dreamer_families.LINK_FAMILY
+    (line,) = hook._upkeep_lines({"upkeep": {"items": [item]}})
+    assert "review_item_context" in line
+    rendered = re.search(r"\[([^\[\]]+)\]$", line).group(1)
+    context = _tool(vault, "review_item_context", ref=rendered)
+    assert context["mutated"] is False
+    triaged = _tool(
+        vault,
+        "triage_memory",
+        ref=rendered,
+        action="dismiss",
+        why="false_positive: unrelated notes",
+        expected_fingerprint=item["fingerprint"],
+    )
+    assert triaged["family"] == dreamer_families.LINK_FAMILY, triaged

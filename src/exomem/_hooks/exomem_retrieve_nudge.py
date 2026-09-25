@@ -1167,7 +1167,9 @@ def _upkeep_lines(packet: dict) -> list[str]:
     then says how to handle it: read `review_item_context` first, then act
     through the item's own route or dispose of it through `triage_memory`. The
     ref ends the line like every other, collapsed like the prose, so no field
-    of the item can start a line of its own.
+    of the item can start a line of its own. It is the context route's upkeep
+    ref, which both tools the line names accept; a link item's own ref is a
+    relation ref that `review_item_context` rejects.
     """
     block = packet.get("upkeep")
     if not isinstance(block, dict):
@@ -1189,7 +1191,10 @@ def _upkeep_lines(packet: dict) -> list[str]:
             "or triage_memory dismiss|snooze."
         )
         label = str(item.get("label") or "upkeep")
-        lines.append(_packet_line(f"upkeep ({label})", text, str(item.get("ref") or "")))
+        context = item.get("context_route") if isinstance(item.get("context_route"), dict) else {}
+        args = context.get("args") if isinstance(context.get("args"), dict) else {}
+        ref = str(args.get("ref") or item.get("ref") or "")
+        lines.append(_packet_line(f"upkeep ({label})", text, ref))
     return lines
 
 
