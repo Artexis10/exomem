@@ -612,7 +612,10 @@ def view_digest(
     digest alone for a caller with no keys, else that plus its own session
     and workspace tiers. Another session's activity never moves it unless it
     reaches this caller's tiers, so parallel sessions cost each other no
-    cache hits."""
+    cache hits. A caller whose own tiers hold nothing is served the vault's
+    packet, so it shares the vault's digest: a fresh session's first turn
+    and a keyless duplicate of it (the hook's call, then the agent's) hit
+    the same cache entry."""
     who = attribution or Attribution()
     if not who.session and not who.workspace:
         return profile.digest
@@ -626,6 +629,8 @@ def view_digest(
         for item in recent(profile, attribution=who, marks=marks, limit=_DIGEST_CONTACTS)
         if item.tier != TIER_VAULT
     ]
+    if not scoped and not contacts:
+        return profile.digest
     material = repr((profile.digest, scoped, contacts))
     return hashlib.sha256(material.encode("utf-8", "surrogatepass")).hexdigest()[:16]
 
@@ -1506,11 +1511,17 @@ def note_selection(
     channel: str,
     *,
     attribution: Attribution | None = None,
+    ts_ns: int | None = None,
 ) -> bool:
     """Record a `read`, `cite` or `pick` of each working-context page the
     caller was released. One sqlite insert, a 50 ms busy timeout at most,
     and it never raises. Serving a packet is never a selection: only these
-    three seams call this."""
+    three seams call this.
+
+    `ts_ns` dates a pick at the mint of the token that carries it: the pick
+    and its thread are one act, so the pick can never be the deliberate act
+    "after the mint" that unseats its own thread, even for a caller whose
+    copy of the token lost the page to visibility (withheld means absent)."""
     if channel not in (*SELECTION, "pick") or disabled():
         return False
     try:
@@ -1527,7 +1538,7 @@ def note_selection(
             return False
         collections = _collection_dirs_on_disk(vault_root, wanted)
         who = attribution or Attribution(client=_observed_client())
-        now = time.time_ns()
+        now = int(ts_ns) if ts_ns else time.time_ns()
         events = [
             HeatEvent(
                 now,
@@ -1893,6 +1904,8 @@ def _state(profile: HeatProfile, watcher: str) -> str:
         return "empty"
     if watcher in ("partial", "behind"):
         return watcher
+    if all(event.origin == "seed" for event in profile.events):
+        return "seeded"
     start = profile.session_start_ns
     latest = [
         event

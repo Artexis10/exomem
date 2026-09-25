@@ -751,10 +751,12 @@ def test_the_packet_replaces_the_reminder(
     assert hook.REMINDER not in context
     assert "depot stock: 180 kg" in context
     assert len(context) <= hook._working_set_max_chars()
-    # The rung carries the session's attribution, never the raw session id.
+    # The rung carries the session's attribution, never the raw session id,
+    # and the workspace as a hash of the project, never its path (ruling S5-1).
     assert seen[0]["attribution"] == {
         "client": "claude-code",
         "session": hook.episode_key("claude-code", SESSION),
+        "workspace": hook.workspace_key(os.getcwd()),
     }
 
 
@@ -2116,3 +2118,110 @@ def test_the_deployed_retrieve_hook_still_matches_the_packaged_one() -> None:
         / "exomem_retrieve_nudge.py"
     ).read_bytes()
     assert deployed == packaged
+
+
+# --------------------------------------------------------------------------- #
+# Ruling S5-1: the workspace key
+# --------------------------------------------------------------------------- #
+
+
+def test_the_workspace_key_is_the_projects_git_top_level_hashed(tmp_path: Path) -> None:
+    project = tmp_path / "project-alpha"
+    (project / "src" / "deep").mkdir(parents=True)
+    (project / ".git").mkdir()
+    worktree = tmp_path / "project-alpha-feature"
+    (worktree / "docs").mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+    loose = tmp_path / "no-repository-here"
+    loose.mkdir()
+
+    key = hook.workspace_key(str(project / "src" / "deep"))
+
+    # Two sessions anywhere in one project share it.
+    assert key == hook.workspace_key(str(project)) == hook.workspace_key(str(project / "src"))
+    assert len(key) == 24 and int(key, 16) >= 0
+    # A worktree is its own project; a folder outside any repository is itself.
+    assert hook.workspace_key(str(worktree / "docs")) not in (key, "")
+    assert hook.workspace_key(str(loose)) not in (key, "")
+    # It names no path.
+    assert "project" not in key and str(tmp_path) not in key
+
+
+def test_attribution_carries_the_workspace_of_the_sessions_directory(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+
+    sent = hook.attribution(SESSION, str(tmp_path / "sub"))
+
+    assert sent == {
+        "client": "claude-code",
+        "session": hook.episode_key("claude-code", SESSION),
+        "workspace": hook.workspace_key(str(tmp_path)),
+    }
+    assert SESSION not in json.dumps(sent) and str(tmp_path) not in json.dumps(sent)
+
+
+def test_a_service_that_predates_the_workspace_key_still_gets_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plugin can update before the service it talks to: the service that
+    knows `client` and `session` but not `workspace` refuses the new field,
+    and the next request keeps the rest of the attribution."""
+    import urllib.error
+
+    bodies: list[dict] = []
+
+    class _Response:
+        def getcode(self) -> int:
+            return 200
+
+        def read(self) -> bytes:
+            return json.dumps({"success": True, "data": {"abstained": True}}).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(request, timeout):
+        body = json.loads(request.data.decode("utf-8"))
+        bodies.append(body)
+        if "workspace" in body:
+            raise urllib.error.HTTPError(request.full_url, 400, "UNKNOWN_PARAM", {}, None)
+        return _Response()
+
+    monkeypatch.setattr(hook, "_rest_port", lambda: 1234)
+    monkeypatch.setattr(hook.urllib.request, "urlopen", fake_urlopen)
+    packet = hook._fetch_packet_via_rest("continue", "key", "", 1.0, hook.attribution(SESSION))
+
+    assert packet == {"abstained": True}
+    assert [sorted(body) for body in bodies] == [
+        ["client", "max_chars", "session", "turn", "workspace"],
+        ["client", "max_chars", "session", "turn"],
+    ]
+
+
+def test_the_cli_rung_passes_the_workspace_and_steps_down_for_an_older_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    argvs: list[list[str]] = []
+
+    class _Proc:
+        def __init__(self, code: int) -> None:
+            self.returncode = code
+            self.stdout = json.dumps({"success": True, "data": {"abstained": True}})
+
+    def fake_run(argv, **_kwargs):
+        argvs.append(list(argv))
+        return _Proc(2 if "--workspace" in argv else 0)
+
+    monkeypatch.setattr(hook.shutil, "which", lambda name: "/usr/bin/exomem")
+    monkeypatch.setattr(hook.subprocess, "run", fake_run)
+    attribution = hook.attribution(SESSION)
+    packet = hook._fetch_packet_via_cli("continue", "", 1.0, attribution)
+
+    assert packet == {"abstained": True}
+    first, second = argvs
+    assert first[first.index("--workspace") + 1] == attribution["workspace"]
+    assert first.index("--workspace") < first.index("--")
+    assert "--workspace" not in second and "--session" in second

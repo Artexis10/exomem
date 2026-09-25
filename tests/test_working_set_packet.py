@@ -1453,7 +1453,7 @@ def test_a_retired_page_is_never_the_hottest_anchor(stateful_vault: Path) -> Non
     assert "Knowledge Base/Products/Retired Sled.md" not in offered
     assert "Knowledge Base/Products/Retired Sled.md" not in working_set.hot_profile(
         stateful_vault, rows=rows
-    )
+    ).members
     # The profile falls through to the next-freshest current page rather
     # than going empty because the freshest one was retired.
     assert packet["abstained"] is False, packet.get("abstention")
@@ -1470,8 +1470,8 @@ def test_the_hot_profile_is_bounded_and_ranked_deterministically(
     index = working_set_index.WorkingSetIndex(stateful_vault)
     rows = working_set_resolve.facts_from_rows(index.anchors())
 
-    first = working_set.hot_profile(stateful_vault, rows=rows)
-    second = working_set.hot_profile(stateful_vault, rows=rows)
+    first = working_set.hot_profile(stateful_vault, rows=rows).members
+    second = working_set.hot_profile(stateful_vault, rows=rows).members
 
     assert first == second
     assert first == frozenset({"Knowledge Base/Products/Cargo Sled.md"})
@@ -1495,7 +1495,7 @@ def test_the_previous_packets_own_anchor_outranks_a_fresher_edit(
         stateful_vault,
         rows=rows,
         continuity_refs=frozenset({working_set_resolve.anchor_ref(carried)}),
-    )
+    ).members
 
     assert hot == frozenset({carried.path})
 
@@ -1518,7 +1518,7 @@ def test_a_page_superseded_by_another_is_never_hot(stateful_vault: Path) -> None
     stale_rows = [row for row in rows if row.path == "Knowledge Base/Products/Old Sled.md"]
     assert stale_rows and stale_rows[0].lifecycle == "active", "the index cannot see it"
 
-    hot = working_set.hot_profile(stateful_vault, rows=rows)
+    hot = working_set.hot_profile(stateful_vault, rows=rows).members
     packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
 
     assert "Knowledge Base/Products/Old Sled.md" not in hot
@@ -1550,7 +1550,7 @@ def test_the_previous_packets_anchors_are_one_tier_taken_whole(
         stateful_vault,
         rows=rows,
         continuity_refs=frozenset(working_set_resolve.anchor_ref(row) for row in carried),
-    )
+    ).members
 
     assert hot == frozenset(row.path for row in carried)
 

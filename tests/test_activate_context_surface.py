@@ -332,10 +332,21 @@ def test_attribution_is_accepted_and_never_changes_the_packet(
         activation_vault, turn=TURN, client="claude-code", session="ep-" + "a1" * 16
     )
 
+    # A session with no history of its own gets exactly the vault's packet.
     assert json.dumps(_without_token(plain), sort_keys=True) == json.dumps(
         _without_token(attributed), sort_keys=True
     )
-    assert served[0] == served[1], "attribution must not reach resolution or the cache key"
+    # Re-based for ruling S5-1 (the heat is scoped to the caller's thread
+    # first): attribution now reaches `serve`, so the caller's own session can
+    # rank first, but only as derived keys. Nothing else about the request
+    # differs, and the raw session id and client never reach it.
+    assert served[0].get("attribution") is None
+    held = served[1]["attribution"]
+    assert held.client == "claude-code"
+    assert held.session and "a1" * 16 not in held.session
+    assert {key: value for key, value in served[0].items() if key != "attribution"} == {
+        key: value for key, value in served[1].items() if key != "attribution"
+    }
     assert not {"client", "session"} & set(served[1])
 
 

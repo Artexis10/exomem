@@ -47,7 +47,14 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from . import context_roles, sidecar_store, working_set, working_set_index, working_set_resolve
+from . import (
+    context_roles,
+    sidecar_store,
+    working_set,
+    working_set_heat,
+    working_set_index,
+    working_set_resolve,
+)
 
 log = logging.getLogger(__name__)
 
@@ -131,6 +138,7 @@ def cache_key(
     continuity: str | None = None,
     anchor: str | None = None,
     continuity_refs: frozenset[str] | set[str] = frozenset(),
+    heat_digest: str = "",
 ) -> tuple:
     """The packet identity.
 
@@ -152,6 +160,14 @@ def cache_key(
     `purpose` is deliberately not a parameter: it may widen or narrow what an
     audience sees, so a purpose-keyed cache would be a second, weaker copy of
     the release plane (design D7).
+
+    `heat_digest` is the digest of the heat projection's output as THIS caller
+    ranks it (`working_set_heat.view_digest`): a read, a pick or a work edit
+    that reaches the referent or the recent-context block moves it, so a
+    read-only shift is never served from the cache, and a batch or an
+    external burst, which record nothing, costs no cache hits. It carries the
+    caller's own session and workspace tiers (ruling S5-1), so two parallel
+    sessions asking "continue" are two packets.
     """
     return (
         tuple(freshness_key) if isinstance(freshness_key, (list, tuple)) else str(freshness_key),
@@ -164,6 +180,7 @@ def cache_key(
         tuple(sorted(str(ref) for ref in continuity_refs)),
         str(anchor or ""),
         bool(os.environ.get("EXOMEM_DISABLE_EMBEDDINGS")),
+        str(heat_digest),
     )
 
 
@@ -385,7 +402,8 @@ def read_continuity(
 
 
 #: The anchor statuses a token carries forward: what the packet served.
-_MINTED_STATUSES = frozenset({"resolved", working_set_resolve.RETRIEVAL_CARRIED_STATUS})
+MINTED_STATUSES = frozenset({"resolved", working_set_resolve.RETRIEVAL_CARRIED_STATUS})
+_MINTED_STATUSES = MINTED_STATUSES
 
 
 def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
@@ -406,7 +424,7 @@ def mint_continuity(packet: Mapping[str, Any], *, identity: str) -> str:
     A carried page (`retrieval_carried`) is minted too: it is the one page
     the packet served, not a listed candidate, and "continue" after it can
     only resume it if the token names it. Its ref is its path, which is what
-    `working_set.continuity_page` resumes; a later turn's `continuity` still
+    the hot profile resumes as a page referent; a later turn's `continuity` still
     only qualifies an anchor that turn reached.
     """
     if not identity or packet.get("abstained"):
@@ -490,6 +508,56 @@ def visible_continuity_refs(
         ):
             kept.add(ref)
     return frozenset(kept)
+
+
+#: How many of the workspace's other sessions' threads a request considers.
+#: The newest few are all a fresh session can mean; each costs a release
+#: decision per page, so the bound is also a bound on work.
+VISIBLE_WORKSPACE_MARKS = 8
+
+
+def visible_marks(
+    vault_root: Path,
+    profile: working_set_heat.HeatProfile,
+    attribution: working_set_heat.Attribution | None,
+    *,
+    purpose: str | None = None,
+) -> dict[str, working_set_heat.SessionMark]:
+    """The served threads this caller's tiers may rank, each page of them one
+    this audience may see (ruling S5-1).
+
+    Decided before the cache key and the compile, for the reason
+    `visible_continuity_refs` is: the packet cache is not keyed on the
+    principal, so a visibility decision made inside a compiled packet would be
+    served to the next audience. A withheld page and a missing one reach the
+    ranking as the same nothing. Only the caller's own session and the
+    workspace's newest `VISIBLE_WORKSPACE_MARKS` sessions are looked at; a
+    caller with no keys ranks no thread at all.
+    """
+    who = attribution or working_set_heat.Attribution()
+    if not who.session and not who.workspace:
+        return {}
+    wanted = [profile.sessions[who.session]] if who.session in profile.sessions else []
+    if who.workspace:
+        wanted += sorted(
+            (
+                mark
+                for key, mark in profile.sessions.items()
+                if key != who.session and mark.workspace == who.workspace and mark.paths
+            ),
+            key=lambda mark: (-mark.seen_ns, mark.session),
+        )[:VISIBLE_WORKSPACE_MARKS]
+    from .governance import egress
+
+    out: dict[str, working_set_heat.SessionMark] = {}
+    for mark in wanted:
+        kept = tuple(
+            path
+            for path in mark.paths
+            if egress.quick_page_visible(vault_root, path, purpose=purpose)
+        )
+        out[mark.session] = mark._replace(paths=kept)
+    return out
 
 
 def reset_caches_for_tests() -> None:
@@ -999,12 +1067,19 @@ def serve(
     evidence_token: tuple[int, int, int] | None = None,
     freshness_snapshot: Any = None,
     lexical_seconds: float = 0.0,
+    attribution: working_set_heat.Attribution | None = None,
 ) -> dict[str, Any]:
     """Compile (or reuse) one unguarded packet. Never raises: it abstains instead.
 
     `lexical_seconds` is what this request's own lexical pass measured,
     passed through to the carry so it can ask the budget for a reserve its
     stage can actually be paid for out of.
+
+    The heat projection is folded and read ONCE here, before the key: the
+    key carries the digest of what this caller ranks from, and the same
+    profile is handed to the compile, so a packet is always compiled against
+    the profile it was keyed on. `attribution` is the caller's derived keys
+    (ruling S5-1).
     """
     root = Path(vault_root)
     limit = working_set.clamp_budget(max_chars)
@@ -1067,6 +1142,14 @@ def serve(
     except Exception:  # noqa: BLE001 - a ref that cannot be decided is not disclosed
         log.warning("continuity visibility check failed; dropping the refs", exc_info=True)
         continuity_refs = frozenset()
+    with working_set._span(timings, "working_set.heat"):
+        heat_profile = working_set_heat.profile(root)
+        try:
+            marks = visible_marks(root, heat_profile, attribution, purpose=purpose)
+        except Exception:  # noqa: BLE001 - a thread that cannot be decided is not ranked
+            log.warning("session thread visibility check failed; ranking none", exc_info=True)
+            marks = {}
+        heat_digest = working_set_heat.view_digest(heat_profile, attribution, marks=marks)
     key = cache_key(
         freshness_key=freshness_key,
         index_generation=index.generation(),
@@ -1077,6 +1160,7 @@ def serve(
         continuity=continuity,
         anchor=anchor,
         continuity_refs=continuity_refs,
+        heat_digest=heat_digest,
     )
     cache_identity = (str(root.absolute()), key, lexical_state, index.token())
     with _CACHE_LOCK:
@@ -1116,6 +1200,9 @@ def serve(
             continuity_passed=continuity_passed,
             anchor=anchor,
             lexical_seconds=lexical_seconds,
+            heat_profile=heat_profile,
+            attribution=attribution,
+            marks=marks,
         )
     except working_set.BudgetExhausted as exc:
         # A deliberate budget skip, not a bug: `log.info`, no traceback. The

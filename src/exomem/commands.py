@@ -5967,6 +5967,7 @@ def op_activate_context(
     include_timings: bool = False,
     client: str | None = None,
     session: str | None = None,
+    workspace: str | None = None,
 ) -> dict:
     """Compile durable context for a raw conversational turn, without a query.
 
@@ -6060,12 +6061,21 @@ def op_activate_context(
             identically and no packet is built.
         include_timings: Include per-stage timings for diagnostics.
         client: Optional lowercase label for the calling client, e.g.
-            `claude-code`, `codex` or `chatgpt`. Recorded in a host-local
-            activation log only; an invalid label is ignored, never refused.
+            `claude-code`, `codex` or `chatgpt`. Recorded host-locally only; an
+            invalid label is ignored, never refused.
         session: Optional opaque conversation identifier, at most 256
             characters, such as the `episode` key an `episode_memory` record
-            returned. Only a vault-keyed hash of it is recorded. Neither
-            argument ever changes the packet.
+            returned. Pass the same one on every turn of a conversation: a turn
+            that names nothing ("continue") is then answered from THIS
+            conversation's own last thread and picks first, before anything
+            other conversations touched, and `recent_context` lists its pages
+            first. Only a salted hash of it is stored, on this machine.
+        workspace: Optional opaque key for the project or folder the
+            conversation runs in, at most 256 characters, such as a hash of
+            the working directory. A fresh conversation in the same workspace
+            continues that workspace's thread before the rest of the vault's.
+            Only a salted hash of it is stored. Omitting both keys ranks by
+            the whole vault's recent work.
 
     Returns: {recent_context, anchors, roles, units, pointers, current_state,
              missing, ambiguity, budget, generation, abstained, abstention?,
@@ -6110,9 +6120,12 @@ def op_activate_context(
     # that abstains still resolved placement several times on its way there,
     # and the abstention paths are the ones a struggling server takes most.
     #
-    # `client` and `session` stop HERE: they are recorded by the activation
-    # log after the packet exists and never reach resolution, the packet, its
-    # cache key or the continuity token.
+    # `client`, `session` and `workspace` never reach resolution or the
+    # continuity token. They rank the heat projection's tiers for a turn that
+    # names nothing (ruling S5-1), enter the packet cache key only as the
+    # digest of that ranking, and are recorded by the activation log after the
+    # packet exists — the session as a vault-keyed hash, the workspace not at
+    # all.
     started = time.perf_counter()
     with state_paths_module.resolution_scope():
         bound_token = None
@@ -6133,6 +6146,7 @@ def op_activate_context(
                 include_timings=include_timings,
                 client=client,
                 session=session,
+                workspace=workspace,
             )
         except Exception as error:
             query_log.log_activation_call(
@@ -6168,6 +6182,7 @@ def _op_activate_context_body(
     include_timings: bool = False,
     client: str | None = None,
     session: str | None = None,
+    workspace: str | None = None,
 ) -> dict:
     """`op_activate_context`'s implementation, called with a budget already
     bound (either the caller's MCP budget, or the door budget the public
@@ -6461,6 +6476,15 @@ def _op_activate_context_body(
             raise
         except Exception:  # noqa: BLE001 - an optimization that fails just does not apply
             log.debug("agent-picked-page early visibility check unavailable", exc_info=True)
+    # The caller's derived keys, once: ruling S5-1's tiers, the pick's own
+    # attribution and the session's last served thread all use the same one.
+    attribution = (
+        working_set_heat_module.attribution_for(
+            vault_root, client=client, session=session, workspace=workspace
+        )
+        if client or session or workspace
+        else None
+    )
     packet = working_set_runtime_module.serve(
         vault_root,
         turn=turn,
@@ -6475,6 +6499,7 @@ def _op_activate_context_body(
         evidence_token=evidence_token,
         freshness_snapshot=snapshot,
         lexical_seconds=lexical_seconds,
+        attribution=attribution,
     )
     # An override that resolved nothing named no anchor of this index. Refused
     # here, before the guard, with the same words a withheld ref gets below —
@@ -6543,12 +6568,34 @@ def _op_activate_context_body(
                 if isinstance(item, Mapping) and item.get("status") == "resolved"
             ],
             "pick",
-            attribution=(
-                working_set_heat_module.attribution_for(
-                    vault_root, client=client, session=session
-                )
-                if client or session
-                else None
+            attribution=attribution,
+            ts_ns=working_set_runtime_module.continuity_minted_ns(token) if token else None,
+        )
+    if attribution is not None and attribution.session:
+        # The session's last served thread (ruling S5-1): what its token names,
+        # after the guard, so a compacted or resumed conversation that lost its
+        # token still continues its own work. Never an event in the ring:
+        # serving is not heat for anyone else's ranking.
+        working_set_heat_module.note_session(
+            vault_root,
+            working_set_heat_module.SessionMark(
+                session=attribution.session,
+                workspace=attribution.workspace,
+                client=attribution.client,
+                paths=tuple(
+                    str(item.get("path") or "")
+                    for item in (packet.get("anchors") or ())
+                    if token
+                    and isinstance(item, Mapping)
+                    and item.get("status") in working_set_runtime_module.MINTED_STATUSES
+                    and item.get("path")
+                ),
+                minted_ns=(
+                    working_set_runtime_module.continuity_minted_ns(token) or time.time_ns()
+                    if token
+                    else 0
+                ),
+                seen_ns=time.time_ns(),
             ),
         )
     # After the guard and never cached: advice to this caller about recording
