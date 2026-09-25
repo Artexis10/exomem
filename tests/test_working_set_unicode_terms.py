@@ -30,6 +30,8 @@ import re
 import string
 import unicodedata
 
+import pytest
+
 from exomem import working_set_index as wsi
 from exomem import working_set_resolve as resolve_module
 
@@ -568,6 +570,22 @@ def test_a_cjk_name_inside_a_token_that_mixes_scripts_is_contained() -> None:
     assert _evidence("quillmereの予算を確認して", budget) == {"budget.md": frozenset({"rare_term"})}
     assert _evidence("quillmere予算", budget) == {"budget.md": frozenset({"rare_term"})}
     assert _evidence("quillmereの予算を確認して", [_row("latin.md", "Quill")]) == {}
+
+
+def test_a_token_below_every_unspaced_script_is_never_classified_by_character(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Most turn tokens are Latin or Cyrillic. A token with no code point at or
+    above the lowest unspaced-script range holds no run, so it is skipped whole
+    instead of classifying each character; a mixed token is still split."""
+    real = resolve_module._continua_class
+    classified: list[str] = []
+    monkeypatch.setattr(resolve_module, "_continua_class", lambda text: classified.append(text) or real(text))
+
+    assert resolve_module._continua_runs("quillmere") == []
+    assert resolve_module._continua_runs("медведица") == []
+    assert classified == []
+    assert [run for _offset, run, _cls in resolve_module._continua_runs("quillmereの予算")] == ["の予算"]
 
 
 def test_latin_and_cyrillic_tokens_are_unaffected() -> None:
