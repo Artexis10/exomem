@@ -131,6 +131,7 @@ from . import vocabulary_workflow as vocabulary_workflow_module
 from . import workflow_contracts as workflow_contracts_module
 from . import workflow_skills as workflow_skills_module
 from . import working_set as working_set_module
+from . import working_set_heat as working_set_heat_module
 from . import working_set_index as working_set_index_module
 from . import working_set_runtime as working_set_runtime_module
 from .command_surface import (
@@ -3078,6 +3079,7 @@ def op_fetch(
         frontmatter_only=False,
         include_history=False,
     )
+    working_set_heat_module.note_selection(vault_root, [page.path], "read")
     out = {
         "id": page.path,
         "title": _title_from_page(page.path, page.frontmatter, page.body),
@@ -3960,6 +3962,7 @@ def op_get(
         frontmatter_only=frontmatter_only,
         include_history=include_history,
     )
+    working_set_heat_module.note_selection(vault_root, [out["path"]], "read")
     if include_history:
         with call_spans_module.span("read.history", {}) as measured:
             out["history"] = vault.read_log_entries(vault_root, out["path"])
@@ -4445,6 +4448,7 @@ def op_replace(
         raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
     if written_path := getattr(result, "new_path", None):
         query_log.log_write_call(tool="replace", written_path=written_path, cited_sources=sources)
+        working_set_heat_module.note_citations(vault_root, sources or ())
     return result.as_dict()
 
 
@@ -4936,6 +4940,7 @@ def op_note(
         raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
     if written_path := getattr(result, "path", None):
         query_log.log_write_call(tool="note", written_path=written_path, cited_sources=sources)
+        working_set_heat_module.note_citations(vault_root, sources or ())
     return result.as_dict()
 
 
@@ -6126,6 +6131,8 @@ def op_activate_context(
                 continuity=continuity,
                 anchor=anchor,
                 include_timings=include_timings,
+                client=client,
+                session=session,
             )
         except Exception as error:
             query_log.log_activation_call(
@@ -6159,6 +6166,8 @@ def _op_activate_context_body(
     continuity: str | None = None,
     anchor: str | None = None,
     include_timings: bool = False,
+    client: str | None = None,
+    session: str | None = None,
 ) -> dict:
     """`op_activate_context`'s implementation, called with a budget already
     bound (either the caller's MCP budget, or the door budget the public
@@ -6521,6 +6530,27 @@ def _op_activate_context_body(
     )
     if token:
         packet["continuity"] = token
+    if anchor:
+        # The agent's admitted choice is a deliberate act (design D6): after the
+        # guard, so a refused or withheld pick never reaches here. Serving a
+        # packet is never heat; only this seam and the read and citation seams
+        # record a selection.
+        working_set_heat_module.note_selection(
+            vault_root,
+            [
+                str(item.get("path") or "")
+                for item in packet.get("anchors") or ()
+                if isinstance(item, Mapping) and item.get("status") == "resolved"
+            ],
+            "pick",
+            attribution=(
+                working_set_heat_module.attribution_for(
+                    vault_root, client=client, session=session
+                )
+                if client or session
+                else None
+            ),
+        )
     # After the guard and never cached: advice to this caller about recording
     # its conversation, not material about the vault, and it names no page.
     episode_due = episode_nudge_module.on_activation(vault_root)
@@ -6630,6 +6660,7 @@ def op_read_memory(
             frontmatter_only=False,
             include_history=False,
         )
+        working_set_heat_module.note_selection(vault_root, [page.path], "read")
         return semantic_unit_read_module.read_semantic_unit(
             vault_root,
             page=page,

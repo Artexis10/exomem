@@ -774,3 +774,153 @@ def test_every_product_write_command_commits_under_a_trace(vault, name: str) -> 
 
     assert len(seen) == 1, "the leaf must run on the writer path"
     assert seen[0] is not None and seen[0][1] == name
+
+
+# --------------------------------------------------------------------------- #
+# The selection seams: reads, citations and admitted picks
+# --------------------------------------------------------------------------- #
+
+SESSION_CAPTURE = "Knowledge Base/Sources/Sessions/2026-05-05-metabolism-curriculum-design.md"
+ARTICLE = "Knowledge Base/Sources/Articles/2026-06-02-postgres-autovacuum-tuning.md"
+NONSENSE_TURN = "zqxwvu plonktastic frobnitz quibblewhomp"
+NAMED_TURN = "I'm planning to tow the Cargo Sled north — how much depot stock is left?"
+REAL_ANCHOR = "Knowledge Base/Products/Cargo Sled.md"
+
+
+def _selections(vault) -> list[tuple[str, str]]:
+    return [
+        (item.path, item.channel)
+        for item in heat.load(vault).events
+        if item.channel in (*heat.SELECTION, "pick")
+    ]
+
+
+def _read(vault, rel: str):
+    from exomem import writer_lease
+
+    return writer_lease.invoke_command(_command("read_memory"), vault, path=rel)
+
+
+@pytest.fixture
+def carry_vault(vault):
+    from test_working_set_carry import _seed_carry_pages
+    from test_working_set_index import _seed_planning, _seed_structure
+
+    from exomem import lexstore, working_set_index, working_set_runtime
+
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _seed_carry_pages(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    heat.reset_for_tests()
+    return vault
+
+
+def test_a_read_records_a_read_event(vault) -> None:
+    from test_governance_egress import _external, _reset_caches, write_rule, write_scope
+
+    from exomem import commands
+    from exomem.governance.principal import request_scope
+
+    heat.reset_for_tests()
+    _read(vault, INSIGHT)
+    commands.op_get(vault, PATTERN)
+    # Raw material is evidence about work, not the work: its read is no event.
+    _read(vault, ARTICLE)
+
+    assert _selections(vault) == [(INSIGHT, "read"), (PATTERN, "read")]
+
+    # A read this caller is not released is no event either: otherwise trying
+    # to read a withheld page would heat it, and "continue" would tell the
+    # caller it exists.
+    write_scope(vault, paths="Knowledge Base/Notes/Patterns/*", name="Patterns")
+    write_rule(vault, ceiling=0)
+    _reset_caches()
+    with request_scope(_external()):
+        try:
+            commands.op_get(vault, PATTERN)
+        except Exception:  # noqa: BLE001 - whatever the refusal is, it records nothing
+            pass
+    assert _selections(vault) == [(INSIGHT, "read"), (PATTERN, "read")]
+
+
+def test_a_citation_records_a_cite_event(vault) -> None:
+    from exomem import writer_lease
+
+    heat.reset_for_tests()
+    content = (
+        "Retries against the queue stay bounded.\n\n## Observations\n\n"
+        "- [operations] Retries against the ingest queue stay bounded at three attempts.\n\n"
+        "## Relations\n\n- relates_to [[Idempotency Key]]\n"
+    )
+    writer_lease.invoke_command(
+        _command("remember"),
+        vault,
+        content=content,
+        title="Bounded ingest retries",
+        slug="bounded-ingest-retries",
+        sources=[SESSION_CAPTURE, ARTICLE],
+    )
+
+    # The captured session it drew on is a citation; the article is raw material.
+    assert [pair for pair in _selections(vault) if pair[1] == "cite"] == [
+        (SESSION_CAPTURE, "cite")
+    ]
+
+
+def test_an_admitted_pick_records_a_pick_and_a_refused_pick_records_nothing(
+    carry_vault,
+) -> None:
+    from test_governance_egress import _external, _reset_caches, write_rule, write_scope
+    from test_working_set_carry import CARRY_PAGE
+
+    from exomem import commands, working_set_runtime
+    from exomem.governance.principal import request_scope
+
+    session = "ep-" + "5e" * 16
+    commands.op_activate_context(
+        carry_vault, turn=NONSENSE_TURN, anchor=CARRY_PAGE, client="codex", session=session
+    )
+    commands.op_activate_context(carry_vault, turn=NONSENSE_TURN, anchor=REAL_ANCHOR)
+
+    picks = [item for item in heat.load(carry_vault).events if item.channel == "pick"]
+    assert [item.path for item in picks] == [CARRY_PAGE, REAL_ANCHOR]
+    # The caller's own attribution, derived, never the value it passed.
+    assert picks[0].session == heat.attribution_for(carry_vault, session=session).session
+    assert picks[0].client == "codex" and session not in picks[0]
+    assert picks[1].session == "" and picks[1].client == ""
+
+    with pytest.raises(ValueError):
+        commands.op_activate_context(
+            carry_vault, turn=NONSENSE_TURN, anchor="Knowledge Base/Nowhere/absent.md"
+        )
+    write_scope(carry_vault, paths="Knowledge Base/Notes/Research/*", name="Research")
+    write_rule(carry_vault, ceiling=0)
+    _reset_caches()
+    working_set_runtime.reset_caches_for_tests()
+    with pytest.raises(ValueError):
+        with request_scope(_external()):
+            commands.op_activate_context(carry_vault, turn=NONSENSE_TURN, anchor=CARRY_PAGE)
+
+    assert [item.path for item in heat.load(carry_vault).events if item.channel == "pick"] == [
+        CARRY_PAGE,
+        REAL_ANCHOR,
+    ]
+
+
+def test_serving_a_packet_records_no_heat(carry_vault) -> None:
+    from exomem import commands
+
+    first = commands.op_activate_context(carry_vault, turn=NAMED_TURN)
+    assert first["abstained"] is False, first.get("abstention")
+    settled = heat.load(carry_vault).events
+
+    for _ in range(3):
+        commands.op_activate_context(carry_vault, turn=NAMED_TURN)
+        commands.op_activate_context(carry_vault, turn="continue")
+
+    # Serving is the server's own output, not a choice: nothing accumulates.
+    assert heat.load(carry_vault).events == settled
+    assert not [item for item in settled if item.channel in (*heat.SELECTION, "pick")]

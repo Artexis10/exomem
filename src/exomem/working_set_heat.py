@@ -1467,6 +1467,131 @@ def recent_attributed(vault_root: Path, paths: Iterable[str]) -> dict[str, tuple
     return out
 
 
+# --------------------------------------------------------------------------- #
+# The selection seams: reads, citations, admitted picks
+# --------------------------------------------------------------------------- #
+
+#: Working-context reasons a selection event may name. An episode recap is
+#: offered once per conversation from its own `episode_page` rows, so a read
+#: of a retired revision must not bring it back beside the newest.
+_SELECTABLE = frozenset({"edited", "captured"})
+
+
+def _owner_request() -> bool:
+    try:
+        from .governance.principal import OWNER_AUDIENCE, effective_principal
+
+        return str(effective_principal().audience_id or "") == OWNER_AUDIENCE
+    except Exception:  # noqa: BLE001 - an unknown principal is not the owner
+        return False
+
+
+def _released(vault_root: Path, rel: str) -> bool:
+    """Whether the current caller may see `rel`. A selection is recorded only
+    for a page released to its caller: otherwise trying to read a withheld
+    page would heat it, and the next "continue" would say it exists."""
+    if _owner_request():
+        return True
+    try:
+        from .governance import egress
+
+        return bool(egress.quick_page_visible(vault_root, rel))
+    except Exception:  # noqa: BLE001 - undecidable is not released
+        return False
+
+
+def note_selection(
+    vault_root: Path,
+    paths: Iterable[str],
+    channel: str,
+    *,
+    attribution: Attribution | None = None,
+) -> bool:
+    """Record a `read`, `cite` or `pick` of each working-context page the
+    caller was released. One sqlite insert, a 50 ms busy timeout at most,
+    and it never raises. Serving a packet is never a selection: only these
+    three seams call this."""
+    if channel not in (*SELECTION, "pick") or disabled():
+        return False
+    try:
+        import time
+
+        from . import working_set
+
+        wanted = [
+            rel
+            for rel in dict.fromkeys(str(path) for path in paths)
+            if rel and _kb_relative(vault_root, Path(vault_root) / rel) == rel
+        ]
+        if not wanted:
+            return False
+        collections = _collection_dirs_on_disk(vault_root, wanted)
+        who = attribution or Attribution(client=_observed_client())
+        now = time.time_ns()
+        events = [
+            HeatEvent(
+                now,
+                rel,
+                channel,
+                origin=channel,
+                client=who.client,
+                session=who.session,
+                workspace=who.workspace,
+            )
+            for rel in wanted
+            if working_set._recent_reason_for(rel, collections=collections) in _SELECTABLE
+            and _released(vault_root, rel)
+        ]
+    except Exception:  # noqa: BLE001 - heat never fails the read it describes
+        log.debug("heat selection could not be classified", exc_info=True)
+        return False
+    return append(vault_root, events) if events else False
+
+
+def cited_paths(vault_root: Path, sources: Iterable[object]) -> list[str]:
+    """The vault-relative pages a governed write's `sources` name, spelled
+    the way the heat ring keys pages. Brackets, an alias and a missing
+    knowledge-base prefix or `.md` are tolerated, as the writers tolerate
+    them; a stable reference is resolved read-only; a value that names no
+    file is dropped (one `stat` per source, on the write path)."""
+    from . import memory_refs
+    from .kbdir import kb_prefix
+
+    out: list[str] = []
+    for raw in sources or ():
+        text = str(raw or "").strip()
+        if text.startswith("[[") and text.endswith("]]"):
+            text = text[2:-2].strip()
+        text = text.split("|", 1)[0].strip()
+        if not text:
+            continue
+        if text.lower().startswith(memory_refs.REF_PREFIX):
+            try:
+                text = memory_refs.resolve_identifier_read_only(vault_root, text)
+            except Exception:  # noqa: BLE001 - an unresolvable ref names nothing
+                continue
+        if not text.startswith(kb_prefix()):
+            text = kb_prefix() + text.lstrip("/")
+        if not text.lower().endswith(".md"):
+            text += ".md"
+        try:
+            if (Path(vault_root) / text).is_file() and text not in out:
+                out.append(text)
+        except OSError:
+            continue
+    return out
+
+
+def note_citations(vault_root: Path, sources: Iterable[object]) -> bool:
+    """`note_selection(..., "cite")` over a governed write's cited sources."""
+    try:
+        paths = cited_paths(vault_root, sources)
+    except Exception:  # noqa: BLE001 - heat never fails the write it describes
+        log.debug("heat citation could not be resolved", exc_info=True)
+        return False
+    return note_selection(vault_root, paths, "cite") if paths else False
+
+
 def reset_for_tests() -> None:
     """Forget every cached profile and in-process fold state."""
     with _LOCK:
