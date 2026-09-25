@@ -24,6 +24,7 @@ from exomem import (
     file_watcher,
     freshness,
     lexstore,
+    memory_refs,
     working_set_heat,
     working_set_index,
     working_set_runtime,
@@ -727,3 +728,93 @@ def test_the_hooks_call_and_the_agents_duplicate_share_one_cache_entry(
 
     assert len(compiled) == 1, compiled
     assert _resolved(hook) == _resolved(agent)
+
+
+# --------------------------------------------------------------------------- #
+# Episodes are heat
+# --------------------------------------------------------------------------- #
+
+_MARIT_REF = memory_refs.memory_ref(_MARIT_ID)
+
+
+def _record(vault: Path, *, about: list[str], episode: str | None = None) -> dict:
+    """One recap, recorded the way an agent records it at a stopping point."""
+    from exomem import schema as schema_module
+    from exomem.governance.principal import owner_principal
+
+    with request_scope(owner_principal(surface="mcp")):
+        return commands.op_episode_memory(
+            vault,
+            schema_module.load_source_schema(vault),
+            action="record",
+            episode=episode,
+            subject="Freight coordination review",
+            summary="Agreed who coordinates the northern freight.",
+            worked_on=["Went through the coordinator's open requests"],
+            about=about,
+            client="claude-code",
+        )
+
+
+def test_an_episode_about_page_leads_until_newer_work(heat_vault: Path) -> None:
+    """A recorded conversation's `about` page is a deliberate act at the
+    recap's time: it leads "continue" over older work, and newer work
+    leads over it."""
+    _give_id(heat_vault, MARIT, _MARIT_ID)
+    _traced_commit(heat_vault, [DEPOT])
+    _record(heat_vault, about=[_MARIT_REF])
+
+    assert _resolved(_continue(heat_vault)) == [MARIT]
+
+    _traced_commit(heat_vault, [SLED])
+
+    assert _resolved(_continue(heat_vault)) == [SLED]
+
+
+def test_an_episode_elsewhere_unseats_an_older_token(heat_vault: Path) -> None:
+    """An episode recorded after a token was minted is a deliberate act
+    outside the token's thread, so the older token stops leading."""
+    _traced_commit(heat_vault, [SLED])
+    first = _continue(heat_vault)
+    assert _resolved(first) == [SLED]
+    _give_id(heat_vault, MARIT, _MARIT_ID)
+    _record(heat_vault, about=[_MARIT_REF])
+
+    after = _continue(heat_vault, continuity=first["continuity"])
+
+    assert _resolved(after) == [MARIT], (after.get("abstention"), after["anchors"])
+
+
+def test_recent_context_reads_episodes_from_the_projection(heat_vault: Path) -> None:
+    """The recap is a governed write, so the watcher's copy of it is our own
+    echo and folds to nothing: the block offers it because the record seam
+    said so, with the recorder's own subject, summary and key."""
+    # Seeded before the recap exists, so the seed cannot be what offers it.
+    commands.op_activate_context(heat_vault, turn=NONSENSE_TURN)
+    recorded = _record(heat_vault, about=[])
+    _watcher_saw_everything(heat_vault)
+
+    packet = commands.op_activate_context(heat_vault, turn=NONSENSE_TURN)
+
+    episodes = [entry for entry in packet["recent_context"] if entry["why"] == "episode"]
+    assert [entry["path"] for entry in episodes] == [recorded["source"]["path"]], packet[
+        "recent_context"
+    ]
+    assert episodes[0]["episode"] == recorded["episode"]
+    assert episodes[0]["title"] == "Freight coordination review"
+    # A retry writes nothing and records nothing.
+    before = len(working_set_heat.load(heat_vault).events)
+    assert _record(heat_vault, about=[], episode=recorded["episode"])["idempotent"] is True
+    assert len(working_set_heat.load(heat_vault).events) == before
+
+
+def test_an_episode_leads_only_the_session_that_recorded_it(heat_vault: Path) -> None:
+    """Ruling S5-1 for episodes: the hooks pass the session as its episode
+    key, so a recap is the recording session's own act. It leads that
+    session's "continue", while a parallel session keeps its own thread."""
+    commands.op_activate_context(heat_vault, turn=SLED_TURN, **S2)
+    _give_id(heat_vault, MARIT, _MARIT_ID)
+    _record(heat_vault, about=[_MARIT_REF], episode=S1["session"])
+
+    assert _resolved(_continue(heat_vault, **S1)) == [MARIT]
+    assert _resolved(_continue(heat_vault, **S2)) == [SLED]

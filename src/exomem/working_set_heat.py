@@ -1592,6 +1592,59 @@ def note_selection(
     return append(vault_root, events) if events else False
 
 
+def note_episode(
+    vault_root: Path,
+    recap_path: str,
+    about_paths: Iterable[str],
+    *,
+    attribution: Attribution | None = None,
+) -> bool:
+    """Record a committed episode recap (design section 5): an `episode_page`
+    event for the recap, which the recent-context block reads and no referent
+    ever does, and an `episode` event, a deliberate act, for each page the
+    recap is about (at most `episode_capture.MAX_ABOUT`, resolved under the
+    recorder's visibility), all at the commit time and under the recorder's
+    attribution. The commit seam records neither: a recap is not work, and
+    this seam knows what it is about. Never raises."""
+    if disabled():
+        return False
+    try:
+        import time
+
+        from . import episode_capture, working_set
+
+        who = attribution or Attribution(client=_observed_client())
+        now = time.time_ns()
+        recap = str(recap_path)
+        wanted = [
+            path for path in dict.fromkeys(str(item) for item in about_paths) if path
+        ][: episode_capture.MAX_ABOUT]
+        collections = _collection_dirs_on_disk(vault_root, wanted)
+        stamped = [
+            (path, "episode")
+            for path in wanted
+            if working_set._recent_reason_for(path, collections=collections) == "edited"
+        ]
+        if working_set._recent_reason_for(recap) == "episode":
+            stamped.insert(0, (recap, "episode_page"))
+        events = [
+            HeatEvent(
+                now,
+                path,
+                channel,
+                origin="episode_memory",
+                client=who.client,
+                session=who.session,
+                workspace=who.workspace,
+            )
+            for path, channel in stamped
+        ]
+    except Exception:  # noqa: BLE001 - heat never fails the record it describes
+        log.debug("heat episode could not be classified", exc_info=True)
+        return False
+    return append(vault_root, events) if events else False
+
+
 def cited_paths(vault_root: Path, sources: Iterable[object]) -> list[str]:
     """The vault-relative pages a governed write's `sources` name, spelled
     the way the heat ring keys pages. Brackets, an alias and a missing

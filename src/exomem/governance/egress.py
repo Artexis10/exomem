@@ -1848,27 +1848,39 @@ def visible_memory_refs(
     says nothing about which of them exist. An unknown, withheld or ambiguous
     ref is simply absent from the answer, and the three are indistinguishable.
     """
+    return frozenset(
+        visible_memory_ref_paths(vault_root, values, principal=principal, purpose=purpose)
+    )
+
+
+def visible_memory_ref_paths(
+    vault_root: Path,
+    values: Iterable[str],
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> dict[str, str]:
+    """`visible_memory_refs` with the one visible page each ref names, from the
+    same single scan: `{ref: vault-relative path}`."""
     wanted = {
         value: memory_id
         for value in dict.fromkeys(str(item or "").strip() for item in values)
         if (memory_id := memory_refs.parse_memory_ref(value)) is not None
     }
     if not wanted:
-        return frozenset()
+        return {}
     found = memory_refs.paths_for_ids_read_only(Path(vault_root), wanted.values())
-    return frozenset(
-        value
-        for value, memory_id in wanted.items()
-        if len(
-            _visible_candidates(
-                Path(vault_root),
-                found.get(memory_id, ()),
-                principal=principal,
-                purpose=purpose,
-            )
+    out: dict[str, str] = {}
+    for value, memory_id in wanted.items():
+        visible = _visible_candidates(
+            Path(vault_root),
+            found.get(memory_id, ()),
+            principal=principal,
+            purpose=purpose,
         )
-        == 1
-    )
+        if len(visible) == 1:
+            out[value] = visible[0]
+    return out
 
 
 def _scope_label(policy: Policy, decision: Decision) -> str | None:
