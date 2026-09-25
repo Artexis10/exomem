@@ -215,6 +215,34 @@ def test_u6_session_key_separates_two_hook_sessions(
     assert _family(_carry(vault, session="conversation-b")) == dreamer_families.LINK_FAMILY
 
 
+def test_a_session_string_is_bound_to_the_principal_that_sends_it(
+    tmp_path: Path, clock: _Clock, serving: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller that sends another principal's session string opens only its
+    own session: the other principal's session start still receives."""
+    vault = _ready(tmp_path)
+
+    def as_principal(name: str) -> None:
+        monkeypatch.setattr(
+            capture_sweep,
+            "ledger_key",
+            lambda root=None, _name=name: (f"principal:{_name}", "chatgpt", str(root)),
+        )
+
+    as_principal("a")
+    assert upkeep.delivery_key(vault, "session-of-b") is not None
+    a_key = upkeep.delivery_key(vault, "session-of-b")
+    as_principal("b")
+    assert upkeep.delivery_key(vault, "session-of-b") != a_key
+    # A sends B's session string first.
+    as_principal("a")
+    _carry(vault, session="session-of-b")
+    clock.advance(11 * MINUTE)
+    # B's own first activation of that session is still a session start.
+    as_principal("b")
+    assert _items(_carry(vault, session="session-of-b"))
+
+
 def test_unkeyable_stateless_http_is_never_pushed(
     tmp_path: Path, clock: _Clock, serving: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

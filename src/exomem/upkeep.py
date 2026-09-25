@@ -556,20 +556,22 @@ def reset_delivery_state() -> None:
 def delivery_key(vault_root: Path, session: str | None) -> tuple[str, ...] | None:
     """Who is asking, for the session-start rule, or None when nobody can be keyed.
 
-    U6's `session` when the caller sent a valid one (the hook door), else the
-    capture sweep's ledger key: the process for stdio, CLI and REST, the stable
-    principal or bearer scope over HTTP, and None for stateless HTTP. The raw
-    session is never kept, only a hash of it.
+    The capture sweep's ledger key: the process for stdio, CLI and REST, the
+    stable principal or bearer scope over HTTP, and None for stateless HTTP.
+    U6's `session`, when the caller sent a valid one (the hook door), narrows
+    that key to one conversation; it is hashed together with the ledger key,
+    so a caller that sends another principal's session string opens only its
+    own session. The raw session is never kept, only a hash of it.
     """
     from . import capture_sweep, query_log
 
     vault = str(vault_root)
-    if isinstance(session, str) and 0 < len(session) <= query_log.SESSION_MAX_CHARS:
-        digest = hashlib.sha256(f"{vault}\0{session}".encode("utf-8", "surrogatepass")).hexdigest()[
-            :24
-        ]
-        return ("session", digest, vault)
     key = capture_sweep.ledger_key(Path(vault_root))
+    if isinstance(session, str) and 0 < len(session) <= query_log.SESSION_MAX_CHARS:
+        owner = "\0".join(str(part) for part in key) if key is not None else ""
+        seed = f"{vault}\0{owner}\0{session}"
+        digest = hashlib.sha256(seed.encode("utf-8", "surrogatepass")).hexdigest()[:24]
+        return ("session", digest, vault)
     return tuple(str(part) for part in key) if key is not None else None
 
 
