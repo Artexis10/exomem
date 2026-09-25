@@ -5399,6 +5399,11 @@ def op_move_file(
     return result.as_dict()
 
 
+_FOLDER_DELETE_REFUSAL = (
+    "AUDIENCE_RESTRICTED: folder deletes are served to the owner only under a governed policy"
+)
+
+
 def op_delete(
     vault_root: Path,
     path: str,
@@ -5459,12 +5464,22 @@ def op_delete(
             APPEND_ONLY; CURATED_PROTECTED; SUPERSEDED_HISTORY;
             INBOUND_LINKS; TRASH_FAILED; (dir) NOT_A_DIR; NOT_EMPTY.
     """
+    # Under a governed policy a folder is deleted by the owner only: a folder
+    # can hold pages the writer may not see, and every answer about them
+    # (counts, refusals, what was trashed) would move with them. One refusal,
+    # whatever the folder holds; a declared recursive delete is refused before
+    # anything is read.
+    restricted = egress_module.restricted_release_filter(vault_root) is not None
+    if restricted and recursive:
+        raise ValueError(_FOLDER_DELETE_REFUSAL)
     path = _resolve_memory_identifier(vault_root, path)
     try:
         abs_path, _rel = resolve_under_vault(vault_root, path)
         is_dir = abs_path.is_dir()
     except VaultPathError:
         is_dir = False  # let the file backend raise the precise path error
+    if restricted and is_dir:
+        raise ValueError(_FOLDER_DELETE_REFUSAL)
     try:
         if is_dir:
             result = delete_directory_module.delete_directory(

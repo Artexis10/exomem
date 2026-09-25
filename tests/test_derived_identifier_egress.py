@@ -947,6 +947,62 @@ def test_an_entity_destination_a_withheld_entity_holds_is_refused_as_any_occupie
     assert answers["withheld"]["message"].startswith("ENTITY_EXISTS")
 
 
+_FOLDERS = {
+    "visible": f"{NOTES}/Open",
+    "mixed": f"{NOTES}/Mixed",
+    "withheld-only": WITHHELD_DIR,
+    "missing": f"{NOTES}/Nowhere",
+}
+
+
+@pytest.mark.parametrize("recursive", [True, False])
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_writer_deletes_no_folder(
+    tmp_path: Path, audience: str, recursive: bool
+) -> None:
+    """One refusal, whatever the folder holds; file deletes are unchanged."""
+    files = {
+        f"{NOTES}/alpha.md": _page("Alpha", "Alpha conclusions.", type="insight"),
+        f"{NOTES}/Open/open.md": _page("Open", "Open text.", type="insight"),
+        f"{NOTES}/Mixed/open.md": _page("Open", "Open text.", type="insight"),
+        f"{WITHHELD_DIR}/hidden.md": _page("Hidden Draft", "Withheld body text."),
+    }
+    vault = _materialize(
+        tmp_path / "vault", files, audience, scope="Notes/Withheld/**,Notes/Mixed/hidden.md"
+    )
+    (vault / NOTES / "Mixed" / "hidden.md").write_text(
+        _page("Hidden Draft", "Withheld body text."), encoding="utf-8"
+    )
+    principal = _principal(audience)
+
+    answers = {
+        label: _call(
+            vault,
+            principal,
+            "manage_memory_file",
+            operation="delete",
+            path=folder,
+            confirm=True,
+            recursive=recursive,
+        )
+        for label, folder in _FOLDERS.items()
+        if recursive or label != "missing"
+    }
+
+    refused = {
+        "__error__": "ValueError",
+        "message": "AUDIENCE_RESTRICTED: folder deletes are served to the owner only "
+        "under a governed policy",
+    }
+    assert all(answer == refused for answer in answers.values()), answers
+    assert sorted(p.name for p in (vault / NOTES / "Mixed").iterdir()) == ["hidden.md", "open.md"]
+    assert (vault / WITHHELD_DIR / "hidden.md").is_file()
+    deleted = _call(
+        vault, principal, "manage_memory_file", operation="delete", path=f"{NOTES}/alpha.md", confirm=True
+    )
+    assert "__error__" not in deleted, deleted
+
+
 def test_the_owner_still_writes_to_a_page_withheld_from_others(tmp_path: Path) -> None:
     base, withheld = _write_door_fixture()
     vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external", scope=_WRITE_SCOPE)
