@@ -311,3 +311,66 @@ def test_hourly_cpu_ledger_rolls() -> None:
     assert ledger.used(1800.0) >= dreamer_policy.HOURLY_CPU_SECONDS
     assert ledger.used(3600.0) == pytest.approx(20.0)
     assert ledger.used(5400.0) == pytest.approx(0.0)
+
+
+# ----------------------------------------------------------------------
+# a damaged sidecar is derived state: wipe and reseed, as connect does
+# ----------------------------------------------------------------------
+
+
+def _damaged_vault(tmp_path: Path) -> Path:
+    import dreamer_fixture as fx
+
+    vault = fx.build(tmp_path)
+    results = fx.run_to_quiet(vault)
+    assert all(result.stop_reason != "error" for result in results), results
+    fx.edit(
+        vault,
+        fx.CAVITATION,
+        fx.insight("Pump cavitation", sources=["field-report-one"], updated="2026-05-09"),
+    )
+    return vault
+
+
+def test_a_sidecar_damaged_mid_file_is_wiped_and_reseeded(tmp_path: Path) -> None:
+    import sqlite3
+
+    vault = _damaged_vault(tmp_path)
+    path = dreamer_store.sidecar_path(vault)
+    size = path.stat().st_size
+    with path.open("r+b") as handle:
+        handle.seek(size // 2)
+        handle.write(b"\xff" * 4096)
+    dreamer_store.clear_reader_memo()
+    stops = [dreamer.run_once(vault) for _ in range(4)]
+    assert any(result.stop_reason != "error" for result in stops), stops
+    import dreamer_fixture as fx
+
+    results = fx.run_to_quiet(vault)
+    assert all(result.stop_reason != "error" for result in results), results
+    check = sqlite3.connect(str(path))
+    try:
+        assert check.execute("PRAGMA quick_check").fetchall() == [("ok",)]
+    finally:
+        check.close()
+    view = dreamer_store.read_view(vault)
+    assert view is not None and view.candidates, "the reseed rebuilt nothing"
+    assert dreamer.status()["consecutive_failures"] == 0
+
+
+def test_a_locked_sidecar_is_not_wiped(tmp_path: Path) -> None:
+    import sqlite3
+
+    vault = _damaged_vault(tmp_path)
+    path = dreamer_store.sidecar_path(vault)
+    holder = sqlite3.connect(str(path), timeout=0, isolation_level=None)
+    before = holder.execute("SELECT count(*) FROM candidates").fetchone()[0]
+    holder.execute("BEGIN EXCLUSIVE")
+    try:
+        result = dreamer.run_once(vault)
+        assert result.stop_reason == "error", result
+        assert holder.execute("SELECT count(*) FROM candidates").fetchone()[0] == before
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    assert path.exists()

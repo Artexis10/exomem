@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 import threading
 import time as _time
 from collections import deque
@@ -480,6 +481,16 @@ def run_once(
         log.warning("dreamer: tick failed", exc_info=True)
         error_code = type(exc).__name__
         stop_reason = "error"
+        # A sidecar damaged past what connect() can see is derived state like
+        # any other: wipe it here and the next tick reseeds, as connect does.
+        # A lock, a read-only file or I/O (OperationalError) is left alone.
+        if isinstance(exc, sqlite3.DatabaseError) and not isinstance(exc, sqlite3.OperationalError):
+            if conn is not None:
+                conn.close()
+                conn = None
+            if store.is_damaged():
+                log.warning("dreamer: sidecar damaged; wiping it for a reseed")
+                store.wipe()
     wall = clock.monotonic() - started_wall
     cpu = max(0.0, clock.thread_time() - started_cpu)
     _record_tick(

@@ -266,6 +266,27 @@ class DreamerStore:
             conn.execute("ROLLBACK")
             raise
 
+    def is_damaged(self) -> bool:
+        """True when the sidecar file itself fails an integrity check.
+
+        A lock, a read-only file or an I/O error is not damage: those raise
+        `OperationalError` here and answer False, so only a corrupt file is
+        ever wiped.
+        """
+        if not self.path.exists():
+            return False
+        try:
+            conn = sqlite3.connect(str(self.path), timeout=1.0)
+            try:
+                rows = conn.execute("PRAGMA quick_check").fetchall()
+            finally:
+                conn.close()
+        except sqlite3.OperationalError:
+            return False
+        except sqlite3.DatabaseError:
+            return True
+        return rows != [("ok",)]
+
     def wipe(self) -> None:
         """Remove the sidecar and its WAL files. It is derived; a reseed rebuilds it."""
         for suffix in ("", "-wal", "-shm", "-journal"):
