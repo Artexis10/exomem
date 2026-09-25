@@ -236,7 +236,8 @@ Namespace `exomem-cloud` is default-deny too: one `podSelector: {}` policy denie
 
 - the cell is a candidate, Ready and not held;
 - the rollout is not paused;
-- no other non-deleted cell carries an `upgrade` or a `restore` hold;
+- no other non-deleted cell carries an `upgrade` or a `restore` hold. A `restore` hold that has already recorded `RESTORE_FAILED` stops counting once the owner resumes the rollout: the hold itself stays, but one broken restore never stalls the fleet's releases;
+- every non-deleted cell was observed this pass. A cell whose observation failed may be the canary or may hold an upgrade, restore or backup slot, so a pass that could not observe one starts no upgrade, backup or digest re-apply anywhere;
 - the cell is not inside a backup backoff (`exomem.io/backup-retry-after` is absent or in the past);
 - **canary first.** The canary is the owner's cell: the non-deleted row with the lowest `rollout_priority`. No other cell starts an attempt while the canary's image differs from the target. If the canary is not eligible, because it is stopped, not Ready or in backoff, the rollout waits for it. Canarying on the owner's own cell is the point of the rule, and when it stalls only the owner is affected, and the owner can fix it. After the canary, candidates go in `rollout_priority` then `cell_id` order, and a cell that is not eligible is skipped rather than waited for. Ordering among tenants protects nothing, and waiting on one broken tenant would hold the whole fleet back.
 
@@ -262,7 +263,7 @@ The attempt's state lives in annotations on the StatefulSet: `exomem.io/hold=upg
      2. Wait until no pod uses the volume. Kubernetes lets pods on the same node share a ReadWriteOnce volume, so a restore that runs next to a terminating pod would corrupt it.
      3. Restore the pre-upgrade snapshot with `restic restore --delete`. The restore Job runs as UID 10001, and `--delete` removes files the new image created. The Job validates the snapshot id against `^[0-9a-f]{64}$` before it reaches a shell. The restore is scoped to `/data/vault` and `/data/host`, and leaves the volume root, including `lost+found`, untouched.
      4. On success, record `exomem.io/restored-snapshot` so that a restore Job removed by its TTL is not run again. Then apply the previous image with the desired replicas, and remove the hold once Ready.
-     5. A failed restore keeps the `restore` hold with `last_error_code = RESTORE_FAILED` and retries with backoff. It never starts either image on an unrestored volume.
+     5. A failed restore keeps the `restore` hold with `last_error_code = RESTORE_FAILED` and retries with backoff. It never starts either image on an unrestored volume. A restore hold that has not finished within 45 minutes of starting (the restore Job's own deadline plus the previous image's readiness) records `RESTORE_FAILED` the same way and keeps waiting.
 5. **Stall bound.** An attempt whose target was never applied 30 minutes after `hold-started-at` ends the same way as a refused target, with `error_code = UPGRADE_STALLED`.
 
 **Resuming after a cellctl restart.**

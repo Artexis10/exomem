@@ -2188,3 +2188,83 @@ async def test_reverting_storage_gib_unparks_a_refused_pvc_shrink(cell_db: CellD
         assert (await db.select_all_rows(connection))[0].last_error_code is None
     finally:
         await connection.close()
+
+
+def test_a_backup_hold_whose_statefulset_is_refused_does_not_hold_the_only_backup_slot() -> None:
+    # The hold cannot exit without its StatefulSet, but it must not starve
+    # every other cell's nightly backup while it waits.
+    stuck, due = "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"
+    rows = [
+        _clean_row(stuck, last_error_code="MANIFEST_IMMUTABLE", hold_kind="backup"),
+        _clean_row(due),
+    ]
+    observations = {stuck: _served(stuck, statefulset_hold_kind="backup"), due: _served(due)}
+    now = datetime(2026, 1, 1, 3, tzinfo=UTC)
+    config = dataclasses.replace(reconcile.DEFAULT_RECONCILE_CONFIG, backup_concurrency=1)
+    assert reconcile._select_backup_candidates(rows, observations, now, config) == set()
+    assert reconcile._select_backup_candidates(rows, observations, now, config, frozenset({stuck})) == {due}
+
+
+class _JobRefusingGateway(FakeClusterGateway):
+    def __init__(self) -> None:
+        super().__init__()
+        self.job_attempts = 0
+
+    def run_job(self, manifest: dict) -> None:
+        self.job_attempts += 1
+        raise ApiException(status=403, reason="refused by the test")
+
+
+async def test_a_refused_backup_job_is_recorded_parked_and_retried_on_the_backoff(cell_db: CellDatabase) -> None:
+    # A Job apply refusal is a D4 refusal like any other: the pass's row
+    # updates still land, the row records MANIFEST_IMMUTABLE, and the Job is
+    # retried on the backoff, never at loop speed.
+    from cellctl.manifests import HOLD_ANNOTATION
+
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = _JobRefusingGateway()
+    memory = reconcile.LoopMemory()
+    window = datetime(2026, 1, 2, 2, tzinfo=UTC)
+    try:
+        await _converge_all(connection, cluster, [cell_id], window - timedelta(hours=3), memory)
+        await _pass(connection, cluster, window, memory=memory)  # the backup hold starts
+        assert _statefulset(cluster, cell_id)["metadata"]["annotations"].get(HOLD_ANNOTATION) == "backup"
+        cluster.observations[cell_id] = _observed_from_applied(cluster, cell_id, pod_exists=False, pod_ready=False)
+        for step in range(12):  # one minute of passes
+            await _pass(connection, cluster, window + timedelta(seconds=5 * (step + 1)), memory=memory)
+        row = (await db.select_all_rows(connection))[0]
+        assert row.last_error_code == "MANIFEST_IMMUTABLE"
+        assert row.observed_state == "stopping"
+        assert cluster.job_attempts == 1
+    finally:
+        await connection.close()
+
+
+def test_a_failed_restore_stops_blocking_the_fleet_only_once_the_owner_resumes_the_rollout() -> None:
+    from cellctl.rollout import select_upgrade_candidate
+
+    owner, broken, tenant = "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "cccccccccccccccc"
+    rows = [
+        _clean_row(owner, rollout_priority=0, observed_image=IMAGE_B),
+        _clean_row(broken, rollout_priority=1, observed_image=IMAGE_A, hold_kind="restore", last_error_code="RESTORE_FAILED"),
+        _clean_row(tenant, rollout_priority=2, observed_image=IMAGE_A),
+    ]
+    observations = {
+        owner: _served(owner, statefulset_image=IMAGE_B),
+        broken: _served(broken, statefulset_hold_kind="restore", pod_ready=False),
+        tenant: _served(tenant),
+    }
+    now = datetime(2026, 1, 1, 12, tzinfo=UTC)
+
+    def pick(rollout: RolloutRow) -> str | None:
+        restoring = any(reconcile._restore_blocks_upgrades(row, observations[row.cell_id], rollout) for row in rows)
+        return select_upgrade_candidate(rows, observations, rollout, IMAGE_B, now=now, any_cell_already_upgrading=restoring)
+
+    assert reconcile._restore_blocks_upgrades(rows[1], observations[broken], RolloutRow(paused=True))
+    assert pick(RolloutRow(paused=True)) is None
+    assert pick(RolloutRow(paused=False)) == tenant
+    # A restore still in progress (no RESTORE_FAILED) blocks either way.
+    in_progress = dataclasses.replace(rows[1], last_error_code=None)
+    assert reconcile._restore_blocks_upgrades(in_progress, observations[broken], RolloutRow(paused=False))

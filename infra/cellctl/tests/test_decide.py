@@ -1949,3 +1949,30 @@ def test_a_hold_pass_writes_ready_from_the_observed_pod() -> None:
     assert waiting.hold_kind == "upgrade"
     assert waiting.row_updates["ready"] is False
     assert "hold_kind" not in waiting.row_updates  # already mirrored
+
+
+def test_a_restore_that_cannot_finish_within_its_bound_records_restore_failed_and_keeps_the_hold() -> None:
+    # The previous image never gets Ready after the restore. The hold stays
+    # (fail closed), but the row says so, which is what lets an owner who
+    # resumes the rollout move the rest of the fleet on.
+    held_row = row(hold_kind="restore", hold_started_at=NOW, observed_image=IMAGE_A)
+    observation = obs(
+        statefulset_exists=True,
+        statefulset_hold_kind="restore",
+        statefulset_hold_started_at=NOW,
+        statefulset_previous_image=IMAGE_A,
+        statefulset_image=IMAGE_A,
+        statefulset_replicas=1,
+        statefulset_pre_upgrade_snapshot=ATTEMPT_SNAPSHOT,
+        statefulset_restored_snapshot=ATTEMPT_SNAPSHOT,
+        pod_ready=False,
+    )
+    within = decide(held_row, rollout(), observation, now=NOW + timedelta(minutes=5), cell_image=IMAGE_B, start_upgrade=False, config=CONFIG)
+    assert within.hold_kind == "restore"
+    assert "last_error_code" not in within.row_updates
+    overdue = decide(
+        held_row, rollout(), observation, now=NOW + CONFIG.restore_bound + timedelta(minutes=1),
+        cell_image=IMAGE_B, start_upgrade=False, config=CONFIG,
+    )
+    assert overdue.hold_kind == "restore"
+    assert overdue.row_updates["last_error_code"] == RESTORE_FAILED

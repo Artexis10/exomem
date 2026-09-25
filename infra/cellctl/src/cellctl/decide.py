@@ -44,6 +44,11 @@ class ReconcileConfig:
     # D6 step 5: an attempt whose target was never applied within this long
     # of the hold starting ends the same way as a refused target.
     upgrade_stall_bound: timedelta = timedelta(minutes=30)
+    # D6 step 4.5: a restore hold not finished this long after it started
+    # (the restore Job's own deadline, plus the previous image's readiness)
+    # records RESTORE_FAILED. The hold stays; it never starts an image on
+    # an unrestored volume.
+    restore_bound: timedelta = timedelta(minutes=45)
     # D8: nightly backup is due once this long has passed since the last one.
     backup_interval: timedelta = timedelta(hours=20)
     # D8: the nightly backup window, as [start_hour, end_hour) UTC.
@@ -687,6 +692,16 @@ def _continue_backup(
 
 
 def _continue_restore(
+    row: CellRow, observation: ClusterObservation, now: datetime, config: ReconcileConfig
+) -> Decision:
+    decision = _restore_step(row, observation, now, config)
+    hold_started_at = observation.statefulset_hold_started_at or row.hold_started_at or now
+    if decision.hold_kind == "restore" and now - hold_started_at > config.restore_bound:
+        decision.row_updates.setdefault("last_error_code", RESTORE_FAILED)
+    return decision
+
+
+def _restore_step(
     row: CellRow, observation: ClusterObservation, now: datetime, config: ReconcileConfig
 ) -> Decision:
     hold_started_at = observation.statefulset_hold_started_at or row.hold_started_at or now

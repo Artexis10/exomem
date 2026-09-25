@@ -42,7 +42,7 @@ from .manifests import (
 )
 from .rollout import current_image, initial_image, parked_canary, select_upgrade_candidate
 from .secrets import derive_cell_bearer, unwrap_secret, wrap_secret
-from .state import CANARY_PARKED, MANIFEST_IMMUTABLE, TARGET_REJECTED, CellRow, ClusterObservation
+from .state import CANARY_PARKED, MANIFEST_IMMUTABLE, RESTORE_FAILED, TARGET_REJECTED, CellRow, ClusterObservation
 
 logger = logging.getLogger("cellctl")
 
@@ -155,6 +155,9 @@ class RefusalPark:
     # The StatefulSet itself was refused or held back, so nothing that goes
     # through it (a backup hold, a digest re-apply) can start either.
     statefulset_blocked: bool
+    # A backup or restore Job was refused; it waits out the backoff too, so
+    # a hold's per-pass Job start never retries at loop speed.
+    job_blocked: bool = False
 
 
 @dataclass
@@ -170,21 +173,53 @@ class LoopMemory:
     refusals: dict[str, RefusalPark] = field(default_factory=dict)
 
 
-def _record_refusal(memory: LoopMemory, cell_id: str, key: RefusalKey, now: datetime, *, statefulset_blocked: bool) -> None:
+def _record_refusal(
+    memory: LoopMemory,
+    cell_id: str,
+    key: RefusalKey,
+    now: datetime,
+    *,
+    statefulset_blocked: bool,
+    job_blocked: bool = False,
+) -> None:
     """The backoff doubles only on a real retry of the same key. A pass
     inside the window (a hold's own pass) keeps it; a new key starts over."""
 
     previous = memory.refusals.get(cell_id)
     if previous is not None and previous.key == key and now < previous.retry_at:
-        memory.refusals[cell_id] = dataclass_replace(previous, statefulset_blocked=statefulset_blocked)
+        memory.refusals[cell_id] = dataclass_replace(
+            previous,
+            statefulset_blocked=statefulset_blocked,
+            job_blocked=job_blocked or previous.job_blocked,
+        )
         return
     if previous is not None and previous.key == key:
         backoff = min(previous.backoff * 2, REFUSAL_BACKOFF_MAX)
     else:
         backoff = REFUSAL_BACKOFF_INITIAL
     memory.refusals[cell_id] = RefusalPark(
-        key=key, retry_at=now + backoff, backoff=backoff, statefulset_blocked=statefulset_blocked
+        key=key,
+        retry_at=now + backoff,
+        backoff=backoff,
+        statefulset_blocked=statefulset_blocked,
+        job_blocked=job_blocked,
     )
+
+
+def _run_cell_job(cluster: ClusterGateway, cell_id: str, manifest: dict, refused: list[tuple[str, str]]) -> None:
+    """D4: a Job apply refusal is recorded like any other object's, so the
+    pass's row updates still land. A transient error still raises."""
+
+    try:
+        cluster.run_job(manifest)
+    except ApiException as error:
+        if not _is_refusal(error):
+            raise
+        name = manifest["metadata"]["name"]
+        logger.error(
+            "cellctl apply refused for cell %s: Job %s status=%s reason=%s", cell_id, name, error.status, error.reason
+        )
+        refused.append(("Job", name))
 
 
 def _image_to_render(row: CellRow, observation: ClusterObservation, rollout, cell_image: str | None) -> str | None:
@@ -241,6 +276,17 @@ class ClusterGateway:
 def _active_hold(row: CellRow, observation: ClusterObservation) -> str | None:
     # D4: annotations are the truth once the StatefulSet can be observed.
     return observation.statefulset_hold_kind if observation.statefulset_exists else row.hold_kind
+
+
+def _restore_blocks_upgrades(row: CellRow, observation: ClusterObservation, rollout) -> bool:
+    """D6: a restore hold blocks every new upgrade attempt. One that has
+    already failed (RESTORE_FAILED) stops blocking once the owner resumes
+    the rollout: the hold itself stays, fail-closed, but a single broken
+    restore never stalls the fleet's releases indefinitely."""
+
+    if _active_hold(row, observation) != "restore":
+        return False
+    return rollout.paused or row.last_error_code != RESTORE_FAILED
 
 
 def _hetzner_volume_absent(volume_id: str, volume_provider, now: datetime, memory: LoopMemory) -> bool:
@@ -448,9 +494,15 @@ def _select_backup_candidates(
     """D8: at most `backup_concurrency` backup holds run at once. Due cells
     go oldest `last_backup_at` first, never-backed-up cells first of all.
     D4: a refused row is still backed up, unless its own StatefulSet was
-    refused and that refusal's backoff has not passed."""
+    refused and that refusal's backoff has not passed. A backup hold whose
+    own StatefulSet is refused cannot exit until it applies, so it does not
+    occupy a slot the rest of the fleet needs."""
 
-    active = sum(1 for row in rows if _active_hold(row, observations[row.cell_id]) == "backup")
+    active = sum(
+        1
+        for row in rows
+        if _active_hold(row, observations[row.cell_id]) == "backup" and row.cell_id not in statefulset_blocked
+    )
     slots = config.backup_concurrency - active
     if slots <= 0:
         return set()
@@ -582,7 +634,7 @@ async def reconcile_once(
     # H1/H9: an upgrade or a restore hold blocks new candidates; a deleted
     # row never counts, whatever its stale annotations or row state say.
     any_upgrading = any(_active_hold(row, observations[row.cell_id]) == "upgrade" for row in non_deleted_rows)
-    any_restoring = any(_active_hold(row, observations[row.cell_id]) == "restore" for row in non_deleted_rows)
+    any_restoring = any(_restore_blocks_upgrades(row, observations[row.cell_id], rollout) for row in non_deleted_rows)
     render_digests = {row.cell_id: _compute_render_digest(row, cluster_config, secrets_config) for row in rows}
 
     # D4 refusal parking. A row is refused while its last refusal's key is
@@ -903,29 +955,44 @@ async def _reconcile_row(
             _record_refusal(memory, row.cell_id, refusal_key, now, statefulset_blocked=True)
             await db.write_observed(connection, row.cell_id, {"last_error_code": MANIFEST_IMMUTABLE, "observed_at": now})
             return
+        park = memory.refusals.get(row.cell_id)
+        jobs_parked = park is not None and park.job_blocked and park.key == refusal_key and now < park.retry_at
+        job_refused: list[tuple[str, str]] = []
+        if jobs_parked and (decision.run_backup_job or decision.run_restore_job_snapshot):
+            # A Job refused for this key waits out the backoff.
+            job_refused.append(("Job", "parked"))
+        else:
+            if decision.run_backup_job:
+                _run_cell_job(
+                    cluster,
+                    row.cell_id,
+                    render_backup_job(
+                        spec,
+                        bucket_name=cluster_config.object_storage_bucket,
+                        endpoint=cluster_config.object_storage_endpoint,
+                    ),
+                    job_refused,
+                )
+            if decision.run_restore_job_snapshot:
+                _run_cell_job(
+                    cluster,
+                    row.cell_id,
+                    render_restore_job(
+                        spec,
+                        bucket_name=cluster_config.object_storage_bucket,
+                        endpoint=cluster_config.object_storage_endpoint,
+                        snapshot_id=decision.run_restore_job_snapshot,
+                    ),
+                    job_refused,
+                )
+        refused = refused + job_refused
         if refused:
-            _record_refusal(memory, row.cell_id, refusal_key, now, statefulset_blocked=False)
+            _record_refusal(
+                memory, row.cell_id, refusal_key, now, statefulset_blocked=False, job_blocked=bool(job_refused)
+            )
         else:
             memory.refusals.pop(row.cell_id, None)
         applied_cleanly = not refused
-
-        if decision.run_backup_job:
-            cluster.run_job(
-                render_backup_job(
-                    spec,
-                    bucket_name=cluster_config.object_storage_bucket,
-                    endpoint=cluster_config.object_storage_endpoint,
-                )
-            )
-        if decision.run_restore_job_snapshot:
-            cluster.run_job(
-                render_restore_job(
-                    spec,
-                    bucket_name=cluster_config.object_storage_bucket,
-                    endpoint=cluster_config.object_storage_endpoint,
-                    snapshot_id=decision.run_restore_job_snapshot,
-                )
-            )
 
     if decision.delete_namespace:
         cluster.delete_namespace(namespace_name(row.cell_id))
