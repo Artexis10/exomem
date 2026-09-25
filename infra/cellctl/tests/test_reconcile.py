@@ -2324,3 +2324,61 @@ async def test_the_pass_is_skipped_without_the_isolation_policy_too(cell_db: Cel
         assert ("exomem-cellctl-isolation", "exomem-cellctl-isolation", "default-deny") in cluster.admission_checks
     finally:
         await connection.close()
+
+
+# --- ready is an observation, never a memory -----------------------------------
+
+
+async def test_a_converged_cell_whose_pod_turns_not_ready_is_observed_not_ready_and_back(
+    cell_db: CellDatabase, monkeypatch
+) -> None:
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    now = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    writes: list[dict[str, object]] = []
+    real_write = db.write_observed
+
+    async def recording_write(connection, row_cell_id, updates):
+        writes.append(dict(updates))
+        await real_write(connection, row_cell_id, updates)
+
+    try:
+        await _converge(connection, cluster, cell_id, now)
+        row = (await db.select_all_rows(connection))[0]
+        assert (row.ready, row.observed_state, row.is_dirty()) == (True, "running", False)
+
+        monkeypatch.setattr(db, "write_observed", recording_write)
+        # Unchanged: observed_at is the only write.
+        await _pass(connection, cluster, now + timedelta(seconds=5))
+        assert writes == [{"observed_at": now + timedelta(seconds=5)}]
+
+        cluster.observations[cell_id] = dataclasses.replace(cluster.observations[cell_id], pod_ready=False, ready_pod_image=None)
+        await _pass(connection, cluster, now + timedelta(seconds=10))
+        row = (await db.select_all_rows(connection))[0]
+        assert row.ready is False
+
+        cluster.observations[cell_id] = dataclasses.replace(cluster.observations[cell_id], pod_ready=True, ready_pod_image=IMAGE_A)
+        for step in range(2):
+            await _pass(connection, cluster, now + timedelta(seconds=15 + 5 * step))
+        row = (await db.select_all_rows(connection))[0]
+        assert (row.ready, row.observed_state) == (True, "running")
+
+        writes.clear()
+        await _pass(connection, cluster, now + timedelta(seconds=30))
+        assert writes == [{"observed_at": now + timedelta(seconds=30)}]
+    finally:
+        await connection.close()
+
+
+def test_the_rollout_gate_reads_readiness_observed_this_pass() -> None:
+    from cellctl.rollout import should_attempt_upgrade
+
+    row = _clean_row("aaaaaaaaaaaaaaaa", observed_image=IMAGE_A)
+    now = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    ready = _served("aaaaaaaaaaaaaaaa")
+    assert should_attempt_upgrade(row, RolloutRow(), ready, IMAGE_B, now=now)
+    not_ready = dataclasses.replace(ready, pod_ready=False, ready_pod_image=None)
+    # The row still says ready from an earlier pass; the pod does not.
+    assert not should_attempt_upgrade(row, RolloutRow(), not_ready, IMAGE_B, now=now)

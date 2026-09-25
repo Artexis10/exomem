@@ -111,3 +111,21 @@ def test_unwrap_fails_under_a_different_key_version() -> None:
     wrapped = wrap_secret(master_key, plaintext, **_AAD)
     with pytest.raises(InvalidTag):
         unwrap_secret(master_key, wrapped, **{**_AAD, "key_version": 2})
+
+
+# C4 shared test vector. The Substrate gateway asserts the same triple, so a
+# difference in how either side decodes the 64-hex key or builds the message
+# shows up as a failing test rather than as CELL_AUTH_MISMATCH in production.
+C4_KEY_HEX = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+C4_CELL_ID = "aaaaaaaaaaaaaaaa"
+C4_BEARER = "lAS-RM751FtdjYccMyK7IujLHk7OVYAZABBMG1aza6o"
+
+
+def test_the_c4_bearer_test_vector_holds_through_the_settings_key_parser() -> None:
+    from cellctl.main import _cell_token_key
+    from cellctl.secrets import derive_cell_bearer
+
+    key = _cell_token_key("CELLCTL_CELL_TOKEN_KEY_CURRENT", C4_KEY_HEX)
+    assert derive_cell_bearer(key, C4_CELL_ID) == C4_BEARER
+    # Upper-case hex decodes to the same key.
+    assert derive_cell_bearer(_cell_token_key("K", C4_KEY_HEX.upper()), C4_CELL_ID) == C4_BEARER

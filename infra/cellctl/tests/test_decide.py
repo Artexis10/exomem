@@ -1484,7 +1484,7 @@ def test_select_upgrade_candidate_picks_lowest_rollout_priority() -> None:
         row(cell_id="bbbbbbbbbbbbbbbb", rollout_priority=2, observed_image=IMAGE_A, ready=True),
         row(cell_id="aaaaaaaaaaaaaaaa", rollout_priority=1, observed_image=IMAGE_A, ready=True),
     ]
-    observations = {r.cell_id: obs(statefulset_image=IMAGE_A) for r in rows}
+    observations = {r.cell_id: obs(statefulset_image=IMAGE_A, pod_ready=True) for r in rows}
     winner = select_upgrade_candidate(
         rows, observations, rollout(), IMAGE_B, now=NOW, any_cell_already_upgrading=False
     )
@@ -1532,8 +1532,8 @@ def test_owner_up_to_date_lets_the_next_priority_candidate_go() -> None:
     friend = row(cell_id="bbbbbbbbbbbbbbbb", rollout_priority=1, observed_image=IMAGE_A, ready=True)
     rows = [owner, friend]
     observations = {
-        owner.cell_id: obs(statefulset_image=IMAGE_B),  # already on the target
-        friend.cell_id: obs(statefulset_image=IMAGE_A),
+        owner.cell_id: obs(statefulset_image=IMAGE_B, pod_ready=True),  # already on the target
+        friend.cell_id: obs(statefulset_image=IMAGE_A, pod_ready=True),
     }
     winner = select_upgrade_candidate(
         rows, observations, rollout(), IMAGE_B, now=NOW, any_cell_already_upgrading=False
@@ -1547,10 +1547,10 @@ def test_after_the_owner_an_ineligible_non_owner_candidate_is_skipped_not_waited
     third = row(cell_id="cccccccccccccccc", rollout_priority=2, observed_image=IMAGE_A, ready=True)
     rows = [owner, blocked, third]
     observations = {
-        owner.cell_id: obs(statefulset_image=IMAGE_B),
+        owner.cell_id: obs(statefulset_image=IMAGE_B, pod_ready=True),
         blocked.cell_id: obs(
             statefulset_exists=True,statefulset_image=IMAGE_A, statefulset_hold_kind="backup"),
-        third.cell_id: obs(statefulset_image=IMAGE_A),
+        third.cell_id: obs(statefulset_image=IMAGE_A, pod_ready=True),
     }
     winner = select_upgrade_candidate(
         rows, observations, rollout(), IMAGE_B, now=NOW, any_cell_already_upgrading=False
@@ -1846,7 +1846,7 @@ def test_a_stopped_canary_off_the_target_holds_the_rollout() -> None:
     tenant = row(cell_id="bbbbbbbbbbbbbbbb", rollout_priority=1, observed_image=IMAGE_A, ready=True)
     observations = {
         owner.cell_id: obs(statefulset_exists=True, statefulset_image=IMAGE_A, statefulset_replicas=0),
-        tenant.cell_id: obs(statefulset_exists=True, statefulset_image=IMAGE_A, statefulset_replicas=1),
+        tenant.cell_id: obs(statefulset_exists=True, statefulset_image=IMAGE_A, statefulset_replicas=1, pod_ready=True),
     }
     pick = select_upgrade_candidate([owner, tenant], observations, rollout(), IMAGE_B, now=NOW, any_cell_already_upgrading=False)
     assert pick is None
@@ -1857,7 +1857,7 @@ def test_a_stopped_canary_already_on_the_target_lets_the_tenants_go() -> None:
     tenant = row(cell_id="bbbbbbbbbbbbbbbb", rollout_priority=1, observed_image=IMAGE_A, ready=True)
     observations = {
         owner.cell_id: obs(statefulset_exists=True, statefulset_image=IMAGE_B, statefulset_replicas=0),
-        tenant.cell_id: obs(statefulset_exists=True, statefulset_image=IMAGE_A, statefulset_replicas=1),
+        tenant.cell_id: obs(statefulset_exists=True, statefulset_image=IMAGE_A, statefulset_replicas=1, pod_ready=True),
     }
     pick = select_upgrade_candidate([owner, tenant], observations, rollout(), IMAGE_B, now=NOW, any_cell_already_upgrading=False)
     assert pick == tenant.cell_id
@@ -1868,7 +1868,7 @@ def test_a_canary_not_yet_provisioned_holds_the_rollout() -> None:
     tenant = row(cell_id="bbbbbbbbbbbbbbbb", rollout_priority=1, observed_image=IMAGE_A, ready=True)
     observations = {
         owner.cell_id: obs(),
-        tenant.cell_id: obs(statefulset_exists=True, statefulset_image=IMAGE_A, statefulset_replicas=1),
+        tenant.cell_id: obs(statefulset_exists=True, statefulset_image=IMAGE_A, statefulset_replicas=1, pod_ready=True),
     }
     pick = select_upgrade_candidate([owner, tenant], observations, rollout(), IMAGE_B, now=NOW, any_cell_already_upgrading=False)
     assert pick is None

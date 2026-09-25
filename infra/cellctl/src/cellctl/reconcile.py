@@ -826,8 +826,14 @@ async def _reconcile_row(
 ) -> None:
     already_served = row.observed_state in ("running", "read_only")
     backup_due = already_served and start_backup
+    # D4: ready is an observation, never a memory. A converged row whose pod
+    # on the update revision is no longer Ready goes through decide(), which
+    # writes ready and observed_state from this pass's observation; one whose
+    # readiness is unchanged writes observed_at alone.
+    readiness_changed = already_served and row.ready != observation.pod_ready
     if (
         not row.is_dirty(refusal_parked=refusal_parked)
+        and not readiness_changed
         and _active_hold(row, observation) is None
         and not backup_due
         and not start_upgrade

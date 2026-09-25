@@ -458,7 +458,9 @@ def test_cellctl_dockerfile_is_digest_pinned_nonroot_and_frozen() -> None:
         "FROM ${PYTHON_IMAGE}",
     ]
     assert "--require-hashes" in dockerfile
-    assert "uv sync --frozen --no-dev --no-editable --compile-bytecode" in dockerfile
+    assert "uv sync --frozen --no-dev --no-install-project --compile-bytecode" in dockerfile
     assert "USER 1000:1000" in dockerfile
-    assert 'ENTRYPOINT ["exomem-cellctl"]' in dockerfile
+    assert 'ENTRYPOINT ["python3", "-m", "cellctl.main"]' in dockerfile
+    # Nothing is built from an unpinned build backend.
+    assert "--no-editable" not in dockerfile and "hatchling" not in dockerfile
     assert "PYTHONDONTWRITEBYTECODE=1" in dockerfile

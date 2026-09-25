@@ -67,7 +67,9 @@ def should_attempt_upgrade(
         return False
     if observation.statefulset_hold_kind or row.hold_kind:
         return False
-    if not row.ready:
+    # D4/D6: readiness is read from this pass's observation of the pod on
+    # the update revision, not only from the row, which an earlier pass wrote.
+    if not (row.ready and observation.pod_ready):
         return False
     # D4: a row whose last apply was refused for its current generation,
     # render digest and image starts no attempt.

@@ -16,10 +16,13 @@ RUN printf '%s\n' 'uv==0.11.28 --hash=sha256:49fe42df9f42056037473f3876adec16157
     && pip install --no-cache-dir --require-hashes -r /tmp/uv.txt
 WORKDIR /src
 COPY pyproject.toml uv.lock ./
-COPY src ./src
 # uv.lock pins and hash-checks every dependency; --frozen never rewrites it.
+# The project itself is not built (its build backend is not in the lock):
+# its source is copied into the venv and compiled below.
 RUN UV_PROJECT_ENVIRONMENT=/opt/cellctl UV_PYTHON=/usr/local/bin/python3 \
-    uv sync --frozen --no-dev --no-editable --compile-bytecode --no-cache
+    uv sync --frozen --no-dev --no-install-project --compile-bytecode --no-cache
+COPY src/cellctl /opt/cellctl/lib/python3.12/site-packages/cellctl
+RUN /opt/cellctl/bin/python3 -m compileall -q /opt/cellctl/lib/python3.12/site-packages/cellctl
 
 FROM ${PYTHON_IMAGE}
 COPY --from=build /opt/cellctl /opt/cellctl
@@ -27,4 +30,4 @@ ENV PATH=/opt/cellctl/bin:${PATH} \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 USER 1000:1000
-ENTRYPOINT ["exomem-cellctl"]
+ENTRYPOINT ["python3", "-m", "cellctl.main"]

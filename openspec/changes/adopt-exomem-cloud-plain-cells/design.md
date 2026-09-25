@@ -147,6 +147,7 @@ cellctl is one Deployment in namespace `exomem-cloud`, with `replicas: 1` and `s
    - `observed_at` is written on every observation.
    - `ready` and `observed_image` come from a pod whose `controller-revision-hash` equals the StatefulSet's `status.updateRevision`, and whose condition is Ready. `observed_image` is that pod's container image. A pod from the previous revision never counts.
    - `observed_generation` is set only by a routine pass whose observation matches the applied generation. A pass that changes the live StatefulSet never also records convergence; the next pass observes it. The StatefulSet carries `exomem.io/row-generation`. A pass changes it when that annotation or the render digest differs from the row, and the StatefulSet's `status.observedGeneration` must equal its `metadata.generation` before `status.updateRevision` is trusted.
+   - **`ready` is an observation, never a memory.** Every pass re-reads the Ready condition of the pod on the StatefulSet's update revision for every row it reconciles, dirty or not. A converged row whose readiness no longer matches goes through the full decision, which writes `ready` and `observed_state` from that observation, so a cell whose pod turns NotReady shows `ready = false` on the next pass and turns back when the pod recovers. A row whose readiness is unchanged writes `observed_at` alone. D6's rollout gate and canary check require the readiness observed this pass as well as the row's.
 
 **Holds.** A maintenance operation owns a cell's image and replica count through one StatefulSet annotation:
 
@@ -493,6 +494,8 @@ A single row: `id int primary key check (id = 1)`, `paused boolean not null defa
 
 `base64url_nopad(HMAC-SHA256(key, "exomem-cloud-cell-token-v1:" + cell_id))`: ASCII input, 43 characters, no padding.
 
+Shared test vector, asserted on both sides: key (64 hex) `000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f`, `cell_id` `aaaaaaaaaaaaaaaa`, bearer `lAS-RM751FtdjYccMyK7IujLHk7OVYAZABBMG1aza6o`.
+
 ## Controls retired, and why
 
 Each row states what the control prevented, what it cost when it fired wrongly, and who paid.
@@ -546,7 +549,7 @@ The gateway gates on desired state, not on the observed `ready` column. An event
 - **One fleet node.** Losing it takes every cell down until it is rebuilt from IaC and restored from backups. The control database survives on its own server.
 - **Public PgBouncer.** It is limited to the Substrate roles, with verify-full TLS, SCRAM, and PgBouncer and nftables connection limits.
 - **fsGroup behaviour on the real CSI driver** is proven only by the D2 test. The implementer escalates rather than weakening custody checks.
-- **The gateway has no cell-token-key ring yet.** It reads one 64-hex `EXOMEM_CLOUD_CELL_TOKEN_KEY`, so during a D7 rotation it accepts only one version at a time and step 3 is a cutover. Until Substrate adds the previous-version ring, a rotation briefly returns `CELL_AUTH_MISMATCH` for a cell whose restart has not reached the new key. That is accepted for launch; rotations are rare and operator-driven.
+- **The gateway has no cell-token-key ring yet.** It reads one 64-hex `EXOMEM_CLOUD_CELL_TOKEN_KEY` from the same Secret entry cellctl reads, so during a D7 rotation it holds one version at a time, and any gateway restart after the entry changes (a rollout, a node drain, an OOM kill) switches it. cellctl moves cells one at a time, each digest-only re-apply waiting up to 10 minutes on the previous one, so a cell not yet re-applied answers `CELL_AUTH_MISMATCH` for up to about fleet size × one cell restart, not briefly. Accepted for launch; rotations are rare and operator-driven, and the runbook must change the entry only in a maintenance window and restart the gateway once every cell's render digest has converged. The Substrate follow-up adds the previous-version ring, after which step 3 needs no window.
 - **Letting go of provisioner-held revocation.** Suspension is `stopped` (`replicas: 0`) plus gateway refusal, and it takes effect within one cellctl pass.
 
 ## Migration Plan
