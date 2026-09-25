@@ -8,7 +8,9 @@ What it proves:
   - the agent joins with the CA-pinned agent token (byte-equal to the token
     the server itself writes to /var/lib/rancher/k3s/server/agent-token),
     reports Ready and carries the node-pool label;
-  - a node presenting a wrong agent password is refused;
+  - a host outside the inventory cannot reach the K3s API through the host
+    firewall, and an admitted peer presenting a wrong agent password is
+    refused (401) where the right one is accepted;
   - a second agent added in a later run joins (the first agent's firewall
     admits it, so both peer-admission checks pass), and the run after that
     is changed=0 again;
@@ -278,17 +280,26 @@ def test_node_pool_join_rerun_second_agent_preflight_removal_and_rejoin_refusal(
     assert code == 0, stderr
     assert _changed(stats) == {SERVER: 0, AGENT_1: 0}, stats
 
-    # 3. A wrong agent password is refused (separate data dir, nothing left behind).
-    wrong = server_side.rsplit(":", 1)[0] + ":" + "wrong" + AGENT_TOKEN
-    attempt = _exec(
-        AGENT_2, "timeout", "30", "/opt/k3s-release", "agent",
-        "--server", f"https://{IPS[SERVER]}:6443", "--token", wrong,
-        "--data-dir", "/tmp/wrong-token", "--node-name", "exomem-intruder",
-        check=False,
+    # 3a. A host that is not an inventoried K3s node cannot reach the API:
+    # the server's host firewall admits 6443 only from peer addresses.
+    blocked = _exec(
+        AGENT_2, "curl", "-sk", "-m", "5", "-o", "/dev/null", "-w", "%{http_code}",
+        f"https://{IPS[SERVER]}:6443/cacerts", check=False,
     )
-    assert "401" in attempt.stderr or "Unauthorized" in attempt.stderr, attempt.stderr[-2000:]
-    assert _kubectl("get", "node", "exomem-intruder", "--ignore-not-found", "-o", "name").stdout == ""
-    _exec(AGENT_2, "rm", "-rf", "/tmp/wrong-token", "/etc/rancher/node", check=False)
+    assert blocked.stdout.strip() == "000", blocked.stdout
+
+    # 3b. From an admitted peer, the node-authenticated bootstrap endpoint the
+    # agent uses refuses a wrong agent password and accepts the right one.
+    def node_auth(password: str) -> str:
+        return _exec(
+            AGENT_1, "curl", "-sk", "-m", "10", "-o", "/dev/null", "-w", "%{http_code}",
+            "-u", f"node:{password}", f"https://{IPS[SERVER]}:6443/v1-k3s/config",
+            check=False,
+        ).stdout.strip()
+
+    assert node_auth("wrong" + AGENT_TOKEN) == "401"
+    assert node_auth(SERVER_TOKEN + "x") == "401"
+    assert node_auth(AGENT_TOKEN) not in {"401", "000"}
 
     # 4. A second agent added in a later run joins; both peer checks pass.
     code, stats, stderr = _playbook(two_agents, "site.yml")
@@ -318,7 +329,12 @@ def test_node_pool_join_rerun_second_agent_preflight_removal_and_rejoin_refusal(
     node = json.loads(_kubectl("get", "node", AGENT_2, "-o", "json").stdout)
     assert not node["spec"].get("unschedulable"), "the preflight must refuse before cordoning"
     assert _exec(AGENT_2, "systemctl", "is-active", "k3s-agent", check=False).stdout.strip() == "active"
-    _kubectl("delete", "namespace", "exo-cell-aaaaaaaaaaaaaaaa", "--wait=true")
+    # Only the PVC matters to the preflight; namespace finalization can stall
+    # on aggregated APIs that this rig does not serve.
+    _kubectl(
+        "delete", "persistentvolumeclaim", "data",
+        "--namespace", "exo-cell-aaaaaaaaaaaaaaaa", "--wait=true", "--timeout=120s",
+    )
 
     # 6. Removal: stop, delete, revoke.
     code, stats, stderr = _playbook(two_agents, "remove-agent.yml", "-e", f"k3s_remove_node={AGENT_2}")
