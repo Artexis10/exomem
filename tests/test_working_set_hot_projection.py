@@ -655,6 +655,7 @@ def test_cache_key_includes_the_heat_digest() -> None:
         "freshness_key": "k",
         "index_generation": 3,
         "roles_hash": "r",
+        "conventions_hash": "c",
         "turn": "continue",
         "max_chars": 4000,
     }
