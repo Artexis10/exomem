@@ -839,9 +839,12 @@ def _available_memory() -> int | None:
 
 
 def ensure_served_artifact(model_name: str) -> None:
-    """Fetch or build a served model's artefact without loading it (quiet-mode warm-up)."""
+    """Fetch or build a served model's artefact without loading it: the quiet-mode
+    warm-up, and a load's first step outside the model slot. The tokenizer guard
+    comes first, so a model that could never load acquires nothing."""
     served = served_artifact(model_name)
     if served is not None:
+        require_tokenizer(model_name)
         ensure_artifact(model_name, served)
 
 

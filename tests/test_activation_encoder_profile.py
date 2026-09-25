@@ -1318,6 +1318,61 @@ def test_available_memory_reads_memavailable_or_else_the_free_pages(
     assert _REAL_AVAILABLE_MEMORY() is None
 
 
+@pytest.mark.parametrize("lane", ["recall", "activation"])
+def test_a_served_model_is_acquired_outside_the_model_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lane: str
+) -> None:
+    """A first load that downloads or builds holds no model slot meanwhile: every
+    other encode on that slot runs, and the slot is taken only for the load."""
+    _tiny_served_repo(tmp_path, monkeypatch)
+    if lane == "recall":
+        monkeypatch.setattr(embeddings, "MODEL_NAME", TINY)
+        load, slot = embeddings.get_model, runtime_resources.model_execution
+    else:
+        monkeypatch.setenv(embeddings.ACTIVATION_MODEL_ENV, TINY)
+        load, slot = embeddings.get_activation_model, embeddings.activation_execution
+    free_while_building: list[bool] = []
+    real_build = embedding_backend._build_artifact
+
+    def build_and_probe(*args) -> None:
+        def probe() -> None:
+            try:
+                with slot(wait=False):
+                    free_while_building.append(True)
+            except runtime_resources.ModelBusyError:
+                free_while_building.append(False)
+
+        other = threading.Thread(target=probe)
+        other.start()
+        other.join(timeout=30)
+        real_build(*args)
+
+    monkeypatch.setattr(embedding_backend, "_build_artifact", build_and_probe)
+
+    model = load()
+
+    assert free_while_building == [True]
+    assert model.backend == embedding_backend.ONNX
+
+
+def test_a_served_model_without_its_tokenizer_acquires_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _asked, served = _tiny_served_repo(tmp_path, monkeypatch)
+    real_resolve = embedding_backend._resolve
+
+    def no_tokenizer(model: str, name: str, revision: str | None = None) -> str:
+        if name == "tokenizer.json":
+            raise FileNotFoundError(name)
+        return real_resolve(model, name, revision)
+
+    monkeypatch.setattr(embedding_backend, "_resolve", no_tokenizer)
+    monkeypatch.setattr(embedding_backend, "ensure_artifact", lambda *_a: pytest.fail("nothing is acquired"))
+
+    with pytest.raises(embedding_backend.ModelFilesUnavailable, match="tokenizer.json"):
+        embedding_backend.ensure_served_artifact(TINY)
+
+
 def test_the_release_asset_is_byte_for_byte_reproducible(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _asked, served = _tiny_served_repo(tmp_path, monkeypatch)
     embedding_backend.load_encoder(TINY)

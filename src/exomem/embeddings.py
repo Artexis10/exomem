@@ -279,6 +279,10 @@ def get_model():
     for the same reason this function did — a lean install must not pay it.
     """
     global _MODEL, _MODEL_GENERATION
+    if _MODEL is None:
+        # A served model's artefact can take minutes to download or build; the
+        # process-wide model slot is taken only to load the finished bytes.
+        embedding_backend.ensure_served_artifact(MODEL_NAME)
     with runtime_resources.model_execution():
         if _MODEL is not None:
             return _MODEL
@@ -1231,6 +1235,8 @@ def get_activation_model():
     global _ACTIVATION_MODEL
     if activation_encoder_is_shared():
         return get_model()
+    if _ACTIVATION_MODEL is None:
+        embedding_backend.ensure_served_artifact(activation_model_name())
     with activation_execution():
         if _ACTIVATION_MODEL is not None:
             return _ACTIVATION_MODEL
