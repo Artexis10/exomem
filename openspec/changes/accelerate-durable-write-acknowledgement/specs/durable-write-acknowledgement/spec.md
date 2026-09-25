@@ -76,6 +76,12 @@ dispatched, and at component completion.
 - **THEN** every batch completes or is superseded, and none is left in `reconcile_required`
 - **AND** every pending-visibility row retires, and managed recall stays ready
 
+#### Scenario: A shared page returned to its earlier bytes is handed on
+
+- **WHEN** a newer write re-renders a shared page exactly as it was before an older batch's write
+- **THEN** the older batch hands that page to the newer batch, whose proven after-state those bytes are
+- **AND** it converges its own paths instead of being held in `reconcile_required`
+
 #### Scenario: A coverer not yet proven heals on the next pass
 
 - **WHEN** an older batch is re-proven after a newer committed write moved one of its shared paths but before the newer batch's own proof

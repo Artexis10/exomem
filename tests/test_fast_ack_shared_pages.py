@@ -337,6 +337,133 @@ def test_a_crash_cut_batch_whose_shared_page_moved_on_recovers(
     _assert_converged(vault, [page_rel, newer_page, log_rel])
 
 
+def test_a_shared_page_a_newer_write_returned_to_its_old_bytes_is_handed_on(
+    live_catalogue: Path, tmp_path: Path
+) -> None:
+    """A shared page can move on and land back on an older batch's before-bytes.
+
+    Two edits each re-render the knowledge base index; the second renders it
+    exactly as it was before the first. The first batch then sees the index in
+    its before-state -- not a torn write of its own, but a newer batch's proven
+    after-state, and that batch holds its custody. Found by the 3-writer burst.
+    """
+    vault = live_catalogue
+    index_rel = "Knowledge Base/index.md"
+    index = vault / index_rel
+    first_rel = "Knowledge Base/Notes/Insights/returned-bytes-first.md"
+    second_rel = "Knowledge Base/Notes/Insights/returned-bytes-second.md"
+
+    def page(title: str) -> bytes:
+        return (
+            f"---\ntitle: {title}\ntype: insight\nstatus: draft\n"
+            f"updated: 2026-09-25\n---\n\n# {title}\n\nBody.\n"
+        ).encode()
+
+    def committed(batch_id: str, writes: dict[str, tuple[bytes | None, bytes]]):
+        receipt = derived_receipts.prepare_batch(
+            vault,
+            batch_id=batch_id,
+            mutation_attempt_digest=hashlib.sha256(batch_id.encode()).hexdigest(),
+            canonical_generation=f"generation-{batch_id}",
+            checkpoint_id=f"checkpoint-{batch_id}",
+            paths=tuple(
+                derived_receipts.DerivedBatchPath(
+                    rel_path=rel,
+                    before_hash=None if old is None else hashlib.sha256(old).hexdigest(),
+                    after_hash=hashlib.sha256(new).hexdigest(),
+                )
+                for rel, (old, new) in sorted(writes.items())
+            ),
+            required_components=frozenset({DerivedComponent.LEXSTORE}),
+        )
+        for rel, (_old, new) in writes.items():
+            target = vault / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(new)
+        assert derived_receipts.prove_committed(
+            vault, receipt, current_generation=receipt.canonical_generation
+        ).outcome == "ready"
+        assert derived_receipts.publish_pending_visibility(
+            vault, receipt, publisher=pending_recall.publish
+        )
+        return receipt
+
+    # A real write first, so the vault has the canonical generation the drain
+    # observes before it dispatches a component.
+    seed = _remember(tmp_path, vault, "Returned bytes seed")["path"]
+    original = index.read_bytes()
+    rendered = original + b"\n- first edit's recent-activity line\n"
+    first = committed(
+        "returned-first",
+        {first_rel: (None, page("Returned bytes first")), index_rel: (original, rendered)},
+    )
+    committed(
+        "returned-second",
+        {second_rel: (None, page("Returned bytes second")), index_rel: (rendered, original)},
+    )
+
+    proof = derived_receipts.prove_committed(
+        vault, first, current_generation=first.canonical_generation
+    )
+
+    assert proof.outcome == "ready"
+    assert _row_states(vault, first.batch_id)[index_rel] == "retired"
+    _drain_until_idle(vault)
+    _assert_converged(vault, [seed, first_rel, second_rel, index_rel])
+
+
+def test_before_bytes_no_newer_batch_wrote_stay_owed(live_catalogue: Path) -> None:
+    """Back at its before-bytes by a hand revert, a path is not handed on.
+
+    A newer batch carries the page, but its recorded after-state is not what is
+    on disk, so nothing proves the bytes belong to it.
+    """
+    vault = live_catalogue
+    shared_rel = "Knowledge Base/index.md"
+    shared = vault / shared_rel
+    own_rel = "Knowledge Base/Notes/Insights/reverted-by-hand-own.md"
+    x = shared.read_bytes()
+    y = x + b"\n- older batch line\n"
+    z = y + b"\n- newer batch line\n"
+    own = b"---\ntitle: Reverted by hand own\ntype: insight\n---\n\n# Reverted\n"
+
+    def prepared(batch_id: str, paths):
+        return derived_receipts.prepare_batch(
+            vault,
+            batch_id=batch_id,
+            mutation_attempt_digest=hashlib.sha256(batch_id.encode()).hexdigest(),
+            canonical_generation=f"generation-{batch_id}",
+            checkpoint_id=f"checkpoint-{batch_id}",
+            paths=tuple(
+                derived_receipts.DerivedBatchPath(
+                    rel_path=rel,
+                    before_hash=None if old is None else hashlib.sha256(old).hexdigest(),
+                    after_hash=hashlib.sha256(new).hexdigest(),
+                )
+                for rel, old, new in paths
+            ),
+            required_components=frozenset({DerivedComponent.LEXSTORE}),
+        )
+
+    older = prepared("reverted-older", [(shared_rel, x, y), (own_rel, None, own)])
+    (vault / own_rel).parent.mkdir(parents=True, exist_ok=True)
+    (vault / own_rel).write_bytes(own)
+    shared.write_bytes(y)
+    newer = prepared("reverted-newer", [(shared_rel, y, z)])
+    shared.write_bytes(z)
+    assert derived_receipts.prove_committed(
+        vault, newer, current_generation=newer.canonical_generation
+    ).outcome == "ready"
+    assert derived_receipts.publish_pending_visibility(
+        vault, newer, publisher=pending_recall.publish
+    )
+    shared.write_bytes(x)
+
+    assert derived_receipts.prove_committed(
+        vault, older, current_generation=older.canonical_generation
+    ).outcome == "reconcile_required"
+
+
 def test_an_out_of_band_move_heals_once_the_recall_lanes_hold_it(
     live_catalogue: Path, tmp_path: Path
 ) -> None:

@@ -1139,18 +1139,50 @@ def _recall_lanes_hold_current(vault_root: Path, rel_path: str) -> bool:
     return pending_recall.recall_lanes_hold(vault_root, {rel_path: identity})
 
 
+def _newer_custody_wrote_bytes(
+    connection: sqlite3.Connection,
+    batch_sequence: int,
+    rel_path: str,
+    identity: str | None,
+) -> bool:
+    """Whether a newer proven batch's recorded after-state is exactly these bytes.
+
+    A shared page can move on and land back on bytes an older batch saw before
+    its own write (an index re-rendered as it was). Those bytes are then a
+    newer write's proven after-state under that batch's custody, not a torn
+    write of the older batch.
+    """
+    return (
+        connection.execute(
+            "SELECT 1 FROM derived_batches AS b "
+            "JOIN derived_batch_paths AS p ON p.batch_id = b.batch_id "
+            "JOIN pending_recall_rows AS r ON r.batch_id = b.batch_id "
+            "AND r.rel_path = p.rel_path "
+            "WHERE b.rowid > ? AND b.state IN ('ready', 'completed', 'superseded') "
+            "AND p.rel_path = ? AND p.after_hash IS ? "
+            "AND r.state IN ('live', 'retired') LIMIT 1",
+            (batch_sequence, rel_path, identity),
+        ).fetchone()
+        is not None
+    )
+
+
 def _handed_on(
     vault_root: Path,
     connection: sqlite3.Connection,
     batch_id: str,
     moved: Sequence[str],
+    returned: Sequence[tuple[str, str | None]] = (),
 ) -> frozenset[str]:
-    """The moved paths whose current bytes are someone else's to make visible.
+    """The paths whose current bytes are someone else's to make visible.
 
-    A moved path is handed on when newer exact custody covers it (option A) or,
-    failing that, when both recall lanes already hold its current bytes (R2).
+    A moved path (`other`) is handed on when newer exact custody covers it
+    (option A) or, failing that, when both recall lanes already hold its
+    current bytes (R2). A path back at this batch's before-bytes is handed on
+    only when a newer proven batch recorded exactly those bytes as its own
+    after-state; otherwise it may be this batch's torn write, and stays owed.
     """
-    if not moved:
+    if not moved and not returned:
         return frozenset()
     row = connection.execute(
         "SELECT rowid FROM derived_batches WHERE batch_id = ?", (batch_id,)
@@ -1158,12 +1190,18 @@ def _handed_on(
     if row is None:
         return frozenset()
     sequence = int(row[0])
-    return frozenset(
+    handed = {
         rel
         for rel in moved
         if _newer_custody_covers_path(connection, sequence, rel)
         or _recall_lanes_hold_current(vault_root, rel)
+    }
+    handed.update(
+        rel
+        for rel, identity in returned
+        if _newer_custody_wrote_bytes(connection, sequence, rel, identity)
     )
+    return frozenset(handed)
 
 
 def _delegated_paths(
@@ -1176,24 +1214,30 @@ def _delegated_paths(
 
     Owner ruling on stranded batches (option A, 2026-09-25): proof is per path.
     A path in its intended after-state is this batch's own. A path whose bytes
-    moved on past it (`other`, never `before`) is proven when newer exact
-    custody covers it, or when both recall lanes already hold its current bytes
-    (R2), and this batch stops owning that path's visibility; its remaining
-    paths still converge here. Any path that is neither -- still in its
-    before-state, unreadable, or moved with nothing covering or holding it --
-    makes the whole batch unprovable, exactly as before.
+    moved on past it (`other`) is proven when newer exact custody covers it, or
+    when both recall lanes already hold its current bytes (R2). A path back at
+    this batch's before-bytes is proven only when a newer proven batch wrote
+    exactly those bytes. A handed-on path's visibility is no longer this
+    batch's; its remaining paths still converge here. Any other path --
+    unreadable, or not explained by newer custody or the lanes -- makes the
+    whole batch unprovable, exactly as before.
     """
-    if any(state not in {"after", "other"} for state in path_states):
+    if any(state not in {"after", "other", "before"} for state in path_states):
         return None
     moved = [
         path.rel_path
         for path, state in zip(receipt.paths, path_states, strict=True)
         if state == "other"
     ]
-    if not moved:
+    returned = [
+        (path.rel_path, path.before_hash)
+        for path, state in zip(receipt.paths, path_states, strict=True)
+        if state == "before"
+    ]
+    if not moved and not returned:
         return frozenset()
-    handed_on = _handed_on(vault_root, connection, receipt.batch_id, moved)
-    return handed_on if len(handed_on) == len(moved) else None
+    handed_on = _handed_on(vault_root, connection, receipt.batch_id, moved, returned)
+    return handed_on if len(handed_on) == len(moved) + len(returned) else None
 
 
 def _retire_delegated_rows(
@@ -1455,7 +1499,12 @@ def _publication_split(
             for p, state in zip(open_paths, states, strict=True)
             if state == "other"
         ]
-        handed_on = _handed_on(vault_root, connection, receipt.batch_id, moved)
+        returned = [
+            (p.rel_path, p.before_hash)
+            for p, state in zip(open_paths, states, strict=True)
+            if state == "before"
+        ]
+        handed_on = _handed_on(vault_root, connection, receipt.batch_id, moved, returned)
     finally:
         connection.close()
     owned = tuple(p for p in open_paths if p.rel_path not in handed_on)

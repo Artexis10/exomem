@@ -138,7 +138,12 @@ original request evaluates a prepared batch from source of truth:
   burst in `reconcile_required` for good, and its unprovable live rows turned
   every managed recall into a warming answer (owner ruling, option A,
   2026-09-25). A moved path whose newer batch is committed but not yet proven
-  leaves the batch `reconcile_required` until recovery re-proves it. A moved
+  leaves the batch `reconcile_required` until recovery re-proves it. A shared
+  page can also move on and land back on bytes an older batch saw before its
+  own write (an index re-rendered as it was): a path back at its before-bytes
+  is handed on only when a newer proven batch recorded exactly those bytes as
+  its after-state, since otherwise it may be the older batch's own torn write
+  (found by the 3-writer burst, 2026-09-25). A moved
   path that no batch covers -- a hand edit in the editor, which is ordinary in
   a personal vault -- is handed on once both recall lanes hold its current
   bytes (ruling R2): that is the overlay's own retirement test, and until it
