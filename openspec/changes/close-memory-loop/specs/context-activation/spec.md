@@ -48,8 +48,9 @@ within that interval.
 #### Scenario: Attribution never changes the packet
 - **WHEN** the same turn is submitted against the same vault state with and without
   `client` and `session`, or with an invalid label or oversize session
-- **THEN** the packets are identical apart from the continuity token each call mints and
-  the optional `upkeep` block, whose session start the `session` identifies
+- **THEN** the packets are identical apart from the continuity token each call mints,
+  the optional `upkeep` block, whose session start the `session` identifies, and
+  `budget.used_chars`, which counts that block's item when one is attached
 - **AND** the call is never refused over its attribution
 
 #### Scenario: The turn is never recorded
