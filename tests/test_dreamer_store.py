@@ -132,6 +132,36 @@ def test_caps_evict_the_weakest_open_candidate(
     conn.close()
 
 
+def test_parked_rows_never_fill_the_cap_and_the_oldest_goes_first(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dreamer_store, "MAX_OPEN_PER_FAMILY", 3)
+    store = dreamer_store.DreamerStore(vault)
+    conn = store.connect()
+    decided: set[str] = set()
+
+    def parked(cid: str, _fingerprint: str) -> bool:
+        return cid in decided
+
+    first = [
+        _propose(store, conn, subject=f"Old {i}", now=NOW + i, parked=parked) for i in range(3)
+    ]
+    decided.update(first)
+    # Three decided rows: a newcomer still enters, and nothing is evicted.
+    fresh = [
+        _propose(store, conn, subject=f"New {i}", now=NOW + 10 + i, parked=parked) for i in range(3)
+    ]
+    ids = {row[0] for row in conn.execute("SELECT id FROM candidates WHERE state = 'open'")}
+    assert ids == {*first, *fresh}
+    # Past the cap among eligible rows, the OLDEST equal-evidence row goes.
+    newest = _propose(store, conn, subject="Newest", now=NOW + 20, parked=parked)
+    ids = {row[0] for row in conn.execute("SELECT id FROM candidates WHERE state = 'open'")}
+    assert newest in ids
+    assert fresh[0] not in ids
+    assert set(first) <= ids
+    conn.close()
+
+
 def test_size_cap_disables_only_global_families(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

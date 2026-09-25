@@ -150,6 +150,24 @@ class Context:
         self.review_payload()
         return self._review["store"]
 
+    def parked(self, cid: str, fingerprint: str) -> bool:
+        """True when a candidate is decided in the review state or held after
+        its deliveries: it no longer competes for the family cap."""
+        payload = self.review_payload()
+        if payload is not None:
+            state, _decision = self.review_store().effective_state(
+                cid, fingerprint, payload=payload
+            )
+            if state != "open":
+                return True
+        if "deliveries" not in self._review:
+            counts: dict[tuple[str, str], int] = {}
+            if self.store is not None and self.conn is not None:
+                for rid, fp, _caller, _at in self.store.deliveries(self.conn):
+                    counts[(rid, fp)] = counts.get((rid, fp), 0) + 1
+            self._review["deliveries"] = counts
+        return self._review["deliveries"].get((cid, fingerprint), 0) >= MAX_DELIVERIES
+
 
 @dataclass(frozen=True)
 class Family:
@@ -348,6 +366,7 @@ def _link_on_page(ctx: Context, rel_path: str) -> None:
             ctx.conn,
             producer=PRODUCER,
             now=ctx.now,
+            parked=ctx.parked,
             **_link_kwargs(ctx, rel_path, review_id, proposal),
         )
 
@@ -639,7 +658,7 @@ def _hydration_refresh(ctx: Context, entity: str) -> None:
             now=ctx.now,
         )
         return
-    ctx.store.upsert_proposal(ctx.conn, producer=PRODUCER, now=ctx.now, **kwargs)
+    ctx.store.upsert_proposal(ctx.conn, producer=PRODUCER, now=ctx.now, parked=ctx.parked, **kwargs)
 
 
 def _hydration_propose(ctx: Context, row: dict[str, Any]) -> dict[str, Any] | None:

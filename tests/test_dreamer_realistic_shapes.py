@@ -128,3 +128,52 @@ def test_item_and_context_over_relations_build_no_resolver(
     commands.op_review_memory(vault, mode="item", ref=ref)
     commands.op_review_item_context(vault, ref=ref)
     assert spy.builds == 0 and spy.walks == 0, (spy.builds, spy.walks)
+
+
+# ----------------------------------------------------------------------
+# F4: the family cap counts only rows still eligible, and never starves
+# ----------------------------------------------------------------------
+
+
+def _cluster_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, count: int = 14) -> Path:
+    vault = tmp_path / "vault"
+    fx.write(vault, fx.SOURCE_ONE, fx.source("Field report one"))
+    fx.write(vault, fx.SOURCE_TWO, fx.source("Field report two"))
+    fx.cluster(vault, count, "field-report-one")
+    fx.seed(vault)
+    fx.publish_graph(vault)
+    fx.warm_identity(vault, monkeypatch)
+    return vault
+
+
+def test_decided_rows_leave_room_for_a_fresh_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _cluster_vault(tmp_path, monkeypatch)
+    _quiet(vault)
+    first = _rows(vault, dreamer_families.LINK_FAMILY)
+    assert len(first) == dreamer_store.MAX_OPEN_PER_FAMILY
+    for row in first:
+        commands.op_triage_memory(
+            vault,
+            ref=row["ref"],
+            action="dismiss",
+            why="false_positive: unrelated notes",
+            source_path=row["subject_path"],
+        )
+    # A fresh, undecided pair on another Source.
+    fresh = []
+    for index in (900, 901):
+        rel = f"{fx.KB}/Notes/Insights/fresh-{index}.md"
+        text = fx.insight(f"Fresh {index}", sources=["field-report-two"], updated="2026-05-02")
+        fx.write(vault, rel, fx.with_id(text, rel))
+        fresh.append(rel)
+    freshness.on_files_changed(vault, changed=[vault / rel for rel in fresh])
+    fx.publish_graph(vault)
+    fx.warm_identity(vault, monkeypatch)
+    _quiet(vault)
+    subjects = {row["subject_path"] for row in _rows(vault, dreamer_families.LINK_FAMILY)}
+    assert subjects & set(fresh), "the fresh pair was starved by decided rows"
+    _quiet(vault, now=LATER)
+    listed = upkeep.review(vault, state="open", limit=50)
+    assert any(item["dispose"]["args"].get("source_path") in fresh for item in listed["items"])

@@ -25,7 +25,7 @@ import random
 import re
 import sqlite3
 import threading
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -410,6 +410,7 @@ class DreamerStore:
         identity: str | None = None,
         ref: str | None = None,
         fingerprint: str | None = None,
+        parked: Callable[[str, str], bool] | None = None,
     ) -> str | None:
         """Write or refresh one proposal; the id is `candidate_id` unless given.
 
@@ -503,9 +504,9 @@ class DreamerStore:
             "INSERT OR IGNORE INTO candidate_paths(path, id) VALUES (?, ?)",
             ((path, cid) for path in sorted(paths)),
         )
-        if self._enforce_family_cap(conn, family, keep=cid):
+        if self._enforce_family_cap(conn, family, keep=cid, parked=parked):
             return None
-        self._enforce_row_cap(conn, now)
+        self._enforce_row_cap(conn, now, parked=parked)
         return cid
 
     def resolve(
@@ -600,28 +601,46 @@ class DreamerStore:
             (1 if deliverable else 0, token, settled_at, cid),
         )
 
-    def _enforce_family_cap(self, conn: sqlite3.Connection, family: str, *, keep: str) -> bool:
-        """Evict the weakest open rows past the cap. True when `keep` was evicted."""
-        count = int(
-            conn.execute(
-                "SELECT count(*) FROM candidates WHERE family=? AND state='open'", (family,)
-            ).fetchone()[0]
-        )
-        excess = count - MAX_OPEN_PER_FAMILY
+    def _enforce_family_cap(
+        self,
+        conn: sqlite3.Connection,
+        family: str,
+        *,
+        keep: str,
+        parked: Callable[[str, str], bool] | None = None,
+    ) -> bool:
+        """Evict the weakest eligible open rows past the cap. True when `keep` was evicted.
+
+        Only rows still eligible for delivery count and compete: a row the
+        review state has decided (dismissed, snoozed, competing) or that is held
+        after its deliveries is `parked`. It stays so a snooze can expire and a
+        reopen can find it, but it can never fill the cap or push out a new
+        proposal. Among eligible rows the weakest evidence goes first, then the
+        OLDEST, so a newcomer is never starved by rows that were there first.
+        """
+        rows = conn.execute(
+            "SELECT id, fingerprint, evidence_count, created_at FROM candidates "
+            "WHERE family=? AND state='open'",
+            (family,),
+        ).fetchall()
+        eligible = [row for row in rows if parked is None or not parked(str(row[0]), str(row[1]))]
+        excess = len(eligible) - MAX_OPEN_PER_FAMILY
         if excess <= 0:
             return False
-        victims = [
-            str(row[0])
-            for row in conn.execute(
-                "SELECT id FROM candidates WHERE family=? AND state='open' "
-                "ORDER BY evidence_count ASC, created_at DESC, id DESC LIMIT ?",
-                (family, excess),
-            )
-        ]
+        eligible.sort(key=lambda row: (int(row[2] or 0), float(row[3] or 0.0), str(row[0])))
+        victims = [str(row[0]) for row in eligible[:excess]]
         self._delete(conn, victims)
         return keep in victims
 
-    def _enforce_row_cap(self, conn: sqlite3.Connection, now: float) -> None:
+    def _enforce_row_cap(
+        self,
+        conn: sqlite3.Connection,
+        now: float,
+        *,
+        parked: Callable[[str, str], bool] | None = None,
+    ) -> None:
+        """Bound the whole table: expired resolved rows go, then resolved rows,
+        then parked ones, then the weakest and oldest eligible rows."""
         conn.execute(
             "DELETE FROM candidates WHERE state<>'open' AND resolved_at < ?",
             (now - RESOLVED_RETENTION_SECONDS,),
@@ -629,14 +648,17 @@ class DreamerStore:
         excess = int(conn.execute("SELECT count(*) FROM candidates").fetchone()[0]) - MAX_ROWS
         if excess <= 0:
             return
-        victims = [
-            str(row[0])
-            for row in conn.execute(
-                "SELECT id FROM candidates ORDER BY (state='open') ASC, "
-                "COALESCE(resolved_at, 0) ASC, evidence_count ASC, id DESC LIMIT ?",
-                (excess,),
-            )
-        ]
+        rows = conn.execute(
+            "SELECT id, fingerprint, state, resolved_at, evidence_count, created_at FROM candidates"
+        ).fetchall()
+
+        def rank(row) -> tuple:
+            if row[2] != "open":
+                return (0, float(row[3] or 0.0), 0, 0.0, str(row[0]))
+            held = parked is not None and parked(str(row[0]), str(row[1]))
+            return (1 if held else 2, 0.0, int(row[4] or 0), float(row[5] or 0.0), str(row[0]))
+
+        victims = [str(row[0]) for row in sorted(rows, key=rank)[:excess]]
         self._delete(conn, victims)
 
     @staticmethod
