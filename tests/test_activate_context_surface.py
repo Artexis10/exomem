@@ -301,3 +301,75 @@ def test_ask_memory_keeps_its_due_state_block_after_an_activation(
 
     assert isinstance(after, dict)
     assert after["due_state"] == baseline["due_state"]
+
+
+# --------------------------------------------------------------------------- #
+# Attribution: `client` and `session` are recorded, never served
+# --------------------------------------------------------------------------- #
+
+
+def _without_token(packet: dict) -> dict:
+    """The packet minus its continuity token, which dates its own minting."""
+    return {key: value for key, value in packet.items() if key != "continuity"}
+
+
+def test_attribution_is_accepted_and_never_changes_the_packet(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    served: list[dict] = []
+    real_serve = working_set_runtime.serve
+
+    per_request = {"freshness_snapshot", "lexical_seconds", "timings"}
+
+    def recording_serve(*args, **kwargs):
+        served.append({key: value for key, value in kwargs.items() if key not in per_request})
+        return real_serve(*args, **kwargs)
+
+    monkeypatch.setattr(working_set_runtime, "serve", recording_serve)
+
+    plain = commands.op_activate_context(activation_vault, turn=TURN)
+    attributed = commands.op_activate_context(
+        activation_vault, turn=TURN, client="claude-code", session="ep-" + "a1" * 16
+    )
+
+    assert json.dumps(_without_token(plain), sort_keys=True) == json.dumps(
+        _without_token(attributed), sort_keys=True
+    )
+    assert served[0] == served[1], "attribution must not reach resolution or the cache key"
+    assert not {"client", "session"} & set(served[1])
+
+
+def test_an_invalid_client_label_or_session_is_ignored_not_refused(
+    activation_vault: Path,
+) -> None:
+    packet = commands.op_activate_context(
+        activation_vault, turn=TURN, client="Not A Label!", session="s" * 5000
+    )
+
+    assert packet["abstained"] is False
+
+
+def test_attribution_is_accepted_on_every_door(
+    activation_vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    for argv in (
+        ["activate", TURN, "--client", "codex", "--session", "abc", "--json"],
+        ["activate_context", TURN, "--client", "codex", "--session", "abc", "--json"],
+    ):
+        code, out = _run_cli(argv, capsys)
+        assert code == 0, out
+        assert json.loads(out)["success"] is True
+
+    client = _rest_client(monkeypatch)
+    response = client.post(
+        "/api/activate_context",
+        json={"turn": TURN, "client": "claude-code", "session": "abc"},
+        headers={"Authorization": "Bearer sekret"},
+    )
+    assert response.status_code == 200, response.text
+
+    product = {command.name: command for command in commands.PRODUCT_COMMANDS}
+    names = [param.name for param in product["activate_context"].params]
+    assert {"client", "session"} <= set(names)

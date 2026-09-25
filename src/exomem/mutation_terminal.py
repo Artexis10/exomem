@@ -45,6 +45,17 @@ _RECORD_RECEIPT_MARKER = "exomem.records-mutation"
 _RECORD_RECEIPT_VERSION = 1
 _LIFECYCLE_RECEIPT_VERSION = 2
 _PLAN_RECEIPT_MARKER = "exomem.planning-mutation"
+_EPISODE_RECEIPT_FIELDS = (
+    "operation",
+    "episode",
+    "revision",
+    "source",
+    "idempotent",
+    "recovery",
+    "ledger",
+    "about_skipped",
+)
+
 _PLAN_RECEIPT_FIELDS = (
     "operation",
     "collection_id",
@@ -1578,6 +1589,10 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         compact.update({key: leaf[key] for key in _RECORD_RECEIPT_FIELDS if key in leaf})
     elif valid_planning_receipt(leaf):
         compact.update({key: leaf[key] for key in _PLAN_RECEIPT_FIELDS if key in leaf})
+    elif isinstance(leaf, Mapping) and leaf.get("operation") == "episode_memory":
+        # The recording agent needs the key back to record the next revision,
+        # and every field here is bounded by `episode_capture`'s own caps.
+        compact.update({key: leaf[key] for key in _EPISODE_RECEIPT_FIELDS if key in leaf})
     elif isinstance(leaf, Mapping) and leaf.get("operation") == "configure_memory":
         # The configuration contract is metadata-only and bounded by the
         # canonical prominence vocabulary. Keep the newly effective contract

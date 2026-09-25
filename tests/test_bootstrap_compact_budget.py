@@ -395,7 +395,8 @@ def _size(payload: dict) -> int:
 #: Warn rather than fail: the remaining bytes are still legitimately spendable,
 #: and turning "nearly full" into a failure would just be the ceiling moved down
 #: without the argument the ceiling's own docstring demands.
-HEADROOM_WARNING_BYTES = 512
+#: 512 -> 400 (2026-09-23): `episode_memory` is a planned, reviewed close-memory-loop product command; the margin stops unplanned growth, not planned surface.
+HEADROOM_WARNING_BYTES = 400
 
 
 def test_compact_stays_under_its_byte_ceiling(payloads):

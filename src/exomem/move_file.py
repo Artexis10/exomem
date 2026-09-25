@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import reserved_paths, semantic_index, semantic_writes
+from . import reserved_paths, semantic_index, semantic_writes, source_taxonomy
 from .governance import catalog_publication, graph_producer
 from .kbdir import kb_dirname
 from .vault import (
@@ -87,6 +87,24 @@ class MoveFileValidation:
     after: tuple[dict[str, Any], ...]
     rename_after: tuple[dict[str, Any], ...]
     atomic_supported: bool
+
+
+def _in_episode_folder(rel: str) -> bool:
+    """Whether `rel` lies anywhere under `Sources/Episodes/`, case-insensitively.
+
+    A recap's revisions are found by one listing of that one folder, by a
+    filename token. A move into it plants a page that listing may take for a
+    recap; a move out of it, into a subfolder or by a rename that strips the
+    token hides a live revision from it, so the next record leaves two live.
+    """
+    parts = rel.replace("\\", "/").split("/")
+    if len(parts) > 1 and parts[0].casefold() == kb_dirname().casefold():
+        parts = parts[1:]
+    return (
+        len(parts) > 2
+        and parts[0].casefold() == source_taxonomy.SOURCES_ROOT.casefold()
+        and parts[1].casefold() == source_taxonomy.EPISODE_PATH_LABEL.casefold()
+    )
 
 
 def _held_rename(vault_root: Path, old_rel: str, new_rel: str) -> None:
@@ -215,6 +233,15 @@ def move_file(
         new_abs, new_rel = resolve_under_vault(vault_root, new_path)
     except VaultPathError as e:
         raise MoveFileError(code=e.code, reason=e.reason) from e
+    if _in_episode_folder(old_rel) or _in_episode_folder(new_rel):
+        raise MoveFileError(
+            code="EPISODE_KIND_RESERVED",
+            reason=(
+                f"Sources/{source_taxonomy.EPISODE_PATH_LABEL}/ holds only conversation "
+                "recaps recorded with episode_memory: nothing moves into it, and a recap "
+                "is not moved, renamed or promoted out of it"
+            ),
+        )
 
     # An artifact and its page move as one unit. Whichever half the caller
     # named, the operation is normalized onto the page — that is the `.md` path
