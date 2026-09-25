@@ -924,3 +924,167 @@ def test_serving_a_packet_records_no_heat(carry_vault) -> None:
     # Serving is the server's own output, not a choice: nothing accumulates.
     assert heat.load(carry_vault).events == settled
     assert not [item for item in settled if item.channel in (*heat.SELECTION, "pick")]
+
+
+# --------------------------------------------------------------------------- #
+# The external fold, the cold seed and the watermark
+# --------------------------------------------------------------------------- #
+
+
+def _live(vault) -> None:
+    """Seed the freshness registry the way the running service's watcher does."""
+    from exomem import file_watcher
+
+    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+
+
+def _age(vault, *, newest: str | None = None) -> None:
+    """Every page old and a minute apart (no burst), `newest` edited now."""
+    import os
+    import time
+
+    now = time.time()
+    for index, page in enumerate(sorted((vault / "Knowledge Base").rglob("*.md"))):
+        stamp = now - 10_000 - index * 60
+        os.utime(page, (stamp, stamp))
+    if newest:
+        os.utime(vault / newest, (now, now))
+
+
+def _external_edit(vault, rel: str, *, text: str = "\nAn external line.\n") -> None:
+    from exomem import freshness
+
+    page = vault / rel
+    page.write_text(page.read_text(encoding="utf-8") + text, encoding="utf-8")
+    freshness.on_files_changed(vault, changed=[page])
+
+
+def test_the_profile_reports_seeded_then_current(vault) -> None:
+    heat.reset_for_tests()
+    _age(vault, newest=INSIGHT)
+    _live(vault)
+
+    first = heat.profile(vault)
+    assert first.state == "seeded"
+    assert {item.origin for item in first.events} == {"seed"}
+    assert heat.members(heat.leading(first)).paths == (INSIGHT,)
+
+    _external_edit(vault, PATTERN)
+    second = heat.profile(vault)
+    assert second.state == "current"
+    assert heat.members(heat.leading(second)).paths == (PATTERN,)
+
+
+def test_an_external_single_edit_is_work(vault) -> None:
+    import time
+
+    heat.reset_for_tests()
+    _age(vault)
+    _live(vault)
+    heat.profile(vault)
+
+    before = time.time_ns()
+    _external_edit(vault, PATTERN)
+    events = [item for item in heat.profile(vault).events if item.origin == "external"]
+
+    assert [(item.path, item.channel) for item in events] == [(PATTERN, "work")]
+    assert events[0].ts_ns <= time.time_ns() and events[0].ts_ns >= before - 10**9
+    # A governed commit's own echo through the same registry is ours, not external.
+    from exomem import freshness
+
+    _edit(vault, INSIGHT, "is more robust than", "is steadier than")
+    freshness.on_files_changed(vault, changed=[vault / INSIGHT])
+    profile = heat.profile(vault)
+    assert [
+        (item.path, item.origin)
+        for item in profile.events
+        if item.path == INSIGHT and item.origin != "seed"
+    ] == [(INSIGHT, "edit_memory")]
+
+
+def test_a_deleted_page_leaves_the_profile_at_once(vault) -> None:
+    from exomem import freshness
+
+    heat.reset_for_tests()
+    _age(vault, newest=INSIGHT)
+    _live(vault)
+    assert INSIGHT in heat.profile(vault).all_rows
+
+    (vault / INSIGHT).unlink()
+    freshness.on_files_changed(vault, deleted=[vault / INSIGHT])
+
+    assert INSIGHT not in heat.profile(vault).all_rows
+    heat.reset_for_tests()
+    assert INSIGHT not in {item.path for item in heat.load(vault).events}, "purged on flush"
+
+
+def test_the_profile_reports_partial_without_a_watcher(vault) -> None:
+    heat.reset_for_tests()
+    _edit(vault, INSIGHT, "is more robust than", "is steadier than")
+
+    profile = heat.profile(vault)
+    assert profile.state == "partial", "governed activity only"
+    assert [item.origin for item in profile.events] == ["edit_memory"]
+    assert "seeded_at_ns" not in profile.meta, "no watcher, nothing to seed from"
+
+    heat.reset_for_tests()
+    empty = heat.profile(vault / ".." / "elsewhere")
+    assert empty.state == "empty"
+
+
+def test_a_restart_recovers_external_edits_from_the_watermark(vault) -> None:
+    import os
+    import time
+
+    heat.reset_for_tests()
+    _age(vault, newest=INSIGHT)
+    _live(vault)
+    assert heat.profile(vault).state == "seeded"
+    watermark = int(heat.load(vault).meta["observed_through_ns"])
+
+    # The process restarts: its fold checkpoint is gone. Meanwhile one page was
+    # edited on disk after the last fold, and another before it.
+    heat.reset_for_tests()
+    time.sleep(0.05)
+    stamp = time.time()
+    os.utime(vault / PATTERN, (stamp, stamp))
+    before = (watermark - 5 * 10**9) / 1e9
+    os.utime(vault / "Knowledge Base/Notes/Failures/cache-stampede-on-cold-start.md", (before, before))
+    _live(vault)
+
+    profile = heat.profile(vault)
+    external = [(item.path, item.ts_ns) for item in profile.events if item.origin == "external"]
+    assert [path for path, _ts in external] == [PATTERN], "only what changed after the watermark"
+    assert external[0][1] == int(stamp * 1e9) or abs(external[0][1] - stamp * 1e9) < 2e6
+    assert profile.state == "current"
+    assert int(heat.load(vault).meta["observed_through_ns"]) > watermark
+
+
+def test_an_incomplete_delta_reports_behind_and_schedules_one_reconcile(
+    vault, monkeypatch
+) -> None:
+    import os
+    import time
+
+    from exomem import readiness
+
+    heat.reset_for_tests()
+    _age(vault, newest=INSIGHT)
+    _live(vault)
+    heat.profile(vault)
+
+    scheduled: list[object] = []
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    monkeypatch.setattr(heat, "_start_reconcile", lambda work: scheduled.append(work))
+    later = time.time() + 1
+    os.utime(vault / PATTERN, (later, later))
+    _live(vault)  # a reseed: no retained history bridges the old checkpoint
+
+    assert heat.profile(vault).state == "behind"
+    assert heat.profile(vault).state == "behind"
+    assert len(scheduled) == 1, "one reconcile, however many requests arrive meanwhile"
+
+    scheduled[0]()
+    profile = heat.profile(vault)
+    assert profile.state == "current"
+    assert [item.path for item in profile.events if item.origin == "external"] == [PATTERN]

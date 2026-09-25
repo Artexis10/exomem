@@ -1592,6 +1592,318 @@ def note_citations(vault_root: Path, sources: Iterable[object]) -> bool:
     return note_selection(vault_root, paths, "cite") if paths else False
 
 
+# --------------------------------------------------------------------------- #
+# The external fold, the cold seed and the watermark reconcile
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class _Fold:
+    """One process's view of one vault's external changes."""
+
+    checkpoint: object = None
+    #: External events not yet in the ring (a busy sidecar keeps them here).
+    pending: list[HeatEvent] = field(default_factory=list)
+    #: Deleted pages: hidden at once, purged with the next flush.
+    tombstones: set[str] = field(default_factory=set)
+    #: Paths a commit was flipping when last folded, with their signature.
+    deferred: dict[str, tuple[int, int, int]] = field(default_factory=dict)
+    behind: bool = False
+    reconciling: bool = False
+
+
+_FOLDS: dict[str, _Fold] = {}
+
+
+def _fold_for(vault_root: Path) -> _Fold:
+    key = _root_key(vault_root)
+    with _LOCK:
+        fold = _FOLDS.get(key)
+        if fold is None:
+            fold = _FOLDS[key] = _Fold()
+        return fold
+
+
+def _live_signatures(vault_root: Path) -> dict[str, tuple[int, int, int]] | None:
+    """`{vault-relative page: signature}` from the live registry, or `None`
+    when it is not live. A dict copy: the seed and the reconcile only."""
+    import os
+
+    from . import freshness
+
+    entries = freshness.live_entries(vault_root, "kb")
+    if entries is None:
+        return None
+    prefix = f"{vault_root}{os.sep}"
+    out: dict[str, tuple[int, int, int]] = {}
+    for key, signature in entries.items():
+        if not key.startswith(prefix) or not key.lower().endswith(".md"):
+            continue
+        try:
+            out[key[len(prefix) :].replace(os.sep, "/")] = (
+                int(signature[0]),
+                int(signature[1]),
+                int(signature[2]),
+            )
+        except (IndexError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _flush(vault_root: Path, fold: _Fold, *, now_ns: int) -> bool:
+    """Write pending external events and purge tombstoned pages. The
+    watermark advances only when the write landed."""
+    with _LOCK:
+        events = list(fold.pending)
+        gone = set(fold.tombstones)
+    if not events and not gone:
+        return True
+
+    def work(conn: sqlite3.Connection) -> None:
+        if events:
+            conn.executemany(
+                "INSERT INTO heat_events (ts_ns, path, channel, origin, client, session, "
+                "workspace) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (e.ts_ns, e.path, e.channel, e.origin, e.client, e.session, e.workspace)
+                    for e in events
+                ],
+            )
+            conn.execute(
+                "DELETE FROM heat_events WHERE seq <= (SELECT MAX(seq) FROM heat_events) - ?",
+                (RING_MAX,),
+            )
+        for path in sorted(gone):
+            conn.execute("DELETE FROM heat_events WHERE path = ?", (path,))
+            conn.execute("DELETE FROM attributed WHERE path = ?", (path,))
+        conn.execute(
+            "INSERT OR REPLACE INTO heat_meta (key, value) VALUES ('observed_through_ns', ?)",
+            (str(int(now_ns)),),
+        )
+
+    if not _write(vault_root, work, what="fold"):
+        return False
+    with _LOCK:
+        fold.pending = [event for event in fold.pending if event not in events]
+        fold.tombstones -= gone
+    return True
+
+
+def _seed(vault_root: Path, fold: _Fold) -> bool:
+    """The cold seed, once per sidecar, from the live registry (today's
+    rules exactly, `seed_events`). `False` when there is no live registry to
+    seed from: an install without a watcher starts from its governed history."""
+    import time
+
+    from . import freshness
+
+    checkpoint = freshness.consumer_checkpoint(vault_root, "kb")
+    live = _live_signatures(vault_root)
+    if live is None:
+        return False
+    now = time.time_ns()
+    events = seed_events({path: signature[0] for path, signature in live.items()})
+
+    def work(conn: sqlite3.Connection) -> None:
+        if events:
+            conn.executemany(
+                "INSERT INTO heat_events (ts_ns, path, channel, origin, client, session, "
+                "workspace) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [(e.ts_ns, e.path, e.channel, e.origin, "", "", "") for e in events],
+            )
+        conn.executemany(
+            "INSERT OR REPLACE INTO heat_meta (key, value) VALUES (?, ?)",
+            [("seeded_at_ns", str(now)), ("observed_through_ns", str(now))],
+        )
+
+    if not _write(vault_root, work, what="seed"):
+        return False
+    with _LOCK:
+        fold.checkpoint = checkpoint
+        fold.behind = False
+    return True
+
+
+def _classify(
+    vault_root: Path,
+    fold: _Fold,
+    changed: Mapping[str, tuple[int, int, int]],
+    deleted: Iterable[str],
+    *,
+    now_ns: int,
+) -> None:
+    """Fold one batch of external changes into `fold`'s pending events."""
+    with _LOCK:
+        carried = dict(fold.deferred)
+    merged = {**carried, **changed}
+    if not merged and not deleted:
+        return
+    folded = fold_external_events(
+        merged,
+        deleted=tuple(deleted),
+        attributed=recent_attributed(vault_root, merged),
+        in_flight=in_flight(vault_root),
+        now_ns=now_ns,
+    )
+    with _LOCK:
+        fold.deferred = {path: merged[path] for path in folded.deferred}
+        fold.pending.extend(folded.events)
+        fold.tombstones |= set(folded.tombstones)
+
+
+def reconcile_watermark(vault_root: Path) -> None:
+    """After a restart or an unbridgeable delta, once: every page the live
+    registry says changed after `observed_through_ns` becomes an external
+    edit under the same echo and burst rules. A dict copy and string work;
+    it reads no page."""
+    import time
+
+    fold = _fold_for(vault_root)
+    try:
+        from . import freshness
+
+        checkpoint = freshness.consumer_checkpoint(vault_root, "kb")
+        live = _live_signatures(vault_root)
+        if live is not None:
+            watermark = int(load(vault_root).meta.get("observed_through_ns") or 0)
+            newer = {path: sig for path, sig in live.items() if sig[0] > watermark}
+            now = time.time_ns()
+            _classify(vault_root, fold, newer, (), now_ns=now)
+            _flush(vault_root, fold, now_ns=now)
+            with _LOCK:
+                fold.checkpoint = checkpoint
+                fold.behind = False
+    except Exception:  # noqa: BLE001 - a failed reconcile leaves the profile behind
+        log.debug("heat watermark reconcile failed", exc_info=True)
+    finally:
+        with _LOCK:
+            fold.reconciling = False
+
+
+def _start_reconcile(work: Callable[[], None]) -> None:
+    thread = threading.Thread(target=work, name="exomem-heat-reconcile", daemon=True)
+    thread.start()
+
+
+def _schedule_reconcile(vault_root: Path, fold: _Fold) -> None:
+    """Single-flight: a managed service reconciles in the background and the
+    request reports `behind`; an unmanaged one (a CLI, a desk-side server) has
+    no worker to wait for and reconciles inline."""
+    with _LOCK:
+        fold.behind = True
+        if fold.reconciling:
+            return
+        fold.reconciling = True
+    try:
+        from . import readiness
+
+        managed = bool(readiness.runtime_managed())
+    except Exception:  # noqa: BLE001 - an unknown runtime is treated as unmanaged
+        managed = False
+    if not managed:
+        reconcile_watermark(vault_root)
+        return
+    try:
+        _start_reconcile(lambda: reconcile_watermark(vault_root))
+    except Exception:  # noqa: BLE001 - a thread that cannot start leaves it behind
+        log.debug("heat reconcile could not start", exc_info=True)
+        with _LOCK:
+            fold.reconciling = False
+
+
+def fold_external(vault_root: Path, *, persisted: HeatProfile | None = None) -> str:
+    """Fold the live registry's changes since this process's checkpoint.
+
+    Called once per activation before the cache key. O(changed paths) under
+    the registry's lock, no `stat`, no page read. Returns the watcher state:
+    `partial` without a live registry, `seeded` right after the cold seed,
+    `behind` while an unbridgeable delta awaits its reconcile, else `current`.
+    """
+    import time
+
+    from . import freshness
+
+    if disabled():
+        return "empty"
+    fold = _fold_for(vault_root)
+    try:
+        if not freshness.is_live(vault_root, "kb"):
+            return "partial"
+        persisted = persisted or load(vault_root)
+        if "seeded_at_ns" not in persisted.meta:
+            return "seeded" if _seed(vault_root, fold) else "partial"
+        with _LOCK:
+            checkpoint = fold.checkpoint
+        if checkpoint is None:
+            _schedule_reconcile(vault_root, fold)
+            return "behind" if fold.behind else "current"
+        delta = freshness.delta_since(vault_root, "kb", checkpoint)
+        if not delta.complete:
+            _schedule_reconcile(vault_root, fold)
+            return "behind" if fold.behind else "current"
+        now = time.time_ns()
+        changed = {
+            rel: tuple(int(part) for part in signature)
+            for key, signature in delta.target_signatures
+            if (rel := _kb_relative(vault_root, key)) is not None
+        }
+        deleted = [
+            rel for key in delta.deleted if (rel := _kb_relative(vault_root, key)) is not None
+        ]
+        with _LOCK:
+            fold.checkpoint = delta.to
+        _classify(vault_root, fold, changed, deleted, now_ns=now)  # type: ignore[arg-type]
+        _flush(vault_root, fold, now_ns=now)
+        return "behind" if fold.behind else "current"
+    except Exception:  # noqa: BLE001 - the fold is best-effort; the ring still serves
+        log.debug("heat fold failed", exc_info=True)
+        return "behind"
+
+
+def profile(vault_root: Path) -> HeatProfile:
+    """The projection this request ranks from: the persisted ring, this
+    process's unflushed external events, deleted pages hidden, and the state
+    the fold reports (`generation.hot_profile.state`)."""
+    if disabled():
+        return build_profile((), state="empty")
+    persisted = load(vault_root)
+    watcher = fold_external(vault_root, persisted=persisted)
+    if watcher in ("seeded", "current", "behind"):
+        persisted = load(vault_root)
+    fold = _fold_for(vault_root)
+    with _LOCK:
+        pending = list(fold.pending)
+        gone = frozenset(fold.tombstones)
+    base = persisted
+    if pending or gone:
+        base = build_profile(
+            (*persisted.events, *pending),
+            sessions=persisted.sessions,
+            state=persisted.state,
+            salt=persisted.salt,
+            token=persisted.token,
+            tombstones=gone,
+            meta=persisted.meta,
+        )
+    return with_state(base, _state(base, watcher))
+
+
+def _state(profile: HeatProfile, watcher: str) -> str:
+    if not profile.events:
+        return "empty"
+    if watcher in ("partial", "behind"):
+        return watcher
+    start = profile.session_start_ns
+    latest = [
+        event
+        for event in profile.events
+        if event.ts_ns >= start and event.channel in DELIBERATE + SELECTION
+    ]
+    if latest and all(event.origin == "seed" for event in latest):
+        return "seeded"
+    return "current"
+
+
 def reset_for_tests() -> None:
     """Forget every cached profile and in-process fold state."""
     with _LOCK:
@@ -1599,3 +1911,4 @@ def reset_for_tests() -> None:
         _PARENTS.clear()
         _IN_FLIGHT.clear()
         _OURS.clear()
+        _FOLDS.clear()
