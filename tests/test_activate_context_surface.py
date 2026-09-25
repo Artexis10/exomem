@@ -368,6 +368,8 @@ def test_attribution_is_accepted_on_every_door(
     for argv in (
         ["activate", TURN, "--client", "codex", "--session", "abc", "--json"],
         ["activate_context", TURN, "--client", "codex", "--session", "abc", "--json"],
+        ["activate", TURN, "--session", "abc", "--workspace", "0f" * 12, "--json"],
+        ["activate_context", TURN, "--session", "abc", "--workspace", "0f" * 12, "--json"],
     ):
         code, out = _run_cli(argv, capsys)
         assert code == 0, out
@@ -376,14 +378,14 @@ def test_attribution_is_accepted_on_every_door(
     client = _rest_client(monkeypatch)
     response = client.post(
         "/api/activate_context",
-        json={"turn": TURN, "client": "claude-code", "session": "abc"},
+        json={"turn": TURN, "client": "claude-code", "session": "abc", "workspace": "0f" * 12},
         headers={"Authorization": "Bearer sekret"},
     )
     assert response.status_code == 200, response.text
 
     product = {command.name: command for command in commands.PRODUCT_COMMANDS}
     names = [param.name for param in product["activate_context"].params]
-    assert {"client", "session"} <= set(names)
+    assert {"client", "session", "workspace"} <= set(names)
 
 
 def test_the_server_instructions_skip_a_turn_a_hook_already_activated() -> None:
