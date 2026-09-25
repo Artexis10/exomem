@@ -54,10 +54,7 @@ def _seed_live_scopes(root: Path) -> None:
     freshness.seed(
         root,
         "vault",
-        (
-            (str(path), freshness.stat_signature(path))
-            for path in vault_module.walk_vault_md(root)
-        ),
+        ((str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(root)),
     )
 
 
@@ -87,8 +84,7 @@ def _scopes_published_by(root: Path, instance_id: str) -> set[str]:
     return {
         scope
         for scope in ("kb", "vault")
-        if getattr(store.published_recall_checkpoint(scope), "instance_id", None)
-        == instance_id
+        if getattr(store.published_recall_checkpoint(scope), "instance_id", None) == instance_id
     }
 
 
@@ -125,5 +121,30 @@ def test_first_write_after_restart_keeps_retrieval_admitted(inherited_catalog: P
     assert readiness.retrieval_admission(root) == {"state": "ready", "admitted": True}
     # And the write stayed O(delta): both scopes were blessed at this process's
     # live checkpoint by the write itself, with no repair owner involved.
+    assert _scopes_published_by(root, freshness.instance_id()) == {"kb", "vault"}
+    assert lexstore.repair_progress(root) is None, "no catalog repair was needed"
+    assert lexstore.search_bm25(root, "quokkarestartmarker", k=3, scope="kb")
+
+
+def test_a_write_that_cannot_bless_a_scope_hands_it_to_the_repair_owner(
+    inherited_catalog: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whatever strands a scope, readiness must converge rather than stay stuck.
+
+    Without the warm-up lineage rebase the write reproduces the rehearsal's
+    stranded `kb` scope exactly. Readiness may honestly drop while the catalog
+    is behind the live projection, but the repair owner must then publish a
+    current catalog and readmission must follow, with no restart.
+    """
+    root = inherited_catalog
+    monkeypatch.setattr(lexstore, "rebase_inherited_catalog_lineage", lambda _root: ())
+    _start_managed_process(root)
+    assert readiness.retrieval_admission(root)["admitted"]
+
+    _governed_write(root)
+    assert lexstore.await_repairs_idle(root)
+
+    assert readiness.retrieval_admission(root) == {"state": "ready", "admitted": True}
+    assert (lexstore.repair_progress(root) or {}).get("last_result") == "published"
     assert _scopes_published_by(root, freshness.instance_id()) == {"kb", "vault"}
     assert lexstore.search_bm25(root, "quokkarestartmarker", k=3, scope="kb")
