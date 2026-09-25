@@ -1025,7 +1025,10 @@ def test_models_cache_does_not_demand_torch_models_on_the_onnx_lane(
     `exomem warm` — the stated remediation — cannot fetch them there either, so
     the WARN is permanent noise that no action clears.
     """
+    from exomem import embeddings as embeddings_module
+
     monkeypatch.setenv("EXOMEM_EMBED_BACKEND", "onnx")
+    monkeypatch.setattr(embeddings_module, "MODEL_NAME", "BAAI/bge-base-en-v1.5")
     monkeypatch.setattr(
         doctor_module, "_model_cached", lambda _hub, dirname: "bge-base" in dirname
     )

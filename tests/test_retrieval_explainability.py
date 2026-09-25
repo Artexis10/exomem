@@ -197,7 +197,7 @@ def test_disabled_embeddings_explain_lexical_fusion_without_loading_model(
     assert profile["lanes"]["vector"] == {
         "status": "disabled",
         "reason": "embeddings_disabled",
-        "model": "BAAI/bge-base-en-v1.5",
+        "model": embeddings.MODEL_NAME,
     }
     assert profile["lanes"]["bm25"]["metric"]["name"] == "raw_bm25_score"
     assert profile["lanes"]["bm25"]["metric"]["direction"] == "higher"
@@ -267,7 +267,7 @@ def test_available_vector_lane_is_reported_only_on_hits_it_returned(
 
     profile = explained["retrieval_profile"]
     assert profile["lanes"]["vector"]["status"] == "participated"
-    assert profile["lanes"]["vector"]["model"] == "BAAI/bge-base-en-v1.5"
+    assert profile["lanes"]["vector"]["model"] == embeddings.MODEL_NAME
     hits = {hit["path"]: hit for hit in explained["hits"]}
     vector_lane = hits[vector_path]["ranking_explanation"]["lanes"]["vector"]
     assert vector_lane["rank"] == 1
@@ -1339,7 +1339,7 @@ def test_mixed_explanation_preserves_divergent_page_and_unit_plans(
     assert plans["unit"]["lanes"]["vector"] == {
         "status": "failed",
         "reason": "search_failed",
-        "model": "BAAI/bge-base-en-v1.5",
+        "model": embeddings.MODEL_NAME,
     }
     assert plans["unit"]["lanes"]["bm25"]["status"] == "participated"
     assert "fusion" not in plans["unit"]
@@ -1398,7 +1398,7 @@ def test_mixed_vector_embedding_failure_is_retried_for_page_lane(
     assert plans["unit"]["lanes"]["vector"] == {
         "status": "failed",
         "reason": "search_failed",
-        "model": "BAAI/bge-base-en-v1.5",
+        "model": embeddings.MODEL_NAME,
     }
     assert plans["page"]["lanes"]["vector"]["status"] == "participated"
 

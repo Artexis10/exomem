@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 SCHEMA_VERSION = 1
-TEXT_MODEL_NAME = "BAAI/bge-base-en-v1.5"
 
 
 @dataclass(slots=True)

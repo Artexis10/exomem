@@ -30,9 +30,16 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-#: The encoder every sidecar without a record was written by.
+#: The encoder every sidecar without a record was written by, and the one a
+#: hosted or cloud cell keeps until the node encoder serves them.
 LEGACY_MODEL = "BAAI/bge-base-en-v1.5"
 LEGACY_DIM = 768
+#: The one multilingual encoder a personal server runs for recall and activation.
+PERSONAL_MODEL = "BAAI/bge-m3"
+#: Names the recall encoder explicitly, over the deployment's default. A
+#: sidecar of another model re-embeds into it as any model change does.
+RECALL_MODEL_ENV = "EXOMEM_RECALL_MODEL"
+
 
 #: Mirror `hosted_runtime.HOSTED_MODE_ENV` and `cloud_cell.CLOUD_MODE_ENV`. Read
 #: directly: `embeddings` imports this module and must stay cheap to import.
@@ -83,6 +90,23 @@ def cell_mode(env: Mapping[str, str] | None = None) -> bool:
     """
     values = os.environ if env is None else env
     return any(str(values.get(flag, "")).strip().lower() not in _FALSE for flag in _CELL_FLAGS)
+
+
+def configured_recall_model(env: Mapping[str, str] | None = None) -> str:
+    """The recall encoder for this process: `EXOMEM_RECALL_MODEL` when set, else
+    the multilingual one on a personal server and the English one on a hosted or
+    cloud cell."""
+    values = os.environ if env is None else env
+    explicit = str(values.get(RECALL_MODEL_ENV, "")).strip()
+    if explicit:
+        return explicit
+    return LEGACY_MODEL if cell_mode(values) else PERSONAL_MODEL
+
+
+def serving_model(index: object) -> str:
+    """The model whose vectors `index` serves: its record's, else the recall encoder's."""
+    identity = getattr(index, "identity", None)
+    return identity.model if isinstance(identity, SpaceIdentity) else recall_model()
 
 
 def recall_model() -> str:

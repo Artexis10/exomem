@@ -2304,7 +2304,7 @@ def _vector_unit_candidates(
     query_vector_provider: Callable[[], Any] | None = None,
 ) -> tuple[list[Any], dict[str, Any], str]:
     """Return bounded vector candidates without opening every Markdown parent."""
-    model_name = "BAAI/bge-base-en-v1.5"
+    model_name = recall_space.recall_model()
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return (
             [],
@@ -2338,7 +2338,7 @@ def _vector_unit_candidates(
         profile = {
             "status": "participated" if hits else "available_nonmatching",
             "backend": type(index).__name__,
-            "model": embeddings.MODEL_NAME,
+            "model": recall_space.serving_model(index),
             "metric": {
                 "name": "cosine_similarity",
                 "direction": "higher",
@@ -2661,7 +2661,7 @@ def _find_semantic_units(
             vector_profile = {
                 "status": "failed",
                 "reason": "incomplete_exact_candidates",
-                "model": vector_profile.get("model", "BAAI/bge-base-en-v1.5"),
+                "model": vector_profile.get("model", recall_space.recall_model()),
             }
             _record_degradation("vector")
             if failed_out is not None and "vector" not in failed_out:
@@ -2684,7 +2684,7 @@ def _find_semantic_units(
             vector_profile = {
                 "status": "failed",
                 "reason": "stale_candidates",
-                "model": vector_profile.get("model", "BAAI/bge-base-en-v1.5"),
+                "model": vector_profile.get("model", recall_space.recall_model()),
             }
             _record_degradation("vector")
             if failed_out is not None and "vector" not in failed_out:

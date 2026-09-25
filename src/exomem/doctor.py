@@ -2049,21 +2049,25 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
             "so it can't be probed.",
             f"Install it with `uv sync --extra {extra}` to enable hybrid search.",
         )
-    from . import embeddings, model_cache
+    from . import embeddings, model_cache, recall_space
 
-    if not _model_cached(_hf_hub_dir(), model_cache.snapshot_dirname(embeddings.MODEL_NAME)):
+    index = embeddings.get_embedding_index(vault_root)
+    # The probe encodes with the encoder that serves this sidecar: the recall
+    # encoder, or the one that wrote it while a re-embed has not cut over.
+    model = recall_space.serving_model(index)
+    if not _model_cached(_hf_hub_dir(), model_cache.snapshot_dirname(model)):
         # doctor must never trigger a download — skip the live probe rather than
         # let embed_texts() fetch the model over the network.
         return _check(
             "embeddings.sidecar",
             "warn",
-            f"Embedding sidecar exists but {embeddings.MODEL_NAME} is not in the local HF "
+            f"Embedding sidecar exists but {model} is not in the local HF "
             "cache, so the live probe was skipped (doctor never downloads).",
             "Run `exomem warm` to fetch the model, then re-run doctor for the live probe.",
         )
     try:
-        index = embeddings.get_embedding_index(vault_root)
-        query_vec = embeddings.embed_texts(["knowledge"], is_query=True)[0]
+        with recall_space.encoding_for(index, load=True):
+            query_vec = embeddings.embed_texts(["knowledge"], is_query=True)[0]
         hits = index.search(query_vec, k=1)
     except Exception as e:  # noqa: BLE001 — diagnostic boundary
         return _check(
@@ -2087,7 +2091,12 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
     # and until now an ONNX install had no way to show that from doctor.
     from . import embedding_backend
 
-    fingerprint = embedding_backend.fingerprint(embeddings.MODEL_NAME)
+    identity = index.identity
+    fingerprint = (
+        identity.fingerprint
+        if identity is not None and identity.fingerprint
+        else embedding_backend.fingerprint(model)
+    )
     try:
         metadata, _matrix = index.all_vectors()
         vector_count: int | None = len(metadata)
@@ -2103,7 +2112,8 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
             "backend": backend,
             "vector_count": vector_count,
             "fingerprint": fingerprint,
-            "model": embeddings.MODEL_NAME,
+            "model": model,
+            "dim": identity.dim if identity is not None else None,
         },
     )
 

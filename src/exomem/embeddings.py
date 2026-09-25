@@ -1,7 +1,8 @@
 """Local vector embeddings for hybrid search.
 
-Loads `BAAI/bge-base-en-v1.5` lazily (heavy import — torch +
-sentence-transformers stays off the keyword-mode hot path). Chunks each
+Loads the recall encoder lazily (`MODEL_NAME`: `BAAI/bge-m3` on a personal
+server, `BAAI/bge-base-en-v1.5` on a hosted or cloud cell; the heavy import
+stays off the keyword-mode hot path). Chunks each
 KB page paragraph-wise with title prepended, normalizes vectors so
 cosine = dot product, and persists to a per-machine sqlite sidecar
 (`.embeddings.sqlite` under the machine-local state root; see `state_paths`).
@@ -52,7 +53,10 @@ from .vector_index_common import vec_gate as _vec_gate
 log = logging.getLogger(__name__)
 
 
-MODEL_NAME = "BAAI/bge-base-en-v1.5"
+#: The recall encoder (`recall_space.configured_recall_model`). A sidecar written
+#: by another encoder keeps serving with that one until `recall_migration` has
+#: re-embedded it into this one's space.
+MODEL_NAME = recall_space.configured_recall_model()
 # The cross-encoder reranker is a stateless scorer (no stored vectors / sidecar dim),
 # so it can be swapped freely without a re-index. EXOMEM_RANKING_MODEL (legacy alias
 # EXOMEM_RERANKER_MODEL) overrides; EXOMEM_DISABLE_RANKING turns it off entirely (a
@@ -1088,7 +1092,7 @@ def encode_batch_size(model) -> int:
 
 
 def embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
-    """Batch-encode texts → float32 `(N, 768)`, L2-normalized for cosine.
+    """Batch-encode texts → float32 `(N, dim)`, L2-normalized for cosine.
 
     The span carries what was encoded, not just how long it took. On the 0.84.1
     personal service one write recorded `embeddings.encode` at 15.6 s with a

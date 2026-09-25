@@ -305,7 +305,7 @@ def collect_candidates(
                     lane_statuses["vector"] = {
                         "status": "participated" if vector_ranking else "available_nonmatching",
                         "backend": type(idx).__name__,
-                        "model": embeddings.MODEL_NAME,
+                        "model": recall_space.serving_model(idx),
                         "metric": {
                             "name": "cosine_similarity",
                             "direction": "higher",
