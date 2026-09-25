@@ -516,6 +516,25 @@ def test_a_busy_sidecar_drops_the_event_and_fails_nothing(sidecar_vault) -> None
     assert [item.path for item in heat.load(sidecar_vault).events] == [SLED]
 
 
+def test_a_corrupt_sidecar_is_wiped_once_and_rebuilt(sidecar_vault) -> None:
+    """Review F3: a sidecar that is not a database any more was never wiped,
+    so every event after it was dropped for good. A corrupt file is removed
+    with its journal once, and the next write rebuilds it empty, asking to be
+    seeded again; a busy one is only ever skipped (above)."""
+    heat.append(sidecar_vault, [ev(T0, SLED, "work")])
+    side = heat.sidecar_path(sidecar_vault)
+    for suffix in ("-wal", "-shm"):
+        side.with_name(side.name + suffix).unlink(missing_ok=True)
+    side.write_bytes(b"this is not a database file at all " * 200)
+    heat.reset_for_tests()
+
+    assert heat.append(sidecar_vault, [ev(T0 + S, MARIT, "work")]) is True
+    rebuilt = heat.load(sidecar_vault)
+
+    assert [item.path for item in rebuilt.events] == [MARIT]
+    assert "seeded_at_ns" not in rebuilt.meta, "a rebuilt sidecar asks to be seeded again"
+
+
 def test_deleting_the_sidecar_costs_only_a_reseed(sidecar_vault) -> None:
     heat.append(sidecar_vault, [ev(T0, SLED, "work")])
     assert heat.load(sidecar_vault).events

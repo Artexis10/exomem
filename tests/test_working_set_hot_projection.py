@@ -990,3 +990,26 @@ def test_another_processs_batch_is_its_echo_before_its_terminal(
 
     assert (DEPOT, "external") not in events, events
     assert _resolved(_continue(heat_vault)) == [SLED]
+
+
+# --------------------------------------------------------------------------- #
+# Round 2: a corrupt sidecar costs a reseed, never the user's work
+# --------------------------------------------------------------------------- #
+
+
+def test_a_corrupt_sidecar_is_rebuilt_and_the_next_edit_leads(heat_vault: Path) -> None:
+    _continue(heat_vault)  # the cold seed
+    sidecar = working_set_heat.sidecar_path(heat_vault)
+    for suffix in ("-wal", "-shm"):
+        sidecar.with_name(sidecar.name + suffix).unlink(missing_ok=True)
+    sidecar.write_bytes(b"this is not a database file at all " * 200)
+    working_set_heat.reset_for_tests()
+    working_set_runtime.reset_caches_for_tests()
+
+    _continue(heat_vault)
+    _edit(heat_vault, SLED, "A towed cargo sled", "A towed freight sled")
+    packet = _continue(heat_vault)
+
+    assert _resolved(packet) == [SLED], (packet.get("abstention"), packet["anchors"])
+    assert packet["generation"]["hot_profile"]["state"] == "current"
+

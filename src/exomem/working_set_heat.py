@@ -893,9 +893,14 @@ def _drop(reason: str) -> None:
         pass
 
 
-def _connect(vault_root: Path) -> sqlite3.Connection | None:
+def _connect(vault_root: Path, *, rebuilt: bool = False) -> sqlite3.Connection | None:
     """One short-lived connection with the seam's busy timeout, or `None`
-    under the kill switch or when the file cannot be opened."""
+    under the kill switch or when the file cannot be opened.
+
+    A file that is not a database (`DatabaseError` that is not the busy
+    `OperationalError`) is derived state gone bad: it is removed with its
+    journal, once, and rebuilt empty, which asks for a reseed. A busy one is
+    only skipped: the caller drops its event and fails nothing."""
     if disabled():
         return None
     try:
@@ -913,10 +918,26 @@ def _connect(vault_root: Path) -> sqlite3.Connection | None:
     try:
         conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         _ensure_schema(conn)
-    except sqlite3.Error:
-        log.debug("heat sidecar schema could not be prepared", exc_info=True)
+    except sqlite3.OperationalError:
+        log.debug("heat sidecar busy", exc_info=True)
         conn.close()
         return None
+    except sqlite3.DatabaseError:
+        conn.close()
+        if rebuilt:
+            log.debug("heat sidecar still unreadable after a rebuild", exc_info=True)
+            return None
+        log.warning("heat sidecar is corrupt; rebuilding it empty")
+        try:
+            for suffix in ("", "-wal", "-shm"):
+                path.with_name(path.name + suffix).unlink(missing_ok=True)
+        except OSError:
+            log.debug("heat sidecar could not be removed", exc_info=True)
+            return None
+        with _LOCK:
+            _PROFILES.pop(str(path), None)
+            _STATED.pop(str(path), None)
+        return _connect(vault_root, rebuilt=True)
     return conn
 
 
