@@ -102,7 +102,7 @@ The tenant PVC is mounted at `/data`. The vault is `/data/vault` (`EXOMEM_VAULT_
 - A K3s test asserts `0700`/`0600` on custody and writer-lease state after first start, after pod replacement and after a restore. Each case is followed by a governed write.
 - If `OnRootMismatch` or setgid inheritance still defeats the custody mode checks on the real storage class, the implementer stops and reports rather than weakening the checks.
 
-A writable `emptyDir` is mounted at `/tmp`. The pod sets `TMPDIR=/tmp`, `EXOMEM_LOG_DIR=/tmp/exomem-logs` and `OMP_NUM_THREADS`, carried over from the hosted StatefulSet environment. The root filesystem stays read-only.
+A writable `emptyDir` is mounted at `/tmp`. The pod sets `TMPDIR=/tmp`, `EXOMEM_LOG_DIR=/tmp/exomem-logs` and `OMP_NUM_THREADS`, carried over from the hosted StatefulSet environment. The root filesystem stays read-only. The fsGroup makes that emptyDir setgid, so the private vault lock directory created under it inherits `S_ISGID`: when that directory is a real directory owned by the running user with mode exactly `0700` plus `S_ISGID`, the inherited bit is cleared back to `0700` and re-checked exactly, never tolerated, and any other owner, symlink or mode bit is still refused.
 
 ### D3. First boot and every upgrade run offline preparation in an init container
 
