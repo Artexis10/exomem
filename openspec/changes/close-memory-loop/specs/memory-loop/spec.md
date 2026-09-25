@@ -662,8 +662,9 @@ in a resolved anchor's evidence so a reader can see why that anchor was served.
 The hot profile SHALL be a bounded, deterministic projection over a machine-local
 ring of typed events recorded by origin where each act happens, never re-derived
 from file modification times. The deliberate acts SHALL be a governed write made
-outside any batch scope, an agent's admitted pick, and a page a recorded episode
-is about; selection SHALL be a successful read and a citation by a governed
+outside any batch scope (a move heats only the moved page, on its new path, and
+never the pages whose links it rewrote), an agent's admitted pick, and a page a
+recorded episode is about; selection SHALL be a successful read and a citation by a governed
 write; a captured session and an episode recap SHALL be contact only, read by the
 recent-context block and never a referent. A write inside a batch scope, a write
 no command traced, and a served packet SHALL record nothing, and the watcher's

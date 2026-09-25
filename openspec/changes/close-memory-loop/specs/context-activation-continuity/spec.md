@@ -43,11 +43,15 @@ naming nothing, naming only what this audience may not see, or naming a row or p
 this turn neither reached nor resumed — SHALL be reported `stale`. A request that
 carries a token or an `anchor` override SHALL never be served another request's cached
 packet. The server SHALL keep no per-conversation state beyond the bounded,
-machine-local heat projection: for a caller that supplies a session key, the refs of the
-last packet that session was served, under a salted derivation of the key, never served
-back and never part of a packet, so a session that lost its token still continues its own
-thread (memory-loop: "A turn that names nothing MAY resolve to the hottest recent
-anchor").
+machine-local heat projection, and SHALL keep there only salted, audience-scoped
+derivations of the keys a caller supplies, never the values: for a caller that supplies a
+session key, the refs of the last packet that session was served and the workspace key it
+was last seen with (the session-to-workspace map the workspace tier ranks by); the
+session and workspace keys on that caller's admitted picks; and, on a recorded episode's
+events, the episode key it was recorded under, which is the session key the hooks pass.
+None of it is served back or part of a packet, so a session that lost its token still
+continues its own thread (memory-loop: "A turn that names nothing MAY resolve to the
+hottest recent anchor").
 
 #### Scenario: Continuity strengthens but does not resolve
 - **WHEN** a turn carries one contact kind for an anchor the previous packet resolved
