@@ -411,7 +411,15 @@ def execute_write_advisory(
             )
         except Exception as error:  # noqa: BLE001 - optional advisory fails closed and soft
             if not isinstance(error, _UnaddressableAdvisory):
-                log.warning("advisory computation failed batch=%s", batch_id, exc_info=True)
+                # The sweep runs over the draft's own title and body, which an
+                # exception message or traceback could carry into the log.
+                from .writer_lease import _content_free_cause
+
+                log.warning(
+                    "advisory computation failed batch=%s (%s)",
+                    batch_id,
+                    _content_free_cause(error, stage="route_advisory"),
+                )
             return _publish(
                 vault_root,
                 claimed_status,

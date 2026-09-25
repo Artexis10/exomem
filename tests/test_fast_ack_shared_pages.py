@@ -928,6 +928,51 @@ def test_the_cause_fragment_keeps_only_closed_tokens() -> None:
     ) == "class=Leaky"
 
 
+def test_a_failed_route_advisory_sweep_logs_no_draft_content(
+    live_catalogue: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The deferred sweep runs over the draft's title and body; its failure log
+    names the exception class and stage only, with no message or traceback."""
+    import logging
+
+    from exomem import corpus_aware, deferred_write_advisory
+
+    vault = live_catalogue
+    title = "Route sweep secret draft title"
+    terminal = _remember(tmp_path, vault, title)
+    assert terminal.get("advisory_sync") == "pending", terminal
+
+    class Leaky(Exception):
+        pass
+
+    def leaky_sweep(_root, inputs, **_kwargs):
+        raise Leaky(f"{inputs.title} {inputs.body}")
+
+    monkeypatch.setattr(corpus_aware, "write_advisory_for", leaky_sweep)
+    with caplog.at_level(logging.DEBUG, logger=deferred_write_advisory.__name__):
+        _drain_until_idle(vault)
+
+    assert _advisory_state(vault, terminal["advisory_result_ref"]) == (
+        "failed",
+        "advisory_failed",
+    )
+    records = [
+        record
+        for record in caplog.records
+        if record.name == deferred_write_advisory.__name__
+        and "advisory computation failed" in record.getMessage()
+    ]
+    assert records, [record.getMessage() for record in caplog.records]
+    for record in records:
+        assert record.exc_info is None
+        assert "class=Leaky" in record.getMessage()
+        assert "secret draft" not in record.getMessage()
+        assert "shared page probe body" not in record.getMessage()
+
+
 def test_an_edit_that_loses_its_guard_race_after_installing_the_manifest_is_retryable(
     live_catalogue: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
