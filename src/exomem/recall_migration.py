@@ -367,7 +367,22 @@ def retire(vault_root: Path, *, keep: Path | None = None) -> list[str]:
     Only after a cutover (the active pointer names a sidecar) and never in the
     process that cut over, so the old sidecar survives until a later start.
     """
-    from . import embeddings, reserved_paths
+    from . import reserved_paths
+
+    doomed = _retirable(vault_root, keep=keep)
+    removed: list[str] = []
+    with reserved_paths._subsystem_authority_scope("embedding_index"):
+        for path in doomed:
+            if reserved_paths._remove_owner_file(vault_root, path, "embeddings-store", missing_ok=True):
+                removed.append(path.name)
+    if removed:
+        log.info("retired recall sidecars no longer serving: %s", ", ".join(removed))
+    return removed
+
+
+def _retirable(vault_root: Path, *, keep: Path | None = None) -> list[Path]:
+    """The sidecar files `retire` would remove now, journal files first."""
+    from . import embeddings
 
     if _key(vault_root) in _CUT_OVER or index_paths.active_sidecar_name(vault_root) is None:
         return []
@@ -389,14 +404,7 @@ def retire(vault_root: Path, *, keep: Path | None = None) -> list[str]:
             doomed.append(path)
     # The database file goes last, after its journal files.
     doomed.sort(key=lambda path: (not path.name.endswith(("-wal", "-shm", "-journal")), path.name))
-    removed: list[str] = []
-    with reserved_paths._subsystem_authority_scope("embedding_index"):
-        for path in doomed:
-            if reserved_paths._remove_owner_file(vault_root, path, "embeddings-store", missing_ok=True):
-                removed.append(path.name)
-    if removed:
-        log.info("retired recall sidecars no longer serving: %s", ", ".join(removed))
-    return removed
+    return doomed
 
 
 # ---------------------------------------------------------------- the job
@@ -432,11 +440,24 @@ def run(vault_root: Path, stop: threading.Event) -> str:
         )
         return "disabled"
     plan_ = plan(vault_root)
-    retire(vault_root, keep=plan_.shadow_path if plan_ is not None else None)
     if plan_ is None:
         active = embeddings.get_embedding_index(vault_root)
+        if active.identity is not None and _retirable(vault_root):
+            # A write can land in the old sidecar after the cutover's last
+            # catch-up pass; if the process died between the pointer swap and
+            # the pass after it, only the old sidecar holds it. One pass over
+            # the serving sidecar before the old one goes heals it.
+            finished, _encoded = _pass(
+                vault_root,
+                MigrationPlan(active.identity, active.identity, active.path),
+                should_stop=stop.is_set,
+            )
+            if not finished:
+                return "paused"  # the old sidecar stays until a pass completes
+        retire(vault_root)
         _update(vault_root, state="current", serving=_space(active.identity, active.path), target=None)
         return "current"
+    retire(vault_root, keep=plan_.shadow_path)
     preload_serving_encoder(vault_root)
     if not build(vault_root, plan_, should_stop=stop.is_set):
         return "paused"

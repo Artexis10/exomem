@@ -346,6 +346,49 @@ def test_the_old_sidecar_is_retired_by_the_next_start_not_the_cutover(world) -> 
     assert _vector_lane(vault)["status"] == "participated"
 
 
+def test_the_next_start_heals_a_write_a_crash_after_the_swap_left_behind(world) -> None:
+    """A write that lands in the old sidecar after the last catch-up pass, when
+    the process dies between the pointer swap and the pass after it, is caught
+    up by the next start before the old sidecar is retired."""
+    vault, _log, _loads = world
+    _warm(vault)
+    plan = recall_migration.plan(vault)
+    assert recall_migration.build(vault, plan) is True
+    edited_rel = next(iter(_PAGES))
+    edited = vault / kb_dirname() / edited_rel
+    publish = index_paths.publish_active_sidecar
+
+    def write_then_swap(vault_root, name):
+        # The write lands in the serving (old) sidecar, just before the swap.
+        edited.write_text(
+            edited.read_text(encoding="utf-8") + "\nWritten in the swap window: a jittered pause.\n",
+            encoding="utf-8",
+        )
+        assert embeddings.upsert_after_write_status(vault, [edited]).status == "completed"
+        publish(vault_root, name)
+        raise KeyboardInterrupt("the process dies after the swap")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(index_paths, "publish_active_sidecar", write_then_swap)
+        with pytest.raises(KeyboardInterrupt):
+            recall_migration.cut_over(vault, plan)
+    assert index_paths.sidecar_path(vault) == plan.shadow_path
+    stale = EmbeddingIndex(vault, path=plan.shadow_path).stored_chunks_for(f"{kb_dirname()}/{edited_rel}")[0]
+    assert "jittered" not in " ".join(stale)
+
+    # A new process.
+    recall_space.unload_previous()
+    embeddings.clear_embedding_indexes()
+    recall_migration.reset_for_tests()
+    find_module.clear_cache()
+    assert recall_migration.run(vault, threading.Event()) == "current"
+
+    active = embeddings.get_embedding_index(vault)
+    assert active.path == plan.shadow_path
+    assert "jittered" in " ".join(active.stored_chunks_for(f"{kb_dirname()}/{edited_rel}")[0])
+    assert not index_paths.legacy_sidecar_path(vault).exists()
+
+
 def test_status_reports_progress_and_the_serving_space(world) -> None:
     vault, log, _loads = world
     _warm(vault)
