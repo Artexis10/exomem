@@ -63,3 +63,34 @@ def test_a_model_env_that_is_not_a_string_map_fails_at_settings_load(monkeypatch
     monkeypatch.setenv("CELLCTL_CELL_MODEL_ENV", raw)
     with pytest.raises(ValueError):
         main.build_cluster_config()
+
+
+def _secrets_env(monkeypatch, current: str, previous: str | None = None) -> None:
+    monkeypatch.setenv("CELLCTL_CELL_TOKEN_KEY_CURRENT", current)
+    monkeypatch.setenv("CELLCTL_CELL_TOKEN_KEY_VERSION", "2")
+    if previous is None:
+        monkeypatch.delenv("CELLCTL_CELL_TOKEN_KEY_PREVIOUS", raising=False)
+        monkeypatch.delenv("CELLCTL_CELL_TOKEN_KEY_PREVIOUS_VERSION", raising=False)
+    else:
+        monkeypatch.setenv("CELLCTL_CELL_TOKEN_KEY_PREVIOUS", previous)
+        monkeypatch.setenv("CELLCTL_CELL_TOKEN_KEY_PREVIOUS_VERSION", "1")
+    monkeypatch.setenv("CELLCTL_BACKUP_MASTER_KEYS", json.dumps({"1": "bWFzdGVy"}))
+    monkeypatch.setenv("CELLCTL_BACKUP_MASTER_KEY_CURRENT_VERSION", "1")
+
+
+def test_the_cell_token_key_is_the_64_hex_key_the_gateway_reads(monkeypatch) -> None:
+    # One Secret entry serves both readers: the Substrate gateway takes
+    # EXOMEM_CLOUD_CELL_TOKEN_KEY as 64 hex characters, so cellctl decodes the
+    # same bytes from the same encoding.
+    current, previous = "ab" * 32, "cd" * 32
+    _secrets_env(monkeypatch, current, previous)
+    config = main.build_secrets_config()
+    assert config.cell_token_key_current == bytes.fromhex(current)
+    assert config.cell_token_key_previous == bytes.fromhex(previous)
+
+
+@pytest.mark.parametrize("bad", ["ab" * 31, "ab" * 33, "zz" * 32, "q83vAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxw="])
+def test_a_cell_token_key_that_is_not_64_hex_fails_at_settings_load(monkeypatch, bad: str) -> None:
+    _secrets_env(monkeypatch, bad)
+    with pytest.raises(ValueError):
+        main.build_secrets_config()

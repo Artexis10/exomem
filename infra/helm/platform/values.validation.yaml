@@ -36,6 +36,8 @@ cloudGateway:
   enabled: true
   image: ghcr.io/substrate-systems/substrate-gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   hostname: mcp.example.test
+  publicBaseUrl: https://app.example.test
+  trustedIngressSourceValue: validation-only-ingress-source-value-0123456789
   databaseEgressCidrs:
     - 10.0.1.5/32
 cloudIngress:

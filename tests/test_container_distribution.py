@@ -88,7 +88,7 @@ def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> 
     automatic = _workflow_job(text, "publish-image", "publish-existing-image")
     manual = _workflow_job(text, "publish-existing-image", "publish-existing-pypi")
 
-    for job, image_attestations in ((automatic, 3), (manual, 2)):
+    for job, image_attestations in ((automatic, 4), (manual, 2)):
         proof_step = job.split(
             "\n      - name: Verify the hosted runtime image and signed candidate\n", 1
         )[1].split("\n      - name:", 1)[0]
@@ -103,7 +103,8 @@ def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> 
             in job
         )
         assert "org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}" in job
-        # The hosted image and its candidate bundle, plus the cloud image on release.
+        # The hosted image and its candidate bundle, plus the cloud and cellctl
+        # images on release.
         assert job.count(ATTEST_ACTION) == image_attestations
         assert "subject-name: ghcr.io/artexis10/exomem" in job
         assert "subject-digest: ${{ steps.hosted-build.outputs.digest }}" in job
@@ -428,3 +429,36 @@ def test_unix_upgrade_documents_why_it_skips_the_cuda_repair() -> None:
 
     assert "cu132" not in upgrade
     assert "CUDA" in upgrade and "Windows" in upgrade
+
+
+def test_release_workflow_publishes_attested_cellctl_image_by_digest() -> None:
+    # The platform chart consumes cellctl by digest (cellctl.image), on the
+    # same release trigger as the Cloud cell image.
+    text = _read(".github/workflows/release-please.yml")
+    automatic = _workflow_job(text, "publish-image", "publish-existing-image")
+    cellctl = automatic.split("\n      - name: Build and push Exomem Cloud cellctl image", 1)[1]
+
+    assert "id: cellctl-build" in cellctl
+    assert "context: infra/cellctl" in cellctl
+    assert "file: infra/cellctl/Dockerfile" in cellctl
+    assert "ghcr.io/artexis10/exomem-cellctl:${{ steps.meta.outputs.version }}" in cellctl
+    assert "ghcr.io/artexis10/exomem-cellctl:${{ steps.meta.outputs.source_commit }}" in cellctl
+    assert "subject-name: ghcr.io/artexis10/exomem-cellctl" in cellctl
+    assert "subject-digest: ${{ steps.cellctl-build.outputs.digest }}" in cellctl
+    assert 'cellctl_image="ghcr.io/artexis10/exomem-cellctl@${CELLCTL_DIGEST}"' in cellctl
+    assert "gh release edit" in cellctl
+
+
+def test_cellctl_dockerfile_is_digest_pinned_nonroot_and_frozen() -> None:
+    dockerfile = _read("infra/cellctl/Dockerfile")
+
+    assert re.search(r"^ARG PYTHON_IMAGE=python:3\.12-slim@sha256:[0-9a-f]{64}$", dockerfile, re.M)
+    assert [line for line in dockerfile.splitlines() if line.startswith("FROM ")] == [
+        "FROM ${PYTHON_IMAGE} AS build",
+        "FROM ${PYTHON_IMAGE}",
+    ]
+    assert "--require-hashes" in dockerfile
+    assert "uv sync --frozen --no-dev --no-editable --compile-bytecode" in dockerfile
+    assert "USER 1000:1000" in dockerfile
+    assert 'ENTRYPOINT ["exomem-cellctl"]' in dockerfile
+    assert "PYTHONDONTWRITEBYTECODE=1" in dockerfile

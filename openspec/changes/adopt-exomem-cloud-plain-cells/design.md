@@ -289,11 +289,12 @@ Nothing else pins a release: no candidates, locks, fixtures or adoption PRs. A C
 
 ### D7. Secrets
 
-- **Cell bearer** (contract C4): `base64url_nopad(HMAC-SHA256(cell_token_key[v], "exomem-cloud-cell-token-v1:" + cell_id))`. The gateway and cellctl both hold `cell_token_key` versions. No bearer is stored in the database.
+- **Cell bearer** (contract C4): `base64url_nopad(HMAC-SHA256(cell_token_key[v], "exomem-cloud-cell-token-v1:" + cell_id))`. The gateway and cellctl both hold `cell_token_key`. No bearer is stored in the database.
+- **Key encoding.** A `cell_token_key` is 32 bytes written as 64 hex characters. The Secret `exomem-cloud-cell-token-key` holds `current` (and during a rotation `previous`) in that form, and both readers take the same entry: the gateway as `EXOMEM_CLOUD_CELL_TOKEN_KEY`, cellctl as `CELLCTL_CELL_TOKEN_KEY_CURRENT`. cellctl refuses any other form at settings load, so the two can never derive bearers from different bytes.
 - **Bearer rotation:**
   1. cellctl applies Secrets carrying both versions.
   2. Cells restart one at a time. The set of key versions is part of the D4 render digest, so the change reaches converged cells, and D4 re-applies digest-only changes one cell at a time.
-  3. The gateway switches to the new version.
+  3. The gateway switches to the new version. Today the gateway holds one key and has no previous-version ring, so this step is a single cutover of the shared `current` entry; the gateway-side ring is a Substrate follow-up after launch (see Risks).
   4. The previous version is removed.
 - **Wrapping.** Every envelope-encrypted value uses AES-GCM with associated data `"<cell_id>:<column>:<key version>"`, so a wrapped blob cannot be moved to another cell, column or version and still decrypt. No wrapped values exist yet, so there is no migration.
 - **Write-once columns are written in one statement.** Each group is written together, in a single `UPDATE ... WHERE cell_id = $1 AND <first column> IS NULL`, and cellctl checks the affected row count:
@@ -382,6 +383,7 @@ Each step retries until its check holds. A failed observation never counts as ab
 - **Firewall.** The Hetzner firewall opens 443 and admin SSH.
 - **Public routes.** Only the gateway's IngressRoute is public. Cells, cellctl and the Kubernetes API are not.
 - **Client address.** Traefik `websecure` sets no `trustedIPs`, so it overwrites `X-Real-Ip` with the peer address that `hostPort` preserves. A NetworkPolicy admits ingress to the gateway only from the Traefik pods, which makes that header the gateway's trustworthy client address.
+- **Trusted ingress source.** The gateway applies its per-IP bucket only to requests carrying `EXOMEM_GATEWAY_TRUSTED_INGRESS_SOURCE_HEADER` (`x-exomem-ingress-source`) with the configured value. The gateway's IngressRoute sets it through a Traefik `headers` middleware, which overwrites any copy a client sends, so only requests that came through this route carry it.
 - **Legacy.** `cloudflared` stays only for the old platform's hostnames until retirement. The old provisioner is scaled to zero in the same step that deploys cellctl (task 6.2), so it never runs beside a Cloud cell namespace and its admission policy needs no `exo-cell-` exclusion. A rollback that scales the old provisioner back up scales cellctl to zero first.
 
 ### D12. Control database on its own server
@@ -471,6 +473,8 @@ A single row: `id int primary key check (id = 1)`, `paused boolean not null defa
 
 ### C3 Gateway to cell
 
+**Environment.** The platform chart renders exactly the environment the Substrate gateway reads (`src/exomem-gateway/server.ts` `validateGatewayEnvironment` and `cloud-config.ts`): `EXOMEM_CONTROL_PLANE_KEY`, `EXOMEM_PUBLIC_BASE_URL`, `EXOMEM_CELL_PROTOCOL_VERSION`, `EXOMEM_GATEWAY_CONTROL_HOSTNAME`, `EXOMEM_GATEWAY_INTERNAL_ORIGIN`, `EXOMEM_GATEWAY_TRUSTED_INGRESS_SOURCE_HEADER` and `_VALUE`, `EXOMEM_CLOUD_MCP_URL`, `EXOMEM_CLOUD_MCP_PATH` and `EXOMEM_CLOUD_CELL_TOKEN_KEY`, plus `DATABASE_URL` for its own Postgres role and `EXOMEM_GATEWAY_PORT`. A chart test pins that set.
+
 **Routing and transport**
 - The gateway resolves the cell only from the authenticated OAuth principal. It proxies while `desired_state` is `running` or `read_only`.
 - It sends `Authorization: Bearer <C4>` to `http://cell.exo-cell-<cell_id>.svc.cluster.local:8765/mcp`.
@@ -542,6 +546,7 @@ The gateway gates on desired state, not on the observed `ready` column. An event
 - **One fleet node.** Losing it takes every cell down until it is rebuilt from IaC and restored from backups. The control database survives on its own server.
 - **Public PgBouncer.** It is limited to the Substrate roles, with verify-full TLS, SCRAM, and PgBouncer and nftables connection limits.
 - **fsGroup behaviour on the real CSI driver** is proven only by the D2 test. The implementer escalates rather than weakening custody checks.
+- **The gateway has no cell-token-key ring yet.** It reads one 64-hex `EXOMEM_CLOUD_CELL_TOKEN_KEY`, so during a D7 rotation it accepts only one version at a time and step 3 is a cutover. Until Substrate adds the previous-version ring, a rotation briefly returns `CELL_AUTH_MISMATCH` for a cell whose restart has not reached the new key. That is accepted for launch; rotations are rare and operator-driven.
 - **Letting go of provisioner-held revocation.** Suspension is `stopped` (`replicas: 0`) plus gateway refusal, and it takes effect within one cellctl pass.
 
 ## Migration Plan

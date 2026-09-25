@@ -231,13 +231,19 @@
     "cloudGateway": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "image", "replicas", "hostname", "maxInflight", "databaseSecretName", "databaseSecretKey", "cellTokenKeySecretName", "databaseEgressCidrs"],
+      "required": ["enabled", "image", "replicas", "hostname", "publicBaseUrl", "mcpPath", "cellProtocolVersion", "databaseSecretName", "databaseSecretKey", "controlPlaneKeySecretName", "controlPlaneKeySecretKey", "cellTokenKeySecretName", "trustedIngressSourceHeader", "trustedIngressSourceValue", "databaseEgressCidrs"],
       "properties": {
         "enabled": {"type": "boolean"},
         "image": {"type": "string"},
         "replicas": {"type": "integer", "minimum": 1, "maximum": 2},
         "hostname": {"type": "string"},
-        "maxInflight": {"type": "integer", "minimum": 1, "maximum": 32},
+        "publicBaseUrl": {"type": "string"},
+        "mcpPath": {"type": "string", "pattern": "^/[A-Za-z0-9/_-]*$"},
+        "cellProtocolVersion": {"type": "string", "pattern": "^[0-9]+$"},
+        "controlPlaneKeySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "controlPlaneKeySecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "trustedIngressSourceHeader": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"},
+        "trustedIngressSourceValue": {"type": "string"},
         "databaseSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
         "databaseSecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
         "cellTokenKeySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
@@ -250,6 +256,8 @@
       "then": {"properties": {
         "image": {"pattern": "^ghcr\\.io/substrate-systems/substrate-gateway@sha256:[a-f0-9]{64}$"},
         "hostname": {"pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$"},
+        "publicBaseUrl": {"pattern": "^https://[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$"},
+        "trustedIngressSourceValue": {"pattern": "^[A-Za-z0-9_-]{32,128}$"},
         "databaseEgressCidrs": {"minItems": 1}
       }}
     },

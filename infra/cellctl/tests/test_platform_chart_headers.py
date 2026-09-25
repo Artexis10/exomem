@@ -327,3 +327,83 @@ def test_the_cloudflare_tunnel_keeps_a_single_web_port_while_websecure_rides_hos
     deployment = _find(documents, "Deployment", "platform-header-test-traefik")
     ports = {port["name"]: port for port in deployment["spec"]["template"]["spec"]["containers"][0]["ports"]}
     assert ports["websecure"]["hostPort"] == 443
+
+
+# The Substrate gateway's environment contract (substrate main,
+# src/exomem-gateway/server.ts validateGatewayEnvironment and cloud-config.ts),
+# plus DATABASE_URL for its own Postgres role and the port the chart probes.
+GATEWAY_ENV = {
+    "EXOMEM_CONTROL_PLANE_KEY",
+    "EXOMEM_PUBLIC_BASE_URL",
+    "EXOMEM_CELL_PROTOCOL_VERSION",
+    "EXOMEM_GATEWAY_CONTROL_HOSTNAME",
+    "EXOMEM_GATEWAY_INTERNAL_ORIGIN",
+    "EXOMEM_GATEWAY_TRUSTED_INGRESS_SOURCE_HEADER",
+    "EXOMEM_GATEWAY_TRUSTED_INGRESS_SOURCE_VALUE",
+    "EXOMEM_CLOUD_MCP_URL",
+    "EXOMEM_CLOUD_MCP_PATH",
+    "EXOMEM_CLOUD_CELL_TOKEN_KEY",
+    "DATABASE_URL",
+    "EXOMEM_GATEWAY_PORT",
+}
+
+
+def _gateway_env(documents: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    deployment = _find(documents, "Deployment", "exomem-cloud-gateway")
+    (container,) = deployment["spec"]["template"]["spec"]["containers"]
+    env = container["env"]
+    names = [entry["name"] for entry in env]
+    assert len(names) == len(set(names)), names
+    return {entry["name"]: entry for entry in env}
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_cloud_gateway_renders_exactly_the_substrate_gateway_env_contract() -> None:
+    documents = _helm_template()
+    env = _gateway_env(documents)
+    assert set(env) == GATEWAY_ENV
+
+    values = yaml.safe_load((PLATFORM_CHART / "values.validation.yaml").read_text(encoding="utf-8"))
+    gateway = values["cloudGateway"]
+    hostname = gateway["hostname"]
+    assert env["EXOMEM_GATEWAY_CONTROL_HOSTNAME"]["value"] == hostname
+    assert env["EXOMEM_CLOUD_MCP_PATH"]["value"] == "/mcp"
+    assert env["EXOMEM_CLOUD_MCP_URL"]["value"] == f"https://{hostname}/mcp"
+    assert env["EXOMEM_CELL_PROTOCOL_VERSION"]["value"] == "1"
+    assert env["EXOMEM_PUBLIC_BASE_URL"]["value"] == gateway["publicBaseUrl"]
+    assert env["EXOMEM_GATEWAY_INTERNAL_ORIGIN"]["value"] == (
+        "http://exomem-cloud-gateway.exomem-cloud.svc.cluster.local:8080"
+    )
+    assert env["EXOMEM_GATEWAY_PORT"]["value"] == "8080"
+    # Secrets come from Secrets. The cell token key is the same Secret entry
+    # cellctl reads as its current key (64 hex characters).
+    assert env["EXOMEM_CLOUD_CELL_TOKEN_KEY"]["valueFrom"]["secretKeyRef"] == {
+        "name": "exomem-cloud-cell-token-key",
+        "key": "current",
+    }
+    cellctl = _find(documents, "Deployment", "cellctl")
+    cellctl_env = {e["name"]: e for e in cellctl["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert (
+        cellctl_env["CELLCTL_CELL_TOKEN_KEY_CURRENT"]["valueFrom"]["secretKeyRef"]
+        == env["EXOMEM_CLOUD_CELL_TOKEN_KEY"]["valueFrom"]["secretKeyRef"]
+    )
+    assert "secretKeyRef" in env["EXOMEM_CONTROL_PLANE_KEY"]["valueFrom"]
+    assert "secretKeyRef" in env["DATABASE_URL"]["valueFrom"]
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_cloud_ingress_sets_the_trusted_ingress_source_header_the_gateway_expects() -> None:
+    # Without it the gateway skips its per-IP bucket. Traefik overwrites any
+    # client-sent copy, and only Traefik pods reach the gateway.
+    documents = _helm_template()
+    env = _gateway_env(documents)
+    header = env["EXOMEM_GATEWAY_TRUSTED_INGRESS_SOURCE_HEADER"]["value"]
+    value = env["EXOMEM_GATEWAY_TRUSTED_INGRESS_SOURCE_VALUE"]["value"]
+    assert header == "x-exomem-ingress-source"
+
+    middleware = _find(documents, "Middleware", "exomem-cloud-trusted-ingress")
+    assert middleware["metadata"]["namespace"] == "exomem-cloud"
+    assert middleware["spec"]["headers"]["customRequestHeaders"] == {header: value}
+    route = _find(documents, "IngressRoute", "exomem-cloud-gateway")
+    (rule,) = route["spec"]["routes"]
+    assert rule["middlewares"] == [{"name": "exomem-cloud-trusted-ingress"}]

@@ -95,11 +95,12 @@
 - [ ] 3.8 Implement capacity publication (D9), with `cell_slots` = limit − headroom − non-cell attachments
 - [ ] 3.9 Add platform chart entries:
   - cellctl, single replica, `Recreate`, with the RBAC in D4 and the `ValidatingAdmissionPolicy` on its ServiceAccount (cell namespaces only, restricted labels, digest-pinned images from the cell repository);
-  - the gateway Deployment and Service consuming the Substrate gateway image digest;
+  - the gateway Deployment and Service consuming the Substrate gateway image digest, rendering exactly the gateway's environment contract (C3), with a chart test pinning that set;
+  - the cellctl image, built from `infra/cellctl/Dockerfile` (digest-pinned base, non-root, read-only root filesystem) and published to GHCR by digest on the same release trigger as the `cloud` image, which the chart consumes by digest;
   - the `exomem-cloud-encrypted` StorageClass;
   - Traefik `websecure` on hostPort 443 only, with no `trustedIPs`;
   - a NetworkPolicy admitting gateway ingress only from the Traefik pods;
-  - cert-manager with a Cloudflare DNS-01 issuer and the gateway certificate and IngressRoute;
+  - cert-manager with a Cloudflare DNS-01 issuer and the gateway certificate and IngressRoute, whose middleware sets the gateway's trusted-ingress source header;
   - SOPS-sourced Secrets.
 - [ ] 3.10 Integration test on disposable K3s:
   - create, then pod kill with a governed write after it;

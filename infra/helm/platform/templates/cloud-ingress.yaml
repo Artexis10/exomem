@@ -53,6 +53,20 @@ spec:
 # Cloudflare, so the ACME DNS-01 challenge and the direct TLS connection
 # both reach this cluster's own certificate, not a third party's (D11, the
 # "Vault traffic is TLS-terminated only on our own servers" requirement).
+# The gateway applies its per-IP bucket only to requests carrying the
+# trusted-ingress header with the configured value. Traefik overwrites any
+# copy a client sends, and the gateway's NetworkPolicy admits only Traefik
+# pods, so the header proves the request came through this route.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: exomem-cloud-trusted-ingress
+  namespace: {{ .Values.cellctl.namespace }}
+spec:
+  headers:
+    customRequestHeaders:
+      {{ .Values.cloudGateway.trustedIngressSourceHeader }}: {{ .Values.cloudGateway.trustedIngressSourceValue | quote }}
+---
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
@@ -65,6 +79,8 @@ spec:
   routes:
     - kind: Rule
       match: Host(`{{ .Values.cloudIngress.hostname }}`)
+      middlewares:
+        - name: exomem-cloud-trusted-ingress
       services:
         - name: exomem-cloud-gateway
           port: 8080

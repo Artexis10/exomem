@@ -9,6 +9,7 @@ import base64
 import json
 import logging
 import os
+import re
 from datetime import timedelta
 
 from kubernetes import client as k8s
@@ -23,10 +24,6 @@ from .storage.b2 import B2Config, B2ObjectStorage
 from .storage.hetzner import HetznerVolumeProvider
 
 
-def _b64_env(name: str) -> bytes:
-    return base64.b64decode(os.environ[name])
-
-
 def _versioned_keys_env(name: str) -> dict[int, bytes]:
     """`name` holds JSON: {"1": "<base64>", "2": "<base64>", ...}."""
 
@@ -34,12 +31,30 @@ def _versioned_keys_env(name: str) -> dict[int, bytes]:
     return {int(version): base64.b64decode(value) for version, value in raw.items()}
 
 
+_CELL_TOKEN_KEY_RE = re.compile(r"[0-9a-fA-F]{64}")
+
+
+def _cell_token_key(name: str, raw: str) -> bytes:
+    """D7: the cell token key is 32 bytes as 64 hex characters, the encoding
+    the Substrate gateway reads from the same Secret entry. Refused at
+    settings load otherwise, never silently re-encoded."""
+
+    value = raw.strip()
+    if not _CELL_TOKEN_KEY_RE.fullmatch(value):
+        raise ValueError(f"{name} must be 64 hex characters (a 32-byte key)")
+    return bytes.fromhex(value)
+
+
 def build_secrets_config() -> SecretsConfig:
     previous_raw = os.environ.get("CELLCTL_CELL_TOKEN_KEY_PREVIOUS")
     previous_version_raw = os.environ.get("CELLCTL_CELL_TOKEN_KEY_PREVIOUS_VERSION")
     return SecretsConfig(
-        cell_token_key_current=_b64_env("CELLCTL_CELL_TOKEN_KEY_CURRENT"),
-        cell_token_key_previous=base64.b64decode(previous_raw) if previous_raw else None,
+        cell_token_key_current=_cell_token_key(
+            "CELLCTL_CELL_TOKEN_KEY_CURRENT", os.environ["CELLCTL_CELL_TOKEN_KEY_CURRENT"]
+        ),
+        cell_token_key_previous=(
+            _cell_token_key("CELLCTL_CELL_TOKEN_KEY_PREVIOUS", previous_raw) if previous_raw else None
+        ),
         cell_token_key_version=int(os.environ["CELLCTL_CELL_TOKEN_KEY_VERSION"]),
         cell_token_key_previous_version=int(previous_version_raw) if previous_version_raw else None,
         backup_master_keys=_versioned_keys_env("CELLCTL_BACKUP_MASTER_KEYS"),

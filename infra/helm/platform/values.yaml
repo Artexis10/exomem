@@ -189,6 +189,9 @@ traefik:
 
 cellctl:
   enabled: false
+  # ghcr.io/artexis10/exomem-cellctl@sha256:<digest>, built from
+  # infra/cellctl/Dockerfile and recorded in the release notes on each release
+  # tag (release-please.yml). Always a digest, never a tag.
   image: ""
   # <cell repository>@sha256:<digest> the ValidatingAdmissionPolicy pins
   # cellctl's own writes to (D4). cellctl itself resolves the per-cell image
@@ -262,10 +265,21 @@ cloudGateway:
   image: ""
   replicas: 1
   hostname: ""
-  maxInflight: 16
+  # Substrate's public origin (EXOMEM_PUBLIC_BASE_URL), and the MCP path on
+  # `hostname` the gateway serves (EXOMEM_CLOUD_MCP_URL is https://hostname+path).
+  publicBaseUrl: ""
+  mcpPath: /mcp
+  cellProtocolVersion: "1"
   databaseSecretName: exomem-cloud-gateway-database
   databaseSecretKey: url
+  controlPlaneKeySecretName: exomem-cloud-gateway-control-plane-key
+  controlPlaneKeySecretKey: key
+  # D7: holds `current` (64 hex characters) -- the same entry cellctl reads.
   cellTokenKeySecretName: exomem-cloud-cell-token-key
+  # D11: set by the Cloud ingress on every forwarded request. The value is
+  # not a secret, but must be at least 32 unguessable URL-safe characters.
+  trustedIngressSourceHeader: x-exomem-ingress-source
+  trustedIngressSourceValue: ""
   # D5: the gateway may egress only to cell pods on 8765 and the control
   # database on 5432 -- explicit addresses, matching gateway.databaseEgressCidrs.
   databaseEgressCidrs: []

@@ -46,48 +46,50 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+          # Exactly the Substrate gateway's environment contract
+          # (src/exomem-gateway/server.ts validateGatewayEnvironment and
+          # cloud-config.ts), plus DATABASE_URL for its own Postgres role and
+          # the port the probes and Service use. Nothing it does not read.
           env:
-            - name: NODE_ENV
-              value: production
             - name: EXOMEM_GATEWAY_PORT
               value: "8080"
-            - name: EXOMEM_GATEWAY_MAX_INFLIGHT
-              value: {{ .Values.cloudGateway.maxInflight | quote }}
-            - name: EXOMEM_CLOUD_GATEWAY_HOSTNAME
-              value: {{ .Values.cloudGateway.hostname | quote }}
-            # C3: only content-type, accept, mcp-session-id and
-            # mcp-protocol-version are forwarded; the gateway adds
-            # x-request-id itself and never forwards the client's own
-            # Authorization, cookies or forwarding headers.
-            - name: EXOMEM_CLOUD_CELL_ORIGIN_TEMPLATE
-              value: http://cell.{namespace}.svc.cluster.local:8765/mcp
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.cloudGateway.databaseSecretName }}
                   key: {{ .Values.cloudGateway.databaseSecretKey }}
-            - name: EXOMEM_CLOUD_CELL_TOKEN_KEY_CURRENT
+            - name: EXOMEM_CONTROL_PLANE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cloudGateway.controlPlaneKeySecretName }}
+                  key: {{ .Values.cloudGateway.controlPlaneKeySecretKey }}
+            - name: EXOMEM_PUBLIC_BASE_URL
+              value: {{ .Values.cloudGateway.publicBaseUrl | quote }}
+            - name: EXOMEM_CELL_PROTOCOL_VERSION
+              value: {{ .Values.cloudGateway.cellProtocolVersion | quote }}
+            - name: EXOMEM_GATEWAY_CONTROL_HOSTNAME
+              value: {{ .Values.cloudGateway.hostname | quote }}
+            - name: EXOMEM_GATEWAY_INTERNAL_ORIGIN
+              value: {{ printf "http://exomem-cloud-gateway.%s.svc.cluster.local:8080" .Values.cellctl.namespace | quote }}
+            # D11: the Cloud ingress sets this header on every request it
+            # forwards (cloud-ingress.yaml), which is what makes the gateway
+            # apply its per-IP bucket to X-Real-Ip.
+            - name: EXOMEM_GATEWAY_TRUSTED_INGRESS_SOURCE_HEADER
+              value: {{ .Values.cloudGateway.trustedIngressSourceHeader | quote }}
+            - name: EXOMEM_GATEWAY_TRUSTED_INGRESS_SOURCE_VALUE
+              value: {{ .Values.cloudGateway.trustedIngressSourceValue | quote }}
+            - name: EXOMEM_CLOUD_MCP_URL
+              value: {{ printf "https://%s%s" .Values.cloudGateway.hostname .Values.cloudGateway.mcpPath | quote }}
+            - name: EXOMEM_CLOUD_MCP_PATH
+              value: {{ .Values.cloudGateway.mcpPath | quote }}
+            # D7: the same Secret entry cellctl reads as its current cell
+            # token key, 64 hex characters. The gateway holds one key; its
+            # side of the rotation ring is a Substrate follow-up.
+            - name: EXOMEM_CLOUD_CELL_TOKEN_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.cloudGateway.cellTokenKeySecretName }}
                   key: current
-            - name: EXOMEM_CLOUD_CELL_TOKEN_KEY_VERSION
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.cloudGateway.cellTokenKeySecretName }}
-                  key: currentVersion
-            - name: EXOMEM_CLOUD_CELL_TOKEN_KEY_PREVIOUS
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.cloudGateway.cellTokenKeySecretName }}
-                  key: previous
-                  optional: true
-            - name: EXOMEM_CLOUD_CELL_TOKEN_KEY_PREVIOUS_VERSION
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.cloudGateway.cellTokenKeySecretName }}
-                  key: previousVersion
-                  optional: true
           readinessProbe:
             httpGet:
               path: /readyz
