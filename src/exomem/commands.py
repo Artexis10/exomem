@@ -2485,6 +2485,11 @@ def op_find(
     )
     if restricted:
         explain = False
+        # Graph hops, in-degree and graph enrichment follow link resolution
+        # over the whole vault, and the shared recall cache is keyed by
+        # `graph`, so such a caller recalls without the graph lane.
+        graph = False
+        graph_enrich = False
     compute_profile: dict[str, str | bool] = {}
     if explain:
         from . import mode as mode_module

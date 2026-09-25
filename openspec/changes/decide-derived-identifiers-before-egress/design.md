@@ -53,6 +53,8 @@ A whole-vault aggregate cannot be recomputed from a filtered result: an audit, a
 
 Recall diagnostics are computed over the whole corpus before release decisions: lane statuses, fusion weights, raw scores and the emit count (`explain`), per-lane ranks and graph in-degree (`signals`), and the keyword-fallback marker (`degraded`). A restricted caller does not receive them; its hits and their order are unchanged. The BM25 IDF and fusion-order residual among visible hits is a known limit.
 
+Recall runs without the graph lane and graph enrichment for such a caller (`ask_memory`, a `context` query and evolution timelines): graph hops, in-degree and enrichment follow link resolution over the whole vault, and the recall cache shared across principals is keyed by that switch, so the decision is made before the cache is consulted. The owner's recall is unchanged. What it prevents: hits whose presence depends on how a withheld page resolves a visible link. Cost when it fires wrongly: a restricted caller recalls without hop neighbours; that caller pays, and the owner never does.
+
 ### Controls
 
 - Dropping an entry, collapsing a folder, and answering a withheld write target as missing. What they prevent: a restricted caller learning that a withheld page exists, what it is called, or what it links, and a restricted writer changing it. Cost when they fire wrongly: a restricted caller misses an entry or cannot write a page it could not read either; that caller pays. The owner never pays: every one of these is `None` or `False` for the owner.
@@ -65,6 +67,5 @@ Recall diagnostics are computed over the whole corpus before release decisions: 
 
 ## Risks / Trade-offs
 
-- Recall's graph lane builds its candidates in a cache shared across principals, so the pages it reaches by a hop still follow whole-vault resolution for a restricted reader; the in-degree it computed is not returned to such a reader. Deciding hops per audience needs that cache keyed by audience and is left for a ruling.
 - Typed relations written on a semantic unit, and the targets two pages both answer, are still paired over whole-vault resolution in relation proposals and the relation queue. Their target is decided before it is shown; re-resolving them per reader is left for a ruling.
 - A folder delete by a restricted writer that holds both visible and withheld files, and a create whose path collides with a withheld file, cannot answer exactly as the absent case without either changing the withheld page or changing the contract. They are left for a ruling.

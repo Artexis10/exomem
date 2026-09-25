@@ -273,6 +273,8 @@ def evolution(
         projects=projects,
         tags=tags,
         limit=overfetch,
+        # No graph lane for a caller other than the owner (see `op_find`).
+        graph=keep is None,
     )
     built = build_timelines(vault_root, hits, max_chains=limit, keep=keep)
     return {"query": query, **built}

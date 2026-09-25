@@ -209,7 +209,9 @@ def _context_hits(
         limit=limit if keep is None else egress.pool_limit(limit),
         scope="kb",
         mode="hybrid",
-        graph=True,
+        # No graph lane for a caller other than the owner: its hops follow
+        # link resolution over the whole vault.
+        graph=keep is None,
         rerank=False,
         prefer_compiled=True,
         prefer_active=True,

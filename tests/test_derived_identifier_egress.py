@@ -1252,6 +1252,53 @@ def test_a_bare_link_only_a_withheld_page_answers_reads_as_unresolved(
     assert _text(answers["C"]) == _text(answers["B"])
 
 
+_RECALL_GRAPH_SURFACES = {
+    "ask-enrich-full": ("ask_memory", {"query": "Alpha", "graph_enrich": True, "detail": "full"}),
+    "ask-enrich": ("ask_memory", {"query": "alpha rollout", "graph_enrich": True}),
+    "ask-deep": ("ask_memory", {"query": "Alpha", "deep": True, "graph_enrich": True}),
+    "context-query": ("connect_memory", {"operation": "context", "query": "Alpha"}),
+    "evolution": ("review_memory", {"mode": "evolution", "query": "Alpha"}),
+}
+
+
+@pytest.mark.parametrize("scenario", sorted(_LINK_SCENARIOS))
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_recall_runs_no_graph_lane(tmp_path: Path, audience: str, scenario: str) -> None:
+    """Graph hops follow whole-vault link resolution, so a restricted caller
+    under a governed policy recalls without them."""
+    fixture, _target = _LINK_SCENARIOS[scenario]
+    base, withheld = fixture()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    principal = _principal(audience)
+
+    answers = {
+        variant: {
+            label: _stable(_call(vault, principal, command, **kwargs))
+            for label, (command, kwargs) in _RECALL_GRAPH_SURFACES.items()
+        }
+        for variant, vault in vaults.items()
+    }
+
+    assert not _names_withheld(answers["A"])
+    for label in _RECALL_GRAPH_SURFACES:
+        assert "__error__" not in answers["A"][label], answers["A"][label]
+        assert _text(answers["A"][label]) == _text(answers["B"][label]), label
+        assert _text(answers["C"][label]) == _text(answers["B"][label]), label
+    assert "graph_hop" not in _text(answers["A"])
+
+
+def test_the_owner_still_recalls_through_the_graph_lane(tmp_path: Path) -> None:
+    base, withheld = _stem_collision()
+    base[f"{NOTES}/alpha.md"] = _page(
+        "Alpha", _LINKS_TO.format(t="Knowledge Base/Notes/beta"), type="insight"
+    )
+    vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")
+
+    owner = _call(vault, None, "ask_memory", query="Alpha", graph_enrich=True, detail="full")
+
+    assert "graph_hop" in _text(owner), owner
+
+
 def test_the_owner_still_resolves_links_over_every_page(tmp_path: Path) -> None:
     base, withheld = _stem_collision()
     vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")

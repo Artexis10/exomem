@@ -73,7 +73,7 @@ For a reader other than the owner, a derived answer that depends on how a visibl
 
 ### Requirement: Counts follow filtering and whole-vault aggregates go to the owner
 
-A count or rank a restricted caller receives SHALL be computed over the entries it receives, and retrieval diagnostics computed before release decisions SHALL NOT be returned to it. A whole-vault aggregate that a restricted view cannot recompute SHALL be served to the owner only under a governed policy, and SHALL answer other audiences with `available: false` and `reason: "audience_restricted"`, decided before anything is read.
+A count or rank a restricted caller receives SHALL be computed over the entries it receives, and retrieval diagnostics computed before release decisions SHALL NOT be returned to it. Under a governed policy such a caller's recall SHALL run without the graph lane and graph enrichment, decided before the shared recall cache is consulted. A whole-vault aggregate that a restricted view cannot recompute SHALL be served to the owner only under a governed policy, and SHALL answer other audiences with `available: false` and `reason: "audience_restricted"`, decided before anything is read.
 
 #### Scenario: A count beside a filtered list
 
@@ -84,3 +84,8 @@ A count or rank a restricted caller receives SHALL be computed over the entries 
 
 - **WHEN** a caller other than the owner asks for an audit, a registry inferred from the corpus, or a coverage block under a governed policy
 - **THEN** it receives `available: false` with `reason: "audience_restricted"`, and the owner receives the aggregate unchanged
+
+#### Scenario: A restricted caller recalls without the graph lane
+
+- **WHEN** a caller other than the owner asks for recall with graph enrichment under a governed policy
+- **THEN** its hits carry no graph hop, in-degree or enrichment, and match the answer from a vault without the withheld pages; the owner's recall is unchanged
