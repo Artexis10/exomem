@@ -1,8 +1,17 @@
 {
-  "description": "Product findings the rehearsal is expected to record on the real cell image until their owners fix them. --harness-check fails on any other failing or blocked step, and reports an entry here whose step now passes so it can be removed.",
+  "description": "Product findings the rehearsal is expected to record on the real cell image until their owners fix them. With --harness-check, a failure passes only when its step is listed here and its failure message contains the listed text. Any other failing or blocked step, or a listed step failing for a different reason, fails the check. An entry whose step now passes is reported so it can be removed.",
   "steps": {
-    "3": "Substrate: isPkceVerifier refuses RFC 7636 verifiers containing '.' or '~' (substrate-systems/substrate#181)",
-    "9": "runtime: after a read_only -> running recovery, the first governed write leaves /health/ready at retrieval_unavailable",
-    "10": "follows step 9: tenant A's cell answers 503 CELL_NOT_READY, so the A-side cross-recall is unverified"
+    "3": {
+      "match": "isPkceVerifier",
+      "owner": "Substrate token endpoint PKCE grammar (substrate-systems/substrate, reported through the operator)"
+    },
+    "9": {
+      "match": "dropped to not-ready and stayed there",
+      "owner": "runtime: readiness after a read_only -> running recovery (reported on Artexis10/exomem#1368 and to the operator)"
+    },
+    "10": {
+      "match": "A-side cross-recall is unverified",
+      "owner": "follows step 9: tenant A's cell answers 503 CELL_NOT_READY"
+    }
   }
 }

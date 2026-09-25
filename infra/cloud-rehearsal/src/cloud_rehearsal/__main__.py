@@ -259,15 +259,20 @@ def _compare_with_known_findings(report: Report, path: Path, only: set[int] | No
     passes is reported so the baseline gets pruned.
     """
 
-    known = {int(number): reason for number, reason in json.loads(path.read_text(encoding="utf-8"))["steps"].items()}
+    known = {int(number): entry for number, entry in json.loads(path.read_text(encoding="utf-8"))["steps"].items()}
     unexpected, resolved = [], []
     for step in report.steps:
         if only is not None and step.number not in only:
             continue
-        if step.status != "passed" and step.number not in known:
-            unexpected.append({"step": step.number, "status": step.status, "message": (step.failure or {}).get("message", "")[:300]})
-        if step.status == "passed" and step.number in known:
-            resolved.append({"step": step.number, "baseline": known[step.number]})
+        message = (step.failure or {}).get("message", "")
+        entry = known.get(step.number)
+        # A listed step passes the check only when it fails for the listed
+        # reason: the same step failing any other way is a regression.
+        expected = entry is not None and step.status == "failed" and entry["match"] in message
+        if step.status != "passed" and not expected:
+            unexpected.append({"step": step.number, "status": step.status, "message": message[:300]})
+        if step.status == "passed" and entry is not None:
+            resolved.append({"step": step.number, "baseline": entry["owner"]})
     return {"known_findings": {str(k): v for k, v in known.items()}, "unexpected": unexpected, "resolved_known_findings": resolved}
 
 

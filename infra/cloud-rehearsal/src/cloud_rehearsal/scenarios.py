@@ -487,6 +487,7 @@ async def step_3_oauth_mcp(ctx: Context, record: StepRecord) -> None:
             component="Substrate src/lib/exomem-hosted/oauth.ts PKCE_VALUE", owner=SUBSTRATE_REPO,
             evidence={"token_response": "400 invalid_grant", "substrate_log": "exomem_oauth_token_rejection stage=code_shape verifier_wellformed=false"},
         )
+        await ctx.a.client.aclose()
         ctx.a.client = TenantClient(ctx.resolver, ctx.browser, ctx.a.session, ctx.substrate.redirect_uri)
         tools = await first_session(ctx.a.client, record)
     if ctx.a.client.authorizations != 1 or not ctx.a.client.access_token:
@@ -644,6 +645,7 @@ async def step_7_upgrade(ctx: Context, record: StepRecord) -> None:
     if before.get("observed_image") != ctx.images.cell_v1:
         raise StepFailure(f"tenant A is not on the release under test before the upgrade: {before.get('observed_image')}")
     started = time.monotonic()
+    snapshot_logs(ctx)
     await ctx.admin_release({"cellImage": ctx.images.cell_v2})
     saw_hold = False
 
@@ -688,6 +690,7 @@ async def step_8_canary_failure(ctx: Context, record: StepRecord) -> None:
             raise StepFailure(f"pre-canary governed write failed: {write.error_code}")
     previous = (await ctx.cell(ctx.a.cell_id))["observed_image"]
     started = time.monotonic()
+    snapshot_logs(ctx)
     await ctx.admin_release({"cellImage": ctx.images.cell_broken})
     seen: set[str] = set()
 
@@ -728,6 +731,7 @@ async def step_8_canary_failure(ctx: Context, record: StepRecord) -> None:
 
 async def step_9_read_only(ctx: Context, record: StepRecord) -> None:
     _require(ctx.a.client and ctx.a.cell_id and ctx.a.user_id and ctx.a.tenant_id)
+    snapshot_logs(ctx)
     await ctx.paddle(
         substrate_mod.paddle_event(
             event_type="subscription.past_due", status="past_due", user_id=ctx.a.user_id, tenant_id=ctx.a.tenant_id,
@@ -758,6 +762,7 @@ async def step_9_read_only(ctx: Context, record: StepRecord) -> None:
         raise StepFailure(f"a write in read-only mode was not refused with CLOUD_CELL_READ_ONLY: {refused.error_code}")
     if ctx.a.phrase not in read.text():
         raise StepFailure("reads stopped working in read-only mode")
+    snapshot_logs(ctx)
     # Payment recovers: back to running, writes work again.
     await ctx.paddle(
         substrate_mod.paddle_event(
@@ -869,6 +874,7 @@ async def step_11_backup_and_scratch_restore(ctx: Context, record: StepRecord) -
     _require(ctx.b.cell_id and ctx.b.client)
     hour = dt.datetime.now(dt.UTC).hour
     window = f"{hour}-{(hour + 2) % 24}"
+    snapshot_logs(ctx)
     ctx.set_backup_window(window)
     record.evidence["backup_window_opened"] = window
     saw_backup_hold = False

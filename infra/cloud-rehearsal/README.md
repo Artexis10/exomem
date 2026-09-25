@@ -29,7 +29,7 @@ Exit codes:
 
 `--harness-check` turns 1 into 0. Pull-request CI uses it, because there the question is whether the harness works, and the findings are in the report and the job summary. A manual dispatch of the workflow is the strict node gate.
 
-With `--harness-check`, every failing or blocked step must be one that `known-findings.json` names, each with its owner. Any other failure is treated as a regression in the rehearsal and exits 2. A known finding whose step now passes is reported, so the baseline can be pruned.
+With `--harness-check`, a failing step passes the check only when `known-findings.json` lists that step and its failure message contains the listed text. Every other failure exits 2 as a regression in the rehearsal. That includes a blocked step, an unlisted step, or a listed step failing for a different reason. A known finding whose step now passes is reported, so the baseline can be pruned.
 
 `gates_node` is true only when all of the following hold:
 - every step passed;
@@ -101,7 +101,7 @@ A post-check scans the gateway, cellctl and cell logs for the run's distinctive 
 
 It never contains a secret.
 
-Logs are snapshotted after every step, so the content-free check also covers pods that later steps replace or delete.
+Logs are snapshotted after every step, and again before each in-step pod replacement: the upgrade, the canary, both read-only transitions and the backup window. The content-free check therefore covers pods that are later replaced or deleted.
 
 The run is marked not valid, and cannot gate the node, when the cell image was supplied with `--cell-image` or when only some steps ran (`--steps`).
 

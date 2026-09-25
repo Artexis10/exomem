@@ -326,12 +326,29 @@ def _apply_ingress(stack: Stack, pki: tls.RehearsalPki, ingress_source_value: st
 
 
 def wait_rollout(stack: Stack, namespace: str, deployment: str, *, timeout: int = 240) -> None:
-    wait_for(
-        lambda: stack.k3s.kubectl(
-            "rollout", "status", f"deployment/{deployment}", "--namespace", namespace, "--timeout=5s", check=False
-        ).returncode == 0,
-        timeout=timeout, interval=3, description=f"deployment {namespace}/{deployment} to roll out",
-    )
+    try:
+        wait_for(
+            lambda: stack.k3s.kubectl(
+                "rollout", "status", f"deployment/{deployment}", "--namespace", namespace, "--timeout=5s", check=False
+            ).returncode == 0,
+            timeout=timeout, interval=3, description=f"deployment {namespace}/{deployment} to roll out",
+        )
+    except TimeoutError as error:
+        raise TimeoutError(f"{error}\n{why_not_running(stack, namespace)}") from None
+
+
+def why_not_running(stack: Stack, namespace: str) -> str:
+    """Content-free cluster state for a failure message: pods, events, node conditions."""
+
+    pods = stack.k3s.kubectl("get", "pods", "--namespace", namespace, "-o", "wide", check=False).stdout
+    events = stack.k3s.kubectl(
+        "get", "events", "--namespace", namespace, "--sort-by=.lastTimestamp",
+        "-o", "custom-columns=REASON:.reason,OBJECT:.involvedObject.name,MESSAGE:.message", check=False,
+    ).stdout.splitlines()[-15:]
+    conditions = stack.k3s.kubectl(
+        "get", "nodes", "-o", "jsonpath={range .items[*].status.conditions[*]}{.type}={.status} {end}", check=False
+    ).stdout
+    return f"pods:\n{pods}\nrecent events:\n" + "\n".join(events) + f"\nnode conditions: {conditions}"
 
 
 def s3_port() -> int:

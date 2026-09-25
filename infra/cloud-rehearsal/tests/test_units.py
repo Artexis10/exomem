@@ -68,18 +68,30 @@ def test_harness_check_fails_only_on_unknown_findings(tmp_path: Path) -> None:
     from cloud_rehearsal.__main__ import _compare_with_known_findings
 
     baseline = tmp_path / "known.json"
-    baseline.write_text(json.dumps({"steps": {"3": "known", "9": "known"}}), encoding="utf-8")
+    baseline.write_text(
+        json.dumps({"steps": {
+            "3": {"match": "isPkceVerifier", "owner": "o"},
+            "9": {"match": "x", "owner": "o"},
+            "10": {"match": "A-side cross-recall is unverified", "owner": "o"},
+        }}),
+        encoding="utf-8",
+    )
     run = _passing_report()
     run.steps[2].status = report.FAILED
+    run.steps[2].failure = {"message": "... isPkceVerifier refuses ..."}
     run.steps[4].status = report.BLOCKED
+    run.steps[9].status = report.FAILED
+    run.steps[9].failure = {"message": "tenant B recalled tenant A's note"}
     result = _compare_with_known_findings(run, baseline, None)
-    assert [item["step"] for item in result["unexpected"]] == [5]
+    # Step 5 is not listed; step 10 is listed but failed for another reason.
+    assert [item["step"] for item in result["unexpected"]] == [5, 10]
     assert [item["step"] for item in result["resolved_known_findings"]] == [9]
 
 
 def test_the_shipped_baseline_parses() -> None:
     shipped = Path(__file__).resolve().parents[1] / "known-findings.json"
-    assert all(int(step) in range(1, 13) for step in json.loads(shipped.read_text(encoding="utf-8"))["steps"])
+    steps = json.loads(shipped.read_text(encoding="utf-8"))["steps"]
+    assert all(int(step) in range(1, 13) and entry["match"] and entry["owner"] for step, entry in steps.items())
 
 
 def test_a_cross_lane_failure_is_recorded_with_its_owner() -> None:
