@@ -2437,6 +2437,33 @@ def custody_census(vault_root: Path, *, now: float | None = None) -> dict[str, A
     return census
 
 
+def _probe_stranded_count(vault_root: Path) -> int:
+    """Count stranded batches without migrating or failing on the store.
+
+    Reconcile runs this before it knows there is anything to repair, and a dry
+    run must leave the store byte-identical. A legacy store with no receipt
+    tables holds no stranded batch; an unreadable one is reported by the
+    sidecar checks, not here.
+    """
+    if not deferred_index.store_path(vault_root).exists():
+        return 0
+    try:
+        connection = deferred_index._connect(vault_root, create=False)
+    except (OSError, RuntimeError, ValueError, sqlite3.Error):
+        return 0
+    try:
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'derived_batches'"
+        ).fetchone() is None:
+            return 0
+        return int(connection.execute(_STRANDED_BATCHES_SQL).fetchone()[0])
+    except sqlite3.Error:
+        return 0
+    finally:
+        connection.close()
+
+
 def reconcile_stranded_batches(
     vault_root: Path,
     *,
@@ -2457,7 +2484,7 @@ def reconcile_stranded_batches(
     still lack stays stranded and is counted in ``remaining``. The report is
     counts only.
     """
-    stranded = stranded_batch_count(vault_root)
+    stranded = _probe_stranded_count(vault_root)
     if dry_run or not stranded or limit <= 0:
         return {"stranded": stranded, "retired": 0, "remaining": stranded}
     connection = _connect_receipt_read(vault_root)
