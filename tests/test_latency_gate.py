@@ -699,7 +699,10 @@ def test_working_set_compiler_with_an_upkeep_item_stays_bounded(
 ) -> None:
     """D1-T11: a session start that carries an upkeep item pays the same
     ceiling. Every measured call is a session start, so every one reads the
-    sidecar, checks signatures, builds the release filter and attaches."""
+    sidecar, checks signatures, builds the release filter and attaches.
+
+    Timed end to end around `op_activate_context`: the carrier attaches after
+    the compiler stamps `timings["total_ms"]`, so that number cannot see it."""
     import dreamer_fixture
     from synth_vault import gen_entity_overlay
 
@@ -717,19 +720,25 @@ def test_working_set_compiler_with_an_upkeep_item_stays_bounded(
     dreamer_fixture.plant_deliverable(vault, pages[0], pages[1:], now=time.time())
     monkeypatch.setattr(dreamer, "delivering", lambda: True)
 
-    def call() -> dict:
+    def call() -> tuple[float, dict]:
         working_set_runtime.reset_caches_for_tests()
         upkeep.reset_delivery_state()
         dreamer_store.clear_reader_memo()
-        return commands.op_activate_context(vault, turn=WORKING_SET_TURN, include_timings=True)
+        started = time.perf_counter()
+        packet = commands.op_activate_context(vault, turn=WORKING_SET_TURN, include_timings=True)
+        return (time.perf_counter() - started) * 1000.0, packet
 
-    packet = call()
+    _wall_ms, packet = call()
     assert packet["upkeep"]["items"], packet.get("upkeep")
-    samples = [_compiler_ms(call()["timings"]) for _ in range(3)]
-    compiler_ms = statistics.median(samples)
-    assert compiler_ms < CEIL_WORKING_SET_MS, (
-        f"context compiler with an upkeep item took {compiler_ms:.1f}ms @ {N_NOTES} notes "
-        f"(ceiling {CEIL_WORKING_SET_MS:.1f}ms)"
+    samples = []
+    for _ in range(3):
+        wall_ms, measured = call()
+        assert measured["upkeep"]["items"], "a sample did not time the carrier"
+        samples.append(wall_ms)
+    request_ms = statistics.median(samples)
+    assert request_ms < CEIL_WORKING_SET_MS, (
+        f"activation with an upkeep item took {request_ms:.1f}ms end to end @ {N_NOTES} "
+        f"notes (ceiling {CEIL_WORKING_SET_MS:.1f}ms)"
     )
     assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
 
