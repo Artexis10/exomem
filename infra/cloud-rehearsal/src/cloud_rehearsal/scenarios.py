@@ -626,7 +626,12 @@ async def step_6_write_after_pod_kill(ctx: Context, record: StepRecord) -> None:
         }
     )
     observed_modes = json.loads(modes)
-    if len(observed_modes) != 3:
+    # The vault and the account home always exist after cell-init. The
+    # standalone custody root is created only when governance first needs
+    # custody, which a fresh cell's ordinary governed writes do not (D1): it
+    # is checked when present and its absence is recorded.
+    record.evidence["custody_root_present"] = len(observed_modes) == 3
+    if not {"/data/vault", "/data/host"} <= set(observed_modes):
         raise StepFailure(f"owner-only paths missing after pod replacement: found only {sorted(observed_modes)}")
     bad = {path: mode for path, mode in observed_modes.items() if mode != "0o700"}
     if bad:
