@@ -59,6 +59,8 @@ class Deferred(Exception):
 
 #: Every `Deferred.reason`: why a page is held, as status reports it.
 DEFERRAL_REASONS = frozenset({"graph_unavailable", "identity_cache_cold", "identity_unavailable"})
+#: The reasons that hold every page, not just the one that met them.
+VAULT_WIDE_DEFERRALS = frozenset({"graph_unavailable"})
 
 
 @dataclass

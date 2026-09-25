@@ -455,6 +455,10 @@ def run_once(
                         store.pending_hold(conn, rel)
                     held.append(rel)
                     waiting = deferred.reason
+                    if deferred.reason in dreamer_families.VAULT_WIDE_DEFERRALS:
+                        # No later page can read what this one could not.
+                        stop_reason = "deferred"
+                        break
                     continue
                 processed.append(rel)
             else:

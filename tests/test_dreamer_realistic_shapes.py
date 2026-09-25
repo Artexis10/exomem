@@ -338,3 +338,30 @@ def test_a_held_pass_ticks_at_most_once_per_poll(
     print(f"\nHELD ticks={len(ticks)} stalled={len(stalled)} gaps={[round(g, 2) for g in gaps]}")
     assert all(gap >= poll * 0.9 for gap in gaps), gaps
     assert dreamer.status()["waiting_reason"] == "identity_cache_cold"
+
+
+def test_an_unreadable_graph_stops_the_tick_at_the_first_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The graph is vault-wide: once it cannot be read, no later page can run
+    either, so the tick stops rather than holding every page it was given."""
+    from exomem import epistemic_graph
+
+    monkeypatch.setenv("EXOMEM_DREAMER", "on")
+    vault = fx.build_realistic(tmp_path)
+    fx.warm_identity(vault, monkeypatch)
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex, "_open_read_snapshot", lambda index: None
+    )
+    holds: list[str] = []
+    real_hold = dreamer_store.DreamerStore.pending_hold
+
+    def hold(conn, path):
+        holds.append(path)
+        return real_hold(conn, path)
+
+    monkeypatch.setattr(dreamer_store.DreamerStore, "pending_hold", staticmethod(hold))
+    tick = dreamer.run_once(vault)
+    assert tick.stop_reason == "deferred" and tick.waiting == "graph_unavailable", tick
+    assert len(holds) == 1, holds
+    assert dreamer.status()["waiting_reason"] == "graph_unavailable"
