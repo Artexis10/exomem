@@ -255,3 +255,85 @@ def plant_deliverable(vault: Path, subject: str, contributors: list[str], *, now
         conn.close()
     dreamer_store.clear_reader_memo()
     return cid
+
+
+# ----------------------------------------------------------------------
+# realistic shapes: `## Relations` lines, `exomem_id` pages, one-Source clusters
+# ----------------------------------------------------------------------
+
+#: Deterministic ids, so a rebuilt fixture carries the same identities.
+_ID_NAMESPACE = "5f1c0a52-3e2d-4d5b-9a0e-6b7c8d9e0f10"
+
+
+def page_id(rel: str) -> str:
+    import uuid
+
+    return str(uuid.uuid5(uuid.UUID(_ID_NAMESPACE), rel))
+
+
+def with_id(text: str, rel: str) -> str:
+    """The page text with an `exomem_id` as its first frontmatter key."""
+    return text.replace("---\n", f"---\nexomem_id: {page_id(rel)}\n", 1)
+
+
+def relations(*lines: tuple[str, str]) -> str:
+    """A `## Relations` section: `(kind, KB-relative target without .md)` pairs."""
+    body = "".join(f"- {kind} [[{target}]]\n" for kind, target in lines)
+    return f"\n## Relations\n\n{body}"
+
+
+def cluster(vault: Path, count: int, source: str, *, stem: str = "cluster-note") -> list[str]:
+    """`count` insights citing one Source, each with a `## Relations` line."""
+    written = []
+    for index in range(count):
+        rel = f"{KB}/Notes/Insights/{stem}-{index:03d}.md"
+        neighbour = f"Notes/Insights/{stem}-{(index + 1) % count:03d}"
+        text = insight(
+            f"{stem.replace('-', ' ').title()} {index:03d}",
+            sources=[source],
+            updated="2026-05-01",
+            observation=f"Fact {index} from the shared report.",
+            extra=relations(("relates_to", neighbour)) if count > 1 else "",
+        )
+        write(vault, rel, with_id(text, rel))
+        written.append(rel)
+    return written
+
+
+def warm_identity(vault: Path, monkeypatch) -> None:
+    """Warm the reference-identity snapshot the way a live service's writes do.
+
+    Id-bearing pages need it for exact relation refs. The suites disable the
+    corpus-context cache by default; this turns it on for the calling test.
+    """
+    from exomem import semantic_contract
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    semantic_contract.reset_corpus_context_cache()
+    semantic_contract.build_corpus_context(vault)
+    assert semantic_contract.current_reference_identity_snapshot(vault) is not None
+
+
+def build_realistic(root: Path, *, with_graph: bool = True) -> Path:
+    """`build` plus the shapes real vaults have.
+
+    Every compiled page and the entity carry an `exomem_id`; the cavitation and
+    seal-wear notes author a `## Relations` line to the entity, and the inlet
+    note one to the seal-wear note. The cavitation/inlet pair stays unauthored,
+    so it remains the link positive, and the hydration positive is unchanged.
+    """
+    vault = build(root, with_graph=False)
+    extras = {
+        CAVITATION: relations(("relates_to", "Notes/Entities/orbit-pump")),
+        SEAL_WEAR: relations(("relates_to", "Notes/Entities/orbit-pump")),
+        INLET: relations(("relates_to", "Notes/Insights/pump-seal-wear")),
+        ENTITY: "",
+    }
+    for rel, extra in extras.items():
+        path = vault / rel
+        write(vault, rel, with_id(path.read_text(encoding="utf-8") + extra, rel))
+    freshness.clear()
+    seed(vault)
+    if with_graph:
+        publish_graph(vault)
+    return vault
