@@ -7,9 +7,16 @@ import numpy as np
 import pytest
 from test_working_set_index import _seed_structure, _write
 
-from exomem import commands, embeddings, lexstore, readiness, working_set_index, working_set_runtime
+from exomem import (
+    commands,
+    embeddings,
+    lexstore,
+    readiness,
+    working_set,
+    working_set_index,
+    working_set_runtime,
+)
 from exomem.runtime_resources import ModelBusyError
-
 
 #: Planted signature space: the two outlier anchors sit on axis 0, which is the
 #: turn's own direction; every other signature is a seeded random direction.
@@ -391,3 +398,41 @@ def test_shared_particles_never_make_an_unrelated_anchor_retrieved(signatures, m
     assert hits == []
     packet = commands.op_activate_context(vault, turn=turn)
     assert all("retrieval" not in anchor["evidence"] for anchor in packet["anchors"])
+
+
+def test_an_install_without_an_encoder_serves_the_old_packet_from_the_cache(vault, monkeypatch):
+    """Embeddings not disabled, but no encoder ever ran (an install without the
+    extra): the state is `absent`, as before step 4, the packet is the one
+    embeddings-off serves, and a repeated turn is served from the packet cache."""
+    _seed_structure(vault)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(readiness, "should_defer", lambda component: False)
+    monkeypatch.setattr(
+        embeddings, "embed_activation_query_if_loaded", lambda text: pytest.fail("there is no encoder to ask")
+    )
+    from test_latency_gate import _seed_freshness_live
+
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild()
+    index.close()
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
+    turn = "Could the Cargo Sled cope?"
+
+    def shape(packet):
+        return {key: packet[key] for key in ("abstained", "anchors", "units", "recent_context", "current_state")}
+
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    working_set_runtime.reset_caches_for_tests()
+    off = commands.op_activate_context(vault, turn=turn)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS")
+    working_set_runtime.reset_caches_for_tests()
+    compiles = []
+    real = working_set.compile_packet
+    monkeypatch.setattr(working_set, "compile_packet", lambda *a, **k: compiles.append(1) or real(*a, **k))
+
+    packets = [commands.op_activate_context(vault, turn=turn) for _ in range(3)]
+
+    assert [packet["generation"]["semantic_evidence"] for packet in packets] == ["absent"] * 3
+    assert len(compiles) == 1, "a settled state is cached"
+    assert all(shape(packet) == shape(off) for packet in packets)

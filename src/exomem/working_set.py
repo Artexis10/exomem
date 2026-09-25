@@ -1057,8 +1057,10 @@ def signature_evidence(
     A catalogue too small to calibrate the band (`uncalibrated`) is not worth
     an encode. The turn is encoded on the activation encoder's interactive
     lane, read at its first `ACTIVATION_TURN_MAX_TOKENS` tokens, and measured
-    only against vectors that encoder made: a cold encoder is `unavailable`
-    (activation never loads one), and vectors of another encoder are `absent`.
+    only against vectors that encoder made. A catalogue with no vectors at all
+    (an install without an encoder) is `absent`, as it always was; vectors whose
+    encoder is cold are `unavailable` (activation never loads one); vectors of
+    another encoder are `absent`.
     """
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return {}, "disabled"
@@ -1067,6 +1069,8 @@ def signature_evidence(
 
         if readiness.should_defer("embeddings"):
             return {}, "warming"
+        if index.vector_fingerprint() is None:
+            return {}, "absent"
         fingerprint = embeddings.activation_fingerprint()
         if fingerprint is None:
             return {}, "unavailable"

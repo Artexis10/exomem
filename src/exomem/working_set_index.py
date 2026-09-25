@@ -1870,28 +1870,48 @@ class WorkingSetIndex:
         """
         if fingerprint is None:
             return (), None
-        conn = self._connect()
-        if conn is None:
-            return (), None
-        token = sidecar_store.read_meta_token(conn)
-        with _CACHE_LOCK:
-            cached = _MATRIX_CACHE.get(self.path)
-        if cached is not None and cached[0] == token:
-            entry = cached[1]
-        else:
-            entry = self._read_matrix(conn)
-            with _CACHE_LOCK:
-                _MATRIX_CACHE[self.path] = (token, entry)
-        stored_fingerprint, ids, matrix = entry
+        stored_fingerprint, ids, matrix = self._matrix_entry()
         if matrix is None or stored_fingerprint != fingerprint:
             return (), None
         return ids, matrix
 
+    def vector_fingerprint(self) -> str | None:
+        """The fingerprint the stored signature vectors were made under, or None
+        when there are none. Read from the same cached entry as the matrix."""
+        stored_fingerprint, _ids, matrix = self._matrix_entry()
+        return stored_fingerprint if matrix is not None else None
+
+    def _matrix_entry(self) -> tuple[str | None, tuple[str, ...], Any]:
+        conn = self._connect()
+        if conn is None:
+            return None, (), None
+        token = sidecar_store.read_meta_token(conn)
+        with _CACHE_LOCK:
+            cached = _MATRIX_CACHE.get(self.path)
+        if cached is not None and cached[0] == token:
+            return cached[1]
+        entry = self._read_matrix(conn)
+        with _CACHE_LOCK:
+            _MATRIX_CACHE[self.path] = (token, entry)
+        return entry
+
     def _read_matrix(self, conn: sqlite3.Connection) -> tuple[str | None, tuple[str, ...], Any]:
-        stored = conn.execute(
-            "SELECT value FROM index_meta WHERE key = 'activation_encoder_fingerprint'"
-        ).fetchone()
-        rows = conn.execute("SELECT anchor_id, vector FROM anchor_vectors ORDER BY anchor_id").fetchall()
+        # One read snapshot for the fingerprint and the rows: a writer that
+        # re-embeds under another encoder between two autocommit reads would
+        # otherwise hand this reader its vectors under the old fingerprint.
+        own = not conn.in_transaction
+        if own:
+            conn.execute("BEGIN")
+        try:
+            stored = conn.execute(
+                "SELECT value FROM index_meta WHERE key = 'activation_encoder_fingerprint'"
+            ).fetchone()
+            rows = conn.execute(
+                "SELECT anchor_id, vector FROM anchor_vectors ORDER BY anchor_id"
+            ).fetchall()
+        finally:
+            if own:
+                conn.rollback()
         if stored is None or not rows:
             return (str(stored[0]) if stored else None), (), None
         import numpy as np

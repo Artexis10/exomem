@@ -303,3 +303,66 @@ def test_a_cold_encoder_reads_unavailable_without_loading(encoder, monkeypatch) 
 
     assert working_set.signature_evidence(index, "Could the sled cope?") == ({}, "unavailable")
     assert fake.loads == 0
+
+
+def test_a_catalogue_without_vectors_reads_absent_not_unavailable(encoder) -> None:
+    """An install without the embeddings extra has no encoder and never had
+    vectors: that is `absent`, a settled state a packet may be cached under,
+    exactly as before step 4. `unavailable` is for vectors that exist while
+    their encoder is cold."""
+    vault, fake = encoder
+    fake.resident = False
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild()
+
+    assert index.vector_matrix(fake.fingerprint) == ((), None)
+    assert working_set.signature_evidence(index, "Could the sled cope?") == ({}, "absent")
+
+
+def test_the_fingerprint_and_the_rows_are_read_in_one_snapshot(encoder, monkeypatch) -> None:
+    """A writer in another process that re-embeds under another encoder between
+    the fingerprint read and the rows read must not hand this reader the other
+    encoder's vectors under its own fingerprint."""
+    vault, fake = encoder
+    reader = working_set_index.WorkingSetIndex(vault)
+    reader.rebuild(load_encoder=True)
+    first = fake.fingerprint
+    working_set_index._MATRIX_CACHE.clear()
+
+    class Interleaved:
+        def __init__(self, conn) -> None:
+            self._conn = conn
+            self.fired = False
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+        def execute(self, sql, *args):
+            cursor = self._conn.execute(sql, *args)
+            if not self.fired and "activation_encoder_fingerprint" in sql and sql.lstrip().upper().startswith("SELECT"):
+                self.fired = True
+                row = cursor.fetchone()
+                fake.fingerprint, fake.dim = "fake-model|cls|l2|bbbb", 16
+                writer = working_set_index.WorkingSetIndex(vault)
+                writer.update(load_encoder=True)
+                writer.close()
+                fake.fingerprint = first
+
+                class Done:
+                    def fetchone(self_inner):
+                        return row
+
+                return Done()
+            return cursor
+
+    reader._conn = Interleaved(reader._connect())
+    ids, matrix = reader.vector_matrix(first)
+
+    if matrix is not None:
+        own = {anchor_id: fake.vector(text) for anchor_id, text in _signatures(reader).items()}
+        for anchor_id, row in zip(ids, matrix, strict=True):
+            assert np.allclose(row, own[anchor_id], atol=1e-5), "a row made by another encoder"
+
+
+def _signatures(index: working_set_index.WorkingSetIndex) -> dict[str, str]:
+    return {row.anchor_id: _signature_of(index, row.anchor_id) for row in index.anchors()}
