@@ -223,7 +223,7 @@ def test_stage_failure_truncates_large_uv_stderr(tmp_path: Path, monkeypatch: py
 
     fake_uv = tmp_path / "uv"
     fake_uv.write_text(
-        f"#!/bin/sh\n{sys.executable} -c \"import sys; sys.stderr.write('x' * (1024 * 1024))\"\nexit 2\n",
+        f"#!/bin/sh\n{sys.executable} -c \"import sys; sys.stderr.write(('x' * 1023 + '\\\\n') * 1024)\"\nexit 2\n",
         encoding="utf-8",
     )
     fake_uv.chmod(0o700)
@@ -294,6 +294,35 @@ def test_stage_success_is_unchanged_when_uv_writes_to_stderr(
     monkeypatch.setenv("EXOMEM_UV", str(fake_uv))
     target = service_upgrade.stage(tmp_path / "managed", sys.executable, "lean", "0.2.0")
     assert target["version"] == "0.2.0"
+
+
+def test_uv_stderr_tail_never_leaks_a_password_split_by_the_byte_clip() -> None:
+    """A clip landing inside `https://user:` must not strip the scheme the
+    userinfo scrub depends on and then emit the password."""
+    from exomem import service_upgrade
+
+    url = b"https://deploy:S3cr3tTok3n9876@pypi.example.com/simple/ "
+    for offset in range(0, len(url)):
+        data = url + b"y" * (4096 - len(url) + offset)
+        tail = service_upgrade._uv_stderr_tail(data)
+        assert "S3cr3tTok3n9876" not in tail, offset
+        assert "ploy:" not in tail, offset
+
+
+def test_uv_stderr_tail_drops_a_leading_partial_line_from_the_read_window() -> None:
+    from exomem import service_upgrade
+
+    # The credential line straddles the start of the bounded read window, so
+    # only its `ploy:S3cr3t…@host` remainder is inside it.
+    url = b"https://deploy:S3cr3tTok3n9876@pypi.example.com/simple/"
+    last = b"\nerror: stale package index\n"
+    window = service_upgrade._UV_STDERR_READ_WINDOW_BYTES
+    padding = b"y" * (window - (len(url) - 10) - 1 - len(last))
+    data = b"z" * (200 * 1024) + url + b" " + padding + last
+    assert data[-window:].startswith(b"ploy:S3cr3t")
+    tail = service_upgrade._uv_stderr_tail(data)
+    assert "S3cr3tTok3n9876" not in tail
+    assert tail == "error: stale package index"
 
 
 def test_runtime_symlink_is_refused_before_operator_lock_creation(tmp_path: Path) -> None:

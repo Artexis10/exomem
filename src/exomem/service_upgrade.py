@@ -29,6 +29,9 @@ MAX_CONTROL_BYTES = 64 * 1024
 #: many trailing lines, further clipped to at most this many trailing bytes.
 _UV_STDERR_TAIL_MAX_LINES = 20
 _UV_STDERR_TAIL_MAX_BYTES = 4 * 1024
+#: How much trailing stderr is scrubbed before the tail is clipped. Scrubbing
+#: runs on whole lines inside this window, never on a clipped fragment.
+_UV_STDERR_READ_WINDOW_BYTES = 64 * 1024
 #: The userinfo segment of a URL (`user:pass` before `@`). Not a shape the
 #: shared egress scrubber recognizes on its own, but exactly what a leaked
 #: package-index retry URL carries.
@@ -305,15 +308,27 @@ def _verify_wheel_install(identity: dict[str, object], snapshot: Path, digest: s
 
 
 def _uv_stderr_tail(data: bytes) -> str:
-    """Bounded, credential-scrubbed tail of a failed uv command's stderr."""
-    text = data.decode("utf-8", errors="replace")
+    """Bounded, credential-scrubbed tail of a failed uv command's stderr.
+
+    Scrubbing runs before any clipping: a clip that lands inside a URL would
+    drop the `://` the userinfo rule anchors on, and a replacement notice is
+    longer than what it replaces, so clipping first neither hides credentials
+    nor bounds the result.
+    """
+    if len(data) > _UV_STDERR_READ_WINDOW_BYTES:
+        data = data[-_UV_STDERR_READ_WINDOW_BYTES:]
+        # The first line in the window started before it, so it may be the
+        # remainder of a credential whose prefix was cut. Never emit it.
+        data = data.partition(b"\n")[2]
+    text = _URL_USERINFO_RE.sub(NOTICE, data.decode("utf-8", errors="replace"))
+    text, _ = scrub_text(text)
     tail = "\n".join(text.splitlines()[-_UV_STDERR_TAIL_MAX_LINES:]).strip()
     tail_bytes = tail.encode("utf-8")
     if len(tail_bytes) > _UV_STDERR_TAIL_MAX_BYTES:
+        # Already scrubbed as whole lines, so a clipped fragment of it
+        # carries nothing the whole line would not.
         tail = tail_bytes[-_UV_STDERR_TAIL_MAX_BYTES:].decode("utf-8", errors="ignore")
-    tail = _URL_USERINFO_RE.sub(NOTICE, tail)
-    cleaned, _ = scrub_text(tail)
-    return cleaned
+    return tail
 
 
 def _write_provenance(path: Path, provenance: dict[str, str]) -> None:
