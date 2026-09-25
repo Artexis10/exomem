@@ -390,10 +390,25 @@ def test_a_topic_switch_leaves_the_previous_anchor_behind(runs: Runs) -> None:
 
 
 def test_the_language_bias_twin_bands_no_same_language_anchor(runs: Runs) -> None:
+    """Risk 2: the Russian turn about an English page never bands, resolves or
+    carries the unrelated Russian anchor, and semantic evidence changes
+    nothing in its packet on any arm.
+
+    Lexically the turn does name that anchor and the Russian pelmeni note, as
+    `retrieval_named` with nothing carried. Since keyword recall reads every
+    script (#1366), Cyrillic words are real stems, and in this English-majority
+    vault its function words are rare: `в` and `на`, said side by side, are a
+    phrase both Russian pages contain. That is the minority-language residual
+    (risk 8), and it belongs to the lexical carry, not to the band."""
     motoblok = _path(runs, "r_motoblok_kshatar")
     assert motoblok in runs.anchors
+    off = _anchors(runs.packets["off"]["M4-ru"])
     for arm in ARMS:
-        assert motoblok not in _anchors(runs.packets[arm]["M4-ru"]), arm
+        anchors = _anchors(runs.packets[arm]["M4-ru"])
+        assert anchors == off, arm
+        status, evidence = anchors.get(motoblok, ("absent", frozenset()))
+        assert status not in {"resolved", "retrieval_carried"}, (arm, status)
+        assert "vector_band" not in evidence, arm
 
 
 def test_the_minority_function_word_residual_is_the_same_on_every_arm(runs: Runs) -> None:
@@ -403,14 +418,9 @@ def test_the_minority_function_word_residual_is_the_same_on_every_arm(runs: Runs
     assert len(set(shapes.values())) == 1, shapes
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "the carry fragment fix (one accented word is one unit) is R-LEX task 1.8, "
-        "on feat/recall-multilingual-lexical; this branch and that one ship together"
-    ),
-)
 def test_a_single_accented_word_carries_nothing(runs: Runs) -> None:
+    """Risk 7: one accented word is one unit, and a unit never pairs with
+    itself, so `Gebührenbescheid?` and `Jätka.` carry no page on any arm."""
     for case_id in ("M7-de", "M7-et"):
         for arm in ARMS:
             packet = runs.packets[arm][case_id]
