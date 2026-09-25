@@ -1,0 +1,417 @@
+{{- if .Values.cellctl.enabled }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.cellctl.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: exomem-cloud
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.35
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.35
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.35
+  annotations:
+    helm.sh/resource-policy: keep
+---
+# D5: exomem-cloud is default-deny. This policy selects every pod and allows
+# nothing; the cellctl policy below and the gateway's own policy
+# (cloud-gateway.yaml) each allow their workload's traffic in both
+# directions. The certificate Issuer uses DNS-01, so no ACME solver pod runs
+# here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: {{ .Values.cellctl.namespace }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cellctl
+  namespace: {{ .Values.cellctl.namespace }}
+automountServiceAccountToken: true
+---
+# D4's RBAC list, verb for verb. The design amendment following the 3.10
+# live-cluster finding (an earlier "create, patch, delete"-only rule 403'd
+# cellctl's own identity-conflict/D10 namespace reads) adds get/list/watch
+# on namespaces: reading namespaces is needed for the identity-conflict
+# check, and exposes only cell names and labels cellctl already holds.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cellctl
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list"]
+  # D9: capacity is read from the CSI driver's own view of each node, never
+  # a chart constant or a Hetzner server id.
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csinodes", "volumeattachments"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods", "events"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["resourcequotas", "persistentvolumeclaims", "services"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  # D4 self-check: cellctl must be able to confirm its own confinement
+  # exists before each pass.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+    verbs: ["get"]
+  # No statefulsets/scale: cellctl scales by applying replicas (D4).
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cellctl
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cellctl
+subjects:
+  - kind: ServiceAccount
+    name: cellctl
+    namespace: {{ .Values.cellctl.namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cellctl
+  namespace: {{ .Values.cellctl.namespace }}
+  labels:
+    app.kubernetes.io/name: cellctl
+    app.kubernetes.io/part-of: exomem-cloud
+spec:
+  replicas: {{ .Values.cellctl.replicas }}
+  strategy:
+    # cellctl holds no lease or fence of its own (D4); two replicas would
+    # both reconcile the same rows concurrently. Recreate, not RollingUpdate,
+    # so the old pod is fully gone before the new one starts.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cellctl
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cellctl
+        app.kubernetes.io/part-of: exomem-cloud
+    spec:
+      serviceAccountName: cellctl
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cellctl
+          image: {{ .Values.cellctl.image | quote }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CELLCTL_LOG_LEVEL
+              value: INFO
+            - name: CELLCTL_HEARTBEAT_PATH
+              value: /tmp/cellctl-heartbeat
+            # D9: capacity.* (not the old cellctl.nodeName/attachmentsLimit,
+            # which no code reads any more -- capacity is now observed from
+            # the cluster, keyed by Kubernetes node name, not configured).
+            - name: CELLCTL_CSI_DRIVER
+              value: {{ .Values.capacity.csiDriver | quote }}
+            - name: CELLCTL_ATTACHMENTS_HEADROOM
+              value: {{ .Values.capacity.headroom | quote }}
+            {{- if .Values.capacity.attachmentsLimitFallback }}
+            - name: CELLCTL_ATTACHMENTS_LIMIT_FALLBACK
+              value: {{ .Values.capacity.attachmentsLimitFallback | quote }}
+            {{- end }}
+            - name: CELLCTL_INIT_DEADLINE_MINUTES
+              value: {{ .Values.cellctl.initDeadlineMinutes | quote }}
+            # D8: nightly backup window and stagger.
+            - name: CELLCTL_BACKUP_WINDOW
+              value: {{ .Values.cells.backupWindow | quote }}
+            - name: CELLCTL_BACKUP_CONCURRENCY
+              value: {{ .Values.cells.backupConcurrency | quote }}
+            {{- if .Values.cells.jobEgressExcept }}
+            - name: CELLCTL_JOB_EGRESS_EXCEPT
+              value: {{ join "," .Values.cells.jobEgressExcept | quote }}
+            {{- end }}
+            - name: CELLCTL_CELL_CPU_REQUEST
+              value: {{ .Values.cellctl.cellResources.cpuRequest | quote }}
+            - name: CELLCTL_CELL_CPU_LIMIT
+              value: {{ .Values.cellctl.cellResources.cpuLimit | quote }}
+            - name: CELLCTL_CELL_MEMORY_REQUEST
+              value: {{ .Values.cellctl.cellResources.memoryRequest | quote }}
+            - name: CELLCTL_CELL_MEMORY_LIMIT
+              value: {{ .Values.cellctl.cellResources.memoryLimit | quote }}
+            - name: CELLCTL_B2_BUCKET_NAME
+              value: {{ .Values.cellctl.b2BucketName | quote }}
+            - name: CELLCTL_B2_BUCKET_ID
+              value: {{ .Values.cellctl.b2BucketId | quote }}
+            - name: CELLCTL_B2_ACCOUNT_ID
+              value: {{ .Values.cellctl.b2AccountId | quote }}
+            - name: CELLCTL_B2_ENDPOINT
+              value: {{ .Values.cellctl.b2Endpoint | quote }}
+            - name: CELLCTL_DATABASE_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cellctl.databaseDsnSecretName }}
+                  key: {{ .Values.cellctl.databaseDsnSecretKey }}
+            - name: CELLCTL_CELL_TOKEN_KEY_CURRENT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cellctl.cellTokenKeySecretName }}
+                  key: current
+            - name: CELLCTL_CELL_TOKEN_KEY_VERSION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cellctl.cellTokenKeySecretName }}
+                  key: currentVersion
+            - name: CELLCTL_CELL_TOKEN_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cellctl.cellTokenKeySecretName }}
+                  key: previous
+                  optional: true
+            - name: CELLCTL_CELL_TOKEN_KEY_PREVIOUS_VERSION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cellctl.cellTokenKeySecretName }}
+                  key: previousVersion
+                  optional: true
+            - name: CELLCTL_BACKUP_MASTER_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cellctl.backupMasterKeySecretName }}
+                  key: keys
+            - name: CELLCTL_BACKUP_MASTER_KEY_CURRENT_VERSION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cellctl.backupMasterKeySecretName }}
+                  key: currentVersion
+            - name: CELLCTL_B2_KEY_MANAGEMENT_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cellctl.b2KeyManagementSecretName }}
+                  key: keyId
+            - name: CELLCTL_B2_KEY_MANAGEMENT_APPLICATION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cellctl.b2KeyManagementSecretName }}
+                  key: applicationKey
+            - name: CELLCTL_HETZNER_READ_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cellctl.hetznerReadTokenSecretName }}
+                  key: token
+          # D4: "Every loop iteration touches a heartbeat file, including
+          # iterations spent waiting to reconnect. The liveness probe fails
+          # only when the heartbeat is older than 120 s." A database or
+          # object-storage outage is eventually consistent and must not
+          # restart cellctl; only a wedged loop should. Readiness uses a
+          # tighter bound (not pinned by the design) so a pod that has
+          # stalled -- but not yet past the liveness threshold -- drops out
+          # of Ready without yet triggering a restart.
+          readinessProbe:
+            exec:
+              command:
+                - python3
+                - -c
+                - "import os,sys,time; p='/tmp/cellctl-heartbeat'; sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < 30 else 1)"
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - python3
+                - -c
+                - "import os,sys,time; p='/tmp/cellctl-heartbeat'; sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < 120 else 1)"
+            periodSeconds: 15
+            failureThreshold: 3
+            initialDelaySeconds: 30
+          resources:
+            {{- .Values.cellctl.resources | toYaml | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# D5: "Namespace exomem-cloud is default-deny too. cellctl may egress only
+# to the Kubernetes API, the control database on 5432 and object storage on
+# 443." Before this policy, no NetworkPolicy selected the cellctl pod at
+# all, so its egress was entirely unrestricted -- cloud-gateway.yaml's own
+# NetworkPolicy only ever covered the gateway pod.
+#
+# The Kubernetes API server has no stable podSelector/namespaceSelector a
+# NetworkPolicy can target (it is not addressed as an ordinary labelled pod,
+# and its address varies by cluster/distribution -- 443 on a managed
+# control plane, 6443 on k3s). Both ports are left open to any destination
+# for that one purpose; object storage's own egress on 443 is covered by
+# the same rule, since B2's endpoint is equally not a fixed address. The
+# control database, which does have a known address, is scoped tightly via
+# cellctl.databaseEgressCidrs, matching every other egress rule in this
+# chart.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cellctl
+  namespace: {{ .Values.cellctl.namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cellctl
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 6443
+          protocol: TCP
+    - to:
+        {{- range .Values.cellctl.databaseEgressCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - port: 5432
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+{{- $repoPattern := printf "^%s@sha256:[a-f0-9]{64}$" (regexQuoteMeta .Values.cellctl.cellImageRepository) }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-cellctl-scope
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      # D4: "*/*" covers every resource AND every subresource, so a write to
+      # a subresource (e.g. statefulsets/status) is confined too. Kubernetes
+      # rejects "*/*" listed alongside any other resource, and "*" alone would
+      # miss subresources.
+      - apiGroups: ["", "apps", "batch", "networking.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["*/*"]
+        scope: "*"
+  matchConditions:
+    - name: cellctl-service-account
+      expression: >-
+        request.userInfo.username ==
+        'system:serviceaccount:{{ .Values.cellctl.namespace }}:cellctl'
+  variables:
+    - name: target
+      expression: >-
+        request.operation == 'DELETE' ? dyn(oldObject) : dyn(object)
+    - name: namespaceName
+      expression: >-
+        request.resource.resource == 'namespaces'
+          ? variables.target.metadata.name
+          : request.namespace
+    - name: labels
+      expression: >-
+        has(variables.target.metadata.labels) ? variables.target.metadata.labels : {}
+  validations:
+    # 1. Every write cellctl makes must land inside a namespace named
+    # exo-cell-<16 lowercase base32> (D4, D5's namespace_name convention).
+    - expression: >-
+        variables.namespaceName.matches('^exo-cell-[a-z2-7]{16}$')
+      message: cellctl may write only inside a cell namespace named exo-cell-<16 base32 cell id>.
+    # 2. A namespace cellctl creates or updates must carry the restricted
+    # Pod Security labels at the platform's pinned version (v1.35, as every
+    # other platform namespace and cellctl's own renderer use), so cellctl can
+    # never relabel a cell namespace to an older, weaker Pod Security version.
+    - expression: >-
+        request.resource.resource != 'namespaces' || request.operation == 'DELETE' ||
+        (variables.labels['pod-security.kubernetes.io/enforce'] == 'restricted' &&
+          variables.labels['pod-security.kubernetes.io/audit'] == 'restricted' &&
+          variables.labels['pod-security.kubernetes.io/warn'] == 'restricted' &&
+          variables.labels['pod-security.kubernetes.io/enforce-version'] == 'v1.35')
+      message: cellctl may create or update a namespace only with the restricted Pod Security labels at enforce-version v1.35.
+    # 3. Every container and init container image cellctl runs must be
+    # digest-pinned from the configured cell repository.
+    - expression: >-
+        !(request.resource.resource in ['statefulsets', 'jobs']) || request.operation == 'DELETE' ||
+        (variables.target.spec.template.spec.containers.all(c, c.image.matches({{ $repoPattern | quote }})) &&
+          (!has(variables.target.spec.template.spec.initContainers) ||
+            variables.target.spec.template.spec.initContainers.all(c, c.image.matches({{ $repoPattern | quote }}))))
+      message: cellctl may run only digest-pinned images from the configured cell repository.
+    # 4. Every pod template cellctl runs, in a StatefulSet or a Job, must
+    # set automountServiceAccountToken: false.
+    - expression: >-
+        !(request.resource.resource in ['statefulsets', 'jobs']) || request.operation == 'DELETE' ||
+        variables.target.spec.template.spec.automountServiceAccountToken == false
+      message: cellctl may run only pod templates with automountServiceAccountToken false.
+    # 4b. ...and none of them may mount a credential through a volume
+    # instead, which automountServiceAccountToken does not cover. Projected
+    # sources are an allowlist (configMap, secret, downwardAPI), so a
+    # serviceAccountToken, clusterTrustBundle or podCertificate source -- or
+    # any source a later Kubernetes adds -- is denied, and so is a CSI
+    # inline volume, which the restricted Pod Security profile allows.
+    - expression: >-
+        !(request.resource.resource in ['statefulsets', 'jobs']) || request.operation == 'DELETE' ||
+        !has(variables.target.spec.template.spec.volumes) ||
+        variables.target.spec.template.spec.volumes.all(v,
+          !has(v.csi) &&
+          (!has(v.projected) || !has(v.projected.sources) ||
+            v.projected.sources.all(s, has(s.configMap) || has(s.secret) || has(s.downwardAPI))))
+      message: cellctl may run only pod templates with no CSI inline volume, whose projected volume sources are configMap, secret or downwardAPI.
+    # 5. Every Service cellctl creates or updates must be ClusterIP with no
+    # externalIPs.
+    - expression: >-
+        request.resource.resource != 'services' || request.operation == 'DELETE' ||
+        (variables.target.spec.type == 'ClusterIP' &&
+          (!has(variables.target.spec.externalIPs) || variables.target.spec.externalIPs.size() == 0))
+      message: cellctl may create or update a Service only as ClusterIP with no externalIPs.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-cellctl-scope
+spec:
+  policyName: exomem-cellctl-scope
+  validationActions: [Deny]
+{{- end }}

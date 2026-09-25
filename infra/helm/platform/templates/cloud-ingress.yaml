@@ -1,0 +1,71 @@
+{{- if .Values.cloudIngress.enabled }}
+{{- if ne .Values.cloudIngress.hostname .Values.cloudGateway.hostname }}
+{{- fail "cloudIngress.hostname must equal cloudGateway.hostname" }}
+{{- end }}
+# D11: cert-manager obtains the MCP hostname's certificate through an ACME
+# DNS-01 solver using a Cloudflare DNS-edit token, so the certificate lives
+# in a Secret and needs no volume. This assumes cert-manager's controller
+# and CRDs are already installed in the cluster (see the delivery report:
+# no task in this change installs the controller itself; the
+# `cert-manager` chart dependency this repo vendors alongside hcloud-csi
+# and traefik, gated by cert-manager.enabled, covers that if it is not
+# already present some other way).
+# SR-L7: a namespaced Issuer, not a ClusterIssuer -- a ClusterIssuer's ACME
+# account and Cloudflare solver could be referenced by a Certificate in any
+# namespace in the cluster. Scoped to this namespace, and its solver is
+# further scoped by selector.dnsNames to only the one hostname it is meant
+# to solve for.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: exomem-cloud-dns01
+  namespace: {{ .Values.cellctl.namespace }}
+spec:
+  acme:
+    email: {{ .Values.cloudIngress.acmeEmail | quote }}
+    server: https://acme-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: exomem-cloud-acme-account-key
+    solvers:
+      - selector:
+          dnsNames:
+            - {{ .Values.cloudIngress.hostname | quote }}
+        dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: {{ .Values.cloudIngress.cloudflareApiTokenSecretName }}
+              key: {{ .Values.cloudIngress.cloudflareApiTokenSecretKey }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: exomem-cloud-gateway
+  namespace: {{ .Values.cellctl.namespace }}
+spec:
+  secretName: exomem-cloud-gateway-tls
+  issuerRef:
+    name: exomem-cloud-dns01
+    kind: Issuer
+  dnsNames:
+    - {{ .Values.cloudIngress.hostname | quote }}
+---
+# The DNS record for this hostname must be DNS-only (not proxied) in
+# Cloudflare, so the ACME DNS-01 challenge and the direct TLS connection
+# both reach this cluster's own certificate, not a third party's (D11, the
+# "Vault traffic is TLS-terminated only on our own servers" requirement).
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: exomem-cloud-gateway
+  namespace: {{ .Values.cellctl.namespace }}
+spec:
+  entryPoints: [websecure]
+  tls:
+    secretName: exomem-cloud-gateway-tls
+  routes:
+    - kind: Rule
+      match: Host(`{{ .Values.cloudIngress.hostname }}`)
+      services:
+        - name: exomem-cloud-gateway
+          port: 8080
+{{- end }}

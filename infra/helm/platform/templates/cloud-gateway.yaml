@@ -1,0 +1,199 @@
+{{- if .Values.cloudGateway.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: exomem-cloud-gateway
+  namespace: {{ .Values.cellctl.namespace }}
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exomem-cloud-gateway
+  namespace: {{ .Values.cellctl.namespace }}
+  labels:
+    app.kubernetes.io/name: exomem-cloud-gateway
+    app.kubernetes.io/part-of: exomem-cloud
+spec:
+  replicas: {{ .Values.cloudGateway.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: exomem-cloud-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: exomem-cloud-gateway
+        app.kubernetes.io/part-of: exomem-cloud
+    spec:
+      serviceAccountName: exomem-cloud-gateway
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: {{ .Values.cloudGateway.image | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: EXOMEM_GATEWAY_PORT
+              value: "8080"
+            - name: EXOMEM_GATEWAY_MAX_INFLIGHT
+              value: {{ .Values.cloudGateway.maxInflight | quote }}
+            - name: EXOMEM_CLOUD_GATEWAY_HOSTNAME
+              value: {{ .Values.cloudGateway.hostname | quote }}
+            # C3: only content-type, accept, mcp-session-id and
+            # mcp-protocol-version are forwarded; the gateway adds
+            # x-request-id itself and never forwards the client's own
+            # Authorization, cookies or forwarding headers.
+            - name: EXOMEM_CLOUD_CELL_ORIGIN_TEMPLATE
+              value: http://cell.{namespace}.svc.cluster.local:8765/mcp
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cloudGateway.databaseSecretName }}
+                  key: {{ .Values.cloudGateway.databaseSecretKey }}
+            - name: EXOMEM_CLOUD_CELL_TOKEN_KEY_CURRENT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cloudGateway.cellTokenKeySecretName }}
+                  key: current
+            - name: EXOMEM_CLOUD_CELL_TOKEN_KEY_VERSION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cloudGateway.cellTokenKeySecretName }}
+                  key: currentVersion
+            - name: EXOMEM_CLOUD_CELL_TOKEN_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cloudGateway.cellTokenKeySecretName }}
+                  key: previous
+                  optional: true
+            - name: EXOMEM_CLOUD_CELL_TOKEN_KEY_PREVIOUS_VERSION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cloudGateway.cellTokenKeySecretName }}
+                  key: previousVersion
+                  optional: true
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 3
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: exomem-cloud-gateway
+  namespace: {{ .Values.cellctl.namespace }}
+  labels:
+    app.kubernetes.io/name: exomem-cloud-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: exomem-cloud-gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# D11: only the Traefik pods in exomem-platform may reach the gateway; the
+# gateway trusts X-Real-Ip from that connection because websecure sets no
+# trustedIPs and hostPort preserves the peer address.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: exomem-cloud-gateway
+  namespace: {{ .Values.cellctl.namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: exomem-cloud-gateway
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: exomem-platform
+          podSelector:
+            matchLabels:
+              exomem.io/ingress: traefik
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress:
+    # D5: the gateway may egress on 8765 only to cell pods. Cells come and go
+    # continuously, so this selects by the labels cellctl renders
+    # (manifests.py): every cell namespace carries exomem.io/cloud-cell, and
+    # the runtime pod app.kubernetes.io/name=exomem-cell. Backup and restore
+    # Job pods share that name label but also carry exomem.io/cell-job.
+    - to:
+        - namespaceSelector:
+            matchExpressions:
+              - key: exomem.io/cloud-cell
+                operator: Exists
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: exomem-cell
+            matchExpressions:
+              - key: exomem.io/cell-job
+                operator: DoesNotExist
+      ports:
+        - port: 8765
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # D5: "The gateway may egress only to cell pods on 8765 and the control
+    # database on 5432." Scoped to explicit addresses, matching
+    # gateway.databaseEgressCidrs' pattern -- not an unrestricted rule.
+    - to:
+        {{- range .Values.cloudGateway.databaseEgressCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - port: 5432
+          protocol: TCP
+{{- end }}

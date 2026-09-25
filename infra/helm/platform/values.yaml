@@ -159,8 +159,16 @@ traefik:
         trustedIPs:
           - 10.42.0.0/16
     websecure:
+      # D11: the Exomem Cloud MCP hostname is served here, exposed only
+      # through this entrypoint on the node's real port 443 via hostPort.
+      # servicelb stays disabled and no trustedIPs are set, so Traefik
+      # overwrites X-Real-Ip with the peer address hostPort preserves; the
+      # cloud gateway's own NetworkPolicy (cloud-gateway.yaml) is what makes
+      # that header trustworthy, by admitting ingress only from these pods.
       expose:
-        default: false
+        default: true
+      exposedPort: 443
+      hostPort: 443
   providers:
     kubernetesCRD:
       enabled: true
@@ -169,3 +177,120 @@ traefik:
       enabled: false
   accessLog:
     enabled: false
+
+# --- Exomem Cloud (adopt-exomem-cloud-plain-cells) ---
+#
+# Separate from the `gateway`/`provisioner`/`storage` blocks above, which
+# stay wired to the old hosted platform until phase R retires it. Cloud
+# cellctl and its gateway run in their own namespace (exomem-cloud) with
+# their own StorageClass, so neither block collides with the hosted one.
+
+cellctl:
+  enabled: false
+  image: ""
+  # <cell repository>@sha256:<digest> the ValidatingAdmissionPolicy pins
+  # cellctl's own writes to (D4). cellctl itself resolves the per-cell image
+  # to run from the database, not from this value.
+  cellImageRepository: ""
+  namespace: exomem-cloud
+  replicas: 1
+  b2BucketName: ""
+  b2BucketId: ""
+  b2AccountId: ""
+  # D8 amendment: restic reaches B2 through its S3-compatible endpoint, not
+  # B2's native API (e.g. https://s3.us-west-002.backblazeb2.com).
+  b2Endpoint: ""
+  # D3 default; not pinned exactly by the design, kept configurable per the
+  # design owner's ruling rather than hardcoded.
+  initDeadlineMinutes: 10
+  databaseDsnSecretName: exomem-cellctl-database-dsn
+  databaseDsnSecretKey: dsn
+  cellTokenKeySecretName: exomem-cloud-cell-token-key
+  backupMasterKeySecretName: exomem-cloud-backup-master-key
+  b2KeyManagementSecretName: exomem-cloud-b2-key-management
+  hetznerReadTokenSecretName: exomem-cloud-hetzner-read-token
+  # D5: cellctl's own egress, scoped to the control database on 5432 --
+  # explicit addresses, refreshed deliberately, matching gateway's own
+  # databaseEgressCidrs pattern.
+  databaseEgressCidrs: []
+  cellResources:
+    cpuRequest: 250m
+    cpuLimit: "2"
+    memoryRequest: 1Gi
+    memoryLimit: 1536Mi
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: 500m, memory: 512Mi}
+
+# D9: capacity is observed from the cluster (CSINode allocatable + live
+# VolumeAttachments), never a chart constant or a Hetzner server id. The old
+# cellctl.nodeName/attachmentsLimit values are gone -- nothing reads them.
+capacity:
+  csiDriver: csi.hetzner.cloud
+  headroom: 5
+  # Set only for a cluster whose CSINode publishes no allocatable count for
+  # csiDriver -- how the local rehearsal runs without Hetzner CSI at all.
+  # Null means "publish cell_slots=0 and log why" (D9: nothing is admitted
+  # to a node whose limit is unknown).
+  attachmentsLimitFallback: null
+
+# D5/D8: cell-fleet-wide settings that are not per-row.
+cells:
+  # UTC hour range "start-end" the nightly backup may run inside: start
+  # inclusive, end exclusive. It may cross midnight ("22-3"); an empty
+  # window (start == end) is rejected by the schema.
+  backupWindow: "2-5"
+  backupConcurrency: 1
+  # Ranges excepted from the backup/restore Jobs' otherwise-unrestricted
+  # object-storage egress ipBlock (0.0.0.0/0): the cluster's own pod/service
+  # CIDRs, plus the standard private, carrier-grade NAT and link-local
+  # ranges, so a Job cannot reach anything inside the cluster or its host
+  # network under the guise of "object storage". The local rehearsal
+  # overrides this to reach its in-cluster S3 double.
+  jobEgressExcept:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 100.64.0.0/10
+    - 169.254.0.0/16
+
+cloudGateway:
+  enabled: false
+  # Supplied by the reviewed Substrate gateway image release; never a mutable tag.
+  image: ""
+  replicas: 1
+  hostname: ""
+  maxInflight: 16
+  databaseSecretName: exomem-cloud-gateway-database
+  databaseSecretKey: url
+  cellTokenKeySecretName: exomem-cloud-cell-token-key
+  # D5: the gateway may egress only to cell pods on 8765 and the control
+  # database on 5432 -- explicit addresses, matching gateway.databaseEgressCidrs.
+  databaseEgressCidrs: []
+
+cloudStorage:
+  className: exomem-cloud-encrypted
+  encryptionSecretName: exomem-cloud-volume-encryption
+  encryptionSecretNamespace: exomem-platform
+
+cloudIngress:
+  enabled: false
+  hostname: ""
+  acmeEmail: ""
+  cloudflareApiTokenSecretName: exomem-cloudflare-dns-token
+  cloudflareApiTokenSecretKey: token
+
+cert-manager:
+  enabled: true
+  crds:
+    # The chart installs cert-manager's own CRDs (ClusterIssuer, Certificate,
+    # ...); installCRDs is set via crds.enabled (the chart's current key),
+    # not the deprecated installCRDs value.
+    enabled: true
+  # cert-manager's controller must be installed and its webhook available
+  # before any Certificate (cloud-ingress.yaml's ClusterIssuer/Certificate)
+  # is applied in the same release, or that apply fails admission. Runs as
+  # its own platform-level release ahead of most clusters' first application
+  # chart in normal practice; bundled here as a chart dependency (like
+  # hcloud-csi and traefik above) because this repo already manages its
+  # cluster-level infra this way.

@@ -170,6 +170,141 @@
           }
         }
       }
+    },
+    "cellctl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "image", "cellImageRepository", "namespace", "replicas", "b2BucketName", "b2BucketId", "b2AccountId", "b2Endpoint", "initDeadlineMinutes", "databaseDsnSecretName", "databaseDsnSecretKey", "cellTokenKeySecretName", "backupMasterKeySecretName", "b2KeyManagementSecretName", "hetznerReadTokenSecretName", "databaseEgressCidrs", "cellResources", "resources"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "image": {"type": "string"},
+        "cellImageRepository": {"type": "string"},
+        "namespace": {"const": "exomem-cloud"},
+        "replicas": {"type": "integer", "minimum": 1, "maximum": 1},
+        "b2BucketName": {"type": "string"},
+        "b2BucketId": {"type": "string"},
+        "b2AccountId": {"type": "string"},
+        "b2Endpoint": {"type": "string"},
+        "initDeadlineMinutes": {"type": "integer", "minimum": 1},
+        "databaseDsnSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "databaseDsnSecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "cellTokenKeySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "backupMasterKeySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "b2KeyManagementSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "hetznerReadTokenSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "databaseEgressCidrs": {
+          "type": "array", "maxItems": 32, "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/32$"}
+        },
+        "cellResources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cpuRequest", "cpuLimit", "memoryRequest", "memoryLimit"],
+          "properties": {
+            "cpuRequest": {"type": "string"},
+            "cpuLimit": {"type": "string"},
+            "memoryRequest": {"type": "string"},
+            "memoryLimit": {"type": "string"}
+          }
+        },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requests", "limits"],
+          "properties": {
+            "requests": {"type": "object"},
+            "limits": {"type": "object"}
+          }
+        }
+      },
+      "if": {"properties": {"enabled": {"const": true}}},
+      "then": {"properties": {
+        "image": {"pattern": "^[^\\s]+@sha256:[a-f0-9]{64}$"},
+        "cellImageRepository": {"pattern": "^[^\\s@]+$"},
+        "b2BucketName": {"minLength": 1},
+        "b2BucketId": {"minLength": 1},
+        "b2AccountId": {"minLength": 1},
+        "b2Endpoint": {"minLength": 1},
+        "databaseEgressCidrs": {"minItems": 1}
+      }}
+    },
+    "cloudGateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "image", "replicas", "hostname", "maxInflight", "databaseSecretName", "databaseSecretKey", "cellTokenKeySecretName", "databaseEgressCidrs"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "image": {"type": "string"},
+        "replicas": {"type": "integer", "minimum": 1, "maximum": 2},
+        "hostname": {"type": "string"},
+        "maxInflight": {"type": "integer", "minimum": 1, "maximum": 32},
+        "databaseSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "databaseSecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "cellTokenKeySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "databaseEgressCidrs": {
+          "type": "array", "maxItems": 32, "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/32$"}
+        }
+      },
+      "if": {"properties": {"enabled": {"const": true}}},
+      "then": {"properties": {
+        "image": {"pattern": "^ghcr\\.io/substrate-systems/substrate-gateway@sha256:[a-f0-9]{64}$"},
+        "hostname": {"pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$"},
+        "databaseEgressCidrs": {"minItems": 1}
+      }}
+    },
+    "cloudStorage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["className", "encryptionSecretName", "encryptionSecretNamespace"],
+      "properties": {
+        "className": {"const": "exomem-cloud-encrypted"},
+        "encryptionSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "encryptionSecretNamespace": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"}
+      }
+    },
+    "cloudIngress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "hostname", "acmeEmail", "cloudflareApiTokenSecretName", "cloudflareApiTokenSecretKey"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "hostname": {"type": "string"},
+        "acmeEmail": {"type": "string"},
+        "cloudflareApiTokenSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "cloudflareApiTokenSecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"}
+      },
+      "if": {"properties": {"enabled": {"const": true}}},
+      "then": {"properties": {
+        "hostname": {"pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$"},
+        "acmeEmail": {"pattern": "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"}
+      }}
+    },
+    "capacity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["csiDriver", "headroom"],
+      "properties": {
+        "csiDriver": {"type": "string", "minLength": 1},
+        "headroom": {"type": "integer", "minimum": 0},
+        "attachmentsLimitFallback": {"type": ["integer", "null"], "minimum": 1}
+      }
+    },
+    "cells": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backupWindow", "backupConcurrency", "jobEgressExcept"],
+      "properties": {
+        "backupWindow": {
+          "type": "string", "pattern": "^([01]?[0-9]|2[0-3])-([01]?[0-9]|2[0-3])$",
+          "not": {"pattern": "^(?:0?0-0?0|0?1-0?1|0?2-0?2|0?3-0?3|0?4-0?4|0?5-0?5|0?6-0?6|0?7-0?7|0?8-0?8|0?9-0?9|10-10|11-11|12-12|13-13|14-14|15-15|16-16|17-17|18-18|19-19|20-20|21-21|22-22|23-23)$"}
+        },
+        "backupConcurrency": {"type": "integer", "minimum": 1},
+        "jobEgressExcept": {
+          "type": "array", "maxItems": 64, "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(?:[0-9]|[1-2][0-9]|3[0-2])$"}
+        }
+      }
     }
   }
 }

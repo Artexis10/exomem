@@ -1,0 +1,150 @@
+name: Cloud cellctl
+
+on:
+  pull_request:
+    paths:
+      - "infra/cellctl/**"
+      - "infra/helm/platform/**"
+      - "infra/tool-versions.env"
+      - ".github/workflows/cloud-cellctl.yml"
+  push:
+    branches: [main]
+    paths:
+      - "infra/cellctl/**"
+      - "infra/helm/platform/**"
+      - "infra/tool-versions.env"
+      - ".github/workflows/cloud-cellctl.yml"
+  # A manual run also replays the live K3s suite (live-k3s below).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-cellctl-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    name: cellctl tests, pinned ruff and platform chart
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Load the pinned tool versions
+        run: grep -E '^[A-Z0-9_]+=' infra/tool-versions.env >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - name: Install the pinned Helm release binary
+        run: |
+          curl --fail --silent --show-error --location \
+            --output /tmp/helm.tar.gz \
+            "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_LINUX_AMD64_SHA256}  /tmp/helm.tar.gz" | sha256sum --check
+          tar --extract --gzip --file /tmp/helm.tar.gz --directory /tmp linux-amd64/helm
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          test "$(helm version --template '{{.Version}}')" = "v${HELM_VERSION}"
+      - name: Install the PostgreSQL 16 server binaries the fixture runs
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-16
+          test -x /usr/lib/postgresql/16/bin/postgres
+          echo "CELLCTL_PG_BIN=/usr/lib/postgresql/16/bin" >> "$GITHUB_ENV"
+      # The chart tests render infra/helm/platform, which needs the dependency
+      # archives the chart step builds, so they run after it.
+      - name: Fast suite
+        working-directory: infra/cellctl
+        run: |
+          uv run --locked python -m pytest -q -p no:cacheprovider \
+            --ignore=tests/test_k3s_integration.py \
+            --ignore=tests/test_platform_chart_headers.py
+      - name: Pinned ruff
+        working-directory: infra/cellctl
+        run: uvx --from "ruff==${RUFF_VERSION}" ruff check src tests
+      - name: Platform chart dependency build, lint and template
+        run: |
+          helm repo add hcloud https://charts.hetzner.cloud
+          helm repo add traefik https://traefik.github.io/charts
+          helm repo add jetstack https://charts.jetstack.io
+          helm dependency build infra/helm/platform
+          helm lint infra/helm/platform --strict \
+            --namespace exomem-platform \
+            --values infra/helm/platform/values.validation.yaml
+          helm template exomem-platform infra/helm/platform \
+            --namespace exomem-platform \
+            --values infra/helm/platform/values.validation.yaml \
+            --include-crds > /dev/null
+      # A skip (no helm on PATH) must fail the job, never pass it quietly.
+      - name: Platform chart tests
+        working-directory: infra/cellctl
+        shell: bash
+        run: |
+          uv run --locked python -m pytest -q -rs -p no:cacheprovider tests/test_platform_chart_headers.py \
+            | tee "${RUNNER_TEMP}/chart-tests.txt"
+          if grep -q '^SKIPPED \[' "${RUNNER_TEMP}/chart-tests.txt"; then
+            echo "::error::a platform chart test was skipped"
+            exit 1
+          fi
+
+  # The live suite builds stand-in images and runs K3s and MinIO in Docker
+  # (privileged) for about 12 minutes. It runs on manual dispatch and at each
+  # delivery, not on every pull request.
+  live-k3s:
+    name: Live K3s integration suite (manual)
+    if: github.event_name == 'workflow_dispatch'
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Load the pinned tool versions
+        run: grep -E '^[A-Z0-9_]+=' infra/tool-versions.env >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Install the pinned Helm release binary
+        run: |
+          curl --fail --silent --show-error --location \
+            --output /tmp/helm.tar.gz \
+            "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_LINUX_AMD64_SHA256}  /tmp/helm.tar.gz" | sha256sum --check
+          tar --extract --gzip --file /tmp/helm.tar.gz --directory /tmp linux-amd64/helm
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          test "$(helm version --template '{{.Version}}')" = "v${HELM_VERSION}"
+      - name: Install the PostgreSQL 16 server binaries the fixture runs
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-16
+          test -x /usr/lib/postgresql/16/bin/postgres
+          echo "CELLCTL_PG_BIN=/usr/lib/postgresql/16/bin" >> "$GITHUB_ENV"
+      - name: Build the platform chart dependencies the suite renders
+        run: |
+          helm repo add hcloud https://charts.hetzner.cloud
+          helm repo add traefik https://traefik.github.io/charts
+          helm repo add jetstack https://charts.jetstack.io
+          helm dependency build infra/helm/platform
+      # A skip (no Docker, a missing variable) must fail the job, never pass it.
+      - name: Live K3s suite
+        working-directory: infra/cellctl
+        shell: bash
+        env:
+          RUN_CELLCTL_K3S_TEST: "1"
+          PYTHONUNBUFFERED: "1"
+        run: |
+          HELM_BIN="$(command -v helm)" \
+          uv run --locked python -m pytest -q -s -rs -p no:cacheprovider tests/test_k3s_integration.py \
+            | tee "${RUNNER_TEMP}/live-k3s.txt"
+          if grep -q '^SKIPPED \[' "${RUNNER_TEMP}/live-k3s.txt"; then
+            echo "::error::the live K3s suite was skipped"
+            exit 1
+          fi
