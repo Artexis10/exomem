@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+import time
 import types
 from pathlib import Path
 
@@ -43,6 +44,8 @@ from exomem import (
 
 E5 = "intfloat/multilingual-e5-small"
 M3 = "BAAI/bge-m3"
+#: The real memory reading, before `_clean` stands a large host in for it.
+_REAL_AVAILABLE_MEMORY = getattr(embedding_backend, "_available_memory", None)
 
 
 @pytest.fixture(autouse=True)
@@ -57,6 +60,8 @@ def _clean(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("EXOMEM_MODEL_ARTIFACT_URL", (tmp_path / "no-assets").as_uri())
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     monkeypatch.setattr(embedding_backend, "_ACQUIRE_FAILED", {}, raising=False)
+    # The tiny test builds need no 10 GiB; the tests of that gate set their own.
+    monkeypatch.setattr(embedding_backend, "_available_memory", lambda: 64 << 30, raising=False)
     yield
 
 
@@ -734,7 +739,9 @@ def test_the_served_artifact_is_built_once_at_the_pinned_revision_and_reused(
     assert len(quantized) == 1
     assert {revision for _file, revision in asked} == {TINY_REVISION}
     assert sorted(path.name for path in target.iterdir()) == ["artifact.json", "model.onnx", "model.onnx.data"]
-    assert [path.name for path in target.parent.iterdir()] == [target.name], "a build leaves no stage behind"
+    assert sorted(path.name for path in target.parent.iterdir()) == sorted(
+        [target.name, f".{target.name}.lock"]
+    ), "a build leaves no stage behind, only its lock"
     assert re.fullmatch(r"[0-9a-f]{16}", first.profile.artifact_digest or "")
     assert manifest["digest"] == first.profile.artifact_digest
     assert (manifest["model"], manifest["revision"], manifest["quantization"], manifest["file_format"]) == (
@@ -798,7 +805,7 @@ def test_a_failed_build_refuses_the_load_and_leaves_nothing_behind(
         embedding_backend.load_encoder(TINY)
 
     target = embedding_backend.artifact_dir(TINY, served)
-    assert not [path for path in target.parent.rglob("*") if path.is_file()]
+    assert not [path for path in target.parent.rglob("*") if path.is_file() and path.name != f".{target.name}.lock"]
 
 
 def test_a_damaged_artifact_is_rebuilt_to_the_same_digest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -884,7 +891,9 @@ def test_a_host_downloads_the_published_artifact_instead_of_building_it(
     assert encoder.profile.artifact_digest == pinned.digest[:16]
     assert embedding_backend.artifact_sha256(target) == pinned.digest
     assert sorted(path.name for path in target.iterdir()) == ["artifact.json", "model.onnx", "model.onnx.data"]
-    assert [path.name for path in target.parent.iterdir()] == [target.name], "a download leaves no stage behind"
+    assert sorted(path.name for path in target.parent.iterdir()) == sorted(
+        [target.name, f".{target.name}.lock"]
+    ), "a download leaves no stage behind, only its lock"
     assert encoder.encode(["w1 w2"], batch_size=8).shape == (1, TINY_WIDTH)
 
 
@@ -1069,7 +1078,7 @@ def test_a_failed_acquisition_is_not_retried_on_every_load(tmp_path: Path, monke
 
     with pytest.raises(embedding_backend.ModelFilesUnavailable, match="no memory for the quantiser"):
         embedding_backend.load_encoder(TINY)
-    with pytest.raises(embedding_backend.ModelFilesUnavailable, match="retried after"):
+    with pytest.raises(embedding_backend.ModelFilesUnavailable, match="until the process restarts"):
         embedding_backend.load_encoder(TINY)
     assert attempts == [1]
 
@@ -1077,6 +1086,205 @@ def test_a_failed_acquisition_is_not_retried_on_every_load(tmp_path: Path, monke
     with pytest.raises(embedding_backend.ModelFilesUnavailable, match="no memory for the quantiser"):
         embedding_backend.load_encoder(TINY)
     assert attempts == [1, 1]
+
+
+# --------------------------------------------------------------------------- #
+# R8: acquisition is safe to run twice and fails well on a small host
+# --------------------------------------------------------------------------- #
+
+
+def _fake_m3_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """bge-m3's served entry with its export stood in for by small files, and
+    nothing published (the reviewer's probes p2 and p13). Returns the export
+    files asked for, so a test can see whether the 2.2 GB download started."""
+    src = tmp_path / "src"
+    src.mkdir()
+    for name in embedding_backend.served_artifact(M3).source:
+        (src / Path(name).name).write_bytes(b"source-" + name.encode() * 1000)
+    resolved: list[str] = []
+    monkeypatch.setattr(
+        embedding_backend,
+        "_resolve",
+        lambda _model, name, revision=None: resolved.append(name) or str(src / Path(name).name),
+    )
+    monkeypatch.setenv(embedding_backend.ARTIFACT_URL_ENV, "off")
+    return resolved
+
+
+def _fake_quantize(sleep: float = 0.0, live: dict[str, int] | None = None):
+    counting = threading.Lock()
+
+    def quantize(_served, _source: str, out: str) -> None:
+        if live is not None:
+            with counting:
+                live["now"] += 1
+                live["calls"] += 1
+                live["max"] = max(live["max"], live["now"])
+        time.sleep(sleep)
+        Path(out).write_bytes(b"graph")
+        Path(out + ".data").write_bytes(b"weights")
+        if live is not None:
+            with counting:
+                live["now"] -= 1
+
+    return quantize
+
+
+def test_two_loads_at_once_acquire_the_artifact_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Probe p2: two loads race on a host with nothing published. The second
+    waits on the lock beside the artefact, then finds the first one's, instead
+    of running a second 8.7 GB build beside it."""
+    _fake_m3_sources(tmp_path, monkeypatch)
+    live = {"now": 0, "max": 0, "calls": 0}
+    monkeypatch.setattr(embedding_backend, "_quantize", _fake_quantize(sleep=1.0, live=live))
+    served = embedding_backend.served_artifact(M3)
+    results: list[tuple[str, str]] = []
+    threads = [
+        threading.Thread(target=lambda: results.append(embedding_backend.ensure_artifact(M3, served)))
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    assert (live["calls"], live["max"]) == (1, 1)
+    assert len(results) == 2 and results[0] == results[1]
+
+
+_KILLED_BUILD_CHILD = """
+import sys, time
+from pathlib import Path
+from exomem import embedding_backend as eb
+
+src = Path(sys.argv[1])
+eb._resolve = lambda _model, name, revision=None: str(src / Path(name).name)
+eb._available_memory = lambda: 64 << 30
+
+def quantize(_served, _source, _out):
+    print("building", flush=True)
+    time.sleep(300)
+
+eb._quantize = quantize
+eb.ensure_artifact("BAAI/bge-m3", eb.served_artifact("BAAI/bge-m3"))
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGKILL is POSIX")
+def test_a_killed_acquisition_holds_no_lock_and_its_stage_is_swept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Probe p2, killed: a build killed mid-way, as the OOM killer kills it,
+    leaves its stage with the copied export in it. The next acquisition finds
+    the lock free, since the kernel dropped it with its dead holder, and sweeps
+    the stage before it builds."""
+    _fake_m3_sources(tmp_path, monkeypatch)
+    served = embedding_backend.served_artifact(M3)
+    target = embedding_backend.artifact_dir(M3, served)
+    child = subprocess.Popen(
+        [sys.executable, "-c", _KILLED_BUILD_CHILD, str(tmp_path / "src")], stdout=subprocess.PIPE, text=True
+    )
+    try:
+        assert child.stdout is not None and child.stdout.readline().strip() == "building"
+    finally:
+        child.kill()
+        child.wait(timeout=60)
+    assert list(target.parent.glob(f".{target.name}-build-*")), "the killed build left its stage"
+
+    monkeypatch.setattr(embedding_backend, "_quantize", _fake_quantize())
+    path, _digest = embedding_backend.ensure_artifact(M3, served)
+
+    assert Path(path).is_file()
+    assert sorted(p.name for p in target.parent.iterdir()) == sorted([target.name, f".{target.name}.lock"])
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGKILL is POSIX")
+def test_a_build_the_kernel_kills_reads_as_out_of_memory_and_waits_a_day(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Probe p13: the quantiser child is killed as the OOM killer kills it. The
+    failure names the likely cause, not a missing package, and the next attempt
+    in this process waits a day, never 15 minutes."""
+    _fake_m3_sources(tmp_path, monkeypatch)
+    monkeypatch.setattr(embedding_backend, "_QUANTIZE_CHILD", "import os, signal\nos.kill(os.getpid(), signal.SIGKILL)\n")
+    spawns: list[int] = []
+    real_run = subprocess.run
+    monkeypatch.setattr(embedding_backend.subprocess, "run", lambda *a, **k: spawns.append(1) or real_run(*a, **k))
+    clock = [1000.0]
+    monkeypatch.setattr(embedding_backend.time, "monotonic", lambda: clock[0])
+    served = embedding_backend.served_artifact(M3)
+
+    with pytest.raises(embedding_backend.ModelFilesUnavailable, match=r"killed by signal 9 \(likely out of memory"):
+        embedding_backend.ensure_artifact(M3, served)
+    for advance in (60, 900, 23 * 3600):
+        clock[0] += advance
+        with pytest.raises(embedding_backend.ModelFilesUnavailable, match="until the process restarts or 24 h pass"):
+            embedding_backend.ensure_artifact(M3, served)
+    assert spawns == [1]
+
+    clock[0] += 3600
+    with pytest.raises(embedding_backend.ModelFilesUnavailable, match="likely out of memory"):
+        embedding_backend.ensure_artifact(M3, served)
+    assert spawns == [1, 1]
+
+
+def test_a_host_short_of_memory_starts_no_build_and_is_told_where_the_artifact_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Below 10 GiB available nothing is downloaded, copied or spawned: the
+    refusal names the published artefact and the variable that fetches it."""
+    resolved = _fake_m3_sources(tmp_path, monkeypatch)
+    built: list[int] = []
+    monkeypatch.setattr(embedding_backend, "_quantize", lambda *_a: built.append(1))
+    monkeypatch.setattr(embedding_backend, "_available_memory", lambda: 6 << 30)
+    served = embedding_backend.served_artifact(M3)
+
+    with pytest.raises(embedding_backend.ModelFilesUnavailable) as refused:
+        embedding_backend.ensure_artifact(M3, served)
+
+    message = str(refused.value)
+    assert embedding_backend.BUILD_MIN_AVAILABLE_BYTES == 10 << 30
+    assert (built, resolved) == ([], []), "no build started and no export fetched"
+    assert "6.0 GiB" in message and "10 GiB" in message
+    assert "bge-m3-int8-7b9a0b3b.onnx.tar" in message and "EXOMEM_MODEL_ARTIFACT_URL" in message
+    with pytest.raises(embedding_backend.ModelFilesUnavailable, match="until the process restarts"):
+        embedding_backend.ensure_artifact(M3, served)
+
+
+@pytest.mark.parametrize("available", [None, 12 << 30], ids=["unmeasured", "enough"])
+def test_a_host_with_memory_or_no_reading_builds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, available: int | None
+) -> None:
+    _fake_m3_sources(tmp_path, monkeypatch)
+    monkeypatch.setattr(embedding_backend, "_quantize", _fake_quantize())
+    monkeypatch.setattr(embedding_backend, "_available_memory", lambda: available)
+
+    path, _digest = embedding_backend.ensure_artifact(M3, embedding_backend.served_artifact(M3))
+
+    assert Path(path).is_file()
+
+
+def test_available_memory_reads_memavailable_or_else_the_free_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _REAL_AVAILABLE_MEMORY is not None
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text(
+        "MemTotal:       16384000 kB\nMemFree:         1024000 kB\nMemAvailable:    7340032 kB\n", encoding="ascii"
+    )
+    monkeypatch.setattr(embedding_backend, "_MEMINFO", meminfo)
+    assert _REAL_AVAILABLE_MEMORY() == 7 << 30
+
+    monkeypatch.setattr(embedding_backend, "_MEMINFO", tmp_path / "absent")
+    pages = {"SC_AVPHYS_PAGES": 1000, "SC_PAGE_SIZE": 4096}
+    monkeypatch.setattr(embedding_backend.os, "sysconf", lambda name: pages[name], raising=False)
+    assert _REAL_AVAILABLE_MEMORY() == 4096 * 1000
+
+    def unknown(name: str) -> int:
+        raise ValueError(name)
+
+    monkeypatch.setattr(embedding_backend.os, "sysconf", unknown, raising=False)
+    assert _REAL_AVAILABLE_MEMORY() is None
 
 
 def test_the_release_asset_is_byte_for_byte_reproducible(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

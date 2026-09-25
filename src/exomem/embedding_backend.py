@@ -19,6 +19,7 @@ and CLIP, so only the hosted lane — which withholds both — can drop it.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -81,10 +82,15 @@ _MAX_ASSET_BYTES = 2 << 30
 #: a plain tar of regular files is never smaller than what it holds.
 _MAX_UNPACKED_BYTES = _MAX_ASSET_BYTES
 #: How long a failed acquisition (no download, no build) is remembered before
-#: a load tries again, so a host that cannot build does not start the build on
-#: every write that asks for the model.
-ACQUIRE_RETRY_SECONDS = 900.0
+#: a load in the same process tries again: a day, so a host that cannot build
+#: does not start the 8.7 GB build every few minutes. A restart tries at once.
+ACQUIRE_RETRY_SECONDS = 24 * 3600.0
 _ACQUIRE_FAILED: dict[tuple[str, str], tuple[float, str]] = {}
+#: The memory a local build must find available before it starts: the quantiser
+#: peaks at about 8.7 GB for bge-m3. Below it the kernel kills the child, after
+#: the 2.2 GB export was downloaded and copied for nothing.
+BUILD_MIN_AVAILABLE_BYTES = 10 << 30
+_MEMINFO = Path("/proc/meminfo")
 #: Intra-op threads a served model's session uses while `EXOMEM_CPU_THREADS` is
 #: unset: the 40-token turn's p95 was 132 ms at two against 304 at one.
 SERVED_DEFAULT_THREADS = 2
@@ -700,21 +706,31 @@ def ensure_artifact(model_name: str, served: ServedArtifact) -> tuple[str, str]:
     fingerprint names what actually runs. Bytes that no longer match the digest
     they were built with are rebuilt; the build is deterministic, so a repaired
     artefact has its old digest back and nothing stored under it is re-embedded.
+
+    Acquiring it happens under a lock beside it (`_acquisition_lock`), so two
+    loads, in one process or in two, never fetch or build it at once: the second
+    waits, then finds the first one's artefact. A failure is not tried again in
+    this process for `ACQUIRE_RETRY_SECONDS`.
     """
     target = artifact_dir(model_name, served)
-    digest = _artifact_digest(target)
-    manifest = _read_manifest(target)
     expected = {
         "model": model_name,
         "revision": served.revision,
         "quantization": served.quantization,
         "file_format": served.file_format,
     }
-    if digest is None or manifest.get("digest") != digest or any(manifest.get(k) != v for k, v in expected.items()):
-        key = (model_name, served.revision)
-        failed = _ACQUIRE_FAILED.get(key)
-        if failed is not None and time.monotonic() - failed[0] < ACQUIRE_RETRY_SECONDS:
-            raise ModelFilesUnavailable(f"{failed[1]} (retried after {int(ACQUIRE_RETRY_SECONDS)} s)")
+    digest = _installed_digest(target, expected)
+    if digest is not None:
+        return str(target / _ARTIFACT_FILES[0]), digest
+    key = (model_name, served.revision)
+    _refuse_while_cooling(key)
+    with _acquisition_lock(target):
+        # Whoever held the lock before may have installed it meanwhile.
+        digest = _installed_digest(target, expected)
+        if digest is not None:
+            return str(target / _ARTIFACT_FILES[0]), digest
+        _refuse_while_cooling(key)
+        _sweep_stages(target)
         try:
             if not _fetch_artifact(model_name, served, target):
                 log.info("building %s %s artefact at %s", model_name, served.quantization, target)
@@ -732,6 +748,94 @@ def ensure_artifact(model_name: str, served: ServedArtifact) -> tuple[str, str]:
             json.dumps({**expected, "digest": digest}, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
     return str(target / _ARTIFACT_FILES[0]), digest
+
+
+def _installed_digest(target: Path, expected: dict[str, str]) -> str | None:
+    """The installed artefact's digest when its manifest vouches for exactly these bytes."""
+    digest = _artifact_digest(target)
+    manifest = _read_manifest(target)
+    if digest is None or manifest.get("digest") != digest or any(manifest.get(k) != v for k, v in expected.items()):
+        return None
+    return digest
+
+
+def _refuse_while_cooling(key: tuple[str, str]) -> None:
+    failed = _ACQUIRE_FAILED.get(key)
+    if failed is not None and time.monotonic() - failed[0] < ACQUIRE_RETRY_SECONDS:
+        raise ModelFilesUnavailable(
+            f"{failed[1]} (not tried again until the process restarts or {int(ACQUIRE_RETRY_SECONDS // 3600)} h pass)"
+        )
+
+
+@contextlib.contextmanager
+def _acquisition_lock(target: Path):
+    """Hold the lock that makes acquiring `target` one caller's work at a time.
+
+    `.<name>.lock` beside `target`, taken with `flock` (a byte-range lock on
+    Windows) on its own open file, so it excludes threads of one process as
+    well as other processes. The kernel releases it when its holder dies, so a
+    killed build never leaves it held. The file stays: removing a lock file
+    races with the next waiter.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with open(target.parent / f".{target.name}.lock", "a+b") as handle:
+        if sys.platform == "win32":  # pragma: no cover - exercised on Windows hosts
+            import msvcrt
+
+            while True:
+                handle.seek(0)
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.5)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _sweep_stages(target: Path) -> None:
+    """Remove the stages a killed fetch or build of `target` left beside it.
+
+    Called only under `target`'s acquisition lock, when no live fetch or build
+    of it can exist, so every stage found belongs to a dead one: up to 2.2 GB of
+    copied export each, which nothing else would ever reclaim. Another target's
+    stages have their own lock and are left alone.
+    """
+    for pattern in (f".{target.name}-fetch-*", f".{target.name}-build-*"):
+        for stage in target.parent.glob(pattern):
+            if stage.is_dir():
+                log.info("removing the stale stage %s a killed acquisition left", stage)
+                shutil.rmtree(stage, ignore_errors=True)
+
+
+def _available_memory() -> int | None:
+    """Bytes of memory a new process can have, or None when the host does not say.
+
+    `MemAvailable` where the kernel reports it (Linux); elsewhere the free
+    physical pages, which leave out reclaimable cache and so read low.
+    """
+    try:
+        with open(_MEMINFO, encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, ValueError, OSError):
+        return None
 
 
 def ensure_served_artifact(model_name: str) -> None:
@@ -820,6 +924,18 @@ def _build_artifact(model_name: str, served: ServedArtifact, target: Path) -> No
     are copied into the stage first. Files move into `target` data first, so a
     graph never names data that is not there.
     """
+    # Before the export is downloaded or copied: a build the host cannot hold
+    # ends with the child killed, and the published artefact is the way out.
+    # What this costs when it misreads a host: no build there, and semantic
+    # evidence stays off until the artefact arrives. An unmeasurable host builds.
+    available = _available_memory()
+    if available is not None and available < BUILD_MIN_AVAILABLE_BYTES:
+        raise ModelFilesUnavailable(
+            f"{model_name}: not building the int8 model here: {available / (1 << 30):.1f} GiB of memory "
+            f"is available and the build needs {BUILD_MIN_AVAILABLE_BYTES >> 30} GiB. Use the published "
+            f"artefact {artifact_asset_name(model_name, served)} instead: it downloads from "
+            f"{ARTIFACT_URL_ENV} (default {DEFAULT_ARTIFACT_URL}), which must be reachable and not off"
+        )
     sources = [Path(_resolve(model_name, name, served.revision)).resolve() for name in served.source]
     target.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=f".{target.name}-build-", dir=target.parent))
@@ -864,6 +980,12 @@ def _quantize(served: ServedArtifact, source: str, out: str) -> None:
         text=True,
         check=False,
     )
+    if result.returncode < 0:
+        # A signal, and on a build this size almost always the kernel's OOM killer.
+        raise ModelFilesUnavailable(
+            f"building the int8 model was killed by signal {-result.returncode} "
+            "(likely out of memory: the build peaks near 9 GB)"
+        )
     if result.returncode != 0:
         detail = (result.stderr or "").strip().splitlines()[-1:] or [f"exit {result.returncode}"]
         raise ModelFilesUnavailable(
