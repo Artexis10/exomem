@@ -936,7 +936,15 @@ def _build_artifact(model_name: str, served: ServedArtifact, target: Path) -> No
             f"artefact {artifact_asset_name(model_name, served)} instead: it downloads from "
             f"{ARTIFACT_URL_ENV} (default {DEFAULT_ARTIFACT_URL}), which must be reachable and not off"
         )
-    sources = [Path(_resolve(model_name, name, served.revision)).resolve() for name in served.source]
+    try:
+        sources = [Path(_resolve(model_name, name, served.revision)).resolve() for name in served.source]
+    except Exception as error:  # noqa: BLE001 — every hub failure is the same refusal
+        # `LocalEntryNotFoundError` offline, the hub's not-found errors online:
+        # each is a failed acquisition, remembered so no load retries it at once.
+        raise ModelFilesUnavailable(
+            f"{model_name}: the export to build from is neither in the model cache nor fetchable "
+            f"({type(error).__name__})"
+        ) from error
     target.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=f".{target.name}-build-", dir=target.parent))
     try:

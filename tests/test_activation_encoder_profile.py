@@ -1264,6 +1264,37 @@ def test_a_host_with_memory_or_no_reading_builds(
     assert Path(path).is_file()
 
 
+@pytest.mark.parametrize("error_name", ["LocalEntryNotFoundError", "RevisionNotFoundError", "OSError"])
+def test_a_hub_failure_is_remembered_like_a_failed_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_name: str
+) -> None:
+    """Offline with the export uncached, or a revision the hub no longer has:
+    the load is refused as unavailable and not retried on the next write."""
+    hub_errors = pytest.importorskip("huggingface_hub.errors")
+    _fake_m3_sources(tmp_path, monkeypatch)
+    asked: list[str] = []
+
+    def missing(_model: str, name: str, revision: str | None = None) -> str:
+        asked.append(name)
+        if error_name == "OSError":
+            raise OSError("connection refused")
+        if error_name == "RevisionNotFoundError":
+            import httpx
+
+            not_found = httpx.Response(404, request=httpx.Request("GET", "https://hub.invalid/revision"))
+            raise hub_errors.RevisionNotFoundError("no such revision", response=not_found)
+        raise hub_errors.LocalEntryNotFoundError("offline and not cached")
+
+    monkeypatch.setattr(embedding_backend, "_resolve", missing)
+    served = embedding_backend.served_artifact(M3)
+
+    with pytest.raises(embedding_backend.ModelFilesUnavailable, match="neither in the model cache nor fetchable"):
+        embedding_backend.ensure_artifact(M3, served)
+    with pytest.raises(embedding_backend.ModelFilesUnavailable, match="until the process restarts"):
+        embedding_backend.ensure_artifact(M3, served)
+    assert len(asked) == 1
+
+
 def test_available_memory_reads_memavailable_or_else_the_free_pages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
