@@ -853,6 +853,11 @@ resident.
 - Progress: `exomem doctor` (`embeddings.reembed`, read from disk) and
   `exomem status` (`recall_reembed`: pages done, seconds per 1,000 chunks, ETA).
 - `EXOMEM_RECALL_REEMBED=off` builds nothing and keeps the old sidecar serving.
+- Both models are resident while the build runs, in every mode, quiet included:
+  warm-up loads the old model before writes are admitted so a write never
+  finds it cold. `EXOMEM_RECALL_REEMBED=off` is the way to keep one model.
+- Rolling back to `BAAI/bge-base-en-v1.5` after a later start has retired the
+  old sidecar re-embeds the whole vault into the English space, the same way.
 - `exomem index` maintains whichever sidecar is serving, with its own model.
 - The sidecar for bge-m3 is about a third larger: 1,024 dimensions against 768.
 
