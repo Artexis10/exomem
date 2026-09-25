@@ -610,6 +610,10 @@ def _receipt_schema_is_current(connection: sqlite3.Connection) -> bool:
         str(row[1])
         for row in connection.execute("PRAGMA table_info(write_advisory_results)")
     }
+    paths = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(derived_batch_paths)")
+    }
     present = {
         str(row[0])
         for row in connection.execute(
@@ -617,13 +621,16 @@ def _receipt_schema_is_current(connection: sqlite3.Connection) -> bool:
             "('write_advisory_result_candidates', "
             "'pending_visibility_generation_insert', "
             "'pending_visibility_generation_update', "
-            "'pending_visibility_generation_delete')"
+            "'pending_visibility_generation_delete', "
+            "'derived_paths_sequence_fill', 'derived_paths_sequence', "
+            "'derived_paths_after_sequence', 'derived_batches_state')"
         )
     }
     return (
         "lease_revision" in components
         and "target_rel_path" in advisory
-        and len(present) == 4
+        and "batch_seq" in paths
+        and len(present) == 8
     )
 
 
@@ -1103,19 +1110,20 @@ def _newer_custody_covers_path(
     pending row for it -- so the path's newer bytes are visible or already
     published, never in a gap.
     """
-    # Driven by the store sequence, not by the path: a shared page such as the
-    # knowledge base log rides in every batch ever written, while only the
-    # batches after this one can cover it.
+    # A seek on (path, store sequence): only the later batches that carry this
+    # path are visited, never the whole later history, which is never pruned.
+    # A shared page's first later proven carrier is ordinarily a hit.
     return (
         connection.execute(
-            "SELECT 1 FROM derived_batches AS b "
-            "WHERE b.rowid > ? AND b.state IN ('ready', 'completed', 'superseded') "
-            "AND EXISTS (SELECT 1 FROM derived_batch_paths AS p "
-            "WHERE p.batch_id = b.batch_id AND p.rel_path = ?) "
+            "SELECT 1 FROM derived_batch_paths AS p "
+            "JOIN derived_batches AS b ON b.batch_id = p.batch_id "
+            "WHERE p.rel_path = ? AND p.batch_seq > ? "
+            "AND b.state IN ('ready', 'completed', 'superseded') "
             "AND EXISTS (SELECT 1 FROM pending_recall_rows AS r "
-            "WHERE r.batch_id = b.batch_id AND r.rel_path = ? "
-            "AND r.state IN ('live', 'retired')) LIMIT 1",
-            (batch_sequence, rel_path, rel_path),
+            "WHERE r.batch_id = p.batch_id AND r.rel_path = p.rel_path "
+            "AND r.state IN ('live', 'retired')) "
+            "ORDER BY p.batch_seq LIMIT 1",
+            (rel_path, batch_sequence),
         ).fetchone()
         is not None
     )
@@ -1157,16 +1165,19 @@ def _newer_custody_wrote_bytes(
     newer write's proven after-state under that batch's custody, not a torn
     write of the older batch.
     """
+    # A seek on (path, after-bytes, store sequence): the ordinary answer is a
+    # miss, and a miss visits no row at all.
     return (
         connection.execute(
-            "SELECT 1 FROM derived_batches AS b "
-            "WHERE b.rowid > ? AND b.state IN ('ready', 'completed', 'superseded') "
-            "AND EXISTS (SELECT 1 FROM derived_batch_paths AS p "
-            "WHERE p.batch_id = b.batch_id AND p.rel_path = ? AND p.after_hash IS ?) "
+            "SELECT 1 FROM derived_batch_paths AS p "
+            "JOIN derived_batches AS b ON b.batch_id = p.batch_id "
+            "WHERE p.rel_path = ? AND p.after_hash IS ? AND p.batch_seq > ? "
+            "AND b.state IN ('ready', 'completed', 'superseded') "
             "AND EXISTS (SELECT 1 FROM pending_recall_rows AS r "
-            "WHERE r.batch_id = b.batch_id AND r.rel_path = ? "
-            "AND r.state IN ('live', 'retired')) LIMIT 1",
-            (batch_sequence, rel_path, identity, rel_path),
+            "WHERE r.batch_id = p.batch_id AND r.rel_path = p.rel_path "
+            "AND r.state IN ('live', 'retired')) "
+            "ORDER BY p.batch_seq LIMIT 1",
+            (rel_path, identity, batch_sequence),
         ).fetchone()
         is not None
     )

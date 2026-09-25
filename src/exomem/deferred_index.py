@@ -83,6 +83,7 @@ def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
             stable_memory_ref TEXT CHECK(
                 stable_memory_ref IS NULL OR length(stable_memory_ref) BETWEEN 1 AND 256
             ),
+            batch_seq INTEGER,
             PRIMARY KEY(batch_id, rel_path),
             FOREIGN KEY(batch_id) REFERENCES derived_batches(batch_id)
         )
@@ -208,6 +209,37 @@ def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS advisory_result_retention "
         "ON write_advisory_results(retention_deadline, terminal_replay_until)"
+    )
+    # Coverage asks "which later batch carries this path?". The batch's store
+    # sequence on each path row lets that seek by path and sequence instead of
+    # walking every later receipt, which are never pruned. A trigger fills it,
+    # so every writer -- an older build after a rollback included -- keeps it.
+    path_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(derived_batch_paths)")
+    }
+    if "batch_seq" not in path_columns:
+        conn.execute("ALTER TABLE derived_batch_paths ADD COLUMN batch_seq INTEGER")
+        conn.execute(
+            "UPDATE derived_batch_paths SET batch_seq = (SELECT b.rowid "
+            "FROM derived_batches AS b WHERE b.batch_id = derived_batch_paths.batch_id)"
+        )
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS derived_paths_sequence_fill "
+        "AFTER INSERT ON derived_batch_paths WHEN NEW.batch_seq IS NULL BEGIN "
+        "UPDATE derived_batch_paths SET batch_seq = (SELECT b.rowid "
+        "FROM derived_batches AS b WHERE b.batch_id = NEW.batch_id) "
+        "WHERE batch_id = NEW.batch_id AND rel_path = NEW.rel_path; END"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS derived_paths_sequence "
+        "ON derived_batch_paths(rel_path, batch_seq)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS derived_paths_after_sequence "
+        "ON derived_batch_paths(rel_path, after_hash, batch_seq)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS derived_batches_state ON derived_batches(state)"
     )
     advisory_columns = {
         str(row[1]) for row in conn.execute("PRAGMA table_info(write_advisory_results)")

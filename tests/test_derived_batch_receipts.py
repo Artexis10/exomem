@@ -2473,6 +2473,13 @@ def test_accepted_parent_schema_migrates_without_losing_any_custody(
             "SELECT result_id, retention_deadline, terminal_replay_until, "
             "publication_revision, target_rel_path FROM write_advisory_results"
         ).fetchone() == (result_id, 80.0, 90.0, 5, None)
+        # Coverage seeks by path and store sequence, so the migration backfills
+        # each path row's sequence from its batch.
+        assert connection.execute(
+            "SELECT p.batch_seq = b.rowid FROM derived_batch_paths AS p "
+            "JOIN derived_batches AS b ON b.batch_id = p.batch_id "
+            "WHERE p.batch_id = 'accepted-parent'"
+        ).fetchone() == (1,)
 
 
 def test_frozen_protocol_fake_drives_the_store_consumer_lifecycle() -> None:
@@ -3285,3 +3292,119 @@ def test_aborted_batch_stops_consuming_the_bounded_snapshot_limit(
     assert all(
         batch.receipt.batch_id != "aborted-batch" for batch in snapshot.batches
     ), [batch.receipt.batch_id for batch in snapshot.batches]
+
+
+def _vm_steps(connection: sqlite3.Connection, run) -> int:
+    """SQLite virtual-machine steps one query takes: deterministic query cost."""
+    steps = [0]
+
+    def tick() -> int:
+        steps[0] += 1
+        return 0
+
+    connection.set_progress_handler(tick, 1)
+    try:
+        run()
+    finally:
+        connection.set_progress_handler(None, 1)
+    return steps[0]
+
+
+def _coverage_costs(vault: Path, later_batches: int) -> dict[str, int]:
+    """Cost of each coverage query for one old batch under a long receipt history.
+
+    Every later batch carries the shared log page, completed with retired
+    pending custody, as a busy vault's history holds them. The old batch's own
+    page is carried by no later batch.
+    """
+    protocol = _protocol()
+    shared = "Knowledge Base/log.md"
+    unique = "Knowledge Base/Notes/coverage-cost-unique.md"
+    connection = deferred_index._connect(vault, create=True)
+    try:
+        with connection:
+            for index in range(later_batches + 1):
+                batch_id = f"coverage-cost-{index:06d}"
+                connection.execute(
+                    "INSERT INTO derived_batches(schema_version, batch_id, "
+                    "mutation_attempt_digest, canonical_generation, checkpoint_id, "
+                    "state, created_at, updated_at, failure_code) "
+                    "VALUES (1, ?, ?, 'generation', 'checkpoint', ?, ?, ?, NULL)",
+                    (
+                        batch_id,
+                        _hash_bytes(batch_id.encode()),
+                        "reconcile_required" if index == 0 else "completed",
+                        float(index),
+                        float(index),
+                    ),
+                )
+                paths = [shared, unique] if index == 0 else [shared]
+                for rel in paths:
+                    connection.execute(
+                        "INSERT INTO derived_batch_paths(batch_id, rel_path, "
+                        "before_hash, after_hash, stable_memory_ref) "
+                        "VALUES (?, ?, ?, ?, NULL)",
+                        (
+                            batch_id,
+                            rel,
+                            _hash_bytes(f"{batch_id}-{rel}-before".encode()),
+                            _hash_bytes(f"{batch_id}-{rel}-after".encode()),
+                        ),
+                    )
+                    connection.execute(
+                        "INSERT INTO pending_recall_rows(batch_id, rel_path, "
+                        "component_revision, canonical_generation, state, "
+                        "created_at, updated_at) VALUES (?, ?, 1, 'generation', ?, 1, 1)",
+                        (batch_id, rel, "live" if index == 0 else "retired"),
+                    )
+        sequence = int(
+            connection.execute(
+                "SELECT rowid FROM derived_batches WHERE batch_id = ?",
+                ("coverage-cost-000000",),
+            ).fetchone()[0]
+        )
+        never = _hash_bytes(b"bytes no batch wrote")
+        return {
+            "covers_unique_miss": _vm_steps(
+                connection,
+                lambda: protocol._newer_custody_covers_path(connection, sequence, unique),
+            ),
+            "covers_shared_hit": _vm_steps(
+                connection,
+                lambda: protocol._newer_custody_covers_path(connection, sequence, shared),
+            ),
+            "wrote_shared_miss": _vm_steps(
+                connection,
+                lambda: protocol._newer_custody_wrote_bytes(
+                    connection, sequence, shared, never
+                ),
+            ),
+            "stranded_count": _vm_steps(
+                connection,
+                lambda: connection.execute(protocol._STRANDED_BATCHES_SQL).fetchone(),
+            ),
+            "recovering_count": _vm_steps(
+                connection,
+                lambda: connection.execute(protocol._RECOVERING_BATCHES_SQL).fetchone(),
+            ),
+        }
+    finally:
+        connection.close()
+
+
+def test_coverage_and_census_cost_stays_flat_as_receipts_grow(tmp_path: Path) -> None:
+    """Coverage seeks by path and store sequence; the census seeks by state.
+
+    Receipts are never pruned, and these queries run on every drain pass that
+    re-proves a stranded batch -- the coverage ones inside the consistency
+    guard. Their cost must not grow with the receipt history.
+    """
+    small_vault = tmp_path / "small"
+    large_vault = tmp_path / "large"
+    small_vault.mkdir()
+    large_vault.mkdir()
+    small = _coverage_costs(small_vault, 200)
+    large = _coverage_costs(large_vault, 2000)
+
+    for query, cost in small.items():
+        assert large[query] <= cost + 64, (query, cost, large[query])
