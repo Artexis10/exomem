@@ -2929,10 +2929,8 @@ def _relation_candidates(
     corpus: semantic_contract.SemanticCorpusContext,
 ) -> tuple[tuple[RelationCandidate, ...], int]:
     candidates: list[RelationCandidate] = []
-    for direction, facts in (
-        ("inbound", corpus.inbound.get(page.path, ())),
-        ("outbound", corpus.outbound.get(page.path, ())),
-    ):
+    outbound, inbound, _visible = semantic_contract.writer_view_relations(page, corpus)
+    for direction, facts in (("inbound", inbound), ("outbound", outbound)):
         for fact in facts:
             qualification = semantic_contract.qualify_relation(
                 fact, registry=corpus.registry, corpus=corpus

@@ -650,6 +650,107 @@ def test_a_restricted_writers_relations_are_judged_over_its_view(
     assert answers["C"] == answers["B"]
 
 
+_UNIT = "\n\n## Observations\n\n- [operating constraint] Keep retries bounded #reliability\n"
+
+
+def _drafted_fixture() -> tuple[dict[str, str], dict[str, str]]:
+    base = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page(
+            "Alpha", f"Alpha.{_UNIT}\n## Relations\n\n- supports [[{NOTES}/beta]]\n", type="insight"
+        ),
+        f"{NOTES}/beta.md": _page(
+            "Beta", f"Beta.{_UNIT}\n## Relations\n\n- supports [[{NOTES}/alpha]]\n", type="insight"
+        ),
+    }
+    withheld = {
+        f"{WITHHELD_DIR}/memo.md": _page(
+            "Memo", f"Withheld body text.{_UNIT}\n## Relations\n\n- supports [[Nimbus Plan]]\n",
+            type="insight",
+        )
+    }
+    return base, withheld
+
+
+@pytest.mark.parametrize("detail", ["compact", "full"])
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_draft_is_judged_without_what_withheld_pages_author(
+    tmp_path: Path, audience: str, detail: str
+) -> None:
+    """A relation a withheld page authors toward the draft, and a body link only
+    a withheld page answers, neither qualify the draft nor show in its review."""
+    base, withheld = _drafted_fixture()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    drafts = {
+        "inbound": ("Nimbus Plan", f"Draft page.{_UNIT}"),
+        "body-link": ("Other Guess", f"Draft page, see [[Memo]].{_UNIT}"),
+    }
+
+    def drafted(vault: Path, title: str, content: str) -> str:
+        answer = _call(
+            vault,
+            _principal(audience),
+            "remember",
+            content=content,
+            title=title,
+            note_type="insight",
+            validate_only=True,
+            response_detail=detail,
+        )
+        answer.pop("draft_token", None)  # carries its issue time
+        return _VOLATILE_TEXT.sub("<v>", _text(answer))
+
+    for label, (title, content) in drafts.items():
+        answers = {variant: drafted(vault, title, content) for variant, vault in vaults.items()}
+
+        assert '"__error__"' not in answers["A"], (label, answers["A"])
+        assert answers["A"] == answers["B"], label
+        assert answers["C"] == answers["B"], label
+
+
+def test_the_owner_still_judges_a_draft_by_every_page(tmp_path: Path) -> None:
+    base, withheld = _drafted_fixture()
+    vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")
+
+    answer = _call(
+        vault, None, "remember", content=f"Draft page.{_UNIT}", title="Nimbus Plan",
+        note_type="insight", validate_only=True, response_detail="full",
+    )
+
+    assert answer["committable_without_review"] is True, answer
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_write_builds_the_owners_corpus(tmp_path: Path, audience: str) -> None:
+    """The corpus a write builds also feeds the graph it publishes, so the
+    written page's facts resolve over every page whoever writes it; only the
+    judgement of the draft is made over the writer's view."""
+    from exomem import semantic_contract
+
+    base, withheld = _writer_fixture()
+    vault = _materialize(tmp_path / "vault", {**base, **withheld}, audience)
+    body = (
+        "Probe body, see [[Hidden Plan]] and [[beta]].\n\n## Relations\n\n"
+        f"- supports [[Hidden Plan]]\n- supports [[{NOTES}/other]]{_UNIT}"
+    )
+    path = f"{NOTES}/probe-page.md"
+    source = _page("Probe Page", body, type="insight")
+
+    def facts(principal: RequestPrincipal | None) -> list[dict[str, Any]]:
+        _reset()
+        with library_scope() if principal is None else request_scope(principal):
+            corpus = semantic_contract.build_corpus_context(vault)
+            state = semantic_contract.build_page_state(
+                vault, path, source, relation_registry=corpus.registry
+            )
+            after = corpus.with_candidate(state)
+        return [fact.as_dict() for fact in after.relation_facts if fact.authored_path == path]
+
+    owner = facts(None)
+    assert any(f"{WITHHELD_DIR}/project-zeta-plan" in _text(fact) for fact in owner)
+    assert facts(_principal(audience)) == owner
+
+
 def test_the_owner_writer_still_resolves_over_every_page(tmp_path: Path) -> None:
     base, withheld = _writer_fixture()
     vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")

@@ -1048,12 +1048,6 @@ class SemanticCorpusContext:
         )
 
     def with_candidate(self, state: SemanticPageState) -> SemanticCorpusContext:
-        # The written page's own links resolve over the writer's view, as its
-        # body links do when it is written: for a writer other than the owner
-        # a link only withheld pages answer is unresolved, exactly as without
-        # them. Every other page resolves as before.
-        visible = vault.writer_link_visibility(self.vault_root)
-        writer_view = None if visible is None else (state.path, visible)
         current = self.pages.get(state.path)
         if current is not None and (
             current.title,
@@ -1072,7 +1066,7 @@ class SemanticCorpusContext:
             state.language_registry_hash,
             state.relation_registry_hash,
         ):
-            return _context_with_stable_topology_candidate(self, state, writer_view=writer_view)
+            return _context_with_stable_topology_candidate(self, state)
         pages = dict(self.pages)
         pages[state.path] = state
         return _context_from_state_map(
@@ -1082,7 +1076,6 @@ class SemanticCorpusContext:
             self.identity_census.with_page(
                 state, casefold_paths=vault.vault_casefolds(self.vault_root)
             ),
-            writer_view=writer_view,
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -3096,15 +3089,11 @@ def _context_from_state_map(
     states: Mapping[str, SemanticPageState],
     registry: relation_registry.RelationRegistry,
     identity_census: StableIdentityCensus,
-    *,
-    writer_view: tuple[str, Callable[[str], bool]] | None = None,
 ) -> SemanticCorpusContext:
     ordered_pages = {path: states[path] for path in sorted(states)}
     entries = tuple((path, ordered_pages[path].title) for path in ordered_pages)
     resolver = vault.WikilinkResolver.from_entries(root, entries)
-    facts = _derive_relation_facts(
-        root, ordered_pages, resolver, registry, writer_view=writer_view
-    )
+    facts = _derive_relation_facts(root, ordered_pages, resolver, registry)
     return _context_from_resolved_state(
         root,
         ordered_pages,
@@ -3119,8 +3108,6 @@ def _context_from_state_map(
 def _context_with_stable_topology_candidate(
     context: SemanticCorpusContext,
     state: SemanticPageState,
-    *,
-    writer_view: tuple[str, Callable[[str], bool]] | None = None,
 ) -> SemanticCorpusContext:
     """Replace one page without re-resolving every authored corpus fact."""
     pages = dict(context.pages)
@@ -3132,7 +3119,6 @@ def _context_with_stable_topology_candidate(
         resolver,
         context.registry,
         target_states=pages,
-        writer_view=writer_view,
     )
     retained_facts = (fact for fact in context.relation_facts if fact.authored_path != state.path)
     facts = tuple(sorted((*retained_facts, *candidate_facts), key=lambda item: item.identity))
@@ -3633,6 +3619,7 @@ class _WikilinkResolverView:
 def _qualifying_body_wikilink_targets(
     page: SemanticPageState,
     corpus: SemanticCorpusContext,
+    visible: Callable[[str], bool] | None = None,
 ) -> tuple[str, ...]:
     """Resolve body links by normalized set membership without relation facts."""
     resolver = _WikilinkResolverView(
@@ -3649,6 +3636,7 @@ def _qualifying_body_wikilink_targets(
                 corpus.vault_root,
                 resolver=resolver,  # type: ignore[arg-type]
                 strict=True,
+                visible=visible,
             )
         except (vault.AmbiguousWikilinkError, vault.UnresolvedWikilinkError):
             continue
@@ -3696,6 +3684,56 @@ def is_relation_review_current(
     )
 
 
+def writer_view_relations(
+    page: SemanticPageState,
+    corpus: SemanticCorpusContext,
+) -> tuple[tuple[RelationFact, ...], tuple[RelationFact, ...], Callable[[str], bool] | None]:
+    """The page's outbound and inbound facts as the current writer may judge them.
+
+    For the owner, an ungoverned vault, or a page the writer may not see, the
+    corpus facts as they stand and `None`. For any other writer judging a page
+    it may see: the page's own targets resolve only over the pages that writer
+    may see, and a fact a page withheld from it authors is dropped, so the
+    judgement reads as it would without those pages. The corpus itself, which
+    also feeds the published graph, keeps every fact.
+    """
+    outbound = corpus.outbound.get(page.path, ())
+    inbound = corpus.inbound.get(page.path, ())
+    visible = vault.writer_link_visibility(corpus.vault_root)
+    if visible is None or not visible(page.path):
+        return outbound, inbound, None
+    resolver = vault.WikilinkResolver.from_entries(corpus.vault_root, corpus.resolver_entries)
+    own = _derive_relation_facts(
+        corpus.vault_root,
+        {page.path: page},
+        resolver,
+        corpus.registry,
+        target_states=corpus.pages,
+        writer_view=(page.path, visible),
+    )
+
+    def _kept(facts: Iterable[RelationFact]) -> list[RelationFact]:
+        return [
+            fact for fact in facts if fact.authored_path != page.path and visible(fact.authored_path)
+        ]
+
+    return (
+        tuple(
+            sorted(
+                (*_kept(outbound), *(f for f in own if f.logical_source_path == page.path)),
+                key=lambda item: item.identity,
+            )
+        ),
+        tuple(
+            sorted(
+                (*_kept(inbound), *(f for f in own if f.logical_target_path == page.path)),
+                key=lambda item: item.identity,
+            )
+        ),
+        visible,
+    )
+
+
 def _relation_disposition(
     page: SemanticPageState,
     corpus: SemanticCorpusContext,
@@ -3706,9 +3744,10 @@ def _relation_disposition(
     before_corpus: SemanticCorpusContext,
     mode: str,
 ) -> RelationDisposition:
+    outbound, inbound, visible = writer_view_relations(page, corpus)
     directional: list[tuple[str, RelationFact]] = []
-    directional.extend(("outbound", fact) for fact in corpus.outbound.get(page.path, ()))
-    directional.extend(("inbound", fact) for fact in corpus.inbound.get(page.path, ()))
+    directional.extend(("outbound", fact) for fact in outbound)
+    directional.extend(("inbound", fact) for fact in inbound)
     rejected: list[RejectedRelationFact] = []
     qualifying: list[tuple[str, RelationFact]] = []
     for direction, fact in sorted(directional, key=lambda item: (item[0], item[1].identity)):
@@ -3720,6 +3759,8 @@ def _relation_disposition(
     review_is_current = review is not None and is_relation_review_current(review, page, corpus)
     stale_review = review is not None and not review_is_current
     other_governed = corpus.eligible_governed_paths - {page.path}
+    if visible is not None:
+        other_governed = frozenset(path for path in other_governed if visible(path))
 
     def _satisfied_actions() -> tuple[str, ...]:
         if stale_review:
@@ -3745,7 +3786,7 @@ def _relation_disposition(
     # automatically-written back-references satisfy the gate and make it vacuous.
     connectivity = [
         fact
-        for fact in corpus.outbound.get(page.path, ())
+        for fact in outbound
         if qualify_connectivity(fact, registry=corpus.registry, corpus=corpus).qualifies
     ]
     if connectivity:
@@ -3759,7 +3800,7 @@ def _relation_disposition(
             actions=_satisfied_actions(),
             qualifying_signal="connectivity",
         )
-    body_wikilink_targets = _qualifying_body_wikilink_targets(page, corpus)
+    body_wikilink_targets = _qualifying_body_wikilink_targets(page, corpus, visible)
     if body_wikilink_targets:
         return RelationDisposition(
             kind="qualifying_relation",
