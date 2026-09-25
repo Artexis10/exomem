@@ -93,12 +93,19 @@ def test_end_to_end_on_a_vault_with_no_products_or_systems_folder(
     assert roles_saved["valid"] is True, roles_saved
     assert not roles_saved["findings"]
 
-    # Neither save touched anything but its own override file.
+    # Neither save touched anything but its own override file and the
+    # history of what it replaced.
     assert context_roles.override_path(root).is_file()
     assert ac.override_path(root).is_file()
-    assert set((root / "Knowledge Base" / "_Schema").iterdir()) == {
+    schema = root / "Knowledge Base" / "_Schema"
+    assert set(schema.iterdir()) == {
         context_roles.override_path(root),
         ac.override_path(root),
+        schema / "history",
+    }
+    assert {path.parent.name for path in (schema / "history").rglob("*.yaml")} == {
+        "context-roles",
+        "activation-conventions",
     }
 
     effective_roles = context_roles.load_roles(root)

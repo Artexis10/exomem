@@ -357,7 +357,15 @@ def load_conventions(
     return registry
 
 
-def save_conventions(vault_root: Path, proposal: Any, *, expected_hash: str) -> dict[str, Any]:
+def save_conventions(
+    vault_root: Path,
+    proposal: Any,
+    *,
+    expected_hash: str,
+    why: str | None = None,
+    rendered: str | None = None,
+    operation: str = "save-conventions",
+) -> dict[str, Any]:
     """Save one reviewed, complete activation-conventions override document.
 
     The proposal is the raw override document -- the same override grammar as
@@ -369,6 +377,10 @@ def save_conventions(vault_root: Path, proposal: Any, *, expected_hash: str) -> 
     Callers are expected to have already rejected a proposal with any
     finding (`op_schema_memory` does, before calling this); the check here
     is defence in depth, matching `context_roles.save_roles`.
+
+    The save, a snapshot of the bytes it replaced and a `log.md` entry naming
+    `why` and both hashes are one batch (`registry_history.commit`);
+    `rendered` is a restore's verbatim version bytes.
     """
     current = load_conventions(vault_root)
     if current.content_hash != expected_hash:
@@ -381,17 +393,26 @@ def save_conventions(vault_root: Path, proposal: Any, *, expected_hash: str) -> 
             f"INVALID_ACTIVATION_CONVENTIONS_REGISTRY: {[dict(item) for item in candidate.findings]!r}"
         )
     path = override_path(vault_root)
-    rendered = yaml.safe_dump(proposal, sort_keys=True, allow_unicode=True)
-    from . import vault as vault_module
+    if rendered is None:
+        rendered = yaml.safe_dump(proposal, sort_keys=True, allow_unicode=True)
+    from . import registry_history
 
-    vault_module.batch_atomic_write(
-        [vault_module.PlannedWrite(path=path, content=rendered)], vault_root=Path(vault_root)
+    history = registry_history.commit(
+        Path(vault_root),
+        path=path,
+        stem=REGISTRY_FILENAME.removesuffix(".yaml"),
+        rendered=rendered,
+        operation=operation,
+        why=why,
+        before_hash=current.content_hash,
+        after_hash=candidate.content_hash,
     )
     _CACHE.pop(path, None)
     return {
         "path": path.relative_to(vault_root).as_posix(),
         "content_hash": candidate.content_hash,
         "previous_hash": current.content_hash,
+        "history": history,
         "created": current.source == "shipped",
     }
 

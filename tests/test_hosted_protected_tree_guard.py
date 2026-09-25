@@ -1498,20 +1498,27 @@ def test_the_governed_save_writes_only_the_override_file_a_hosted_cell_would_see
 
     # `_cell` already seeds a starter copy of both files (mirroring every other
     # scaffolded `_Schema` document, as a customisation starting point), so the
-    # governed save changes their CONTENT rather than adding new paths -- the
-    # claim is exactly the two expected keys changed and nothing else moved.
+    # governed save changes their CONTENT -- exactly the two expected keys
+    # changed -- and adds only the history of what each save replaced.
     trees_after = _protected_tree_state(root)
-    assert set(trees_after) == set(trees_before)
+    assert set(trees_before) <= set(trees_after)
+    added = set(trees_after) - set(trees_before)
+    history_root = f"{_kb()}/_Schema/history"
+    assert added and all(key.startswith(history_root) for key in added)
     changed = {key for key in trees_before if trees_after[key] != trees_before[key]}
     assert changed == {
         f"{_kb()}/_Schema/{context_roles_module.REGISTRY_FILENAME}",
         f"{_kb()}/_Schema/{activation_conventions_module.REGISTRY_FILENAME}",
     }
+    snapshots = sorted(key for key in added if key.endswith(".yaml"))
+    assert len(snapshots) == 2
 
-    # The same cell's direct file tools remain refused for both new files.
+    # The same cell's direct file tools remain refused for both new files and
+    # for the history the saves kept.
     for target in (
         context_roles_module.override_path(root).relative_to(root).as_posix(),
         activation_conventions_module.override_path(root).relative_to(root).as_posix(),
+        *snapshots,
     ):
         refused = _call(app, config, "edit_memory", _guarded_body("edit_memory", target))
         assert refused.status_code == 403, refused.text

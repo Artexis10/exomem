@@ -109,6 +109,7 @@ from . import reconcile as reconcile_module
 from . import record_memory as record_memory_module
 from . import recover_from_trash as recover_from_trash_module
 from . import referent_runtime as referent_runtime_module
+from . import registry_history as registry_history_module
 from . import relation_census as relation_census_module
 from . import relation_queue as relation_queue_module
 from . import relation_registry as relation_registry_module
@@ -9789,6 +9790,7 @@ def op_schema_memory(
     vocabulary_ref: str | None = None,
     vocabulary_fingerprint: str | None = None,
     detail: Literal["counts", "keys"] | None = None,
+    version: str | None = None,
 ) -> dict:
     """Infer, validate, diff, or save governed memory schemas and workflow contracts.
 
@@ -9816,8 +9818,11 @@ def op_schema_memory(
             the current registry's content_hash; `diff` compares a proposal against
             the effective registry; `save-roles`/`save-conventions` (matched to their
             subject) commit a reviewed proposal with why and expected_hash, refusing
-            a proposal that has any finding; `infer` is refused for both, since the
-            server does not propose conventions or roles.
+            a proposal that has any finding; `history` lists the kept versions
+            (newest first: time, why, before and after hash); `restore` reinstates
+            one `version` with why and expected_hash, validated like a save; `infer`
+            is refused for both, since the server does not propose conventions or
+            roles.
         name: A saved workflow key for inspect/refresh, validate as an alternative to
             proposal, resolve (or `@standalone`), and optional preview/save update.
         subject: `contract`, `categories`, `entity-types`, `relations`,
@@ -9858,6 +9863,8 @@ def op_schema_memory(
         vocabulary_fingerprint: Exact reviewed vocabulary fingerprint; grants no write permission.
         detail: Relation census detail: `counts` (default) or `keys`, which adds
             predicate keys and counts.
+        version: A kept registry version from `history`, for `restore` on
+            `context-roles` or `activation-conventions`.
 
     Returns:
         A structured profile/proposal, validation report, contract diff, or workflow result.
@@ -9931,6 +9938,7 @@ def op_schema_memory(
             vault_root,
             subject=subject,
             operation=operation,
+            version=version,
             proposal=proposal,
             why=why,
             expected_hash=expected_hash,
@@ -10625,6 +10633,7 @@ def _governed_registry_schema_operation(
     *,
     subject: str,
     operation: str,
+    version: str | None = None,
     proposal: dict[str, Any] | None,
     why: str | None,
     expected_hash: str | None,
@@ -10679,9 +10688,10 @@ def _governed_registry_schema_operation(
             f"INVALID_SCHEMA_OPERATION: infer is refused for {subject}; "
             "the server does not propose conventions or roles"
         )
-    if operation not in ("validate", "diff", save_operation):
+    if operation not in ("validate", "diff", save_operation, "history", "restore"):
         raise ValueError(
-            f"INVALID_SCHEMA_OPERATION: {subject} accepts validate, diff, or {save_operation}"
+            f"INVALID_SCHEMA_OPERATION: {subject} accepts validate, diff, {save_operation}, "
+            "history, or restore"
         )
     if (
         save
@@ -10699,6 +10709,60 @@ def _governed_registry_schema_operation(
         raise ValueError(
             f"INVALID_SCHEMA_ARGUMENT: {subject} accepts only proposal, why, and expected_hash"
         )
+    stem = "context-roles" if subject == "context-roles" else "activation-conventions"
+    if version is not None and operation != "restore":
+        raise ValueError("INVALID_SCHEMA_ARGUMENT: version applies only to restore")
+    if operation == "history":
+        if proposal is not None or why is not None or expected_hash is not None:
+            raise ValueError(
+                f"INVALID_SCHEMA_ARGUMENT: {subject} history takes no proposal, why, "
+                "or expected_hash"
+            )
+        return {
+            "subject": subject,
+            "content_hash": getattr(load_fn(vault_root), hash_attribute),
+            "versions": registry_history_module.versions(vault_root, stem=stem),
+        }
+    if operation == "restore":
+        if proposal is not None:
+            raise ValueError("INVALID_SCHEMA_ARGUMENT: restore takes a version, not a proposal")
+        if not version:
+            raise ValueError("INVALID_SCHEMA_ARGUMENT: restore requires version")
+        if not why or not why.strip():
+            raise ValueError("WHY_REQUIRED: restore requires why")
+        if not expected_hash:
+            raise ValueError("EXPECTED_HASH_REQUIRED: restore requires expected_hash")
+        text = registry_history_module.read_version(vault_root, stem=stem, version=version)
+        import yaml
+
+        try:
+            data = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            raise ValueError(f"UNKNOWN_REGISTRY_VERSION: {version!r} does not parse") from exc
+        candidate = load_fn(vault_root, proposal=data)
+        if candidate.findings:
+            return {
+                "subject": subject,
+                "valid": False,
+                "findings": [dict(item) for item in candidate.findings],
+                "saved": None,
+            }
+        saved = save_fn(
+            vault_root,
+            data,
+            expected_hash=expected_hash,
+            why=why.strip(),
+            rendered=text,
+            operation="restore",
+        )
+        return {
+            "subject": subject,
+            "valid": True,
+            "findings": [],
+            "why": why.strip(),
+            "restored": version,
+            "saved": saved,
+        }
     if proposal is None or not isinstance(proposal, dict):
         raise ValueError(
             f"INCOMPLETE_REGISTRY_PROPOSAL: {operation} requires a reviewed proposal for {subject}"
@@ -10749,7 +10813,9 @@ def _governed_registry_schema_operation(
             "findings": [dict(item) for item in candidate.findings],
             "saved": None,
         }
-    saved = save_fn(vault_root, proposal, expected_hash=expected_hash)
+    saved = save_fn(
+        vault_root, proposal, expected_hash=expected_hash, why=why.strip(), operation=save_operation
+    )
     return {
         "subject": subject,
         "valid": True,

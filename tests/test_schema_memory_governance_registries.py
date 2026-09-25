@@ -146,7 +146,7 @@ def test_diff_conventions_against_the_effective_registry(bare_vault: Path) -> No
 # --------------------------------------------------------------------------- #
 
 
-def test_save_roles_writes_only_the_override_file_through_the_canonical_batch(
+def test_save_roles_writes_the_override_and_its_snapshot_through_the_canonical_batch(
     bare_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[list[vault.PlannedWrite]] = []
@@ -169,14 +169,18 @@ def test_save_roles_writes_only_the_override_file_through_the_canonical_batch(
 
     assert result["valid"] is True
     assert result["saved"]["previous_hash"] == before_hash
+    # One canonical batch: the override and a snapshot of what it replaced
+    # (this bare vault has no log.md to prepend to), nothing else.
     assert len(calls) == 1
-    assert len(calls[0]) == 1
-    write = calls[0][0]
+    assert len(calls[0]) == 2
+    write, snapshot = calls[0]
     assert write.path == context_roles.override_path(bare_vault)
+    assert snapshot.create_only is True
+    assert snapshot.path.parent.parent == bare_vault / "Knowledge Base" / "_Schema" / "history"
     assert yaml.safe_load(write.content) == _valid_roles_proposal()
 
 
-def test_save_conventions_writes_only_the_override_file_through_the_canonical_batch(
+def test_save_conventions_writes_the_override_and_its_snapshot_through_the_canonical_batch(
     bare_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[list[vault.PlannedWrite]] = []
@@ -199,10 +203,14 @@ def test_save_conventions_writes_only_the_override_file_through_the_canonical_ba
 
     assert result["valid"] is True
     assert result["saved"]["previous_hash"] == before_hash
+    # One canonical batch: the override and a snapshot of what it replaced
+    # (this bare vault has no log.md to prepend to), nothing else.
     assert len(calls) == 1
-    assert len(calls[0]) == 1
-    write = calls[0][0]
+    assert len(calls[0]) == 2
+    write, snapshot = calls[0]
     assert write.path == ac.override_path(bare_vault)
+    assert snapshot.create_only is True
+    assert snapshot.path.parent.parent == bare_vault / "Knowledge Base" / "_Schema" / "history"
     assert yaml.safe_load(write.content) == _valid_conventions_proposal()
 
 

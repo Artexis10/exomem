@@ -4627,6 +4627,8 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "census": "structure",
         "save-roles": "mutation",
         "save-conventions": "mutation",
+        "history": "structure",
+        "restore": "mutation",
     },
     ("record_memory", "action"): {
         "describe": "structure",

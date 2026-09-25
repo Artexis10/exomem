@@ -250,7 +250,15 @@ def load_roles(vault_root: Path | None = None, *, proposal: Any | None = None) -
     return registry
 
 
-def save_roles(vault_root: Path, proposal: Any, *, expected_hash: str) -> dict[str, Any]:
+def save_roles(
+    vault_root: Path,
+    proposal: Any,
+    *,
+    expected_hash: str,
+    why: str | None = None,
+    rendered: str | None = None,
+    operation: str = "save-roles",
+) -> dict[str, Any]:
     """Save one reviewed, complete context-role override document.
 
     The proposal is the raw override document -- the same shape as the file
@@ -272,6 +280,11 @@ def save_roles(vault_root: Path, proposal: Any, *, expected_hash: str) -> dict[s
     Callers are expected to have already rejected a proposal with any
     finding (`op_schema_memory` does, before calling this); the check here
     is defence in depth, matching `semantic_language_registry.save_registry`.
+
+    The save, a snapshot of the bytes it replaced and a `log.md` entry naming
+    `why` and both hashes are one batch (`registry_history.commit`).
+    `rendered` is a restore's verbatim version bytes, so a restored file
+    reproduces the exact `roles_hash` it had.
     """
     current = load_roles(vault_root)
     if current.roles_hash != expected_hash:
@@ -284,17 +297,29 @@ def save_roles(vault_root: Path, proposal: Any, *, expected_hash: str) -> dict[s
             f"INVALID_CONTEXT_ROLE_REGISTRY: {[dict(item) for item in candidate.findings]!r}"
         )
     path = override_path(vault_root)
-    rendered = yaml.safe_dump(proposal, sort_keys=True)
-    from . import vault as vault_module
+    if rendered is None:
+        rendered = yaml.safe_dump(proposal, sort_keys=True)
+    # The hash the file on disk will carry: over the rendered bytes, which
+    # for a verbatim restore differ from `yaml.safe_dump(proposal)`.
+    after_hash = _hash(f"{shipped_registry().roles_hash}:{_hash(rendered)}")
+    from . import registry_history
 
-    vault_module.batch_atomic_write(
-        [vault_module.PlannedWrite(path=path, content=rendered)], vault_root=Path(vault_root)
+    history = registry_history.commit(
+        Path(vault_root),
+        path=path,
+        stem=REGISTRY_FILENAME.removesuffix(".yaml"),
+        rendered=rendered,
+        operation=operation,
+        why=why,
+        before_hash=current.roles_hash,
+        after_hash=after_hash,
     )
     _CACHE.pop(path, None)
     return {
         "path": path.relative_to(vault_root).as_posix(),
-        "content_hash": candidate.roles_hash,
+        "content_hash": after_hash,
         "previous_hash": current.roles_hash,
+        "history": history,
         "created": current.source == "shipped",
     }
 
