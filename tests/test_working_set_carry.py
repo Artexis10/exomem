@@ -2445,3 +2445,16 @@ def test_the_carry_looks_up_rarity_only_for_stems_that_can_pair(
     working_set_runtime.carry_candidates(tmp_path, "the girvan 東京タワー slot window")
     assert asked == [("girvan", "slot", "window")]
 
+
+def test_fullwidth_halfwidth_and_ethiopic_sentence_ends_end_the_window() -> None:
+    """The fullwidth full stop and semicolon, the halfwidth ideographic full
+    stop and the Ethiopic full stop end a sentence as their ASCII and CJK
+    kin do. The window is split on the raw turn, before NFKC folds any of
+    them."""
+    for breaker in ("．", "｡", "；", "።"):
+        assert working_set_runtime.adjacent_rare_pairs(
+            f"the lisbon run{breaker} the harbour run", ("lisbon", "harbour")
+        ) == (), repr(breaker)
+    assert working_set_runtime.adjacent_rare_pairs(
+        "the lisbon harbour run", ("lisbon", "harbour")
+    ) == (("harbour", "lisbon"),)

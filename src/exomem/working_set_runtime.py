@@ -709,9 +709,11 @@ def pairable_stems(turn: str) -> tuple[str, ...]:
 #: rather than between two of them. The split reads the raw turn, so each
 #: script's own sentence end is named: the Devanagari danda and double
 #: danda, the Greek question mark, the Arabic question mark and full stop,
-#: the Armenian full stop, and the CJK full stop and fullwidth ! and ?.
+#: the Armenian full stop, the Ethiopic full stop, the CJK full stop, the
+#: halfwidth ideographic full stop, and the fullwidth full stop, semicolon,
+#: ! and ?.
 _SENTENCE_BREAK = re.compile(
-    "[.!?;\n\r।॥;؟۔։。！？]+"
+    "[.!?;\n\r।॥;؟۔։።。｡．；！？]+"
 )
 #: The joiners `working_set_index.tokens_of` admits inside a term. The parts
 #: they join are separate words of one compound.
