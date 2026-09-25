@@ -621,15 +621,17 @@ def _episode_revision_count(key: str) -> int | None:
     binding it as a default parameter, so a test (or a future tuning knob)
     that reassigns the module constant actually changes the bound used here.
     """
-    api_key, source = _resolve_rest_key()
-    if not api_key or (source == "file" and _rest_host() not in _LOOPBACK_HOSTS):
-        return None
-    port = _rest_port()
-    if port is None:
-        return None
     timeout = _EPISODE_DOOR_TIMEOUT_SECONDS
 
     def _call() -> int | None:
+        # Key resolution may read `service.env`, which can block (a FIFO, a
+        # stalled mount), so it runs inside the bound with the request.
+        api_key, source = _resolve_rest_key()
+        if not api_key or (source == "file" and _rest_host() not in _LOOPBACK_HOSTS):
+            return None
+        port = _rest_port()
+        if port is None:
+            return None
         body = json.dumps({"action": "inspect", "episode": key}).encode("utf-8")
         req = urllib.request.Request(
             f"http://{_rest_host()}:{port}/api/episode_memory",

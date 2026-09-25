@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import threading
 import time
 from pathlib import Path
 
@@ -449,6 +451,36 @@ def test_a_transcript_record_still_counts_without_consulting_the_door(
         name="r2.jsonl",
     )
     assert not _is_episode_ask(_stop(monkeypatch, capsys, recorded))
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs a FIFO")
+def test_a_blocking_service_env_stays_within_the_door_timeout(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Reading the REST key from `service.env` is part of the door check, so a
+    service env that never yields (a FIFO nobody writes) is bounded too."""
+    monkeypatch.delenv("EXOMEM_REST_API_KEY", raising=False)
+    fifo = tmp_path / "service.env"
+    os.mkfifo(fifo)
+    monkeypatch.setenv("EXOMEM_SERVICE_ENV", str(fifo))
+    monkeypatch.setattr(hook, "_EPISODE_DOOR_TIMEOUT_SECONDS", 0.05)
+
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    _stops(monkeypatch, capsys, tmp_path, k - 1)
+    transcript = _transcript(tmp_path, SUBSTANTIVE, name="fifo.jsonl")
+    outcome: list = []
+    worker = threading.Thread(
+        target=lambda: outcome.append(_stop(monkeypatch, capsys, transcript)), daemon=True
+    )
+    worker.start()
+    worker.join(2.0)
+    if worker.is_alive():
+        # Release the blocked reader so the test process can exit.
+        with open(fifo, "w", encoding="utf-8"):
+            pass
+        worker.join(2.0)
+        pytest.fail("the Stop blocked on reading service.env")
+    assert _is_episode_ask(outcome[0])
 
 
 def _counting_door(monkeypatch: pytest.MonkeyPatch) -> dict:
