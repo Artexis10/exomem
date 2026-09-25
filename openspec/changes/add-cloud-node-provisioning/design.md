@@ -110,7 +110,7 @@ It carries no `cluster-init`, server token, etcd options, apiserver arguments, a
 
 **Secure token.** The agent's token is `K10<sha256 of server-ca.crt>::node:<k3s_agent_token>`. The hash comes from `stat` with a SHA-256 checksum, delegated to the server, so no file content leaves the server. This pins the cluster CA, and a machine on the subnet cannot impersonate the server.
 
-**Removed hosts do not rejoin.** An agent host carrying the removal marker `/etc/rancher/k3s/removed`, which `remove-agent.yml` writes, fails the agent play before any change. A `site.yml` run between removal and the destroy therefore cannot re-register it.
+**Removed hosts do not rejoin.** `remove-agent.yml` writes the removal marker `/etc/rancher/k3s/removed`. `site.yml` then skips a host carrying it, with a warning, in both the hardening play and the agent play. A run between removal and the destroy therefore neither changes that host nor re-registers it, and it still converges every other node. The remaining nodes may re-admit the removed address, which is inert because that host runs nothing. The first run after the destroy and inventory regeneration prunes it.
 
 **Join postconditions.** A `k3s-agent.service` unit runs `k3s agent --config …`. After it starts, the play asks the server, until each holds:
 1. the node reports `Ready`;
@@ -144,32 +144,30 @@ Each rule carries the fixed comment `Exomem K3s inter-node`. Every run reads the
 
    `cell PVCs in exo-cell- namespaces ≤ Σ (allocatable − k3s_remove_headroom − non-cell attachments) − non-cell attachments on the target`
 
-   `k3s_remove_headroom` defaults to 5, the chart's `capacity.headroom`. PVCs are counted rather than attachments, because stopped cells still own their volumes. The preflight runs immediately before cordoning, and refusal changes nothing.
+   `k3s_remove_headroom` defaults to 5, the chart's `capacity.headroom`. As in cellctl, a node's slots are not clamped at zero, so the sum equals what cellctl publishes. PVCs are counted rather than attachments, because stopped cells still own their volumes. The preflight runs immediately before cordoning, and refusal changes nothing.
 4. **Cordon, then drain.** A present node is always cordoned. If it is also Ready, it is drained with `--ignore-daemonsets --delete-emptydir-data --timeout`, never `--force`. A pod with no controller stops the drain for a human.
 5. **Stop the agent completely.** The unit uses `KillMode=process`, as the server's does, so stopping it leaves pod containers running. The step therefore does what K3s's `k3s-killall.sh` does:
    - stop and disable `k3s-agent`;
-   - kill every `containerd-shim`;
+   - kill every `containerd-shim`, then every process still in a `kubepods` cgroup (a container outlives its shim), and wait until none remain;
+   - delete the agent configuration, which carries the agent token;
    - unmount everything under `/var/lib/kubelet/pods`, then every CSI `globalmount` under `/var/lib/kubelet/plugins/kubernetes.io/csi`;
    - close each dm-crypt mapping that the encrypted storage class opened;
    - write the removal marker.
 
-   The stop counts as confirmed only on a reachable host showing no shim process, no pod or CSI volume mount, and no open crypt mapping except ones backing a mount outside kubelet, or when the operator passes `k3s_remove_host_gone=true` after verifying that the server is destroyed. An unreachable host without that confirmation fails the play before anything is deleted. A live agent is therefore never deleted and left to re-register, and a volume is never force-detached from a running writer.
+   The stop counts as confirmed only on a reachable host showing no shim process, no process in a pod cgroup, no pod or CSI volume mount, and no open crypt mapping except ones backing a mount outside kubelet, or when the operator passes `k3s_remove_host_gone=true` after verifying that the server is destroyed. The target is pinged first. An unreachable host simply stays unconfirmed, so a lone dead agent never aborts the run. Without the operator's confirmation, the delete play then fails before anything is deleted. A live agent is therefore never deleted and left to re-register, and a volume is never force-detached from a running writer.
 6. **Force the stragglers off.** With the agent confirmed stopped, it applies the `node.kubernetes.io/out-of-service=nodeshutdown:NoExecute` taint. It then waits until no VolumeAttachment names the node. That covers the NotReady rerun case, where evicted pods on a dead kubelet would otherwise stay Terminating.
 7. **Delete.** It deletes the Node with `--ignore-not-found`, waits, and re-checks that the Node stays absent.
 8. **Revoke.** It converges the inter-node UFW rules on the remaining K3s nodes, excluding the target's address.
 
 If the Node is already absent, the playbook skips step 1's label check and steps 3, 4, 6 and 7. It still stops the agent (5) and converges the firewall (8). The operator then removes the map entry and plans the destroy. A rerun is meaningful only until that destroy: afterwards the regenerated inventory no longer holds the target, and step 1 refuses it.
 
-### N7. Traefik is pinned to the control-plane node and rolls without surge
+### N7. Traefik is pinned to the control-plane node
 
-The platform chart sets:
+The platform chart sets `traefik.nodeSelector: {node-role.kubernetes.io/control-plane: "true"}`. K3s applies that label to server nodes. The DNS record for D11's hostPort entrypoint will target the server's stable primary IP, so the pin keeps ingress on that address.
 
-- `traefik.nodeSelector: {node-role.kubernetes.io/control-plane: "true"}`. K3s applies that label to server nodes.
-- `traefik.updateStrategy`: RollingUpdate with `maxSurge: 0` and `maxUnavailable: 1`.
+The pin also constrains scheduling on `main`, harmlessly: with one node, Traefik already runs there. The line sits outside the `ports.websecure` hunk PR #1368 edits.
 
-With one replica on `hostPort: 443`, pinned to one node, a surge pod could never schedule, and the rollout would hang. The DNS record for D11's hostPort entrypoint will target the server's stable primary IP, so the pin keeps ingress on that address.
-
-The pin also constrains scheduling on `main`, harmlessly: with one node, Traefik already runs there. The lines sit outside the `ports.websecure` hunk PR #1368 edits.
+**Rollout strategy belongs to D11.** A single `hostPort: 443` replica on one node cannot roll with a surge pod, so D11 needs `maxSurge: 0`. On `main`, Traefik is still one ClusterIP replica with no `hostPort`, and a no-surge strategy would only add an ingress outage to every rollout. The strategy therefore lands with D11's `hostPort` in PR #1368, not here.
 
 ### N8. Verification without a provider or real hosts
 
@@ -211,6 +209,7 @@ Pinning a Job to the node where the volume was last attached would add a failure
 - **A drain is a short outage per cell.** An evicted cell restarts elsewhere once its volume moves, in about a minute. This is consistent with the plain-cells non-goal.
 - **Unencrypted overlay.** Flannel VXLAN is unencrypted, and it runs only on the Hetzner private network.
 - **Over-count during removal.** The preflight counts cell PVCs, but admission counts non-deleted rows. A row admitted but not yet provisioned has no PVC, so it is invisible to the preflight. And cellctl ignores cordoning and NotReady, so it keeps publishing the target's slots until step 7 deletes the Node. Admissions in that window can over-commit capacity. The preflight runs immediately before cordoning, which keeps the window to the drain itself. The runbook removes nodes when no invitations are pending.
+- **Holds only on the row.** The preflight reads holds from StatefulSet annotations. cellctl also treats a row's `hold_kind` as a hold when the StatefulSet is gone, and the preflight cannot see that case. The runbook checks the row as well.
 - **Stale placement column.** cellctl writes a row's `node` only at first placement, so after a drain the column names the old node. Nothing in this change reads it. Fixing it belongs to cellctl.
 - **Memory-blind capacity.** Slots count attachments, not memory. N1's type allow-list keeps an agent's slots within its memory at the current cell request. A larger cell request needs the list revisited.
 - **Pod-CIDR rules on any interface.** `base` admits the pod and service CIDRs on every interface, so a host that spoofs a pod-CIDR source address on the private network bypasses N5's peer rules. N5 narrows the node ports, not that pre-existing allowance, and the spec states the guarantee accordingly.

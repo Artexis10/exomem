@@ -25,6 +25,7 @@
               'allow in on ([^ ]+) from ([^ ]+) to any port ([0-9]+) proto (tcp|udp)') -%}
         {%- set parsed = found[0] if found else none -%}
         {%- if parsed and (parsed[1] not in k3s_firewall_peer_ips
+              or parsed[0] != k3s_resolved_private_interface
               or (parsed[2] == '6443' and k3s_node_role != 'server')) -%}
           {%- set _ = stale.append({'interface': parsed[0], 'src': parsed[1],
                                     'port': parsed[2], 'proto': parsed[3]}) -%}

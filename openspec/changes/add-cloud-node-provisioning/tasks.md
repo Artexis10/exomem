@@ -29,7 +29,7 @@
 
 ## 4. Ingress (N7)
 
-- [ ] 4.1 Pin `traefik.nodeSelector` to the control-plane label and set a no-surge `updateStrategy`, with a contract test and a render test
+- [ ] 4.1 Pin `traefik.nodeSelector` to the control-plane label, with a contract test and a Helm render test. The no-surge rollout lands with D11's `hostPort` in #1368.
 
 ## 5. Verification (N8)
 
@@ -42,5 +42,5 @@
   - removal completes, and a rerun changes nothing.
 - [ ] 5.2 Pass `terraform fmt -check`, `validate` and `test`, `ansible-lint --profile production`, `ansible-playbook --syntax-check` on both playbooks, the hosted contract tests, the privacy gate and strict OpenSpec validation
 - [ ] 5.3 Add an operator runbook covering adding a node, removing a node, the one-time server restart for `agent-token`, and the destroy approval
-- [ ] 5.4 Raise the removal of the plain-cells D8 node-affinity clause (N9) for PR #1368 in this PR's description
+- [ ] 5.4 Raise, in this PR's description, for PR #1368: removing the plain-cells D8 node-affinity clause (N9), and the no-surge Traefik rollout D11 needs (N7)
 - [ ] 5.5 Get an independent code review of the diff, and resolve every blocking finding

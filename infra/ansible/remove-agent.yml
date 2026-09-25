@@ -8,6 +8,9 @@
   become: true
   gather_facts: false
   any_errors_fatal: true
+  vars:
+    # Play-level, overridable with -e: role defaults are not visible here.
+    k3s_drain_timeout: 600s
 
   tasks:
     - name: Resolve the one K3s server
@@ -113,21 +116,36 @@
   hosts: k3s_agents
   become: true
   gather_facts: false
+  vars:
+    k3s_remove_host_gone: false
 
   tasks:
+    # An unreachable target must not fail this play (with one agent that would
+    # end the run before the delete play); it simply stays unconfirmed.
+    - name: Check whether the agent can be reached
+      ansible.builtin.ping:
+      ignore_unreachable: true
+      register: k3s_remove_reach
+      when:
+        - inventory_hostname == k3s_remove_node
+        - not (k3s_remove_host_gone | bool)
+
     - name: Stop the agent completely
       ansible.builtin.include_role:
         name: k3s
         tasks_from: remove_stop.yml
-        apply:
-          ignore_unreachable: true
-      when: inventory_hostname == k3s_remove_node
+      when:
+        - inventory_hostname == k3s_remove_node
+        - not (k3s_remove_host_gone | bool)
+        - k3s_remove_reach is not unreachable
 
 - name: Delete the stopped agent's node
   hosts: hosted_nodes:!k3s_agents
   become: true
   gather_facts: false
   any_errors_fatal: true
+  vars:
+    k3s_remove_host_gone: false
 
   tasks:
     - name: Require a confirmed stop before deleting a present node
@@ -156,7 +174,10 @@
               - node.kubernetes.io/out-of-service=nodeshutdown:NoExecute
               - --overwrite
           register: k3s_remove_taint
-          changed_when: "'modified' in k3s_remove_taint.stdout or 'tainted' in k3s_remove_taint.stdout"
+          changed_when: true
+          when: >-
+            'node.kubernetes.io/out-of-service'
+            not in (k3s_remove_node_doc.spec.taints | default([]) | map(attribute='key') | list)
 
         - name: Wait until no volume is attached to the node
           ansible.builtin.command:

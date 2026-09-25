@@ -42,9 +42,16 @@ k3s_firewall_comment: Exomem K3s inter-node
 # capacity.headroom, so the preflight counts slots exactly as cellctl does.
 k3s_cell_namespace_prefix: exo-cell-
 k3s_remove_headroom: 5
-k3s_drain_timeout: 600s
-# Set only after verifying the agent's server is destroyed: it lets removal
-# delete the Node of an agent that can no longer be reached to stop it.
-k3s_remove_host_gone: false
+k3s_remove_pod_procs_argv:
+  - /usr/bin/find
+  - /sys/fs/cgroup
+  - -path
+  - "*kubepods*"
+  - -name
+  - cgroup.procs
+  - -exec
+  - /usr/bin/cat
+  - "{}"
+  - +
 k3s_remove_pod_mount_pattern: ^/var/lib/kubelet/pods/
 k3s_remove_csi_mount_pattern: ^/var/lib/kubelet/plugins/kubernetes.io/csi/

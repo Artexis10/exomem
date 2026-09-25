@@ -49,14 +49,20 @@
   register: k3s_removed_marker
   when: k3s_node_role == 'agent'
 
-- name: Refuse to rejoin an agent that remove-agent.yml removed
-  ansible.builtin.assert:
-    that:
-      - not k3s_removed_marker.stat.exists
-    fail_msg: >-
-      {{ inventory_hostname }} was removed by remove-agent.yml; destroy its server
-      (drop its k3s_agent_nodes entry) instead of rejoining it.
-  when: k3s_node_role == 'agent'
+- name: Report that a removed agent is not rejoined
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} was removed by remove-agent.yml and is skipped;
+      destroy its server (drop its k3s_agent_nodes entry) instead of rejoining it.
+  when:
+    - k3s_node_role == 'agent'
+    - k3s_removed_marker.stat.exists
+
+- name: Never rejoin an agent that remove-agent.yml removed
+  ansible.builtin.meta: end_host
+  when:
+    - k3s_node_role == 'agent'
+    - k3s_removed_marker.stat.exists
 
 # Recorded on every node: Ansible templates delegate_to before it evaluates
 # `when`, so even skipped agent tasks on the server need these defined.

@@ -114,11 +114,11 @@ Removing an agent SHALL, in order:
 2. refuse while any cell maintenance hold is present;
 3. refuse unless the cell volumes in the cluster fit the remaining nodes' published slots. Slots are computed as the controller computes them: allocatable, minus headroom, minus non-cell attachments, net of the target's non-cell attachments;
 4. cordon the agent and, when it is Ready, drain it without force;
-5. stop K3s and every pod container on it, unmount every pod and CSI volume mount, and close the volumes' encryption mappings. Treat the stop as confirmed only when a reachable host shows no container process, no pod or CSI volume mount and no open volume mapping, or on the operator's explicit confirmation that the server is gone;
+5. stop K3s, every pod container and every process in a pod cgroup on it, remove its agent credentials, unmount every pod and CSI volume mount, and close the volumes' encryption mappings. Treat the stop as confirmed only when a reachable host shows no container process, no pod or CSI volume mount and no open volume mapping, or on the operator's explicit confirmation that the server is gone;
 6. only once the stop is confirmed, force remaining pods and volumes off it, then delete its Kubernetes node and confirm it stays absent;
 7. converge the remaining nodes' inter-node firewall rules without it.
 
-The removal MUST NOT delete the Kubernetes node of an agent whose stop is unconfirmed. It MUST NOT force a volume off a node that may still run containers. It MUST be safe to rerun after any step until the agent's server is destroyed. A removed agent's host MUST NOT rejoin through the join playbook.
+The removal MUST NOT delete the Kubernetes node of an agent whose stop is unconfirmed. It MUST NOT force a volume off a node that may still run containers. It MUST be safe to rerun after any step until the agent's server is destroyed. A removed agent's host MUST NOT rejoin through the join playbook, and a lone unreachable agent MUST NOT stop the removal from reaching its confirmation check.
 
 #### Scenario: Not enough room elsewhere
 
@@ -138,13 +138,13 @@ The removal MUST NOT delete the Kubernetes node of an agent whose stop is unconf
 #### Scenario: Join playbook after removal
 
 - **WHEN** the join playbook runs against an agent host that removal has stopped
-- **THEN** the agent play fails for that host before changing it, and the node does not re-register
+- **THEN** the playbook leaves that host unchanged and does not re-register its node, and it still converges every other node
 
 ### Requirement: Public ingress stays on the server node
 
-The platform ingress SHALL be scheduled only on the control-plane node, so that adding an agent never moves the public entrypoint off the address its DNS record targets. Its rollout MUST NOT require a second pod to schedule beside the running one.
+The platform ingress SHALL be scheduled only on the control-plane node, so that adding an agent never moves the public entrypoint off the address its DNS record targets.
 
 #### Scenario: Agent added while ingress is running
 
-- **WHEN** an agent joins and the ingress pod is rescheduled or rolled
-- **THEN** the ingress pod runs on the control-plane node, and the rollout completes with one replica
+- **WHEN** an agent joins and the ingress pod is rescheduled
+- **THEN** the ingress pod runs on the control-plane node

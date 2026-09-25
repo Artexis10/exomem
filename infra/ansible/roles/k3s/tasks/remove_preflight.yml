@@ -65,8 +65,10 @@
         {%- if drivers and (drivers[0].allocatable | default({})).count is defined -%}
           {%- set non_cell = k3s_remove_attached | selectattr('node', 'equalto', node.metadata.name)
                 | rejectattr('cell') | list | length -%}
+          {#- No per-node clamp: cellctl's compute_node_capacity lets a node's
+              slots go negative, and the sum must match what it publishes. -#}
           {%- set total.slots = total.slots
-                + ([drivers[0].allocatable.count | int - k3s_remove_headroom | int - non_cell, 0] | max) -%}
+                + drivers[0].allocatable.count | int - k3s_remove_headroom | int - non_cell -%}
         {%- endif -%}
       {%- endfor -%}
       {{ total.slots }}

@@ -9,6 +9,21 @@
   serial: 1
   any_errors_fatal: true
 
+  pre_tasks:
+    # add-cloud-node-provisioning N6: a host remove-agent.yml stopped is
+    # awaiting its Terraform destroy; leave it untouched rather than rejoin it.
+    - name: Look for the K3s agent removal marker
+      ansible.builtin.stat:
+        path: /etc/rancher/k3s/removed
+        get_checksum: false
+        get_mime: false
+        get_attributes: false
+      register: k3s_removed_marker
+
+    - name: Skip a removed agent until its server is destroyed
+      ansible.builtin.meta: end_host
+      when: k3s_removed_marker.stat.exists
+
   roles:
     - base
 

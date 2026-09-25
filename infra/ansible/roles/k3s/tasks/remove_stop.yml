@@ -11,6 +11,12 @@
     group: root
     mode: "0600"
 
+# The agent configuration carries the (CA-pinned) agent token.
+- name: Remove the agent configuration and its token from the host
+  ansible.builtin.file:
+    path: /etc/rancher/k3s/config.yaml
+    state: absent
+
 - name: Stop and disable the K3s agent
   ansible.builtin.systemd_service:
     name: k3s-agent
@@ -31,6 +37,34 @@
   register: k3s_remove_shims
   changed_when: k3s_remove_shims.rc == 0
   failed_when: k3s_remove_shims.rc not in [0, 1]
+
+- name: List processes still in a pod cgroup
+  ansible.builtin.command:
+    argv: "{{ k3s_remove_pod_procs_argv }}"
+  register: k3s_remove_pod_procs
+  changed_when: false
+
+# A container survives its shim being killed, so kill every process still in
+# a pod cgroup too (what k3s-killall.sh's process-tree walk achieves).
+- name: Kill every process left in a pod cgroup
+  ansible.builtin.command:
+    argv: "{{ ['/usr/bin/kill', '-KILL'] + k3s_remove_pod_pids }}"
+  vars:
+    k3s_remove_pod_pids: "{{ k3s_remove_pod_procs.stdout.split() | default([]) }}"
+  register: k3s_remove_pod_kill
+  changed_when: true
+  failed_when: false
+  when: k3s_remove_pod_procs.stdout.split() | length > 0
+
+- name: Wait until no process remains in a pod cgroup
+  ansible.builtin.command:
+    argv: "{{ k3s_remove_pod_procs_argv }}"
+  register: k3s_remove_pod_procs_after
+  changed_when: false
+  retries: 12
+  delay: 5
+  until: k3s_remove_pod_procs_after.stdout.split() | length == 0
+  failed_when: false
 
 - name: List pod volume mounts left on the host
   ansible.builtin.command:
@@ -66,6 +100,10 @@
       - crypt
   register: k3s_remove_crypt
   changed_when: false
+  # Without the kernel's device-mapper no crypt mapping can exist.
+  failed_when:
+    - k3s_remove_crypt.rc != 0
+    - "'communicate with kernel device-mapper' not in k3s_remove_crypt.stderr"
 
 # The encrypted storage class opens one mapping per volume; a mapping that
 # still backs a mount (such as an encrypted root) reports busy and stays.
@@ -76,7 +114,7 @@
       - close
       - "{{ item }}"
   loop: >-
-    {{ k3s_remove_crypt.stdout_lines | reject('match', '^No devices found')
+    {{ (k3s_remove_crypt.stdout_lines if k3s_remove_crypt.rc == 0 else []) | reject('match', '^No devices found')
        | map('split') | map('first') | list }}
   register: k3s_remove_crypt_close
   changed_when: k3s_remove_crypt_close.rc == 0
@@ -114,6 +152,10 @@
       - crypt
   register: k3s_remove_crypt_after
   changed_when: false
+  # Without the kernel's device-mapper no crypt mapping can exist.
+  failed_when:
+    - k3s_remove_crypt_after.rc != 0
+    - "'communicate with kernel device-mapper' not in k3s_remove_crypt_after.stderr"
 
 - name: Confirm nothing on the host still runs, mounts or maps a volume
   ansible.builtin.set_fact:
@@ -121,9 +163,11 @@
       {%- set targets = k3s_remove_mounts_after.stdout_lines | map('split') | map('last') | list -%}
       {%- set kept_sources = k3s_remove_mounts_after.stdout_lines | map('split')
             | rejectattr('1', 'match', '^/var/lib/kubelet/') | map('first') | list -%}
-      {%- set open_maps = k3s_remove_crypt_after.stdout_lines | reject('match', '^No devices found')
+      {%- set open_maps = (k3s_remove_crypt_after.stdout_lines if k3s_remove_crypt_after.rc == 0 else [])
+            | reject('match', '^No devices found')
             | map('split') | map('first') | list -%}
       {{ k3s_remove_survivors.rc == 1
+         and k3s_remove_pod_procs_after.stdout | default('') | trim | length == 0
          and (targets | select('match', k3s_remove_pod_mount_pattern) | list | length) == 0
          and (targets | select('match', k3s_remove_csi_mount_pattern) | list | length) == 0
          and (open_maps | reject('in', kept_sources | map('regex_replace', '^/dev/mapper/', '') | list)

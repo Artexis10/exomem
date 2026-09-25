@@ -198,14 +198,48 @@ run "rejects_an_address_outside_the_subnet" {
   expect_failures = [var.nodes]
 }
 
-run "rejects_the_subnet_network_gateway_and_broadcast_addresses" {
+run "rejects_the_subnet_network_address" {
   command = plan
 
   variables {
     nodes = {
       "01" = { private_ip = "10.50.1.0", server_type = "cpx42" }
-      "02" = { private_ip = "10.50.1.1", server_type = "cpx42" }
-      "03" = { private_ip = "10.50.1.255", server_type = "cpx42" }
+    }
+  }
+
+  expect_failures = [var.nodes]
+}
+
+run "rejects_the_subnet_gateway_address" {
+  command = plan
+
+  variables {
+    nodes = {
+      "01" = { private_ip = "10.50.1.1", server_type = "cpx42" }
+    }
+  }
+
+  expect_failures = [var.nodes]
+}
+
+run "rejects_the_subnet_broadcast_address" {
+  command = plan
+
+  variables {
+    nodes = {
+      "01" = { private_ip = "10.50.1.255", server_type = "cpx42" }
+    }
+  }
+
+  expect_failures = [var.nodes]
+}
+
+run "rejects_the_subnet_non_ip_address" {
+  command = plan
+
+  variables {
+    nodes = {
+      "01" = { private_ip = "not-an-address", server_type = "cpx42" }
     }
   }
 

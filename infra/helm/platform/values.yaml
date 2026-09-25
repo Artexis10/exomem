@@ -141,13 +141,6 @@ traefik:
   # agents join. K3s labels every server node control-plane=true.
   nodeSelector:
     node-role.kubernetes.io/control-plane: "true"
-  # One replica on hostPort 443, pinned to one node: a surge pod could never
-  # schedule beside it, so roll by replacing it.
-  updateStrategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 1
-      maxSurge: 0
   service:
     # Traefik 41.x takes the service type at service.spec.type; a bare
     # `service.type` is not a key in this chart and was silently ignored, so the

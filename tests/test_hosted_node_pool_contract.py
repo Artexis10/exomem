@@ -345,12 +345,17 @@ def test_agent_presents_the_ca_pinned_secure_token_format() -> None:
     assert "/var/lib/rancher/k3s/server/agent-token" not in agent
 
 
-def test_agent_play_refuses_a_host_that_removal_marked() -> None:
+def test_join_playbook_skips_a_host_that_removal_marked() -> None:
     validate = _read(K3S_ROLE / "tasks/validate.yml")
     stop = _read(K3S_ROLE / "tasks/remove_stop.yml")
+    site = _yaml(ANSIBLE / "site.yml")
     assert "path: /etc/rancher/k3s/removed" in validate
-    assert "not k3s_removed_marker.stat.exists" in validate
+    assert "ansible.builtin.meta: end_host" in validate
     assert "dest: /etc/rancher/k3s/removed" in stop
+    harden = site[0]["pre_tasks"]
+    assert harden[0]["ansible.builtin.stat"]["path"] == "/etc/rancher/k3s/removed"
+    assert harden[1]["ansible.builtin.meta"] == "end_host"
+    assert harden[1]["when"] == "k3s_removed_marker.stat.exists"
 
 
 def _kubelet_args(text: str) -> list[str]:
@@ -481,8 +486,15 @@ def test_remove_agent_playbook_orders_its_steps_and_never_forces() -> None:
     assert "--disable-eviction" not in argv
     assert "Ready" in tasks["Drain the agent without force"]["when"]
 
+    reach = tasks["Check whether the agent can be reached"]
+    assert reach["ignore_unreachable"] is True
     stop = tasks["Stop the agent completely"]
-    assert stop["ansible.builtin.include_role"]["apply"] == {"ignore_unreachable": True}
+    assert "k3s_remove_reach is not unreachable" in stop["when"]
+    # Playbook knobs are play-level: role defaults are invisible outside the role.
+    for play in plays:
+        for knob in ("k3s_drain_timeout", "k3s_remove_host_gone"):
+            if knob in json.dumps(play.get("tasks", [])):
+                assert knob in play.get("vars", {}), (play["name"], knob)
     confirm = tasks["Require a confirmed stop before deleting a present node"]
     assert "k3s_remove_host_gone" in confirm["ansible.builtin.assert"]["that"][0]
     assert "k3s_remove_stop_confirmed" in confirm["ansible.builtin.assert"]["that"][0]
@@ -506,7 +518,13 @@ def test_remove_stop_kills_containers_unmounts_and_closes_volume_mappings() -> N
     assert "k3s_remove_csi_mount_pattern: ^/var/lib/kubelet/plugins/kubernetes.io/csi/" in defaults
     assert "/usr/sbin/cryptsetup" in stop and "- close" in stop
     assert "k3s_remove_stop_confirmed" in stop
-    assert "- -umount" not in stop
+    # A container outlives its shim: every pod-cgroup process is killed and
+    # its absence is part of the confirmation.
+    assert "k3s_remove_pod_procs_argv" in stop and "k3s_remove_pod_procs_argv" in defaults
+    assert '"*kubepods*"' in defaults
+    assert "k3s_remove_pod_procs_after.stdout" in stop
+    # The agent token does not outlive the removal on the host.
+    assert "path: /etc/rancher/k3s/config.yaml\n    state: absent" in stop
 
 
 def test_remove_preflight_refuses_when_other_nodes_lack_attachment_slots() -> None:
@@ -525,11 +543,32 @@ def test_remove_preflight_refuses_when_other_nodes_lack_attachment_slots() -> No
 def test_traefik_is_pinned_to_the_control_plane_node() -> None:
     values = _yaml(ROOT / "infra/helm/platform/values.yaml")
     assert values["traefik"]["nodeSelector"] == {"node-role.kubernetes.io/control-plane": "true"}
-    # One pinned hostPort replica can only roll by replacement.
-    assert values["traefik"]["updateStrategy"] == {
-        "type": "RollingUpdate",
-        "rollingUpdate": {"maxUnavailable": 1, "maxSurge": 0},
-    }
+    # The no-surge rollout belongs with D11's hostPort, not a ClusterIP Traefik.
+    assert "updateStrategy" not in values["traefik"]
+
+
+def test_rendered_traefik_deployment_is_pinned_to_the_control_plane() -> None:
+    helm = os.environ.get("HELM_BIN")
+    if not helm:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
+    platform = ROOT / "infra/helm/platform"
+    rendered = subprocess.run(
+        [
+            helm, "template", "contract-test", str(platform),
+            "--namespace", "exomem-platform",
+            "--values", str(platform / "values.validation.yaml"),
+        ],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    deployments = [
+        document
+        for document in yaml.safe_load_all(rendered)
+        if document and document.get("kind") == "Deployment"
+        and document["metadata"]["name"].endswith("-traefik")
+    ]
+    assert len(deployments) == 1
+    spec = deployments[0]["spec"]["template"]["spec"]
+    assert spec["nodeSelector"] == {"node-role.kubernetes.io/control-plane": "true"}
 
 
 def test_agent_token_is_a_registered_sops_destination_beside_the_server_token() -> None:

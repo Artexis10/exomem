@@ -17,6 +17,10 @@ publishes a volume-attachment limit, and zeroes it once the Node is deleted.
 - Pick an unused private address in the subnet (not `10.50.1.10` or
   `10.50.1.20`), and a type from the allow-list: `cpx42`, `ccx23`, `ccx33`
   or `ccx43`.
+- Before a removal, confirm that no cell row carries a hold. The playbook sees
+  holds on StatefulSets, but not a hold recorded only on a row whose
+  StatefulSet is gone:
+  `psql "$EXOMEM_CELLCTL_DSN" -c "select cell_id, hold_kind from exomem_cloud_cells where hold_kind is not null"`.
 - Do not change an existing entry's `private_ip` in place. Remove the entry and
   add a new key instead.
 
@@ -77,7 +81,9 @@ infra/scripts/apply_saved_plan.sh foundation /run/user/$UID/foundation-agents.tf
 ```
 
 Regenerate the inventory afterwards. A removed host carries
-`/etc/rancher/k3s/removed`, and `site.yml` refuses to rejoin it.
+`/etc/rancher/k3s/removed`, and `site.yml` skips it, with a warning, rather than
+rejoin it. To abandon a half-finished removal instead, delete that marker on the
+host, run `kubectl uncordon <node>`, and converge with `site.yml`.
 
 ## Verify
 

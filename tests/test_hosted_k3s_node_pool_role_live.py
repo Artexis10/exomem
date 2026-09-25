@@ -18,7 +18,7 @@ What it proves:
     slots, before cordoning anything;
   - removal stops the agent, deletes its node, revokes its inter-node rules,
     and a rerun reports changed=0;
-  - site.yml refuses to rejoin the removed agent.
+  - site.yml skips the removed agent without rejoining it.
 
 Deviations from a real host, all confined to this rig:
   - the pinned K3s binary is served from a file:// copy of the
@@ -352,7 +352,10 @@ def test_node_pool_join_rerun_second_agent_preflight_removal_and_rejoin_refusal(
     assert code == 0, stderr
     assert sum(_changed(stats).values()) == 0, stats
 
-    # 8. site.yml refuses to rejoin the removed agent.
+    # 8. site.yml skips the removed agent (awaiting destroy) and converges the rest.
     code, stats, stderr = _playbook(two_agents, "site.yml")
-    assert code != 0
+    assert code == 0, stderr
     assert _kubectl("get", "node", AGENT_2, "--ignore-not-found", "-o", "name").stdout == ""
+    assert _exec(AGENT_2, "systemctl", "is-active", "k3s-agent", check=False).stdout.strip() != "active"
+    assert _exec(AGENT_2, "test", "-e", "/etc/rancher/k3s/config.yaml", check=False).returncode != 0
+    assert _node_ready(AGENT_1) == "True"

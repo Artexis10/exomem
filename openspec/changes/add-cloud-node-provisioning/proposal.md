@@ -23,7 +23,7 @@ The existing server is also not ready to accept a second node. Its host firewall
   - **Drain and stop.** It cordons the node, drains it without force and stops K3s on it.
   - **Delete only after a confirmed stop.** Only once the stop is confirmed does it taint the node out of service, delete the Kubernetes node and check that the node stays gone.
   - **Firewall.** It converges the remaining nodes' host-firewall rules without the removed node.
-- **Ingress stays on the server.** The platform Traefik is pinned to the control-plane node, the node that carries the public address the ingress DNS record targets, and rolls without a surge pod. A new agent can then never pull the public entrypoint away from that record, and a single `hostPort` replica can always roll.
+- **Ingress stays on the server.** The platform Traefik is pinned to the control-plane node, the node that carries the public address the ingress DNS record targets. A new agent can then never pull the public entrypoint away from that record. The no-surge rollout a single `hostPort` replica needs lands with D11's `hostPort`.
 - **Inventory.** The inventory generator emits every agent from a new non-sensitive Terraform output.
 
 ## Capabilities
@@ -41,7 +41,7 @@ None. `cloud-cell` belongs to the active change `adopt-exomem-cloud-plain-cells`
 - **Terraform:** a new `infra/terraform/foundation/modules/k3s-agents` module, with its own mocked-provider `terraform test` suite and lock file. The foundation root gets the `k3s_agent_nodes` variable, the module call and a `k3s_agent_nodes` output.
 - **Ansible:** agent mode in the `k3s` role, `agent-token` and inter-node UFW rules on the server, an agent play in `site.yml`, a new `remove-agent.yml` playbook, and the inventory example.
 - **Scripts:** `generate_ansible_inventory.py` emits `k3s_agents`. `validate.sh` runs the module's format, validate and test steps.
-- **Helm:** `traefik.nodeSelector` and a no-surge `traefik.updateStrategy` in the platform chart.
+- **Helm:** `traefik.nodeSelector` in the platform chart.
 - **Secrets:** one new SOPS-sourced Ansible variable, `k3s_agent_token`.
 - **Tests:** contract tests, the Terraform test suites, and a gated role test that runs the real playbooks against systemd containers.
 - **Not changed:** cellctl, which is in review in #1368. Its CSINode-based capacity already covers any number of nodes.
