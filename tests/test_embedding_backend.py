@@ -32,6 +32,8 @@ EQUIVALENCE_TEXTS = [
     "🧠🔬 emoji only 🚀",
     "repeat " * 300,
     "\n\nnewlines\n\tand\ttabs\n\n",
+    # BERT deletes these control characters and joins the words either side.
+    "field\x1crecord\x1dgroup\x1eunit\x1fnext\x85line",
     "SELECT * FROM notes WHERE id = 42; -- code-shaped text",
     "The quick brown fox jumps over the lazy dog. " * 20,
 ]

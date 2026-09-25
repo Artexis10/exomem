@@ -1373,6 +1373,35 @@ def test_a_served_model_without_its_tokenizer_acquires_nothing(
         embedding_backend.ensure_served_artifact(TINY)
 
 
+@pytest.mark.parametrize("declared", [False, True], ids=["bert-like", "sentencepiece"])
+def test_only_a_profile_that_declares_it_collapses_whitespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: bool
+) -> None:
+    """Measured on bge-base-en's tokenizer: `alpha\\x1cbeta` is one word to BERT,
+    which deletes the control character, and two after a collapse. U+2028,
+    U+2029, NBSP, tab and newlines gave the same ids either way. So only the
+    sentencepiece profiles, whose own normaliser collapses, do it."""
+    _tiny_served_repo(tmp_path, monkeypatch)
+    if declared:
+        monkeypatch.setattr(embedding_backend, "_COLLAPSES_WHITESPACE", frozenset({TINY}))
+    encoder = embedding_backend.load_encoder(TINY)
+
+    glued = encoder.encode(["w1\x1cw2"], batch_size=8)
+    parted = encoder.encode(["w1 w2"], batch_size=8)
+
+    assert encoder.profile.collapse_whitespace is declared
+    assert bool(np.allclose(glued, parted, atol=1e-6)) is declared
+
+
+def test_the_collapse_is_declared_for_the_sentencepiece_models_only() -> None:
+    assert embedding_backend._COLLAPSES_WHITESPACE == {
+        E5,
+        "intfloat/multilingual-e5-base",
+        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        M3,
+    }
+
+
 def test_the_release_asset_is_byte_for_byte_reproducible(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _asked, served = _tiny_served_repo(tmp_path, monkeypatch)
     embedding_backend.load_encoder(TINY)

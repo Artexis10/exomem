@@ -187,6 +187,19 @@ _DECLARED: dict[str, tuple[str, str, str, str]] = {
     "BAAI/bge-m3": ("", "", _POOLING_CLS, "<pad>"),
 }
 _UNDECLARED = ("", "", _POOLING_CLS, "[PAD]")
+#: Models with a sentencepiece (XLM-R) tokenizer, whose own normaliser strips and
+#: collapses whitespace where the exported `tokenizer.json` does not: the ONNX
+#: lane collapses it for them. A BERT tokenizer is left alone. It deletes control
+#: characters (U+001C-U+001F, U+0085) and joins the words either side, where a
+#: collapse would part them: on bge-base-en that gives different token ids.
+_COLLAPSES_WHITESPACE = frozenset(
+    {
+        "intfloat/multilingual-e5-small",
+        "intfloat/multilingual-e5-base",
+        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        "BAAI/bge-m3",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -255,6 +268,10 @@ class EncoderProfile:
     quantization: str | None = None
     file_format: str | None = None
     artifact_digest: str | None = None
+    #: Whether the ONNX lane collapses whitespace before tokenizing
+    #: (`_COLLAPSES_WHITESPACE`). How a runtime reproduces the model's own
+    #: tokenizer, not which vector it computes, so not in the fingerprint.
+    collapse_whitespace: bool = False
 
     def fingerprint(self) -> str:
         """Identity of the vector space: model, pooling, prefixes, limit, L2,
@@ -330,6 +347,7 @@ def read_profile(model_name: str) -> EncoderProfile:
         revision=served.revision if served else None,
         quantization=served.quantization if served else None,
         file_format=served.file_format if served else None,
+        collapse_whitespace=model_name in _COLLAPSES_WHITESPACE,
     )
 
 
@@ -358,6 +376,7 @@ def profile_from_sentence_transformer(model_name: str, model) -> EncoderProfile:
         passage_prefix=passage,
         max_seq=min(int(max_seq), SERVED_MAX_SEQ) if isinstance(max_seq, int) and max_seq > 0 else _DEFAULT_MAX_SEQ,
         pad_token=str(tokenizer_pad) if isinstance(tokenizer_pad, str) and tokenizer_pad else pad,
+        collapse_whitespace=model_name in _COLLAPSES_WHITESPACE,
     )
 
 
@@ -523,13 +542,14 @@ class _OnnxEncoder:
         return np.vstack(out)
 
     def _encode_batch(self, batch: list[str], normalize: bool, max_tokens: int | None = None) -> np.ndarray:
-        # Collapse whitespace first. A sentencepiece tokenizer (XLM-R: e5, MiniLM)
-        # strips and collapses it in its own normaliser, which the exported
-        # `tokenizer.json` does not reproduce: a trailing space became an extra
-        # word-boundary token and moved e5's vector to cosine 0.96 against torch.
-        # A BERT tokenizer uses whitespace only as a separator, so for bge this
-        # changes no token id.
-        encodings = self._tokenizer.encode_batch([" ".join(text.split()) for text in batch])
+        # Collapse whitespace first where the profile declares it. A sentencepiece
+        # tokenizer (XLM-R: e5, MiniLM, bge-m3) strips and collapses it in its own
+        # normaliser, which the exported `tokenizer.json` does not reproduce: a
+        # trailing space became an extra word-boundary token and moved e5's vector
+        # to cosine 0.96 against torch. A BERT tokenizer gets the text as is:
+        # `str.split` parts words at U+001C-U+001F and U+0085, which BERT deletes.
+        texts = [" ".join(text.split()) for text in batch] if self.profile.collapse_whitespace else batch
+        encodings = self._tokenizer.encode_batch(texts)
         if max_tokens is not None:
             feed = self._capped_feed(encodings, max_tokens)
         else:
