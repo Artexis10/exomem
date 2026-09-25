@@ -439,3 +439,165 @@ def test_the_view_digest_moves_with_the_callers_own_tier_only() -> None:
     assert heat.view_digest(profile, heat.Attribution()) == profile.digest
     assert heat.view_digest(profile, MINE) != heat.view_digest(moved, MINE)
     assert heat.view_digest(profile, OTHER) == heat.view_digest(moved, OTHER)
+
+
+# --------------------------------------------------------------------------- #
+# The sidecar
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def sidecar_vault(tmp_path):
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
+    heat.reset_for_tests()
+    yield vault
+    heat.reset_for_tests()
+
+
+def test_the_ring_drops_the_oldest_event(sidecar_vault, monkeypatch) -> None:
+    monkeypatch.setattr(heat, "RING_MAX", 8)
+
+    assert heat.append(sidecar_vault, [ev(T0 + index * S, SLED, "read") for index in range(6)])
+    assert heat.append(sidecar_vault, [ev(T0 + (6 + index) * S, MARIT, "read") for index in range(4)])
+
+    loaded = heat.load(sidecar_vault)
+    assert len(loaded.events) == 8
+    assert [item.ts_ns for item in loaded.events] == [T0 + index * S for index in range(2, 10)]
+    assert loaded.all_rows[SLED].read_ns == T0 + 5 * S
+    # The sidecar lives beside the activation index: machine-local, never in the vault.
+    assert not list(sidecar_vault.rglob("*.sqlite"))
+    assert heat.sidecar_path(sidecar_vault).exists()
+
+
+def test_a_busy_sidecar_drops_the_event_and_fails_nothing(sidecar_vault) -> None:
+    import sqlite3
+    import time
+
+    from exomem import metrics
+
+    heat.append(sidecar_vault, [ev(T0, SLED, "work")])
+    before = metrics.snapshot()
+    blocker = sqlite3.connect(heat.sidecar_path(sidecar_vault), timeout=0)
+    blocker.execute("BEGIN EXCLUSIVE")
+    try:
+        started = time.monotonic()
+        written = heat.append(sidecar_vault, [ev(T0 + S, MARIT, "read")])
+        took = time.monotonic() - started
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    assert written is False
+    assert took < 1.0, "a seam never waits seconds for heat"
+    after = metrics.snapshot()
+    assert str(after) != str(before), "the drop is counted"
+    assert [item.path for item in heat.load(sidecar_vault).events] == [SLED]
+
+
+def test_deleting_the_sidecar_costs_only_a_reseed(sidecar_vault) -> None:
+    heat.append(sidecar_vault, [ev(T0, SLED, "work")])
+    assert heat.load(sidecar_vault).events
+
+    heat.sidecar_path(sidecar_vault).unlink()
+    for suffix in ("-wal", "-shm"):
+        extra = heat.sidecar_path(sidecar_vault).with_name(heat.SIDECAR_NAME + suffix)
+        if extra.exists():
+            extra.unlink()
+
+    fresh = heat.load(sidecar_vault)
+    assert fresh.events == () and fresh.state == "empty"
+    assert "seeded_at_ns" not in fresh.meta, "a new sidecar asks to be seeded again"
+    assert heat.append(sidecar_vault, [ev(T0 + S, MARIT, "read")])
+    assert [item.path for item in heat.load(sidecar_vault).events] == [MARIT]
+
+
+def test_a_schema_change_wipes_and_asks_for_a_reseed(sidecar_vault, monkeypatch) -> None:
+    heat.append(sidecar_vault, [ev(T0, SLED, "work")])
+    heat.set_meta(sidecar_vault, {"seeded_at_ns": T0})
+    before = heat.load(sidecar_vault)
+    assert before.events and before.meta.get("seeded_at_ns")
+
+    monkeypatch.setattr(heat, "SCHEMA_VERSION", heat.SCHEMA_VERSION + 1)
+    after = heat.load(sidecar_vault)
+
+    assert after.events == ()
+    assert "seeded_at_ns" not in after.meta
+    assert after.token != before.token, "the token keeps counting across a wipe"
+
+
+def test_the_kill_switch_opens_nothing(sidecar_vault, monkeypatch) -> None:
+    monkeypatch.setenv("EXOMEM_DISABLE_WORKING_SET", "1")
+
+    assert heat.append(sidecar_vault, [ev(T0, SLED, "work")]) is False
+    assert heat.note_session(sidecar_vault, heat.SessionMark("s", paths=(SLED,))) is False
+    assert heat.load(sidecar_vault).events == ()
+    assert not heat.sidecar_path(sidecar_vault).exists()
+
+
+def test_another_processs_events_are_seen_on_the_next_token(sidecar_vault) -> None:
+    import sqlite3
+
+    heat.append(sidecar_vault, [ev(T0, SLED, "work")])
+    first = heat.load(sidecar_vault)
+    assert heat.load(sidecar_vault) is first, "an unmoved token reuses the aggregate"
+
+    # Another process: its own connection, its own insert, the shared token bump.
+    other = sqlite3.connect(heat.sidecar_path(sidecar_vault))
+    with other:
+        other.execute(
+            "INSERT INTO heat_events (ts_ns, path, channel, origin, client, session, workspace) "
+            "VALUES (?, ?, 'read', 'read', '', '', '')",
+            (T0 + S, MARIT),
+        )
+        other.execute("UPDATE meta SET value = value + 1 WHERE key = 'generation'")
+    other.close()
+
+    second = heat.load(sidecar_vault)
+    assert second is not first
+    assert [item.path for item in second.events] == [SLED, MARIT]
+
+
+def test_session_and_workspace_keys_are_derived_never_stored_raw(sidecar_vault) -> None:
+    import sqlite3
+
+    raw_session, raw_workspace = "ep-" + "ab" * 16, "c0ffee" * 4
+    mine = heat.attribution_for(
+        sidecar_vault, client="claude-code", session=raw_session, workspace=raw_workspace
+    )
+    assert mine.session and mine.workspace and mine.client == "claude-code"
+    assert raw_session not in mine and raw_workspace not in mine
+    assert len(mine.session) == heat.KEY_HEX
+    # Stable per sidecar, so a session is recognised on its next turn.
+    again = heat.attribution_for(sidecar_vault, session=raw_session, workspace=raw_workspace)
+    assert (again.session, again.workspace) == (mine.session, mine.workspace)
+    # Unusable values are ignored, never refused.
+    odd = heat.attribution_for(sidecar_vault, client="Not A Label", session="x" * 300, workspace=7)
+    assert odd == heat.Attribution()
+
+    heat.note_session(
+        sidecar_vault,
+        heat.SessionMark(mine.session, mine.workspace, mine.client, (SLED,), T0, T0),
+    )
+    heat.append(sidecar_vault, [ev(T0, SLED, "pick", session=mine.session)])
+    dump = "\n".join(sqlite3.connect(heat.sidecar_path(sidecar_vault)).iterdump())
+    assert raw_session not in dump and raw_workspace not in dump
+    assert mine.session in dump
+
+
+def test_a_session_keeps_its_thread_through_an_abstention_and_the_table_is_bounded(
+    sidecar_vault, monkeypatch
+) -> None:
+    heat.note_session(sidecar_vault, heat.SessionMark("s1", "w1", "codex", (SLED,), T0, T0))
+    heat.note_session(sidecar_vault, heat.SessionMark("s1", "w2", "codex", (), 0, T0 + S))
+
+    mark = heat.load(sidecar_vault).sessions["s1"]
+    assert mark.paths == (SLED,) and mark.minted_ns == T0
+    assert mark.workspace == "w2" and mark.seen_ns == T0 + S
+
+    monkeypatch.setattr(heat, "SESSIONS_MAX", 3)
+    for index in range(5):
+        heat.note_session(
+            sidecar_vault, heat.SessionMark(f"s{index + 2}", "w", "", (MARIT,), T0, T0 + 10 * S + index)
+        )
+    assert sorted(heat.load(sidecar_vault).sessions) == ["s4", "s5", "s6"]

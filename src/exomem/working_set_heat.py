@@ -36,9 +36,17 @@ This half of the module is pure: functions over events, no sidecar, no vault.
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
+import secrets
+import sqlite3
+import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import NamedTuple
+
+log = logging.getLogger(__name__)
 
 #: The newest events the ring keeps. Several busy sessions; the aggregate over
 #: it is a few milliseconds and is cached per sidecar token.
@@ -223,6 +231,9 @@ class HeatProfile:
     salt: str = ""
     token: tuple = ()
     tombstones: frozenset[str] = field(default_factory=frozenset)
+    #: Text facts the sidecar keeps beside the ring (`observed_through_ns`,
+    #: `seeded_at_ns`), for the fold and the state report.
+    meta: Mapping[str, str] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #
@@ -282,6 +293,7 @@ def build_profile(
     salt: str = "",
     token: tuple = (),
     tombstones: frozenset[str] = frozenset(),
+    meta: Mapping[str, str] | None = None,
 ) -> HeatProfile:
     """Aggregate `events` (oldest first) into the profile every reader shares."""
     kept = tuple(event for event in events if event.path not in tombstones)
@@ -305,6 +317,7 @@ def build_profile(
         salt=salt,
         token=token,
         tombstones=frozenset(tombstones),
+        meta=dict(meta or {}),
     )
     return _with_digest(profile)
 
@@ -436,16 +449,7 @@ def leading(
             )
 
     if who.workspace:
-        view = HeatProfile(
-            events=profile.events,
-            sessions=sessions,
-            state=profile.state,
-            session_start_ns=profile.session_start_ns,
-            last_deliberate_ns=profile.last_deliberate_ns,
-            window_rows=profile.window_rows,
-            all_rows=profile.all_rows,
-            digest=profile.digest,
-        )
+        view = replace(profile, sessions=sessions)
         events, threads = _workspace_scope(view, who)
         if _holds_deliberate(events) or threads:
             marked = [(path, mark.minted_ns) for mark in threads for path in mark.paths]
@@ -547,16 +551,7 @@ def recent(
         if _holds_deliberate(own) or marked:
             holds.append(TIER_SESSION)
     if who.workspace:
-        view = HeatProfile(
-            events=profile.events,
-            sessions=sessions,
-            state=profile.state,
-            session_start_ns=profile.session_start_ns,
-            last_deliberate_ns=profile.last_deliberate_ns,
-            window_rows=profile.window_rows,
-            all_rows=profile.all_rows,
-            digest=profile.digest,
-        )
+        view = replace(profile, sessions=sessions)
         events, threads = _workspace_scope(view, who)
         marked = [(path, mark.minted_ns) for mark in threads for path in mark.paths]
         tiers[TIER_WORKSPACE] = _contacts(aggregate(events, marks=marked), TIER_WORKSPACE)
@@ -604,19 +599,7 @@ def _with_digest(profile: HeatProfile) -> HeatProfile:
         )
     )
     digest = hashlib.sha256(material.encode("utf-8", "surrogatepass")).hexdigest()[:16]
-    return HeatProfile(
-        events=profile.events,
-        sessions=profile.sessions,
-        state=profile.state,
-        session_start_ns=profile.session_start_ns,
-        last_deliberate_ns=profile.last_deliberate_ns,
-        window_rows=profile.window_rows,
-        all_rows=profile.all_rows,
-        digest=digest,
-        salt=profile.salt,
-        token=profile.token,
-        tombstones=profile.tombstones,
-    )
+    return replace(profile, digest=digest)
 
 
 def view_digest(
@@ -811,3 +794,472 @@ def seed_events(
         chosen.append(HeatEvent(stamp, path, channel, origin="seed"))
     chosen.sort(key=lambda event: (-event.ts_ns, event.path))
     return tuple(sorted(chosen[: max(0, limit)], key=lambda event: (event.ts_ns, event.path)))
+
+
+# =========================================================================== #
+# The sidecar
+# =========================================================================== #
+#
+# Machine-local, never in the vault, disposable: the same placement as the
+# activation index, but its own file. Heat changes on every read, and the
+# anchor sidecar's generation feeds the packet cache key, the continuity
+# identity and the anchor row cache, so coupling the two would invalidate
+# anchor rows on every read.
+
+SIDECAR_NAME = ".working-set-heat.sqlite"
+#: Bumped whenever the tables change shape; a mismatch wipes and reseeds.
+SCHEMA_VERSION = 1
+#: A seam never waits on heat longer than this. The shared sidecar default is
+#: five seconds, which a read must never pay for a hint.
+BUSY_TIMEOUT_MS = 50
+#: The counter a dropped event increments. Dropping fails nothing.
+DROPPED_METRIC = "exomem_heat_events_dropped_total"
+#: What derived keys are cut to.
+KEY_HEX = 24
+#: The longest caller-supplied key value accepted; longer is ignored, never refused.
+KEY_MAX_CHARS = 256
+
+_LOCK = threading.Lock()
+#: `{sidecar path: (token, profile)}`: the aggregate is derived once per token.
+_PROFILES: dict[str, tuple[tuple, HeatProfile]] = {}
+#: Sidecar parents already known to exist, so a warm seam pays no `stat`.
+_PARENTS: set[str] = set()
+
+
+def disabled() -> bool:
+    """The activation kill switch turns the whole projection off. There is no
+    switch of its own, and deliberately not the query-log gate, which would
+    switch the read tier off on every lean install."""
+    from . import working_set_index
+
+    return working_set_index.disabled()
+
+
+def sidecar_path(vault_root: Path) -> Path:
+    from .state_paths import vault_state_dir
+
+    return vault_state_dir(Path(vault_root)) / SIDECAR_NAME
+
+
+def _drop(reason: str) -> None:
+    try:
+        from . import metrics
+
+        metrics.inc_counter(DROPPED_METRIC, {"reason": reason})
+    except Exception:  # noqa: BLE001 - a counter never fails a seam
+        pass
+
+
+def _connect(vault_root: Path) -> sqlite3.Connection | None:
+    """One short-lived connection with the seam's busy timeout, or `None`
+    under the kill switch or when the file cannot be opened."""
+    if disabled():
+        return None
+    try:
+        path = sidecar_path(vault_root)
+        parent = str(path.parent)
+        if parent not in _PARENTS:
+            from . import sidecar_store
+
+            sidecar_store.ensure_sidecar_parent(path)
+            _PARENTS.add(parent)
+        conn = sqlite3.connect(path, timeout=BUSY_TIMEOUT_MS / 1000)
+    except (OSError, sqlite3.Error, ValueError):
+        log.debug("heat sidecar unavailable", exc_info=True)
+        return None
+    try:
+        conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        _ensure_schema(conn)
+    except sqlite3.Error:
+        log.debug("heat sidecar schema could not be prepared", exc_info=True)
+        conn.close()
+        return None
+    return conn
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    existing = {
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    if "heat_meta" in existing:
+        row = conn.execute("SELECT value FROM heat_meta WHERE key = 'schema_version'").fetchone()
+        if row is not None and str(row[0]) == str(SCHEMA_VERSION):
+            return
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.Error:  # pragma: no cover - WAL unavailable on unusual filesystems
+        pass
+    with conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS heat_events ("
+            "seq INTEGER PRIMARY KEY AUTOINCREMENT, ts_ns INTEGER NOT NULL, "
+            "path TEXT NOT NULL, channel TEXT NOT NULL, origin TEXT NOT NULL, "
+            "client TEXT NOT NULL, session TEXT NOT NULL, workspace TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS attributed ("
+            "path TEXT PRIMARY KEY, mtime_ns INTEGER NOT NULL, ctime_ns INTEGER NOT NULL, "
+            "size INTEGER NOT NULL, ts_ns INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS heat_sessions ("
+            "session TEXT PRIMARY KEY, workspace TEXT NOT NULL, client TEXT NOT NULL, "
+            "paths TEXT NOT NULL, minted_ns INTEGER NOT NULL, seen_ns INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS heat_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER)")
+        row = conn.execute("SELECT value FROM heat_meta WHERE key = 'schema_version'").fetchone()
+        if row is not None and str(row[0]) != str(SCHEMA_VERSION):
+            # A different shape: the derived rows go, the token keeps counting,
+            # so a consumer that cached the old rows can never believe it current.
+            for table in ("heat_events", "attributed", "heat_sessions"):
+                conn.execute(f"DELETE FROM {table}")  # noqa: S608 - fixed names
+            conn.execute("DELETE FROM heat_meta")
+        conn.execute(
+            "INSERT OR REPLACE INTO heat_meta (key, value) VALUES ('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO heat_meta (key, value) VALUES ('salt', ?)",
+            (secrets.token_hex(16),),
+        )
+        if conn.execute("SELECT 1 FROM meta WHERE key = 'instance'").fetchone() is None:
+            from . import sidecar_store
+
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('instance', ?)",
+                (secrets.randbelow(sidecar_store.INSTANCE_MAX) + 1,),
+            )
+        _bump(conn)
+
+
+def _bump(conn: sqlite3.Connection) -> None:
+    cur = conn.execute("UPDATE meta SET value = value + 1 WHERE key = 'generation'")
+    if cur.rowcount == 0:
+        conn.execute("INSERT INTO meta (key, value) VALUES ('generation', 1)")
+
+
+def _token(conn: sqlite3.Connection) -> tuple:
+    rows = dict(
+        conn.execute("SELECT key, value FROM meta WHERE key IN ('generation', 'instance')")
+    )
+    return (int(rows.get("instance") or 0), int(rows.get("generation") or 0))
+
+
+def _write(vault_root: Path, work: Callable[[sqlite3.Connection], None], *, what: str) -> bool:
+    """Run `work` in one write transaction that bumps the token. Never raises:
+    a busy or broken sidecar drops the write, counts it, and fails nothing."""
+    conn = _connect(vault_root)
+    if conn is None:
+        if not disabled():
+            _drop(what)
+        return False
+    try:
+        with conn:
+            work(conn)
+            _bump(conn)
+        return True
+    except sqlite3.Error:
+        log.debug("heat %s dropped", what, exc_info=True)
+        _drop(what)
+        return False
+    finally:
+        conn.close()
+
+
+def append(vault_root: Path, events: Iterable[HeatEvent]) -> bool:
+    """Append events to the ring, dropping the oldest past `RING_MAX`."""
+    rows = [
+        (
+            int(event.ts_ns),
+            str(event.path),
+            str(event.channel),
+            str(event.origin),
+            str(event.client),
+            str(event.session),
+            str(event.workspace),
+        )
+        for event in events
+        if event.channel in CHANNELS and event.path
+    ]
+    if not rows:
+        return True
+
+    def work(conn: sqlite3.Connection) -> None:
+        conn.executemany(
+            "INSERT INTO heat_events (ts_ns, path, channel, origin, client, session, workspace) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        conn.execute(
+            "DELETE FROM heat_events WHERE seq <= (SELECT MAX(seq) FROM heat_events) - ?",
+            (RING_MAX,),
+        )
+
+    return _write(vault_root, work, what="events")
+
+
+def record_attributed(
+    vault_root: Path, signatures: Mapping[str, Sequence[int]], *, ts_ns: int
+) -> bool:
+    """Remember the post-write signature of our own commits, so the watcher's
+    echo of them is never mistaken for an external edit."""
+    rows = [
+        (str(path), int(sig[0]), int(sig[1]), int(sig[2]), int(ts_ns))
+        for path, sig in signatures.items()
+        if len(sig) >= 3
+    ]
+    if not rows:
+        return True
+
+    def work(conn: sqlite3.Connection) -> None:
+        conn.executemany(
+            "INSERT OR REPLACE INTO attributed (path, mtime_ns, ctime_ns, size, ts_ns) "
+            "VALUES (?, ?, ?, ?, ?)",
+            rows,
+        )
+        conn.execute(
+            "DELETE FROM attributed WHERE path IN (SELECT path FROM attributed "
+            "ORDER BY ts_ns DESC, path LIMIT -1 OFFSET ?)",
+            (ATTRIBUTED_MAX,),
+        )
+
+    return _write(vault_root, work, what="attributed")
+
+
+def attributed_signatures(
+    vault_root: Path, paths: Iterable[str]
+) -> dict[str, tuple[int, int, int]]:
+    """`{path: signature}` of our own recorded commits among `paths`."""
+    wanted = sorted({str(path) for path in paths})
+    if not wanted:
+        return {}
+    conn = _connect(vault_root)
+    if conn is None:
+        return {}
+    out: dict[str, tuple[int, int, int]] = {}
+    try:
+        for start in range(0, len(wanted), 400):
+            chunk = wanted[start : start + 400]
+            marks = ",".join("?" * len(chunk))
+            for path, mtime, ctime, size in conn.execute(
+                f"SELECT path, mtime_ns, ctime_ns, size FROM attributed WHERE path IN ({marks})",  # noqa: S608
+                chunk,
+            ):
+                out[str(path)] = (int(mtime), int(ctime), int(size))
+    except sqlite3.Error:
+        log.debug("heat attributed lookup failed", exc_info=True)
+        return out
+    finally:
+        conn.close()
+    return out
+
+
+def note_session(vault_root: Path, mark: SessionMark) -> bool:
+    """Remember a session's workspace and, when a token was minted, its last
+    served thread. Bounded to `SESSIONS_MAX`, least recently seen dropped. A
+    mark with no paths keeps the thread already stored: an abstention does not
+    end a conversation's thread."""
+    if not mark.session:
+        return True
+    paths = json.dumps(sorted({str(path) for path in mark.paths}))
+
+    def work(conn: sqlite3.Connection) -> None:
+        if mark.paths:
+            conn.execute(
+                "INSERT OR REPLACE INTO heat_sessions "
+                "(session, workspace, client, paths, minted_ns, seen_ns) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    mark.session,
+                    mark.workspace,
+                    mark.client,
+                    paths,
+                    int(mark.minted_ns),
+                    int(mark.seen_ns),
+                ),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO heat_sessions (session, workspace, client, paths, minted_ns, seen_ns) "
+                "VALUES (?, ?, ?, '[]', 0, ?) ON CONFLICT(session) DO UPDATE SET "
+                "workspace = excluded.workspace, client = excluded.client, "
+                "seen_ns = excluded.seen_ns",
+                (mark.session, mark.workspace, mark.client, int(mark.seen_ns)),
+            )
+        conn.execute(
+            "DELETE FROM heat_sessions WHERE session IN (SELECT session FROM heat_sessions "
+            "ORDER BY seen_ns DESC, session LIMIT -1 OFFSET ?)",
+            (SESSIONS_MAX,),
+        )
+
+    return _write(vault_root, work, what="session")
+
+
+def purge(vault_root: Path, paths: Iterable[str]) -> bool:
+    """Drop every event of deleted pages (their tombstones hid them already)."""
+    gone = sorted({str(path) for path in paths})
+    if not gone:
+        return True
+
+    def work(conn: sqlite3.Connection) -> None:
+        for start in range(0, len(gone), 400):
+            chunk = gone[start : start + 400]
+            marks = ",".join("?" * len(chunk))
+            conn.execute(f"DELETE FROM heat_events WHERE path IN ({marks})", chunk)  # noqa: S608
+            conn.execute(f"DELETE FROM attributed WHERE path IN ({marks})", chunk)  # noqa: S608
+
+    return _write(vault_root, work, what="purge")
+
+
+def set_meta(vault_root: Path, values: Mapping[str, object]) -> bool:
+    """Write text-valued sidecar facts (`observed_through_ns`, `seeded_at_ns`)."""
+    items = [(str(key), str(value)) for key, value in values.items()]
+
+    def work(conn: sqlite3.Connection) -> None:
+        conn.executemany("INSERT OR REPLACE INTO heat_meta (key, value) VALUES (?, ?)", items)
+
+    return _write(vault_root, work, what="meta")
+
+
+class _Loaded(NamedTuple):
+    token: tuple
+    events: tuple[HeatEvent, ...]
+    sessions: tuple[SessionMark, ...]
+    meta: dict[str, str]
+
+
+def _read(conn: sqlite3.Connection) -> _Loaded:
+    token = _token(conn)
+    events = tuple(
+        HeatEvent(
+            int(ts), str(path), str(channel), str(origin), str(client), str(session), str(space)
+        )
+        for ts, path, channel, origin, client, session, space in conn.execute(
+            "SELECT ts_ns, path, channel, origin, client, session, workspace "
+            "FROM heat_events ORDER BY seq"
+        )
+    )
+    sessions: list[SessionMark] = []
+    for session, space, client, paths, minted, seen in conn.execute(
+        "SELECT session, workspace, client, paths, minted_ns, seen_ns FROM heat_sessions"
+    ):
+        try:
+            listed = tuple(str(item) for item in json.loads(paths) if isinstance(item, str))
+        except (TypeError, ValueError):
+            listed = ()
+        sessions.append(
+            SessionMark(str(session), str(space), str(client), listed, int(minted), int(seen))
+        )
+    meta = {
+        str(key): str(value) for key, value in conn.execute("SELECT key, value FROM heat_meta")
+    }
+    return _Loaded(token, events, tuple(sessions), meta)
+
+
+def load(vault_root: Path) -> HeatProfile:
+    """The persisted projection, aggregated once per sidecar token.
+
+    One token read when nothing moved; the ring and the sessions when it did.
+    Another process's writes move the token, so they are seen on the next
+    read. Never raises: an unreadable sidecar is an empty profile. The state
+    is `empty` or `partial` here; the fold decides the reported one
+    (`with_state`).
+    """
+    empty = build_profile((), state="empty")
+    conn = _connect(vault_root)
+    if conn is None:
+        return empty
+    try:
+        key = str(sidecar_path(vault_root))
+        token = _token(conn)
+        with _LOCK:
+            cached = _PROFILES.get(key)
+        if cached is not None and cached[0] == token:
+            return cached[1]
+        loaded = _read(conn)
+    except sqlite3.Error:
+        log.debug("heat sidecar unreadable", exc_info=True)
+        return empty
+    finally:
+        conn.close()
+    profile = build_profile(
+        loaded.events,
+        sessions=loaded.sessions,
+        state="empty" if not loaded.events else "partial",
+        salt=loaded.meta.get("salt", ""),
+        token=loaded.token,
+        meta=loaded.meta,
+    )
+    with _LOCK:
+        _PROFILES[key] = (loaded.token, profile)
+    return profile
+
+
+def with_state(profile: HeatProfile, state: str) -> HeatProfile:
+    """`profile` reporting `state`, its digest recomputed (the state is in it)."""
+    if profile.state == state:
+        return profile
+    return _with_digest(replace(profile, state=state if state in STATES else profile.state))
+
+
+# --------------------------------------------------------------------------- #
+# Attribution: derived keys, never raw values (ruling S5-1)
+# --------------------------------------------------------------------------- #
+
+
+def derive_key(salt: str, kind: str, audience: str, value: object) -> str:
+    """A caller's opaque key as the sidecar stores it, or `""` when absent or
+    unusable. Salted per sidecar and scoped to the audience, so the stored
+    value is never the caller's own string and a key another principal passes
+    matches nothing of the owner's."""
+    if not isinstance(value, str) or not value or len(value) > KEY_MAX_CHARS or not salt:
+        return ""
+    material = f"exomem-heat-{kind}-v1\0{salt}\0{audience}\0{value}"
+    return hashlib.sha256(material.encode("utf-8", "surrogatepass")).hexdigest()[:KEY_HEX]
+
+
+def _audience() -> str:
+    try:
+        from .governance.principal import effective_principal
+
+        return str(effective_principal().audience_id or "")
+    except Exception:  # noqa: BLE001 - an unknown audience shares nobody's keys
+        return "\0unresolved"
+
+
+def client_label(value: object) -> str:
+    """A declared or observed client label as recorded: the label, or `""`."""
+    from . import query_log
+
+    declared = query_log.declared_client(value)
+    return declared if declared not in (None, "invalid") else ""
+
+
+def attribution_for(
+    vault_root: Path,
+    *,
+    client: object = None,
+    session: object = None,
+    workspace: object = None,
+    salt: str | None = None,
+) -> Attribution:
+    """The caller's derived keys, for ranking and for recording. Reads the
+    sidecar's salt unless the caller holds a profile that carries it."""
+    if salt is None:
+        salt = load(vault_root).salt
+    audience = _audience()
+    return Attribution(
+        session=derive_key(salt, "session", audience, session),
+        workspace=derive_key(salt, "workspace", audience, workspace),
+        client=client_label(client),
+    )
+
+
+def reset_for_tests() -> None:
+    """Forget every cached profile and in-process fold state."""
+    with _LOCK:
+        _PROFILES.clear()
+        _PARENTS.clear()
