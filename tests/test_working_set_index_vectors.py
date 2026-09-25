@@ -60,6 +60,9 @@ def encoder(vault: Path, monkeypatch: pytest.MonkeyPatch):
     fake = _Encoder()
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(embeddings, "embed_activation_passages", fake.passages)
+    monkeypatch.setattr(
+        embeddings, "embed_activation_passages_if_loaded", lambda texts: fake.passages(texts) if fake.resident else None
+    )
     monkeypatch.setattr(embeddings, "activation_fingerprint", lambda: fake.fingerprint if fake.resident else None)
     monkeypatch.setattr(embeddings, "get_activation_model", fake.load)
     monkeypatch.setattr(embeddings, "get_model", lambda: pytest.fail("the index never loads recall's model"))
@@ -427,3 +430,52 @@ def test_a_managed_runtime_re_embeds_once_after_the_encoder_changes(encoder, mon
     assert matrix is not None and len(ids) == len(after.anchors())
     status, served, _stale = working_set_runtime.ensure_index(vault, freshness_stamp="stamp-1")
     assert scheduled == ["stamp-1"], "nothing more to schedule once the vectors match"
+
+
+def test_an_inline_update_never_loads_a_model_when_the_reaper_wins_the_race(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reaper may unload the model between the pass's residency check and
+    its encode. The inline pass then encodes nothing: it only ever uses a model
+    already resident, and never loads one on the request thread."""
+    from exomem import embedding_backend
+
+    _seed_structure(vault)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv(embeddings.ACTIVATION_MODEL_ENV, raising=False)
+
+    class Resident:
+        backend, device, concurrent_encodes = "onnx", "cpu", True
+        profile = embedding_backend.EncoderProfile(
+            model=embeddings.MODEL_NAME, pooling="cls", query_prefix="", passage_prefix="", max_seq=512, pad_token="[PAD]"
+        )
+
+        def encode(self, texts, **_kwargs):
+            return np.vstack([_Encoder().vector(text) for text in texts])
+
+        def release(self) -> None:
+            pass
+
+    loads: list[str] = []
+    monkeypatch.setattr(embedding_backend, "load_encoder", lambda name, **_k: loads.append(name) or Resident())
+    monkeypatch.setattr(embeddings, "_MODEL", Resident())
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild()
+    fingerprint = embeddings.activation_fingerprint()
+    assert len(index.vector_matrix(fingerprint)[0]) == len(index.anchors())
+    _write(vault / "Knowledge Base/Products/Tern Wagon.md", "---\ntype: note\nstatus: active\n---\n# Tern Wagon\n\nNew.\n")
+    real = embeddings.activation_fingerprint
+    reaped: list[bool] = []
+
+    def residency_check_then_reap():
+        value = real()
+        if value is not None and not reaped:
+            reaped.append(embeddings.unload_model())
+        return value
+
+    monkeypatch.setattr(embeddings, "activation_fingerprint", residency_check_then_reap)
+
+    index.update()
+
+    assert reaped == [True]
+    assert loads == [], "a request-thread index update loaded a model"

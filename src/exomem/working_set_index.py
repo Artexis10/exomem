@@ -2187,8 +2187,15 @@ class WorkingSetIndex:
                     batch = missing if load_encoder else missing[:INLINE_VECTOR_ENCODE_LIMIT]
                     import numpy as np
 
-                    matrix = embeddings.embed_activation_passages([c.signature for c in batch])
-                    if embeddings.activation_fingerprint() == fingerprint:
+                    texts = [c.signature for c in batch]
+                    # A request thread's pass uses a resident model or none: the
+                    # reaper may unload it between the residency check and here.
+                    matrix = (
+                        embeddings.embed_activation_passages(texts)
+                        if load_encoder
+                        else embeddings.embed_activation_passages_if_loaded(texts)
+                    )
+                    if matrix is not None and embeddings.activation_fingerprint() == fingerprint:
                         new = {
                             c.anchor_id: (wanted[c.anchor_id], np.asarray(vector, dtype=np.float32).tobytes())
                             for c, vector in zip(batch, matrix, strict=True)

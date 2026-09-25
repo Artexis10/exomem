@@ -1280,6 +1280,38 @@ def embed_activation_query_if_loaded(text: str) -> np.ndarray | None:
         return np.asarray(vecs, dtype=np.float32)[0]
 
 
+def embed_activation_passages_if_loaded(texts: list[str]) -> np.ndarray | None:
+    """Encode activation signatures only with an encoder already resident.
+
+    The request thread's index pass uses this: it holds the model's lock and its
+    guard while it takes the model, exactly as `embed_query_if_loaded` does, so
+    a reaper that unloads it in the meantime leaves None, never a load. None
+    also when the model is busy; the background pass encodes what is left.
+    """
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS") or not texts:
+        return None
+    shared = activation_encoder_is_shared()
+    lock = _MODEL_LOCK if shared else _ACTIVATION_MODEL_LOCK
+    guard = BGE_GUARD if shared else ACTIVATION_GUARD
+    if not lock.acquire(blocking=False):
+        return None
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(guard.active())
+            model = _MODEL if shared else _ACTIVATION_MODEL
+        finally:
+            lock.release()
+        if model is None:
+            return None
+        _query_prefix, passage_prefix = _prefixes(model, MODEL_NAME if shared else activation_model_name())
+        return _encode_in_turns(
+            model,
+            [passage_prefix + text for text in texts],
+            admission=_activation_admission,
+            execution=activation_execution,
+        )
+
+
 def embed_activation_passages(texts: list[str]) -> np.ndarray:
     """Encode activation signatures with the activation encoder's passage prefix.
 

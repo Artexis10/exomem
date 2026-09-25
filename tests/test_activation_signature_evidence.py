@@ -84,6 +84,7 @@ def signatures(vault: Path, monkeypatch: pytest.MonkeyPatch):
     # pipeline, band, resolver, role lanes and egress are real.
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(embeddings, "embed_activation_passages", _PlantedEncoder().passages)
+    monkeypatch.setattr(embeddings, "embed_activation_passages_if_loaded", _PlantedEncoder().passages)
     monkeypatch.setattr(embeddings, "activation_fingerprint", lambda: FINGERPRINT)
     monkeypatch.setattr(embeddings, "embed_activation_query_if_loaded", lambda text: QUERY)
     monkeypatch.setattr(readiness, "should_defer", lambda component: False)
