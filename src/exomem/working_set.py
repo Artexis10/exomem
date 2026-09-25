@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from . import (
+    activation_conventions,
     context_roles,
     request_budget,
     source_taxonomy,
@@ -1668,10 +1669,13 @@ def compile_packet(
     # the sidecar that issued the number, which is how the manifest registry
     # tells a rebuilt counter from an older one.
     index_token = index.token()
+    conventions_registry = activation_conventions.load_conventions(root)
+    conventions = conventions_registry.conventions
     generation: dict[str, Any] = {
         "freshness_key": freshness_key,
         "index_generation": index_token[1],
         **registry.generation_block(),
+        **conventions_registry.generation_block(),
     }
     # Bounded work between two boundaries that already gate the request, for
     # the reason `working_set.recent` takes no boundary of its own (below).
@@ -1757,6 +1761,11 @@ def compile_packet(
                 # resolver, and a mixed tier is reported, never guessed.
                 hot_paths=hot.anchor_paths if not hot.pages else frozenset(),
                 term_anchor_counts=index.term_anchor_counts(),
+                stopwords=conventions.stopwords,
+                rare_term_max_anchors=conventions.rare_term_max_anchors,
+                eligible_categories=working_set_resolve.eligible_categories(
+                    analysis, registry.roles.values()
+                ),
             )
             candidates = working_set_resolve.add_graph_corroboration(
                 candidates, retrieval_paths=retrieval_paths
@@ -1987,6 +1996,8 @@ def compile_packet(
             purpose=purpose,
             index_generation=index_token[1],
             index_token=index_token,
+            state_fields=conventions.state_fields,
+            date_fields=conventions.date_fields,
         )
     items, missing = run_lanes(
         root,

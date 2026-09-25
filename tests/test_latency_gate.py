@@ -814,3 +814,176 @@ def test_referential_working_set_stays_under_ceiling_with_a_full_ring(
         f"\nreferential working set, full ring: {small_ms:.1f}ms @ {N_NOTES}, "
         f"{large_ms:.1f}ms @ {N_NOTES_LARGE} (bound {bound:.1f}ms)\n"
     )
+
+
+# --- Task 5.3 (make-activation-conventions-vault-owned): the same ceiling
+# holds with a vault-owned registry in effect. `test_working_set_compiler_
+# does_not_scale_linearly` above already measures 8k notes but only asserts
+# the SCALING ratio against the 2k measurement; this pins the absolute
+# ceiling at 8k too, the way the 2k test above already pins it.
+
+
+def _conventions_override_at_caps() -> dict:
+    """An override sized to exactly every cap `activation_conventions` names,
+    with rules that match no real page -- the caps exist to bound per-request
+    evaluation cost, not the number of pages one rule admits (design.md
+    decision 3's own point), so this measures the cost of the RULE COUNT.
+    """
+    from exomem import activation_conventions as ac_module
+
+    return {
+        "schema_version": 1,
+        "anchors": {
+            "resource": {
+                "add_folders": [f"CustomResource{i}" for i in range(ac_module.MAX_FOLDERS_PER_KIND)],
+                "add_tags": [f"resource-tag-{i}" for i in range(ac_module.MAX_TAGS_PER_KIND)],
+                "add_types": [f"resource-type-{i}" for i in range(ac_module.MAX_TYPES_PER_KIND)],
+            },
+            "hub": {
+                "add_folders": [f"CustomHub{i}" for i in range(ac_module.MAX_FOLDERS_PER_KIND)],
+                "add_tags": [f"hub-tag-{i}" for i in range(ac_module.MAX_TAGS_PER_KIND)],
+                "add_types": [f"hub-type-{i}" for i in range(ac_module.MAX_TYPES_PER_KIND)],
+            },
+            "add_skip_folders": [f"CustomSkip{i}" for i in range(ac_module.MAX_SKIP_FOLDERS)],
+        },
+        "state": {
+            "prefer_state_fields": [f"custom_state_field_{i}" for i in range(ac_module.MAX_STATE_FIELDS)]
+        },
+        "stopwords": {"add": [f"customstopword{i}" for i in range(ac_module.MAX_STOPWORDS)]},
+        "resolution": {"rare_term_max_anchors": 1},
+    }
+
+
+def _roles_override_at_caps() -> dict:
+    """An override sized to exactly every cap `context_roles` names: the
+    roles-per-override, cues-per-role and evidence-categories-per-role caps.
+    """
+    from exomem import context_roles as roles_module
+
+    categories = [
+        "decision", "fact", "finding", "insight",
+        "constraint", "requirement", "assumption", "risk",
+    ]
+    assert len(categories) == roles_module.MAX_EVIDENCE_CATEGORIES_PER_ROLE
+    cues = [f"custom cue number {i}" for i in range(roles_module.MAX_CUES_PER_ROLE)]
+    return {
+        "schema_version": 1,
+        "roles": {
+            f"custom_latency_role_{i}": {
+                "lane": "evidence",
+                "description": "synthetic role for the latency gate",
+                "cues": cues,
+                "evidence_cues": cues,
+                "evidence_categories": categories,
+            }
+            for i in range(roles_module.MAX_ROLES_PER_OVERRIDE)
+        },
+    }
+
+
+def _write_overrides_at_caps(vault: Path) -> None:
+    import yaml
+
+    from exomem import activation_conventions as ac_module
+    from exomem import context_roles as roles_module
+
+    roles_module.override_path(vault).parent.mkdir(parents=True, exist_ok=True)
+    roles_module.override_path(vault).write_text(
+        yaml.safe_dump(_roles_override_at_caps(), sort_keys=True), encoding="utf-8"
+    )
+    ac_module.override_path(vault).write_text(
+        yaml.safe_dump(_conventions_override_at_caps(), sort_keys=True), encoding="utf-8"
+    )
+    roles_module.clear_cache()
+    ac_module.clear_cache()
+
+
+@pytest.mark.timeout(600)
+def test_working_set_compiler_stays_bounded_at_8k_notes_with_the_shipped_registry(
+    tmp_path: Path, model_free
+) -> None:
+    from synth_vault import gen_entity_overlay
+
+    vault = _build_dense_vault(tmp_path, N_NOTES_LARGE)
+    gen_entity_overlay(vault, 500, seed=19)
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
+
+    compiler_ms, packet = _measure_working_set(vault)
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert compiler_ms < CEIL_WORKING_SET_MS, (
+        f"context compiler took {compiler_ms:.1f}ms @ {N_NOTES_LARGE} notes "
+        f"(ceiling {CEIL_WORKING_SET_MS:.1f}ms)"
+    )
+
+
+@pytest.mark.timeout(300)
+def test_working_set_compiler_stays_bounded_with_an_override_at_the_caps(
+    tmp_path: Path, model_free
+) -> None:
+    from synth_vault import gen_entity_overlay
+
+    vault = _build_dense_vault(tmp_path, N_NOTES)
+    gen_entity_overlay(vault, 500, seed=19)
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
+    _write_overrides_at_caps(vault)
+
+    compiler_ms, packet = _measure_working_set(vault)
+
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert packet["generation"]["roles_source"] == "vault"
+    assert packet["generation"]["conventions_source"] == "vault"
+    assert compiler_ms < CEIL_WORKING_SET_MS, (
+        f"context compiler took {compiler_ms:.1f}ms @ {N_NOTES} notes with an "
+        f"override at every cap (ceiling {CEIL_WORKING_SET_MS:.1f}ms)"
+    )
+
+
+@pytest.mark.timeout(300)
+def test_a_rule_admitting_a_large_folder_is_reported_not_gated(
+    tmp_path: Path, model_free
+) -> None:
+    """design.md's Risks section: 'An owner admits everything ... The first is
+    slow; the latency gate reports it.' `Notes/` holds three of
+    `gen_dense_vault`'s seven folders, so naming it as a resource rule makes
+    most of the corpus an anchor candidate -- legitimately slow, not unsound
+    (more anchors only tightens `rare_term`), so this measures and reports
+    the cost instead of gating it against `CEIL_WORKING_SET_MS`. The
+    `pytest.mark.timeout` above is the actual backstop, against a hang rather
+    than against a slow-but-correct compile.
+    """
+    import yaml
+
+    from exomem import activation_conventions as ac_module
+    from synth_vault import gen_entity_overlay
+
+    vault = _build_dense_vault(tmp_path, N_NOTES)
+    gen_entity_overlay(vault, 500, seed=19)
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
+
+    override_path = ac_module.override_path(vault)
+    override_path.parent.mkdir(parents=True, exist_ok=True)
+    override_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "anchors": {"resource": {"add_folders": ["Notes"]}},
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    ac_module.clear_cache()
+
+    compiler_ms, packet = _measure_working_set(vault)
+
+    print(
+        f"\n[reported, not gated] compiler took {compiler_ms:.1f}ms @ {N_NOTES} notes "
+        f"with 'Notes/' admitted whole as a resource rule "
+        f"(ordinary ceiling {CEIL_WORKING_SET_MS:.1f}ms)"
+    )
+    assert packet["abstained"] is False, packet.get("abstention")
+    assert packet["generation"]["conventions_source"] == "vault"

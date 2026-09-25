@@ -1,0 +1,97 @@
+# Activation conventions — how THIS vault is shaped and spelled.
+#
+# `activate_context` resolves a raw turn to durable anchors and fills a small
+# working-memory packet. Some of what it needs to know is not a universal
+# rule — it is a fact about how ONE vault happens to be organised: which
+# folders hold resources and hubs, which folders are noise the index should
+# skip, which frontmatter fields state a Records item's condition and
+# observation date, which words are function words in this vault's own
+# language, and how many anchors one shared name word may name before it
+# stops counting as contact. This file is where that shape lives, so the
+# compiler never has to guess it from constants tuned on someone else's vault.
+#
+# No server component writes this file except a governed `schema_memory` save
+# your agent makes on your explicit request (subject `activation-conventions`).
+#
+# YOUR OVERRIDE: copy this file's shape (not its shipped values) to
+# `<vault>/<Knowledge Base>/_Schema/activation-conventions.yaml` and edit it
+# there. The override grammar is different from the shipped shape below: it
+# names what to ADD and, where allowed, what to DROP.
+#
+#   schema_version: 1
+#   anchors:
+#     resource:
+#       add_folders: [Equipment, Vehicles/Fleet]   # KB-relative, at most 3 segments
+#       drop_folders: [Systems]                    # stop treating a shipped folder as a resource
+#       add_types: [asset]                         # frontmatter `type:` values, resource kind
+#     hub:
+#       add_tags: [hub-de]
+#     add_skip_folders: [Vorlagen]                 # never dropped — see below
+#   state:
+#     prefer_state_fields: [stock, level]          # tried before the shipped names
+#     drop_state_fields: [value]
+#   stopwords:
+#     # Add-only: a stopword can never be un-listed, only extended. A heavily
+#     # templated vault should add its own repeated section headings here —
+#     # "summary", "connections", "why" and the like, if that is what your
+#     # own templates use — so a template heading never supplies the second
+#     # shared term a real name word needs for lexical contact.
+#     add: [der, die, das, zusammenfassung, verbindungen]
+#   resolution:
+#     rare_term_max_anchors: 2                     # may only be tightened, 1..3
+# A folder rule cannot claim raw material (`Sources/`, `Evidence/`), a
+# Planning or Records collection tree, the entity folder, or anything
+# beginning with the knowledge-base folder's own name — those rules are
+# rejected with a finding, and the rest of the file still loads. Folder
+# segments are compared case-insensitively.
+#
+# A broken override never stops activation: the shipped registry below
+# applies instead, and every packet's `generation.conventions_findings`
+# names what was wrong.
+
+schema_version: 1
+
+anchors:
+  resource:
+    folders: [Products, Systems]
+    tags: []
+    types: []
+  hub:
+    folders: []
+    tags: [hub]
+    types: []
+  skip_folders: [_trash, _attachments, _Staging, Templates]
+
+state:
+  state_fields: [state, status, condition, location, value, balance, remaining]
+  date_fields: [observed_on, occurred_on, as_of, date, updated]
+
+stopwords:
+  # "no", "on" and "off" are quoted: unquoted, YAML 1.1 reads them as booleans, not
+  # the words they are — the loader would silently drop both.
+  [
+    a, an, and, are, as, at, be, but, by, can, do, for,
+    from, how, i, "i'm", im, in, is, it, its, just, me, much,
+    my, "no", not, of, "on", or, our, out, so, still, that, the,
+    their, them, then, there, these, they, this, to, up, was,
+    we, what, when, where, which, who, why, will, with, you,
+    your, again, any, does, did, get, got, had, has, have,
+    left, like, make, many, more, most, need, now, one, only,
+    other, over, should, some, such, than, too, use, very,
+    want, way, well, about,
+    # Closed-class additions: the hortative "let", then prepositions,
+    # subordinating conjunctions, modal and auxiliary forms and common
+    # pronouns — never a content word, however common. "off" is quoted
+    # for the same YAML 1.1 reason as "no" and "on".
+    let,
+    before, after, into, onto, during, while, between,
+    under, through, without, within, against, because, if,
+    would, could, been, were, also, both, each, since,
+    until, upon, per, via, being, am, he, she, his,
+    her, us, shall, may, might, must, "off", down,
+    across, toward, towards, among, around,
+  ]
+
+resolution:
+  rare_term_max_anchors: 3
+

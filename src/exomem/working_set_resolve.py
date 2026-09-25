@@ -145,46 +145,43 @@ MAX_CANDIDATES = 24
 MAX_ANCHORS = 6
 MAX_NGRAM = 4
 
-#: Turn cues. Deterministic substrings, evaluated on the same NFKC-casefolded
-#: text the anchor terms are normalised with. A cue is a lens, not a
-#: classification: it can only ADD a role or a category to look for.
-CUE_PATTERNS: Mapping[str, tuple[str, ...]] = {
-    "planning": ("i'm planning", "im planning", "planning to", "how should i", "should i"),
-    "constraint": ("constraint", "limit", "allowed to", "can i", "am i able"),
-    "preference": ("prefer", "i like", "i hate", "usually"),
-    "current_state": ("right now", "currently", "at the moment", "how much", "how many"),
-    "method": ("how do i", "how to", "what is the best way", "approach"),
-    "question": ("?", "what about", "why does"),
-    "recent_change": ("again", "still", "changed", "since"),
-    "precedent": ("last time", "before", "previously"),
-    # A turn that says it points back at what the session was doing
-    # (close-memory-loop D2). Unlike every other cue this one is not a lens on
-    # WHAT to look for. It is NECESSARY for a turn to be referential but not
-    # sufficient: the turn must also say nothing else (`REFERENTIAL_FILLER`
-    # and `analyze_turn`), because every cue word has an ordinary sense —
-    # "update my resume", "check the status of my flight", "continue the
-    # story" — and a prior must never answer one of those. Matched on whole
-    # tokens, not as a substring (`_REFERENTIAL_CUE_PHRASES`), so
-    # "discontinue" and "statuses" are not cues; bare "go on" and "pick up"
-    # are absent because their ordinary senses are far commoner.
-    "referential": (
-        "continue",
-        "where were we",
-        "where did we leave",
-        "what were we doing",
-        "carry on",
-        "status",
-        "status update",
-        "status report",
-        "what's next",
-        "whats next",
-        "what is next",
-        "same as before",
-        "as before",
-        "pick up where",
-        "resume",
-    ),
-}
+#: An evidence cue must be at least this many characters long
+#: (`make-activation-conventions-vault-owned` decision 1) -- the bound a
+#: bare `?` fails, which is the one intended shipped difference from the
+#: deleted `CUE_PATTERNS` table. `context_roles.MIN_EVIDENCE_CUE_CHARS`
+#: applies the SAME bound at override-merge time (to decide whether a cue
+#: the owner just added can ever be evidence, for the finding it reports);
+#: this module has no dependency on `context_roles`, so the value is
+#: restated here rather than imported.
+MIN_EVIDENCE_CUE_CHARS = 3
+
+#: A turn that says it points back at what the session was doing
+#: (close-memory-loop D2). Unlike a role cue this is not a lens on WHAT to
+#: look for. It is NECESSARY for a turn to be referential but not
+#: sufficient: the turn must also say nothing else (`REFERENTIAL_FILLER`
+#: and `analyze_turn`), because every cue word has an ordinary sense —
+#: "update my resume", "check the status of my flight", "continue the
+#: story" — and a prior must never answer one of those. Matched on whole
+#: tokens, not as a substring (`_REFERENTIAL_CUE_PHRASES`), so
+#: "discontinue" and "statuses" are not cues; bare "go on" and "pick up"
+#: are absent because their ordinary senses are far commoner.
+REFERENTIAL_CUES: tuple[str, ...] = (
+    "continue",
+    "where were we",
+    "where did we leave",
+    "what were we doing",
+    "carry on",
+    "status",
+    "status update",
+    "status report",
+    "what's next",
+    "whats next",
+    "what is next",
+    "same as before",
+    "as before",
+    "pick up where",
+    "resume",
+)
 
 #: The referential cues as token runs, spelled the way `tokens_of` spells a
 #: turn, longest first so an overlapping pair ("same as before", "as before")
@@ -192,7 +189,7 @@ CUE_PATTERNS: Mapping[str, tuple[str, ...]] = {
 #: turn tokens.
 _REFERENTIAL_CUE_PHRASES: tuple[str, ...] = tuple(
     sorted(
-        {" ".join(tokens_of(normalize(pattern))) for pattern in CUE_PATTERNS["referential"]},
+        {" ".join(tokens_of(normalize(pattern))) for pattern in REFERENTIAL_CUES},
         key=lambda phrase: (-len(phrase), phrase),
     )
 )
@@ -248,41 +245,35 @@ CONTACT_KINDS: frozenset[str] = WORDED_CONTACT_KINDS | RETRIEVED_CONTACT_KINDS
 #: that module has no dependency on this one.
 _STOPWORDS: frozenset[str] = STOPWORDS
 
-#: Cue → semantic-unit category, for `category_match`. Structural lookup only.
-_CUE_CATEGORIES: Mapping[str, tuple[str, ...]] = {
-    "planning": ("action",),
-    "constraint": ("constraint", "requirement"),
-    "preference": ("preference",),
-    "current_state": ("fact",),
-    "method": ("technique", "design"),
-    "question": ("question", "problem"),
-    "recent_change": ("decision", "finding"),
-    "precedent": ("decision", "insight"),
-}
-
-
 @dataclass(frozen=True, slots=True)
 class TurnAnalysis:
-    """One normalised turn. Computed once and reused by every lane."""
+    """One normalised turn. Computed once and reused by every lane.
+
+    Registry-free by design (`make-activation-conventions-vault-owned`,
+    decision 1): the deleted `CUE_PATTERNS`/`_CUE_CATEGORIES` tables lived
+    here, but a role's cue vocabulary is now the vault's own
+    `context_roles` registry, so this dataclass no longer carries a `cues`
+    field at all -- `eligible_categories()` below reads the roles and this
+    analysis's `tokens` directly, without either one needing to know about
+    the other's shape.
+    """
 
     text: str
     tokens: tuple[str, ...]
     ngrams: tuple[str, ...]
-    cues: tuple[str, ...]
     #: Does this turn point at recent work instead of naming anything? A
     #: property of the TURN alone — whether anything hot exists to point at,
     #: and whether the turn's words reached an anchor after all, are facts
     #: about the vault and the candidate set, decided in `resolve()`.
     referential: bool = False
+    #: Did the turn speak a referential cue at all, whatever else it said? A
+    #: cue with residue is recorded here and leaves `referential` false.
+    referential_cue: bool = False
     #: The two-capital words the turn spelled as acronyms, casefolded like
     #: `tokens`: the casing the analysis otherwise discards, kept only because
     #: the rare-term length floor needs it (`RARE_TERM_MIN_CHARS`). Empty for
     #: a turn with no lower-case letter, where capitals carry no signal.
     acronyms: frozenset[str] = frozenset()
-
-    @property
-    def cue_categories(self) -> frozenset[str]:
-        return frozenset(category for cue in self.cues for category in _CUE_CATEGORIES.get(cue, ()))
 
 
 @dataclass(frozen=True, slots=True)
@@ -501,12 +492,12 @@ def _referential_residue(token_text: str) -> tuple[str, ...]:
 
 
 def analyze_turn(turn: str) -> TurnAnalysis:
-    """Normalise a raw turn once: NFKC + casefold, tokens, n-grams, cues."""
+    """Normalise a raw turn once: NFKC + casefold, tokens, n-grams."""
     # Calls the shared `normalize()` rather than restating its formula: a
     # hand-rolled copy here once skipped `normalize()`'s typographic-
     # apostrophe fold, so a turn spelled with a curly quote matched none of
-    # `CUE_PATTERNS`'s plain-apostrophe substrings (e.g. "i'm planning")
-    # even though every OTHER comparison in this module already folded it.
+    # a role cue's plain-apostrophe substrings (e.g. "i'm planning") even
+    # though every OTHER comparison in this module already folded it.
     text = normalize(turn)
     # Order and repetitions are kept: the n-gram window below must be able to
     # start a phrase at a word the turn has already used, or a turn naming two
@@ -530,27 +521,66 @@ def analyze_turn(turn: str) -> TurnAnalysis:
                     seen.add(phrase)
                     ngrams.append(phrase)
     token_text = f" {' '.join(tokens)} "
-    cues = tuple(
-        name
-        for name, patterns in CUE_PATTERNS.items()
-        if (
-            any(f" {phrase} " in token_text for phrase in _REFERENTIAL_CUE_PHRASES)
-            if name == "referential"
-            else any(pattern in text for pattern in patterns)
-        )
-    )
     # A declared cue, and nothing else said (close-memory-loop D2, as
     # narrowed twice): the turn has to say it points back, and must not also
     # say what it is about.
-    referential = "referential" in cues and not _referential_residue(token_text)
+    referential_cue = any(f" {phrase} " in token_text for phrase in _REFERENTIAL_CUE_PHRASES)
+    referential = referential_cue and not _referential_residue(token_text)
     return TurnAnalysis(
         text=text,
         tokens=tokens,
         ngrams=tuple(ngrams),
-        cues=cues,
         referential=referential,
+        referential_cue=referential_cue,
         acronyms=_acronyms_of(turn),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Role-cue evidence (make-activation-conventions-vault-owned, decision 1)
+# --------------------------------------------------------------------------- #
+
+
+def _is_evidence_cue(cue: str, turn_tokens: Sequence[str]) -> bool:
+    """The three bounds, in order: long enough, tokenises, whole terms in
+    order. `tokens_of` normalises its own input (NFKC + casefold, the same
+    typographic apostrophe/hyphen fold `turn_tokens` was produced with), so
+    a cue authored either way still lines up with the turn."""
+    if len(cue) < MIN_EVIDENCE_CUE_CHARS:
+        return False
+    cue_tokens = tokens_of(cue)
+    span = len(cue_tokens)
+    if span == 0 or span > len(turn_tokens):
+        return False
+    return any(
+        tuple(turn_tokens[start : start + span]) == cue_tokens
+        for start in range(len(turn_tokens) - span + 1)
+    )
+
+
+def eligible_categories(analysis: TurnAnalysis, roles: Iterable[Any]) -> frozenset[str]:
+    """Categories `category_match` may draw on for this turn: the union of
+    `evidence_categories` over every role with an EVIDENCE cue in the turn
+    (design `make-activation-conventions-vault-owned`, decision 1).
+
+    `roles` is whatever iterable of role-like objects the caller's registry
+    exposes (`context_roles.RoleRegistry.roles.values()` in production) --
+    each read only for `.evidence_cues` and `.evidence_categories`, so this
+    function stays free of any dependency on `context_roles`'s own types.
+    A cue failing a bound (a bare `?`, for instance) can still SELECT its
+    role -- `context_roles.select_roles` matches every cue as a plain
+    substring -- but never contributes a category here.
+    """
+    categories: set[str] = set()
+    turn_tokens = analysis.tokens
+    for role in roles:
+        role_categories = getattr(role, "evidence_categories", None)
+        role_cues = getattr(role, "evidence_cues", None)
+        if not role_categories or not role_cues:
+            continue
+        if any(_is_evidence_cue(cue, turn_tokens) for cue in role_cues):
+            categories.update(role_categories)
+    return frozenset(categories)
 
 
 # --------------------------------------------------------------------------- #
@@ -570,6 +600,9 @@ def candidates_for(
     hot_paths: frozenset[str] = frozenset(),
     term_anchor_counts: Mapping[str, int] | None = None,
     config: RankingConfig | None = None,
+    stopwords: frozenset[str] = _STOPWORDS,
+    rare_term_max_anchors: int = RARE_TERM_MAX_ANCHORS,
+    eligible_categories: frozenset[str] = frozenset(),
 ) -> tuple[CandidateFacts, ...]:
     """Assemble categorical evidence for every anchor this turn can reach.
 
@@ -586,10 +619,25 @@ def candidates_for(
     content is a reference has something to refer to. Whether such a
     candidate then resolves is `resolve()`'s call, not this function's: the
     condition is about the whole candidate set.
+
+    `stopwords` and `rare_term_max_anchors` default to the shipped values;
+    the real build passes the vault's EFFECTIVE activation-conventions
+    registry (`make-activation-conventions-vault-owned`), read once per
+    build in `working_set.compile_packet` and passed to both this function
+    and the index's own derived-short-name admission, so a turn's own words
+    and an anchor's derived alias are measured against the same list.
+
+    `eligible_categories` defaults to none: this function stays registry-free
+    (`analysis` carries no cues of its own), so `category_match` is only ever
+    considered when the caller passes the categories the vault's roles
+    registry made eligible for THIS turn -- `working_set.compile_packet`
+    computes it once per build via `eligible_categories()` above and passes
+    it through, the same pattern `stopwords`/`rare_term_max_anchors` already
+    follow.
     """
     config = config or DEFAULT_RANKING
     term_counts = term_anchor_counts or {}
-    turn_terms = frozenset(analysis.tokens) - _STOPWORDS
+    turn_terms = frozenset(analysis.tokens) - stopwords
     # R4 (fix/activation-competing-senses): possessive fold, applied on the
     # TURN side of the lexical comparison -- "gamma's" must contribute the
     # term "gamma" the same way a plural turn token already folds to its
@@ -617,13 +665,17 @@ def candidates_for(
         | frozenset(
             folded
             for token in analysis.tokens
-            if (folded := fold_possessive(token)) not in STOPWORDS
+            if (folded := fold_possessive(token)) not in stopwords
         )
     )
-    cue_categories = analysis.cue_categories
+    cue_categories = eligible_categories
     claims_winner = _claims_winner(analysis, routing_targets)
     bands = _vector_bands(rows, vectors, query_vector, config) if query_vector is not None else {}
-    min_terms = max(1, int(config.working_set_lexical_min_terms))
+    # A floor of 2, whatever `RankingConfig` says (design.md decision 2a):
+    # the two-shared-terms minimum is part of the soundness argument, so it
+    # lives in code, not in an operator-tunable file. The shipped default is
+    # already 2, so this never changes shipped behaviour.
+    min_terms = max(2, int(config.working_set_lexical_min_terms))
 
     # R2 (fix/activation-competing-senses), pass 1 of 2: each row's own
     # matched `exact_alias` phrases, and the turn TOKEN POSITIONS any
@@ -656,7 +708,7 @@ def candidates_for(
     # `turn_terms_folded`'s own construction above).
     term_positions: dict[str, list[int]] = {}
     for index, token in enumerate(analysis.tokens):
-        if token in _STOPWORDS:
+        if token in stopwords:
             continue
         folded_term = _fold_lexical_term(token)
         if folded_term is None:
@@ -732,7 +784,7 @@ def candidates_for(
                     else frozenset(),
                 )
                 and count is not None
-                and count <= RARE_TERM_MAX_ANCHORS
+                and count <= rare_term_max_anchors
             ):
                 # R2: a turn term all of whose occurrences lie inside the
                 # token span of a DIFFERENT anchor's own spelled-out
