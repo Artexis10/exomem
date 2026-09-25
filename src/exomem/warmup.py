@@ -510,6 +510,19 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             except Exception:  # noqa: BLE001 — durable receipt survives retry
                 log.warning("deferred embed drain failed", exc_info=True)
 
+    def _preload_recall_serving() -> None:
+        # A sidecar still in another encoder's space (a re-embed not yet cut
+        # over) is served by that encoder. It loads here in every mode, before
+        # writes are admitted, so neither a query nor a write ever loads it: a
+        # write would otherwise fail to encode and leave its row stale until the
+        # cutover. Quiet mode accepts it resident for as long as the re-embed runs.
+        from . import recall_migration
+
+        _model_step(
+            "model_recall_serving",
+            lambda: recall_migration.preload_serving_encoder(vault_root),
+        )
+
     disabled = bool(os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"))
     if disabled or not preload:
         # Skip model preloads: either a lexical-only install (DISABLE_EMBEDDINGS,
@@ -535,6 +548,7 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             # defer to the lexical lanes instead of waiting on the load.
             log.info("preloading the served embedding model %s", embeddings.MODEL_NAME)
             if _preload("model_bge", embeddings.get_model, lambda m: m.encode(["warm"])):
+                _preload_recall_serving()
                 drained = readiness.mark_ready("embeddings")
             else:
                 drained = readiness.drain_deferred("embeddings")
@@ -545,6 +559,8 @@ def warm_all(vault_root: Path) -> dict[str, float]:
                 _model_step(
                     "model_artifact", lambda: embedding_backend.ensure_served_artifact(embeddings.MODEL_NAME)
                 )
+            if not disabled:
+                _preload_recall_serving()
             drained = readiness.mark_ready("embeddings")
         # Quiet mode: embeddings ARE available (just lazy), so replay any write
         # parked during the brief lexical warm — mirror the real-preload branch so
@@ -567,15 +583,7 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         # rest of the warm), but drain_deferred() still empties the queue so those
         # writes are replayed instead of lost.
         if bge_ok:
-            from . import recall_migration
-
-            # A sidecar still in another encoder's space (a re-embed not yet cut
-            # over) is served by that encoder. It loads here, before writes are
-            # admitted, so neither a query nor a write ever loads it.
-            _model_step(
-                "model_recall_serving",
-                lambda: recall_migration.preload_serving_encoder(vault_root),
-            )
+            _preload_recall_serving()
             log.info("embedding model ready")
             drained = readiness.mark_ready("embeddings")
         else:

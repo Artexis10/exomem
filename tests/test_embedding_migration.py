@@ -392,6 +392,46 @@ def test_warm_up_loads_the_serving_encoder_before_writes_are_admitted(
     assert _vector_lane(vault)["status"] == "participated"
 
 
+@pytest.mark.parametrize(("mode", "preloaded"), [("normal", {OLD, NEW}), ("quiet", {OLD})])
+def test_warm_up_loads_the_serving_encoder_in_every_mode(world, monkeypatch, mode, preloaded) -> None:
+    """Normal and quiet mode preload no model by policy, yet a sidecar still
+    served by its previous encoder needs that encoder before writes are
+    admitted: a write would otherwise fail to encode and leave its row stale
+    until the cutover. Quiet mode accepts that encoder beside the lazy recall
+    model for as long as the re-embed runs."""
+    from exomem import warmup
+
+    vault, _log, loads = world
+    monkeypatch.setenv("EXOMEM_MODE", mode)
+    monkeypatch.delenv("EXOMEM_PRELOAD_MODELS", raising=False)
+    monkeypatch.setenv("EXOMEM_DISABLE_RANKING", "1")
+    monkeypatch.setattr(warmup, "warm_caches", lambda *_args, **_kwargs: {})
+    # The shipped recall model is a served artefact; NEW stands in for it.
+    monkeypatch.setattr(
+        embedding_backend, "served_artifact", lambda name: object() if name == NEW else None
+    )
+    monkeypatch.setattr(embedding_backend, "ensure_served_artifact", lambda _name: None)
+    admitted_when_loaded: list[bool] = []
+    real_load = embedding_backend.load_encoder
+
+    def load(name: str, **kwargs):
+        if name == OLD:
+            admitted_when_loaded.append(readiness.is_ready("embeddings"))
+        return real_load(name, **kwargs)
+
+    monkeypatch.setattr(embedding_backend, "load_encoder", load)
+    readiness.begin_warm()
+    thread = threading.Thread(target=warmup.warm_all, args=(vault,), name="exomem-warm")
+    thread.start()
+    thread.join(timeout=120)
+    readiness.finish_warm()
+
+    assert admitted_when_loaded == [False]
+    assert {name for name, _thread in loads} == preloaded
+    assert all(thread == "exomem-warm" for _name, thread in loads)
+    assert _vector_lane(vault)["status"] == "participated"
+
+
 def test_switched_off_the_job_still_loads_the_serving_encoder(world, monkeypatch) -> None:
     vault, log, loads = world
     monkeypatch.setenv(recall_migration.REEMBED_ENV, "off")
