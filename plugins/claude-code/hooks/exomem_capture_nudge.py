@@ -45,9 +45,14 @@ file). A higher count means a recap was recorded through some other door (a
 client whose tool list predates `episode_memory`, the REST facade directly, a
 door this hook doesn't otherwise watch), which the transcript-only
 `_successful_episode_record` check can never see; the substantive-turn count
-resets and the ask is skipped. Any failure of that call — the door
-unconfigured, a timeout, any error, or the episode simply not found yet —
-falls straight through to the transcript-only behaviour above.
+resets and the ask is skipped. A record this hook saw itself leaves the
+baseline unknown, so the next read re-bases on it instead of counting it as
+another door's. `inspect` is scoped to one audience, so "any door" means any
+door acting as the same audience as the REST key; a recap recorded under a
+different principal is invisible here and the ask simply fires. Any failure
+of that call — the door unconfigured, a timeout, any error, or the episode
+simply not found yet — falls straight through to the transcript-only
+behaviour above.
 
 Contract (Claude Code / Codex Stop hook): read the event JSON on stdin; print
 `{"decision":"block","reason":...}` and exit 0 to block the stop and feed the
