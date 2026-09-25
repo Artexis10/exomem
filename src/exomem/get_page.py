@@ -137,15 +137,21 @@ NOT_UTF8_REASON = "file is not UTF-8 text"
 
 
 def unreadable_or_absent(
-    vault_root: Path, relatives: tuple[str, ...], missing_path: str, reason: str
+    vault_root: Path,
+    relatives: tuple[str, ...],
+    missing_path: str,
+    reason: str,
+    *,
+    code: str = "UNREADABLE",
 ) -> GetError:
-    """UNREADABLE where the caller may see the item, the absent refusal elsewhere.
+    """`code` where the caller may see the item, the absent refusal elsewhere.
 
     A file is known to be unreadable only once its bytes are in hand, and the
     full release decision needs the frontmatter those bytes failed to yield.
     Deciding by path first means a withheld file answers exactly like a
     missing one, whatever its bytes are; a scope that needs the frontmatter
-    to classify the path withholds it.
+    to classify the path withholds it. Any other refusal that reveals the
+    item exists (an ambiguous on-disk spelling) passes its own `code`.
     """
     from .governance import egress
 
@@ -156,7 +162,7 @@ def unreadable_or_absent(
             # outcome is an unreadable report, not a release.
             egress.release_level_for_path_only(vault_root, rel, receipt_decision="withheld")
             return GetError(code="NOT_FOUND", reason=f"file does not exist: {missing_path}")
-    return GetError(code="UNREADABLE", reason=reason)
+    return GetError(code=code, reason=reason)
 
 
 def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
@@ -233,12 +239,17 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
             )
     except reserved_paths.ReservedPathLeafError as error:
         if error.code == "AMBIGUOUS_PATH":
-            raise GetError(
-                code="AMBIGUOUS_PATH",
-                reason=(
+            # Only a caller who may see the page learns it has two spellings;
+            # to anyone else a withheld collision is simply absent.
+            raise unreadable_or_absent(
+                vault_root,
+                (resolution.relative, resolution.resolved_relative),
+                missing_path,
+                (
                     f"{missing_path} matches more than one on-disk spelling; "
                     "refusing to guess which"
                 ),
+                code="AMBIGUOUS_PATH",
             ) from None
         if error.code in {
             "CAPABILITY_UNAVAILABLE",

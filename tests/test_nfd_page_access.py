@@ -273,3 +273,39 @@ def test_withheld_nfd_page_reads_as_missing_to_restricted_caller(vault: Path) ->
         commands.op_get(vault, path=rel)
 
     assert str(withheld.value) == str(absent.value)
+
+
+# ---------------- review follow-ups ----------------
+
+
+def _collision(vault: Path) -> tuple[str, Path]:
+    """An NFC page and its NFD twin, both on disk under one logical name."""
+    directory = vault.joinpath(*_DIRECTORY)
+    _write_page(directory, _COMPOSED_NAME, body="composed body")
+    _write_page(directory, _DECOMPOSED_NAME, body="decomposed body")
+    return f"{_DIRECTORY_REL}/{_COMPOSED_NAME}", directory
+
+
+def _snapshot(directory: Path) -> dict[str, bytes]:
+    return {
+        path.name: path.read_bytes()
+        for path in directory.iterdir()
+        if unicodedata.normalize("NFKC", path.name) == _COMPOSED_NAME
+    }
+
+
+def test_withheld_nfd_collision_reads_as_missing_to_restricted_caller(vault: Path) -> None:
+    """A collision on a withheld path must not answer AMBIGUOUS_PATH: that
+    would tell a denied caller the page exists in two spellings."""
+    rel, directory = _collision(vault)
+    _govern_deny(vault)
+
+    with request_scope(_external()), pytest.raises(ValueError) as withheld:
+        commands.op_get(vault, path=rel)
+
+    (directory / _COMPOSED_NAME).unlink()
+    (directory / _DECOMPOSED_NAME).unlink()
+    with request_scope(_external()), pytest.raises(ValueError) as absent:
+        commands.op_get(vault, path=rel)
+
+    assert str(withheld.value) == str(absent.value)
