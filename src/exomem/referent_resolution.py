@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from .bm25 import stem_word
+from .bm25 import stem_word, word_forms
 from .entity_candidates import identity_key
 from .entity_types import EntityTypeRegistry, core_registry
 from .project_keys import _levenshtein
@@ -382,7 +382,9 @@ def _fuzzy_name(cue: ReferentCue, entity: EntityRecord) -> tuple[str, str, int] 
 
 
 def _matches_attribute(descriptor: str, attribute: str) -> bool:
-    if descriptor == attribute or stem_word(descriptor) == stem_word(attribute):
+    # The attribute is the stored side: any of its indexed forms, so a
+    # descriptor typed without accents still meets an accented attribute.
+    if descriptor == attribute or stem_word(descriptor) in word_forms(attribute):
         return True
     shorter, longer = sorted((descriptor, attribute), key=len)
     return len(shorter) >= 4 and longer.startswith(shorter)
@@ -398,7 +400,7 @@ def _tokens_match_qualifiers(
     qualifier_stems: frozenset[str],
     tokens: tuple[str, ...],
 ) -> bool:
-    token_stems = {stem_word(token) for token in tokens}
+    token_stems = {form for token in tokens for form in word_forms(token)}
     if qualifier_stems & token_stems:
         return True
     return any(

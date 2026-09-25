@@ -10,10 +10,26 @@ whenever the corpus changes (`rank_bm25` has no incremental add/remove API),
 but that in-memory global-stat step is cheap relative to walking, admitting,
 and reading the vault.
 
-Tokens are stemmed with Snowball (English) so morphologically related
-words score together — "regulation" matches a page with "regulator",
-"compounding" matches "compound". The same stemmer is exposed to find.py
-for its stem-aware all-tokens-present gate.
+Tokenizer v2 (`tokenize`, `token_units`) reads every script and is
+byte-identical to v1 on ASCII text:
+
+- ASCII text keeps the v1 fast path: lowercase, `[a-z0-9]+`, English Snowball,
+  so "regulation" matches a page with "regulator" exactly as before.
+- Other text is NFKC-normalised and casefolded, then split into maximal runs
+  of letters, digits and combining marks. A run splits again wherever it
+  crosses between an unspaced script (Han, kana, Hangul, Thai, Lao, Khmer,
+  Myanmar; declared in `text_scripts`) and a spaced one.
+- An unspaced run emits overlapping two-character bigrams (a character is a
+  base plus its combining marks); a one-character run emits that character.
+- A spaced word is stemmed by its script, never by a guessed language: ASCII
+  by English Snowball, all-Cyrillic by Russian, all-Greek by Greek,
+  all-Armenian by Armenian; anything else is left as written.
+- On the INDEX side only, a Latin word whose accents fold away also emits the
+  folded form, so "zolvarn" finds "Zölvarn" while "Zölvarn" still matches its
+  exact surface. The query side emits surface forms only, so no query term is
+  counted twice.
+
+The same stemmer is exposed to find.py for its stem-aware gates.
 """
 
 from __future__ import annotations
@@ -21,20 +37,40 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import unicodedata
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, NamedTuple
 
 from . import find as find_module
-from . import freshness, recall_policy
+from . import freshness, recall_policy, text_scripts
 from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
 
+#: Version of the token contract. Persisted token stores (the lexical
+#: catalogue) carry it inside their own schema version.
+TOKENIZER_VERSION = 2
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 _STEMMER_LOCAL = threading.local()
+
+#: The kanji that turns a counter into a question word (何度, 何時, 何月).
+_QUESTION_KANJI = "\u4f55"
+
+#: Snowball stemmer for a word whose letters are all in one of these scripts.
+_SCRIPT_STEMMERS = {"cyrillic": "russian", "greek": "greek", "armenian": "armenian"}
+
+#: Unicode planes searched when the character tables are built. Every
+#: combining mark, symbol and variation selector in Unicode sits in the Basic
+#: or Supplementary Multilingual Plane or in plane 14.
+_MARK_PLANES = ((0x0000, 0x1FFFF), (0xE0000, 0xEFFFF))
+
+#: Variation selectors choose a glyph (text or emoji presentation, an
+#: ideographic variant); they carry no letter, so they are dropped before
+#: tokenizing rather than kept as marks that would glue a keycap to its digit.
+_VARIATION_SELECTORS = ((0x180B, 0x180D), (0x180F, 0x180F), (0xFE00, 0xFE0F), (0xE0100, 0xE01EF))
 
 # Above this fraction of the retained corpus, bounded per-path repair gives way
 # to the existing full walk. The measurement supporting the value lives in the
@@ -57,25 +93,297 @@ class _CorpusCacheEntry(NamedTuple):
     policy_identity: tuple[str, str]
 
 
-def _get_stemmer():
-    stemmer = getattr(_STEMMER_LOCAL, "stemmer", None)
+def _get_stemmer(language: str = "english"):
+    """This thread's Snowball stemmer for `language` (they are not thread-safe)."""
+    stemmers = getattr(_STEMMER_LOCAL, "stemmers", None)
+    if stemmers is None:
+        stemmers = _STEMMER_LOCAL.stemmers = {}
+    stemmer = stemmers.get(language)
     if stemmer is None:
         import snowballstemmer
 
-        stemmer = snowballstemmer.stemmer("english")
-        _STEMMER_LOCAL.stemmer = stemmer
+        stemmer = stemmers[language] = snowballstemmer.stemmer(language)
     return stemmer
 
 
 @lru_cache(maxsize=16384)
 def stem_word(word: str) -> str:
-    """Memoized single-word stem. Tokens repeat across documents at scale."""
-    return _get_stemmer().stemWord(word)
+    """Memoized single-word stem, chosen by the word's script.
+
+    ASCII words get English Snowball, exactly as tokenizer v1 did. A word whose
+    letters are all Cyrillic, all Greek or all Armenian gets that script's
+    stemmer. Anything else is returned unchanged: stemming by a guessed
+    language could give a query and a page two different stems of one word.
+    """
+    if word.isascii():
+        return _get_stemmer().stemWord(word)
+    language = _SCRIPT_STEMMERS.get(text_scripts.uniform_letter_script(word) or "")
+    if language is None:
+        return word
+    return _get_stemmer(language).stemWord(word)
 
 
-def tokenize(text: str) -> list[str]:
-    """Lowercase, split on word chars, Snowball-stem each token."""
-    return [stem_word(w) for w in _TOKEN_RE.findall(text.lower())]
+class TokenUnit(NamedTuple):
+    """The stems one spaced word or one unspaced run contributed.
+
+    Corroboration and pairing rules count units, not stems: an accented word's
+    folded variant and a run's many bigrams are one piece of evidence.
+    """
+
+    stems: tuple[str, ...]
+    run: bool
+
+
+def _in_mark_planes(code_point: int) -> bool:
+    return any(start <= code_point <= end for start, end in _MARK_PLANES)
+
+
+@lru_cache(maxsize=1)
+def _character_tables() -> tuple[str, dict[int, str | None]]:
+    """(regex class body of every combining mark, raw-text translation table).
+
+    The table runs before NFKC on non-ASCII text. It maps every non-ASCII
+    symbol (S*) and enclosing mark (Me) to a space, so NFKC can never turn one
+    into letters that join the word beside it ("Zorblex™" would otherwise
+    become `zorblextm`, "20℃" `20c`), and it deletes variation selectors.
+    Built once, from the running interpreter's Unicode data.
+    """
+    ranges: list[list[int]] = []
+    table: dict[int, str | None] = {}
+    for start, end in _MARK_PLANES:
+        for code_point in range(start, end + 1):
+            category = unicodedata.category(chr(code_point))
+            if category[0] == "M":
+                if ranges and ranges[-1][1] == code_point - 1:
+                    ranges[-1][1] = code_point
+                else:
+                    ranges.append([code_point, code_point])
+                if category == "Me":
+                    table[code_point] = " "
+            elif category[0] == "S" and code_point > 0x7F:
+                table[code_point] = " "
+    for low, high in _VARIATION_SELECTORS:
+        for code_point in range(low, high + 1):
+            table[code_point] = None
+    marks = "".join(f"\\U{low:08x}-\\U{high:08x}" for low, high in ranges)
+    return marks, table
+
+
+def _mark_class() -> str:
+    """Regex class body of every combining mark (Unicode M*)."""
+    return _character_tables()[0]
+
+
+@lru_cache(maxsize=1)
+def _scanner() -> tuple[re.Pattern[str], re.Pattern[str], re.Pattern[str]]:
+    """(token runs, script parts of a run, characters of an unspaced part).
+
+    A token starts with a letter or number (`[^\\W_]` is exactly Unicode L*
+    and N*) and continues with letters, numbers and combining marks. A mark
+    never starts a token: without a base it is a stray diacritic ("it´s",
+    "‾" after NFKC), exactly as `working_set_index` rules. Underscore and
+    every punctuation mark separate, as `[a-z0-9]+` always did.
+    """
+    marks = _mark_class()
+    continua = text_scripts.continua_character_class()
+    runs = re.compile(f"[^\\W_](?:[^\\W_]|[{marks}])*")
+    parts = re.compile(
+        f"(?P<run>(?![{marks}])[{continua}](?:[{continua}]|[{marks}])*)"
+        f"|(?P<word>(?:[^{continua}]|[{marks}])+)"
+    )
+    characters = re.compile(f"[^{marks}][{marks}]*|[{marks}]+")
+    return runs, parts, characters
+
+
+def _is_token_character(character: str) -> bool:
+    """Can `character` appear inside a token (after a letter)?"""
+    return _scanner()[0].fullmatch("a" + character) is not None
+
+
+def _latin_fold(word: str) -> str | None:
+    """`word` with its combining marks removed, when that changes a Latin word.
+
+    Restricted to Latin: dropping marks destroys an Indic word and conflates
+    Cyrillic й with и.
+    """
+    if word.isascii() or text_scripts.uniform_letter_script(word) != "latin":
+        return None
+    folded = unicodedata.normalize(
+        "NFC",
+        "".join(
+            character
+            for character in unicodedata.normalize("NFD", word)
+            if unicodedata.category(character) != "Mn"
+        ),
+    )
+    return folded if folded != word else None
+
+
+@lru_cache(maxsize=16384)
+def _word_unit(word: str, query: bool) -> TokenUnit:
+    surface = stem_word(word)
+    folded = None if query else _latin_fold(word)
+    if folded is None:
+        return TokenUnit((surface,), False)
+    variant = stem_word(folded)
+    stems = (surface,) if variant == surface else (surface, variant)
+    return TokenUnit(stems, False)
+
+
+def _run_unit(run: str, characters: re.Pattern[str]) -> TokenUnit:
+    parts = characters.findall(run)
+    if len(parts) < 2:
+        return TokenUnit((run,), True)
+    return TokenUnit(tuple(left + right for left, right in zip(parts, parts[1:], strict=False)), True)
+
+
+#: Stretches of raw text between ASCII separators. An all-ASCII stretch is
+#: exactly one v1 word; only a stretch holding a non-ASCII character is
+#: normalised and scanned, so English prose with a typographic dash pays the
+#: scanner only around the dash.
+_STRETCH_RE = re.compile("[A-Za-z0-9\u0080-\U0010ffff]+")
+
+
+def _normalized_tokens(stretch: str) -> list[str]:
+    """Letter/number tokens of one non-ASCII stretch, after the raw-text
+    table, NFKC and casefolding."""
+    table = _character_tables()[1]
+    normalized = unicodedata.normalize("NFKC", stretch.translate(table)).casefold()
+    return _scanner()[0].findall(normalized)
+
+
+def _nonascii_units(token: str, query: bool) -> list[TokenUnit]:
+    """Units of one normalised token that holds a non-ASCII character."""
+    _runs, parts, characters = _scanner()
+    return [
+        _run_unit(part.group(), characters)
+        if part.lastgroup == "run"
+        else _word_unit(part.group(), query)
+        for part in parts.finditer(token)
+    ]
+
+
+def _scan_units(text: str, query: bool) -> list[TokenUnit]:
+    """Units of non-ASCII `text`."""
+    units: list[TokenUnit] = []
+    for stretch in _STRETCH_RE.findall(text):
+        if stretch.isascii():
+            units.append(TokenUnit((stem_word(stretch.lower()),), False))
+            continue
+        for token in _normalized_tokens(stretch):
+            if token.isascii():
+                units.append(TokenUnit((stem_word(token),), False))
+            else:
+                units.extend(_nonascii_units(token, query))
+    return units
+
+
+def _scan_stems(text: str, query: bool) -> list[str]:
+    """`_scan_units` flattened, without building a unit per ASCII word."""
+    stems: list[str] = []
+    for stretch in _STRETCH_RE.findall(text):
+        if stretch.isascii():
+            stems.append(stem_word(stretch.lower()))
+            continue
+        for token in _normalized_tokens(stretch):
+            if token.isascii():
+                stems.append(stem_word(token))
+            else:
+                for unit in _nonascii_units(token, query):
+                    stems.extend(unit.stems)
+    return stems
+
+
+def token_units(text: str, *, query: bool = False) -> list[TokenUnit]:
+    """The stems of `text` grouped by the word or unspaced run they came from.
+
+    `query=True` is the query side: surface forms only, no folded variants.
+    Flattening the units gives `tokenize(text, query=query)`.
+    """
+    if text.isascii():
+        return [TokenUnit((stem_word(w),), False) for w in _TOKEN_RE.findall(text.lower())]
+    return _scan_units(text, query)
+
+
+def tokenize(text: str, *, query: bool = False) -> list[str]:
+    """The stems of `text`, in order: index side by default, query side on request.
+
+    On ASCII text both sides equal tokenizer v1 (lowercase, `[a-z0-9]+`,
+    English Snowball). See the module docstring for everything else.
+    """
+    if text.isascii():
+        return [stem_word(w) for w in _TOKEN_RE.findall(text.lower())]
+    return _scan_stems(text, query)
+
+
+def word_forms(word: str) -> tuple[str, ...]:
+    """Index-side stems of one word: its stem, plus the stem of its
+    accent-folded form when it is a Latin word with marks. An ASCII word is
+    stemmed whole, exactly as `stem_word` always stemmed it. Symbols separate
+    before NFKC, as in `tokenize`, so "Zorblex™" is `zorblex`."""
+    if word.isascii():
+        return (stem_word(word),)
+    table = _character_tables()[1]
+    parts = unicodedata.normalize("NFKC", word.translate(table)).casefold().split()
+    return tuple(
+        dict.fromkeys(stem for part in parts for stem in _word_unit(part, False).stems)
+    )
+
+
+def first_stem_span(text: str, stems) -> tuple[int, int] | None:
+    """`(start, length)` in `text` of the first word or run carrying one of
+    `stems` on its index side, or None. Offsets are into `text` as given; inside
+    an unspaced run the matching bigram itself is located when normalisation
+    kept the run's length."""
+    runs = _scanner()[0]
+    for match in runs.finditer(text):
+        word = match.group()
+        for unit in token_units(word):
+            hit = next((stem for stem in unit.stems if stem in stems), None)
+            if hit is None:
+                continue
+            if unit.run:
+                normalized = unicodedata.normalize("NFKC", word).casefold()
+                offset = normalized.find(hit)
+                if offset >= 0 and len(normalized) == len(word):
+                    return match.start() + offset, len(hit)
+            return match.start(), len(word)
+    return None
+
+
+def run_content_stems(stems) -> tuple[str, ...]:
+    """The distinct bigrams of an unspaced run that carry its content.
+
+    Japanese writes particles and inflections in hiragana, so a bigram that
+    touches hiragana mostly records grammar: "会議の議事録はいつ共有" shares
+    議事, 事録 and 共有 with "議事録は翌日までに共有します" and almost none of
+    its particle bigrams. The content is the bigrams without hiragana and
+    without the question kanji 何; a run with no such bigram keeps its
+    hiragana-free ones, and a run whose every bigram holds hiragana keeps them
+    all. Runs in other scripts have no hiragana and keep every bigram.
+    """
+    distinct = tuple(dict.fromkeys(stems))
+    content = tuple(
+        stem for stem in distinct if not any(text_scripts.is_hiragana(ch) for ch in stem)
+    )
+    # 何 (what) builds question words with a counter (何度, 何時, 何月): like a
+    # particle it asks rather than names, so "パンは何度で焼きますか" is about パン.
+    named = tuple(stem for stem in content if _QUESTION_KANJI not in stem)
+    return named or content or distinct
+
+
+def unit_present(unit: TokenUnit, stems) -> bool:
+    """Does text holding `stems` contain this unit?
+
+    A word is present when any of its forms is. An unspaced run is present
+    when a strict majority of its content bigrams are (`run_content_stems`):
+    requiring all of them would demand the query's exact phrasing, while any
+    one of them would accept a page sharing a single particle bigram.
+    """
+    if not unit.run:
+        return any(stem in stems for stem in unit.stems)
+    content = run_content_stems(unit.stems)
+    return 2 * sum(1 for stem in content if stem in stems) > len(content)
 
 
 # Back-compat alias for callers that still import _tokenize.
@@ -339,7 +647,7 @@ class BM25Index:
         bm25, paths = self._fresh_corpus(vault_root, scope, freshness)
         if bm25 is None or not paths:
             return []
-        tokens = _tokenize(query)
+        tokens = tokenize(query, query=True)
         if not tokens:
             return []
         scores = bm25.get_scores(tokens)

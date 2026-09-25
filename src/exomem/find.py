@@ -2193,7 +2193,7 @@ def _python_unit_scores(
     """Deterministic in-process lexical rung when the FTS sidecar is absent."""
     from . import bm25
 
-    query_tokens = bm25.tokenize(query)
+    query_tokens = bm25.tokenize(query, query=True)
     if not query_tokens:
         return {}
     refs = list(records)
@@ -2218,7 +2218,7 @@ def _unit_text_match_refs(
     """Exact OR/stemming membership shared with both lexical rungs."""
     from . import bm25
 
-    wanted = set(bm25.tokenize(query))
+    wanted = set(bm25.tokenize(query, query=True))
     if not wanted:
         return set()
     return {
@@ -5016,34 +5016,34 @@ def _any_stem_present(page: ParsedPage, query_norm: str) -> bool:
     """True if at least ONE query stem appears in title+body.
 
     The relaxed counterpart to `_stem_tokens_present` (which requires ALL).
-    Tokenizes the query the SAME way BM25 tokenizes text (split on `[a-z0-9]+`,
-    then stem) so a hyphenated query like `cognitive-core-marker-xyz` matches a
-    body that contains those words split on the hyphens.
+    Tokenizes the query the SAME way BM25 tokenizes a query (split into words
+    and unspaced-script bigrams, then stem) so a hyphenated query like
+    `cognitive-core-marker-xyz` matches a body that contains those words split
+    on the hyphens.
     """
     if not query_norm:
         return False
     from . import bm25 as bm25_module
 
-    return any(qs in page.stem_set for qs in bm25_module.tokenize(query_norm))
+    return any(qs in page.stem_set for qs in bm25_module.tokenize(query_norm, query=True))
 
 
-def _query_word_stem_groups(query_norm: str) -> list[tuple[list[str], bool]]:
-    """Per whitespace word: (BM25 subtoken stems, is_function_word).
+def _query_word_stem_groups(query_norm: str) -> list[tuple[list[str], bool, int]]:
+    """Per query word: (distinct BM25 stems, is_function_word, stems required).
 
     Loop-invariant precompute for `_stem_word_coverage` — the query is
     tokenized and classified once per query, not once per candidate page. A
     word is a function word only when EVERY subtoken stem is a function-word
     stem, so a compound like `state-of-the-art` stays a content word. Words
-    with no `[a-z0-9]` content tokenize to nothing and are skipped; the
-    tokenizer is ASCII-only, so non-ASCII words drop out of the denominator
-    (known limit: mixed-script queries are gated more permissively than
-    v0.36.0's all-stems veto).
+    with no letter or digit tokenize to nothing and are skipped. An unspaced
+    run (Japanese, Chinese, Thai...) is its own word, present when a strict
+    majority of its bigrams are (see `find_policy.query_word_stem_groups`).
     """
     return find_policy.query_word_stem_groups(query_norm)
 
 
 def _stem_word_coverage(
-    page: ParsedPage, word_stem_groups: list[tuple[list[str], bool]]
+    page: ParsedPage, word_stem_groups: list[tuple[list[str], bool, int]]
 ) -> tuple[int, int, int]:
     """(present, total, content_present) coverage over precomputed word groups.
 
@@ -5052,7 +5052,8 @@ def _stem_word_coverage(
     one of its BM25 subtoken stems appears in title+body: a compound like
     `alpha-beta-gamma` needs all three parts (so exact-marker queries stay
     precise), while trailing punctuation (`measure?` → `measur`) cannot mask
-    a real match. `content_present` counts present words that are NOT
+    a real match. An unspaced run is one word too, present when a strict
+    majority of its bigrams appear. `content_present` counts present words that are NOT
     function words: the degraded-corroboration gate requires a strict
     majority present (2 * present > total) AND at least one content word
     among them, so "what is the … of the …" phrasing cannot ride its
