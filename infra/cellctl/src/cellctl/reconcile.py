@@ -419,7 +419,9 @@ async def _resolve_object_storage_key(
 def _compute_render_digest(row: CellRow, cluster_config: ClusterConfig, secrets_config: SecretsConfig) -> str:
     """D4: a SHA-256 over the non-secret render inputs -- the renderer
     version, chart-level cell settings, the set of cell_token_key versions
-    in play, and the key versions of the row. Never a secret value itself."""
+    in play, and the row's storage and key versions. Never a secret value
+    itself. storage_gib bumps no generation, so it must be here: it renders
+    into the PVC and the quota, and it is part of the refusal park key."""
 
     material = {
         "render_version": RENDER_VERSION,
@@ -428,6 +430,7 @@ def _compute_render_digest(row: CellRow, cluster_config: ClusterConfig, secrets_
         "job_egress_except": sorted(cluster_config.job_egress_except),
         "cell_token_key_version": secrets_config.cell_token_key_version,
         "cell_token_key_previous_version": secrets_config.cell_token_key_previous_version,
+        "storage_gib": row.storage_gib,
         "backup_key_version": row.backup_key_version,
         "b2_key_version": row.b2_key_version,
     }
@@ -696,11 +699,21 @@ async def _publish_parked_canary(
 
     canary = parked_canary(rows, observations, cell_image, refused)
     if canary is not None:
-        if not rollout.paused and rollout.error_code in (None, CANARY_PARKED) and rollout.held_cell_id != canary:
+        # Only a real pause is never overwritten. A resumed rollout may still
+        # carry the earlier error code or held_cell_id; neither hides this.
+        if not rollout.paused and (rollout.error_code, rollout.held_cell_id) != (CANARY_PARKED, canary):
             logger.warning("cellctl: the rollout is waiting on canary cell %s, whose last apply was refused", canary)
-            await db.write_rollout(connection, {"error_code": CANARY_PARKED, "held_cell_id": canary})
+            await db.write_rollout(
+                connection,
+                {"error_code": CANARY_PARKED, "held_cell_id": canary},
+                only_if={"paused": False, "error_code": rollout.error_code, "held_cell_id": rollout.held_cell_id},
+            )
     elif rollout.error_code == CANARY_PARKED:
-        await db.write_rollout(connection, {"error_code": None, "held_cell_id": None})
+        await db.write_rollout(
+            connection,
+            {"error_code": None, "held_cell_id": None},
+            only_if={"paused": rollout.paused, "error_code": CANARY_PARKED, "held_cell_id": rollout.held_cell_id},
+        )
 
 
 async def _reconcile_row(

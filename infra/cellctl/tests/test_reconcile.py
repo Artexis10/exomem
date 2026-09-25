@@ -2129,3 +2129,62 @@ async def test_a_held_cell_that_fails_to_observe_blocks_a_second_upgrade(cell_db
         assert rows[tenant].hold_kind is None
     finally:
         await connection.close()
+
+
+async def test_a_parked_canary_is_published_even_when_a_resumed_rollout_still_names_it(cell_db: CellDatabase) -> None:
+    # An owner resume that clears only paused/error_code leaves held_cell_id
+    # on the owner; that must not hide CANARY_PARKED.
+    owner, tenant = "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"
+    await _seed_cell(cell_db, owner, "tenant-a")
+    await _seed_cell(cell_db, tenant, "tenant-b")
+    admin = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
+    try:
+        await admin.execute("UPDATE exomem_cloud_cells SET rollout_priority = 0 WHERE cell_id = $1", owner)
+    finally:
+        await admin.close()
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = _ObjectRefusingGateway()
+    memory = reconcile.LoopMemory()
+    now = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    try:
+        await _converge_all(connection, cluster, [owner, tenant], now, memory)
+        await db.write_rollout(connection, {"paused": False, "error_code": None, "held_cell_id": owner})
+        await _set_storage(cell_db, owner, 5, desired_state="read_only")
+        cluster.refuse = _refuse_kind(owner, "PersistentVolumeClaim")
+        await _pass(connection, cluster, now + timedelta(seconds=5), memory=memory)
+        cluster.observations[owner] = _observed_from_applied(cluster, owner)
+        await _pass(connection, cluster, now + timedelta(seconds=6), memory=memory)
+        await _set_cell_image(cell_db, IMAGE_B)
+        await _pass(connection, cluster, now + timedelta(seconds=10), memory=memory)
+        rollout = await db.read_rollout(connection)
+        assert (rollout.paused, rollout.error_code, rollout.held_cell_id) == (False, "CANARY_PARKED", owner)
+    finally:
+        await connection.close()
+
+
+async def test_reverting_storage_gib_unparks_a_refused_pvc_shrink(cell_db: CellDatabase) -> None:
+    # storage_gib renders into the PVC and the quota but bumps no generation,
+    # so it must be part of the park key, or undoing a refused shrink leaves
+    # the row parked for the whole backoff.
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = _ObjectRefusingGateway()
+    memory = reconcile.LoopMemory()
+    now = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    try:
+        await _converge_all(connection, cluster, [cell_id], now, memory)
+        await _set_storage(cell_db, cell_id, 5, desired_state="read_only")
+        cluster.refuse = _refuse_kind(cell_id, "PersistentVolumeClaim")
+        await _pass(connection, cluster, now + timedelta(seconds=5), memory=memory)
+        assert (await db.select_all_rows(connection))[0].last_error_code == "MANIFEST_IMMUTABLE"
+
+        await _set_storage(cell_db, cell_id, 10)
+        cluster.refuse = None
+        cluster.observations[cell_id] = _observed_from_applied(cluster, cell_id)
+        await _pass(connection, cluster, now + timedelta(seconds=10), memory=memory)
+        pvc = next(m for (ns, kind, _), m in cluster.applied.items() if ns == namespace_name(cell_id) and kind == "PersistentVolumeClaim")
+        assert pvc["spec"]["resources"]["requests"]["storage"] == "10Gi"
+        assert (await db.select_all_rows(connection))[0].last_error_code is None
+    finally:
+        await connection.close()

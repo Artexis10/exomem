@@ -330,3 +330,14 @@ def test_model_env_may_not_relocate_state_config_or_a_writable_directory() -> No
         with pytest.raises(ValueError, match=key):
             render_statefulset(_spec(model_env={key: "/elsewhere"}))
     render_statefulset(_spec(model_env={"EXOMEM_EMBED_BACKEND": "onnx", "EXOMEM_WHISPER_MODEL": "base"}))
+
+
+def test_the_previous_bearer_reference_is_optional_so_a_refused_secret_never_blocks_the_pod() -> None:
+    # Inside a hold the StatefulSet is applied even when this pass's Secret
+    # was refused. A required reference to a key the live Secret lacks would
+    # leave the pod in CreateContainerConfigError, time the hold out and
+    # blame the image.
+    statefulset = render_statefulset(_spec(bearer_previous="previous"))
+    env = statefulset["spec"]["template"]["spec"]["containers"][0]["env"]
+    previous = next(entry for entry in env if entry["name"] == "EXOMEM_CLOUD_CELL_TOKEN_PREVIOUS")
+    assert previous["valueFrom"]["secretKeyRef"]["optional"] is True

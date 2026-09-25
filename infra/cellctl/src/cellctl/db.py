@@ -147,14 +147,32 @@ async def write_observed(
     )
 
 
-async def write_rollout(connection: asyncpg.Connection, updates: dict[str, object]) -> None:
+async def write_rollout(
+    connection: asyncpg.Connection,
+    updates: dict[str, object],
+    *,
+    only_if: dict[str, object] | None = None,
+) -> bool:
+    """Writes `updates` to the rollout row. With `only_if`, writes only while
+    each named column still holds that value, so a pause the owner route
+    wrote after cellctl read the row is never overwritten. Returns whether
+    the row was written."""
+
     if not updates:
-        return
-    unknown = set(updates) - set(ROLLOUT_COLUMNS)
+        return False
+    only_if = only_if or {}
+    unknown = (set(updates) | set(only_if)) - set(ROLLOUT_COLUMNS)
     if unknown:
         raise ValueError(f"not a rollout column: {sorted(unknown)}")
     assignments, values = _assignments(updates, start=1)
-    await connection.execute(f"UPDATE exomem_cloud_rollout SET {assignments} WHERE id = 1", *values)
+    conditions = ["id = 1"]
+    for index, (column, value) in enumerate(only_if.items(), start=len(values) + 1):
+        conditions.append(f"{column} IS NOT DISTINCT FROM ${index}")
+        values.append(value)
+    result = await connection.execute(
+        f"UPDATE exomem_cloud_rollout SET {assignments} WHERE {' AND '.join(conditions)}", *values
+    )
+    return result == "UPDATE 1"
 
 
 async def try_write_once(

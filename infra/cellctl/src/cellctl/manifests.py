@@ -397,11 +397,18 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
         },
     ]
     if spec.bearer_previous:
+        # Optional: inside a hold the StatefulSet is applied even when this
+        # pass's Secret was refused, and a required reference to a key the
+        # live Secret lacks would keep the pod from starting at all.
         env.append(
             {
                 "name": "EXOMEM_CLOUD_CELL_TOKEN_PREVIOUS",
                 "valueFrom": {
-                    "secretKeyRef": {"name": spec.secret_name, "key": "cell-token-previous"}
+                    "secretKeyRef": {
+                        "name": spec.secret_name,
+                        "key": "cell-token-previous",
+                        "optional": True,
+                    }
                 },
             }
         )

@@ -192,6 +192,24 @@ async def test_read_rollout_and_write_rollout_as_cellctl(cell_db: CellDatabase) 
     assert after.last_good_image == "img@sha256:aa"
 
 
+async def test_a_conditional_rollout_write_never_overwrites_a_pause_written_since_the_read(cell_db: CellDatabase) -> None:
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    try:
+        seen = await db.read_rollout(connection)
+        # The owner route pauses after cellctl read the row.
+        await db.write_rollout(connection, {"paused": True, "error_code": "OWNER_PAUSE"})
+        written = await db.write_rollout(
+            connection,
+            {"error_code": "CANARY_PARKED", "held_cell_id": None},
+            only_if={"paused": seen.paused, "error_code": seen.error_code, "held_cell_id": seen.held_cell_id},
+        )
+        after = await db.read_rollout(connection)
+    finally:
+        await connection.close()
+    assert written is False
+    assert (after.paused, after.error_code) == (True, "OWNER_PAUSE")
+
+
 async def test_write_capacity_inserts_then_updates(cell_db: CellDatabase) -> None:
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
     try:
