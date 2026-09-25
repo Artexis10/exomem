@@ -3830,7 +3830,9 @@ def commit_prepared_creation_draft(
         reuse = prepared.reuse
         preliminary_commit_result = prepared.preliminary_commit_result
         activation_manifest.ensure_manifest(
-            root, census=preliminary.before_corpus.activation_census
+            root,
+            census=preliminary.before_corpus.activation_census,
+            commit_point=False,
         )
         with vault.vault_creation_lock(root, "semantic-creation"):
             attempt = _attempt(

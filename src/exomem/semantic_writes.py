@@ -2641,7 +2641,7 @@ def _commit_existing(
         if preflight.manifest_install_required:
             with mutation_timing_span(timings, "commit.manifest"):
                 winner = activation_manifest.ensure_manifest(
-                    root, census=preflight.activation_census
+                    root, census=preflight.activation_census, commit_point=False
                 )
                 result, _ = _reevaluate_existing(preflight, manifest=winner)
                 if result.should_block:
@@ -3224,7 +3224,9 @@ def commit_move(
             ),
         )
     if preflight.manifest_install_required:
-        winner = activation_manifest.ensure_manifest(root, census=preflight.activation_census)
+        winner = activation_manifest.ensure_manifest(
+            root, census=preflight.activation_census, commit_point=False
+        )
         if winner != preflight.prospective_manifest:
             raise SemanticWriteError(
                 "SEMANTIC_CONTRACT_BLOCKED",

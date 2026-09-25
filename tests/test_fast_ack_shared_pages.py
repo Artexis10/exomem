@@ -711,3 +711,57 @@ def test_the_cause_fragment_keeps_only_closed_tokens() -> None:
     assert writer_lease._content_free_cause(
         Leaky("Knowledge Base/Notes/secret.md"), stage="Knowledge Base/x.md"
     ) == "class=Leaky"
+
+
+def test_an_edit_that_loses_its_guard_race_after_installing_the_manifest_is_retryable(
+    live_catalogue: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Installing the activation manifest is not the edit's commit point.
+
+    The first governed write into a vault installs the activation manifest in
+    its own atomic batch, then commits the edit. When the edit's batch then
+    loses a shared-auxiliary guard race it aborts with nothing written, and the
+    documented answer is the retryable `STALE_SEMANTIC_WRITE`. Found by the
+    3-writer burst (R4): the manifest batch had already marked the mutation
+    committed, so the aborted edit came back committed-uncertain.
+    """
+    from exomem import activation_manifest, semantic_writes
+    from exomem import edit as edit_module
+    from exomem import vault as vault_module
+
+    vault = live_catalogue
+    assert activation_manifest.load_manifest(vault) is None
+    rel = next(
+        path.relative_to(vault).as_posix()
+        for path in sorted((vault / "Knowledge Base" / "Notes").rglob("*.md"))
+        if path.name not in {"index.md", "log.md"}
+    )
+    before = (vault / rel).read_bytes()
+
+    def lose_the_race(*_args, **_kwargs):
+        raise vault_module.PathGuardError("PATH_GUARD_CHANGED", "guarded leaf changed")
+
+    monkeypatch.setattr(semantic_writes, "_commit_existing_locked", lose_the_race)
+
+    def leaf(vault_root: Path, **_surface_kwargs):
+        result = edit_module.edit(
+            vault_root, path=rel, why="guard race probe", new_body="Guard race probe body.\n"
+        )
+        return {"path": result.path, "warnings": list(result.warnings)}
+
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "lease-state")
+    )
+    with pytest.raises(Exception) as raised:
+        manager.invoke(
+            SimpleNamespace(name="edit_memory", leaf=leaf, read_only=False),
+            (vault,),
+            {"response_detail": "compact"},
+            idempotency_key=None,
+            mutation_request_id=str(uuid.uuid4()),
+        )
+
+    assert activation_manifest.load_manifest(vault) is not None
+    assert (vault / rel).read_bytes() == before
+    assert "STALE_SEMANTIC_WRITE" in str(raised.value)
+    assert "UNCERTAIN" not in str(raised.value)
