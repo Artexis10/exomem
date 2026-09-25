@@ -223,6 +223,88 @@ def test_happy_path_writes_env_and_prints_connector(tmp_path: Path) -> None:
     assert "UNVERIFIED" in out and "120 req" in out
 
 
+# ============================================================================
+# run_remote_setup — refuses to write secrets into a vault (server-side
+# parity: `exomem.dotenv_guard`, the same guard `server_runtime` applies)
+# ============================================================================
+
+
+def test_refuses_to_write_secrets_at_the_vault_root(vault: Path) -> None:
+    """A vault is synced content remote principals can write; secrets must
+    never land there just because the operator ran the wizard from inside it."""
+    env_path = vault / ".env"
+
+    code, out, doctor_calls = _run(env_path)
+
+    assert code == 2
+    assert not env_path.exists()
+    assert doctor_calls == []
+    assert "inside a vault" in out
+    assert str(env_path) in out
+
+
+def test_refuses_to_write_secrets_in_a_vault_subdirectory(vault: Path) -> None:
+    env_path = vault / "Knowledge Base" / ".env"
+
+    code, out, doctor_calls = _run(env_path)
+
+    assert code == 2
+    assert not env_path.exists()
+    assert doctor_calls == []
+    assert "inside a vault" in out
+
+
+def test_refuses_to_write_secrets_when_the_working_directory_is_a_symlinked_vault(
+    vault: Path, tmp_path: Path
+) -> None:
+    linked_root = tmp_path / "symlinked-service-root"
+    linked_root.symlink_to(vault)
+    env_path = linked_root / ".env"
+
+    code, out, doctor_calls = _run(env_path)
+
+    assert code == 2
+    assert not env_path.exists()
+    assert doctor_calls == []
+    assert "inside a vault" in out
+
+
+def test_refuses_to_write_secrets_when_the_env_path_is_a_symlink_into_the_vault(
+    vault: Path, tmp_path: Path
+) -> None:
+    """The working directory is outside the vault, but `--env-path` (or the
+    default `<cwd>/.env`) is a symlink whose target lands inside it."""
+    planted_dir = vault / "Knowledge Base"
+    planted_dir.mkdir(exist_ok=True)
+    planted = planted_dir / ".env"
+    service_root = tmp_path / "service-root"
+    service_root.mkdir()
+    env_path = service_root / ".env"
+    env_path.symlink_to(planted)
+
+    code, out, doctor_calls = _run(env_path)
+
+    assert code == 2
+    assert not planted.exists()
+    assert doctor_calls == []
+    assert "inside a vault" in out
+
+
+def test_does_not_write_secrets_when_refused_even_if_a_file_already_existed(
+    vault: Path,
+) -> None:
+    """A refusal must not fall back to silently patching whatever is already
+    there -- the wizard writes nothing at all."""
+    env_path = vault / ".env"
+    original = "EXOMEM_BASE_URL=https://pre-existing.example.com\n"
+    env_path.write_text(original, encoding="utf-8")
+
+    code, _, _ = _run(env_path)
+
+    assert code == 2
+    assert env_path.read_text(encoding="utf-8") == original
+
+
 def test_existing_signing_key_is_preserved(tmp_path: Path) -> None:
     env_path = tmp_path / ".env"
     env_path.write_text(

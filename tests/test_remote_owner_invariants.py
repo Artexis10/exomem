@@ -75,19 +75,20 @@ def test_only_the_operator_setup_wizard_writes_an_environment_file() -> None:
     assert _importers(modules, "setup_wizard") <= {"__main__.py"}
 
 
-#: Loaders whose file comes from `server_runtime._working_directory_dotenv`,
-#: which is `<cwd>/.env` unless the working directory is inside a vault.
-_GUARDED_LOADERS = {
-    ("server_runtime.py", "_working_directory_dotenv"),
-    ("server_runtime.py", "initialize_runtime"),
-}
+#: Every in-process `.env` loader must resolve its file through one of these
+#: shared `dotenv_guard` helpers rather than naming `<cwd>/.env` itself, so
+#: the vault refusal lives in exactly one place.
+_GUARD_HELPERS = ("working_directory_dotenv", "dotenv_load_guard")
 
 
 def test_every_env_file_loader_reads_only_the_working_directory_env() -> None:
-    """Structural pin: each `.env` loader in the package names `<cwd>/.env`
-    (directly or through the service's vault guard), or is the setup wizard
-    reloading the file it just wrote. It does not by itself prove the working
-    directory is outside the vault; the startup tests below do that."""
+    """Structural pin: each `.env` loader in the package resolves its file
+    through the shared `dotenv_guard` helpers (which return `None` instead of
+    a vault-held file), or is the setup wizard reloading the file it just
+    wrote (already validated by the write-time guard before that reload is
+    ever reached). It does not by itself prove the guard refuses correctly;
+    the behavioural tests below -- and `tests/test_dotenv_guard.py` -- do
+    that."""
     offenders: list[str] = []
     for name, tree in _modules():
         for function in ast.walk(tree):
@@ -101,26 +102,32 @@ def test_every_env_file_loader_reads_only_the_working_directory_env() -> None:
             if not calls:
                 continue
             if (name, function.name) == ("remote_setup_wizard.py", "_load_env"):
-                # Reloads the file the operator's setup command just wrote.
+                # Reloads the file the operator's setup command just wrote,
+                # at a location `run_remote_setup` already guarded before writing.
                 continue
             source = ast.unparse(function)
-            if "Path.cwd() / '.env'" in source:
-                continue
-            if (name, function.name) in _GUARDED_LOADERS:
+            if any(f"{helper}(" in source for helper in _GUARD_HELPERS):
                 continue
             offenders.append(f"{name}:{function.name}")
     assert offenders == []
-    # The guarded service loader still derives its file from the working
-    # directory, and service startup loads only what that guard returns.
+    # The shared guard itself still derives its default candidate from the
+    # working directory.
     guard = next(
         node
         for module, tree in _modules()
-        if module == "server_runtime.py"
+        if module == "dotenv_guard.py"
         for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "_working_directory_dotenv"
+        if isinstance(node, ast.FunctionDef) and node.name == "dotenv_load_guard"
     )
-    assert "Path.cwd().resolve()" in ast.unparse(guard)
-    assert "cwd / '.env'" in ast.unparse(guard)
+    assert "path.parent.resolve()" in ast.unparse(guard)
+    convenience = next(
+        node
+        for module, tree in _modules()
+        if module == "dotenv_guard.py"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "working_directory_dotenv"
+    )
+    assert "Path.cwd() / '.env'" in ast.unparse(convenience)
 
 
 class _Stop(Exception):

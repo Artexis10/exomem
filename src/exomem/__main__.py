@@ -316,14 +316,23 @@ def _load_cwd_dotenv() -> None:
 
     Never in a cloud cell: its environment is the pod spec, and "no `.env`
     file is loaded" (design D1.6) covers every loader, the CLI's included.
+    Never from inside a vault: a `.env` a remote writer planted there (for
+    example to set `EXOMEM_OAUTH_STORAGE_URL`) must not become CLI
+    configuration just because an operator ran a command from inside it --
+    the same guard `server_runtime` applies to the service's own load.
     """
     from . import cloud_cell
 
     if cloud_cell.cloud_mode_enabled():
         return
+    from .dotenv_guard import working_directory_dotenv
+
+    dotenv_path = working_directory_dotenv()
+    if dotenv_path is None:
+        return
     from dotenv import load_dotenv
 
-    load_dotenv(dotenv_path=Path.cwd() / ".env", override=True)
+    load_dotenv(dotenv_path=dotenv_path, override=True)
 
 
 def _build_auth_session_authority():
