@@ -1,0 +1,441 @@
+"""The hot profile as a decaying event projection (close-memory-loop 7.3/7.4).
+
+The projection keeps typed events — a path, a time, a channel and where the
+event came from — instead of re-deriving heat from each file's current mtime.
+These are the pure model's own rules, with no sidecar and no vault: the
+session window, the categorical ranking, the caller-scoped tiers (ruling
+S5-1), the digest, and how external changes are classified.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from exomem import working_set_heat as heat
+
+KB = "Knowledge Base"
+SLED = f"{KB}/Products/Cargo Sled.md"
+MARIT = f"{KB}/Entities/People/Marit Solheim.md"
+DEPOT = f"{KB}/Projects/Depot Rota.md"
+NOTE = f"{KB}/Notes/Research/quillon-vantry-window.md"
+LEDGER = f"{KB}/Notes/Research/harbour-ledger.md"
+
+S = 1_000_000_000
+H = 3600 * S
+T0 = 1_790_000_000 * S
+
+
+def ev(ts: int, path: str, channel: str, **attribution: str) -> heat.HeatEvent:
+    return heat.HeatEvent(ts, path, channel, origin=channel, **attribution)
+
+
+def profile_of(*events: heat.HeatEvent, sessions=(), state: str = "current") -> heat.HeatProfile:
+    return heat.build_profile(events, sessions=sessions, state=state)
+
+
+def top(profile: heat.HeatProfile, *, limit: int = 5, **kwargs) -> tuple[str, ...]:
+    """The referent members: the leading tier's first group, cut at `limit`."""
+    return heat.members(heat.leading(profile, **kwargs), limit=limit).paths
+
+
+# --------------------------------------------------------------------------- #
+# The session window and the ranking
+# --------------------------------------------------------------------------- #
+
+
+def test_the_session_starts_after_the_last_six_hour_gap() -> None:
+    events = [
+        ev(T0, MARIT, "work"),
+        ev(T0 + 10 * H, SLED, "read"),
+        # Five hours later: the same session.
+        ev(T0 + 15 * H, DEPOT, "work"),
+        ev(T0 + 15 * H + 30 * S, NOTE, "read"),
+    ]
+
+    assert heat.session_start(events) == T0 + 10 * H
+    # An edit ten hours before the latest session's start ranks nothing.
+    profile = profile_of(*events)
+    assert profile.session_start_ns == T0 + 10 * H
+    assert MARIT not in profile.window_rows
+    # A gap of exactly six hours splits.
+    assert heat.session_start([ev(T0, MARIT, "work"), ev(T0 + 6 * H, SLED, "read")]) == T0 + 6 * H
+    # Contact-only events never open or extend a session.
+    assert heat.session_start([ev(T0, MARIT, "work"), ev(T0 + 20 * H, SLED, "captured")]) == T0
+    assert heat.session_start([]) == 0
+
+
+def test_deliberate_acts_outrank_selection_inside_a_session() -> None:
+    # A morning edit still outranks an afternoon lookup.
+    profile = profile_of(ev(T0, SLED, "work"), ev(T0 + 4 * H, MARIT, "read"))
+    assert top(profile) == (SLED,)
+    # An edit ten days old yields to a read made yesterday: it is outside the session.
+    profile = profile_of(ev(T0, SLED, "work"), ev(T0 + 10 * 24 * H, MARIT, "read"))
+    assert top(profile) == (MARIT,)
+    # Picks and episodes are deliberate too; citations are selection.
+    profile = profile_of(ev(T0, NOTE, "pick"), ev(T0 + H, MARIT, "cite"))
+    assert top(profile) == (NOTE,)
+    profile = profile_of(ev(T0, DEPOT, "episode"), ev(T0 + H, MARIT, "read"))
+    assert top(profile) == (DEPOT,)
+    # Contact-only channels never lead a referent.
+    profile = profile_of(ev(T0 + H, f"{KB}/Sources/Sessions/talk.md", "captured"))
+    assert top(profile) == ()
+
+
+def test_an_exact_tie_is_every_member_cut_at_k() -> None:
+    paths = [f"{KB}/Notes/n{index}.md" for index in range(7)]
+    profile = profile_of(*(ev(T0, path, "work") for path in paths))
+
+    (lead,) = [lead for lead in heat.leading(profile) if lead.groups]
+    assert lead.groups[0] == tuple(sorted(paths))
+    assert top(profile, limit=5) == tuple(sorted(paths))[:5]
+    # A three-page work commit is three events at one time: a tie, not a burst.
+    profile = profile_of(ev(T0, SLED, "work"), ev(T0, MARIT, "work"), ev(T0, DEPOT, "work"))
+    assert top(profile) == tuple(sorted((SLED, MARIT, DEPOT)))
+
+
+def test_an_ineligible_top_is_skipped_within_the_read_bound() -> None:
+    profile = profile_of(
+        ev(T0 + 2 * S, SLED, "work"), ev(T0 + S, MARIT, "work"), ev(T0, DEPOT, "work")
+    )
+    checked: list[str] = []
+
+    def eligible(path: str) -> bool:
+        checked.append(path)
+        return path != SLED
+
+    chosen = heat.members(heat.leading(profile), limit=5, eligible=eligible)
+    assert chosen.paths == (MARIT,) and chosen.tier == 3
+    assert checked == [SLED, MARIT], "the next group is read only after the top failed"
+    # At most `limit` eligibility reads, whatever the ring holds.
+    assert heat.members(heat.leading(profile), limit=1, eligible=eligible).paths == ()
+
+
+def test_a_read_count_never_outranks_a_newer_read() -> None:
+    often = [ev(T0 + index * S, SLED, "read") for index in range(1000)]
+    profile = profile_of(*often, ev(T0 + 1001 * S, MARIT, "read"))
+
+    assert top(profile) == (MARIT,)
+    # And a thousand reads rank as one: the row keeps its latest time only.
+    assert profile.all_rows[SLED].read_ns == T0 + 999 * S
+
+
+def test_continuity_leads_until_a_deliberate_act_elsewhere() -> None:
+    minted = T0 + 10 * S
+    kwargs = dict(token_paths=frozenset({MARIT}), token_minted_ns=minted, token_passed=True)
+
+    # A newer read elsewhere does not move the conversation on.
+    profile = profile_of(ev(T0, MARIT, "work"), ev(minted + S, SLED, "read"))
+    assert top(profile, **kwargs) == (MARIT,)
+    # A newer edit, pick or episode elsewhere does.
+    for channel in ("work", "pick", "episode"):
+        profile = profile_of(ev(T0, MARIT, "work"), ev(minted + S, SLED, channel))
+        assert top(profile, **kwargs) == (SLED,), channel
+    # An act older than the mint leaves the token leading.
+    profile = profile_of(ev(minted - S, SLED, "work"))
+    assert top(profile, **kwargs) == (MARIT,)
+    # A token that does not say when it was minted leads, as tokens always did.
+    profile = profile_of(ev(minted + S, SLED, "work"))
+    assert top(profile, token_paths=frozenset({MARIT}), token_passed=True) == (MARIT,)
+    # A leading token whose refs all went leads with nothing: it never falls through.
+    profile = profile_of(ev(minted - S, SLED, "work"))
+    assert top(profile, token_paths=frozenset(), token_minted_ns=minted, token_passed=True) == ()
+    # Taken whole: a two-page answer is one tier.
+    both = frozenset({MARIT, DEPOT})
+    profile = profile_of(ev(minted + S, MARIT, "work"))
+    assert top(profile, token_paths=both, token_minted_ns=minted, token_passed=True) == tuple(
+        sorted(both)
+    )
+
+
+def test_the_digest_moves_on_a_read_and_not_on_a_batch_or_burst() -> None:
+    base = [ev(T0, SLED, "work"), ev(T0 + S, MARIT, "read")]
+    digest = profile_of(*base).digest
+
+    # A read that reaches the rows moves it.
+    assert profile_of(*base, ev(T0 + 2 * S, DEPOT, "read")).digest != digest
+    assert profile_of(*base, ev(T0 + 2 * S, SLED, "pick")).digest != digest
+    # A batch and an external burst write no event, so nothing about them can move it.
+    burst = heat.fold_external_events(
+        {path: (T0 + 3 * S + index, 0, 1) for index, path in enumerate((SLED, MARIT, DEPOT, NOTE))},
+        now_ns=T0 + 4 * S,
+    )
+    assert burst.events == ()
+    assert profile_of(*base, *burst.events).digest == digest
+    assert heat.classify_commit(SLED, traced=True, in_batch=True, reason="edited") is None
+    # The state is part of it.
+    assert profile_of(*base, state="behind").digest != digest
+    # Deterministic.
+    assert profile_of(*base).digest == digest
+
+
+# --------------------------------------------------------------------------- #
+# External changes: bursts, echoes, in-flight commits, skewed clocks
+# --------------------------------------------------------------------------- #
+
+
+def test_an_external_burst_carries_no_heat_and_erases_none() -> None:
+    user = ev(T0, SLED, "work")
+    # A sync rewrote four pages, the user's own among them, a second apart.
+    burst = heat.fold_external_events(
+        {path: (T0 + 60 * S + index * S, 0, 1) for index, path in enumerate((SLED, MARIT, DEPOT, NOTE))},
+        now_ns=T0 + 120 * S,
+    )
+
+    assert burst.events == ()
+    # The user's earlier work keeps its own time: the burst erased nothing.
+    assert top(profile_of(user, *burst.events)) == (SLED,)
+    # One lone external edit is work.
+    single = heat.fold_external_events({MARIT: (T0 + 60 * S, 0, 1)}, now_ns=T0 + 120 * S)
+    assert [(item.path, item.channel, item.origin) for item in single.events] == [
+        (MARIT, "work", "external")
+    ]
+    # A delta larger than a fold may classify is a sync by definition.
+    many = {f"{KB}/Notes/n{index}.md": (T0 + index * 10 * S, 0, 1) for index in range(heat.MAX_FOLD_PATHS + 1)}
+    assert heat.fold_external_events(many, now_ns=T0 + H * 10**3).events == ()
+
+
+def test_the_echo_of_a_governed_commit_is_not_an_external_edit() -> None:
+    signature = (T0 + 5 * S, T0 + 5 * S, 120)
+    echo = heat.fold_external_events(
+        {SLED: signature}, attributed={SLED: signature}, now_ns=T0 + 10 * S
+    )
+    assert echo.events == ()
+    # The same page changed again after the commit is a genuine external edit.
+    later = (T0 + 6 * S, T0 + 6 * S, 121)
+    edited = heat.fold_external_events(
+        {SLED: later}, attributed={SLED: signature}, now_ns=T0 + 10 * S
+    )
+    assert [(item.path, item.ts_ns) for item in edited.events] == [(SLED, T0 + 6 * S)]
+    # An echo neither joins nor forms a burst with genuine edits.
+    mixed = heat.fold_external_events(
+        {
+            SLED: signature,
+            MARIT: (T0 + 5 * S, 0, 1),
+            DEPOT: (T0 + 5 * S + 1, 0, 1),
+        },
+        attributed={SLED: signature},
+        now_ns=T0 + 10 * S,
+    )
+    assert sorted(item.path for item in mixed.events) == sorted((MARIT, DEPOT))
+
+
+def test_an_in_flight_path_is_deferred_not_classified() -> None:
+    folded = heat.fold_external_events(
+        {SLED: (T0, 0, 1), MARIT: (T0 + S, 0, 1)},
+        in_flight=frozenset({SLED}),
+        now_ns=T0 + 10 * S,
+    )
+
+    assert folded.deferred == frozenset({SLED})
+    assert [item.path for item in folded.events] == [MARIT]
+    # Deleted paths become tombstones and never events.
+    gone = heat.fold_external_events({}, deleted=(DEPOT,), now_ns=T0)
+    assert gone.tombstones == frozenset({DEPOT}) and gone.events == ()
+
+
+def test_a_future_dated_mtime_is_clamped_to_observation() -> None:
+    now = T0 + 10 * S
+    folded = heat.fold_external_events({SLED: (T0 + 400 * 24 * H, 0, 1)}, now_ns=now)
+
+    assert [item.ts_ns for item in folded.events] == [now]
+    # So a later edit on this machine can still outrank it.
+    profile = profile_of(*folded.events, ev(now + S, MARIT, "work"))
+    assert top(profile) == (MARIT,)
+
+
+def test_raw_material_and_navigation_are_never_events() -> None:
+    folded = heat.fold_external_events(
+        {
+            f"{KB}/Sources/Articles/raw.md": (T0, 0, 1),
+            f"{KB}/Evidence/proof.md": (T0, 0, 1),
+            f"{KB}/index.md": (T0, 0, 1),
+            f"{KB}/Sources/Sessions/talk.md": (T0 + S, 0, 1),
+            f"{KB}/Sources/Episodes/recap.md": (T0 + 2 * S, 0, 1),
+        },
+        now_ns=T0 + 10 * S,
+    )
+
+    assert sorted((item.path, item.channel) for item in folded.events) == [
+        (f"{KB}/Sources/Episodes/recap.md", "episode_page"),
+        (f"{KB}/Sources/Sessions/talk.md", "captured"),
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# The cold seed
+# --------------------------------------------------------------------------- #
+
+
+def _seeded_top(mtimes: dict[str, int]) -> tuple[str, ...]:
+    return top(profile_of(*heat.seed_events(mtimes), state="seeded"))
+
+
+def _pre_projection_edit_tier(mtimes: dict[str, int]) -> frozenset[str]:
+    """The edit tier of `hot_profile` at `e1429082`, restated: burst members
+    carry no edit, nor does anything at or before the latest burst's newest
+    edit (R-N2); the leading tier is every page at the newest remaining time."""
+    burst = heat.burst_paths(mtimes)
+    after = max((mtimes[path] for path in burst), default=0)
+    # Anchors are working context: never a navigation page or raw material.
+    reason = heat.default_reason_for(mtimes)
+    edited = {
+        path: mtime
+        for path, mtime in mtimes.items()
+        if reason(path) == "edited" and path not in burst and mtime > after
+    }
+    if not edited:
+        return frozenset()
+    newest = max(edited.values())
+    return frozenset(path for path, mtime in edited.items() if mtime == newest)
+
+
+SEED_SHAPES = {
+    "one fresh edit": {SLED: T0 + H, MARIT: T0, DEPOT: T0 - 60 * S, NOTE: T0 - 120 * S},
+    "a whole vault in one burst": {SLED: T0, MARIT: T0, DEPOT: T0, NOTE: T0},
+    "an edit after the burst": {
+        MARIT: T0,
+        DEPOT: T0 + S,
+        NOTE: T0 + 2 * S,
+        SLED: T0 + H,
+    },
+    "an edit before the burst": {
+        SLED: T0,
+        MARIT: T0 + H,
+        DEPOT: T0 + H + S,
+        NOTE: T0 + H + 2 * S,
+    },
+    "a stalled burst": {
+        MARIT: T0,
+        DEPOT: T0 + int(2.9 * S),
+        NOTE: T0 + int(3.2 * S),
+        SLED: T0 - 2 * H,
+    },
+    "two pages at one time": {SLED: T0 + H, MARIT: T0 + H, DEPOT: T0},
+    "navigation never makes a burst": {
+        SLED: T0 + H,
+        f"{KB}/index.md": T0 + H + 1,
+        f"{KB}/log.md": T0 + H + 2,
+        MARIT: T0,
+    },
+}
+
+
+@pytest.mark.parametrize("shape", sorted(SEED_SHAPES))
+def test_the_seed_reproduces_the_pre_projection_ranking(shape: str) -> None:
+    mtimes = SEED_SHAPES[shape]
+
+    assert frozenset(_seeded_top(mtimes)) == _pre_projection_edit_tier(mtimes)
+    seeded = heat.seed_events(mtimes)
+    assert all(item.origin == "seed" for item in seeded)
+    assert len(heat.seed_events({f"{KB}/Notes/n{i}.md": T0 + i * H for i in range(400)})) == (
+        heat.SEED_MAX
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Ruling S5-1: the caller's own session first, then its workspace, then the vault
+# --------------------------------------------------------------------------- #
+
+MINE = heat.Attribution(session="s-one", workspace="w-exomem")
+OTHER = heat.Attribution(session="s-two", workspace="w-kitchen")
+
+
+def _mark(session: str, workspace: str, paths: tuple[str, ...], minted: int) -> heat.SessionMark:
+    return heat.SessionMark(
+        session=session, workspace=workspace, client="claude-code", paths=paths, minted_ns=minted,
+        seen_ns=minted,
+    )
+
+
+def test_the_callers_own_session_leads_over_a_newer_act_elsewhere() -> None:
+    profile = profile_of(
+        ev(T0, SLED, "pick", session="s-one", workspace="w-exomem"),
+        # Another session's pick, and unattributed work, both newer.
+        ev(T0 + H, MARIT, "pick", session="s-two", workspace="w-kitchen"),
+        ev(T0 + 2 * H, DEPOT, "work"),
+    )
+
+    assert top(profile, attribution=MINE) == (SLED,)
+    assert top(profile, attribution=OTHER) == (MARIT,)
+    # A caller with no keys gets the vault-wide ranking, which is today's.
+    assert top(profile) == top(profile, attribution=heat.Attribution()) == (DEPOT,)
+
+
+def test_a_sessions_last_served_thread_leads_its_own_tier() -> None:
+    marks = (
+        _mark("s-one", "w-exomem", (SLED,), T0),
+        _mark("s-two", "w-kitchen", (MARIT,), T0 + H),
+    )
+    profile = profile_of(ev(T0 + 2 * H, DEPOT, "work"), sessions=marks)
+
+    assert top(profile, attribution=MINE) == (SLED,)
+    assert top(profile, attribution=OTHER) == (MARIT,)
+    # Its own deliberate act after the mint moves the session on.
+    profile = profile_of(
+        ev(T0 + 2 * H, NOTE, "pick", session="s-one"), sessions=marks
+    )
+    assert top(profile, attribution=MINE) == (NOTE,)
+
+
+def test_a_fresh_session_takes_its_workspaces_thread() -> None:
+    marks = (
+        _mark("s-old", "w-exomem", (SLED,), T0),
+        _mark("s-two", "w-kitchen", (MARIT,), T0 + H),
+    )
+    profile = profile_of(ev(T0 + 2 * H, DEPOT, "work"), sessions=marks)
+    fresh = heat.Attribution(session="s-new", workspace="w-exomem")
+
+    assert top(profile, attribution=fresh) == (SLED,)
+    # An episode recorded under another session of the workspace counts too.
+    profile = profile_of(
+        ev(T0 + 3 * H, NOTE, "episode", session="s-old"), sessions=marks
+    )
+    assert top(profile, attribution=fresh) == (NOTE,)
+    # A workspace with nothing in it falls through to the vault.
+    elsewhere = heat.Attribution(session="s-new", workspace="w-garden")
+    assert top(profile, attribution=elsewhere) == top(profile)
+
+
+def test_selection_never_lifts_a_tier_over_a_deliberate_act_below_it() -> None:
+    profile = profile_of(
+        ev(T0, SLED, "work"),
+        ev(T0 + H, MARIT, "read", session="s-one", workspace="w-exomem"),
+    )
+
+    leads = heat.leading(profile, attribution=MINE)
+    assert [lead.tier for lead in leads] == [3]
+    assert top(profile, attribution=MINE) == (SLED,)
+
+
+def test_recent_lists_the_leading_tier_first_then_fills_from_below() -> None:
+    marks = (_mark("s-one", "w-exomem", (SLED,), T0),)
+    profile = profile_of(
+        ev(T0 + H, MARIT, "work"),
+        ev(T0 + 2 * H, DEPOT, "read"),
+        ev(T0 + 3 * H, NOTE, "pick", session="s-two", workspace="w-exomem"),
+        sessions=marks,
+    )
+
+    mine = heat.recent(profile, attribution=MINE)
+    assert [(item.path, item.tier) for item in mine] == [
+        (SLED, 1),
+        (NOTE, 2),
+        (DEPOT, 3),
+        (MARIT, 3),
+    ]
+    assert [item.reason for item in mine] == ["activated", "activated", "activated", "edited"]
+    # Keyless: newest contact first, which is the vault-wide order.
+    assert [item.path for item in heat.recent(profile)] == [NOTE, DEPOT, MARIT]
+
+
+def test_the_view_digest_moves_with_the_callers_own_tier_only() -> None:
+    marks = (_mark("s-one", "w-exomem", (SLED,), T0), _mark("s-two", "w-kitchen", (MARIT,), T0))
+    profile = profile_of(ev(T0, DEPOT, "work"), sessions=marks)
+    moved = profile_of(
+        ev(T0, DEPOT, "work"),
+        sessions=(_mark("s-one", "w-exomem", (NOTE,), T0 + S), marks[1]),
+    )
+
+    assert heat.view_digest(profile, heat.Attribution()) == profile.digest
+    assert heat.view_digest(profile, MINE) != heat.view_digest(moved, MINE)
+    assert heat.view_digest(profile, OTHER) == heat.view_digest(moved, OTHER)
