@@ -2266,6 +2266,7 @@ def test_runbook_index_is_complete_and_executable_by_default() -> None:
         "backup-restore",
         "deletion",
         "node-replacement",
+        "node-pool",
         "break-glass",
     }
     assert set(contract["runbooks"]) == required

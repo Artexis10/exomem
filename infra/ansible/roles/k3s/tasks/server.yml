@@ -1,0 +1,70 @@
+---
+- name: Create the K3s server audit log directory
+  ansible.builtin.file:
+    path: /var/lib/rancher/k3s/server/logs
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Install the Kubernetes audit policy
+  ansible.builtin.copy:
+    src: audit-policy.yaml
+    dest: /etc/rancher/k3s/audit-policy.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart K3s
+
+- name: Install the Pod Security admission configuration
+  ansible.builtin.copy:
+    src: admission-config.yaml
+    dest: /etc/rancher/k3s/admission-config.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart K3s
+
+- name: Install the K3s server configuration
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: /etc/rancher/k3s/config.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: Restart K3s
+
+- name: Install the K3s systemd unit
+  ansible.builtin.template:
+    src: k3s.service.j2
+    dest: /etc/systemd/system/k3s.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart K3s
+
+- name: Apply configuration handlers before first K3s start
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start K3s
+  ansible.builtin.systemd_service:
+    name: k3s
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Wait for the local Kubernetes API readiness endpoint
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - get
+      - --raw=/readyz
+  register: k3s_ready
+  changed_when: false
+  retries: 30
+  delay: 2
+  until: k3s_ready.rc == 0 and k3s_ready.stdout == "ok"

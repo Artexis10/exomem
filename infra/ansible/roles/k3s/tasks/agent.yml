@@ -1,0 +1,163 @@
+---
+# The secure token format K10<CA hash>::node:<password> pins the cluster CA,
+# so a machine on the subnet cannot impersonate the server to a joining
+# agent. Only the CA certificate's checksum leaves the server.
+- name: Read the cluster CA checksum on the server
+  ansible.builtin.stat:
+    path: /var/lib/rancher/k3s/server/tls/server-ca.crt
+    checksum_algorithm: sha256
+    get_mime: false
+    get_attributes: false
+  delegate_to: "{{ k3s_server_host }}"
+  register: k3s_server_ca
+
+- name: Require the server's cluster CA
+  ansible.builtin.assert:
+    that:
+      - k3s_server_ca.stat.exists
+      - k3s_server_ca.stat.checksum | length == 64
+    fail_msg: The K3s server has no cluster CA yet; run the server play first.
+
+- name: Compose the CA-pinned agent join token
+  ansible.builtin.set_fact:
+    k3s_agent_join_token: "{{ 'K10' ~ k3s_server_ca.stat.checksum ~ '::node:' ~ k3s_agent_token }}"
+  no_log: true
+
+- name: Install the K3s agent configuration
+  ansible.builtin.template:
+    src: agent-config.yaml.j2
+    dest: /etc/rancher/k3s/config.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: Restart K3s
+
+- name: Install the K3s agent systemd unit
+  ansible.builtin.template:
+    src: k3s-agent.service.j2
+    dest: /etc/systemd/system/k3s-agent.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart K3s
+
+- name: Apply configuration handlers before first K3s agent start
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start the K3s agent
+  ansible.builtin.systemd_service:
+    name: k3s-agent
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Wait until the server reports the agent node Ready
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - get
+      - node
+      - "{{ inventory_hostname }}"
+      - -o
+      - jsonpath={.status.conditions[?(@.type=="Ready")].status}
+  delegate_to: "{{ k3s_server_host }}"
+  register: k3s_agent_ready
+  changed_when: false
+  retries: "{{ k3s_join_retries }}"
+  delay: "{{ k3s_join_delay }}"
+  until: k3s_agent_ready.rc == 0 and k3s_agent_ready.stdout == "True"
+
+# node-label applies only at registration; this keeps the label convergent.
+- name: Converge the agent node-pool label
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - label
+      - node
+      - "{{ inventory_hostname }}"
+      - "{{ k3s_agent_node_label }}"
+      - --overwrite
+  delegate_to: "{{ k3s_server_host }}"
+  register: k3s_agent_label
+  changed_when: "'not labeled' not in k3s_agent_label.stdout"
+
+# A --limit or partial run can leave a peer without this node's rules, which
+# would break the overlay silently while the node still reports Ready.
+- name: Read every other K3s node's inter-node rules
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/ufw
+      - show
+      - added
+  delegate_to: "{{ item }}"
+  loop: "{{ k3s_cluster_hosts | difference([inventory_hostname]) }}"
+  register: k3s_peer_rules
+  changed_when: false
+
+- name: Require every other K3s node to admit this agent
+  ansible.builtin.assert:
+    that:
+      - ("from " ~ private_node_ip ~ " to any port 8472 proto udp") in item.stdout
+      - ("from " ~ private_node_ip ~ " to any port 10250 proto tcp") in item.stdout
+      - >-
+        item.item != k3s_server_host
+        or ("from " ~ private_node_ip ~ " to any port 6443 proto tcp") in item.stdout
+    fail_msg: >-
+      {{ item.item }} does not admit {{ private_node_ip }} on the K3s inter-node
+      ports; run site.yml without --limit so every node converges.
+  loop: "{{ k3s_peer_rules.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Check whether the Hetzner CSI driver is installed
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - get
+      - csidriver
+      - "{{ k3s_csi_driver }}"
+      - --ignore-not-found
+      - -o
+      - name
+  delegate_to: "{{ k3s_server_host }}"
+  register: k3s_csi_driver_present
+  changed_when: false
+  when: k3s_agent_require_csi_capacity
+
+- name: Report that capacity waits for the platform install
+  ansible.builtin.debug:
+    msg: >-
+      {{ k3s_csi_driver }} is not installed yet; {{ inventory_hostname }} publishes
+      0 cell slots until the platform chart installs the driver.
+  when:
+    - k3s_agent_require_csi_capacity
+    - k3s_csi_driver_present.stdout | length == 0
+
+- name: Wait until the agent publishes a volume-attachment limit
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/k3s
+      - kubectl
+      - get
+      - csinode
+      - "{{ inventory_hostname }}"
+      - -o
+      - jsonpath={.spec.drivers[?(@.name=="{{ k3s_csi_driver }}")].allocatable.count}
+  delegate_to: "{{ k3s_server_host }}"
+  register: k3s_agent_csinode
+  changed_when: false
+  retries: "{{ k3s_join_retries }}"
+  delay: "{{ k3s_join_delay }}"
+  until: >-
+    k3s_agent_csinode.rc == 0
+    and k3s_agent_csinode.stdout is match('^[0-9]+$')
+    and k3s_agent_csinode.stdout | int > 0
+  when:
+    - k3s_agent_require_csi_capacity
+    - k3s_csi_driver_present.stdout | length > 0

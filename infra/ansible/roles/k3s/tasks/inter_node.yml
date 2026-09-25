@@ -1,0 +1,6 @@
+---
+- name: Resolve the K3s private network interface
+  ansible.builtin.import_tasks: interface.yml
+
+- name: Converge the K3s inter-node firewall
+  ansible.builtin.import_tasks: firewall.yml
