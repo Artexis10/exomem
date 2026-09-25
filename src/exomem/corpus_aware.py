@@ -49,6 +49,7 @@ HUB_WEIGHT = 0.15  # weight on log1p(graph_in_degree) when re-ranking suggestion
 DUP_THRESHOLD = 0.90  # default min doc-doc cosine for a near-dup; override via EXOMEM_DUP_THRESHOLD
 CONTRADICTION_FLOOR = 0.82  # default lower edge of the contradiction band [floor, dup_threshold); override via EXOMEM_CONTRADICTION_FLOOR
 RELATED_OVERFETCH = 3  # fetch limit * this from find(), then re-rank + trim
+_RELEASED_POOL_ROUNDS = 4  # bounds the re-fetches a restricted caller's pool may take
 
 # Lead-body word budget for the synthesized "what is this about" query.
 _QUERY_LEAD_WORDS = 400
@@ -592,13 +593,16 @@ def _canon(path: str) -> str:
     return p.lower()
 
 
-def _why(hit) -> str:
-    """One-line rationale assembled from the hit's ranking signals."""
+def _why(hit, *, ranks: bool = True) -> str:
+    """One-line rationale assembled from the hit's ranking signals.
+
+    `ranks=False` names the lanes without their whole-corpus rank numbers.
+    """
     bits: list[str] = []
     if hit.vector_rank:
-        bits.append(f"semantic #{hit.vector_rank}")
+        bits.append(f"semantic #{hit.vector_rank}" if ranks else "semantic")
     if hit.bm25_rank:
-        bits.append(f"keyword #{hit.bm25_rank}")
+        bits.append(f"keyword #{hit.bm25_rank}" if ranks else "keyword")
     if hit.graph_in_degree:
         hub = " (hub)" if hit.graph_in_degree >= 3 else ""
         bits.append(f"{hit.graph_in_degree} shared link(s){hub}")
@@ -648,6 +652,7 @@ def suggest_related(
     suggested edge, since you can't act on a read-only/out-of-KB link.
     """
     from . import find as find_module
+    from .governance import egress
 
     lead = " ".join((body or "").split()[:_QUERY_LEAD_WORDS])
     query = f"{title}\n\n{lead}".strip() or (title or "").strip()
@@ -657,19 +662,36 @@ def suggest_related(
     self_canon = _canon(self_path) if self_path else None
     excluded = {_canon(e) for e in (existing_links or set())}
 
-    try:
-        hits = find_module.find(
-            vault_root,
-            query=query,
-            limit=limit * RELATED_OVERFETCH,
-            mode="hybrid",
-            graph=True,
-            scope=scope,
-            prefer_compiled=True,
-        )
-    except Exception as e:  # noqa: BLE001 — suggestions are best-effort
-        log.debug("suggest_related find() failed: %s", e)
-        return []
+    # A caller other than the owner ranks over the pages it may see: no graph
+    # lane (hops and in-degree follow links over the whole vault), no withheld
+    # hit, and no rank number computed over the whole corpus, as `op_find`.
+    keep = egress.restricted_release_filter(vault_root)
+    wanted = limit * RELATED_OVERFETCH
+    pool = wanted
+    for _round in range(_RELEASED_POOL_ROUNDS):
+        try:
+            hits = find_module.find(
+                vault_root,
+                query=query,
+                limit=pool,
+                mode="hybrid",
+                graph=keep is None,
+                scope=scope,
+                prefer_compiled=True,
+            )
+        except Exception as e:  # noqa: BLE001 — suggestions are best-effort
+            log.debug("suggest_related find() failed: %s", e)
+            return []
+        if keep is None:
+            break
+        released = [h for h in hits if keep(h.path)]
+        if len(released) >= wanted or len(hits) < pool:
+            break
+        # Withheld hits took pool slots: widen the pool so the visible
+        # candidates are the ones a vault without those pages would rank.
+        pool += wanted - len(released)
+    if keep is not None:
+        hits = released[:wanted]
 
     eligible = []
     for h in hits:
@@ -690,7 +712,11 @@ def suggest_related(
     ranked = sorted(enumerate(eligible), key=_score, reverse=True)
     return [
         RelatedSuggestion(
-            path=h.path, title=h.title, type=h.type, why=_why(h), excerpt=h.excerpt
+            path=h.path,
+            title=h.title,
+            type=h.type,
+            why=_why(h, ranks=keep is None),
+            excerpt=h.excerpt,
         )
         for _, h in ranked[:limit]
     ]

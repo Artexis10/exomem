@@ -751,6 +751,58 @@ def test_a_restricted_write_builds_the_owners_corpus(tmp_path: Path, audience: s
     assert facts(_principal(audience)) == owner
 
 
+def _suggestion_fixture() -> tuple[dict[str, str], dict[str, str]]:
+    base = {
+        **_filler(),
+        f"{NOTES}/rollout-notes.md": _page(
+            "Rollout Notes", "Rollout background and rollout plan basics.", type="insight"
+        ),
+    }
+    withheld = {
+        f"{WITHHELD_DIR}/rollout-plan.md": _page(
+            "Rollout Plan",
+            "Rollout plan rollout background rollout plan rollout. "
+            f"[[{NOTES}/lonely]] [[{NOTES}/filler-harbor]]",
+            type="insight",
+        )
+    }
+    return base, withheld
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_link_suggestions_read_as_if_the_withheld_page_were_absent(
+    tmp_path: Path, audience: str
+) -> None:
+    """Suggested links rank over the pages the caller may see, with no graph
+    lane and no whole-corpus rank numbers, for every caller of the ranking."""
+    from exomem import corpus_aware
+
+    base, withheld = _suggestion_fixture()
+    vaults = _twins(tmp_path, base, withheld, audience)
+
+    def suggested(vault: Path) -> str:
+        draft = _call(
+            vault, _principal(audience), "connect_memory", operation="suggest-links",
+            draft_title="Rollout plan", draft_body="rollout background rollout plan",
+        )
+        page = _call(
+            vault, _principal(audience), "connect_memory", operation="suggest-links",
+            path=f"{NOTES}/rollout-notes.md",
+        )
+        _reset()
+        with request_scope(_principal(audience)):
+            direct = corpus_aware.suggest_related(
+                vault, title="Rollout plan", body="rollout background rollout plan"
+            )
+        return _text([draft, page, [item.as_dict() for item in direct]])
+
+    answers = {variant: suggested(vault) for variant, vault in vaults.items()}
+
+    assert '"__error__"' not in answers["A"], answers["A"]
+    assert answers["A"] == answers["B"]
+    assert answers["C"] == answers["B"]
+
+
 def test_the_owner_writer_still_resolves_over_every_page(tmp_path: Path) -> None:
     base, withheld = _writer_fixture()
     vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")
