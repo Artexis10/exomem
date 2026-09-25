@@ -40,12 +40,35 @@ CELL_LABEL = "exomem.io/cloud-cell"
 REVISION_LABEL = "controller-revision-hash"
 
 
+# D4: every Kubernetes call is bounded (connect, read seconds). A half-open
+# connection to the API server surfaces as an error the pass handles, well
+# inside the 120 s liveness bound, instead of blocking the loop until
+# liveness restarts cellctl and discards its in-memory refusal parks.
+API_REQUEST_TIMEOUT = (5, 30)
+
+
+def _bound_requests(api_client: k8s.ApiClient) -> None:
+    """Gives every request through `api_client` API_REQUEST_TIMEOUT unless
+    the caller passed its own. Typed and dynamic clients both go through
+    ApiClient.request."""
+
+    unbounded = api_client.request
+
+    def request(*args, **kwargs):
+        if kwargs.get("_request_timeout") is None:
+            kwargs["_request_timeout"] = API_REQUEST_TIMEOUT
+        return unbounded(*args, **kwargs)
+
+    api_client.request = request
+
+
 def _not_found(error: ApiException) -> bool:
     return error.status == 404
 
 
 class ClusterClient:
     def __init__(self, api_client: k8s.ApiClient) -> None:
+        _bound_requests(api_client)
         self._api = api_client
         self._dynamic = DynamicClient(api_client)
         self._core = k8s.CoreV1Api(api_client)

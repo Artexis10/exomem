@@ -375,15 +375,57 @@ MODEL_ENV_FORBIDDEN_KEYS = frozenset(
         "HF_HUB_CACHE",
     }
 )
-MODEL_ENV_FORBIDDEN_PREFIXES = ("XDG_", "EXOMEM_CLOUD_")
+# Also refused: anything that picks the code the cell runs (the loader, the
+# interpreter, helper executables), changes the process's mode or carries a
+# credential or an endpoint.
+MODEL_ENV_FORBIDDEN_KEYS = MODEL_ENV_FORBIDDEN_KEYS | {"PATH", "EXOMEM_UV", "EXOMEM_MODE"}
+MODEL_ENV_FORBIDDEN_PREFIXES = (
+    "XDG_",
+    "LD_",
+    "PYTHON",
+    "EXOMEM_CLOUD_",
+    "EXOMEM_HOSTED_",
+    "EXOMEM_WRITER_LEASE_",
+    "EXOMEM_LEASE_",
+    "EXOMEM_OAUTH_",
+    "EXOMEM_AUTH_",
+)
+MODEL_ENV_FORBIDDEN_SUFFIXES = (
+    "_CMD",
+    "_PYTHON",
+    "_BIN",
+    "_KEY",
+    "_TOKEN",
+    "_SECRET",
+    "_URL",
+    "_URLS",
+    "_FILE",
+    "_PATH",
+    "_DIR",
+    "_HOME",
+    "_ROOT",
+    "_DB",
+)
+_MODEL_ENV_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*")
 
 
-def check_model_env(model_env: dict[str, str]) -> None:
-    """Raises ValueError naming the first model_env key cellctl refuses.
-    Checked when cellctl loads its settings, and again on every render."""
+def check_model_env(model_env: object) -> None:
+    """Raises ValueError naming the first model_env entry cellctl refuses.
+    It must be a map of upper-case names to strings. Checked when cellctl
+    loads its settings, and again on every render."""
 
-    for key in sorted(model_env):
-        if key in MODEL_ENV_FORBIDDEN_KEYS or key.startswith(MODEL_ENV_FORBIDDEN_PREFIXES):
+    if not isinstance(model_env, dict):
+        raise ValueError("cell model environment must be a JSON object")
+    for key in sorted(model_env, key=str):
+        if not isinstance(key, str) or not _MODEL_ENV_NAME_RE.fullmatch(key):
+            raise ValueError(f"cell model environment has an invalid name: {key!r}")
+        if not isinstance(model_env[key], str):
+            raise ValueError(f"cell model environment value for {key} must be a string")
+        if (
+            key in MODEL_ENV_FORBIDDEN_KEYS
+            or key.startswith(MODEL_ENV_FORBIDDEN_PREFIXES)
+            or key.endswith(MODEL_ENV_FORBIDDEN_SUFFIXES)
+        ):
             raise ValueError(f"cell model environment may not set {key}")
 
 
@@ -650,8 +692,11 @@ def _restic_repo(spec: CellManifestSpec, bucket_name: str, endpoint: str) -> str
     return f"s3:{endpoint}/{bucket_name}/cells/{spec.cell_id}"
 
 
-def _restic_env(spec: CellManifestSpec) -> list[dict]:
+def _restic_env(spec: CellManifestSpec, repo: str) -> list[dict]:
     return [
+        # The repository carries chart values (endpoint, bucket); it reaches
+        # restic through its environment, never through the `sh -c` string.
+        {"name": "RESTIC_REPOSITORY", "value": repo},
         {
             # The per-cell B2 application key id/secret double as the S3
             # access key id/secret against B2's S3-compatible endpoint.
@@ -687,7 +732,9 @@ def _job_volume_mounts(*, data_read_only: bool) -> list[dict]:
     ]
 
 
-def _job_pod_spec(spec: CellManifestSpec, *, job_kind: str, command: list[str], data_read_only: bool) -> dict:
+def _job_pod_spec(
+    spec: CellManifestSpec, *, job_kind: str, command: list[str], data_read_only: bool, repo: str
+) -> dict:
     return {
         "restartPolicy": "Never",
         "automountServiceAccountToken": False,
@@ -698,7 +745,7 @@ def _job_pod_spec(spec: CellManifestSpec, *, job_kind: str, command: list[str], 
                 "image": spec.image,
                 "imagePullPolicy": "IfNotPresent",
                 "command": ["sh", "-c", " && ".join(command)],
-                "env": _restic_env(spec),
+                "env": _restic_env(spec, repo),
                 "resources": {
                     "requests": {"cpu": "100m", "memory": "256Mi"},
                     "limits": {"cpu": "1", "memory": "1Gi"},
@@ -734,14 +781,14 @@ def render_backup_job(spec: CellManifestSpec, *, bucket_name: str, endpoint: str
     # Job) directly on either a non-zero `restic backup` or an id that does
     # not match a real 64-hex-character snapshot id.
     commands = [
-        f"restic -r {repo} snapshots || restic -r {repo} init",
-        f"restic -r {repo} backup --json {' '.join(BACKUP_PATHS)} > /tmp/backup.json || exit 1",
+        "restic snapshots || restic init",
+        f"restic backup --json {' '.join(BACKUP_PATHS)} > /tmp/backup.json || exit 1",
         (
             "SNAPSHOT_ID=$(grep -o '\"snapshot_id\":\"[a-f0-9]\\{64\\}\"' /tmp/backup.json "
             "| tail -n 1 | cut -d'\"' -f4)"
         ),
         '[ -n "$SNAPSHOT_ID" ] || exit 1',
-        f"restic -r {repo} forget {' '.join(RETENTION_ARGS)} --prune",
+        f"restic forget {' '.join(RETENTION_ARGS)} --prune",
         "printf '%s' \"$SNAPSHOT_ID\" > /dev/termination-log",
     ]
     return {
@@ -759,7 +806,7 @@ def render_backup_job(spec: CellManifestSpec, *, bucket_name: str, endpoint: str
             "template": {
                 "metadata": {"labels": {**_selector_labels(spec), JOB_KIND_LABEL: JOB_KIND_BACKUP}},
                 "spec": _job_pod_spec(
-                    spec, job_kind=JOB_KIND_BACKUP, command=commands, data_read_only=True
+                    spec, job_kind=JOB_KIND_BACKUP, command=commands, data_read_only=True, repo=repo
                 ),
             },
         },
@@ -788,7 +835,7 @@ def render_restore_job(
     # `--delete` reach the root-owned lost+found, which restic running as
     # UID 10001 cannot remove (exit 1, measured with restic 0.19.1).
     includes = " ".join(f"--include {path}" for path in BACKUP_PATHS)
-    commands = [f"restic -r {repo} restore {snapshot_id} --target / --delete {includes}"]
+    commands = [f"restic restore {snapshot_id} --target / --delete {includes}"]
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -804,7 +851,7 @@ def render_restore_job(
             "template": {
                 "metadata": {"labels": {**_selector_labels(spec), JOB_KIND_LABEL: JOB_KIND_RESTORE}},
                 "spec": _job_pod_spec(
-                    spec, job_kind=JOB_KIND_RESTORE, command=commands, data_read_only=False
+                    spec, job_kind=JOB_KIND_RESTORE, command=commands, data_read_only=False, repo=repo
                 ),
             },
         },

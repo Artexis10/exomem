@@ -343,3 +343,32 @@ def test_the_self_check_rejects_a_binding_narrowed_by_match_resources() -> None:
     narrowed = NS(namespace_selector=NS(match_labels={"exomem.io/confined": "true"}))
     client._admission = _Admission(policy_name="exomem-cellctl-scope", actions=["Deny"], match_resources=narrowed)
     assert client.admission_policy_present("exomem-cellctl-scope", "exomem-cellctl-scope") is False
+
+
+def test_every_kubernetes_call_carries_a_request_timeout() -> None:
+    # A half-open connection to the API server must surface as an error the
+    # pass handles, not block the loop until liveness restarts cellctl.
+    import pytest
+    from kubernetes import client as k8s
+
+    from cellctl.k8s_client import API_REQUEST_TIMEOUT
+
+    api_client = k8s.ApiClient(k8s.Configuration(host="https://127.0.0.1:9"))
+    seen: list[object] = []
+
+    class _Stop(Exception):
+        pass
+
+    def request(method, url, **kwargs):
+        seen.append(kwargs.get("_request_timeout"))
+        raise _Stop
+
+    api_client.rest_client.request = request
+    with pytest.raises(_Stop):
+        ClusterClient(api_client)  # the dynamic client's discovery request
+    core = k8s.CoreV1Api(api_client)
+    with pytest.raises(_Stop):
+        core.read_namespace("exo-cell-" + CELL_ID)
+    with pytest.raises(_Stop):
+        core.read_namespace("exo-cell-" + CELL_ID, _request_timeout=3)
+    assert seen == [API_REQUEST_TIMEOUT, API_REQUEST_TIMEOUT, 3]

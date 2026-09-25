@@ -47,9 +47,10 @@ def test_backup_job_backs_up_vault_and_host_with_retention() -> None:
     job = render_backup_job(
         _held_spec(cell_id="aaaaaaaaaaaaaaaa"), bucket_name="exomem-cloud-backups", endpoint=ENDPOINT
     )
-    command = job["spec"]["template"]["spec"]["containers"][0]["command"]
-    joined = " ".join(command)
-    assert "cells/aaaaaaaaaaaaaaaa" in joined
+    container = job["spec"]["template"]["spec"]["containers"][0]
+    joined = " ".join(container["command"])
+    repository = next(e["value"] for e in container["env"] if e["name"] == "RESTIC_REPOSITORY")
+    assert repository.endswith("/cells/aaaaaaaaaaaaaaaa")
     assert "/data/vault" in joined and "/data/host" in joined
     assert "--keep-daily 7" in joined
     assert "--keep-weekly 4" in joined
@@ -59,9 +60,10 @@ def test_backup_job_uses_the_s3_compatible_restic_repo() -> None:
     # D8 amendment: restic reaches B2 through its S3-compatible endpoint, not
     # the native "b2:" backend.
     job = render_backup_job(_held_spec(), bucket_name="exomem-cloud-backups", endpoint=ENDPOINT)
-    joined = " ".join(job["spec"]["template"]["spec"]["containers"][0]["command"])
-    assert f"s3:{ENDPOINT}/exomem-cloud-backups/cells/" in joined
-    assert "b2:" not in joined
+    container = job["spec"]["template"]["spec"]["containers"][0]
+    repository = next(e["value"] for e in container["env"] if e["name"] == "RESTIC_REPOSITORY")
+    assert repository.startswith(f"s3:{ENDPOINT}/exomem-cloud-backups/cells/")
+    assert "b2:" not in " ".join(container["command"]) + repository
     env_names = {e["name"] for e in job["spec"]["template"]["spec"]["containers"][0]["env"]}
     assert {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"} <= env_names
     assert "B2_ACCOUNT_ID" not in env_names and "B2_ACCOUNT_KEY" not in env_names
@@ -171,14 +173,30 @@ def test_restore_and_backup_are_scoped_to_vault_and_host_leaving_the_volume_root
     spec = _held_spec(cell_id="aaaaaaaaaaaaaaaa")
     repo = f"s3:{ENDPOINT}/exomem-cloud-backups/cells/aaaaaaaaaaaaaaaa"
     restore = render_restore_job(spec, bucket_name="exomem-cloud-backups", endpoint=ENDPOINT, snapshot_id=SNAPSHOT_ID)
-    assert restore["spec"]["template"]["spec"]["containers"][0]["command"] == [
+    restore_container = restore["spec"]["template"]["spec"]["containers"][0]
+    assert restore_container["command"] == [
         "sh",
         "-c",
-        f"restic -r {repo} restore {SNAPSHOT_ID} --target / --delete --include /data/vault --include /data/host",
+        f"restic restore {SNAPSHOT_ID} --target / --delete --include /data/vault --include /data/host",
     ]
+    assert {"name": "RESTIC_REPOSITORY", "value": repo} in restore_container["env"]
     backup = render_backup_job(spec, bucket_name="exomem-cloud-backups", endpoint=ENDPOINT)
     script = backup["spec"]["template"]["spec"]["containers"][0]["command"][2]
-    assert f"restic -r {repo} backup --json /data/vault /data/host > /tmp/backup.json || exit 1" in script.split(" && ")
+    assert "restic backup --json /data/vault /data/host > /tmp/backup.json || exit 1" in script.split(" && ")
+
+
+def test_the_repository_never_reaches_the_job_shell() -> None:
+    # The endpoint and bucket are chart values; they reach restic through
+    # RESTIC_REPOSITORY, never through the `sh -c` string.
+    endpoint = "https://s3.example/$(touch /tmp/owned);x"
+    spec = _held_spec(cell_id="aaaaaaaaaaaaaaaa")
+    for job in (
+        render_backup_job(spec, bucket_name="b`id`", endpoint=endpoint),
+        render_restore_job(spec, bucket_name="b`id`", endpoint=endpoint, snapshot_id=SNAPSHOT_ID),
+    ):
+        container = job["spec"]["template"]["spec"]["containers"][0]
+        assert "s3.example" not in container["command"][2] and "`id`" not in container["command"][2]
+        assert {"name": "RESTIC_REPOSITORY", "value": f"s3:{endpoint}/b`id`/cells/aaaaaaaaaaaaaaaa"} in container["env"]
 
 
 def test_a_snapshot_id_with_a_trailing_newline_never_reaches_the_restore_shell() -> None:
