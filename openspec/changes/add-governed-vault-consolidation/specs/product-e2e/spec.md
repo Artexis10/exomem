@@ -169,7 +169,7 @@ binds that reference and observed digest; no caller field selects K.
 
 Contract E2E SHALL invoke `consolidate_memory` through a real stdio MCP client,
 authenticated REST application, installed CLI, and an explicitly selected
-`hosted-alpha-agent-v3` cell/control-plane
+`hosted-alpha-agent-v5` cell/control-plane
 adapter. Each surface SHALL expose the same finite actions, selector
 classification, normalized schema, logical results, stable errors, idempotent
 mutation terminals, fresh principal/session binding, and trusted-confirmation
@@ -177,12 +177,12 @@ semantics. The suite SHALL exercise at least one full lifecycle through stdio
 MCP and one through Hosted, with REST/CLI parity probes at every externally
 observable state and action boundary.
 
-Generated OpenAPI, MCP schema, v3 Hosted descriptor/hash and plugin/manifest,
+Generated OpenAPI, MCP schema, v5 Hosted descriptor/hash and plugin/manifest,
 CLI help, bootstrap, and capability documentation SHALL be checked against
-committed bounded fixtures. V1/v2 membership, descriptors, hashes,
+committed bounded fixtures. V1 through v4 membership, descriptors, hashes,
 plugins/manifests, locks, clients, and registered evidence SHALL be asserted
-byte-identical, and the test SHALL prove that defining v3 neither selects nor
-promotes it. V3 startup SHALL consume a valid signed private
+byte-identical, and the test SHALL prove that defining v5 neither selects nor
+promotes it. V5 startup SHALL consume a valid signed private
 `HostedProfileSelection/v1` whose typed cell/vault/installation-generation-fence,
 release/protocol, descriptor,
 Records/identity/run/seal/receipt reader, artifact store, source-export/control-
@@ -193,8 +193,8 @@ The record SHALL be detached Ed25519-signed over its exact framed JCS bytes,
 name its `ed25519-sha256:` signer key id, and verify through the private
 purpose/audience/profile-scoped selection registry with status, validity,
 revocation, generation, and bounded rotation overlap. Missing, unsigned,
-unknown-key, revoked, expired, or one-field-mismatched records SHALL leave v1/v2
-behavior unchanged and v3 unavailable. Every process and request SHALL have a timeout and
+unknown-key, revoked, expired, or one-field-mismatched records SHALL leave v1 through v4
+behavior unchanged and v5 unavailable. Every process and request SHALL have a timeout and
 SHALL fail rather than hang. The gate SHALL assert that caller fields cannot forge owner
 confirmation, destination identity, principal attestations, artifact trust, or
 internal consolidation authority.
@@ -225,23 +225,23 @@ terminal MAY use `delivery=replayed`.
 - **THEN** initial delivery is exactly `{"success":true,"data":{"delivery":"initial","terminal":T}}` and replay is exactly `{"success":true,"data":{"delivery":"replayed","terminal":T}}`, with byte-identical canonical `T`, `outcome=committed`, and no second effect
 - **AND** changed tenant, principal/session, action, token, artifact, plan, or payload conflicts
 
-#### Scenario: Hosted deployment remains on v2
+#### Scenario: Existing Hosted deployment remains on an earlier profile
 
-- **WHEN** v3 artifacts exist but the cell deployment explicitly selects v2
-- **THEN** Hosted discovery and dispatch omit `consolidate_memory` and the v2 descriptor/hash remain unchanged
-- **AND** the command becomes available only after a separately compatible v3 candidate is explicitly selected and its promotion evidence verifies
+- **WHEN** v5 artifacts exist but the cell deployment explicitly selects any profile from v1 through v4
+- **THEN** Hosted discovery and dispatch omit `consolidate_memory` and that selected profile's descriptor/hash remain unchanged
+- **AND** the command becomes available only after a separately compatible v5 candidate is explicitly selected and its promotion evidence verifies
 
 #### Scenario: Hosted apply drains its own cell
 
-- **WHEN** v3 apply is admitted while ordinary Hosted mutations are active
+- **WHEN** v5 apply is admitted while ordinary Hosted mutations are active
 - **THEN** the exact apply operation atomically converts out of the ordinary active-mutation counter before seal drain and waits for every other participant
 - **AND** it completes without self-deadlock, double admission, or excluding another operation
 
-#### Scenario: Hosted v3 selection trust is incomplete
+#### Scenario: Hosted v5 selection trust is incomplete
 
 - **WHEN** the selection signature algorithm/encoding, signer key, registry purpose/audience/profile, validity/revocation, source-export or custodian verifier readiness, owner-entitlement readiness, or exact-cell transport-supervisor readiness is absent or mismatched
 - **THEN** startup neither advertises nor admits `consolidate_memory` for that cell
-- **AND** v1/v2 descriptors, dispatch, and active deployment selection remain byte-identical
+- **AND** v1 through v4 descriptors, dispatch, and active deployment selection remain byte-identical
 
 ### Requirement: Crash-matrix E2E proves sealed recovery, abort, and truthful rollback
 

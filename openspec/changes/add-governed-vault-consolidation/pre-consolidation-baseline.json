@@ -1,0 +1,282 @@
+{
+  "bootstrap": {
+    "compact": {
+      "advanced_order": [
+        "coordination_status",
+        "process_media",
+        "maintain_memory",
+        "schema_memory",
+        "govern_memory",
+        "manage_memory_file",
+        "query_dataset",
+        "read_media"
+      ],
+      "canonical_sha256": "a586ebc02827418cd8074174ffa8f9f182ada20f88acb4daadc3504a7a197c75",
+      "first_run_safe_order": [
+        "coordination_status",
+        "bootstrap",
+        "ask_memory",
+        "read_memory",
+        "browse_memory",
+        "compile_source",
+        "transfer_artifact",
+        "review_memory",
+        "review_item_context",
+        "connect_memory",
+        "adopt_vault",
+        "adoption_studio",
+        "maintain_memory",
+        "schema_memory",
+        "govern_memory",
+        "query_dataset",
+        "read_media"
+      ],
+      "json_default_bytes": 61376,
+      "primary_order": [
+        "bootstrap",
+        "ask_memory",
+        "read_memory",
+        "browse_memory",
+        "remember",
+        "edit_memory",
+        "observe_memory",
+        "replace_memory",
+        "capture_source",
+        "compile_source",
+        "preserve_evidence",
+        "preserve_artifacts",
+        "transfer_artifact",
+        "review_memory",
+        "review_item_context",
+        "triage_memory",
+        "connect_memory",
+        "adopt_vault",
+        "adoption_studio",
+        "record_memory",
+        "plan_memory"
+      ],
+      "route_order": [
+        "coordination_status",
+        "bootstrap",
+        "ask_memory",
+        "read_memory",
+        "browse_memory",
+        "remember",
+        "edit_memory",
+        "observe_memory",
+        "replace_memory",
+        "capture_source",
+        "compile_source",
+        "preserve_evidence",
+        "preserve_artifacts",
+        "transfer_artifact",
+        "process_media",
+        "review_memory",
+        "review_item_context",
+        "triage_memory",
+        "connect_memory",
+        "adopt_vault",
+        "adoption_studio",
+        "maintain_memory",
+        "schema_memory",
+        "govern_memory",
+        "manage_memory_file",
+        "record_memory",
+        "plan_memory",
+        "query_dataset",
+        "read_media"
+      ]
+    },
+    "diagnostics": {
+      "canonical_sha256": "a60ac9677da633b1c6aa9976651f9817d35ed1442888a449c1aa4fb7d9aed9d4",
+      "json_default_bytes": 94390
+    },
+    "full": {
+      "canonical_sha256": "daa6cd18b8d888d4579ade635d21c2c41f213ca1fa97a2a1aa5e8379e7b05719",
+      "json_default_bytes": 94360
+    }
+  },
+  "core_file_sha256": {
+    "docs/capabilities.md": "1b0a93305653872a22d72be68868e871929f69dca895552fd99833f7596f068b",
+    "infra/contracts/exomem-hosted-deployment-lock-pair-v2.json": "8431fab0912e68f75d5eb452df1c321b743e06d91a66d526cd1172f44719815f",
+    "infra/contracts/exomem-hosted-deployment-lock-v2.schema.json": "d1f0c6fdffef8a4e4c22c5cf5a241cbf02cfe67fc41398fc901535c7a7168d62",
+    "infra/contracts/exomem-hosted-deployment-lock-v3.schema.json": "3c01a55153d4bb067727ae85f09cfe609379f20ef3a8d1b115f99690dc2dcade",
+    "infra/contracts/exomem-hosted-release-v1.json": "58a18cc36f854519682066aca8722db14f1e2635579939405394ef431f4dcd9f",
+    "plugins/hosted/candidates/hosted-alpha-agent-v2/definition.json": "e9bf353e8e73957cc894ab903b98066dc2c46575a483d849e6e7ddd70412ea54",
+    "plugins/hosted/candidates/hosted-alpha-agent-v3/definition.json": "4618e39a87ace4a9f75dddc368dcb281960d6a6c799f59c090d2cb2e98e5f81c",
+    "plugins/hosted/candidates/hosted-alpha-agent-v4/definition.json": "162f1d4f9e4b55a47fcbd3258eb91e0ff54631cdbf14fced396252555a50d257",
+    "plugins/hosted/definition.json": "96f92d72b47b2578d28e8cc60fe65a3d1dbb0f0ea11d3ee8ecc44d895e443196",
+    "src/exomem/tool_surface_contract.json": "3af1e3c050d24af17511dec25f898f5ba74fcb861e8b4f46ada8898a8b497d30",
+    "tests/fixtures/mcp_tool_schemas.json": "f2c4912204d5d4c5a2cdc858d5e40419d59e86b300b65e5f999b0c3b1745e9a5"
+  },
+  "hosted_profiles": {
+    "hosted-alpha-agent-v1": {
+      "command_surface_sha256": "eddd997c22885ca913aa57dea2e6a2afaa7cb5f0dd52d87b564c1c3d7bbadc7f",
+      "commands": [
+        "bootstrap",
+        "ask_memory",
+        "read_memory",
+        "browse_memory",
+        "remember",
+        "observe_memory",
+        "capture_source",
+        "compile_source",
+        "preserve_evidence",
+        "review_memory",
+        "review_item_context",
+        "triage_memory",
+        "connect_memory"
+      ],
+      "compatibility_sha256": "fc0098ffa8c0c3cf0f41c94943930701ad6ac2ff1d3ac9e6a1e7615c44f4c93f",
+      "definition_sha256": "be79a05714036554726ef688cc57b41580c06ac9a6d170b969168cfdd9d50ab2"
+    },
+    "hosted-alpha-agent-v2": {
+      "command_surface_sha256": "9397885e979200ea9f72251fcffbe35042ad41addf4df79051f2e066da04923e",
+      "commands": [
+        "bootstrap",
+        "ask_memory",
+        "read_memory",
+        "browse_memory",
+        "remember",
+        "observe_memory",
+        "capture_source",
+        "compile_source",
+        "preserve_evidence",
+        "review_memory",
+        "review_item_context",
+        "triage_memory",
+        "connect_memory",
+        "record_memory"
+      ],
+      "compatibility_sha256": "ebb45eba774d080379984220c2c205fb3b934ed688fff669a8832eac9e353545",
+      "definition_sha256": "e967d2dc056fdc5977953d719db4e785a64838a795be956ff2cf9f9bf1aa9a13"
+    },
+    "hosted-alpha-agent-v3": {
+      "command_surface_sha256": "4bc83f2e5509099c6f5b829d61dadb66560e0ccf941aa3d681b6fb847ddfeaa5",
+      "commands": [
+        "bootstrap",
+        "ask_memory",
+        "read_memory",
+        "browse_memory",
+        "remember",
+        "observe_memory",
+        "capture_source",
+        "compile_source",
+        "preserve_evidence",
+        "review_memory",
+        "review_item_context",
+        "triage_memory",
+        "connect_memory",
+        "record_memory",
+        "replace_memory",
+        "plan_memory",
+        "edit_memory"
+      ],
+      "compatibility_sha256": "e67845c386032144914c642140efacee2b38aca5fde37d8d86621e1b080f6a3f",
+      "definition_sha256": "3a60523f23976f5cb7289f207404b2dbec335cfad4d41385d69418008d0aed0d"
+    },
+    "hosted-alpha-agent-v4": {
+      "command_surface_sha256": "4b4b71280fec7915042483207b1ab0e15e916148ac1b88ef965e03671de80968",
+      "commands": [
+        "coordination_status",
+        "bootstrap",
+        "ask_memory",
+        "read_memory",
+        "browse_memory",
+        "remember",
+        "edit_memory",
+        "observe_memory",
+        "replace_memory",
+        "capture_source",
+        "compile_source",
+        "preserve_evidence",
+        "preserve_artifacts",
+        "review_memory",
+        "review_item_context",
+        "triage_memory",
+        "connect_memory",
+        "adoption_studio",
+        "maintain_memory",
+        "schema_memory",
+        "govern_memory",
+        "manage_memory_file",
+        "record_memory",
+        "plan_memory",
+        "query_dataset"
+      ],
+      "compatibility_sha256": "4a12a115086166c5b37cde02e6bfcc6aa2c095b6d073dc23f5634803b13c0ce9",
+      "definition_sha256": "447f9e01207f32cd42f19f5230a7da721d6d0fa90f622e16e9831f9795d7ac5d"
+    }
+  },
+  "openapi": {
+    "operation_count": 28,
+    "operations": [
+      "POST /api/adopt_vault",
+      "POST /api/adoption_studio",
+      "POST /api/ask_memory",
+      "POST /api/bootstrap",
+      "POST /api/browse_memory",
+      "POST /api/capture_source",
+      "POST /api/compile_source",
+      "POST /api/connect_memory",
+      "POST /api/coordination_status",
+      "POST /api/edit_memory",
+      "POST /api/govern_memory",
+      "POST /api/maintain_memory",
+      "POST /api/manage_memory_file",
+      "POST /api/observe_memory",
+      "POST /api/plan_memory",
+      "POST /api/preserve_artifacts",
+      "POST /api/preserve_evidence",
+      "POST /api/process_media",
+      "POST /api/query_dataset",
+      "POST /api/read_memory",
+      "POST /api/record_memory",
+      "POST /api/remember",
+      "POST /api/replace_memory",
+      "POST /api/review_item_context",
+      "POST /api/review_memory",
+      "POST /api/schema_memory",
+      "POST /api/transfer_artifact",
+      "POST /api/triage_memory"
+    ],
+    "operations_sha256": "630ec67d8cab461a69e1721fef1550a13b79154334d6e077ba4f61f3041b88f3"
+  },
+  "repository_head": "32170d098970a409fd3305fe8f59d302439ebed3",
+  "schema": "exomem.governed-consolidation-prechange-baseline/v1",
+  "tree_digest_algorithm": "sha256(canonical-json([{path,sha256}], paths sorted, UTF-8, sorted keys, compact separators))",
+  "tree_sha256": {
+    "hosted_candidate_v2": {
+      "file_count": 3,
+      "sha256": "a1897e75b77764a5344f4deb4f30c71061b1b48d121928c48d67112473c916f5"
+    },
+    "hosted_candidate_v3": {
+      "file_count": 4,
+      "sha256": "3a9b58dc07612e4bf66e1e708d250d445ac5380b4eed7908703fd30a06af3a6d"
+    },
+    "hosted_candidate_v4": {
+      "file_count": 4,
+      "sha256": "359cd5571e5b57298589c3aec32e0c7b3ee4df0c29fb060a61dd34aee0cdc538"
+    },
+    "hosted_generated_candidate_v2": {
+      "file_count": 29,
+      "sha256": "f706078c9c6ee5353ff87ae73bf6c2bcfee5dce762f9682fa865c18295307753"
+    },
+    "hosted_generated_candidate_v3": {
+      "file_count": 15,
+      "sha256": "76857e8b97236bce91ed697689365a6fac541b1eaeb2a4e3063c071e4332fec9"
+    },
+    "hosted_generated_candidate_v4": {
+      "file_count": 29,
+      "sha256": "0d9b7c6dad60771c14cf1e02776413ac035b50506c3897d272ef95312ae30441"
+    },
+    "hosted_generated_v1": {
+      "file_count": 27,
+      "sha256": "b954db2523775e4327c3e13035037d3e5f5619580516eb4f447ff26b9396c1d3"
+    },
+    "hosted_promotion": {
+      "file_count": 6,
+      "sha256": "3e7b6fcd4a051ced9efead21490bbbf6a012c7ae7dc2e7e5f4707946469d6b89"
+    }
+  }
+}
