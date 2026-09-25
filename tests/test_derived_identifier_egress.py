@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -1001,6 +1002,51 @@ def test_a_restricted_writer_deletes_no_folder(
         vault, principal, "manage_memory_file", operation="delete", path=f"{NOTES}/alpha.md", confirm=True
     )
     assert "__error__" not in deleted, deleted
+
+
+_VOLATILE_TEXT = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,}"
+)
+
+
+@pytest.mark.parametrize("detail", ["legacy", "full", "compact"])
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_move_reports_the_links_it_may_see(
+    tmp_path: Path, audience: str, detail: str
+) -> None:
+    """Every linking page is rewritten; the report covers the visible ones."""
+    base = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page("Alpha", "Alpha conclusions."),
+        f"{NOTES}/linker.md": _page("Linker", "See [[Knowledge Base/Notes/alpha]] and [[alpha]]."),
+    }
+    hidden = f"{WITHHELD_DIR}/hidden-linker.md"
+    withheld = {hidden: _page("Hidden Draft", "Also [[Knowledge Base/Notes/alpha]] and [[alpha]].")}
+    vaults = _twins(tmp_path, base, withheld, audience)
+
+    answers = {
+        variant: _VOLATILE_TEXT.sub(
+            "<v>",
+            _text(
+                _call(
+                    vault,
+                    _principal(audience),
+                    "manage_memory_file",
+                    operation="move",
+                    old_path=f"{NOTES}/alpha.md",
+                    new_path=f"{NOTES}/alpha-moved.md",
+                    response_detail=detail,
+                )
+            ),
+        )
+        for variant, vault in vaults.items()
+    }
+
+    assert '"__error__"' not in answers["A"], answers["A"]
+    assert answers["A"] == answers["B"] == answers["C"]
+    assert "[[Knowledge Base/Notes/alpha-moved]]" in (vaults["A"] / hidden).read_text(
+        encoding="utf-8"
+    )
 
 
 def test_the_owner_still_writes_to_a_page_withheld_from_others(tmp_path: Path) -> None:

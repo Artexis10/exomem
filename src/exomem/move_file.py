@@ -426,6 +426,15 @@ def move_file(
     warnings: list[str] = []
     files_touched: list[str] = []
     wikilinks_updated = 0
+    # Every linking page is rewritten, including pages the mover may not see,
+    # so the vault stays consistent; the counts and paths reported to a mover
+    # other than the owner cover the pages it may see. The activity log keeps
+    # the full figures.
+    from .governance import egress
+
+    visible = egress.restricted_release_filter(vault_root)
+    reported_touched: list[str] = []
+    reported_updated = 0
 
     # Stage inbound-link rewrites. The file itself moves with one filesystem
     # rename so bytes of any type are preserved without a copy/unlink window.
@@ -471,6 +480,9 @@ def move_file(
                 )
                 files_touched.append(rel)
                 wikilinks_updated += n_changed
+                if visible is None or visible(rel):
+                    reported_touched.append(rel)
+                    reported_updated += n_changed
 
     def validation_result(
         *, source_hash: str, destination_hash: str
@@ -493,8 +505,8 @@ def move_file(
             MoveFileResult(
                 old_path=old_rel,
                 new_path=new_rel,
-                wikilinks_updated=wikilinks_updated,
-                files_touched=list(files_touched),
+                wikilinks_updated=reported_updated,
+                files_touched=list(reported_touched),
                 warnings=list(warnings),
             ),
             tuple(before),
@@ -564,6 +576,8 @@ def move_file(
                         )
                     files_touched.append(old_rel)
                     wikilinks_updated += source_changes
+                    reported_touched.append(old_rel)
+                    reported_updated += source_changes
             if content_transform is not None:
                 moved_source = content_transform(moved_source)
             log_rel_no_ext, log_body, log_plan = plan_activity_log()
@@ -879,8 +893,8 @@ def move_file(
     return MoveFileResult(
         old_path=old_rel,
         new_path=new_rel,
-        wikilinks_updated=wikilinks_updated,
-        files_touched=files_touched,
+        wikilinks_updated=reported_updated,
+        files_touched=reported_touched,
         warnings=warnings,
         semantic=semantic,
         index=index_feedback,
