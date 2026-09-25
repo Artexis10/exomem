@@ -3746,11 +3746,23 @@ def annotate_page(
         try:
             # This is a swap detector, not the source of authorization.  The
             # immutable ``raw`` bytes remain the sole representation decided,
-            # hashed, receipted, and returned below.
-            if (vault_root / rel_path).read_bytes() != raw:
+            # hashed, receipted, and returned below. `rel_path` is the sole
+            # decision key throughout -- `resolve_physical_relative` only
+            # changes which on-disk spelling the re-read opens (a macOS-origin
+            # NFD name on a byte-exact filesystem is a different name from
+            # `rel_path`'s NFKC form), never what is decided or on which
+            # string, and still refuses outright rather than guess if two
+            # physical spellings of `rel_path` collide.
+            physical_relative = reserved_paths.resolve_physical_relative(
+                vault_root, rel_path
+            )
+            current = reserved_paths.read_generic_bytes(
+                vault_root, physical_relative, physical=True
+            )
+            if current.data != raw:
                 _record_blocked_outcome(who.audience_id)
                 return None
-        except OSError:
+        except (OSError, reserved_paths.ReservedPathLeafError):
             _record_blocked_outcome(who.audience_id)
             return None
         parsed = find_corpus.parse_page(
