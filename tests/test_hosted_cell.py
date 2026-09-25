@@ -460,6 +460,34 @@ def test_a_legacy_named_owner_binding_cannot_be_promoted_back_into_a_hosted_cell
     assert armed == []
 
 
+def test_every_cleared_setting_clears_its_legacy_alias() -> None:
+    """Every `EXOMEM_*` name hosted mode clears must also clear the `KB_MCP_*`
+    spelling `env_compat.promote_legacy()` would otherwise promote back onto
+    it. This guards the mechanical derivation in `hosted_runtime`: a future
+    addition to `_HOSTED_CLEARED_SETTINGS` cannot silently skip its alias."""
+    from exomem import env_compat
+
+    cleared = set(hosted_runtime._HOSTED_CLEARED_ENV)
+    for name in cleared:
+        if not name.startswith(env_compat.CANONICAL_PREFIX):
+            continue
+        legacy = env_compat.LEGACY_PREFIX + name[len(env_compat.CANONICAL_PREFIX):]
+        assert legacy in cleared, f"{name} is cleared but its legacy alias {legacy} is not"
+
+
+@pytest.mark.parametrize(
+    "legacy_alias",
+    sorted(name for name in hosted_runtime._HOSTED_CLEARED_ENV if name.startswith("KB_MCP_")),
+)
+def test_hosted_mode_clears_every_legacy_alias(tmp_path: Path, legacy_alias: str) -> None:
+    """Set each legacy alias, apply hosted mode's process environment, and
+    confirm the legacy spelling is gone (not merely absent to begin with)."""
+    config = HostedCellConfig.from_env(_env(tmp_path), require_provisioned=False)
+    process_env = {legacy_alias: "legacy-value-sentinel"}
+    config.apply_process_environment(process_env)
+    assert legacy_alias not in process_env
+
+
 def test_hosted_config_rejects_protocol_versions_not_implemented_by_this_release(
     tmp_path: Path,
 ) -> None:
