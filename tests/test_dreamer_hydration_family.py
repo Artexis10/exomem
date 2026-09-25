@@ -97,6 +97,43 @@ def test_one_source_fanned_out_counts_once(tmp_path: Path) -> None:
     assert _candidate(vault) is None
 
 
+def test_unsourced_contributors_count_as_one_origin_between_them(tmp_path: Path) -> None:
+    """The graph carries no session key, so pages that declare no Source cannot
+    be told apart by conversation: together they are one origin, never two."""
+    vault = fx.build(tmp_path)
+    for rel, title, updated, links in (
+        (fx.CAVITATION, "Pump cavitation", "2026-05-01", "Cavitation on the"),
+        (fx.SEAL_WEAR, "Pump seal wear", "2026-05-02", "Seal wear on the"),
+    ):
+        fx.edit(
+            vault,
+            rel,
+            fx.insight(
+                title,
+                sources=[],
+                updated=updated,
+                links=f"{links} [[Notes/Entities/orbit-pump]] is recorded.",
+            ),
+        )
+    _quiet(vault)
+    assert _candidate(vault) is None
+
+    # One sourced contributor beside them makes two independent origins.
+    fx.edit(
+        vault,
+        fx.INLET,
+        fx.insight(
+            "Pump inlet pressure",
+            sources=["field-report-one"],
+            updated="2026-05-03",
+            links="Inlet pressure on the [[Notes/Entities/orbit-pump]] falls first.",
+        ),
+    )
+    _quiet(vault)
+    row = _candidate(vault)
+    assert row is not None and row["measures"]["origins"] == 2, row
+
+
 def test_entity_linking_back_resolves(tmp_path: Path) -> None:
     vault = fx.build(tmp_path)
     _quiet(vault)

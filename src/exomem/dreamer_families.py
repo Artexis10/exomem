@@ -428,6 +428,8 @@ LINK = Family(
 HYDRATION_FAMILY = "upkeep_hydration"
 HYDRATION_KIND = "curation.hydrate"
 
+#: The one origin every contributor that declares no Source shares.
+_UNSOURCED_ORIGIN = "unsourced"
 #: Independent origins a hydration proposal needs.
 HYDRATION_MIN_ORIGINS = 2
 
@@ -584,7 +586,11 @@ def _hydration_detect(ctx: Context, entity: str) -> dict[str, Any] | None:
         }
     if not contributors:
         return None
-    origins = provenance.origin_keys(sources)
+    # Pages that declare no Source count as ONE origin between them. The graph
+    # carries no session key to tell their conversations apart, so the
+    # conservative reading is a single conversation-only fan-out.
+    unsourced = {path: _UNSOURCED_ORIGIN for path, declared in sources.items() if not declared}
+    origins = provenance.origin_keys(sources, fallback=unsourced)
     if len(set(origins.values())) < HYDRATION_MIN_ORIGINS:
         return None
     pairs = sorted(
