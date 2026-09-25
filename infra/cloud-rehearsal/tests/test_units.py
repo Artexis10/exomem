@@ -137,3 +137,17 @@ def test_pki_verifies_under_strict_x509(tmp_path: Path) -> None:
             assert wrapped.version()
     thread.join(timeout=5)
     listener.close()
+
+
+def test_the_lock_dir_overlay_matches_the_runtime_exactly_once() -> None:
+    """The overlay's anchor must match the shipped check, or the build stops."""
+
+    from cloud_rehearsal import images
+
+    compile(build.LOCK_DIR_OVERLAY, "overlay.py", "exec")
+    compile(build.LOCK_DIR_PROBE, "probe.py", "exec")
+    source = (images.REPO_ROOT / "src/exomem/vault.py").read_text(encoding="utf-8")
+    if "S_ISGID" in source:
+        pytest.skip("the runtime fix is on this branch; the probe will skip the overlay")
+    assert source.count(build.LOCK_DIR_ANCHOR) == 1
+    compile(source.replace(build.LOCK_DIR_ANCHOR, build.LOCK_DIR_REPLACEMENT), "vault.py", "exec")

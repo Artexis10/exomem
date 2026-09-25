@@ -91,7 +91,8 @@ async def _run(args: argparse.Namespace) -> int:
             source = substrate.fetch_source(args.cache, args.substrate_commit)
             substrate.build_source(source)
         with _stage(report, "images"):
-            v1, v2, broken = build.build_cell_images(run_id, workdir, prebuilt=args.cell_image)
+            v1, v2, broken, cell_overlays = build.build_cell_images(run_id, workdir, prebuilt=args.cell_image)
+            report.overlays.extend(cell_overlays)
             gateway_tag = build.build_gateway_image(run_id, workdir, source, mode=args.gateway_build)
             cellctl_tag = build.build_cellctl_image(run_id, workdir)
         with _stage(report, "infrastructure"):
