@@ -478,6 +478,85 @@ def test_before_bytes_no_newer_batch_wrote_stay_owed(live_catalogue: Path) -> No
     assert doctor._check_fast_ack_custody(vault).status == "fail"
 
 
+def _proven_batch(vault: Path, batch_id: str, writes) -> object:
+    """One batch committed, proven and published: its rows are live custody."""
+    receipt = derived_receipts.prepare_batch(
+        vault,
+        batch_id=batch_id,
+        mutation_attempt_digest=hashlib.sha256(batch_id.encode()).hexdigest(),
+        canonical_generation=f"generation-{batch_id}",
+        checkpoint_id=f"checkpoint-{batch_id}",
+        paths=tuple(
+            derived_receipts.DerivedBatchPath(
+                rel_path=rel,
+                before_hash=None if old is None else hashlib.sha256(old).hexdigest(),
+                after_hash=hashlib.sha256(new).hexdigest(),
+            )
+            for rel, old, new in writes
+        ),
+        required_components=frozenset({DerivedComponent.LEXSTORE}),
+    )
+    for rel, _old, new in writes:
+        target = vault / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(new)
+    assert derived_receipts.prove_committed(
+        vault, receipt, current_generation=receipt.canonical_generation
+    ).outcome == "ready"
+    assert derived_receipts.publish_pending_visibility(
+        vault, receipt, publisher=pending_recall.publish
+    )
+    return receipt
+
+
+def test_an_older_batch_never_covers_a_newer_batch_s_moved_path(
+    live_catalogue: Path,
+) -> None:
+    """Coverage runs forward only: custody an older batch held is not newer custody.
+
+    Both batches carry the shared index; a hand edit then moves it past the
+    newer batch's after-state, and neither lane holds the edit. Only a later
+    batch could own those bytes, so the newer batch stays owed.
+    """
+    vault = live_catalogue
+    shared_rel = "Knowledge Base/index.md"
+    shared = vault / shared_rel
+    x = shared.read_bytes()
+    y = x + b"\n- older batch line\n"
+    z = y + b"\n- newer batch line\n"
+    _proven_batch(vault, "forward-older", [(shared_rel, x, y)])
+    newer = _proven_batch(vault, "forward-newer", [(shared_rel, y, z)])
+    shared.write_bytes(z + b"\n- edited by hand, never indexed\n")
+
+    assert derived_receipts.prove_committed(
+        vault, newer, current_generation=newer.canonical_generation
+    ).outcome == "reconcile_required"
+
+
+def test_an_older_batch_s_after_bytes_never_hand_on_a_newer_batch_s_revert(
+    live_catalogue: Path,
+) -> None:
+    """Returned bytes an older batch wrote are not a newer batch's handover.
+
+    The newer batch's path is reverted by hand to its before-bytes, which are
+    exactly the older batch's recorded after-state. Only a later batch's
+    after-state proves such bytes are not the newer batch's torn write.
+    """
+    vault = live_catalogue
+    shared_rel = "Knowledge Base/index.md"
+    shared = vault / shared_rel
+    x = shared.read_bytes()
+    y = x + b"\n- older batch line\n"
+    z = y + b"\n- newer batch line\n"
+    _proven_batch(vault, "revert-older", [(shared_rel, x, y)])
+    newer = _proven_batch(vault, "revert-newer", [(shared_rel, y, z)])
+    shared.write_bytes(y)
+
+    assert derived_receipts.prove_committed(
+        vault, newer, current_generation=newer.canonical_generation
+    ).outcome == "reconcile_required"
+
+
 def test_an_out_of_band_move_heals_once_the_recall_lanes_hold_it(
     live_catalogue: Path, tmp_path: Path
 ) -> None:
