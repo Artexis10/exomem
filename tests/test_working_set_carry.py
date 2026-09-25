@@ -2420,3 +2420,28 @@ def test_a_turn_in_an_unspaced_script_never_reaches_the_ranking_query(
     assert state == "available"
     assert hits == ()
     assert calls == [], "the ranking query ran for a turn in an unspaced script"
+
+
+def test_the_carry_looks_up_rarity_only_for_stems_that_can_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unspaced run's bigrams never pair, so the carry never pays a rarity
+    lookup for them: on a 1,600-page Japanese vault a long Japanese turn spent
+    0.65-0.83 s looking up stems that could not carry anything. A turn with
+    fewer than two spaced-word stems asks nothing; a mixed turn asks about
+    its words only."""
+    asked: list[tuple[str, ...]] = []
+
+    def spy(_root, stems, **_kwargs):
+        asked.append(tuple(stems))
+        return (), 0, "available"
+
+    monkeypatch.setattr(working_set_runtime, "rare_turn_terms", spy)
+
+    assert working_set_runtime.carry_candidates(tmp_path, "明日は、散歩です。" * 40) == ((), "available")
+    assert working_set_runtime.carry_candidates(tmp_path, "girvan 東京タワーの高さ") == ((), "available")
+    assert asked == []
+
+    working_set_runtime.carry_candidates(tmp_path, "the girvan 東京タワー slot window")
+    assert asked == [("girvan", "slot", "window")]
+

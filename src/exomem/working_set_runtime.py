@@ -688,6 +688,22 @@ def content_stems(turn: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(bm25_module.tokenize(content_words(turn), query=True)))
 
 
+def pairable_stems(turn: str) -> tuple[str, ...]:
+    """`content_stems` without the stems of unspaced runs, which never pair
+    (see `adjacent_rare_pairs`), so the carry never pays a rarity lookup for
+    them."""
+    from . import bm25 as bm25_module
+
+    return tuple(
+        dict.fromkeys(
+            stem
+            for unit in bm25_module.token_units(content_words(turn), query=True)
+            if not unit.run
+            for stem in unit.stems
+        )
+    )
+
+
 #: What ends a proximity window. Sentence-ending punctuation and a line
 #: break; a comma deliberately does not, being punctuation inside a phrase
 #: rather than between two of them. The split reads the raw turn, so each
@@ -874,7 +890,10 @@ def carry_candidates(
     from . import lexstore
 
     try:
-        stems = content_stems(turn)
+        # Only stems that can pair are worth a rarity lookup: an unspaced
+        # run's bigrams never pair, and on a 1,600-page Japanese vault a long
+        # Japanese turn spent 0.65-0.83 s looking them up.
+        stems = pairable_stems(turn)
         if len(stems) < working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS:
             return (), "available"
         rare, corpus_pages, state = rare_turn_terms(
