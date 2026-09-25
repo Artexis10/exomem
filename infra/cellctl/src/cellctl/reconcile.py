@@ -826,19 +826,34 @@ async def _reconcile_row(
 ) -> None:
     already_served = row.observed_state in ("running", "read_only")
     backup_due = already_served and start_backup
-    # D4: ready is an observation, never a memory. A converged row whose pod
-    # on the update revision is no longer Ready goes through decide(), which
-    # writes ready and observed_state from this pass's observation; one whose
-    # readiness is unchanged writes observed_at alone.
-    readiness_changed = already_served and row.ready != observation.pod_ready
-    if (
-        not row.is_dirty(refusal_parked=refusal_parked)
-        and not readiness_changed
-        and _active_hold(row, observation) is None
+    nothing_to_start = (
+        _active_hold(row, observation) is None
         and not backup_due
         and not start_upgrade
         and not is_render_digest_candidate
-    ):
+    )
+    # D4: ready is an observation, never a memory. A served, converged row
+    # whose only change is its pod's readiness is observed, not re-applied:
+    # ready follows the pod on the update revision both ways, observed_state
+    # stays served (so it is still backed up), and nothing is written but
+    # ready when it changes and observed_at.
+    readiness_only = (
+        nothing_to_start
+        and already_served
+        and not refusal_parked
+        and not dataclass_replace(row, ready=True).is_dirty()
+        and observation.statefulset_exists
+        and observation.statefulset_image == row.observed_image
+    )
+    if readiness_only:
+        updates: dict[str, object] = {"observed_at": now}
+        if row.ready != observation.pod_ready:
+            updates = {"ready": observation.pod_ready, **updates}
+        await db.write_observed(connection, row.cell_id, updates)
+        return
+    # A parked refused row is not dirty, but it still goes through decide(),
+    # which applies nothing while it is parked and observes it this pass.
+    if not row.is_dirty(refusal_parked=refusal_parked) and not refusal_parked and nothing_to_start:
         # D4: observed_at is written on every observation, including one
         # that finds nothing to do.
         await db.write_observed(connection, row.cell_id, {"observed_at": now})
@@ -1050,6 +1065,12 @@ async def _reconcile_row(
         row_updates.pop("observed_generation", None)
     elif applied_cleanly and row.last_error_code == MANIFEST_IMMUTABLE and "last_error_code" not in row_updates:
         row_updates["last_error_code"] = None
+    # Bounded writes: a column whose value is unchanged is not written again.
+    row_updates = {
+        column: value
+        for column, value in row_updates.items()
+        if column == "observed_at" or getattr(row, column) != value
+    }
     await db.write_observed(connection, row.cell_id, row_updates)
     if decision.rollout_updates and not pause_first:
         await db.write_rollout(connection, decision.rollout_updates)

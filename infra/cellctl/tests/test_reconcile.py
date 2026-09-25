@@ -746,6 +746,8 @@ def _observed_from_applied(cluster: FakeClusterGateway, cell_id: str, **override
 
     from cellctl.k8s_client import _parse_timestamp
     from cellctl.manifests import (
+        BACKUP_RETRY_AFTER_ANNOTATION,
+        BACKUP_RETRY_MINUTES_ANNOTATION,
         HOLD_ANNOTATION,
         HOLD_STARTED_ANNOTATION,
         PRE_UPGRADE_SNAPSHOT_ANNOTATION,
@@ -777,6 +779,11 @@ def _observed_from_applied(cluster: FakeClusterGateway, cell_id: str, **override
         statefulset_pre_upgrade_snapshot=annotations.get(PRE_UPGRADE_SNAPSHOT_ANNOTATION),
         statefulset_target_applied_at=_parse_timestamp(annotations.get(TARGET_APPLIED_ANNOTATION)),
         statefulset_restored_snapshot=annotations.get(RESTORED_SNAPSHOT_ANNOTATION),
+        # As ClusterClient.observe() reads them: the D6/D8 backup backoff.
+        statefulset_backup_retry_after=_parse_timestamp(annotations.get(BACKUP_RETRY_AFTER_ANNOTATION)),
+        statefulset_backup_retry_minutes=int(annotations[BACKUP_RETRY_MINUTES_ANNOTATION])
+        if BACKUP_RETRY_MINUTES_ANNOTATION in annotations
+        else None,
         statefulset_render_digest=annotations.get(RENDER_DIGEST_ANNOTATION),
         statefulset_render_digest_applied_at=_parse_timestamp(annotations.get(RENDER_DIGEST_APPLIED_AT_ANNOTATION)),
         statefulset_row_generation=int(annotations[ROW_GENERATION_ANNOTATION])
@@ -2332,10 +2339,22 @@ async def test_the_pass_is_skipped_without_the_isolation_policy_too(cell_db: Cel
 async def test_a_converged_cell_whose_pod_turns_not_ready_is_observed_not_ready_and_back(
     cell_db: CellDatabase, monkeypatch
 ) -> None:
+    # Ready is an observation: it follows the pod both ways, on the next
+    # pass. Readiness alone never re-applies the cell's manifests, keeps the
+    # served observed_state (so nightly backups still select it) and costs
+    # one row write per pass at most.
     cell_id = "aaaaaaaaaaaaaaaa"
     await _seed_cell(cell_db, cell_id, "tenant-a")
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
-    cluster = FakeClusterGateway()
+
+    class _CountingGateway(FakeClusterGateway):
+        applies = 0
+
+        def apply_all(self, manifests: list[dict]) -> None:
+            self.applies += 1
+            super().apply_all(manifests)
+
+    cluster = _CountingGateway()
     now = datetime(2026, 1, 1, 12, tzinfo=UTC)
     writes: list[dict[str, object]] = []
     real_write = db.write_observed
@@ -2350,24 +2369,65 @@ async def test_a_converged_cell_whose_pod_turns_not_ready_is_observed_not_ready_
         assert (row.ready, row.observed_state, row.is_dirty()) == (True, "running", False)
 
         monkeypatch.setattr(db, "write_observed", recording_write)
+        applies_before = cluster.applies
         # Unchanged: observed_at is the only write.
         await _pass(connection, cluster, now + timedelta(seconds=5))
         assert writes == [{"observed_at": now + timedelta(seconds=5)}]
 
         cluster.observations[cell_id] = dataclasses.replace(cluster.observations[cell_id], pod_ready=False, ready_pod_image=None)
-        await _pass(connection, cluster, now + timedelta(seconds=10))
-        row = (await db.select_all_rows(connection))[0]
-        assert row.ready is False
+        writes.clear()
+        for step in range(3):
+            at = now + timedelta(seconds=10 + 5 * step)
+            await _pass(connection, cluster, at)
+            row = (await db.select_all_rows(connection))[0]
+            assert (row.ready, row.observed_state) == (False, "running"), step
+        assert writes == [
+            {"ready": False, "observed_at": now + timedelta(seconds=10)},
+            {"observed_at": now + timedelta(seconds=15)},
+            {"observed_at": now + timedelta(seconds=20)},
+        ]
+        assert cluster.applies == applies_before
+        # Still backed up while NotReady: the volume is intact.
+        window = datetime(2026, 1, 2, 3, tzinfo=UTC)
+        config = reconcile.DEFAULT_RECONCILE_CONFIG
+        assert cell_id in reconcile._select_backup_candidates([row], {cell_id: cluster.observations[cell_id]}, window, config)
 
         cluster.observations[cell_id] = dataclasses.replace(cluster.observations[cell_id], pod_ready=True, ready_pod_image=IMAGE_A)
-        for step in range(2):
-            await _pass(connection, cluster, now + timedelta(seconds=15 + 5 * step))
+        writes.clear()
+        await _pass(connection, cluster, now + timedelta(seconds=25))
         row = (await db.select_all_rows(connection))[0]
         assert (row.ready, row.observed_state) == (True, "running")
+        assert writes == [{"ready": True, "observed_at": now + timedelta(seconds=25)}]
+        assert cluster.applies == applies_before
+    finally:
+        await connection.close()
 
-        writes.clear()
-        await _pass(connection, cluster, now + timedelta(seconds=30))
-        assert writes == [{"observed_at": now + timedelta(seconds=30)}]
+
+async def test_a_parked_refused_row_follows_its_pods_readiness_both_ways(cell_db: CellDatabase) -> None:
+    # A parked MANIFEST_IMMUTABLE row is not dirty, but its ready is still
+    # an observation: it recovers on the next pass, not after the backoff.
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = _ObjectRefusingGateway()
+    memory = reconcile.LoopMemory()
+    now = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    try:
+        await _converge_all(connection, cluster, [cell_id], now, memory)
+        await _set_storage(cell_db, cell_id, 5, desired_state="read_only")
+        cluster.refuse = _refuse_kind(cell_id, "PersistentVolumeClaim")
+        await _pass(connection, cluster, now + timedelta(seconds=5), memory=memory)
+        cluster.observations[cell_id] = _observed_from_applied(cluster, cell_id)
+        await _pass(connection, cluster, now + timedelta(seconds=10), memory=memory)
+        row = (await db.select_all_rows(connection))[0]
+        assert (row.last_error_code, row.ready) == ("MANIFEST_IMMUTABLE", True)
+
+        cluster.observations[cell_id] = dataclasses.replace(cluster.observations[cell_id], pod_ready=False, ready_pod_image=None)
+        await _pass(connection, cluster, now + timedelta(seconds=15), memory=memory)
+        assert (await db.select_all_rows(connection))[0].ready is False
+        cluster.observations[cell_id] = dataclasses.replace(cluster.observations[cell_id], pod_ready=True, ready_pod_image=IMAGE_A)
+        await _pass(connection, cluster, now + timedelta(seconds=20), memory=memory)
+        assert (await db.select_all_rows(connection))[0].ready is True
     finally:
         await connection.close()
 
