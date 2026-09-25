@@ -54,7 +54,9 @@ def _reset_caches() -> None:
     egress.clear_decision_memo()
 
 
-def _withhold_insights(root: Path, *, ceiling: int = egress.LEVEL_NONE) -> None:
+def _withhold_insights(
+    root: Path, *, ceiling: int = egress.LEVEL_NONE, audience: str = CF_AUDIENCE
+) -> None:
     governance = root / "Knowledge Base" / "_Governance"
     (governance / "scopes").mkdir(parents=True, exist_ok=True)
     (governance / "rules").mkdir(parents=True, exist_ok=True)
@@ -65,7 +67,7 @@ def _withhold_insights(root: Path, *, ceiling: int = egress.LEVEL_NONE) -> None:
     )
     (governance / "rules" / "insights.yaml").write_text(
         f'governance_version: 1\nid: {RULE_ID}\nscope_ids: ["{SCOPE_ID}"]\n'
-        f'audience: "{CF_AUDIENCE}"\nceiling: {ceiling}\n',
+        f'audience: "{audience}"\nceiling: {ceiling}\n',
         encoding="utf-8",
     )
     _reset_caches()
@@ -371,3 +373,29 @@ def test_owner_seed_view_is_unchanged_by_a_policy_with_a_stale_index(
 
     assert b"parent_ref_validation_work_exhausted" in ungoverned[1]
     assert governed == ungoverned
+
+
+def test_owner_targeted_rule_still_withholds_the_owners_unit_seed(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rule that names the `owner` audience is a supported configuration
+    (see `test_declared_purpose_cannot_widen_even_for_the_owner` in
+    test_governance_egress.py). The owner shortcut in `unit_parent_withheld`
+    may skip only the graph's row-budget signal, never the per-candidate
+    decision, so an owner-targeted rule must still withhold the owner's own
+    seed exactly as it withholds the owner's page read."""
+    _source, compact, _rich = _unit_context_fixture(vault)
+    client = _rest_client(monkeypatch)
+    body = {"unit_ref": compact.unit_ref}
+
+    nopolicy = _context(client, body, OWNER_HEADERS)
+    _withhold_insights(vault, audience="owner")
+    page = client.post("/api/read_memory", json={"path": _SOURCE}, headers=OWNER_HEADERS)
+    withheld = _context(client, body, OWNER_HEADERS)
+    _remove_page(vault)
+    absent = _context(client, body, OWNER_HEADERS)
+
+    assert page.status_code == 404
+    assert b'"unit_status": "found"' in nopolicy[1]
+    assert b'"unit_status": "missing"' in withheld[1]
+    assert withheld == absent

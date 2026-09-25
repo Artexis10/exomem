@@ -5680,8 +5680,15 @@ def _release_permits_link_target(vault_root: Path, target: object) -> bool:
     clean = target.strip().replace("\\", "/").strip("/")
     if "/" in clean:
         for candidate in {clean, f"{clean}.md"} if not clean.lower().endswith(".md") else {clean}:
-            if (Path(vault_root) / candidate).is_file():
-                return _permits(candidate)
+            try:
+                candidate_abs, confined = resolve_under_vault(vault_root, candidate)
+            except VaultPathError:
+                # Undecidable the same way a candidate that doesn't resolve
+                # under the vault at all is: not the release plane's
+                # business, and never stat'd or read to get there.
+                continue
+            if candidate_abs.is_file():
+                return _permits(confined)
         return True
     # Bare basename: resolve it the way the matcher does — by filename across
     # the vault. Ambiguity fails closed; a name that matches nothing is simply

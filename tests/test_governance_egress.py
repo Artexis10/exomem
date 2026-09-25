@@ -27,6 +27,7 @@ from exomem.governance import (
     authorization_session_lifecycle,
     bridges,
     egress,
+    policy,
     receipts,
 )
 from exomem.governance.decisions import Decision
@@ -2600,6 +2601,45 @@ def test_hit_receipt_describes_only_the_final_limited_representation(vault: Path
     assert len(outcomes) == 1
 
 
+def test_outcome_for_decision_never_reads_a_path_outside_the_vault(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """`_outcome_for_decision` hashes a candidate's bytes for the receipt when
+    no `content_hash` is already known. That candidate is expected to already
+    be a decided, vault-relative path, but this is the last thing that
+    touches the filesystem before the receipt is written, so it must not read
+    (and record the size of) a path that escapes the vault, even if one
+    reached this far."""
+    outside_dir = tmp_path_factory.mktemp("outside")
+    outside = outside_dir / "server-secret.txt"
+    outside.write_bytes(b"OUTSIDE-SECRET-" * 10)
+    traversal = "../" * 12 + str(outside).lstrip("/")
+
+    opened: list[str] = []
+    real_read_bytes = Path.read_bytes
+
+    def _spy_read_bytes(self: Path) -> bytes:
+        opened.append(str(self))
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _spy_read_bytes)
+
+    with egress.disclosure_boundary(vault, "probe") as collector:
+        egress._outcome_for_decision(
+            vault,
+            traversal,
+            decision=None,
+            policy=policy.load(vault),
+            audience="external",
+            outcome="released",
+        )
+    outcome = collector.outcomes[-1].value
+
+    assert opened == []
+    assert "content_hash" not in outcome
+    assert "size" not in outcome
+
+
 def test_large_reduction_receipt_uses_truthful_bounded_aggregates(vault: Path) -> None:
     with egress.disclosure_boundary(vault, "overview") as collector:
         for _ in range(140):
@@ -3598,6 +3638,60 @@ def test_inbound_links_ungoverned_is_untouched(vault: Path) -> None:
     _reset_caches()
     result = commands.op_list_inbound_links(vault, target=RESTRICTED_PATH)
     assert result["count"] >= 1
+
+
+def test_release_permits_link_target_escaping_the_vault_is_never_opened(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """`_release_permits_link_target` joined the raw `target` string with
+    `vault_root` and stat'd (then, for a `.md`-shaped candidate, read) the
+    result with no containment check, so a `../` traversal or an absolute
+    path reached the filesystem outside the vault before any decision was
+    made.
+
+    `op_list_inbound_links` itself already refuses a `../` or absolute
+    `target` earlier, through `_resolve_memory_identifier`'s
+    `reserved_paths.classify_logical` check, before this function ever runs
+    — so this exercises `_release_permits_link_target` directly, the way a
+    future or internal caller could still reach it, exactly as the receipt
+    hash in `_outcome_for_decision` is confined even though its own caller
+    is expected to have already decided the candidate.
+
+    Every escaping form must answer exactly as the function's own contract
+    for a target that resolves to nothing under the vault (`True`, i.e. not
+    the release plane's business), and none may touch a file outside the
+    vault to get there."""
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    _reset_caches()
+    outside_dir = tmp_path_factory.mktemp("outside")
+    outside = outside_dir / "server-secret.md"
+    outside.write_text("---\ntype: insight\n---\nOUTSIDE-SECRET\n", encoding="utf-8")
+
+    vault_resolved = str(vault.resolve())
+    opened_outside: list[str] = []
+    real_read_bytes = Path.read_bytes
+
+    def _spy_read_bytes(self: Path) -> bytes:
+        try:
+            inside = str(self.resolve()).startswith(vault_resolved)
+        except OSError:
+            inside = False
+        if not inside:
+            opened_outside.append(str(self))
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _spy_read_bytes)
+
+    traversal_md = "../" * 12 + str(outside).lstrip("/")
+    traversal_bare = traversal_md[: -len(".md")]
+    absolute = "/" + str(outside).lstrip("/")
+    forms = [traversal_md, traversal_bare, absolute]
+
+    for target in forms:
+        assert commands._release_permits_link_target(vault, target) is True, target
+
+    assert opened_outside == []
 
 
 def test_adopt_scan_inherits_the_walk_gate(vault: Path) -> None:
