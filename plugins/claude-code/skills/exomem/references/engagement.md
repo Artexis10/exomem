@@ -164,6 +164,17 @@ qualifies. A write response may carry a
 prompts a pass if one has not already been completed for that episode, never a
 demand that something be written.
 
+**Record the conversation.** At a decision or stopping point, record one bounded
+recap with `episode_memory(action="record")`: a one-line subject and summary,
+what was worked on, decided and left open, and at most three verbatim user
+statements worth keeping. It is raw material about the conversation, not a
+compiled conclusion, and it is what the next session on any client sees first in
+`recent_context`. Reuse the `episode` key a hook named or an earlier record
+returned; an identical retry writes nothing. A Stop hook's episode check or an
+`episode_due` block in an activation packet asks for one; skip it when nothing
+durable happened. At `off`, record only when the user asks; at `light`, also
+when a hook's episode check asks.
+
 ## Generated artifact adoption
 
 Generated drafts stay ephemeral. Generation, preview, filename, MIME type,

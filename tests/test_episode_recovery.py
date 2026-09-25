@@ -485,3 +485,123 @@ def test_recovery_rejects_non_positive_or_non_integer_revision(vault: Path, revi
         created = _owner_store(vault).create("revision", reference=reference)
         with pytest.raises(ValueError, match="EPISODE_INPUT_INVALID"):
             _owner_store(vault).recover_input(created["episode_id"], input_revision=revision)
+
+
+# --- receipt-bound binding: the writer's receipt names the path -------------
+
+
+def test_bind_committed_input_creates_then_appends_without_a_corpus_walk(
+    vault: Path, walk_sentinel
+) -> None:
+    """The Source writer just proved the path; the ref is never resolved by scan.
+
+    `resolve_visible_identifier` walks the whole corpus by design, so a bind
+    that went through it would pay one vault walk for a page it just wrote.
+    """
+    first = _write_page(vault, "First recap.\n")
+    kb = vault / "Knowledge Base"
+    sentinel = walk_sentinel(kb / "Notes", kb / "Sources", kb, current_thread_only=True)
+    sentinel.reset()
+    with request_scope(_owner("client-a")):
+        created = _owner_store(vault).bind_committed_input(
+            "ep-" + "b2" * 16, path=_REL, reference=first
+        )
+    walked = [path for path in sentinel.enumerated if "_Governance" not in path]
+    assert walked == [], sentinel.report()
+    assert created["input_revision"] == 1
+    assert created["ledger"] == "bound"
+    assert created["recovery"] == "available"
+
+    _write_page(vault, "Second recap.\n")
+    with request_scope(_owner("client-a")):
+        appended = _owner_store(vault).bind_committed_input(
+            "ep-" + "b2" * 16, path=_REL, reference=first
+        )
+        recovered = _owner_store(vault).recover_input(appended["episode_id"])
+    assert appended["episode_id"] == created["episode_id"]
+    assert appended["input_revision"] == 2
+    assert recovered["body"] == "Second recap.\n"
+
+
+def test_bind_committed_input_is_idempotent_for_an_unchanged_page(vault: Path) -> None:
+    reference = _write_page(vault, "Same recap.\n")
+    with request_scope(_owner("client-a")):
+        first = _owner_store(vault).bind_committed_input(
+            "ep-" + "c3" * 16, path=_REL, reference=reference
+        )
+        again = _owner_store(vault).bind_committed_input(
+            "ep-" + "c3" * 16, path=_REL, reference=reference
+        )
+
+    assert again["input_revision"] == first["input_revision"] == 1
+    assert again["journal_digest"] == first["journal_digest"]
+
+
+def test_bind_committed_input_refuses_a_wrong_ref_at_the_path(vault: Path) -> None:
+    _write_page(vault, "Recap.\n")
+    other = memory_refs.memory_ref("87654321-4321-8765-4321-876543218765")
+    with request_scope(_owner("client-a")):
+        with pytest.raises(ValueError, match="EPISODE_INPUT_INVALID"):
+            _owner_store(vault).bind_committed_input(
+                "ep-" + "d4" * 16, path=_REL, reference=other
+            )
+        with pytest.raises(ValueError, match="EPISODE_NOT_FOUND"):
+            _owner_store(vault).inspect(
+                hashlib.sha256(
+                    json.dumps(
+                        ["exomem-episode-v1", "ep-" + "d4" * 16],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()
+            )
+
+
+def test_bind_committed_input_binds_digest_only_for_a_withheld_page(vault: Path) -> None:
+    """A committed write is never answered with an error for being invisible."""
+    reference = _write_page(vault, "Recap the recorder may not read back.\n")
+    _write_source_rule(vault, ceiling=0)
+    with request_scope(_owner("client-a")):
+        bound = _owner_store(vault).bind_committed_input(
+            "ep-" + "e5" * 16, path=_REL, reference=reference
+        )
+        recovered = _owner_store(vault).recover_input(bound["episode_id"])
+
+    assert bound["ledger"] == "digest_only"
+    assert bound["recovery"] == "unavailable"
+    assert recovered == {"status": "unavailable", "input_revision": 1}
+
+
+def test_bind_committed_input_fails_on_an_unresolved_principal_before_reading(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reference = _write_page(vault, "Recap.\n")
+    from exomem import episode_recovery
+
+    def _no_read(*_args, **_kwargs):
+        raise AssertionError("the page was read before the owner resolved")
+
+    monkeypatch.setattr(episode_recovery, "get_page", _no_read)
+    with pytest.raises(ValueError, match="EPISODE_OWNER_UNRESOLVED"):
+        _owner_store(vault).bind_committed_input(
+            "ep-" + "f6" * 16, path=_REL, reference=reference
+        )
+
+
+def test_bind_committed_input_keeps_two_audiences_isolated(vault: Path) -> None:
+    reference = _write_page(vault, "Shared canonical recap.\n")
+    key = "ep-" + "a7" * 16
+    with request_scope(_owner("client-a")):
+        first = _owner_store(vault).bind_committed_input(key, path=_REL, reference=reference)
+    with request_scope(_owner("client-b")):
+        second = _owner_store(vault).bind_committed_input(key, path=_REL, reference=reference)
+        _write_page(vault, "Revised by audience B.\n")
+        revised = _owner_store(vault).bind_committed_input(key, path=_REL, reference=reference)
+    with request_scope(_owner("client-a")):
+        still = _owner_store(vault).inspect(first["episode_id"])
+
+    assert second["episode_id"] == first["episode_id"]
+    assert second["journal_digest"] != first["journal_digest"]
+    assert revised["input_revision"] == 2
+    assert still["input_revision"] == 1

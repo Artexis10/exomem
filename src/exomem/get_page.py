@@ -131,6 +131,34 @@ def _read_prepared_snapshot(target: Path) -> tuple[bytes, os.stat_result] | None
     return raw, bound
 
 
+#: The fixed reason for bytes that are not UTF-8. The codec's own message
+#: names the offending byte and its offset, which is content.
+NOT_UTF8_REASON = "file is not UTF-8 text"
+
+
+def unreadable_or_absent(
+    vault_root: Path, relatives: tuple[str, ...], missing_path: str, reason: str
+) -> GetError:
+    """UNREADABLE where the caller may see the item, the absent refusal elsewhere.
+
+    A file is known to be unreadable only once its bytes are in hand, and the
+    full release decision needs the frontmatter those bytes failed to yield.
+    Deciding by path first means a withheld file answers exactly like a
+    missing one, whatever its bytes are; a scope that needs the frontmatter
+    to classify the path withholds it.
+    """
+    from .governance import egress
+
+    for rel in dict.fromkeys(relatives):
+        if egress.release_level_for_path_only(vault_root, rel) <= egress.LEVEL_NONE:
+            # Leave the withheld receipt a decodable read of this page leaves.
+            # The first decision records nothing, because above the floor the
+            # outcome is an unreadable report, not a release.
+            egress.release_level_for_path_only(vault_root, rel, receipt_decision="withheld")
+            return GetError(code="NOT_FOUND", reason=f"file does not exist: {missing_path}")
+    return GetError(code="UNREADABLE", reason=reason)
+
+
 def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
     """Normalize, resolve, and bind one direct read to an immutable snapshot."""
 
@@ -189,7 +217,12 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
             vault_root, resolution.resolved_relative
         )
         if snapshot.identity != expected_identity:
-            raise GetError(code="UNREADABLE", reason="file changed while being read")
+            raise unreadable_or_absent(
+                vault_root,
+                (resolution.relative, resolution.resolved_relative),
+                missing_path,
+                "file changed while being read",
+            )
     except reserved_paths.ReservedPathLeafError as error:
         if error.code in {
             "CAPABILITY_UNAVAILABLE",
@@ -202,7 +235,12 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
                 code="NOT_FOUND",
                 reason=f"file does not exist: {missing_path}",
             ) from None
-        raise GetError(code="UNREADABLE", reason="file could not be read safely") from None
+        raise unreadable_or_absent(
+            vault_root,
+            (resolution.relative, resolution.resolved_relative),
+            missing_path,
+            "file could not be read safely",
+        ) from None
     return PreparedPageRead(
         target=resolution.resolved,
         path=resolution.relative,
@@ -246,10 +284,13 @@ def get_page(
     """
     prepared = _prepared or prepare_page_read(vault_root, path=path)
 
+    relatives = (prepared.path, prepared.resolved_relative)
     try:
         content = prepared.raw.decode("utf-8")
-    except UnicodeDecodeError as e:
-        raise GetError(code="UNREADABLE", reason=str(e)) from e
+    except UnicodeDecodeError:
+        raise unreadable_or_absent(
+            vault_root, relatives, prepared.missing_path, NOT_UTF8_REASON
+        ) from None
 
     parsed = find_module._parse_page(
         prepared.target,
@@ -259,9 +300,11 @@ def get_page(
         resolved_relative=prepared.resolved_relative,
     )
     if parsed is None:
-        raise GetError(
-            code="UNREADABLE",
-            reason=f"could not parse {prepared.path} as a markdown file with frontmatter",
+        raise unreadable_or_absent(
+            vault_root,
+            relatives,
+            prepared.missing_path,
+            f"could not parse {prepared.path} as a markdown file with frontmatter",
         )
     return GetResult(
         path=prepared.path,

@@ -8,6 +8,7 @@ from typing import Any
 from . import context_pack, epistemic_graph, get_page, memory_refs, vault
 from . import find as find_module
 from .find_types import Hit, ParsedPage
+from .governance import egress
 
 
 def assemble_context(
@@ -45,13 +46,19 @@ def assemble_context(
                 path = get_page.get_page(vault_root, path=path).path
             except get_page.GetError as exc:
                 raise ValueError(f"{exc.code}: {exc.reason}") from exc
-        if unit_ref is not None and path:
-            _validate_unit_parent_path(vault_root, unit_ref=unit_ref, path=path)
+        # A unit seed is a fact about its parent page: against a withheld
+        # parent it resolves, and validates, as a unit of an absent page does.
+        # The caller's own reference is still what the envelope echoes.
+        graph_unit_ref = unit_ref
+        if unit_ref is not None and egress.unit_parent_withheld(vault_root, unit_ref):
+            graph_unit_ref = egress.UNRESOLVABLE_UNIT_REF
+        if graph_unit_ref is not None and path:
+            _validate_unit_parent_path(vault_root, unit_ref=graph_unit_ref, path=path)
         graph = epistemic_graph.graph_context(
             vault_root,
             path=path,
             query=query,
-            unit_ref=unit_ref,
+            unit_ref=graph_unit_ref,
             categories=categories,
             kinds=kinds,
             depth=depth,
