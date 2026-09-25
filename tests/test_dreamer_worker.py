@@ -374,3 +374,54 @@ def test_a_locked_sidecar_is_not_wiped(tmp_path: Path) -> None:
         holder.execute("ROLLBACK")
         holder.close()
     assert path.exists()
+
+
+def test_a_stopped_worker_never_comes_back(tmp_path: Path, monkeypatch) -> None:
+    """A worker stopped mid-tick past the join timeout finishes that tick and
+    exits: a later start runs a new worker, never the old one again."""
+    vault = _vault(tmp_path, 2)
+    monkeypatch.setenv("EXOMEM_DREAMER", "on")
+    monkeypatch.setattr(dreamer_policy, "IDLE_SECONDS", 0.2)
+    monkeypatch.setattr(dreamer_policy, "SETTLE_FLOOR_SECONDS", 0.2)
+    monkeypatch.setattr(dreamer_policy, "settle_seconds", lambda _last: 0.2)
+    entered = threading.Event()
+    release = threading.Event()
+    real = dreamer.run_once
+
+    def slow(*args, **kwargs):
+        if threading.current_thread() is first:
+            entered.set()
+            release.wait(10)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(dreamer, "run_once", slow)
+    first = dreamer.start(vault)
+    assert first is not None and entered.wait(15)
+    dreamer.stop(timeout=0.1)
+    assert first.is_alive()  # still inside its tick
+    second = dreamer.start(vault)
+    try:
+        assert second is not None and second is not first
+        release.set()
+        first.join(timeout=5)
+        assert not first.is_alive(), "the stopped worker was revived by the next start"
+    finally:
+        release.set()
+        dreamer.stop(timeout=5)
+
+
+def test_an_interrupted_tick_keeps_the_held_reason(tmp_path: Path, monkeypatch) -> None:
+    """A tick cut off before it reaches the held pages learns nothing about
+    them, so status keeps saying why they are held."""
+    import dreamer_fixture as fx
+
+    monkeypatch.setenv("EXOMEM_DREAMER", "on")
+    vault = fx.build_realistic(tmp_path)  # a cold identity cache holds its pages
+    results = fx.run_to_quiet(vault)
+    assert results[-1].stop_reason == "deferred", results
+    assert dreamer.status()["waiting_reason"] == "identity_cache_cold"
+    cut = dreamer.run_once(vault, should_stop=lambda: True)
+    assert cut.stop_reason == "stop" and cut.processed == (), cut
+    status = dreamer.status()
+    assert status["waiting_reason"] == "identity_cache_cold", status
+    assert status["state"] == "waiting", status

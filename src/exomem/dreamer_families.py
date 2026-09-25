@@ -57,6 +57,10 @@ class Deferred(Exception):
         self.reason = reason
 
 
+#: Every `Deferred.reason`: why a page is held, as status reports it.
+DEFERRAL_REASONS = frozenset({"graph_unavailable", "identity_cache_cold", "identity_unavailable"})
+
+
 @dataclass
 class Context:
     """One page's processing context: the store transaction and small memos."""

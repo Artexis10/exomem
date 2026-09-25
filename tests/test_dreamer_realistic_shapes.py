@@ -9,6 +9,7 @@ good, and one Source edit fanned out into unbounded work inside one page.
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -311,14 +312,18 @@ def test_a_held_pass_ticks_at_most_once_per_poll(
     vault = fx.build_realistic(tmp_path)
     ticks: list[tuple[float, object]] = []
     real = dreamer.run_once
+    worker: list[object] = []
 
     def counted(*args, **kwargs):
         result = real(*args, **kwargs)
-        ticks.append((time.monotonic(), result))
+        # Only this test's worker: another test's stopped worker may still be
+        # finishing its last tick.
+        if threading.current_thread() in worker:
+            ticks.append((time.monotonic(), result))
         return result
 
     monkeypatch.setattr(dreamer, "run_once", counted)
-    dreamer.start(vault)
+    worker.append(dreamer.start(vault))
     try:
         time.sleep(6.0)
     finally:

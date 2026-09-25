@@ -126,6 +126,8 @@ class _State:
 
 _LOCK = threading.Lock()
 _thread: threading.Thread | None = None
+#: The running worker's stop signal. Each start makes a new one, so a worker
+#: stopped mid-tick past the join timeout still exits after that tick.
 _stop = threading.Event()
 _STATE = _State()
 
@@ -201,19 +203,20 @@ def reset_for_tests() -> None:
 
 def start(vault_root: Path) -> threading.Thread | None:
     """Start the worker when enabled. Idempotent; off creates nothing at all."""
-    global _thread
+    global _thread, _stop
     current = setting()
     if current == "off":
         return None
     with _LOCK:
         if _thread is not None and _thread.is_alive():
             return _thread
-        _stop.clear()
+        stop_event = threading.Event()
+        _stop = stop_event
         _STATE.setting = current
         _STATE.phase = current
         _STATE.vault_changed_at = _time.monotonic()
         thread = threading.Thread(
-            target=_run, args=(Path(vault_root),), name=THREAD_NAME, daemon=True
+            target=_run, args=(Path(vault_root), stop_event), name=THREAD_NAME, daemon=True
         )
         _thread = thread
         thread.start()
@@ -227,7 +230,8 @@ def stop(timeout: float = 2.0) -> None:
     with _LOCK:
         thread = _thread
         _thread = None
-    _stop.set()
+        stop_event = _stop
+    stop_event.set()
     if thread is not None and thread is not threading.current_thread():
         thread.join(timeout=timeout)
 
@@ -261,21 +265,21 @@ def failure() -> dict[str, Any] | None:
     return {"since": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(since))}
 
 
-def _run(vault_root: Path) -> None:
+def _run(vault_root: Path, stop_event: threading.Event) -> None:
     clock = Clock()
-    while not _stop.is_set():
+    while not stop_event.is_set():
         try:
-            sleep = _loop_once(vault_root, clock)
+            sleep = _loop_once(vault_root, clock, stop_event)
         except Exception:  # noqa: BLE001 - the worker must outlive any one loop
             log.warning("dreamer: loop failed", exc_info=True)
             sleep = policy.POLL_SECONDS
-        if _stop.wait(sleep):
+        if stop_event.wait(sleep):
             break
     # What this process delivered since the last write outlives the thread.
     _flush_deliveries(vault_root)
 
 
-def _loop_once(vault_root: Path, clock: Clock) -> float:
+def _loop_once(vault_root: Path, clock: Clock, stop_event: threading.Event | None = None) -> float:
     """One gate evaluation and, when it opens, one tick. Returns the sleep."""
     signals = gather_signals(vault_root, clock)
     decision = policy.decide(signals)
@@ -288,9 +292,13 @@ def _loop_once(vault_root: Path, clock: Clock) -> float:
         sleep = decision.sleep_s
     else:
         with _LOCK:
-            _STATE.waiting_reason = None
-            _STATE.waiting_since = None
-        result = run_once(vault_root, clock=clock, should_stop=_stop.is_set)
+            # The gate opened, so a gate reason is over. Why pages are held is
+            # the tick's to say.
+            if _STATE.waiting_reason not in dreamer_families.DEFERRAL_REASONS:
+                _STATE.waiting_reason = None
+                _STATE.waiting_since = None
+        should_stop = stop_event.is_set if stop_event is not None else None
+        result = run_once(vault_root, clock=clock, should_stop=should_stop)
         # A tick that moved nothing forward (nothing to do, or only pages that
         # cannot run yet) waits a full poll, not a duty cycle.
         sleep = policy.sleep_after_tick(result.wall) if result.processed else policy.POLL_SECONDS
@@ -602,16 +610,19 @@ def _record_tick(
         else:
             state.consecutive_failures = 0
             state.failed_since = None
-        if waiting is None:
+        if waiting is not None:
+            if state.waiting_reason != waiting:
+                state.waiting_since = clock.time()
+            state.waiting_reason = waiting
+        elif processed or stop in {"drained", "idle"}:
+            # The tick got through without holding a page.
             state.waiting_reason = None
             state.waiting_since = None
-        elif state.waiting_reason != waiting:
-            state.waiting_reason = waiting
-            state.waiting_since = clock.time()
+        # A tick cut off before it reached anything leaves the reason as it was.
         if state.consecutive_failures >= policy.FAILED_AFTER:
             state.phase = "failed"
         else:
-            state.phase = "idle" if waiting is None else "waiting"
+            state.phase = "idle" if state.waiting_reason is None else "waiting"
         health = _health_locked(now_mono)
     if conn is None or stop == "idle":
         return
