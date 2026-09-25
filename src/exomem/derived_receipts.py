@@ -61,6 +61,7 @@ _RETRYABLE_FAILURE_CODES = frozenset(
 _ADVISORY_FAILURE_CODES = frozenset(
     {
         "advisory_failed",
+        "advisory_unavailable",
         "embedding_unavailable",
         "generation_changed",
         "handler_unavailable",
@@ -609,6 +610,10 @@ def _receipt_schema_is_current(connection: sqlite3.Connection) -> bool:
         str(row[1])
         for row in connection.execute("PRAGMA table_info(write_advisory_results)")
     }
+    paths = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(derived_batch_paths)")
+    }
     present = {
         str(row[0])
         for row in connection.execute(
@@ -616,13 +621,16 @@ def _receipt_schema_is_current(connection: sqlite3.Connection) -> bool:
             "('write_advisory_result_candidates', "
             "'pending_visibility_generation_insert', "
             "'pending_visibility_generation_update', "
-            "'pending_visibility_generation_delete')"
+            "'pending_visibility_generation_delete', "
+            "'derived_paths_sequence_fill', 'derived_paths_sequence', "
+            "'derived_paths_after_sequence', 'derived_batches_state')"
         )
     }
     return (
         "lease_revision" in components
         and "target_rel_path" in advisory
-        and len(present) == 4
+        and "batch_seq" in paths
+        and len(present) == 8
     )
 
 
@@ -1102,19 +1110,20 @@ def _newer_custody_covers_path(
     pending row for it -- so the path's newer bytes are visible or already
     published, never in a gap.
     """
-    # Driven by the store sequence, not by the path: a shared page such as the
-    # knowledge base log rides in every batch ever written, while only the
-    # batches after this one can cover it.
+    # A seek on (path, store sequence): only the later batches that carry this
+    # path are visited, never the whole later history, which is never pruned.
+    # A shared page's first later proven carrier is ordinarily a hit.
     return (
         connection.execute(
-            "SELECT 1 FROM derived_batches AS b "
-            "WHERE b.rowid > ? AND b.state IN ('ready', 'completed', 'superseded') "
-            "AND EXISTS (SELECT 1 FROM derived_batch_paths AS p "
-            "WHERE p.batch_id = b.batch_id AND p.rel_path = ?) "
+            "SELECT 1 FROM derived_batch_paths AS p "
+            "JOIN derived_batches AS b ON b.batch_id = p.batch_id "
+            "WHERE p.rel_path = ? AND p.batch_seq > ? "
+            "AND b.state IN ('ready', 'completed', 'superseded') "
             "AND EXISTS (SELECT 1 FROM pending_recall_rows AS r "
-            "WHERE r.batch_id = b.batch_id AND r.rel_path = ? "
-            "AND r.state IN ('live', 'retired')) LIMIT 1",
-            (batch_sequence, rel_path, rel_path),
+            "WHERE r.batch_id = p.batch_id AND r.rel_path = p.rel_path "
+            "AND r.state IN ('live', 'retired')) "
+            "ORDER BY p.batch_seq LIMIT 1",
+            (rel_path, batch_sequence),
         ).fetchone()
         is not None
     )
@@ -1127,6 +1136,12 @@ def _recall_lanes_hold_current(vault_root: Path, rel_path: str) -> bool:
     a hand edit in an editor is the ordinary case -- is visible once the lanes
     hold what is on disk now, and that is the right test for handing it on.
     Absence is held as proven absence. An unreadable path never is.
+
+    This is the overlay's lane test (lexical catalogue plus reference sidecar),
+    not its whole retirement test, which also waits for the batch's resolver,
+    semantic-purge and freshness components. A handed-on row therefore stops
+    shadowing vector and graph evidence before this batch's own components have
+    run; they still run over the path later, from its current bytes.
     """
     target = vault_root.joinpath(*rel_path.split("/"))
     try:
@@ -1156,16 +1171,19 @@ def _newer_custody_wrote_bytes(
     newer write's proven after-state under that batch's custody, not a torn
     write of the older batch.
     """
+    # A seek on (path, after-bytes, store sequence): the ordinary answer is a
+    # miss, and a miss visits no row at all.
     return (
         connection.execute(
-            "SELECT 1 FROM derived_batches AS b "
-            "WHERE b.rowid > ? AND b.state IN ('ready', 'completed', 'superseded') "
-            "AND EXISTS (SELECT 1 FROM derived_batch_paths AS p "
-            "WHERE p.batch_id = b.batch_id AND p.rel_path = ? AND p.after_hash IS ?) "
+            "SELECT 1 FROM derived_batch_paths AS p "
+            "JOIN derived_batches AS b ON b.batch_id = p.batch_id "
+            "WHERE p.rel_path = ? AND p.after_hash IS ? AND p.batch_seq > ? "
+            "AND b.state IN ('ready', 'completed', 'superseded') "
             "AND EXISTS (SELECT 1 FROM pending_recall_rows AS r "
-            "WHERE r.batch_id = b.batch_id AND r.rel_path = ? "
-            "AND r.state IN ('live', 'retired')) LIMIT 1",
-            (batch_sequence, rel_path, identity, rel_path),
+            "WHERE r.batch_id = p.batch_id AND r.rel_path = p.rel_path "
+            "AND r.state IN ('live', 'retired')) "
+            "ORDER BY p.batch_seq LIMIT 1",
+            (rel_path, identity, batch_sequence),
         ).fetchone()
         is not None
     )
@@ -1183,17 +1201,26 @@ def _handed_on(
     A moved path (`other`) is handed on when newer exact custody covers it
     (option A) or, failing that, when both recall lanes already hold its
     current bytes (R2). A path back at this batch's before-bytes is handed on
-    only when a newer proven batch recorded exactly those bytes as its own
+    when a newer proven batch recorded exactly those bytes as its own
     after-state; otherwise it may be this batch's torn write, and stays owed.
+    One before-state cannot be a torn write: a page this batch created is
+    absent again after the batch was proven committed, so someone deleted it
+    since. That absence goes through the same lanes test as a moved path.
     """
     if not moved and not returned:
         return frozenset()
     row = connection.execute(
-        "SELECT rowid FROM derived_batches WHERE batch_id = ?", (batch_id,)
+        "SELECT rowid, state, EXISTS (SELECT 1 FROM pending_recall_rows AS r "
+        "WHERE r.batch_id = b.batch_id AND r.state IN ('live', 'retired')) "
+        "FROM derived_batches AS b WHERE batch_id = ?",
+        (batch_id,),
     ).fetchone()
     if row is None:
         return frozenset()
     sequence = int(row[0])
+    # Proven committed once: the batch is active now, or it published custody
+    # before it stranded. A first proof or a crash-cut batch is neither.
+    proven = str(row[1]) in {"ready", "completed"} or bool(row[2])
     handed = {
         rel
         for rel in moved
@@ -1204,6 +1231,7 @@ def _handed_on(
         rel
         for rel, identity in returned
         if _newer_custody_wrote_bytes(connection, sequence, rel, identity)
+        or (identity is None and proven and _recall_lanes_hold_current(vault_root, rel))
     )
     return frozenset(handed)
 
@@ -1221,7 +1249,9 @@ def _delegated_paths(
     moved on past it (`other`) is proven when newer exact custody covers it, or
     when both recall lanes already hold its current bytes (R2). A path back at
     this batch's before-bytes is proven only when a newer proven batch wrote
-    exactly those bytes. A handed-on path's visibility is no longer this
+    exactly those bytes, or -- for a page this batch created, once the batch
+    was proven committed -- when both lanes hold its absence. A handed-on
+    path's visibility is no longer this
     batch's; its remaining paths still converge here. Any other path --
     unreadable, or not explained by newer custody or the lanes -- makes the
     whole batch unprovable, exactly as before.
@@ -1285,8 +1315,19 @@ def _activate_proven_batch(
     )
 
 
-def _supersede_batch(connection: sqlite3.Connection, batch_id: str, *, now: float) -> None:
-    """Retire a batch whose every path newer custody now owns."""
+def _supersede_batch(
+    connection: sqlite3.Connection,
+    batch_id: str,
+    *,
+    now: float,
+    advisory: bool = True,
+) -> None:
+    """Retire a batch whose every path newer custody now owns.
+
+    ``advisory=False`` retires receipt custody only and leaves the batch's
+    advisory result to the caller, which is reconcile's route: there the
+    target page may be exactly what the advisory describes.
+    """
     connection.execute(
         "UPDATE derived_batch_components SET state = 'superseded', "
         "claim_owner = NULL, claim_expires_at = NULL, updated_at = ? "
@@ -1305,11 +1346,52 @@ def _supersede_batch(connection: sqlite3.Connection, batch_id: str, *, now: floa
         "WHERE batch_id = ?",
         (now, batch_id),
     )
-    connection.execute(
-        "UPDATE write_advisory_results SET state = 'superseded', "
-        "updated_at = ? WHERE batch_id = ?",
-        (now, batch_id),
-    )
+    if advisory:
+        connection.execute(
+            "UPDATE write_advisory_results SET state = 'superseded', "
+            "updated_at = ? WHERE batch_id = ?",
+            (now, batch_id),
+        )
+
+
+def _settle_owed_advisory(
+    vault_root: Path,
+    connection: sqlite3.Connection,
+    batch_id: str,
+    *,
+    now: float,
+) -> None:
+    """Answer a stranded batch's advisory that never ran; leave a finished one.
+
+    A `ready` or `failed` result stays as published. A `pending` result over an
+    unchanged target is owed an answer the retired batch can no longer give,
+    so it fails as `advisory_unavailable`; one whose target moved describes
+    nothing current and is superseded.
+    """
+    from .deferred_write_advisory import _observe_fingerprint
+
+    for result_id, target_rel_path, target_fingerprint in connection.execute(
+        "SELECT result_id, target_rel_path, target_fingerprint "
+        "FROM write_advisory_results WHERE batch_id = ? AND state = 'pending'",
+        (batch_id,),
+    ).fetchall():
+        unchanged = target_rel_path is not None and (
+            _observe_fingerprint(vault_root, str(target_rel_path))
+            == str(target_fingerprint)
+        )
+        if unchanged:
+            connection.execute(
+                "UPDATE write_advisory_results SET state = 'failed', "
+                "failure_code = 'advisory_unavailable', updated_at = ? "
+                "WHERE result_id = ? AND state = 'pending'",
+                (now, result_id),
+            )
+        else:
+            connection.execute(
+                "UPDATE write_advisory_results SET state = 'superseded', "
+                "updated_at = ? WHERE result_id = ? AND state = 'pending'",
+                (now, result_id),
+            )
 
 
 def _prove_committed_guarded(
@@ -2355,6 +2437,33 @@ def custody_census(vault_root: Path, *, now: float | None = None) -> dict[str, A
     return census
 
 
+def _probe_stranded_count(vault_root: Path) -> int:
+    """Count stranded batches without migrating or failing on the store.
+
+    Reconcile runs this before it knows there is anything to repair, and a dry
+    run must leave the store byte-identical. A legacy store with no receipt
+    tables holds no stranded batch; an unreadable one is reported by the
+    sidecar checks, not here.
+    """
+    if not deferred_index.store_path(vault_root).exists():
+        return 0
+    try:
+        connection = deferred_index._connect(vault_root, create=False)
+    except (OSError, RuntimeError, ValueError, sqlite3.Error):
+        return 0
+    try:
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'derived_batches'"
+        ).fetchone() is None:
+            return 0
+        return int(connection.execute(_STRANDED_BATCHES_SQL).fetchone()[0])
+    except sqlite3.Error:
+        return 0
+    finally:
+        connection.close()
+
+
 def reconcile_stranded_batches(
     vault_root: Path,
     *,
@@ -2367,13 +2476,15 @@ def reconcile_stranded_batches(
 
     For each batch in `reconcile_required`, ``converge`` runs the ordinary
     writer fan-out over what every one of its paths holds now. The batch is
-    then retired as `superseded` -- its pending rows and advisory result with
-    it -- once both recall lanes hold every path's current bytes, which is the
-    overlay's own retirement test and full reconciliation of the path and
-    component demand. A batch the lanes still lack stays stranded and is
-    counted in ``remaining``. The report is counts only.
+    then retired as `superseded` -- its pending rows with it -- once both recall
+    lanes hold every path's current bytes, which is the overlay's lane test and
+    full reconciliation of the path and component demand. Only receipt custody
+    is retired: a finished advisory result stays as published, and one that
+    never ran is settled by :func:`_settle_owed_advisory`. A batch the lanes
+    still lack stays stranded and is counted in ``remaining``. The report is
+    counts only.
     """
-    stranded = stranded_batch_count(vault_root)
+    stranded = _probe_stranded_count(vault_root)
     if dry_run or not stranded or limit <= 0:
         return {"stranded": stranded, "retired": 0, "remaining": stranded}
     connection = _connect_receipt_read(vault_root)
@@ -2442,7 +2553,10 @@ def reconcile_stranded_batches(
                         (batch_id,),
                     ).fetchone()
                     if still is not None:
-                        _supersede_batch(write, batch_id, now=retired_at)
+                        _supersede_batch(write, batch_id, now=retired_at, advisory=False)
+                        _settle_owed_advisory(
+                            vault_root, write, batch_id, now=retired_at
+                        )
                         retired += 1
                 except Exception:
                     write.rollback()

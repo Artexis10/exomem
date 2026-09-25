@@ -41,7 +41,15 @@ only after exact canonical state proves, for every path, either the intended
 after-state or a later state that a newer exact receipt covers with live or
 retired pending custody for that path, or a later state whose current bytes
 both persistent recall lanes (the lexical catalogue and the reference sidecar)
-already hold. Rollback,
+already hold. A path back at its recorded before-bytes is not such a later
+state: it is covered only when a newer proven receipt, carrying live or retired
+pending custody for that path, recorded exactly those bytes (or that absence)
+as its after-state; or, for a page the receipt itself created, when the
+receipt was already proven committed (it is active, or it published its
+pending custody) and both recall lanes hold the page's absence. Plain newer
+coverage of the path, or the lanes holding before-bytes the receipt did not
+create, SHALL NOT cover it, since those bytes may be the receipt's own torn
+write. Rollback,
 partial state, or an unrelated later state MUST NOT activate it. The recorded
 canonical generation is lineage for ordering and supersession; proof SHALL NOT
 require it to equal the vault-wide checkpoint, which advances on every write to
@@ -82,6 +90,12 @@ dispatched, and at component completion.
 - **THEN** the older batch hands that page to the newer batch, whose proven after-state those bytes are
 - **AND** it converges its own paths instead of being held in `reconcile_required`
 
+#### Scenario: A path reverted by hand to its before-bytes stays owed
+
+- **WHEN** a path an older proven batch wrote is returned by a hand edit to that batch's before-bytes, and no newer proven batch recorded those bytes as its after-state
+- **THEN** the older batch is held in `reconcile_required`, even when a newer batch carries the path or both recall lanes hold the reverted bytes
+- **AND** `doctor` fails its custody check until `maintain --reconcile` converges the batch from current bytes
+
 #### Scenario: A coverer not yet proven heals on the next pass
 
 - **WHEN** an older batch is re-proven after a newer committed write moved one of its shared paths but before the newer batch's own proof
@@ -93,6 +107,12 @@ dispatched, and at component completion.
 - **WHEN** a page an unconverged batch wrote is edited outside any governed write
 - **THEN** the batch is held in `reconcile_required` while either recall lane lacks the edited bytes
 - **AND** once both lanes hold them, recovery hands the page on and the batch converges its other paths, or is superseded when it owns none
+
+#### Scenario: A new page deleted by hand before it converges heals
+
+- **WHEN** a page a proven batch created is deleted outside any governed write before the batch converges
+- **THEN** the batch is held while either recall lane still holds the page, and once both hold its absence recovery hands the page on and the batch converges its other paths, with no operator step
+- **AND** managed recall is ready once the lanes hold the absence, and the page's advisory result is superseded
 
 #### Scenario: Multi-page burst keeps every batch provable
 
@@ -217,10 +237,14 @@ pending-visibility outcome with its closed failure code. `doctor` SHALL fail
 while any batch is stranded and SHALL NOT mutate custody to compute the line.
 Operator reconciliation (`maintain --reconcile`) SHALL converge each stranded
 batch's paths from their current canonical bytes through the ordinary writer
-fan-out and SHALL retire the batch as `superseded`, with its pending rows and
-advisory result, once both recall lanes hold every path's current bytes; a
-batch the lanes still lack SHALL stay stranded and be counted as remaining.
-The reconcile report SHALL carry counts only.
+fan-out and SHALL retire the batch as `superseded`, with its pending rows,
+once both recall lanes hold every path's current bytes; a batch the lanes still
+lack SHALL stay stranded and be counted as remaining. Reconciliation SHALL
+retire receipt custody only: a `ready` or `failed` advisory result SHALL stay
+as published, and only an advisory result that never ran SHALL be settled -- as
+`failed` with code `advisory_unavailable` when its target page is unchanged, or
+`superseded` when the target moved. The reconcile report SHALL carry counts
+only.
 
 #### Scenario: Doctor names stranded custody
 
@@ -233,6 +257,12 @@ The reconcile report SHALL carry counts only.
 - **WHEN** an operator runs `maintain --reconcile` while a batch is stranded
 - **THEN** the batch's pages are converged from their current bytes and the batch is retired once both recall lanes hold them
 - **AND** managed recall is ready afterwards, and a dry run reports the same counts without changing custody
+
+#### Scenario: A ready advisory survives reconcile
+
+- **WHEN** a batch was stranded by a shared page while its own page stayed in its after-state, and its advisory result is `ready`
+- **THEN** reconciliation retires the batch and leaves the advisory result `ready`, so the warnings it carries still resolve
+- **AND** an advisory result for such a batch that never ran resolves as `failed` with code `advisory_unavailable` rather than `superseded`
 
 ### Requirement: Fast Acknowledgement Is Proven End To End
 

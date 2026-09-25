@@ -143,10 +143,20 @@ original request evaluates a prepared batch from source of truth:
   own write (an index re-rendered as it was): a path back at its before-bytes
   is handed on only when a newer proven batch recorded exactly those bytes as
   its after-state, since otherwise it may be the older batch's own torn write
-  (found by the 3-writer burst, 2026-09-25). A moved
+  (found by the 3-writer burst, 2026-09-25). One before-state cannot be a torn
+  write: a page the batch created, absent again after the batch was proven
+  committed (it is active, or published its pending custody before it
+  stranded), was deleted since. That absence is handed on through the same
+  lanes test as a moved path, once both recall lanes hold it, so a page
+  deleted by hand before its batch converges leaves managed recall ready with
+  no operator step; its advisory result is superseded, since it describes a
+  page that no longer exists. A first proof or a crash-cut batch is not
+  proven committed and keeps the stricter rule. A moved
   path that no batch covers -- a hand edit in the editor, which is ordinary in
   a personal vault -- is handed on once both recall lanes hold its current
-  bytes (ruling R2): that is the overlay's own retirement test, and until it
+  bytes (ruling R2): that is the overlay's lane test (lexical catalogue and
+  reference sidecar; the overlay's full retirement also waits for the batch's
+  resolver, semantic-purge and freshness components), and until it
   holds the batch stays `reconcile_required` rather than publishing anything;
 - every path equals the before state and the canonical attempt is known not to
   have committed → retire as `aborted`, retiring the batch's own pending
@@ -571,8 +581,12 @@ fast-acknowledged writes, but the pending overlay keeps reading durable custody,
 so a batch already held in `reconcile_required` stays until it is repaired.
 `doctor` reports it (`fast_ack_custody`, failing while any batch is stranded)
 and `maintain --reconcile` repairs it by converging its pages from current bytes
-and retiring it once both recall lanes hold them. The runbook entry is therefore
-"set the flag to 0, then reconcile".
+and retiring it once both recall lanes hold them. Reconcile retires receipt
+custody only: a batch stranded by a shared page can still own a page exactly as
+its advisory result describes it, so a `ready` or `failed` result stays as
+published; a result that never ran fails as `advisory_unavailable` over an
+unchanged target and is superseded over a moved one. The runbook entry is
+therefore "set the flag to 0, then reconcile".
 
 Rollback is mandatory on any stale post-write read, any acknowledged write with
 missing required custody, any cross-tenant/result authorization leak, two or
