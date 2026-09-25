@@ -1114,16 +1114,21 @@ For a caller other than the owner, a derived structure SHALL decide each candida
 
 ### Requirement: A restricted writer's links resolve over the pages it may see
 
-For a writer other than the owner under a governed policy, write-time wikilink resolution SHALL consider only pages the writer may see: stem, title and path matches in body links, `sources`, bridge sources, entity connections, draft relation suggestions, capture-sweep mentions, and the semantic contract's resolution of the written page's own relation targets. A link that matches only withheld pages SHALL resolve, warn and be reported exactly as it would if those pages were absent, and an ambiguity SHALL list only visible pages. A path that names no file SHALL be unaffected. The owner's resolution SHALL be unchanged.
+For a writer other than the owner under a governed policy, write-time wikilink resolution SHALL consider only pages the writer may see: stem, title and path matches in body links, `sources`, bridge sources, entity connections, draft relation suggestions, capture-sweep mentions, and the semantic contract's resolution of the written page's own relation targets and body links. The semantic contract SHALL judge a page the writer may see without the relations that pages withheld from the writer author, so they count toward neither its disposition, its review candidates, their total nor its qualifying directions, and only visible pages count as its governed peers. That judgement SHALL be made where the page is judged: the corpus a write builds, which also feeds the graph it publishes, SHALL keep the owner's resolution. A link that matches only withheld pages SHALL resolve, warn and be reported exactly as it would if those pages were absent, and an ambiguity SHALL list only visible pages. A path that names no file SHALL be unaffected. The owner's resolution SHALL be unchanged.
 
 #### Scenario: A guess matches a withheld page
 
 - **WHEN** a restricted writer's page links a bare stem, a title, or a full path that only a withheld page matches
 - **THEN** the stored page, the warnings, the capture-sweep mentions and the contract's relation disposition are identical to the twin without that page
 
+#### Scenario: A withheld page relates to a restricted draft
+
+- **WHEN** a withheld page authors a relation to the title a restricted writer drafts, or the draft's body links a name only a withheld page answers
+- **THEN** the draft's validation is identical to the twin without that page, and the owner's draft still qualifies through that relation
+
 ### Requirement: Write doors decide their target before acting
 
-For a writer other than the owner under a governed policy, a write door SHALL decide its target page before resolving, reading or changing it. `edit_memory`, `observe_memory` by path or memory reference, `replace_memory`, and `manage_memory_file` `append`, `move` source, `delete` of a file, and `reclassify` SHALL answer a target the writer may not see exactly as a missing target, and SHALL leave it unchanged. A folder delete by such a writer SHALL be refused with one `AUDIENCE_RESTRICTED` answer whatever the folder holds, and a declared recursive delete SHALL be refused before anything is read. A creation door whose destination a withheld page occupies SHALL answer with its ordinary occupied-destination refusal, naming no path the writer did not supply, and SHALL leave that page unchanged, including under `overwrite`. A move that updates wikilinks SHALL rewrite every linking page, and SHALL report counts and paths for the linking pages the writer may see. The owner's writes SHALL be unchanged.
+For a writer other than the owner under a governed policy, a write door SHALL decide its target page before resolving, reading or changing it. `edit_memory`, `observe_memory` by path or memory reference, `replace_memory`, and `manage_memory_file` `append`, `move` source, `delete` of a file, and `reclassify` SHALL answer a target the writer may not see exactly as a missing target, and SHALL leave it unchanged. A folder delete by such a writer SHALL be refused with one `AUDIENCE_RESTRICTED` answer whatever a folder it may see holds, and a declared recursive delete SHALL be refused before anything is read; a folder holding only pages withheld from it SHALL be answered as a missing path, as its listing is. A creation door whose destination a withheld page occupies SHALL answer with its ordinary occupied-destination refusal, naming no path the writer did not supply, and SHALL leave that page unchanged, including under `overwrite`. A move that updates wikilinks SHALL rewrite every linking page, and SHALL report counts, paths and contract results for the linking pages the writer may see, with no index report and no derived-graph outcome, so its answer in every response detail is the same whether or not a withheld page linked the moved one. When rewriting a withheld linking page would be refused, whatever refuses it, the move SHALL answer one `LINK_REWRITE_REFUSED` refusal that names no finding, type, tree or path. These rulings SHALL apply under a non-empty policy only; on a vault with no policy every caller's writes SHALL be answered as the owner's are. The owner's writes SHALL be unchanged.
 
 #### Scenario: A write door names a withheld page
 
@@ -1132,8 +1137,18 @@ For a writer other than the owner under a governed policy, a write door SHALL de
 
 #### Scenario: A restricted writer deletes a folder
 
-- **WHEN** a restricted writer deletes a folder that holds visible pages, withheld pages, both, or nothing it may see
+- **WHEN** a restricted writer deletes a folder that holds visible pages, or both visible and withheld pages
 - **THEN** it receives the same `AUDIENCE_RESTRICTED` refusal each time and nothing is trashed
+
+#### Scenario: A restricted writer deletes a folder of withheld pages
+
+- **WHEN** a restricted writer deletes, without declaring it recursive, a folder whose every page is withheld from it
+- **THEN** it receives the answer a missing path gives, and nothing is trashed
+
+#### Scenario: A vault with no policy
+
+- **WHEN** a caller other than the owner deletes a folder or moves a page on a vault with no policy, where an erased page's tombstone exists
+- **THEN** it is answered as the owner is
 
 #### Scenario: A destination a withheld page occupies
 
@@ -1143,7 +1158,12 @@ For a writer other than the owner under a governed policy, a write door SHALL de
 #### Scenario: A move rewrites a withheld page's link
 
 - **WHEN** a restricted writer moves a page that a withheld page links
-- **THEN** the withheld page's link is rewritten and the move's reported counts and touched paths match the twin without that page
+- **THEN** the withheld page's link is rewritten and the move's answer, in every response detail, matches the twin without that page
+
+#### Scenario: A withheld linking page refuses the rewrite
+
+- **WHEN** a restricted writer's move would rewrite a withheld page in an append-only tree, or a withheld page whose semantic contract then blocks
+- **THEN** the move answers one `LINK_REWRITE_REFUSED` refusal naming no finding, type, tree or path, and nothing is changed
 
 ### Requirement: Link resolution for restricted readers follows their view
 
@@ -1161,7 +1181,7 @@ For a reader other than the owner, a derived answer that depends on how a visibl
 
 ### Requirement: Counts follow filtering and whole-vault aggregates go to the owner
 
-A count or rank a restricted caller receives SHALL be computed over the entries it receives, and retrieval diagnostics computed before release decisions SHALL NOT be returned to it. Under a governed policy such a caller's recall SHALL run without the graph lane and graph enrichment, decided before the shared recall cache is consulted. A whole-vault aggregate that a restricted view cannot recompute SHALL be served to the owner only under a governed policy, and SHALL answer other audiences with `available: false` and `reason: "audience_restricted"`, decided before anything is read.
+A count or rank a restricted caller receives SHALL be computed over the entries it receives, and retrieval diagnostics computed before release decisions SHALL NOT be returned to it. Under a governed policy such a caller's recall SHALL run without the graph lane and graph enrichment, decided before the shared recall cache is consulted; its link suggestions SHALL rank over the pages it may see, without the graph lane and without whole-corpus rank numbers. A whole-vault aggregate that a restricted view cannot recompute SHALL be served to the owner only under a governed policy, and SHALL answer other audiences with `available: false` and `reason: "audience_restricted"`, decided before anything is read.
 
 #### Scenario: A count beside a filtered list
 
@@ -1177,3 +1197,8 @@ A count or rank a restricted caller receives SHALL be computed over the entries 
 
 - **WHEN** a caller other than the owner asks for recall with graph enrichment under a governed policy
 - **THEN** its hits carry no graph hop, in-degree or enrichment, and match the answer from a vault without the withheld pages; the owner's recall is unchanged
+
+#### Scenario: A restricted caller's link suggestions
+
+- **WHEN** a withheld page matches a draft a restricted caller asks link suggestions for, or links pages the draft could link
+- **THEN** the suggestions and their reasons are identical to the twin without that page
