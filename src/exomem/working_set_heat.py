@@ -648,7 +648,9 @@ def view_digest(
     cache hits. A caller whose own tiers hold nothing is served the vault's
     packet, so it shares the vault's digest: a fresh session's first turn
     and a keyless duplicate of it (the hook's call, then the agent's) hit
-    the same cache entry."""
+    the same cache entry. Not with a continuity token: a keyed caller ranks
+    it in its own session tier and a keyless one in the vault tier, so their
+    packets differ even when the keyed caller's tiers are empty (review F5)."""
     who = attribution or Attribution()
     if not who.session and not who.workspace:
         return profile.digest
@@ -1493,9 +1495,19 @@ def persist_commit(observed: ObservedCommit | None) -> None:
     released. Never raises."""
     if observed is None or (not observed.events and not observed.signatures):
         return
+    # The signatures at once: another process's fold must recognise these
+    # pages as our echo from the moment they are on disk, or it folds them as
+    # external work (review F6). Only the heat itself waits for the terminal,
+    # so a commit that never completes earns none.
+    try:
+        if observed.signatures:
+            record_attributed(observed.root, observed.signatures, ts_ns=observed.ts_ns)
+    except Exception:  # noqa: BLE001 - heat never fails a commit
+        log.debug("heat commit signatures could not be recorded", exc_info=True)
+    if not observed.events:
+        return
 
     def work() -> list[object]:
-        record_attributed(observed.root, observed.signatures, ts_ns=observed.ts_ns)
         append(observed.root, observed.events)
         return []
 

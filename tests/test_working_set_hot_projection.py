@@ -820,7 +820,6 @@ def test_an_episode_leads_only_the_session_that_recorded_it(heat_vault: Path) ->
     assert _resolved(_continue(heat_vault, **S2)) == [SLED]
 
 
-
 # --------------------------------------------------------------------------- #
 # Round 2: a governed move heats the moved page only
 # --------------------------------------------------------------------------- #
@@ -911,7 +910,6 @@ def test_a_users_edit_follows_its_page_through_a_move(heat_vault: Path) -> None:
     assert _resolved(packet) == [LANTERN_MOVED], (packet.get("abstention"), packet["anchors"])
 
 
-
 # --------------------------------------------------------------------------- #
 # Round 2: a passed token never shares a cache entry across keyed and keyless
 # --------------------------------------------------------------------------- #
@@ -943,3 +941,52 @@ def test_a_token_is_never_served_across_keyed_and_keyless_callers(
 
     assert own == [SLED], own
     assert plain == [MARIT], plain
+
+
+# --------------------------------------------------------------------------- #
+# Round 2: our own echo is recognised before the commit's terminal lands
+# --------------------------------------------------------------------------- #
+
+
+def test_another_processs_batch_is_its_echo_before_its_terminal(
+    heat_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review F6: a one-page maintenance batch from another process (a CLI)
+    whose terminal had not landed yet: its signature row waited with the
+    events, so the service folded the batch's page as external work and
+    "continue" followed the batch. The signatures are written at once; only
+    the heat waits for the terminal."""
+    import re
+
+    _backfill(heat_vault)
+    page = heat_vault / DEPOT
+    page.write_text(
+        re.sub(r"^exomem_id: .*\n", "", page.read_text(encoding="utf-8"), count=1, flags=re.M),
+        encoding="utf-8",
+    )
+    _one_old_tick(heat_vault)
+    _live(heat_vault)
+    working_set_heat.reset_for_tests()
+    sidecar = working_set_heat.sidecar_path(heat_vault)
+    for suffix in ("", "-wal", "-shm"):
+        sidecar.with_name(sidecar.name + suffix).unlink(missing_ok=True)
+    working_set_runtime.reset_caches_for_tests()
+    _continue(heat_vault)  # the cold seed
+    _edit(heat_vault, SLED, "A towed cargo sled", "A towed freight sled")
+    held: list = []
+    monkeypatch.setattr(
+        writer_lease, "defer_until_terminal_persisted", lambda work: held.append(work) or True
+    )
+    _backfill(heat_vault)  # rewrites the Depot Ledger page only
+    with working_set_heat._LOCK:
+        working_set_heat._OURS.clear()  # the service is another process
+    _watcher_saw_everything(heat_vault)
+
+    events = [
+        (event.path, event.origin)
+        for event in working_set_heat.profile(heat_vault).events
+        if event.origin != "seed"
+    ]
+
+    assert (DEPOT, "external") not in events, events
+    assert _resolved(_continue(heat_vault)) == [SLED]
