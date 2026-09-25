@@ -316,32 +316,11 @@ def _body_wikilink_candidates(
     canonical_lines = {
         relation.line for relation in document.note_relations if relation.canonical
     }
-    from .governance import egress
-
-    visible = egress.visible_page_filter(vault_root)
     index = epistemic_graph_module.EpistemicGraphIndex(vault_root)
     connection = index._open_read_snapshot()
     if connection is None:
         return []
     try:
-        if visible is not None:
-            # The queue proposed this page's links as the reader's view
-            # resolves them; regenerate the same ones.
-            link_rows = epistemic_graph_module._VisibleLinkView(
-                vault_root, connection, visible, index.registry
-            ).body_link_rows(page.rel_path)
-            if link_rows is not None:
-                return [
-                    {
-                        "from": page.rel_path,
-                        "to": target,
-                        "relation_type": "links_to",
-                        "method": "wikilink",
-                        "evidence": payload["evidence"],
-                    }
-                    for target, payload, *_rest in link_rows[: max(0, int(limit))]
-                    if isinstance(payload.get("evidence"), dict)
-                ]
         rows = connection.execute(
             "SELECT d.path, d.title, e.review_evidence "
             "FROM graph_edges e JOIN graph_nodes d "
@@ -475,26 +454,14 @@ def _page_candidates(
         _MAX_GENERATED_PER_METHOD,
         max(1, budget * _CLASSIFICATION_HEADROOM),
     )
-    from .governance import egress
-
-    visible = egress.visible_page_filter(vault_root)
-    decided: dict[str, Any] = {} if visible is None else {"keep": visible}
     generated = [
         *epistemic_graph_module._structural_candidates(
-            vault_root, page.rel_path, **decided
+            vault_root, page.rel_path
         )[:method_cap],
         *_body_wikilink_candidates(vault_root, page, limit=method_cap),
         *epistemic_graph_module._frontmatter_source_candidates(page)[:method_cap],
         *_shared_source_candidates(vault_root, page.rel_path, limit=method_cap),
     ]
-    if visible is not None:
-        # A caller other than the owner can resolve, triage or accept only a
-        # candidate it could have been shown.
-        generated = [
-            candidate
-            for candidate in generated
-            if epistemic_graph_module.candidate_is_visible(candidate, visible)
-        ]
     return epistemic_graph_module._dedupe_candidates(generated)
 
 
@@ -682,15 +649,11 @@ def build_queue(
     if refusal is not None:
         return refusal
     vault_root = Path(vault_root)
-    visible = egress.visible_page_filter(vault_root)
-    # The owner's batch is requested exactly as before.
-    decided: dict[str, Any] = {} if visible is None else {"keep": visible}
     batch = epistemic_graph_module.EpistemicGraphIndex(
         vault_root
     ).relation_review_batch(
         limit_pages=limit_pages,
         limit_per_page=limit_per_page,
-        **decided,
     )
     status = str(batch.get("status") or "warming")
     if status != "available":
@@ -744,7 +707,6 @@ def build_queue(
         "groups": groups,
         "retryable": False,
     }
-
 
 
 def _refuse_other_audiences(vault_root: Path) -> None:

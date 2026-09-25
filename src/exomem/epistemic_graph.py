@@ -17,7 +17,7 @@ import sqlite3
 import threading
 import time
 import weakref
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -6486,20 +6486,14 @@ class EpistemicGraphIndex:
         *,
         limit_pages: int = 50,
         limit_per_page: int = 10,
-        keep: Callable[[str], bool] | None = None,
     ) -> dict[str, Any]:
         """Assemble the deterministic relation queue from one bounded snapshot.
 
         The eight statements below are a fixed plan: eligibility, sources, and
         one set query for each graph-representable candidate family.  Nothing in
         this path opens Markdown, invokes embeddings, or acquires writer authority.
-
-        `keep` is the caller's release decision (`None` for the owner). Source
-        pages and every candidate's target and evidence are decided before the
-        page and item caps and before anything is counted.
         """
         from . import context_refs, relation_queue, review_state, semantic_contract
-        from .governance import egress as egress_module
 
         page_cap = min(50, max(0, int(limit_pages)))
         item_cap = min(64, max(0, int(limit_per_page)))
@@ -6523,13 +6517,7 @@ class EpistemicGraphIndex:
                 "coverage": {"eligible_pages": 0, "relation_scan_complete": False},
             }
         try:
-            # Coverage reduces every eligible page, so under a governed policy
-            # it is the owner's: another audience is refused it before it is
-            # read, and its page totals below count only pages it was decided.
-            coverage_refusal = (
-                None if keep is None else egress_module.owner_only_aggregate(self.vault_root)
-            )
-            coverage_row = None if coverage_refusal is not None else conn.execute(
+            coverage_row = conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(activation_connected), 0), "
                 "COALESCE(SUM(activation_typed_relations > 0), 0), "
                 "COALESCE(SUM(activation_connected = 1 "
@@ -6541,7 +6529,7 @@ class EpistemicGraphIndex:
                 "COALESCE(SUM(activation_unregistered), 0) "
                 "FROM graph_nodes WHERE kind = 'file' AND review_eligible = 1"
             ).fetchone()
-            coverage = {} if coverage_row is None else dict(
+            coverage = dict(
                 zip(
                     (
                         "eligible_pages",
@@ -6557,34 +6545,16 @@ class EpistemicGraphIndex:
                     strict=True,
                 )
             )
-            eligible_total = coverage.get("eligible_pages", 0)
-            source_query = (
+            eligible_total = coverage["eligible_pages"]
+            source_rows = conn.execute(
                 "SELECT n.path, n.title, n.source_hash, n.activation_signal_version, "
                 "n.exomem_id, CASE WHEN n.exomem_id IS NULL THEN 0 ELSE "
                 "(SELECT COUNT(*) FROM graph_nodes ids WHERE ids.kind = 'file' "
                 "AND ids.exomem_id = n.exomem_id) END "
                 "FROM graph_nodes n WHERE n.kind = 'file' AND n.review_eligible = 1 "
-                "ORDER BY n.activation_priority, n.path"
-            )
-            decided_all = True
-            if keep is None:
-                source_rows = conn.execute(
-                    f"{source_query} LIMIT ?", (source_cap + 1,)
-                ).fetchall()
-            else:
-                # Decided in priority order until the cap is met, so a withheld
-                # page never takes a source slot.
-                source_rows = []
-                for row in conn.execute(source_query):
-                    if keep(str(row[0])):
-                        source_rows.append(row)
-                        if len(source_rows) > source_cap:
-                            decided_all = False
-                            break
-                # The caller's eligible total is known when every source was
-                # decided; otherwise it exceeds the cap, which is all the
-                # truncation flag needs.
-                eligible_total = len(source_rows)
+                "ORDER BY n.activation_priority, n.path LIMIT ?",
+                (source_cap + 1,),
+            ).fetchall()
             selected_rows = source_rows[:source_cap]
             selected = [str(row[0]) for row in selected_rows]
             if not selected or page_cap == 0 or item_cap == 0:
@@ -6601,8 +6571,7 @@ class EpistemicGraphIndex:
                         "placeholder_target": 0,
                         "decided": 0,
                     },
-                    "coverage": coverage_refusal
-                    or {
+                    "coverage": {
                         **coverage,
                         "relation_pages_scanned": 0,
                         "relation_candidate_pages_found": 0,
@@ -6840,26 +6809,6 @@ class EpistemicGraphIndex:
                 "ORDER BY source_path, target_path, dst_key LIMIT ?",
                 (*selected, per_source_cap, branch_cap + 1),
             ).fetchall()
-            if keep is not None:
-                # A source whose body links could resolve to a page this reader
-                # may not see proposes the links a vault without it would.
-                view = _VisibleLinkView(self.vault_root, conn, keep, self.registry)
-                by_source: dict[str, list[tuple[Any, ...]]] = {}
-                for row in wiki_and_authored_rows:
-                    by_source.setdefault(str(row[1]), []).append(row)
-                for source in selected:
-                    link_rows = view.body_link_rows(source)
-                    if link_rows is None:
-                        continue
-                    by_source[source] = [
-                        (0, source, target, json.dumps(evidence), raw, target_id,
-                         target_count, authored, len(link_rows))
-                        for target, evidence, raw, target_id, target_count, authored
-                        in link_rows[:per_source_cap]
-                    ]
-                wiki_and_authored_rows = [
-                    row for source in sorted(by_source) for row in by_source[source]
-                ][: branch_cap + 1]
         except sqlite3.Error:
             return {
                 "status": "warming",
@@ -6907,9 +6856,6 @@ class EpistemicGraphIndex:
             or any(int(row[-1] or 0) > per_source_cap for row in shared_source_rows)
         )
 
-        def released(*paths: Any) -> bool:
-            return keep is None or all(keep(_with_md(str(path or ""))) for path in paths)
-
         def remember(
             path: Any, exomem_id: Any, count: Any, target_exists: Any = 1
         ) -> str:
@@ -6945,8 +6891,6 @@ class EpistemicGraphIndex:
                 authored_match,
                 _source_total,
             ) = row
-            if not released(target):
-                continue
             target_rel = remember(target, target_id, target_count)
             review_evidence = _json(evidence_raw)
             evidence = review_evidence.get("evidence")
@@ -6982,8 +6926,7 @@ class EpistemicGraphIndex:
             definition = self.registry.definition(str(relation_type or ""))
             authored_relation = relation_registry.normalize_relation(str(raw_relation or ""))
             if (
-                not released(target)
-                or definition is None
+                definition is None
                 or definition.family not in _LIFT_RELATION_FAMILIES
                 or not _is_writable_relation_label(authored_relation)
             ):
@@ -7047,8 +6990,6 @@ class EpistemicGraphIndex:
                 authored_match,
                 _source_total,
             ) = row
-            if not released(target):
-                continue
             target_rel = remember(target, target_id, target_count)
             key = (str(source), target_rel)
             question_authored[key] = bool(authored_match)
@@ -7101,8 +7042,6 @@ class EpistemicGraphIndex:
                 authored_match,
                 _source_total,
             ) = row
-            if not released(other, str(target_key or "").removeprefix("file:")):
-                continue
             target_rel = remember(other, target_id, target_count)
             key = (str(source), target_rel)
             resolution_authored[key] = bool(authored_match)
@@ -7148,8 +7087,6 @@ class EpistemicGraphIndex:
                 authored_match,
                 _source_total,
             ) = row
-            if not released(target):
-                continue
             target_rel = remember(target, target_id, target_count, target_exists)
             methods[str(source)]["frontmatter_sources"].append(
                 {
@@ -7170,8 +7107,6 @@ class EpistemicGraphIndex:
             authored_match,
             _source_total,
         ) in shared_source_rows[:branch_cap]:
-            if not released(target, str(shared_key or "").removeprefix("file:")):
-                continue
             target_rel = remember(target, target_id, target_count)
             methods[str(source)]["shared_sources"].append(
                 {
@@ -7386,9 +7321,6 @@ class EpistemicGraphIndex:
                     "relation_scan_complete": False,
                 },
             }
-        unscanned = {"pages_unscanned": max(0, eligible_total - pages_scanned)}
-        if not decided_all:
-            unscanned = {}  # more visible pages than the cap; not counted
         return {
             "status": "available",
             "mode": "relation-queue",
@@ -7398,11 +7330,10 @@ class EpistemicGraphIndex:
             "pages_shown": len(groups),
             "pages_scanned": pages_scanned,
             "pages_truncated": pages_truncated,
-            **unscanned,
+            "pages_unscanned": max(0, eligible_total - pages_scanned),
             "items_truncated": items_truncated,
             "filtered": filtered,
-            "coverage": coverage_refusal
-            or {
+            "coverage": {
                 **coverage,
                 "relation_pages_scanned": pages_scanned,
                 "relation_candidate_pages_found": len(groups),
@@ -8022,16 +7953,7 @@ def suggest_relations(
     include_model_suggestions: bool = False,
     limit: int = 10,
 ) -> dict[str, Any]:
-    """Return proposed relation candidates without mutating files or sidecars.
-
-    A caller other than the owner is proposed only relations among pages it
-    may see: every candidate's endpoints and evidence are decided before the
-    per-method caps and the `limit`, so the list reads as if the withheld
-    pages were absent.
-    """
-    from .governance import egress
-
-    visible = egress.visible_page_filter(vault_root)
+    """Return proposed relation candidates without mutating files or sidecars."""
     candidates: list[dict[str, Any]] = []
     warnings: list[str] = []
     if path:
@@ -8060,22 +7982,15 @@ def suggest_relations(
             # take at most nine of ten slots; the existing four keep their
             # relative order among themselves. Pinned in both directions by the
             # suggestion-order test.
-            # The owner's generators are called exactly as before.
-            decided: dict[str, Any] = {} if visible is None else {"keep": visible}
-            view: dict[str, Any] = {} if visible is None else {"visible": visible}
-            candidates.extend(_structural_candidates(vault_root, rel, **decided))
-            candidates.extend(_wikilink_candidates(vault_root, page.body, rel, **view))
+            candidates.extend(_structural_candidates(vault_root, rel))
+            candidates.extend(_wikilink_candidates(vault_root, page.body, rel))
             candidates.extend(_frontmatter_source_candidates(page))
-            candidates.extend(_shared_source_candidates(vault_root, rel, **decided))
-            candidates.extend(_embedding_proximity_candidates(vault_root, page, **decided))
+            candidates.extend(_shared_source_candidates(vault_root, rel))
+            candidates.extend(_embedding_proximity_candidates(vault_root, page))
     elif draft_body:
         candidates.extend(
             _draft_wikilink_candidates(vault_root, draft_body, draft_title=draft_title)
         )
-    if visible is not None:
-        candidates = [
-            candidate for candidate in candidates if candidate_is_visible(candidate, visible)
-        ]
     if include_model_suggestions:
         warnings.append("model-backed graph relation suggestions unavailable")
     return {
@@ -10272,53 +10187,6 @@ class _VisibleLinkView:
         }
         return [json.loads(json.dumps(edge.as_dict(), sort_keys=True)) for edge in resolved]
 
-    def body_link_rows(self, rel_path: str) -> list[tuple[Any, ...]] | None:
-        """`rel_path`'s body-link edges here, or `None` when they are unchanged.
-
-        Each row is `(target path, review evidence, raw relation, target exomem
-        id, pages sharing that id, authored)` in the order the stored graph
-        ranks them (occurrence, target, relation); `authored` marks a target
-        the page also names with a `links_to` relation line.
-        """
-        edges = self.page_edges(rel_path)
-        if edges is None:
-            return None
-        authored = {
-            str(edge["dst_key"])
-            for edge in edges
-            if edge["origin"] == "markdown_relation" and edge["raw_relation"] == "links_to"
-        }
-        evidence = self._evidence.get(rel_path, {})
-        ranked: list[tuple[tuple[int, str, str], tuple[Any, ...]]] = []
-        for edge in edges:
-            if edge["origin"] != "wikilink":
-                continue
-            target = self.conn.execute(
-                "SELECT d.path, d.exomem_id, CASE WHEN d.exomem_id IS NULL THEN 0 ELSE "
-                "(SELECT COUNT(*) FROM graph_nodes ids WHERE ids.kind = 'file' "
-                "AND ids.exomem_id = d.exomem_id) END FROM graph_nodes d "
-                "WHERE d.node_key = ? AND d.kind = 'file'",
-                (edge["dst_key"],),
-            ).fetchone()
-            if target is None:
-                continue
-            payload = evidence.get(str(edge["edge_key"]), {})
-            occurrence = (payload.get("internal") or {}).get("occurrence", -1)
-            ranked.append(
-                (
-                    (int(occurrence), str(target[0]), str(edge["raw_relation"])),
-                    (
-                        str(target[0]),
-                        payload,
-                        str(edge["raw_relation"]),
-                        target[1],
-                        int(target[2] or 0),
-                        str(edge["dst_key"]) in authored,
-                    ),
-                )
-            )
-        return [row for _key, row in sorted(ranked, key=lambda item: item[0])]
-
     def inbound_sources(self, rel_path: str) -> set[str]:
         """Visible pages whose links to `rel_path`'s names resolve differently here."""
         keys = _dependency_changed_keys({rel_path}, self._shared_resolver())
@@ -10466,21 +10334,12 @@ def _nodes_by_keys(conn: sqlite3.Connection, keys: set[str]) -> list[dict[str, A
     return [n for n in nodes if n is not None]
 
 
-def _wikilink_candidates(
-    vault_root: Path,
-    body: str,
-    rel_path: str,
-    *,
-    visible: Callable[[str], bool] | None = None,
-) -> list[dict[str, Any]]:
-    """Body links as `links_to` candidates; `visible` resolves them in a reader's view."""
+def _wikilink_candidates(vault_root: Path, body: str, rel_path: str) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     for match in vault_module.find_body_wikilinks(body):
         target = match.group(1).strip()
         try:
-            canonical, warning = vault_module.normalize_wikilink(
-                target, vault_root, strict=False, visible=visible
-            )
+            canonical, warning = vault_module.normalize_wikilink(target, vault_root, strict=False)
         except Exception:  # noqa: BLE001 - malformed links are ignored
             continue
         if warning:
@@ -10510,35 +10369,21 @@ def _frontmatter_source_candidates(page) -> list[dict[str, Any]]:
     ]
 
 
-def _shared_source_candidates(
-    vault_root: Path, rel_path: str, *, keep: Callable[[str], bool] | None = None
-) -> list[dict[str, Any]]:
+def _shared_source_candidates(vault_root: Path, rel_path: str) -> list[dict[str, Any]]:
     idx = EpistemicGraphIndex(vault_root)
     conn = idx._open_read_snapshot()
     if conn is None:
         return []
     try:
         src_key = _file_key(rel_path)
-        query = (
+        rows = conn.execute(
             "SELECT e2.src_key, e1.dst_key FROM graph_edges e1 "
             "JOIN graph_edges e2 ON e1.dst_key = e2.dst_key "
             "WHERE e1.src_key = ? AND e1.relation_type = 'derived_from' "
             "AND e2.relation_type = 'derived_from' AND e2.src_key != ? "
-            "ORDER BY e2.src_key"
-        )
-        if keep is None:
-            rows = conn.execute(f"{query} LIMIT 10", (src_key, src_key)).fetchall()
-        else:
-            # The first ten the caller may see, decided in order, rather than
-            # ten rows of which some are then discarded.
-            rows = []
-            for other_key, shared_key in conn.execute(query, (src_key, src_key)):
-                if keep(str(other_key).removeprefix("file:")) and keep(
-                    str(shared_key).removeprefix("file:")
-                ):
-                    rows.append((other_key, shared_key))
-                    if len(rows) >= 10:
-                        break
+            "ORDER BY e2.src_key LIMIT 10",
+            (src_key, src_key),
+        ).fetchall()
     finally:
         conn.close()
     out: list[dict[str, Any]] = []
@@ -10701,9 +10546,7 @@ _SHARED_RESOLUTION_TARGET_SQL = f"""
 """
 
 
-def _structural_candidates(
-    vault_root: Path, rel_path: str, *, keep: Callable[[str], bool] | None = None
-) -> list[dict[str, Any]]:
+def _structural_candidates(vault_root: Path, rel_path: str) -> list[dict[str, Any]]:
     """Three structural generators over ONE validated read snapshot.
 
     `_open_read_snapshot` re-checks freshness, recall-policy identity and graph
@@ -10726,9 +10569,9 @@ def _structural_candidates(
         rel = _with_md(rel_path)
         file_key = _file_key(rel)
         produced = [
-            *_unit_relation_lift_candidates(conn, index.registry, rel, file_key, keep=keep),
-            *_shared_open_question_candidates(conn, rel, keep=keep),
-            *_shared_resolution_target_candidates(conn, rel, file_key, keep=keep),
+            *_unit_relation_lift_candidates(conn, index.registry, rel, file_key),
+            *_shared_open_question_candidates(conn, rel),
+            *_shared_resolution_target_candidates(conn, rel, file_key),
         ]
     except sqlite3.Error:  # a structural suggestion must never break a read
         return []
@@ -10757,8 +10600,6 @@ def _unit_relation_lift_candidates(
     registry: relation_registry.RelationRegistry,
     rel_path: str,
     file_key: str,
-    *,
-    keep: Callable[[str], bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Propose the kinds the author already typed on this page's own units.
 
@@ -10808,7 +10649,7 @@ def _unit_relation_lift_candidates(
         if not authored or not _is_writable_relation_label(authored):
             continue
         target = _with_md(str(dst_key or "").removeprefix("file:"))
-        if not target or target == rel_path or (keep is not None and not keep(target)):
+        if not target or target == rel_path:
             continue
         entry = grouped.setdefault(
             (target, authored), {"family": definition.family, "units": []}
@@ -10847,7 +10688,7 @@ def _unit_relation_lift_candidates(
 
 
 def _shared_open_question_candidates(
-    conn: sqlite3.Connection, rel_path: str, *, keep: Callable[[str], bool] | None = None
+    conn: sqlite3.Connection, rel_path: str
 ) -> list[dict[str, Any]]:
     """Pages carrying the same normalized open question.
 
@@ -10870,7 +10711,7 @@ def _shared_open_question_candidates(
     grouped: dict[str, list[dict[str, Any]]] = {}
     for other_path, question, unit_ref, anchor, other_unit_ref, other_anchor in rows:
         target = _with_md(str(other_path or ""))
-        if not target or target == rel_path or (keep is not None and not keep(target)):
+        if not target or target == rel_path:
             continue
         grouped.setdefault(target, []).append(
             {
@@ -10899,11 +10740,7 @@ def _shared_open_question_candidates(
 
 
 def _shared_resolution_target_candidates(
-    conn: sqlite3.Connection,
-    rel_path: str,
-    file_key: str,
-    *,
-    keep: Callable[[str], bool] | None = None,
+    conn: sqlite3.Connection, rel_path: str, file_key: str
 ) -> list[dict[str, Any]]:
     """Pages whose units answer or resolve the same target as this page's.
 
@@ -10942,12 +10779,9 @@ def _shared_resolution_target_candidates(
         target = _with_md(str(other_path or ""))
         if not target or target == rel_path:
             continue
-        shared = _with_md(str(target_key or "").removeprefix("file:"))
-        if keep is not None and not (keep(target) and keep(shared)):
-            continue
         grouped.setdefault(target, []).append(
             {
-                "target": shared,
+                "target": _with_md(str(target_key or "").removeprefix("file:")),
                 "relation": relation,
                 "anchor": anchor,
                 "unit_ref": unit_ref,
@@ -10981,23 +10815,15 @@ def _ordered_matches(
     return ordered[:_STRUCTURAL_EVIDENCE_MATCHES]
 
 
-def _embedding_proximity_candidates(
-    vault_root: Path, page, *, keep: Callable[[str], bool] | None = None
-) -> list[dict[str, Any]]:
+def _embedding_proximity_candidates(vault_root: Path, page) -> list[dict[str, Any]]:
     """Optional embedding-proximity suggestions; empty when embeddings are off."""
     try:
         from . import corpus_aware
 
         # The page is stored: its current rows already hold a vector for each of
-        # these chunk texts, so only a text they lack is encoded. A caller other
-        # than the owner over-fetches, so a withheld neighbour's slot is taken
-        # by the next page it may see.
+        # these chunk texts, so only a text they lack is encoded.
         scores = corpus_aware._best_cosine_per_file(
-            vault_root,
-            title=page.title,
-            body=page.body,
-            k=10 if keep is None else 20,
-            published_path=page.rel_path,
+            vault_root, title=page.title, body=page.body, k=10, published_path=page.rel_path
         )
     except Exception:  # noqa: BLE001 - writer hooks must not break Markdown writes
         return []
@@ -11005,10 +10831,8 @@ def _embedding_proximity_candidates(
     self_path = page.rel_path
     for target, score in sorted(scores.items(), key=lambda item: (-item[1], item[0])):
         target_path = _with_md(target)
-        if target_path == self_path or (keep is not None and not keep(target_path)):
+        if target_path == self_path:
             continue
-        if keep is not None and len(out) >= 10:
-            break
         out.append(
             {
                 "from": self_path,
@@ -11025,16 +10849,11 @@ def _draft_wikilink_candidates(
     vault_root: Path, body: str, *, draft_title: str | None
 ) -> list[dict[str, Any]]:
     pseudo = f"draft:{draft_title or 'untitled'}"
-    # A draft is the caller's own text: its links resolve over the pages the
-    # caller may see, as the write that follows would resolve them.
-    visible = vault_module.writer_link_visibility(vault_root)
     candidates: list[dict[str, Any]] = []
     for match in vault_module.find_body_wikilinks(body):
         target = match.group(1).strip()
         try:
-            canonical, warning = vault_module.normalize_wikilink(
-                target, vault_root, strict=False, visible=visible
-            )
+            canonical, warning = vault_module.normalize_wikilink(target, vault_root, strict=False)
         except Exception:  # noqa: BLE001 - malformed links are ignored
             continue
         if warning:
@@ -11060,23 +10879,6 @@ def _dedupe_edges(edges: list[GraphEdge]) -> list[GraphEdge]:
         seen.add(edge.edge_key)
         out.append(edge)
     return out
-
-
-def candidate_is_visible(candidate: Mapping[str, Any], keep: Callable[[str], bool]) -> bool:
-    """True when every page a relation candidate names is one `keep` admits.
-
-    That is its endpoints and the pages its evidence rests on (a shared
-    source, a shared resolution target). A proposal whose basis the caller may
-    not see is not a proposal the caller can review.
-    """
-    names = [str(candidate.get("from") or ""), str(candidate.get("to") or "")]
-    evidence = candidate.get("evidence")
-    if isinstance(evidence, Mapping):
-        names.append(str(evidence.get("shared_source") or ""))
-        for match in evidence.get("matches") or ():
-            if isinstance(match, Mapping):
-                names.append(str(match.get("target") or ""))
-    return all(keep(_with_md(name)) for name in names if name and not name.startswith("draft:"))
 
 
 def _dedupe_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:

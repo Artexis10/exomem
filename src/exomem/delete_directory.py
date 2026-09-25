@@ -74,17 +74,6 @@ class DeleteDirectoryError(Exception):
         return {"code": self.code, "reason": self.reason}
 
 
-def _only_withheld(vault_root: Path, rel_path: str) -> bool:
-    """True when every listable file in the folder is withheld from the caller."""
-    from . import list_directory
-    from .governance import egress
-
-    keep = egress.restricted_release_filter(vault_root)
-    if keep is None:
-        return False
-    return list_directory._withheld_target(vault_root, rel_path, keep, True, {}, is_dir=True)
-
-
 def delete_directory(
     vault_root: Path,
     *,
@@ -112,11 +101,6 @@ def delete_directory(
         )
     except VaultPathError as e:
         raise DeleteDirectoryError(code=e.code, reason=e.reason) from e
-    if _only_withheld(vault_root, rel_path):
-        # A folder holding only files the caller may not see does not exist
-        # for it: answered exactly as a missing path, and never touched.
-        requested = str(path).strip().replace("\\", "/").lstrip("/")
-        raise DeleteDirectoryError(code="NOT_FOUND", reason=f"path does not exist: {requested}")
 
     try:
         lifecycle.assert_not_protected(vault_root, rel_path)
