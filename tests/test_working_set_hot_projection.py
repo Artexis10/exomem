@@ -627,3 +627,103 @@ def test_recent_context_leads_with_the_callers_own_thread(heat_vault: Path) -> N
     assert DEPOT in _recent(first) and DEPOT in _recent(second)
     # A caller with no keys gets the vault's order: the newest contact first.
     assert _recent(keyless)[0] == DEPOT, keyless["recent_context"]
+
+
+# --------------------------------------------------------------------------- #
+# The packet cache key carries the heat digest
+# --------------------------------------------------------------------------- #
+
+
+def test_a_read_only_shift_is_not_served_from_the_packet_cache(heat_vault: Path) -> None:
+    """Deferred limit 3, end to end: a session with no edits at all. A read
+    moved nothing in the old key, so the second "continue" was served the
+    cached first answer, and the block's reads were stale."""
+    commands.op_read_memory(heat_vault, path=SLED)
+    first = _continue(heat_vault)
+    assert _resolved(first) == [SLED], (first.get("abstention"), first["anchors"])
+
+    commands.op_read_memory(heat_vault, path=MARIT)
+    second = _continue(heat_vault)
+
+    assert _resolved(second) == [MARIT], (second.get("abstention"), second["anchors"])
+    assert second["recent_context"][0]["path"] == MARIT, second["recent_context"]
+
+
+def test_cache_key_includes_the_heat_digest() -> None:
+    base = {
+        "freshness_key": "k",
+        "index_generation": 3,
+        "roles_hash": "r",
+        "turn": "continue",
+        "max_chars": 4000,
+    }
+
+    one = working_set_runtime.cache_key(**base, heat_digest="aaaa")
+
+    assert one == working_set_runtime.cache_key(**base, heat_digest="aaaa")
+    assert one != working_set_runtime.cache_key(**base, heat_digest="bbbb")
+
+
+def test_a_packet_is_compiled_against_the_profile_it_was_keyed_on(
+    heat_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import working_set
+
+    _traced_commit(heat_vault, [SLED])
+    seen: dict[str, list] = {"profiles": [], "keyed": [], "compiled": []}
+    real_profile = working_set_heat.profile
+    real_digest = working_set_heat.view_digest
+    real_compile = working_set.compile_packet
+
+    def profile(root):
+        out = real_profile(root)
+        seen["profiles"].append(out)
+        return out
+
+    def digest(heat, *args, **kwargs):
+        seen["keyed"].append(heat)
+        return real_digest(heat, *args, **kwargs)
+
+    def compile_packet(*args, **kwargs):
+        seen["compiled"].append(kwargs.get("heat_profile"))
+        return real_compile(*args, **kwargs)
+
+    monkeypatch.setattr(working_set_heat, "profile", profile)
+    monkeypatch.setattr(working_set_heat, "view_digest", digest)
+    monkeypatch.setattr(working_set, "compile_packet", compile_packet)
+
+    packet = _continue(heat_vault)
+
+    assert len(seen["profiles"]) == 1, "one fold and one profile read per request"
+    assert seen["keyed"][0] is seen["profiles"][0] is seen["compiled"][0]
+    assert packet["generation"]["hot_profile"]["state"] == seen["profiles"][0].state
+    # The same request again, nothing new in between: the cached packet.
+    again = _continue(heat_vault)
+    assert len(seen["compiled"]) == 1
+    assert _resolved(again) == _resolved(packet) == [SLED]
+
+
+def test_the_hooks_call_and_the_agents_duplicate_share_one_cache_entry(
+    heat_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hook activates the turn with the session's keys and the agent then
+    calls again without them. A session with no history of its own is served
+    the vault's packet, so it shares the vault's digest and the duplicate is a
+    cache hit, not a second compile."""
+    from exomem import working_set
+
+    _traced_commit(heat_vault, [SLED])
+    compiled: list[str] = []
+    real_compile = working_set.compile_packet
+
+    def compile_packet(*args, **kwargs):
+        compiled.append(kwargs.get("turn", ""))
+        return real_compile(*args, **kwargs)
+
+    monkeypatch.setattr(working_set, "compile_packet", compile_packet)
+
+    hook = commands.op_activate_context(heat_vault, turn=SLED_TURN, **S1)
+    agent = commands.op_activate_context(heat_vault, turn=SLED_TURN)
+
+    assert len(compiled) == 1, compiled
+    assert _resolved(hook) == _resolved(agent)
