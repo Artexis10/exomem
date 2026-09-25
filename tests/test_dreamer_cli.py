@@ -68,3 +68,16 @@ def test_the_environment_kill_switch_is_reported(capsys, monkeypatch) -> None:
     assert cli.main(["dreamer", "status", "--json"]) == 0
     lines = capsys.readouterr().out.strip().splitlines()
     assert json.loads(lines[-1])["setting"] == "off"
+
+
+def test_turning_it_on_says_a_server_started_off_needs_a_restart(capsys) -> None:
+    """A server that booted with the dreamer off has no worker thread to re-read
+    the setting, so `on` must not promise it applies within one poll."""
+    for command in ("on", "resume"):
+        assert cli.main(["dreamer", command]) == 0
+        out = capsys.readouterr().out
+        assert "restart" in out, out
+    for command in ("pause", "off"):
+        assert cli.main(["dreamer", command]) == 0
+        out = capsys.readouterr().out
+        assert "within one poll" in out and "restart" not in out, out

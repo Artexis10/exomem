@@ -958,8 +958,9 @@ def _dreamer_main(argv: list[str]) -> int:
         prog="exomem dreamer",
         description="Show or set the dreamer, the default-off background worker that "
         "proposes bounded upkeep. on | off | pause | resume write the `dreamer` key in "
-        "the per-machine config file, which a running server re-reads within one poll; "
-        "EXOMEM_DREAMER in the service environment overrides it.",
+        "the per-machine config file, which a running server's worker re-reads within one "
+        "poll; a server started with the dreamer off has no worker, so `on` takes effect "
+        "at its next restart. EXOMEM_DREAMER in the service environment overrides it.",
     )
     parser.add_argument("action", choices=("status", "on", "off", "pause", "resume"))
     parser.add_argument(
@@ -998,7 +999,15 @@ def _dreamer_main(argv: list[str]) -> int:
     print(f"Dreamer set to '{value}'  ({path})")
     if effective != value:
         print(f"EXOMEM_DREAMER in this environment overrides it: effective '{effective}'.")
-    print("A running exomem server applies it within one poll (about 30s).")
+    if value == "on":
+        # The worker thread is what re-reads the setting, and a server started
+        # with the dreamer off never created one.
+        print(
+            "A running exomem server whose worker is running applies it within one poll "
+            "(about 30s); a server started with the dreamer off starts it at its next restart."
+        )
+    else:
+        print("A running exomem server applies it within one poll (about 30s).")
     return 0
 
 
