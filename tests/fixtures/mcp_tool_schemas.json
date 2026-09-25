@@ -69,7 +69,7 @@
             }
           ],
           "default": null,
-          "description": "One ref the agent is naming on its own authority: the sense meant from a previous `ambiguity` block, or any ordinary compiled page a packet already listed (`recent_context`, `retrieval_named`, or an `unresolved` turn's candidates) — not raw `Sources`/`Evidence` material, which stays a `read_memory` target. That anchor or page is then treated as resolved on your choice alone, its roles run, and any competing senses are omitted. A ref that names nothing eligible this way, or one this audience may not see, is refused identically and no packet is built."
+          "description": "One ref the agent is naming on its own authority: the sense meant from a previous `ambiguity` block, or any ordinary compiled page a packet already listed (`recent_context`, `retrieval_named`, or an `unresolved` turn's candidates) — not raw `Sources`/`Evidence` material, which stays a `read_memory` target. That anchor or page is then treated as resolved on your choice alone, its roles run, and any competing senses are omitted. A ref that names nothing eligible this way, or one this audience may not see, is refused identically and no packet is built. When the user corrects which page they meant, call again with the same turn and `anchor` set to it."
         },
         "include_timings": {
           "default": false,
@@ -6520,7 +6520,7 @@
       "additionalProperties": false,
       "properties": {
         "operation": {
-          "description": "For `relations`, `propose-relation` returns a reviewed delta without writing and `save-relations` commits that delta with expected_hash and why. For `entity-types`, `resolve-entity-type` reads matching definitions using query and optional requested_type; `save-entity-types` saves a reviewed proposal with why and expected_hash when updating. The current entity registry is included in bootstrap. For `relations`, `census` returns counts-only relation quality from the published graph (optional detail, date_from, date_to) and never writes. For `workflow-contracts`, exactly one of: inventory (no workflow fields); inspect (name); validate (exactly one of name or proposal); resolve (context plus at most one of name or proposal); preview (proposal, optional name); save (proposal and why, optional name plus expected_hash for updates); or refresh (name, expected_hash, and why). Other subjects retain their existing operations.",
+          "description": "For `relations`, `propose-relation` returns a reviewed delta without writing and `save-relations` commits that delta with expected_hash and why. For `entity-types`, `resolve-entity-type` reads matching definitions using query and optional requested_type; `save-entity-types` saves a reviewed proposal with why and expected_hash when updating. The current entity registry is included in bootstrap. For `relations`, `census` returns counts-only relation quality from the published graph (optional detail, date_from, date_to) and never writes. For `workflow-contracts`, exactly one of: inventory (no workflow fields); inspect (name); validate (exactly one of name or proposal); resolve (context plus at most one of name or proposal); preview (proposal, optional name); save (proposal and why, optional name plus expected_hash for updates); or refresh (name, expected_hash, and why). Other subjects retain their existing operations. For `context-roles` and `activation-conventions`, `validate` returns a proposal's findings plus the current registry's content_hash; `diff` compares a proposal against the effective registry; `save-roles`/`save-conventions` (matched to their subject) commit a reviewed proposal with why and expected_hash, refusing a proposal that has any finding; `history` lists the kept versions (newest first: time, why, before and after hash); `restore` reinstates one `version` with why and expected_hash, validated like a save; `infer` is refused for both, since the server does not propose conventions or roles.",
           "type": "string"
         },
         "name": {
@@ -6537,7 +6537,7 @@
         },
         "subject": {
           "default": "contract",
-          "description": "`contract`, `categories`, `entity-types`, `relations`, `traversal-profiles`, or `workflow-contracts`. Workflow contracts support inventory, inspect, validate, resolve, preview, save, and refresh with their exact argument matrix.",
+          "description": "`contract`, `categories`, `entity-types`, `relations`, `traversal-profiles`, `context-roles`, `activation-conventions`, or `workflow-contracts`. Workflow contracts support inventory, inspect, validate, resolve, preview, save, and refresh with their exact argument matrix.",
           "type": "string"
         },
         "project": {
@@ -6579,7 +6579,7 @@
             }
           ],
           "default": null,
-          "description": "Current relation registry hash required by save-relations, or\ncurrent workflow hash required for workflow save updates and refresh."
+          "description": "Current relation registry hash required by save-relations, current\nworkflow hash required for workflow save updates and refresh, or the current\nroles_hash/conventions_hash required by save-roles/save-conventions."
         },
         "strict": {
           "default": false,
@@ -6608,7 +6608,7 @@
             }
           ],
           "default": null,
-          "description": "Reviewed relation definition for propose-relation, reviewed delta\nfor save-relations, or workflow proposal for workflow modes.\npropose-relation requires requested_label (the name portion), parent\n(one core relation key), description, and direction (directed or symmetric);\nnamespace supplies the prefix and defaults to vault. Optional fields are\naliases, inverse, origins, source_kinds, target_kinds, projects, page_types,\nand query. Pass this mapping directly without an extensions wrapper.\nsave-relations takes the returned delta and expected_hash."
+          "description": "Reviewed relation definition for propose-relation, reviewed delta\nfor save-relations, workflow proposal for workflow modes, or a complete\noverride document (the same shape as the vault file) for context-roles'\nvalidate/diff/save-roles and activation-conventions' validate/diff/save-conventions.\npropose-relation requires requested_label (the name portion), parent\n(one core relation key), description, and direction (directed or symmetric);\nnamespace supplies the prefix and defaults to vault. Optional fields are\naliases, inverse, origins, source_kinds, target_kinds, projects, page_types,\nand query. Pass this mapping directly without an extensions wrapper.\nsave-relations takes the returned delta and expected_hash."
         },
         "why": {
           "anyOf": [
@@ -6620,7 +6620,7 @@
             }
           ],
           "default": null,
-          "description": "Required audit reason for relation delta save, workflow save/refresh,\nand entity-type saves."
+          "description": "Required audit reason for relation delta save, workflow save/refresh,\nentity-type saves, and save-roles/save-conventions."
         },
         "include_model_suggestions": {
           "default": false,
@@ -6778,6 +6778,18 @@
           ],
           "default": null,
           "description": "Relation census detail: `counts` (default) or `keys`, which adds predicate keys and counts."
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A kept registry version from `history`, for `restore` on `context-roles` or `activation-conventions`."
         },
         "response_detail": {
           "default": "compact",

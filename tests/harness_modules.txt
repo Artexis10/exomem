@@ -43,6 +43,7 @@ tests/test_hosted_secret_handoff.py
 tests/test_hosted_security.py
 tests/test_hosted_terraform_contract.py
 tests/test_install_hook.py
+tests/test_learning_fresh_session_journey.py
 tests/test_lifecycle_routing_journey.py
 tests/test_lme_adapter.py
 tests/test_lme_basic_memory_direct.py
