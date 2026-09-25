@@ -294,3 +294,18 @@ cert-manager:
   # chart in normal practice; bundled here as a chart dependency (like
   # hcloud-csi and traefik above) because this repo already manages its
   # cluster-level infra this way.
+  #
+  # v1.19.6, pinned by multi-arch image index digest (the chart renders
+  # <repository>@<digest> when a digest is set), resolved from quay.io on
+  # 2026-09-25. Bump these together with the chart version in Chart.yaml.
+  image:
+    digest: sha256:c6a328f6095a02731e943c95d5e61bdc3b87373cc9fbd915f73d8615cda766f9
+  cainjector:
+    image:
+      digest: sha256:f7ce571e372f28229cab2e07c803e2dc0b37c5642818a097ab42a19af182a329
+  webhook:
+    image:
+      digest: sha256:c4b7103d6c1edb196ee448660835b9a5d0fb3f9064019d881fd56e94859df288
+  startupapicheck:
+    image:
+      digest: sha256:20bc1106514032737873e8d46afacfbcc61d6ffe0e29f47b9d914b28e18ad521

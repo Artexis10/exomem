@@ -1081,6 +1081,19 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
     )
     assert denied_fresh.returncode != 0
     assert "exomem-cellctl-isolation" in denied_fresh.stderr, denied_fresh.stderr
+    print("[3.10] scenario: admission denies a StatefulSet in a fresh cell namespace with no default-deny")
+    fresh_statefulset = {
+        "apiVersion": "apps/v1",
+        "kind": "StatefulSet",
+        "metadata": {"name": "cell", "namespace": fresh_namespace},
+        "spec": copy.deepcopy(stateful_set["spec"]),
+    }
+    denied_fresh_statefulset = _kubectl(
+        k3s.name, ["create", "--dry-run=server", "--filename=-", f"--as={cellctl_username}"],
+        documents=[fresh_statefulset], check=False,
+    )
+    assert denied_fresh_statefulset.returncode != 0
+    assert "exomem-cellctl-isolation" in denied_fresh_statefulset.stderr, denied_fresh_statefulset.stderr
     _kubectl(k3s.name, ["delete", "namespace", fresh_namespace, "--wait=false"])
 
     print("[3.10] scenario: admission denies deleting default-deny")
