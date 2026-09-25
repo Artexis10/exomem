@@ -281,10 +281,12 @@ def collect_candidates(
                     idx = embeddings.get_embedding_index(vault_root)
                 with _span(timings, "vector.embed"):
                     if query_vector_provider is not None:
-                        query_vec = query_vector_provider()
+                        encoded_for, query_vec = query_vector_provider()
                     else:
+                        encoded_for = getattr(idx, "identity", None)
                         with recall_space.encoding_for(idx):
                             query_vec = embeddings.embed_texts([query], is_query=True)[0]
+                recall_space.require_same_space(idx, encoded_for, query_vec)
                 with _span(timings, "vector.search"):
                     chunk_hits = idx.search(
                         query_vec,

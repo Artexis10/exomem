@@ -1535,9 +1535,13 @@ def find(
         if not query_vector_ready:
             from . import embeddings
 
-            # Encoded for the serving sidecar, or refused before encoding.
-            with recall_space.encoding_for(embeddings.get_embedding_index(vault_root)):
-                query_vector = embeddings.embed_texts([query], is_query=True)[0]
+            # Encoded for the serving sidecar, or refused before encoding. The
+            # sidecar's identity travels with the vector, so a lane that finds
+            # another sidecar serving by then refuses it (`require_same_space`).
+            index = embeddings.get_embedding_index(vault_root)
+            encoded_for = getattr(index, "identity", None)
+            with recall_space.encoding_for(index):
+                query_vector = (encoded_for, embeddings.embed_texts([query], is_query=True)[0])
             query_vector_ready = True
         return query_vector
 
@@ -2324,10 +2328,12 @@ def _vector_unit_candidates(
         index = embeddings.get_embedding_index(vault_root)
         with _span(timings, "vector.unit.embed"):
             if query_vector_provider is not None:
-                query_vector = query_vector_provider()
+                encoded_for, query_vector = query_vector_provider()
             else:
+                encoded_for = getattr(index, "identity", None)
                 with recall_space.encoding_for(index):
                     query_vector = embeddings.embed_texts([query], is_query=True)[0]
+        recall_space.require_same_space(index, encoded_for, query_vector)
         hits = index.search_semantic_units(
             query_vector,
             k=candidate_limit,

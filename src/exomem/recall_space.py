@@ -145,6 +145,31 @@ def encoding_for(index: object, *, load: bool = False) -> contextlib.AbstractCon
     return encoding(load=True) if load else encoding()
 
 
+def require_same_space(index: object, encoded_for: SpaceIdentity | None, vector: Any) -> None:
+    """Refuse to search `index` with a query vector encoded for another space.
+
+    `encoded_for` is the identity of the sidecar the vector was encoded for. A
+    re-embed can cut over between that encode and this search (a plan that
+    reuses one query vector across lanes), and two spaces of one width would
+    otherwise mix silently. A vector encoded for an empty sidecar fits one that
+    has since been written by the recall encoder at the vector's width.
+    """
+    current = getattr(index, "identity", None)
+    if current == encoded_for:
+        return
+    width = len(vector) if vector is not None else None
+    if (
+        encoded_for is None
+        and current is not None
+        and current.accepts(recall_model(), None)
+        and current.dim == width
+    ):
+        return
+    raise VectorSpaceMismatch(
+        f"the query was encoded for {encoded_for}, the serving sidecar holds {current}"
+    )
+
+
 def declared_dim(model: str) -> int:
     """The width `model` produces, or the legacy width when recall does not know it."""
     return DECLARED_DIMS.get(model, LEGACY_DIM)

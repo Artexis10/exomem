@@ -1430,3 +1430,62 @@ def test_disabled_vector_mode_explains_its_useful_keyword_fallback(
     assert set(explained["hits"][0]["ranking_explanation"]["lanes"]) == {
         "keyword"
     }
+
+
+def test_a_query_vector_is_never_searched_in_another_vector_space(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mixed plan encodes the query once and both lanes reuse it. A
+    re-embed that cuts over between the unit lane and the page lane leaves the
+    page lane holding a sidecar of another space, here of the same width: its
+    vector lane reports the mismatch instead of searching with the old vector."""
+    from exomem import recall_space
+
+    page_path = _write_unit_page(tmp_path)
+    _prepare_semantic_catalog(tmp_path, [tmp_path / page_path])
+
+    class SpaceIndex:
+        def __init__(self, fingerprint: str) -> None:
+            self.identity = recall_space.SpaceIdentity("BAAI/bge-m3", fingerprint, 2)
+            self.searched = 0
+
+        def search(self, _query_vector, *, k: int, allowed_paths=None):
+            self.searched += 1
+            return [(page_path, 0, "Session lifetime is thirty days", 0.82)]
+
+        def search_semantic_units(self, *_args, **_kwargs):
+            return []
+
+    before, after = SpaceIndex("fp-before"), SpaceIndex("fp-after")
+    served: list[SpaceIndex] = []
+
+    def get_embedding_index(_root):
+        # The unit lane and the query encode see the sidecar before the cutover;
+        # the page lane, after it.
+        index = before if len(served) < 2 else after
+        served.append(index)
+        return index
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setattr(embeddings, "get_embedding_index", get_embedding_index)
+    monkeypatch.setattr(embeddings, "embed_texts", lambda _texts, *, is_query: [[0.6, 0.8]])
+
+    explained = commands.op_ask_memory(
+        tmp_path,
+        query="session lifetime",
+        result_level="mixed",
+        mode="hybrid",
+        graph=False,
+        rerank=False,
+        scope="kb-only",
+        detail="compact",
+        explain=True,
+    )
+
+    plans = explained["retrieval_profile"]["result_plans"]
+    assert served[:2] == [before, before] and after in served
+    assert after.searched == 0
+    assert plans["page"]["lanes"]["vector"]["status"] == "unavailable"
+    assert plans["page"]["lanes"]["vector"]["reason"] == "vector_space_mismatch"
