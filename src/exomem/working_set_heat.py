@@ -1836,8 +1836,9 @@ def _flush(vault_root: Path, fold: _Fold, *, now_ns: int) -> bool:
 
     if not _write(vault_root, work, what="fold"):
         return False
+    written = set(events)
     with _LOCK:
-        fold.pending = [event for event in fold.pending if event not in events]
+        fold.pending = [event for event in fold.pending if event not in written]
         fold.tombstones -= gone
     return True
 
