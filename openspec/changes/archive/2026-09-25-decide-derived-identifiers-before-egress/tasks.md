@@ -19,6 +19,6 @@
 
 ## 3. Verification
 
-- [ ] 3.1 Scoped suites for every module touched, the governance egress and working-set suites, the no-sweep and latency gates, the relation registry and queue suites, and the retrieval golden set with the owner's ranking unchanged.
-- [ ] 3.2 Ruff, the privacy gate, OpenSpec strict, capabilities, the hosted check and the harness module list.
-- [ ] 3.3 Rerun the twin matrix on the tip and measure the owner's latency before and after.
+- [x] 3.1 Scoped suites for every module touched, the governance egress and working-set suites, the no-sweep and latency gates, the relation registry and queue suites, and the retrieval golden set with the owner's ranking unchanged.
+- [x] 3.2 Ruff, the privacy gate, OpenSpec strict, capabilities, the hosted check and the harness module list.
+- [x] 3.3 Rerun the twin matrix on the tip and measure the owner's latency before and after.
