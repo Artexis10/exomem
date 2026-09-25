@@ -494,6 +494,26 @@ def test_a_record_the_hook_saw_does_not_swallow_the_next_due_ask(
     assert _is_episode_ask(results[-1])
 
 
+def test_a_revision_after_the_ledger_count_drops_still_suppresses_the_ask(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A restored vault can report fewer revisions than were last seen. A new
+    revision from another door after that must still count, not stay hidden
+    until it passes the old high-water mark."""
+    monkeypatch.setenv("EXOMEM_EPISODE_ASK_COOLDOWN_SEC", "0")
+    count = _counting_door(monkeypatch)
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+
+    count["n"] = 2
+    assert not any(_is_episode_ask(result) for result in _stops(monkeypatch, capsys, tmp_path, k))
+
+    count["n"] = 1  # the ledger was restored to an earlier state
+    assert _is_episode_ask(_stops(monkeypatch, capsys, tmp_path, k)[-1])
+
+    count["n"] = 2  # another door records a new revision
+    assert not _is_episode_ask(_stops(monkeypatch, capsys, tmp_path, 1)[-1])
+
+
 # --- the retrieve hook sends attribution with every packet request ------------
 
 

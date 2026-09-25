@@ -695,7 +695,7 @@ def _episode_ask(
             if baseline != _REVISIONS_UNKNOWN and revisions > baseline:
                 state["substantive_since_record"] = 0
                 about_due = False
-            state["last_seen_revisions"] = max(baseline, revisions)
+            state["last_seen_revisions"] = revisions
     due = about_due
     if due:
         state["last_ask_ts"] = now
