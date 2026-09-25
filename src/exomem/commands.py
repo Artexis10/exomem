@@ -3348,6 +3348,12 @@ def op_suggest_relations(
         candidate includes from/to, relation_type, method, and evidence.
         `mutated` is always false.
     """
+    # Under a governed policy relation proposals are the owner's, like the
+    # relation queue they feed: their candidates are resolved over the whole
+    # vault. Another audience is refused before the path is resolved.
+    refusal = egress_module.owner_only_aggregate(vault_root)
+    if refusal is not None:
+        return refusal
     if path:
         path = _resolve_memory_identifier(vault_root, path)
     return epistemic_graph_module.suggest_relations(
@@ -6195,18 +6201,7 @@ def op_activate_context(
         finally:
             if bound_token is not None:
                 request_budget_module.reset_current(bound_token)
-    # The freshness key counts and digests every file in the vault, so it
-    # moves with pages the caller may not see; a reader other than the owner
-    # does not receive it. The owner's packet is unchanged.
-    generation = packet.get("generation") if isinstance(packet, dict) else None
-    if (
-        isinstance(generation, dict)
-        and "freshness_key" in generation
-        and egress_module.restricted_release_filter(vault_root, purpose=purpose) is not None
-    ):
-        packet["generation"] = {
-            key: value for key, value in generation.items() if key != "freshness_key"
-        }
+    _withhold_vault_generation(vault_root, packet, purpose=purpose)
     query_log.log_activation_call(
         vault_root,
         packet=packet,
@@ -6215,6 +6210,24 @@ def op_activate_context(
         duration_ms=round((time.perf_counter() - started) * 1000, 3),
     )
     return packet
+
+
+#: Packet generation fields that move with every file in the vault: the
+#: freshness key counts and digests them, and the index generation advances on
+#: every write. A reader other than the owner does not receive them.
+_VAULT_GENERATION_FIELDS = ("freshness_key", "index_generation")
+
+
+def _withhold_vault_generation(vault_root: Path, packet: Any, *, purpose: str | None) -> None:
+    generation = packet.get("generation") if isinstance(packet, dict) else None
+    if (
+        isinstance(generation, dict)
+        and any(name in generation for name in _VAULT_GENERATION_FIELDS)
+        and egress_module.restricted_release_filter(vault_root, purpose=purpose) is not None
+    ):
+        packet["generation"] = {
+            key: value for key, value in generation.items() if key not in _VAULT_GENERATION_FIELDS
+        }
 
 
 def _op_activate_context_body(
@@ -6586,6 +6599,8 @@ def _op_activate_context_body(
     if guarded is None:
         return _abstain("withheld", generation=packet.get("generation") or generation_stub)
     packet = guarded
+    # Before the token is minted: it carries the index generation too.
+    _withhold_vault_generation(vault_root, packet, purpose=purpose)
     token = working_set_runtime_module.mint_continuity(
         packet, identity=working_set_runtime_module.identity_for(vault_root)
     )
@@ -9023,6 +9038,12 @@ def op_connect_memory(
             requested_relation=requested_relation,
             edit_memory=_accept_relations_edit,
         )
+    if operation == "suggest-relations":
+        # Relation proposals are owner work under a governed policy (see
+        # `op_suggest_relations`); refused before the path is resolved.
+        refusal = egress_module.owner_only_aggregate(vault_root)
+        if refusal is not None:
+            return refusal
     if path:
         path = _resolve_memory_identifier(vault_root, path)
     if target:

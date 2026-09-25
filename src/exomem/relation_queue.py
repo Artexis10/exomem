@@ -671,9 +671,16 @@ def build_queue(
     limit_per_page: int = _DEFAULT_LIMIT_PER_PAGE,
     today=None,
 ) -> dict[str, Any]:
-    """Assemble one bounded graph-native relation-acceptance queue."""
+    """Assemble one bounded graph-native relation-acceptance queue.
+
+    Under a governed policy the queue is the owner's: another audience
+    receives the `audience_restricted` refusal before anything is read.
+    """
     from .governance import egress
 
+    refusal = egress.owner_only_aggregate(vault_root)
+    if refusal is not None:
+        return refusal
     vault_root = Path(vault_root)
     visible = egress.visible_page_filter(vault_root)
     # The owner's batch is requested exactly as before.
@@ -739,6 +746,23 @@ def build_queue(
     }
 
 
+
+def _refuse_other_audiences(vault_root: Path) -> None:
+    """Relation review is owner work under a governed policy.
+
+    A candidate names pages as resolved over the whole vault, so another
+    audience is refused before any candidate is resolved or read, with one
+    answer whatever the reference names.
+    """
+    from .governance import egress
+
+    if egress.owner_only_aggregate(vault_root) is not None:
+        raise ValueError(
+            "AUDIENCE_RESTRICTED: relation review is served to the owner only "
+            "under a governed policy"
+        )
+
+
 def _refresh_required(ref: str) -> ValueError:
     return ValueError(
         "REVIEW_REFRESH_REQUIRED: the relation candidate is not present in the "
@@ -753,6 +777,7 @@ def resolve_candidate(
     source_path: str | None = None,
 ) -> ResolvedCandidate:
     """Resolve one current candidate from a hint or the bounded legacy prefix."""
+    _refuse_other_audiences(vault_root)
     vault_root = Path(vault_root)
     wanted = parse_relation_review_ref(ref)
     if source_path is None:
@@ -831,6 +856,7 @@ def triage(
     source_path: str | None = None,
 ) -> dict[str, Any]:
     """Persist a fingerprint-bound dismiss/snooze/reopen for a relation candidate."""
+    _refuse_other_audiences(vault_root)
     resolved = resolve_candidate(vault_root, ref, source_path=source_path)
     if expected_fingerprint and resolved.fingerprint != expected_fingerprint:
         raise ValueError(
@@ -872,6 +898,7 @@ def accept(
     live signal, and an optional-by-omission check is skippable by any caller
     that simply doesn't send it.
     """
+    _refuse_other_audiences(vault_root)
     if not why or not str(why).strip():
         raise ValueError(
             "INVALID_ACCEPT: accept-relation requires an audit reason (`why`)"

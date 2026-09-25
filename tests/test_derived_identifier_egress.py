@@ -1299,6 +1299,95 @@ def test_the_owner_still_recalls_through_the_graph_lane(tmp_path: Path) -> None:
     assert "graph_hop" in _text(owner), owner
 
 
+def _relation_review_fixture() -> tuple[dict[str, str], dict[str, str]]:
+    base = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page("Alpha", _LINKS_TO.format(t="beta"), type="insight"),
+        f"{NOTES}/beta.md": _page("Beta", "Beta rollout background.", type="insight"),
+    }
+    withheld = {f"{WITHHELD_DIR}/other-page.md": _page("Hidden Draft", "Withheld body text.")}
+    return base, withheld
+
+
+def _relation_review_calls(ref: str) -> dict[str, tuple[str, dict[str, Any]]]:
+    alpha = f"{NOTES}/alpha.md"
+    return {
+        "queue": ("review_memory", {"mode": "relation-queue"}),
+        "suggest-visible": ("connect_memory", {"operation": "suggest-relations", "path": alpha}),
+        "suggest-withheld": (
+            "connect_memory",
+            {"operation": "suggest-relations", "path": f"{WITHHELD_DIR}/other-page.md"},
+        ),
+        "suggest-missing": (
+            "connect_memory",
+            {"operation": "suggest-relations", "path": f"{NOTES}/no-such-page.md"},
+        ),
+        "triage": (
+            "triage_memory",
+            {"ref": ref, "action": "dismiss", "source_path": alpha},
+        ),
+        "accept": (
+            "connect_memory",
+            {
+                "operation": "accept-relation",
+                "ref": ref,
+                "path": alpha,
+                "expected_hash": "0" * 64,
+                "why": "reviewed",
+            },
+        ),
+    }
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_relation_review_is_the_owners_under_a_governed_policy(
+    tmp_path: Path, audience: str
+) -> None:
+    """The relation queue, relation proposals and their triage and accept are
+    owner work: another audience is refused before anything is read."""
+    from exomem import relation_queue
+
+    base, withheld = _relation_review_fixture()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    owner_queue = _call(vaults["A"], None, "review_memory", mode="relation-queue")
+    item = next(
+        item for group in owner_queue["groups"] for item in group["items"]
+    )
+    calls = _relation_review_calls(item["ref"])
+
+    answers = {
+        variant: {
+            label: _call(vault, _principal(audience), command, **kwargs)
+            for label, (command, kwargs) in calls.items()
+        }
+        for variant, vault in vaults.items()
+    }
+
+    refused = {"available": False, "reason": "audience_restricted"}
+    for label in ("queue", "suggest-visible", "suggest-withheld", "suggest-missing"):
+        assert answers["A"][label] == refused, (label, answers["A"][label])
+    for label in ("triage", "accept"):
+        assert answers["A"][label]["message"].startswith("AUDIENCE_RESTRICTED"), answers["A"][label]
+    assert _text(answers["A"]) == _text(answers["B"]) == _text(answers["C"])
+    assert relation_queue.is_relation_ref(item["ref"])
+    with request_scope(_principal(audience)):
+        direct = commands.op_suggest_relations(vaults["A"], path=f"{NOTES}/alpha.md")
+    assert direct == refused
+
+
+def test_the_owner_still_reviews_relations_under_a_governed_policy(tmp_path: Path) -> None:
+    base, withheld = _relation_review_fixture()
+    vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")
+
+    queue = _call(vault, None, "review_memory", mode="relation-queue")
+    suggested = _call(
+        vault, None, "connect_memory", operation="suggest-relations", path=f"{NOTES}/alpha.md"
+    )
+
+    assert queue["status"] == "available" and queue["groups"], queue
+    assert "__error__" not in suggested and "available" not in suggested, suggested
+
+
 def test_the_owner_still_resolves_links_over_every_page(tmp_path: Path) -> None:
     base, withheld = _stem_collision()
     vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")
@@ -1439,3 +1528,30 @@ def test_the_owner_still_activates_a_page_withheld_from_others(tmp_path: Path) -
     packet = answers["What is in the Nimbus Plan?"]
     assert [anchor["path"] for anchor in packet["anchors"]] == [f"{WITHHELD_DIR}/nimbus-plan.md"]
     assert "freshness_key" in packet["generation"]
+    assert "index_generation" in packet["generation"]
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_packet_and_its_token_carry_no_index_generation(
+    tmp_path: Path, audience: str
+) -> None:
+    """The index generation advances on every write, withheld pages included."""
+    from exomem import lexstore, working_set_index, working_set_runtime
+
+    hub, withheld = _ACTIVATION_SCENARIOS["same-title"]
+    vault = _materialize(tmp_path / "vault", {**_activation_base(hub), **withheld}, audience)
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).reset()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+
+    turn = "What is the status of the Orion Program?"
+    restricted = _call(vault, _principal(audience), "activate_context", turn=turn)
+    owner = _call(vault, None, "activate_context", turn=turn)
+
+    assert owner["generation"]["index_generation"] > 0
+    assert "index_generation" not in restricted["generation"]
+    assert restricted.get("continuity"), restricted
+    decoded = working_set_runtime.decode_continuity(restricted["continuity"])
+    assert decoded is not None and decoded["generation"] == 0
+    assert working_set_runtime.decode_continuity(owner["continuity"])["generation"] > 0

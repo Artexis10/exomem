@@ -986,6 +986,45 @@ def test_a_colliding_name_decides_every_page_that_bears_it(vault: Path) -> None:
     assert guarded["units"] == []
 
 
+def test_residual_prose_naming_a_page_a_withheld_page_shares_a_name_with_is_dropped(
+    vault: Path,
+) -> None:
+    """DOCUMENTED RESIDUAL (decide-derived-identifiers-before-egress, design Risks).
+
+    A unit whose prose names a title or stem that a visible page and a withheld
+    page share is dropped for a restricted caller, although the same unit is
+    served when the withheld page is absent. The guard decides every page that
+    bears the name and fails closed rather than resolving the name over the
+    caller's view; per-audience name tables are deferred to the owner/remote
+    audience split. This test pins the current answer so that closing the
+    residual is a deliberate change.
+    """
+    withheld = vault / "Knowledge Base" / "Notes" / "Patterns" / "Widget.md"
+    permitted = vault / "Knowledge Base" / "Notes" / "Insights" / "widget.md"
+    for path, title in ((withheld, "Widget"), (permitted, "widget")):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\ntype: pattern\nstatus: active\nupdated: 2026-09-01\n---\n\n# {title}\n\nBody.\n",
+            encoding="utf-8",
+        )
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    unit = _prose_unit("widget", ref=_unit_ref(OPEN_PATH, "shared-name"))
+
+    def guarded_units() -> list:
+        _indexed(vault)
+        packet = _packet()
+        packet["units"] = [unit]
+        with request_scope(_external()):
+            guarded = egress.guard_working_set(vault, packet, _prose_release())
+        assert guarded is not None
+        return guarded["units"]
+
+    assert guarded_units() == []
+    withheld.unlink()
+    assert guarded_units() == [unit]
+
+
 # --------------------------------------------------------------------------- #
 # Round three: every spelling of a reference, and no sidecar on an open vault
 # --------------------------------------------------------------------------- #
