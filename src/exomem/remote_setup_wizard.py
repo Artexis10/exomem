@@ -303,6 +303,17 @@ def run_remote_setup(
     print_fn("exomem setup --remote")
     print_fn("")
 
+    from .dotenv_guard import dotenv_load_guard
+
+    if dotenv_load_guard(env_path) is None:
+        print_fn(
+            f"setup --remote: refusing to write secrets to {env_path} -- it is "
+            "inside a vault, whose files remote principals can write through sync. "
+            "Re-run this command from a working directory outside the vault. "
+            "No changes were written."
+        )
+        return 2
+
     existing_text = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
     existing = parse_env(existing_text)
 
