@@ -240,6 +240,9 @@ def start(stack: Stack, source: Path, pki: tls.RehearsalPki, cell_image_reposito
             "--entryPoints.websecure.address=:443",
             "--providers.file.filename=/edge/dynamic.yml",
             "--log.level=WARN",
+            # No call home: nothing in the run may reach a real server.
+            "--global.checkNewVersion=false",
+            "--global.sendAnonymousUsage=false",
         ]
     )
     stack.containers.append(edge)

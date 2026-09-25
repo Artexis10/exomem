@@ -290,6 +290,9 @@ def _apply_ingress(stack: Stack, pki: tls.RehearsalPki, ingress_source_value: st
                                     "--entryPoints.websecure.address=:8443",
                                     "--providers.file.filename=/config/dynamic.json",
                                     "--log.level=WARN",
+                                    # No call home: nothing in the run may reach a real server.
+                                    "--global.checkNewVersion=false",
+                                    "--global.sendAnonymousUsage=false",
                                 ],
                                 "ports": [{"name": "websecure", "containerPort": 8443}],
                                 "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,

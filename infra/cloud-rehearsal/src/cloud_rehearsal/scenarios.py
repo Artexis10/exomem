@@ -57,6 +57,7 @@ from .report import (
     StepFailure,
     StepRecord,
     failure_record,
+    innermost,
 )
 from .shell import run
 from .substrate import PUBLIC_BASE_URL, Substrate
@@ -279,6 +280,31 @@ def _running_ready(image: str | None = None) -> Callable[[dict[str, Any]], bool]
     return check
 
 
+async def first_session(client: TenantClient, record: StepRecord, *, timeout: float = 120.0) -> list[str]:
+    """The connector's first MCP session once its cell is observed ready.
+
+    A pod that just turned Ready can still be unreachable through the
+    gateway for a few seconds (its NetworkPolicy and Service endpoints
+    converge after readiness), and the gateway answers 503 CELL_NOT_READY
+    meanwhile, as C3 says. A connector retries; so does this, and the
+    evidence records how long the gap was.
+    """
+
+    started = time.monotonic()
+    refusals = 0
+    while True:
+        try:
+            async with client.mcp() as session:
+                tools, _ = await session.list_tools()
+            record.evidence["gateway_503_before_serving"] = {"count": refusals, "seconds": round(time.monotonic() - started, 2)}
+            return tools
+        except Exception as error:  # noqa: BLE001 - only a 503 is retried
+            if "503" not in _flatten(error) or time.monotonic() - started > timeout:
+                raise
+            refusals += 1
+            await asyncio.sleep(1)
+
+
 def _flatten(error: BaseException) -> str:
     """The messages of an exception and, for a task group, every sub-exception."""
 
@@ -374,8 +400,7 @@ async def step_3_oauth_mcp(ctx: Context, record: StepRecord) -> None:
     ctx.a.client = TenantClient(ctx.resolver, ctx.browser, ctx.a.session, ctx.substrate.redirect_uri)
     try:
         with pkce_grammar(PKCE_FULL_GRAMMAR):
-            async with ctx.a.client.mcp() as session:
-                tools, _ = await session.list_tools()
+            tools = await first_session(ctx.a.client, record)
         record.evidence["pkce_full_rfc7636_grammar"] = "accepted"
     except Exception as error:  # noqa: BLE001 - classified below
         detail = _flatten(error)
@@ -390,8 +415,7 @@ async def step_3_oauth_mcp(ctx: Context, record: StepRecord) -> None:
             evidence={"token_response": "400 invalid_grant", "substrate_log": "exomem_oauth_token_rejection stage=code_shape verifier_wellformed=false"},
         )
         ctx.a.client = TenantClient(ctx.resolver, ctx.browser, ctx.a.session, ctx.substrate.redirect_uri)
-        async with ctx.a.client.mcp() as session:
-            tools, _ = await session.list_tools()
+        tools = await first_session(ctx.a.client, record)
     if ctx.a.client.authorizations != 1 or not ctx.a.client.access_token:
         raise StepFailure("the connector did not complete exactly one OAuth authorization")
     exposed = CLOUD_EXCLUSIONS & set(tools)
@@ -679,6 +703,7 @@ async def step_10_second_tenant_denial(ctx: Context, record: StepRecord) -> None
     await ctx.wait_cell(ctx.b.cell_id, _running_ready(), timeout=600, description="tenant B's cell to be running and ready")
     record.evidence["b_provision_seconds"] = round(time.monotonic() - started, 2)
     ctx.b.client = TenantClient(ctx.resolver, ctx.browser, ctx.b.session, ctx.substrate.redirect_uri)
+    await first_session(ctx.b.client, record)
     async with ctx.b.client.mcp() as session:
         write = await session.governed_write(
             {"title": f"Garden plan {ctx.b.phrase}", "content": f"Plant the {ctx.b.phrase} beans by the south fence.\n\n## Observations\n\n- [garden] beans by the south fence #garden\n", "status": "draft"}
@@ -772,7 +797,7 @@ async def step_11_backup_and_scratch_restore(ctx: Context, record: StepRecord) -
             document["metadata"]["labels"].pop("exomem.io/cloud-cell", None)
         else:
             document["metadata"]["namespace"] = scratch
-    payload = "---\n".join(json.dumps(doc) for doc in documents if doc["kind"] != "Job")
+    payload = "\n---\n".join(json.dumps(doc) for doc in documents if doc["kind"] != "Job")
     ctx.kubectl("apply", "--server-side", "--field-manager=rehearsal-operator", "--filename=-", input_text=payload)
     job = next(doc for doc in documents if doc["kind"] == "Job")
     ctx.kubectl("apply", "--server-side", "--field-manager=rehearsal-operator", "--filename=-", input_text=json.dumps(job))
@@ -924,7 +949,8 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
         try:
             await step(ctx, record)
             record.status = PASSED
-        except Exception as error:  # noqa: BLE001 - recorded, and the run continues
+        except Exception as raised:  # noqa: BLE001 - recorded, and the run continues
+            error = innermost(raised)
             record.status = FAILED
             record.failure = failure_record(error)
             if isinstance(error, CrossLaneDefect):

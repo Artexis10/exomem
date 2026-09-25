@@ -149,7 +149,16 @@ def _sample_key(measurement: str) -> str:
     }.get(measurement, "")
 
 
+def innermost(error: BaseException) -> BaseException:
+    """The MCP client raises through anyio task groups; report the real cause."""
+
+    while isinstance(error, BaseExceptionGroup) and len(error.exceptions) == 1:
+        error = error.exceptions[0]
+    return error
+
+
 def failure_record(error: BaseException) -> dict[str, Any]:
+    error = innermost(error)
     record: dict[str, Any] = {"type": type(error).__name__, "message": str(error)[:4000]}
     if isinstance(error, CrossLaneDefect):
         record.update({"cross_lane": True, "component": error.component, "owner": error.owner, "evidence": error.evidence})
