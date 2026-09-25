@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.93.0](https://github.com/Artexis10/exomem/compare/v0.92.0...v0.93.0) (2026-09-24)
+
+
+### Features
+
+* **episodes:** recap what each session worked on, for every client ([#1363](https://github.com/Artexis10/exomem/issues/1363)) ([45c93b8](https://github.com/Artexis10/exomem/commit/45c93b8088fda44cf7746025d7a5bb80be1f3228))
+
+
+### Bug Fixes
+
+* **access:** bind download tokens to their principal and decide every read before it resolves ([#1364](https://github.com/Artexis10/exomem/issues/1364)) ([dc68b06](https://github.com/Artexis10/exomem/commit/dc68b066d1954d9a4ef503c1b1af443d6b21c34d))
+* **graph:** keep graph repair correct under transient failures and NFD names ([#1361](https://github.com/Artexis10/exomem/issues/1361)) ([a2c3ab0](https://github.com/Artexis10/exomem/commit/a2c3ab0fea5b1873e1a2871da3071bcd7cc319e9))
+
 ## [0.92.0](https://github.com/Artexis10/exomem/compare/v0.91.1...v0.92.0) (2026-09-23)
 
 
