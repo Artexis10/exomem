@@ -189,14 +189,23 @@ def _relation_document(page: Any, vault_root: Path) -> Any:
     )
 
 
-def _authored_targets(page: Any, vault_root: Path) -> set[tuple[str, str]]:
-    """Set of `(relation_type, target.md)` already authored under ``## Relations``."""
+def _authored_targets(
+    page: Any,
+    vault_root: Path,
+    *,
+    resolver: vault_module.WikilinkResolver | None = None,
+) -> set[tuple[str, str]]:
+    """Set of `(relation_type, target.md)` already authored under ``## Relations``.
+
+    `resolver` is a caller-built resolver (the dreamer builds one from the graph
+    snapshot, with no I/O); without one, resolution builds a whole-vault resolver.
+    """
     document = _relation_document(page, vault_root)
     authored: set[tuple[str, str]] = set()
     for relation in document.canonical_note_relations:
         try:
             canonical, warning = vault_module.normalize_wikilink(
-                relation.target, vault_root, strict=False
+                relation.target, vault_root, resolver=resolver, strict=False
             )
         except Exception:  # noqa: BLE001 - malformed authored links are ignored
             continue

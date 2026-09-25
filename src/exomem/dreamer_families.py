@@ -64,6 +64,8 @@ class Context:
     _pages: dict[str, Any] = field(default_factory=dict)
     _review: dict[str, Any] = field(default_factory=dict)
     _graph: list[Any] = field(default_factory=list)
+    _resolver: list[Any] = field(default_factory=list)
+    _authored: dict[str, set[tuple[str, str]]] = field(default_factory=dict)
 
     def graph(self) -> Any:
         """One validated graph read snapshot for this page, opened once.
@@ -84,6 +86,39 @@ class Context:
     def close(self) -> None:
         while self._graph:
             self._graph.pop().close()
+
+    def resolver(self) -> Any:
+        """A wikilink resolver over the graph snapshot's pages, built once, no I/O.
+
+        Resolving an authored `## Relations` target without one builds a
+        whole-vault resolver: a walk that reads every page's title.
+        """
+        if not self._resolver:
+            from . import vault as vault_module
+
+            rows = (
+                self.graph()
+                .execute("SELECT path, title FROM graph_nodes WHERE kind = 'file'")
+                .fetchall()
+            )
+            self._resolver.append(
+                vault_module.WikilinkResolver.from_entries(
+                    self.vault_root,
+                    ((str(path), str(title) if title else None) for path, title in rows),
+                )
+            )
+        return self._resolver[0]
+
+    def authored(self, page: Any) -> set[tuple[str, str]]:
+        """`(relation_type, target.md)` pairs `page` authors, resolved without I/O."""
+        rel = str(page.rel_path)
+        if rel not in self._authored:
+            from . import relation_queue
+
+            self._authored[rel] = relation_queue._authored_targets(
+                page, self.vault_root, resolver=self.resolver()
+            )
+        return self._authored[rel]
 
     def page(self, rel_path: str) -> Any | None:
         """One parsed page through the shared parse cache, or None when gone.
@@ -177,12 +212,11 @@ _LINK_LIMIT_PER_PAGE = 10
 
 def _authored_between(ctx: Context, page: Any, other: Any) -> bool:
     """True when either page already authors any relation to the other."""
-    from . import epistemic_graph, relation_queue
+    from . import epistemic_graph
 
     for source, target in ((page, other), (other, page)):
-        authored = relation_queue._authored_targets(source, ctx.vault_root)
         wanted = epistemic_graph._with_md(target.rel_path)
-        if any(path == wanted for _kind, path in authored):
+        if any(path == wanted for _kind, path in ctx.authored(source)):
             return True
     return False
 
@@ -221,6 +255,7 @@ def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
             candidate,
             store=ctx.review_store(),
             state_payload=payload,
+            authored=ctx.authored(page),
             exact_refs=refs,
         )
         if reason in {"authored_edge", "placeholder_target"} or enriched is None:
