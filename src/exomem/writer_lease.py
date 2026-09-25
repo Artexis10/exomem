@@ -5015,6 +5015,13 @@ class LeaseManager:
             scope=implicit_idempotency_scope or idempotency_principal_scope,
             targets=[str(mutation_subject)],
         )
+        if receipt_vault_root is not None and (
+            command.name == "move_file"
+            or (command.name == "manage_memory_file" and kwargs.get("operation") == "move")
+        ):
+            from . import move_file as move_file_module
+
+            result = move_file_module.restricted_mover_terminal(receipt_vault_root, result)
         projected = project_terminal(result, response_detail)
         from .governance import scrubber as governance_scrubber
 

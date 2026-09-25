@@ -19,7 +19,7 @@ import hashlib
 import logging
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -725,6 +725,8 @@ def move_file(
                 vault_root, preflight=preflight, mutate=mutate
             )
             semantic = committed.as_dict()
+            if visible is not None:
+                semantic = _visible_semantic(semantic, preflight.evaluations, visible)
         except semantic_writes.SemanticWriteError as error:
             raise MoveFileError(code=error.code, reason=error.reason) from error
         except PathGuardError as error:
@@ -897,8 +899,62 @@ def move_file(
         files_touched=reported_touched,
         warnings=warnings,
         semantic=semantic,
-        index=index_feedback,
+        # The index outcome covers every rewritten page, so a mover other
+        # than the owner receives none.
+        index=index_feedback if visible is None else None,
     )
+
+
+def _visible_semantic(
+    semantic: dict[str, Any], evaluations: Any, visible: Callable[[str], bool]
+) -> dict[str, Any]:
+    """The move's semantic block over the pages a restricted mover may see."""
+    shown = [item for item in evaluations if visible(item.after.path)]
+    identities = {item.after.identity for item in shown}
+    return {
+        **semantic,
+        "affected_paths": [item.after.path for item in shown],
+        "contract_results": {
+            key: value
+            for key, value in semantic.get("contract_results", {}).items()
+            if key in identities
+        },
+        "lifecycle_states": {
+            key: value
+            for key, value in semantic.get("lifecycle_states", {}).items()
+            if key in identities
+        },
+    }
+
+
+_GRAPH_SYNC_FIELDS = frozenset(
+    {"graph_sync", "graph_sync_code", "graph_sync_checkpoint", "graph_sync_remediation"}
+)
+
+
+def restricted_mover_terminal(vault_root: Path, result: Any) -> Any:
+    """A move's terminal as a mover other than the owner receives it.
+
+    Every linking page is rewritten, including pages withheld from the mover,
+    and the derived-graph outcome covers all of them: a rewrite the mover may
+    not see can turn a completed graph update into a pending repair. Such a
+    mover therefore receives no graph outcome, so its answer is the same
+    whether or not a withheld page linked the moved one. The durable terminal
+    keeps it.
+    """
+    from .governance import egress
+
+    if not isinstance(result, Mapping) or egress.restricted_release_filter(vault_root) is None:
+        return result
+
+    def _without(value: Mapping[str, Any]) -> dict[str, Any]:
+        return {key: item for key, item in value.items() if key not in _GRAPH_SYNC_FIELDS}
+
+    terminal = _without(result)
+    leaf = terminal.get("leaf_result")
+    if isinstance(leaf, Mapping):
+        terminal["leaf_result"] = _without(leaf)
+    return terminal
 
 
 def _rewrite_wikilinks(text: str, old_rel: str, new_rel: str) -> tuple[str, int]:

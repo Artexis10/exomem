@@ -1247,6 +1247,65 @@ def test_a_restricted_move_reports_the_links_it_may_see(
     )
 
 
+INSIGHTS = f"{NOTES}/Insights"
+
+
+def _typed(h1: str, body: str, relation_to: str) -> str:
+    return _page(
+        h1, f"{body}{_UNIT}\n## Relations\n\n- supports [[{relation_to}]]\n",
+        type="insight", status="active",
+    )
+
+
+def _semantic_move_fixture() -> dict[str, str]:
+    return {
+        **_filler(),
+        f"{INSIGHTS}/alpha.md": _typed("Alpha", "Alpha.", f"{INSIGHTS}/beta"),
+        f"{INSIGHTS}/beta.md": _typed("Beta", "Beta.", f"{INSIGHTS}/alpha"),
+        f"{INSIGHTS}/gamma.md": _typed("Gamma", "Gamma.", f"{INSIGHTS}/alpha"),
+    }
+
+
+@pytest.mark.parametrize("detail", [None, "compact", "full", "legacy"])
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
+    tmp_path: Path, audience: str, detail: str | None
+) -> None:
+    """The answer carries nothing the rewrite of a withheld linking page
+    produced: no graph or index outcome, and no contract result for it."""
+    scope = "Notes/Withheld/**, Notes/Insights/Withheld/**"
+    base = _semantic_move_fixture()
+    hidden = f"{INSIGHTS}/Withheld/linker.md"
+    variants = {
+        "B": base,
+        "A": {**base, hidden: _typed("Linker", f"Links [[{INSIGHTS}/gamma]].", f"{INSIGHTS}/alpha")},
+        "C": {**base, hidden: _typed("Linker", f"Links [[{INSIGHTS}/alpha]].", f"{INSIGHTS}/alpha")},
+    }
+    vaults = {
+        variant: _materialize(tmp_path / variant / "vault", files, audience, scope=scope)
+        for variant, files in variants.items()
+    }
+    extra = {} if detail is None else {"response_detail": detail}
+
+    answers = {
+        variant: _VOLATILE_TEXT.sub(
+            "<v>",
+            _text(
+                _call(
+                    vault, _principal(audience), "manage_memory_file", operation="move",
+                    old_path=f"{INSIGHTS}/gamma.md", new_path=f"{INSIGHTS}/gamma-x.md", **extra,
+                )
+            ),
+        )
+        for variant, vault in vaults.items()
+    }
+
+    assert '"__error__"' not in answers["A"], answers["A"]
+    assert answers["A"] == answers["B"]
+    assert answers["C"] == answers["B"]
+    assert f"[[{INSIGHTS}/gamma-x]]" in (vaults["A"] / hidden).read_text(encoding="utf-8")
+
+
 def test_the_owner_still_writes_to_a_page_withheld_from_others(tmp_path: Path) -> None:
     base, withheld = _write_door_fixture()
     vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external", scope=_WRITE_SCOPE)
