@@ -95,11 +95,12 @@
 - [ ] 3.8 Implement capacity publication (D9), with `cell_slots` = limit − headroom − non-cell attachments
 - [ ] 3.9 Add platform chart entries:
   - cellctl, single replica, `Recreate`, with the RBAC in D4 and the `ValidatingAdmissionPolicy` on its ServiceAccount (cell namespaces only, restricted labels, digest-pinned images from the cell repository);
-  - the gateway Deployment and Service consuming the Substrate gateway image digest;
+  - the gateway Deployment and Service consuming the Substrate gateway image digest, rendering exactly the gateway's environment contract (C3), with a chart test pinning that set;
+  - the cellctl image, built from `infra/cellctl/Dockerfile` (digest-pinned base, non-root, read-only root filesystem) and published to GHCR by digest on the same release trigger as the `cloud` image, which the chart consumes by digest;
   - the `exomem-cloud-encrypted` StorageClass;
   - Traefik `websecure` on hostPort 443 only, with no `trustedIPs`;
   - a NetworkPolicy admitting gateway ingress only from the Traefik pods;
-  - cert-manager with a Cloudflare DNS-01 issuer and the gateway certificate and IngressRoute;
+  - cert-manager with a Cloudflare DNS-01 issuer and the gateway certificate and IngressRoute, whose middleware sets the gateway's trusted-ingress source header;
   - SOPS-sourced Secrets.
 - [ ] 3.10 Integration test on disposable K3s:
   - create, then pod kill with a governed write after it;
@@ -177,10 +178,10 @@
 
 ## 6. Node deployment and owner acceptance (P4)
 
-- [ ] 6.1 Apply the control server and run the database cutover under the Substrate runbook, which sets Neon read-only, lists every consumer, restores with `--no-owner --no-acl`, and runs the grants script. Then verify Endstate and Exomem.
+- [ ] 6.1 Scale the old platform's in-cluster gateway, provisioner and workers to zero before the window (Substrate D8 step 1). Then apply the control server and run the database cutover under the Substrate runbook, which sets Neon read-only, lists every consumer, restores with `--no-owner --no-acl`, and runs the grants script. Then verify Endstate and Exomem.
   - Role apply on the control server starts every unit; `systemctl is-active` for postgresql, pgbouncer, the certbot and pgbackrest timers.
   - A pgbackrest full backup to B2 completes and the restore-verify timer's script passes against B2 before the Neon cutover.
-- [ ] 6.2 Deploy cellctl and the gateway beside the old platform, set `cell_image`, and scale the old provisioner and workers to zero
+- [ ] 6.2 Deploy cellctl and the gateway beside the old platform, and set `cell_image`
 - [ ] 6.3 Owner acceptance on the real node:
   1. invite and connect the claude.ai custom connector;
   2. capture;
