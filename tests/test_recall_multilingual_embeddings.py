@@ -352,6 +352,11 @@ def test_the_english_gold_outranks_its_same_language_twins(dense) -> None:
             f"[dense] twin {row['language']}: gold {row['gold_rank']} "
             f"poison {row['poison_rank']} | {row['query']}"
         )
+    # A gold outside the top 10 fails outright: scored as rank 11, it would tie
+    # an absent poison and pass the rank comparisons below.
+    assert [
+        (row["language"], row["query"]) for row in twins if row["gold_rank"] > 10
+    ] == []
     by_language: dict[str, list[dict]] = {}
     for row in twins:
         by_language.setdefault(row["language"], []).append(row)
