@@ -42,7 +42,14 @@ from .manifests import (
 )
 from .rollout import current_image, initial_image, parked_canary, select_upgrade_candidate
 from .secrets import derive_cell_bearer, unwrap_secret, wrap_secret
-from .state import CANARY_PARKED, MANIFEST_IMMUTABLE, RESTORE_FAILED, TARGET_REJECTED, CellRow, ClusterObservation
+from .state import (
+    CANARY_PARKED,
+    MANIFEST_IMMUTABLE,
+    RESTORE_FAILED,
+    TARGET_REJECTED,
+    CellRow,
+    ClusterObservation,
+)
 
 logger = logging.getLogger("cellctl")
 
