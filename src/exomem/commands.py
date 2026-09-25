@@ -5466,20 +5466,32 @@ def op_delete(
     """
     # Under a governed policy a folder is deleted by the owner only: a folder
     # can hold pages the writer may not see, and every answer about them
-    # (counts, refusals, what was trashed) would move with them. One refusal,
-    # whatever the folder holds; a declared recursive delete is refused before
-    # anything is read.
-    restricted = egress_module.restricted_release_filter(vault_root) is not None
+    # (counts, refusals, what was trashed) would move with them. One refusal
+    # for a folder the writer may see, whatever it holds; a declared
+    # recursive delete is refused before anything is read. A folder holding
+    # only pages withheld from the writer does not exist for it, as its
+    # listing says, and is answered as a missing path.
+    keep = egress_module.restricted_release_filter(vault_root)
+    restricted = keep is not None
     if restricted and recursive:
         raise ValueError(_FOLDER_DELETE_REFUSAL)
     path = _resolve_memory_identifier(vault_root, path)
     try:
-        abs_path, _rel = resolve_under_vault(vault_root, path)
+        abs_path, rel = resolve_under_vault(vault_root, path)
         is_dir = abs_path.is_dir()
     except VaultPathError:
         is_dir = False  # let the file backend raise the precise path error
     if restricted and is_dir:
-        raise ValueError(_FOLDER_DELETE_REFUSAL)
+        from . import list_directory as list_directory_module
+
+        if not list_directory_module._withheld_target(
+            vault_root, rel, keep, True, {}, is_dir=True
+        ):
+            raise ValueError(_FOLDER_DELETE_REFUSAL)
+        if confirm:
+            requested = str(path).strip().replace("\\", "/").lstrip("/")
+            raise ValueError(f"NOT_FOUND: path does not exist: {requested}")
+        is_dir = False  # the file backend's unconfirmed refusal, as for a missing path
     try:
         if is_dir:
             result = delete_directory_module.delete_directory(

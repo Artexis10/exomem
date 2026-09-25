@@ -1156,7 +1156,9 @@ _FOLDERS = {
 def test_a_restricted_writer_deletes_no_folder(
     tmp_path: Path, audience: str, recursive: bool
 ) -> None:
-    """One refusal, whatever the folder holds; file deletes are unchanged."""
+    """One refusal for a folder the writer may see, whatever it holds; a
+    folder holding only withheld pages answers as a missing path, as listing
+    it does; file deletes are unchanged."""
     files = {
         f"{NOTES}/alpha.md": _page("Alpha", "Alpha conclusions.", type="insight"),
         f"{NOTES}/Open/open.md": _page("Open", "Open text.", type="insight"),
@@ -1171,26 +1173,32 @@ def test_a_restricted_writer_deletes_no_folder(
     )
     principal = _principal(audience)
 
-    answers = {
-        label: _call(
-            vault,
-            principal,
-            "manage_memory_file",
-            operation="delete",
-            path=folder,
-            confirm=True,
-            recursive=recursive,
+    def delete(folder: str, **kwargs: Any) -> Any:
+        answer = _call(
+            vault, principal, "manage_memory_file", operation="delete", path=folder,
+            recursive=recursive, **kwargs,
         )
-        for label, folder in _FOLDERS.items()
-        if recursive or label != "missing"
-    }
+        return _text(answer).replace(folder, "<folder>")
 
-    refused = {
-        "__error__": "ValueError",
-        "message": "AUDIENCE_RESTRICTED: folder deletes are served to the owner only "
-        "under a governed policy",
-    }
-    assert all(answer == refused for answer in answers.values()), answers
+    answers = {label: delete(folder, confirm=True) for label, folder in _FOLDERS.items()}
+    unconfirmed = {label: delete(folder) for label, folder in _FOLDERS.items()}
+
+    refused = _text(
+        {
+            "__error__": "ValueError",
+            "message": "AUDIENCE_RESTRICTED: folder deletes are served to the owner only "
+            "under a governed policy",
+        }
+    )
+    assert answers["visible"] == answers["mixed"] == refused, answers
+    assert answers["withheld-only"] == answers["missing"], answers
+    assert unconfirmed["withheld-only"] == unconfirmed["missing"], unconfirmed
+    if recursive:
+        assert answers["missing"] == refused, answers
+    else:
+        assert "NOT_FOUND" in answers["missing"], answers
+        listed = _call(vault, principal, "browse_memory", mode="list", path=WITHHELD_DIR)
+        assert "NOT_FOUND" in _text(listed), listed
     assert sorted(p.name for p in (vault / NOTES / "Mixed").iterdir()) == ["hidden.md", "open.md"]
     assert (vault / WITHHELD_DIR / "hidden.md").is_file()
     deleted = _call(
