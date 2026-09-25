@@ -148,3 +148,55 @@ def test_a_write_that_cannot_bless_a_scope_hands_it_to_the_repair_owner(
     assert (lexstore.repair_progress(root) or {}).get("last_result") == "published"
     assert _scopes_published_by(root, freshness.instance_id()) == {"kb", "vault"}
     assert lexstore.search_bm25(root, "quokkarestartmarker", k=3, scope="kb")
+
+
+def test_a_healed_scope_is_not_handed_to_repair_again(
+    inherited_catalog: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stranding the repair owner already healed must not cost another rebuild.
+
+    The repair worker's targeted retry of a contended foreground upsert passes
+    the same witness step and can record a stranded scope without handing it
+    off; its own promotion proof repairs it. The next ordinary write, which
+    blesses both scopes cleanly, must then neither revoke admission nor
+    rebuild the whole catalogue on that stale record.
+    """
+    root = inherited_catalog
+    monkeypatch.setattr(lexstore, "rebase_inherited_catalog_lineage", lambda _root: ())
+    _start_managed_process(root)
+
+    real_lock = lexstore.LexicalStore._publication_lock
+    contended = {"foreground": True}
+
+    def lock(self, timeout=lexstore._PUBLICATION_TIMEOUT_BACKGROUND):
+        if contended["foreground"] and timeout == lexstore._PUBLICATION_TIMEOUT_FOREGROUND:
+            raise vault_module.VaultLockTimeout("VAULT_LOCK_TIMEOUT", "contended")
+        return real_lock(self, timeout=timeout)
+
+    monkeypatch.setattr(lexstore.LexicalStore, "_publication_lock", lock)
+    _governed_write(root)
+    contended["foreground"] = False
+    assert lexstore.await_repairs_idle(root)
+    assert readiness.retrieval_admission(root) == {"state": "ready", "admitted": True}
+
+    rebuilds: list[int] = []
+    real_rebuild = lexstore.LexicalStore.rebuild_atomic
+
+    def counted(self):
+        rebuilds.append(1)
+        return real_rebuild(self)
+
+    monkeypatch.setattr(lexstore.LexicalStore, "rebuild_atomic", counted)
+    vault_module.batch_atomic_write(
+        [
+            vault_module.PlannedWrite(
+                path=root / "Knowledge Base/Notes/Insights/second-probe.md",
+                content=NOTE_TEXT.replace("After restart probe", "Second probe"),
+            )
+        ],
+        vault_root=root,
+    )
+    assert lexstore.await_repairs_idle(root)
+
+    assert rebuilds == []
+    assert readiness.retrieval_admission(root) == {"state": "ready", "admitted": True}

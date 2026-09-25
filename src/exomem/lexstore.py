@@ -5118,9 +5118,16 @@ class LexicalStore:
 
         if self._failed or not self.path.exists():
             return ()
+        with _REPAIRS_LOCK:
+            if self.vault_root.resolve() in _REPAIRS_IN_FLIGHT:
+                # A repair publishes this process's own lineage anyway, and a
+                # checkpoint changed under it would void its publication.
+                return ()
         rebased: list[str] = []
         try:
-            with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_FOREGROUND):
+            # Warm-up runs off the request path, so it can wait out a start-up
+            # watcher batch rather than leave the first write to the repair.
+            with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_BACKGROUND):
                 conn = self._connect()
                 try:
                     if not self._schema_is_current(conn):
@@ -5158,12 +5165,32 @@ class LexicalStore:
         successful mutation does would ever schedule the repair that restores
         it. Offline callers keep the read path's own verify-or-rebuild heal.
         """
+        from . import freshness as freshness_module
         from . import readiness
 
         with self._lock:
-            stranded = bool(self._stranded_scopes)
+            flagged = set(self._stranded_scopes)
             self._stranded_scopes.clear()
-        if not stranded or not readiness.runtime_managed():
+        if not flagged or not readiness.runtime_managed():
+            return False
+        # The record is only a hint: a repair or a later bless may have healed
+        # the scope since (the repair worker's targeted retry records a
+        # stranding without handing it off). Re-prove it read-only now so a
+        # healed catalogue is never revoked and rebuilt on a stale record.
+        still_stranded = False
+        for scope in flagged:
+            if not freshness_module.recall_is_live(self.vault_root, scope):
+                continue
+            stored = self.published_recall_checkpoint(scope)
+            if (
+                stored is None
+                or not freshness_module.recall_delta_since(
+                    self.vault_root, scope, stored
+                ).complete
+            ):
+                still_stranded = True
+                break
+        if not still_stranded:
             return False
         _schedule_runtime_catalog_repair(self.vault_root)
         return True
