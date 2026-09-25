@@ -328,8 +328,13 @@ def _current(vault_root: Path, ref: str) -> tuple[dict[str, Any], dict[str, Any]
     the worker records the refreshed row on its next pass.
     """
     cid = parse_upkeep_ref(ref)
+    # Visibility before anything else, and on every path: a withheld item is
+    # answered exactly like an id that does not exist, before any revalidation,
+    # fingerprint comparison or write. The release filter is built for an
+    # absent id too, so the two take the same work.
+    keep = _keep(Path(vault_root))
     row = _row(Path(vault_root), cid)
-    if row is None:
+    if row is None or serve(row, keep=keep) is None:
         raise _not_found(ref)
     ctx = dreamer_families.Context(
         vault_root=Path(vault_root), store=None, conn=None, now=time.time()
