@@ -37,12 +37,18 @@ closed, bounded derived-batch receipt that binds the mutation attempt, canonical
 generation, affected safe relative paths, exact before and intended after hashes
 or tombstones, and the required component set. The receipt MUST carry no
 arbitrary vault content. A prepared receipt SHALL authorize derived publication
-only after exact canonical state proves the intended after-state. Rollback,
+only after exact canonical state proves, for every path, either the intended
+after-state or a later state that a newer exact receipt covers with live or
+retired pending custody for that path. Rollback,
 partial state, or an unrelated later state MUST NOT activate it. The recorded
 canonical generation is lineage for ordering and supersession; proof SHALL NOT
 require it to equal the vault-wide checkpoint, which advances on every write to
-any page. A later exact receipt MAY supersede older work only when it covers
-the same path/component demand without a visibility gap.
+any page. A later exact receipt MAY take over an older receipt's demand path
+by path, only for a path it covers without a visibility gap; the older receipt
+still converges the paths it owns, and is superseded as a whole only when newer
+receipts cover every path/component demand. The same per-path predicate SHALL
+hold at the acknowledgement's proof, at every re-proof before a component is
+dispatched, and at component completion.
 
 #### Scenario: Process dies after canonical replacement
 
@@ -61,6 +67,18 @@ the same path/component demand without a visibility gap.
 - **WHEN** a later governed mutation changes a path before an older derived receipt completes
 - **THEN** the older receipt cannot republish the stale generation
 - **AND** it is retired only after newer exact custody or full reconciliation covers the path and component
+
+#### Scenario: Distinct pages sharing navigation and cited pages converge
+
+- **WHEN** several governed pages are each written once in a burst and every write also rewrites shared pages (the knowledge base log and index, a cited source's back-reference)
+- **THEN** every batch completes or is superseded, and none is left in `reconcile_required`
+- **AND** every pending-visibility row retires, and managed recall stays ready
+
+#### Scenario: A coverer not yet proven heals on the next pass
+
+- **WHEN** an older batch is re-proven after a newer committed write moved one of its shared paths but before the newer batch's own proof
+- **THEN** the older batch is held in `reconcile_required`
+- **AND** the next recovery pass proves the newer batch and then the older one, which converges its own paths
 
 #### Scenario: Multi-page burst keeps every batch provable
 

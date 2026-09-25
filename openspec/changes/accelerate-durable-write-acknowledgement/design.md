@@ -128,6 +128,17 @@ original request evaluates a prepared batch from source of truth:
   stranded every page but the last of a multi-page burst in
   `reconcile_required` (integration finding, 2026-09-02). Exact after-state is
   proven by content hashes plus the observation recheck alone;
+- every path equals its intended after hash/tombstone, or has moved on past it
+  and a newer exact batch covers that path (higher store sequence; `ready`,
+  `completed` or `superseded`; a live or retired pending row for that path) →
+  `ready`, retiring this batch's pending rows for the handed-on paths; with no
+  path left in after-state → `superseded`. A shared page -- the knowledge
+  base's log and index, a cited source's back-reference -- moves on under
+  every later write, so whole-batch proof held every batch but the last of a
+  burst in `reconcile_required` for good, and its unprovable live rows turned
+  every managed recall into a warming answer (owner ruling, option A,
+  2026-09-25). A moved path whose newer batch is committed but not yet proven
+  leaves the batch `reconcile_required` until recovery re-proves it;
 - every path equals the before state and the canonical attempt is known not to
   have committed → retire as `aborted`, retiring the batch's own pending
   rows in the same transition;
@@ -160,7 +171,10 @@ derived work, while the existing idempotency/GraphCommitReceipt protocol decides
 canonical retry semantics independently.
 
 Publication is at-least-once with exact generation checks and idempotent sidecar
-upserts. Component completion CAS-clears only the claimed revision. Claim expiry
+upserts. Pending visibility is published for the paths a batch owns; a path
+handed on to newer custody is retired instead. Component completion CAS-clears
+only the claimed revision, and applies the same per-path predicate as the proof:
+every path is in its after-state or moved on under newer custody. Claim expiry
 allows another process to resume after worker death.
 
 **Alternative rejected — infer commitment from filesystem similarity for the
