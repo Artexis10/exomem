@@ -50,6 +50,9 @@ def vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (root / kb_dirname()).mkdir(parents=True)
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(root))
     monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    # No encoder is resident unless a test says so: a real one an earlier test
+    # loaded would stamp its fingerprint on every record.
+    monkeypatch.setattr(embeddings, "_MODEL", None)
     embeddings.clear_embedding_indexes()
     claims.clear_claim_indexes()
     find_module.clear_cache()
