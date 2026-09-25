@@ -319,8 +319,9 @@ jobs:
     runs-on: ubuntu-latest
     # A cold cache fetches bge-m3 and, until its artefact is published, builds
     # the int8 artefact on the runner (minutes, ~9 GB peak) before the
-    # multilingual activation acceptance runs; a warm cache needs neither.
-    timeout-minutes: 30
+    # multilingual activation acceptance runs; a warm cache needs neither. The
+    # dense recall acceptance adds about four minutes of sidecar builds.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
