@@ -55,12 +55,27 @@ For a writer other than the owner under a governed policy, write-time wikilink r
 
 ### Requirement: Write doors decide their target before acting
 
-For a writer other than the owner under a governed policy, a write door SHALL decide its target page before resolving, reading or changing it. `edit_memory`, `observe_memory` by path or memory reference, `replace_memory`, and `manage_memory_file` `append`, `move` source, `delete` of a file or of a folder holding only withheld files, and `reclassify` SHALL answer a target the writer may not see exactly as a missing target, and SHALL leave it unchanged. The owner's writes SHALL be unchanged.
+For a writer other than the owner under a governed policy, a write door SHALL decide its target page before resolving, reading or changing it. `edit_memory`, `observe_memory` by path or memory reference, `replace_memory`, and `manage_memory_file` `append`, `move` source, `delete` of a file, and `reclassify` SHALL answer a target the writer may not see exactly as a missing target, and SHALL leave it unchanged. A folder delete by such a writer SHALL be refused with one `AUDIENCE_RESTRICTED` answer whatever the folder holds, and a declared recursive delete SHALL be refused before anything is read. A creation door whose destination a withheld page occupies SHALL answer with its ordinary occupied-destination refusal, naming no path the writer did not supply, and SHALL leave that page unchanged, including under `overwrite`. A move that updates wikilinks SHALL rewrite every linking page, and SHALL report counts and paths for the linking pages the writer may see. The owner's writes SHALL be unchanged.
 
 #### Scenario: A write door names a withheld page
 
 - **WHEN** a restricted writer edits, observes, replaces, appends to, moves, deletes or reclassifies a withheld page
 - **THEN** the answer is byte-identical to the answer for an absent page, and the withheld page's bytes are unchanged
+
+#### Scenario: A restricted writer deletes a folder
+
+- **WHEN** a restricted writer deletes a folder that holds visible pages, withheld pages, both, or nothing it may see
+- **THEN** it receives the same `AUDIENCE_RESTRICTED` refusal each time and nothing is trashed
+
+#### Scenario: A destination a withheld page occupies
+
+- **WHEN** a restricted writer creates, overwrites, or moves a page to a path a withheld page occupies
+- **THEN** it receives the door's ordinary occupied-destination refusal and the withheld page's bytes are unchanged
+
+#### Scenario: A move rewrites a withheld page's link
+
+- **WHEN** a restricted writer moves a page that a withheld page links
+- **THEN** the withheld page's link is rewritten and the move's reported counts and touched paths match the twin without that page
 
 ### Requirement: Link resolution for restricted readers follows their view
 
