@@ -22,7 +22,17 @@ from email.parser import BytesParser
 from pathlib import Path
 from typing import Any
 
+from .governance.scrubber import NOTICE, scrub_text
+
 MAX_CONTROL_BYTES = 64 * 1024
+#: Bound on the uv stderr tail surfaced in a staging failure: at most this
+#: many trailing lines, further clipped to at most this many trailing bytes.
+_UV_STDERR_TAIL_MAX_LINES = 20
+_UV_STDERR_TAIL_MAX_BYTES = 4 * 1024
+#: The userinfo segment of a URL (`user:pass` before `@`). Not a shape the
+#: shared egress scrubber recognizes on its own, but exactly what a leaked
+#: package-index retry URL carries.
+_URL_USERINFO_RE = re.compile(r"(?<=://)[^/\s@]+:[^/\s@]+(?=@)")
 PROFILES = {
     "lean": "",
     "onnx": "embeddings-onnx",
@@ -294,6 +304,18 @@ def _verify_wheel_install(identity: dict[str, object], snapshot: Path, digest: s
         raise RuntimeError("staged candidate files do not match its wheel")
 
 
+def _uv_stderr_tail(data: bytes) -> str:
+    """Bounded, credential-scrubbed tail of a failed uv command's stderr."""
+    text = data.decode("utf-8", errors="replace")
+    tail = "\n".join(text.splitlines()[-_UV_STDERR_TAIL_MAX_LINES:]).strip()
+    tail_bytes = tail.encode("utf-8")
+    if len(tail_bytes) > _UV_STDERR_TAIL_MAX_BYTES:
+        tail = tail_bytes[-_UV_STDERR_TAIL_MAX_BYTES:].decode("utf-8", errors="ignore")
+    tail = _URL_USERINFO_RE.sub(NOTICE, tail)
+    cleaned, _ = scrub_text(tail)
+    return cleaned
+
+
 def _write_provenance(path: Path, provenance: dict[str, str]) -> None:
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
@@ -346,9 +368,11 @@ def stage(
         [uv, "venv", "--python", str(launcher), str(environment)],
         [uv, "pip", "install", "--refresh-package", "exomem", "--python", str(target_python), requirement],
     ):
-        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=900)
+        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=900)
         if result.returncode:
-            raise RuntimeError(f"release staging failed (uv exit {result.returncode})")
+            tail = _uv_stderr_tail(result.stderr or b"")
+            detail = f"; uv stderr: {tail}" if tail else ""
+            raise RuntimeError(f"release staging failed (uv exit {result.returncode}){detail}")
     identity = _staged_identity(target_python, wheel=snapshot is not None)
     version = identity["version"]
     if not version or (package_version and version != package_version):
