@@ -328,3 +328,33 @@ def test_a_link_targets_only_governed_pages(tmp_path: Path) -> None:
     assert not (targets | subjects) & set(excluded), pairs
     # The governed pair still stands.
     assert (fx.CAVITATION, fx.INLET) in pairs or (fx.INLET, fx.CAVITATION) in pairs, pairs
+
+
+def test_link_evidence_takes_the_source_title_from_the_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A shared Source is raw material: its title comes from the graph
+    snapshot, and its page is never parsed to get it."""
+    vault = fx.build(tmp_path)
+    parsed: list[str] = []
+    real_page = dreamer_families.Context.page
+
+    def page(ctx, rel):
+        parsed.append(rel)
+        return real_page(ctx, rel)
+
+    monkeypatch.setattr(dreamer_families.Context, "page", page)
+    ctx = dreamer_families.Context(vault_root=vault, store=None, conn=None, now=time.time())
+    try:
+        proposals = dreamer_families._link_proposals(ctx, fx.CAVITATION)
+    finally:
+        ctx.close()
+    shared = [
+        item
+        for proposal in proposals.values()
+        for item in proposal["evidence"]
+        if item["role"] == "shared_source"
+    ]
+    assert shared and all(item["path"] == fx.SOURCE_ONE for item in shared), proposals
+    assert {item["title"] for item in shared} == {"Field report one"}
+    assert fx.SOURCE_ONE not in parsed, parsed

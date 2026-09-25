@@ -309,7 +309,11 @@ def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
         shared = (candidate.get("evidence") or {}).get("shared_source")
         if isinstance(shared, str) and _sig(ctx, epistemic_graph._with_md(shared)):
             shared_rel = epistemic_graph._with_md(shared)
-            shared_page = ctx.page(shared_rel)
+            # A Source is raw material: its title comes from the graph, unparsed.
+            node = snapshot.execute(
+                "SELECT title FROM graph_nodes WHERE node_key = ? AND kind = 'file'",
+                (f"file:{shared_rel}",),
+            ).fetchone()
             evidence.append(
                 {
                     "path": shared_rel,
@@ -317,7 +321,7 @@ def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
                     "sig": _sig(ctx, shared_rel),
                     "role": "shared_source",
                     "origin": "",
-                    "title": getattr(shared_page, "title", None),
+                    "title": node[0] if node is not None else None,
                 }
             )
         out[str(enriched["review_id"])] = {
