@@ -462,6 +462,23 @@ def _continua_class(text: str) -> str | None:
     return found
 
 
+def _continua_runs(token: str) -> list[tuple[int, str, str]]:
+    """The token's maximal single-class scriptio-continua runs, each with its
+    offset in the token and its class. A turn token can glue a Latin word to a
+    Japanese phrase (`nameの予算を確認`); its Japanese run still holds names."""
+    runs: list[tuple[int, str, str]] = []
+    start, current = 0, None
+    for index, char in enumerate(token):
+        cls = _continua_class(char)
+        if cls != current:
+            if current is not None:
+                runs.append((start, token[start:index], current))
+            start, current = index, cls
+    if current is not None:
+        runs.append((start, token[start:], current))
+    return runs
+
+
 def _contained_names(
     analysis: TurnAnalysis, rows: Sequence[AnchorFacts], term_counts: Mapping[str, int]
 ) -> frozenset[str]:
@@ -474,9 +491,9 @@ def _contained_names(
     longer name, not this one.
     """
     runs = [
-        (position, token, cls)
+        (position, token, offset, run, cls)
         for position, token in enumerate(analysis.tokens)
-        if (cls := _continua_class(token)) is not None
+        for offset, run, cls in _continua_runs(token)
     ]
     if not runs:
         return frozenset()
@@ -488,10 +505,10 @@ def _contained_names(
             if cls is None:
                 continue
             occurrences = tuple(
-                (position, start, start + len(name))
-                for position, token, run_cls in runs
+                (position, offset + start, offset + start + len(name))
+                for position, token, offset, run, run_cls in runs
                 if run_cls == cls and token != name
-                for start in _occurrences(token, name)
+                for start in _occurrences(run, name)
             )
             if occurrences and (best is None or len(name) > len(best[0])):
                 best = (name, occurrences)

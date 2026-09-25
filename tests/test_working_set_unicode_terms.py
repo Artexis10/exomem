@@ -558,6 +558,18 @@ def test_a_name_must_share_the_run_s_script() -> None:
     assert _evidence("백화점에 가자", [_row("korean.md", "백화")]) == {}
 
 
+def test_a_cjk_name_inside_a_token_that_mixes_scripts_is_contained() -> None:
+    """A Latin word glued to a Japanese phrase is one turn token. Its Japanese
+    run is read like any other: 予算 sits inside `quillmereの予算を確認`, and a
+    run that is exactly the name still counts, since the token is not the name.
+    The Latin part stays a fragment, never a name."""
+    budget = [_row("budget.md", "予算")]
+
+    assert _evidence("quillmereの予算を確認して", budget) == {"budget.md": frozenset({"rare_term"})}
+    assert _evidence("quillmere予算", budget) == {"budget.md": frozenset({"rare_term"})}
+    assert _evidence("quillmereの予算を確認して", [_row("latin.md", "Quill")]) == {}
+
+
 def test_latin_and_cyrillic_tokens_are_unaffected() -> None:
     """A Latin or Cyrillic name inside a longer word is a fragment, not a name."""
     assert _evidence("the cedarwood trailer", [_row("cedar.md", "Cedar")]) == {}
