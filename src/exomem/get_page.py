@@ -209,12 +209,20 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
     try:
         # The resolver may have followed a stable in-vault alias. Read the
         # exact resolved target it classified, not the caller spelling that
-        # could be swapped after resolution.
-        expected_identity = reserved_paths.inspect_generic_file(
+        # could be swapped after resolution. `resolve_physical_relative` finds
+        # the on-disk spelling when it differs from the NFKC one this door
+        # otherwise assumes -- a macOS-origin NFD name on a byte-exact
+        # filesystem (Linux ext4) -- and refuses outright rather than guess
+        # if two physical spellings collide; `physical=True` below then opens
+        # exactly that confirmed spelling instead of re-normalizing it away.
+        physical_relative = reserved_paths.resolve_physical_relative(
             vault_root, resolution.resolved_relative
         )
+        expected_identity = reserved_paths.inspect_generic_file(
+            vault_root, physical_relative, physical=True
+        )
         snapshot = reserved_paths.read_generic_bytes(
-            vault_root, resolution.resolved_relative
+            vault_root, physical_relative, physical=True
         )
         if snapshot.identity != expected_identity:
             raise unreadable_or_absent(
@@ -224,6 +232,14 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
                 "file changed while being read",
             )
     except reserved_paths.ReservedPathLeafError as error:
+        if error.code == "AMBIGUOUS_PATH":
+            raise GetError(
+                code="AMBIGUOUS_PATH",
+                reason=(
+                    f"{missing_path} matches more than one on-disk spelling; "
+                    "refusing to guess which"
+                ),
+            ) from None
         if error.code in {
             "CAPABILITY_UNAVAILABLE",
             "IDENTITY_CHANGED",
