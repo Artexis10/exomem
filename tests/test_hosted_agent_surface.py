@@ -141,6 +141,7 @@ def test_hosted_exclusions_state_a_reason_and_a_lifting_condition() -> None:
     assert set(commands.HOSTED_SURFACE_EXCLUSIONS) == {
         "activate_context",
         "configure_memory",
+        "episode_memory",
         "transfer_artifact",
         "adopt_vault",
         "process_media",

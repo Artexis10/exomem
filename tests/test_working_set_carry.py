@@ -1258,6 +1258,26 @@ def test_a_sentence_boundary_ends_the_window() -> None:
     ) == (("girvan", "slot"),)
 
 
+def test_a_sentence_end_in_any_script_ends_the_window() -> None:
+    """The window is split on the RAW turn, so a script's own sentence end
+    has to be named: the Devanagari danda and double danda, the Greek
+    question mark (which NFKC would read as a semicolon), the Arabic
+    question mark and full stop, the Armenian full stop, and the CJK full
+    stop and fullwidth exclamation and question marks."""
+    for breaker in (
+        "।", "॥", ";", "؟", "۔", "։", "。", "！", "？"
+    ):
+        assert working_set_runtime.adjacent_rare_pairs(
+            f"the lisbon run{breaker} the harbour run", ("lisbon", "harbour")
+        ) == (), repr(breaker)
+
+    rare = ("लिस्बन", "बंदरगाह")
+    assert working_set_runtime.adjacent_rare_pairs("लिस्बन का दौरा। बंदरगाह बंद था", rare) == ()
+    assert working_set_runtime.adjacent_rare_pairs("लिस्बन बंदरगाह बंद था", rare) == (
+        tuple(sorted(rare)),
+    )
+
+
 def test_a_hyphenated_name_pairs_on_both_of_its_stems() -> None:
     """One raw token can carry two stems. "girvan-slot" is the phrase said
     as tightly as a phrase can be said, and reading only the first stem
@@ -2324,3 +2344,79 @@ def test_a_single_word_or_run_never_carries_a_page(vault: Path, turn: str, page_
 
     assert state == "available"
     assert hits == (), hits
+
+
+# --------------------------------------------------------------------------- #
+# The carry stays off for unspaced runs
+# --------------------------------------------------------------------------- #
+
+
+_GRAMMAR_ONLY_TURNS = [
+    ("明日は、散歩です", "今日は晴れです。"),
+    ("昨日は、映画です", "今日は晴れです。"),
+    ("これは、どうですか", "会議の資料はこれです。"),
+    ("오늘은 회의입니다", "오늘은 맑습니다."),
+]
+
+
+def _write_probe_page(vault: Path, page_line: str) -> None:
+    _write(
+        vault / "Knowledge Base" / "Notes" / "Research" / "probe-page.md",
+        "---\ntype: research-note\nstatus: active\nupdated: 2026-09-10\n---\n\n"
+        f"# Probe page\n\n## Summary\n\n- [decision] {page_line} ^pp-1\n",
+    )
+
+
+def test_an_unspaced_run_contributes_no_pairable_stem() -> None:
+    """A run's bigrams are rare in a vault that holds little of its script,
+    and two runs side by side share particles and endings (日は, です,
+    니다) with any page in that script. Paired, those bigrams named pages the
+    turn never mentioned; so a run pairs with nothing, not with another run
+    and not with a word."""
+    for turn, _page_line in _GRAMMAR_ONLY_TURNS:
+        stems = working_set_runtime.content_stems(turn)
+        assert len(stems) > 2, turn
+        assert working_set_runtime.adjacent_rare_pairs(turn, stems) == (), turn
+    assert working_set_runtime.adjacent_rare_pairs(
+        "the girvan 東京タワー window", ("girvan", "東京", "window")
+    ) == (("girvan", "window"),)
+
+
+@pytest.mark.parametrize(("turn", "page_line"), _GRAMMAR_ONLY_TURNS)
+def test_grammar_shared_across_two_runs_carries_nothing(
+    vault: Path, turn: str, page_line: str
+) -> None:
+    """End to end: a Japanese or Korean turn whose two runs share only
+    particles and endings with one page of a measurable corpus carries no
+    page."""
+    _write_probe_page(vault, page_line)
+    _seed_proximity_corpus(vault)
+
+    hits, state = working_set_runtime.carry_candidates(vault, turn)
+
+    assert state == "available"
+    assert hits == (), hits
+
+
+def test_a_turn_in_an_unspaced_script_never_reaches_the_ranking_query(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no pairable unit the ranking query is never made. Two adjacent
+    runs made |A|x|B| pair groups, evaluated per matching row: a 1,200
+    character Japanese turn took about a minute on a 1,600-page vault."""
+    _write_probe_page(vault, "今日は晴れです。")
+    _seed_proximity_corpus(vault)
+    calls: list[str] = []
+    real = lexstore.search_bm25_result
+
+    def counting(*args, **kwargs):
+        calls.append("bm25")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(lexstore, "search_bm25_result", counting)
+
+    hits, state = working_set_runtime.carry_candidates(vault, "明日は、散歩です。" * 40)
+
+    assert state == "available"
+    assert hits == ()
+    assert calls == [], "the ranking query ran for a turn in an unspaced script"

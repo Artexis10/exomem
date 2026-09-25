@@ -252,6 +252,23 @@ def _destination(vault_root: Path, rel: str, kind, domain) -> str:
     return "/".join((kb_dirname(), *segments, rel.rsplit("/", 1)[-1]))
 
 
+def _refuse_episode_kind(current_kind: str, target_kind: str | None) -> None:
+    """A recap is only what `episode_memory` recorded and bound, in one folder.
+
+    Nothing is reclassified into the kind, and a recap is not reclassified out
+    of it or into a domain subfolder: its revisions are found by one listing
+    of `Sources/Episodes/`, so a moved recap is one that listing no longer
+    sees, and the next record would leave two live revisions.
+    """
+    if source_taxonomy.EPISODE_KIND in (current_kind, target_kind):
+        raise ReclassifyError(
+            "EPISODE_KIND_RESERVED",
+            f"the {source_taxonomy.EPISODE_KIND!r} kind is reserved for conversation "
+            "recaps recorded with episode_memory: a recap cannot be reclassified, "
+            "and nothing else can become one",
+        )
+
+
 def _introduction_warnings(plan: source_taxonomy.TaxonomyPlan) -> tuple[str, ...]:
     """Say so when a correction introduces vocabulary the vault had not seen.
 
@@ -342,6 +359,8 @@ def propose(
             "this artifact is, which is a judgement the caller has to make"
         )
 
+    if source_kind is not None or domain is not None:
+        _refuse_episode_kind(current_kind, proposed_kind)
     effective_domain = proposed_domain or current_domain
     destination: str | None = None
     relocation_required = False
@@ -405,6 +424,7 @@ def reclassify(
         )
     except source_taxonomy.TaxonomyError as error:
         raise ReclassifyError("INVALID_CLASSIFICATION", str(error)) from error
+    _refuse_episode_kind(current_kind, kind_resolution.key)
 
     plan = source_taxonomy.plan_registrations(
         vault_root, kind=kind_resolution, domain=domain_resolution

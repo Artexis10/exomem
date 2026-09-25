@@ -78,6 +78,7 @@ _OPTIONAL_COMMANDS = frozenset(
         "delete",
         "edit",
         "edit_memory",
+        "episode_memory",
         "evolution",
         "fetch",
         "find",

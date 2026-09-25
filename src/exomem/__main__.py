@@ -2678,6 +2678,10 @@ def _activate_main(argv: list[str]) -> int:
     parser.add_argument(
         "--timings", action="store_true", help="include per-stage timings"
     )
+    parser.add_argument("--client", default=None, help="calling client label, recorded only")
+    parser.add_argument(
+        "--session", default=None, help="opaque conversation id, recorded only as a hash"
+    )
     parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
     args = parser.parse_args(argv)
 
@@ -2692,6 +2696,10 @@ def _activate_main(argv: list[str]) -> int:
         core += ["--anchor", args.anchor]
     if args.timings:
         core.append("--include-timings")
+    if args.client:
+        core += ["--client", args.client]
+    if args.session:
+        core += ["--session", args.session]
     return _core_op_main(_with_json(core, args.json))
 
 

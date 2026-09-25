@@ -59,6 +59,12 @@ MAX_KEY_LENGTH = 41
 MAX_PROJECTION_DEPTH = 2
 
 SOURCES_ROOT = "Sources"
+#: The kind a conversation recap is filed under, and the one directory it may
+#: use. Reserved in both directions: the kind cannot be moved and no other kind
+#: may claim the folder, because recent-context detection of a recap is a pure
+#: path test (`working_set._recent_reason_for`) that must never need a read.
+EPISODE_KIND = "episode"
+EPISODE_PATH_LABEL = "Episodes"
 
 _REGISTRY_FILENAME = "source-taxonomy.yaml"
 _KIND_SECTION = "source_kinds"
@@ -314,6 +320,14 @@ _BUILTIN_KINDS: tuple[Definition, ...] = (
         path_label="Manuals",
         description="product manuals and reference documentation",
         aliases=("manual", "manuals", "documentation"),
+        builtin=True,
+    ),
+    Definition(
+        key=EPISODE_KIND,
+        label="Episode",
+        path_label=EPISODE_PATH_LABEL,
+        description="agent-authored conversation recaps with bounded verbatim excerpts",
+        aliases=("episodes",),
         builtin=True,
     ),
     Definition(
@@ -690,6 +704,13 @@ def _definition_from_entry(
         path_label = existing.path_label
     else:
         path_label = derive_path_label(key)
+    if axis == "source_kind" and (key == EPISODE_KIND) != (
+        path_label.casefold() == EPISODE_PATH_LABEL.casefold()
+    ):
+        raise TaxonomyError(
+            f"{axis} {key!r} cannot use path_label {path_label!r}: "
+            f"Sources/{EPISODE_PATH_LABEL}/ is reserved for the {EPISODE_KIND!r} kind"
+        )
     status = str(entry.get("status") or "active").strip().casefold()
     if status not in _STATUSES:
         findings.append(f"{axis} {key!r} has unknown status {status!r}; using active")
