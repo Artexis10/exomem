@@ -424,6 +424,16 @@ def test_retrieved_evidence_alone_never_resolves_however_many_kinds_stack() -> N
 # --------------------------------------------------------------------------- #
 
 
+def _shipped_eligible(analysis: resolve_module.TurnAnalysis) -> frozenset[str]:
+    """The categories the shipped role registry makes eligible for a turn: what
+    the runtime passes in since the cue table moved into the registry."""
+    from exomem import context_roles
+
+    return resolve_module.eligible_categories(
+        analysis, context_roles.shipped_registry().roles.values()
+    )
+
+
 def _term_row(
     path: str,
     title: str,
@@ -522,7 +532,10 @@ def test_a_rare_single_name_term_with_broad_overlap_and_only_a_qualifier_stays_p
     row = _term_row("bench.md", "Workshop bench", terms=("workshop", "bench", "limit"))
     analysis = resolve_module.analyze_turn("is the bench past its limit")
     candidates = resolve_module.candidates_for(
-        analysis, (row,), term_anchor_counts={"bench": 1}
+        analysis,
+        (row,),
+        term_anchor_counts={"bench": 1},
+        eligible_categories=_shipped_eligible(analysis),
     )
 
     assert len(candidates) == 1
@@ -544,6 +557,7 @@ def test_a_rare_single_name_term_with_retrieval_resolves_via_rare_term() -> None
         (row,),
         term_anchor_counts={"bench": 1},
         retrieval_paths=frozenset({"bench.md"}),
+        eligible_categories=_shipped_eligible(analysis),
     )
 
     assert len(candidates) == 1
