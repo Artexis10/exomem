@@ -1606,7 +1606,7 @@ class WorkingSetIndex:
         )
         conn.execute(
             "CREATE TABLE IF NOT EXISTS anchor_vectors "
-            "(anchor_id TEXT PRIMARY KEY, signature_digest TEXT NOT NULL, vector BLOB NOT NULL)"
+            "(anchor_id TEXT PRIMARY KEY, signature_digest TEXT NOT NULL DEFAULT '', vector BLOB NOT NULL)"
         )
         try:
             conn.execute(
@@ -1663,11 +1663,13 @@ class WorkingSetIndex:
             )
             conn.commit()
         elif int(stored[0]) != SCHEMA_VERSION:
-            # A table whose columns changed is recreated, not just emptied.
+            # A table whose columns changed is recreated, not just emptied. The
+            # digest defaults to '' so the previous release's two-column insert
+            # still succeeds after a rollback; an empty digest never matches.
             conn.execute("DROP TABLE IF EXISTS anchor_vectors")
             conn.execute(
                 "CREATE TABLE anchor_vectors "
-                "(anchor_id TEXT PRIMARY KEY, signature_digest TEXT NOT NULL, vector BLOB NOT NULL)"
+                "(anchor_id TEXT PRIMARY KEY, signature_digest TEXT NOT NULL DEFAULT '', vector BLOB NOT NULL)"
             )
             self._wipe(conn)
 

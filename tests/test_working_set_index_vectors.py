@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import sqlite3
 from pathlib import Path
 
 import numpy as np
@@ -75,6 +76,36 @@ def _encoded(fake: _Encoder) -> list[str]:
 
 def test_the_schema_records_fingerprinted_vectors() -> None:
     assert working_set_index.SCHEMA_VERSION == 9
+
+
+def test_a_rollback_to_schema_8_and_back_keeps_the_index_working(encoder) -> None:
+    """A host that rolls back one release opens this sidecar with the schema-8
+    code, which writes vectors as `(anchor_id, vector)`. That insert must
+    succeed on this table, and the next schema-9 open rebuilds from it."""
+    vault, fake = encoder
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild()
+    path = index.path
+    index.close()
+
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("UPDATE meta SET value = '8' WHERE key = 'schema_version'")
+        conn.execute(
+            "INSERT OR REPLACE INTO anchor_vectors (anchor_id, vector) VALUES (?, ?)",
+            ("schema-8-row", np.zeros(16, dtype=np.float32).tobytes()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    working_set_index._MATRIX_CACHE.clear()
+
+    again = working_set_index.WorkingSetIndex(vault)
+    again.rebuild(load_encoder=True)
+
+    ids, matrix = again.vector_matrix(fake.fingerprint)
+    assert matrix is not None and len(ids) == len(again.anchors())
+    assert "schema-8-row" not in ids
 
 
 def test_one_changed_anchor_encodes_exactly_one_signature(encoder) -> None:
