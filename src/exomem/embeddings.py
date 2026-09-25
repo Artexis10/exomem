@@ -302,12 +302,13 @@ def get_reranker():
         with _RERANKER_LOCK:
             if _RERANKER is not None:
                 return _RERANKER
+            # The tokenizer guard first, before any import a lean install lacks.
+            embedding_backend.require_tokenizer(RERANKER_NAME)
             runtime_resources.configure_torch()
             from sentence_transformers import CrossEncoder
 
             device = accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
             log.info("loading reranker %s on %s", RERANKER_NAME, device)
-            embedding_backend.require_tokenizer(RERANKER_NAME)
             _RERANKER = model_cache.load_offline_first(
                 RERANKER_NAME,
                 lambda **kw: CrossEncoder(RERANKER_NAME, device=device, **kw),

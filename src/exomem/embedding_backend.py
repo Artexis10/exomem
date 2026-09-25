@@ -394,11 +394,13 @@ class _TorchEncoder:
     concurrent_encodes = False
 
     def __init__(self, model_name: str, device: str, half: bool) -> None:
+        # The tokenizer guard is the first thing a load does, before any import
+        # that a lean install may not have.
+        require_tokenizer(model_name)
         # Heavy import stays local — keyword-mode and a lean install must not pay it.
         runtime_resources.configure_torch()
         from sentence_transformers import SentenceTransformer
 
-        require_tokenizer(model_name)
         model = model_cache.load_offline_first(
             model_name,
             lambda **kw: SentenceTransformer(model_name, device=device, **kw),
@@ -450,11 +452,13 @@ class _OnnxEncoder:
     concurrent_encodes = True
 
     def __init__(self, model_name: str, device: str) -> None:
+        # The tokenizer guard is the first thing a load does, before any import
+        # that a lean install may not have.
+        tokenizer_path = require_tokenizer(model_name)
         import onnxruntime as ort
         from tokenizers import Tokenizer
 
         self.profile = read_profile(model_name)
-        tokenizer_path = require_tokenizer(model_name)
         served = served_artifact(model_name)
         if served is None:
             onnx_path = _model_file(model_name, self.profile.onnx_file)
