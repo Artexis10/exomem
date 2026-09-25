@@ -2128,10 +2128,14 @@ class WorkingSetIndex:
         (and no leave to load one) nothing is encoded: unchanged anchors keep
         their vectors and changed ones lose theirs. A resident encoder other
         than the one the vectors were made with is treated the same way on an
-        inline pass: it never starts its own vector space there, because a
-        bounded inline pass would leave a partial population for the band to
-        calibrate on. Only a background pass re-embeds everything under it.
-        None when embeddings are off, which leaves no vectors at all.
+        inline pass in a managed runtime: it never starts its own vector space
+        there, because a bounded inline pass would leave a partial population
+        for the band to calibrate on, and the runtime schedules the background
+        pass that re-embeds everything under it. Nothing schedules that pass in
+        an unmanaged runtime, so there a changed encoder is a first population:
+        the stale rows go and the bounded inline fill takes over, still with a
+        resident model only. None when embeddings are off, which leaves no
+        vectors at all.
         """
         if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
             return None
@@ -2167,7 +2171,12 @@ class WorkingSetIndex:
                 if anchor_id in stored and stored[anchor_id][0] == digest
             }
 
-        if not load_encoder and fingerprint is not None and stored_fingerprint not in (None, fingerprint):
+        if (
+            not load_encoder
+            and fingerprint is not None
+            and stored_fingerprint not in (None, fingerprint)
+            and _runtime_managed()
+        ):
             keep = reusable(stored_fingerprint)
             space = stored_fingerprint if keep else None
             return _VectorPlan(
@@ -2336,6 +2345,16 @@ class _VectorPlan:
     rows: dict[str, tuple[str, bytes]]
     fingerprint: str | None
     changed: bool
+
+
+def _runtime_managed() -> bool:
+    """Whether a managed runtime owns this process (and schedules re-embeds)."""
+    try:
+        from . import readiness
+
+        return bool(readiness.runtime_managed())
+    except Exception:  # noqa: BLE001 - an unknown runtime is treated as unmanaged
+        return False
 
 
 def _signature_digest(signature: str) -> str:

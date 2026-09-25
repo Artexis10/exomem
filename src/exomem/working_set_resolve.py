@@ -449,6 +449,9 @@ _CONTINUA_RANGES: tuple[tuple[str, int, int], ...] = (
     ("khmer", 0x19E0, 0x19FF),
 )
 
+#: The lowest code point of any unspaced-script range.
+_CONTINUA_FLOOR = min(low for _name, low, _high in _CONTINUA_RANGES)
+
 
 def _continua_class(text: str) -> str | None:
     """The scriptio-continua class every code point of `text` belongs to, or None."""
@@ -466,6 +469,10 @@ def _continua_runs(token: str) -> list[tuple[int, str, str]]:
     """The token's maximal single-class scriptio-continua runs, each with its
     offset in the token and its class. A turn token can glue a Latin word to a
     Japanese phrase (`nameの予算を確認`); its Japanese run still holds names."""
+    # Most tokens are Latin or Cyrillic: nothing below the lowest range can
+    # belong to a run, so such a token is skipped without a per-character scan.
+    if all(ord(char) < _CONTINUA_FLOOR for char in token):
+        return []
     runs: list[tuple[int, str, str]] = []
     start, current = 0, None
     for index, char in enumerate(token):

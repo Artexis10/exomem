@@ -361,23 +361,24 @@ def test_the_fingerprint_and_the_rows_are_read_in_one_snapshot(encoder, monkeypa
     reader._conn = Interleaved(reader._connect())
     ids, matrix = reader.vector_matrix(first)
 
-    if matrix is not None:
-        own = {anchor_id: fake.vector(text) for anchor_id, text in _signatures(reader).items()}
-        for anchor_id, row in zip(ids, matrix, strict=True):
-            assert np.allclose(row, own[anchor_id], atol=1e-5), "a row made by another encoder"
+    assert matrix is not None
+    own = {anchor_id: fake.vector(text) for anchor_id, text in _signatures(reader).items()}
+    for anchor_id, row in zip(ids, matrix, strict=True):
+        assert np.allclose(row, own[anchor_id], atol=1e-5), "a row made by another encoder"
 
 
 def _signatures(index: working_set_index.WorkingSetIndex) -> dict[str, str]:
     return {row.anchor_id: _signature_of(index, row.anchor_id) for row in index.anchors()}
 
 
-def test_an_inline_pass_never_starts_another_encoders_vector_space(encoder) -> None:
-    """After the resident encoder changes, an inline pass encodes nothing: the
-    stored rows stay under the fingerprint they were made with, and semantic
-    evidence reads `absent` until the background pass re-embeds them all. A
-    partial population under the new encoder would calibrate the band on a
-    sample."""
+def test_an_inline_pass_never_starts_another_encoders_vector_space(encoder, monkeypatch) -> None:
+    """In a managed runtime, after the resident encoder changes, an inline pass
+    encodes nothing: the stored rows stay under the fingerprint they were made
+    with, and semantic evidence reads `absent` until the background pass it
+    schedules re-embeds them all. A partial population under the new encoder
+    would calibrate the band on a sample."""
     vault, fake = encoder
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
     index = working_set_index.WorkingSetIndex(vault)
     index.rebuild()
     first = fake.fingerprint
@@ -393,6 +394,45 @@ def test_an_inline_pass_never_starts_another_encoders_vector_space(encoder) -> N
     assert set(index.vector_matrix(first)[0]) == set(stored)
     assert index.vector_matrix(fake.fingerprint) == ((), None)
     assert working_set.signature_evidence(index, "Could the sled cope?") == ({}, "absent")
+
+
+def test_an_unmanaged_runtime_refills_a_changed_encoder_s_vectors_inline(encoder, monkeypatch) -> None:
+    """With no managed runtime nothing schedules the background re-embed (the
+    reviewer's r5_unmanaged probe: `absent` forever). So there a changed
+    encoder is a first population: the stale rows go, and each inline pass
+    fills at most `INLINE_VECTOR_ENCODE_LIMIT` signatures from the resident
+    model, never loading one."""
+    vault, fake = encoder
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: False)
+    for i in range(70):
+        _write(
+            vault / f"Knowledge Base/Products/Zorvath {i:03d}.md",
+            f"---\ntype: note\nstatus: active\n---\n# Zorvath {i:03d}\n\nPlanted {i}.\n",
+        )
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild(load_encoder=True)
+    first = fake.fingerprint
+    total = len(index.anchors())
+    assert total > working_set_index.INLINE_VECTOR_ENCODE_LIMIT
+    fake.fingerprint = "fake-model|cls|l2|bbbb"
+    fake.encoded.clear()
+    monkeypatch.setattr(embeddings, "get_activation_model", lambda: pytest.fail("a request-thread pass loaded a model"))
+
+    passes = 0
+    while len(index.vector_matrix(fake.fingerprint)[0]) < len(index.anchors()) and passes < 5:
+        _write(
+            vault / f"Knowledge Base/Products/Tern Wagon {passes}.md",
+            "---\ntype: note\nstatus: active\n---\n# Tern Wagon\n\nNew.\n",
+        )
+        index.update()
+        passes += 1
+        assert index.vector_matrix(first) == ((), None), "no row of the old encoder survives"
+
+    assert passes == 2
+    assert all(len(batch) <= working_set_index.INLINE_VECTOR_ENCODE_LIMIT for batch in fake.encoded)
+    assert index.vector_fingerprint() == fake.fingerprint
+    assert set(index.vector_matrix(fake.fingerprint)[0]) == {anchor.anchor_id for anchor in index.anchors()}
+    assert working_set.signature_evidence(index, "Could the sled cope?")[1] != "absent"
 
 
 def test_a_managed_runtime_re_embeds_once_after_the_encoder_changes(encoder, monkeypatch) -> None:
