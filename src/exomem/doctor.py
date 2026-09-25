@@ -2119,6 +2119,47 @@ def _hf_hub_dir() -> Path:
     return model_cache.hub_dir()
 
 
+def _check_recall_reembed(vault_root: Path | None) -> DoctorCheck | None:
+    """Which vector space serves recall, and how far a re-embed into the recall
+    encoder's space has come. Read from the sidecars on disk; loads no model."""
+    if vault_root is None:
+        return None
+    from . import recall_migration
+
+    try:
+        state = recall_migration.disk_status(vault_root)
+    except Exception as e:  # noqa: BLE001 — diagnostic boundary
+        return _check("embeddings.reembed", "warn", f"Recall sidecars could not be read: {e}")
+    serving = state.get("serving")
+    if serving is None:
+        return None
+    building = state.get("building")
+    if not building:
+        return _check(
+            "embeddings.reembed",
+            "pass",
+            f"Recall serves {serving['model']} vectors ({serving['dim']}-d) from {serving['sidecar']}.",
+            details=state,
+        )
+    if state.get("reembed") == "off":
+        return _check(
+            "embeddings.reembed",
+            "warn",
+            f"Recall serves {serving['model']} vectors while a sidecar for {building['model']} "
+            f"is partly built ({building['paths_done']}/{state['paths_total']} pages); "
+            "EXOMEM_RECALL_REEMBED=off keeps it from finishing.",
+            "Unset EXOMEM_RECALL_REEMBED to let the service finish and cut over.",
+            details=state,
+        )
+    return _check(
+        "embeddings.reembed",
+        "pass",
+        f"Recall serves {serving['model']} vectors while the service re-embeds into "
+        f"{building['model']}: {building['paths_done']}/{state['paths_total']} pages built.",
+        details=state,
+    )
+
+
 def _model_cached(hub: Path, dirname: str) -> bool:
     """True if a model's snapshot dir exists and is non-empty — a pure directory
     check, so a caller can gate model-loading work on it WITHOUT risking a
@@ -3437,6 +3478,9 @@ def doctor(
         sidecar = _check_embedding_sidecar(vault_root)
         if sidecar is not None:
             checks.append(sidecar)
+        reembed = _check_recall_reembed(vault_root)
+        if reembed is not None:
+            checks.append(reembed)
 
     if profile in ("standard", "media"):
         checks.extend([

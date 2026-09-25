@@ -468,15 +468,18 @@ class EmbeddingIndex:
         self._set_identity(identity)
 
     @contextlib.contextmanager
-    def encoding(self) -> Iterator[None]:
+    def encoding(self, *, load: bool = False) -> Iterator[None]:
         """Encode for this sidecar inside the block, or refuse before encoding.
 
         Selects the encoder that serves this sidecar's vector space and checks
         it against the sidecar's record before anything is encoded, so a query
-        vector or a row made inside the block belongs to this sidecar. Raises
-        `recall_space.VectorSpaceMismatch` when no encoder here serves that
-        space. A sidecar holding no vectors takes whatever the recall encoder
-        produces.
+        vector or a row made inside the block belongs to this sidecar. A
+        sidecar written by another model than the recall encoder's (one a
+        re-embed has not replaced yet) is served by that model, which warm-up
+        keeps resident and a request never loads: `recall_space.ServingEncoderCold`
+        when it is not resident. `recall_space.VectorSpaceMismatch` when the
+        encoder here is another build than the one the sidecar records. A
+        sidecar holding no vectors takes whatever the recall encoder produces.
         """
         identity = self.identity
         if identity is None:
@@ -484,9 +487,25 @@ class EmbeddingIndex:
             return
         model = recall_space.recall_model()
         if identity.model != model:
-            raise recall_space.VectorSpaceMismatch(
-                f"the sidecar holds {identity.model} vectors; recall encodes with {model}"
-            )
+            if recall_space.cell_mode():
+                # A cell runs no second encoder and never re-embeds in place.
+                raise recall_space.VectorSpaceMismatch(
+                    f"the sidecar holds {identity.model} vectors; this cell encodes with {model}"
+                )
+            if load:
+                recall_space.previous_encoder(identity.model)
+            if recall_space.previous_resident(identity.model) is None:
+                raise recall_space.ServingEncoderCold(
+                    f"{identity.model}, which serves this sidecar, is not resident"
+                )
+            fingerprint = recall_space.resident_fingerprint(identity.model)
+            if not identity.accepts(identity.model, fingerprint):
+                raise recall_space.VectorSpaceMismatch(
+                    f"the sidecar was written by another build of {identity.model}"
+                )
+            with recall_space.selecting(identity.model):
+                yield
+            return
         if identity.fingerprint is not None and recall_space.resident_fingerprint(model) is None:
             from . import embeddings
 

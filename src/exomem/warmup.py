@@ -543,6 +543,15 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         # rest of the warm), but drain_deferred() still empties the queue so those
         # writes are replayed instead of lost.
         if bge_ok:
+            from . import recall_migration
+
+            # A sidecar still in another encoder's space (a re-embed not yet cut
+            # over) is served by that encoder. It loads here, before writes are
+            # admitted, so neither a query nor a write ever loads it.
+            _model_step(
+                "model_recall_serving",
+                lambda: recall_migration.preload_serving_encoder(vault_root),
+            )
             log.info("embedding model ready")
             drained = readiness.mark_ready("embeddings")
         else:

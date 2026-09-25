@@ -6,9 +6,11 @@ mixed matrix cannot even be built. So the sidecar records which encoder wrote
 it (the model, the encoder's fingerprint when it was resident, and the width),
 reads its width from that record instead of a module constant, refuses rows of
 another width, and a query from an encoder it was not written by leaves the
-vector lane out while the lexical lanes serve. A sidecar written before the
-record existed was written by the English model at 768 dimensions: that is the
-only encoder recall ever shipped.
+vector lane out while the lexical lanes serve (on a personal server a sidecar
+of another model is served by that model until it is re-embedded; see
+tests/test_embedding_migration.py). A sidecar written before the record existed
+was written by the English model at 768 dimensions: that is the only encoder
+recall ever shipped.
 
 Which sidecar serves is named by an active pointer beside it, so a new space
 can be built next to the serving one and swapped in atomically. The claims
@@ -261,11 +263,15 @@ def test_a_query_in_the_sidecar_space_serves_the_vector_lane(served) -> None:
     assert encoder.queries == 1
 
 
-def test_a_query_from_another_model_leaves_the_vector_lane_out_and_lexical_serves(
+def test_a_cell_leaves_the_vector_lane_out_for_another_models_sidecar(
     served, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A personal server serves such a sidecar with the model that wrote it
+    # while it re-embeds (tests/test_embedding_migration.py); a hosted or cloud
+    # cell runs no second encoder, so the sidecar is refused there.
     vault, encoder = served
     monkeypatch.setattr(embeddings, "MODEL_NAME", SPACE_B)
+    monkeypatch.setattr(recall_space, "cell_mode", lambda env=None: True)
 
     result = _explained(vault, "retry backoff")
 

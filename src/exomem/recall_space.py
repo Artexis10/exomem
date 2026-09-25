@@ -22,14 +22,22 @@ configured recall model, exactly as before.
 from __future__ import annotations
 
 import contextlib
+import os
 import sqlite3
-from collections.abc import Iterator
+import threading
+from collections.abc import Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import Any
 
 #: The encoder every sidecar without a record was written by.
 LEGACY_MODEL = "BAAI/bge-base-en-v1.5"
 LEGACY_DIM = 768
+
+#: Mirror `hosted_runtime.HOSTED_MODE_ENV` and `cloud_cell.CLOUD_MODE_ENV`. Read
+#: directly: `embeddings` imports this module and must stay cheap to import.
+_CELL_FLAGS = ("EXOMEM_HOSTED_CELL", "EXOMEM_CLOUD_CELL")
+_FALSE = frozenset({"", "0", "false", "no", "off"})
 
 #: Widths of the models recall declares, so an empty store answers at the width
 #: its encoder will produce without loading the encoder. Anything else is
@@ -67,6 +75,16 @@ LEGACY_IDENTITY = SpaceIdentity(LEGACY_MODEL, None, LEGACY_DIM)
 _SELECTED: ContextVar[str | None] = ContextVar("exomem_recall_encoder", default=None)
 
 
+def cell_mode(env: Mapping[str, str] | None = None) -> bool:
+    """Whether this process is a hosted or cloud cell.
+
+    A malformed flag counts as a cell, the way content-private logging reads
+    it: such a cell refuses to start anyway.
+    """
+    values = os.environ if env is None else env
+    return any(str(values.get(flag, "")).strip().lower() not in _FALSE for flag in _CELL_FLAGS)
+
+
 def recall_model() -> str:
     """The model recall encodes with when no sidecar selects another."""
     from . import embeddings
@@ -89,14 +107,18 @@ def selecting(model: str | None) -> Iterator[None]:
         _SELECTED.reset(token)
 
 
-def encoding_for(index: object) -> contextlib.AbstractContextManager[None]:
+def encoding_for(index: object, *, load: bool = False) -> contextlib.AbstractContextManager[None]:
     """`index.encoding()`: encode for that sidecar, or refuse before encoding.
 
-    An index adapter that keeps no vector-space record (a narrow third-party or
+    `load` lets a batch caller (the CLI's incremental index, never a request)
+    load the encoder that serves the sidecar when it is not resident. An index
+    adapter that keeps no vector-space record (a narrow third-party or
     in-memory index) has no `encoding`, and nothing to check.
     """
     encoding = getattr(index, "encoding", None)
-    return encoding() if callable(encoding) else contextlib.nullcontext()
+    if not callable(encoding):
+        return contextlib.nullcontext()
+    return encoding(load=True) if load else encoding()
 
 
 def declared_dim(model: str) -> int:
@@ -117,9 +139,11 @@ def resident_fingerprint(model: str) -> str | None:
     """
     from . import embedding_backend, embeddings
 
-    if model != embeddings.MODEL_NAME:
-        return None
-    profile = getattr(embeddings._MODEL, "profile", None)
+    if model == embeddings.MODEL_NAME:
+        resident = embeddings._MODEL
+    else:
+        resident = previous_resident(model)
+    profile = getattr(resident, "profile", None)
     if isinstance(profile, embedding_backend.EncoderProfile) and profile.model == model:
         return profile.fingerprint()
     return None
@@ -213,3 +237,126 @@ def admit(
         # so emptying it later can never hand it to another encoder.
         write_identity(conn, identity)
     return identity
+
+
+# ------------------------------------------------------- the serving encoder
+
+
+class ServingEncoderCold(RuntimeError):
+    """The encoder that serves the sidecar is not resident; requests never load it."""
+
+    reason = "model_warming"
+
+
+#: The encoder of a sidecar recall still serves from while a new space is built
+#: (`recall_migration`): at most one, loaded by warm-up or the migration job and
+#: never by a request, and released at the cutover. It has an execution slot of
+#: its own, so a query for the serving sidecar never waits behind a batch of the
+#: build, which encodes with the recall encoder.
+_PREVIOUS_LOCK = threading.Lock()
+_PREVIOUS: tuple[str, Any] | None = None
+_PREVIOUS_GENERATION = 0
+_PREVIOUS_INFLIGHT = 0
+_PREVIOUS_GATE: Any = None
+
+
+def previous_encoder(model: str) -> Any:
+    """The serving sidecar's encoder, loading it: warm-up and background threads only."""
+    global _PREVIOUS, _PREVIOUS_GENERATION
+    from . import embedding_backend
+
+    with _PREVIOUS_LOCK:
+        if _PREVIOUS is not None and _PREVIOUS[0] == model:
+            return _PREVIOUS[1]
+    encoder = embedding_backend.load_encoder(model)
+    with _PREVIOUS_LOCK:
+        if _PREVIOUS is not None and _PREVIOUS[0] == model:
+            return _PREVIOUS[1]
+        replaced, _PREVIOUS = _PREVIOUS, (model, encoder)
+        _PREVIOUS_GENERATION += 1
+    if replaced is not None:
+        _release(replaced[1])
+    return encoder
+
+
+def previous_resident(model: str) -> Any | None:
+    """The serving sidecar's encoder when it is resident; never loads."""
+    with _PREVIOUS_LOCK:
+        if _PREVIOUS is not None and _PREVIOUS[0] == model:
+            return _PREVIOUS[1]
+    return None
+
+
+def unload_previous() -> bool:
+    """Release the serving sidecar's encoder. True when one was resident.
+
+    An encode in flight keeps its own reference and finishes on it; the runtime
+    memory goes back when that reference does.
+    """
+    global _PREVIOUS, _PREVIOUS_GENERATION
+    with _PREVIOUS_LOCK:
+        if _PREVIOUS is None:
+            return False
+        released, _PREVIOUS = _PREVIOUS, None
+        _PREVIOUS_GENERATION += 1
+        in_flight = _PREVIOUS_INFLIGHT
+    if not in_flight:
+        _release(released[1])
+    return True
+
+
+def _release(encoder: Any) -> None:
+    release = getattr(encoder, "release", None)
+    if release is not None:
+        with contextlib.suppress(Exception):  # an unload must never raise
+            release()
+
+
+def _previous_gate() -> Any:
+    global _PREVIOUS_GATE
+    from . import runtime_resources
+
+    with _PREVIOUS_LOCK:
+        if _PREVIOUS_GATE is None:
+            _PREVIOUS_GATE = runtime_resources.ModelAdmissionGate(
+                runtime_resources.resolve_policy().model_admission
+            )
+        return _PREVIOUS_GATE
+
+
+@contextlib.contextmanager
+def _in_flight() -> Iterator[None]:
+    global _PREVIOUS_INFLIGHT
+    with _PREVIOUS_LOCK:
+        _PREVIOUS_INFLIGHT += 1
+    try:
+        yield
+    finally:
+        with _PREVIOUS_LOCK:
+            _PREVIOUS_INFLIGHT -= 1
+
+
+def encode_with_previous(model: str, texts: list[str], *, is_query: bool) -> Any:
+    """Encode for a sidecar written by `model`, with its resident encoder."""
+    from . import embeddings
+
+    encoder = previous_resident(model)
+    if encoder is None:
+        raise ServingEncoderCold(f"{model} is not resident")
+    query_prefix, passage_prefix = embeddings._prefixes(encoder, model)
+    prefix = query_prefix if is_query else passage_prefix
+    gate = _previous_gate()
+    with _in_flight():
+        return embeddings._encode_in_turns(
+            encoder,
+            [prefix + text for text in texts] if prefix else list(texts),
+            admission=gate.admission,
+            execution=gate.execution,
+        )
+
+
+def previous_space(model: str) -> str:
+    """The passage-memo space of the serving sidecar's encoder, with its load."""
+    from . import embedding_backend
+
+    return f"{resident_fingerprint(model) or embedding_backend.fingerprint(model)}#{_PREVIOUS_GENERATION}"

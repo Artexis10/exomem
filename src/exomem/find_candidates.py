@@ -325,6 +325,18 @@ def collect_candidates(
                 timings.error("vector", e)
         except runtime_resources.ModelBusyError:
             raise
+        except recall_space.ServingEncoderCold as e:
+            if capture_trace:
+                lane_statuses["vector"] = {
+                    "status": "warming",
+                    "reason": recall_space.ServingEncoderCold.reason,
+                    "model": embeddings.MODEL_NAME,
+                }
+            log.info("vector search deferred (%s); ranking without the dense lane", e)
+            if timings is not None:
+                timings.skipped("vector")
+            if degraded_out is not None:
+                degraded_out.append("embeddings")
         except recall_space.VectorSpaceMismatch as e:
             # The sidecar holds another encoder's vectors: the dense lane is
             # absent until it is rebuilt in this space, and the others serve.

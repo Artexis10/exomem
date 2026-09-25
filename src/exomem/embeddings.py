@@ -1137,6 +1137,10 @@ def _encode_caller() -> str:
 def _embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     if not texts:
         return np.zeros((0, recall_space.current_dim()), dtype=np.float32)
+    selected = recall_space.selected_model()
+    if selected is not None and selected != MODEL_NAME:
+        # A sidecar still in another encoder's space, served by that encoder.
+        return recall_space.encode_with_previous(selected, texts, is_query=is_query)
     model = get_model()
     query_prefix, passage_prefix = _prefixes(model, MODEL_NAME)
     prefix = query_prefix if is_query else passage_prefix
@@ -1393,18 +1397,24 @@ def vector_backend_active(vault_root: Path) -> bool:
         conn.close()
 
 
-def get_embedding_index(vault_root: Path) -> EmbeddingIndex:
+def get_embedding_index(vault_root: Path, *, path: Path | None = None) -> EmbeddingIndex:
     """Return the process-shared `EmbeddingIndex` for this vault.
 
     ALL production call sites (find, warm-up, writers, audit) must go through this
     so the in-memory matrix cache is shared and survives across calls — the whole
     reason find() stops paying a full reload per query. Tests may still construct
     `EmbeddingIndex` directly to exercise the class in isolation.
+
+    `path` names a sidecar that does not serve recall (one a re-embed is
+    building): it has no shared matrix to keep, and gets an instance of its own.
     """
     key = str(Path(vault_root).resolve())
     # The serving sidecar can change (a new vector space cut over), and the
     # shared instance follows it: the old one and its matrix are dropped.
-    path = index_paths.sidecar_path(vault_root)
+    serving = index_paths.sidecar_path(vault_root)
+    if path is not None and Path(path) != serving:
+        return EmbeddingIndex(vault_root, path=Path(path))
+    path = serving
     with _INDEX_CACHE_LOCK:
         idx = _INDEX_CACHE.get(key)
         if idx is None or idx.path != path:
@@ -1847,6 +1857,9 @@ def _vector_space() -> str:
     fingerprint, which for a served model names the exact bytes it runs. An
     encoder with no profile (none loaded, or a substitute) is named by the
     model it stands for."""
+    selected = recall_space.selected_model()
+    if selected is not None and selected != MODEL_NAME:
+        return recall_space.previous_space(selected)
     profile = getattr(_MODEL, "profile", None)
     if isinstance(profile, embedding_backend.EncoderProfile):
         return profile.fingerprint()
@@ -2314,7 +2327,7 @@ def index_incremental(
         flat: list[str] = []
         for _rp, chs, _m in group:
             flat.extend(chs)
-        with recall_space.encoding_for(index):
+        with recall_space.encoding_for(index, load=True):
             vectors = embed_texts(flat, is_query=False)
         offset = 0
         for rp, chs, m in group:
@@ -2353,7 +2366,7 @@ def index_incremental(
             for unit in state.document.units
             if unit.unit_ref is not None
         ]
-        with recall_space.encoding_for(index):
+        with recall_space.encoding_for(index, load=True):
             vectors = (
                 embed_texts(texts, is_query=False)
                 if texts

@@ -2356,6 +2356,15 @@ def _vector_unit_candidates(
         )
     except runtime_resources.ModelBusyError:
         raise
+    except recall_space.ServingEncoderCold as error:
+        log.info("semantic-unit vector search deferred (%s); using lexical ranking", error)
+        if degraded_out is not None:
+            degraded_out.append("embeddings")
+        return (
+            [],
+            {"status": "warming", "reason": recall_space.ServingEncoderCold.reason, "model": model_name},
+            "kb",
+        )
     except recall_space.VectorSpaceMismatch as error:
         log.info("semantic-unit vector search unavailable (%s); using lexical ranking", error)
         if degraded_out is not None:
