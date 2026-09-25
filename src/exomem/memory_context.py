@@ -154,7 +154,12 @@ def assemble_context(
     seed: dict[str, Any] = {"path": resolved_seed_path, "query": query}
     if path:
         seed["ref"] = ref_index.ref_for_path(str(resolved_seed_path))
-    if unit_ref is not None:
+    # A unit seed that resolves to no unit is not restated to a caller other
+    # than the owner: the entry filter decides the page a reference names, so
+    # the echo would survive for an absent page and not for a withheld one.
+    if unit_ref is not None and not (
+        keep is not None and (graph or {}).get("unit_status") == "missing"
+    ):
         seed["unit_ref"] = unit_ref
     if categories:
         seed["categories"] = list(categories)

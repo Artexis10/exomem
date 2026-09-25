@@ -19,7 +19,7 @@
 
 ### Identifier fields are enumerated, with a suffix rule for new ones
 
-The entry filter decides the listed fields and any key ending in `_path`, `_key`, `_anchor`, `_source`, `_target` or `_ref`. A non-path value in such a field is never decided, so the rule costs nothing where it does not apply, and a new derived field fails closed on arrival. A `file:` node key and a vault URI are unwrapped; an extensionless reference is also decided as the page it names. A proposed relation `bullet` is scanned for wikilinks; an entry whose text links a withheld page is dropped rather than rewritten, because the text is the proposal.
+The entry filter decides the listed fields and any key ending in `_path`, `_key`, `_anchor`, `_source`, `_target` or `_ref`. A non-path value in such a field is never decided, so the rule costs nothing where it does not apply, and a new derived field fails closed on arrival. A `file:` node key and a vault URI are unwrapped; an extensionless reference is also decided as the page it names. A proposed relation `bullet` is scanned for wikilinks; an entry whose text links a withheld page is dropped rather than rewritten, because the text is the proposal. The filter decides each page once per call, and lists each directory it resolves a spelling in once per call, so a payload that names the same pages in many fields costs no more than one that names them once. A `context` unit seed that resolves to no unit is not restated in `seed` to a caller other than the owner: the filter decides the page a reference names, so the restated reference would survive for an absent page and not for a withheld one.
 
 ### Decide before assembly, for callers other than the owner
 
