@@ -66,6 +66,9 @@ done
 "${helm_bin}" repo add traefik https://traefik.github.io/charts \
   --repository-config "${helm_repository_config}" \
   --repository-cache "${helm_repository_cache}"
+"${helm_bin}" repo add jetstack https://charts.jetstack.io \
+  --repository-config "${helm_repository_config}" \
+  --repository-cache "${helm_repository_cache}"
 "${helm_bin}" dependency build "${infra_dir}/helm/platform" \
   --repository-config "${helm_repository_config}" \
   --repository-cache "${helm_repository_cache}"

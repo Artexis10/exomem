@@ -177,10 +177,10 @@
 
 ## 6. Node deployment and owner acceptance (P4)
 
-- [ ] 6.1 Apply the control server and run the database cutover under the Substrate runbook, which sets Neon read-only, lists every consumer, restores with `--no-owner --no-acl`, and runs the grants script. Then verify Endstate and Exomem.
+- [ ] 6.1 Scale the old platform's in-cluster gateway, provisioner and workers to zero before the window (Substrate D8 step 1). Then apply the control server and run the database cutover under the Substrate runbook, which sets Neon read-only, lists every consumer, restores with `--no-owner --no-acl`, and runs the grants script. Then verify Endstate and Exomem.
   - Role apply on the control server starts every unit; `systemctl is-active` for postgresql, pgbouncer, the certbot and pgbackrest timers.
   - A pgbackrest full backup to B2 completes and the restore-verify timer's script passes against B2 before the Neon cutover.
-- [ ] 6.2 Deploy cellctl and the gateway beside the old platform, set `cell_image`, and scale the old provisioner and workers to zero
+- [ ] 6.2 Deploy cellctl and the gateway beside the old platform, and set `cell_image`
 - [ ] 6.3 Owner acceptance on the real node:
   1. invite and connect the claude.ai custom connector;
   2. capture;
