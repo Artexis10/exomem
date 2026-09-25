@@ -2315,11 +2315,15 @@ def _recent_context(
     taken = {"edited": 0, "activated": 0}
     episode_times: dict[str, int] = {}
     for contact in contacts:
-        kind = _recent_reason_for(contact.path, collections=collections)
-        if not kind:
+        if contact.reason == "episode":
+            # A recap page's only contact is its own `episode_page` event.
+            if _recent_reason_for(contact.path) == "episode":
+                episode_times[contact.path] = contact.ts_ns
             continue
-        if kind == "episode":
-            episode_times[contact.path] = contact.ts_ns
+        if min(taken.values()) >= limit:
+            continue
+        kind = _recent_reason_for(contact.path, collections=collections)
+        if not kind or kind == "episode":
             continue
         # A captured session stays `captured` whoever touched it last: its
         # body is raw material, and an `activated` entry would read a
@@ -2467,7 +2471,8 @@ def _recent_reason_for(rel: str, *, collections: frozenset[str] = frozenset()) -
 
     if not rel.lower().endswith(".md"):
         return ""
-    inner = rel[len(kb_prefix()) :] if rel.startswith(kb_prefix()) else rel
+    prefix = kb_prefix()
+    inner = rel[len(prefix) :] if rel.startswith(prefix) else rel
     parts = inner.split("/")
     if any(part.startswith(".") or part in find_corpus.EXCLUDED_DIR_NAMES for part in parts[:-1]):
         return ""

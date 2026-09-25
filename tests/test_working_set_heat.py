@@ -110,6 +110,27 @@ def test_an_ineligible_top_is_skipped_within_the_read_bound() -> None:
     assert heat.members(heat.leading(profile), limit=1, eligible=eligible).paths == ()
 
 
+def test_a_full_ring_is_checked_for_admissibility_only_as_far_as_it_is_read() -> None:
+    """A ring of thousands of rows is not run through the admissibility check
+    on every request: checking stops once far more rows than any reader walks
+    are in hand, and the referent is the one a full pass gives."""
+    pages = [f"{KB}/Notes/Journal/note-{index:04d}.md" for index in range(4000)]
+    profile = profile_of(*(ev(T0 + index * S, page, "work") for index, page in enumerate(pages)))
+    skipped = set(pages[-40:])
+    checked: list[str] = []
+
+    def admissible(path: str) -> bool:
+        checked.append(path)
+        return path not in skipped
+
+    chosen = heat.members(heat.leading(profile, admissible=admissible), limit=5)
+
+    assert chosen.paths == (pages[-41],)
+    assert len(checked) <= heat.GROUP_ROWS_MAX + len(skipped) + 1
+    full = [page for page in reversed(pages) if page not in skipped]
+    assert chosen.paths == (full[0],)
+
+
 def test_a_read_count_never_outranks_a_newer_read() -> None:
     often = [ev(T0 + index * S, SLED, "read") for index in range(1000)]
     profile = profile_of(*often, ev(T0 + 1001 * S, MARIT, "read"))

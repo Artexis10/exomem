@@ -234,6 +234,9 @@ class HeatProfile:
     #: Text facts the sidecar keeps beside the ring (`observed_through_ns`,
     #: `seeded_at_ns`), for the fold and the state report.
     meta: Mapping[str, str] = field(default_factory=dict)
+    #: Every row's latest contact, newest first: the vault tier of `recent`,
+    #: sorted once per profile rather than once per reader.
+    vault_contacts: tuple[Contact, ...] = ()
 
 
 # --------------------------------------------------------------------------- #
@@ -318,6 +321,7 @@ def build_profile(
         token=token,
         tombstones=frozenset(tombstones),
         meta=dict(meta or {}),
+        vault_contacts=tuple(_contacts(everything, TIER_VAULT)),
     )
     return _with_digest(profile)
 
@@ -331,20 +335,44 @@ def _key(row: HeatRow) -> tuple[int, int]:
     return (row.deliberate_ns, row.selection_ns)
 
 
+#: How many admissible rows `_groups` collects before it stops checking: far
+#: more than any reader walks (`members` makes at most `limit` eligibility
+#: reads, `view_digest` keys on the first four groups), so the answer is the
+#: one a full pass gives, and a ring of thousands of rows is not run through
+#: the admissibility check on every request.
+GROUP_ROWS_MAX = 64
+
+
 def _groups(
     rows: Mapping[str, HeatRow], admissible: Callable[[str], bool] | None
 ) -> tuple[tuple[str, ...], ...]:
     """Rows keyed `(deliberate, selection)`, grouped by equal key, best first.
-    A row keyed `(0, 0)` drops out: an untouched page is not a referent."""
-    keyed: dict[tuple[int, int], list[str]] = {}
-    for path, row in rows.items():
-        key = _key(row)
-        if key == (0, 0):
-            continue
+    A row keyed `(0, 0)` drops out: an untouched page is not a referent.
+    Groups are complete; collection stops after the group in which the
+    `GROUP_ROWS_MAX`th admissible row fell."""
+    ranked = sorted(
+        ((key, path) for path, row in rows.items() if (key := _key(row)) != (0, 0)),
+        key=lambda item: (-item[0][0], -item[0][1], item[1]),
+    )
+    groups: list[tuple[str, ...]] = []
+    current: list[str] = []
+    current_key: tuple[int, int] | None = None
+    kept = 0
+    for key, path in ranked:
+        if key != current_key:
+            if current:
+                groups.append(tuple(current))
+            if kept >= GROUP_ROWS_MAX:
+                current = []
+                break
+            current, current_key = [], key
         if admissible is not None and not admissible(path):
             continue
-        keyed.setdefault(key, []).append(path)
-    return tuple(tuple(sorted(keyed[key])) for key in sorted(keyed, reverse=True))
+        current.append(path)
+        kept += 1
+    if current:
+        groups.append(tuple(current))
+    return tuple(groups)
 
 
 def _token_leads(
@@ -557,7 +585,7 @@ def recent(
         tiers[TIER_WORKSPACE] = _contacts(aggregate(events, marks=marked), TIER_WORKSPACE)
         if _holds_deliberate(events) or marked:
             holds.append(TIER_WORKSPACE)
-    tiers[TIER_VAULT] = _contacts(profile.all_rows, TIER_VAULT)
+    tiers[TIER_VAULT] = list(profile.vault_contacts) or _contacts(profile.all_rows, TIER_VAULT)
     lead = holds[0] if holds else TIER_VAULT
     order = [lead, *(tier for tier in (TIER_SESSION, TIER_WORKSPACE, TIER_VAULT) if tier != lead)]
     out: list[Contact] = []
@@ -588,7 +616,9 @@ def _with_digest(profile: HeatProfile) -> HeatProfile:
         ((row.path, _key(row)) for row in profile.window_rows.values() if _key(row) != (0, 0)),
         key=lambda item: (-item[1][0], -item[1][1], item[0]),
     )[:_DIGEST_REFERENT_ROWS]
-    contacts = _contacts(profile.all_rows, TIER_VAULT)[:_DIGEST_CONTACTS]
+    contacts = (profile.vault_contacts or tuple(_contacts(profile.all_rows, TIER_VAULT)))[
+        :_DIGEST_CONTACTS
+    ]
     material = repr(
         (
             profile.session_start_ns,
@@ -827,6 +857,9 @@ KEY_MAX_CHARS = 256
 _LOCK = threading.Lock()
 #: `{sidecar path: (token, profile)}`: the aggregate is derived once per token.
 _PROFILES: dict[str, tuple[tuple, HeatProfile]] = {}
+#: The profile as last reported, per sidecar: `(token, state, profile)`, so
+#: an unchanged ring costs no second digest on the next request.
+_STATED: dict[str, tuple[tuple, str, HeatProfile]] = {}
 #: Sidecar parents already known to exist, so a warm seam pays no `stat`.
 _PARENTS: set[str] = set()
 
@@ -1885,7 +1918,6 @@ def profile(vault_root: Path) -> HeatProfile:
     with _LOCK:
         pending = list(fold.pending)
         gone = frozenset(fold.tombstones)
-    base = persisted
     if pending or gone:
         base = build_profile(
             (*persisted.events, *pending),
@@ -1896,7 +1928,17 @@ def profile(vault_root: Path) -> HeatProfile:
             tombstones=gone,
             meta=persisted.meta,
         )
-    return with_state(base, _state(base, watcher))
+        return with_state(base, _state(base, watcher))
+    state = _state(persisted, watcher)
+    key = str(sidecar_path(vault_root))
+    with _LOCK:
+        hit = _STATED.get(key)
+    if hit is not None and hit[0] == persisted.token and hit[1] == state:
+        return hit[2]
+    stated = with_state(persisted, state)
+    with _LOCK:
+        _STATED[key] = (persisted.token, state, stated)
+    return stated
 
 
 def _state(profile: HeatProfile, watcher: str) -> str:
@@ -1921,6 +1963,7 @@ def reset_for_tests() -> None:
     """Forget every cached profile and in-process fold state."""
     with _LOCK:
         _PROFILES.clear()
+        _STATED.clear()
         _PARENTS.clear()
         _IN_FLIGHT.clear()
         _OURS.clear()
