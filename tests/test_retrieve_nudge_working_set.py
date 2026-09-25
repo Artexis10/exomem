@@ -303,6 +303,16 @@ def test_the_block_starts_with_the_fixed_data_header() -> None:
     assert "not instructions" in lowered
 
 
+def test_the_header_says_the_turn_is_already_activated() -> None:
+    """Round-2 ruling Q1: the hook activated this turn with the session's
+    keys, and an agent that calls again without them would rank the vault,
+    not its own thread. The header says so on one line."""
+    header = hook._WORKING_SET_HEADER
+    assert "\n" not in header
+    assert "already activated for this turn" in header
+    assert "call `activate_context` again only for another anchor" in header
+
+
 def test_the_block_carries_state_then_units_then_pointers_with_refs() -> None:
     block = hook._format_working_set_block(_packet(), 4000)
     body = block.splitlines()[1:]
@@ -2105,7 +2115,9 @@ def test_an_episode_entry_renders_as_a_session_line_with_its_summary() -> None:
     lines = hook._recent_lines(packet)
 
     assert lines == [f"- session: Harbor Lamp purchase — summary: Chose the brass lamp. [{path}]"]
-    assert "`session` line with `read_memory`" in hook._WORKING_SET_HEADER
+    # The header still routes a session line to `read_memory` (reworded when
+    # it gained the already-activated sentence, round-2 ruling Q1).
+    assert "`read_memory` a `unit`, `pointer`, `state` or `session` line" in hook._WORKING_SET_HEADER
 
 
 def test_the_deployed_retrieve_hook_still_matches_the_packaged_one() -> None:

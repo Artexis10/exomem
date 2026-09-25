@@ -384,3 +384,12 @@ def test_attribution_is_accepted_on_every_door(
     product = {command.name: command for command in commands.PRODUCT_COMMANDS}
     names = [param.name for param in product["activate_context"].params]
     assert {"client", "session"} <= set(names)
+
+
+def test_the_server_instructions_skip_a_turn_a_hook_already_activated() -> None:
+    """Round-2 ruling Q1: the skip clause names the injected working set, so
+    the agent does not repeat the hook's keyed call without its keys."""
+    text = server.SERVER_INSTRUCTIONS
+    assert "a turn whose Exomem working set a hook already injected" in text
+    assert "call again only to set `anchor`" in text
+
