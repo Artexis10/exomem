@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from secret_keysets import KeySetError, loads_unique_json, validate_key_sets
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MATRIX = ROOT / "infra/contracts/secret-destinations-v1.json"
@@ -25,6 +26,7 @@ class Destination:
     target: str
     fields: dict[str, str]
     pattern: re.Pattern[str]
+    key_sets: tuple[frozenset[str], ...] = ()
 
 
 def _tracked_secret_files(root: Path) -> list[Path]:
@@ -50,6 +52,7 @@ def _destinations(matrix: dict[str, Any]) -> list[Destination]:
         raw_destinations = secret.get("destinations") if isinstance(secret, dict) else None
         if not isinstance(secret_name, str) or not isinstance(raw_destinations, dict):
             raise RuntimeError("secret destination matrix is invalid")
+        value_shape = secret.get("value_shape", "line")
         for destination_id, raw in raw_destinations.items():
             if not isinstance(destination_id, str) or not isinstance(raw, dict):
                 raise RuntimeError("secret destination matrix is invalid")
@@ -66,6 +69,17 @@ def _destinations(matrix: dict[str, Any]) -> list[Destination]:
             ):
                 raise RuntimeError("secret destination matrix has an invalid SOPS target")
             fields = {key: value for key, value in raw.items() if isinstance(value, str)}
+            key_sets: tuple[frozenset[str], ...] = ()
+            if kind == "sops_k8s_secret":
+                if value_shape == "json-object" and "key" not in raw:
+                    try:
+                        key_sets = validate_key_sets(raw.get("key_sets"))
+                    except KeySetError as exc:
+                        raise RuntimeError(
+                            "secret destination matrix has invalid key sets"
+                        ) from exc
+                elif "key_sets" in raw or not isinstance(raw.get("key"), str):
+                    raise RuntimeError("secret destination matrix has invalid key sets")
             targets.add(target)
             expression = re.escape(target).replace(re.escape("{version}"), _VERSION)
             destinations.append(
@@ -76,6 +90,7 @@ def _destinations(matrix: dict[str, Any]) -> list[Destination]:
                     target,
                     fields,
                     re.compile(expression + r"\Z"),
+                    key_sets,
                 )
             )
     if not destinations:
@@ -126,9 +141,12 @@ def _validate_shape(document: dict[str, Any], destination: Destination) -> None:
             {"app.kubernetes.io/managed-by", "exomem.io/secret-version"},
             "Secret labels",
         )
-        _require_exact_keys(
-            payload["stringData"], {destination.fields["key"]}, "Secret stringData"
-        )
+        string_data = payload["stringData"]
+        if destination.key_sets:
+            if not isinstance(string_data, dict) or set(string_data) not in destination.key_sets:
+                raise RuntimeError("tracked SOPS artifact has an invalid Secret stringData shape")
+        else:
+            _require_exact_keys(string_data, {destination.fields["key"]}, "Secret stringData")
     elif destination.kind == "sops_ansible_vars":
         _require_exact_keys(payload, {destination.fields["variable"]}, "Ansible variables")
     else:
@@ -153,12 +171,14 @@ def validate_artifact(path: Path, *, root: Path, destinations: list[Destination]
     lowered = path.name.lower()
     if any(token in lowered for token in (".dec.", ".plain.", ".decrypted.", "age.key", ".agekey")):
         raise RuntimeError("tracked plaintext secret artifact is forbidden")
-    matches = [destination for destination in destinations if destination.pattern.fullmatch(relative)]
+    matches = [
+        destination for destination in destinations if destination.pattern.fullmatch(relative)
+    ]
     if len(matches) != 1:
         raise RuntimeError("tracked SOPS artifact does not match exactly one destination")
     try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        document = loads_unique_json(path.read_bytes())
+    except (OSError, KeySetError) as exc:
         raise RuntimeError("tracked SOPS artifact is invalid") from exc
     if not isinstance(document, dict):
         raise RuntimeError("tracked SOPS artifact has no encrypted payload")
@@ -177,8 +197,8 @@ def validate(
     *, matrix_path: Path = DEFAULT_MATRIX, artifacts: list[Path] | None = None, root: Path = ROOT
 ) -> int:
     try:
-        matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        matrix = loads_unique_json(matrix_path.read_bytes())
+    except (OSError, KeySetError) as exc:
         raise RuntimeError("secret destination matrix is invalid") from exc
     destinations = _destinations(matrix)
     candidates = artifacts if artifacts is not None else _tracked_secret_files(root)

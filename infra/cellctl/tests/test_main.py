@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
 
 from cellctl import main
+from cellctl.storage.b2 import B2Config
 
 from .test_manifests import RELOCATING_KEYS
 
@@ -49,13 +51,17 @@ def test_an_ordinary_model_env_loads(monkeypatch) -> None:
         "BAD NAME",
     ],
 )
-def test_a_model_env_that_redirects_code_or_carries_credentials_fails_at_settings_load(monkeypatch, key: str) -> None:
+def test_a_model_env_that_redirects_code_or_carries_credentials_fails_at_settings_load(
+    monkeypatch, key: str
+) -> None:
     _settings_env(monkeypatch, {key: "x"})
     with pytest.raises(ValueError):
         main.build_cluster_config()
 
 
-@pytest.mark.parametrize("raw", ['{"EXOMEM_EMBED_BACKEND": 1}', '["EXOMEM_EMBED_BACKEND"]', '"onnx"'])
+@pytest.mark.parametrize(
+    "raw", ['{"EXOMEM_EMBED_BACKEND": 1}', '["EXOMEM_EMBED_BACKEND"]', '"onnx"']
+)
 def test_a_model_env_that_is_not_a_string_map_fails_at_settings_load(monkeypatch, raw: str) -> None:
     # A non-string value would make every cell's StatefulSet apply refuse.
     monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
@@ -89,7 +95,42 @@ def test_the_cell_token_key_is_the_64_hex_key_the_gateway_reads(monkeypatch) -> 
     assert config.cell_token_key_previous == bytes.fromhex(previous)
 
 
-@pytest.mark.parametrize("bad", ["ab" * 31, "ab" * 33, "zz" * 32, "q83vAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxw="])
+def test_synthetic_platform_bundles_match_cellctl_consumers(monkeypatch) -> None:
+    token = {
+        "current": "ab" * 32,
+        "currentVersion": "2",
+        "previous": "cd" * 32,
+        "previousVersion": "1",
+    }
+    backup_key = bytes(range(32))
+    backup = {
+        "keys": json.dumps({"1": base64.b64encode(backup_key).decode("ascii")}),
+        "currentVersion": "1",
+    }
+    b2 = {"keyId": "synthetic-key-id", "applicationKey": "synthetic-application-key"}
+    _secrets_env(monkeypatch, token["current"], token["previous"])
+    monkeypatch.setenv("CELLCTL_CELL_TOKEN_KEY_VERSION", token["currentVersion"])
+    monkeypatch.setenv("CELLCTL_CELL_TOKEN_KEY_PREVIOUS_VERSION", token["previousVersion"])
+    monkeypatch.setenv("CELLCTL_BACKUP_MASTER_KEYS", backup["keys"])
+    monkeypatch.setenv("CELLCTL_BACKUP_MASTER_KEY_CURRENT_VERSION", backup["currentVersion"])
+    config = main.build_secrets_config()
+    assert config.cell_token_key_current == bytes.fromhex(token["current"])
+    assert config.cell_token_key_previous == bytes.fromhex(token["previous"])
+    assert config.backup_master_keys == {1: backup_key}
+    assert config.backup_master_key_current_version == 1
+    b2_config = B2Config(
+        key_management_key_id=b2["keyId"],
+        key_management_application_key=b2["applicationKey"],
+        bucket_id="synthetic-bucket",
+        account_id="synthetic-account",
+    )
+    assert b2_config.key_management_key_id == b2["keyId"]
+    assert b2_config.key_management_application_key == b2["applicationKey"]
+
+
+@pytest.mark.parametrize(
+    "bad", ["ab" * 31, "ab" * 33, "zz" * 32, "q83vAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxw="]
+)
 def test_a_cell_token_key_that_is_not_64_hex_fails_at_settings_load(monkeypatch, bad: str) -> None:
     _secrets_env(monkeypatch, bad)
     with pytest.raises(ValueError):
