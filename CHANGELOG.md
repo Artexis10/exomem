@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.94.0](https://github.com/Artexis10/exomem/compare/v0.93.0...v0.94.0) (2026-09-26)
+
+
+### Features
+
+* **activation:** add a multilingual relevance sensor on a served bge-m3 encoder ([#1381](https://github.com/Artexis10/exomem/issues/1381)) ([ca233a3](https://github.com/Artexis10/exomem/commit/ca233a3a95cdf980fb921ec3800d37ed87916815))
+* **activation:** scope recent work to the conversation with a heat projection ([#1388](https://github.com/Artexis10/exomem/issues/1388)) ([0c5f70a](https://github.com/Artexis10/exomem/commit/0c5f70a43e0165f91d853b1e97875f058f33a2dc))
+* **cloud:** add cellctl, the Exomem Cloud cell controller ([#1368](https://github.com/Artexis10/exomem/issues/1368)) ([8891ae2](https://github.com/Artexis10/exomem/commit/8891ae269f4f76e378a2f080cb92a0bdd8c79b59))
+* **cloud:** P3 local end-to-end rehearsal (tasks 5.1-5.3) ([#1378](https://github.com/Artexis10/exomem/issues/1378)) ([4806850](https://github.com/Artexis10/exomem/commit/48068504c589ef6eecedda01d0e7cae596a5ce44))
+* **cloud:** rehearse Substrate main with the stock OAuth client ([#1387](https://github.com/Artexis10/exomem/issues/1387)) ([612c3c6](https://github.com/Artexis10/exomem/commit/612c3c66935f3ebbd6f36261edc34a9619880dc0))
+* **infra:** deliver complete multi-field Secrets ([#1398](https://github.com/Artexis10/exomem/issues/1398)) ([99c6742](https://github.com/Artexis10/exomem/commit/99c6742408e35b7bbc77dc7f137727d33c4597f1))
+* **infra:** provision Exomem Cloud K3s agent nodes from one Terraform variable ([#1377](https://github.com/Artexis10/exomem/issues/1377)) ([9388308](https://github.com/Artexis10/exomem/commit/9388308c84e0c7f0f1849e057bd74b7c6e986592))
+* **recall:** encode recall with bge-m3 on personal servers ([#1385](https://github.com/Artexis10/exomem/issues/1385)) ([eb7a093](https://github.com/Artexis10/exomem/commit/eb7a093c2d32c7705a4cd45264f00693a89ac547))
+* **recall:** read every script in keyword recall ([#1366](https://github.com/Artexis10/exomem/issues/1366)) ([b007d40](https://github.com/Artexis10/exomem/commit/b007d406de6016620724c68a8d0976999e2903c7))
+* **upkeep:** add the default-off dreamer for bounded background consolidation ([#1382](https://github.com/Artexis10/exomem/issues/1382)) ([4504881](https://github.com/Artexis10/exomem/commit/45048816e0883d182cae6859f1e8239e163a3da0))
+
+
+### Bug Fixes
+
+* check cloud deletion resources in cleanup order ([#1395](https://github.com/Artexis10/exomem/issues/1395)) ([3399328](https://github.com/Artexis10/exomem/commit/339932873b4e6c3829c3e84ac20f68ebcaaee617))
+* **governance:** answer restricted writers as if withheld pages were absent ([#1394](https://github.com/Artexis10/exomem/issues/1394)) ([67b17d7](https://github.com/Artexis10/exomem/commit/67b17d76bbe39aaaae4d64227f4e69c6496958a8))
+* **infra:** place the control database on cx23, the smallest x86 type fsn1 still sells ([#1390](https://github.com/Artexis10/exomem/issues/1390)) ([9a199dd](https://github.com/Artexis10/exomem/commit/9a199dd9efb8127e15639e608fcc18116e3b92c0))
+* **infra:** route Cloud MCP directly to fleet TLS ([#1393](https://github.com/Artexis10/exomem/issues/1393)) ([bcc83cc](https://github.com/Artexis10/exomem/commit/bcc83cc8a3c6acc1a6038ff2b21a26ac8e37c87f))
+* **readiness:** keep retrieval admitted after a restart's first governed write ([#1386](https://github.com/Artexis10/exomem/issues/1386)) ([9e19a33](https://github.com/Artexis10/exomem/commit/9e19a33a6d1be3145b507381f3c05c6c87335215))
+* **vault:** clear inherited setgid on the private lock directory ([#1384](https://github.com/Artexis10/exomem/issues/1384)) ([f33e391](https://github.com/Artexis10/exomem/commit/f33e39122c2bb6ee3a83f45afe1de567afdf90d8))
+* **vocabulary:** refuse an escaping path hint before any filesystem call ([#1400](https://github.com/Artexis10/exomem/issues/1400)) ([b0bd7da](https://github.com/Artexis10/exomem/commit/b0bd7da3f7de2671c48fa4b1ed2088be44716143))
+
 ## [0.93.0](https://github.com/Artexis10/exomem/compare/v0.92.0...v0.93.0) (2026-09-24)
 
 
