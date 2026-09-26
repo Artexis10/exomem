@@ -5021,7 +5021,16 @@ class LeaseManager:
         ):
             from . import move_file as move_file_module
 
-            result = move_file_module.restricted_mover_terminal(receipt_vault_root, result)
+            result = move_file_module.restricted_mover_terminal(
+                receipt_vault_root,
+                result,
+                committed=lambda leaf: committed_terminal(
+                    leaf,
+                    request_id=request_id,
+                    receipt_id=receipt,
+                    idempotency_key=effective_public_idempotency_key,
+                ),
+            )
         projected = project_terminal(result, response_detail)
         from .governance import scrubber as governance_scrubber
 

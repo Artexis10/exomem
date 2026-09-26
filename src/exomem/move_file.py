@@ -950,20 +950,30 @@ _GRAPH_SYNC_FIELDS = frozenset(
 )
 
 
-def restricted_mover_terminal(vault_root: Path, result: Any) -> Any:
+def restricted_mover_terminal(
+    vault_root: Path,
+    result: Any,
+    *,
+    committed: Callable[[Any], Mapping[str, Any]],
+) -> Any:
     """A move's terminal as a mover other than the owner receives it.
 
     Every linking page is rewritten, including pages withheld from the mover,
-    and the derived-graph outcome covers all of them: a rewrite the mover may
-    not see can turn a completed graph update into a pending repair. Such a
-    mover therefore receives no graph outcome, so its answer is the same
-    whether or not a withheld page linked the moved one. The durable terminal
-    keeps it.
+    and what those rewrites leave behind shapes the answer: a rewrite the
+    mover may not see can turn a completed graph update into a pending repair,
+    and whether the move wrote any bytes decides whether its leaf comes back
+    wrapped in the committed terminal. Such a mover therefore always receives
+    the committed terminal (`committed` wraps a bare leaf) and no graph
+    outcome, so its answer, in every response detail and on every later
+    move, is the same whether or not a withheld page linked the moved one.
+    The durable terminal keeps the graph outcome.
     """
     from .governance import egress
 
     if not isinstance(result, Mapping) or egress.governed_release_filter(vault_root) is None:
         return result
+    if "leaf_result" not in result and "new_path" in result and "old_path" in result:
+        result = committed(result)
 
     def _without(value: Mapping[str, Any]) -> dict[str, Any]:
         return {key: item for key, item in value.items() if key not in _GRAPH_SYNC_FIELDS}

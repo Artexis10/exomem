@@ -1329,9 +1329,13 @@ def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
     tmp_path: Path, audience: str, detail: str | None
 ) -> None:
     """The answer carries nothing the rewrite of a withheld linking page
-    produced: no graph or index outcome, and no contract result for it."""
+    produced: no graph or index outcome, no contract result for it, and the
+    same shape on every later move, of that page or another."""
     scope = "Notes/Withheld/**, Notes/Insights/Withheld/**"
-    base = _semantic_move_fixture()
+    base = {
+        **_semantic_move_fixture(),
+        f"{INSIGHTS}/solo.md": _typed("Solo", "Solo.", f"{INSIGHTS}/alpha"),
+    }
     hidden = f"{INSIGHTS}/Withheld/linker.md"
     variants = {
         "B": base,
@@ -1344,23 +1348,29 @@ def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
     }
     extra = {} if detail is None else {"response_detail": detail}
 
-    answers = {
-        variant: _VOLATILE_TEXT.sub(
-            "<v>",
-            _text(
-                _call(
-                    vault, _principal(audience), "manage_memory_file", operation="move",
-                    old_path=f"{INSIGHTS}/gamma.md", new_path=f"{INSIGHTS}/gamma-x.md", **extra,
-                )
-            ),
-        )
-        for variant, vault in vaults.items()
-    }
+    moves = (("gamma", "gamma-x"), ("gamma-x", "gamma-y"), ("solo", "solo-x"))
 
-    assert '"__error__"' not in answers["A"], answers["A"]
-    assert answers["A"] == answers["B"]
-    assert answers["C"] == answers["B"]
-    assert f"[[{INSIGHTS}/gamma-x]]" in (vaults["A"] / hidden).read_text(encoding="utf-8")
+    def moved(vault: Path) -> list[str]:
+        return [
+            _VOLATILE_TEXT.sub(
+                "<v>",
+                _text(
+                    _call(
+                        vault, _principal(audience), "manage_memory_file", operation="move",
+                        old_path=f"{INSIGHTS}/{old}.md", new_path=f"{INSIGHTS}/{new}.md", **extra,
+                    )
+                ),
+            )
+            for old, new in moves
+        ]
+
+    answers = {variant: moved(vault) for variant, vault in vaults.items()}
+
+    assert '"__error__"' not in _text(answers["A"]), answers["A"]
+    for step in range(len(moves)):
+        assert answers["A"][step] == answers["B"][step], step
+        assert answers["C"][step] == answers["B"][step], step
+    assert f"[[{INSIGHTS}/gamma-y]]" in (vaults["A"] / hidden).read_text(encoding="utf-8")
 
 
 _HIDDEN_LINKERS = {
