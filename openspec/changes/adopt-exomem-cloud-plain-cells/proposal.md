@@ -51,4 +51,5 @@ None in this change. The retirement phase removes the superseded `hosted-*` capa
 - **Delivery:** a CI job that publishes the cell image by digest.
 - **Companion Substrate change `adopt-exomem-cloud-plain-cells`:** owns admission, the OAuth authorization server, the pass-through gateway, the control-database schema and the database driver change.
 - **Existing platform:** the running platform (Helm revision 65, zero cells) stays untouched until cutover and is removed in the retirement phase.
-- **Out of scope:** billing semantics, the website, the Endstate products, and the local standalone install.
+- **Migration preparation:** preserve the existing personal service and endpoint while preparing parallel hostname validation and rollback. Put Cloud key-management credentials in a dedicated backup account. Production activation is a separate checkpoint.
+- **Out of scope:** billing semantics, the website, the Endstate products, and changes to the local standalone runtime, vault or custody.
