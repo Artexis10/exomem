@@ -2480,3 +2480,35 @@ def test_a_restricted_packet_and_its_token_carry_no_index_generation(
     assert "index_generation" not in minted["generation"]
     decoded = working_set_runtime.decode_continuity(minted.get("continuity"))
     assert decoded is not None and decoded["generation"] == 0, minted.get("continuity")
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_reclassification_proposal_counts_the_links_it_may_see(
+    tmp_path: Path, audience: str
+) -> None:
+    """A proposal to reclassify a visible Source reports the references the
+    writer may see, so a withheld page linking that Source leaves no trace."""
+    source = f"{KB}/Sources/Web/target-source.md"
+    base = {
+        source: _page("Target Source", "Body.", type="source", source_type="article"),
+        f"{INSIGHTS}/visible-linker.md": _typed("Visible", "V.", source[:-3]),
+    }
+    hidden = f"{INSIGHTS}/Withheld/w.md"
+    variants = {
+        "B": base,
+        "A": {**base, hidden: _typed("W", "W.", source[:-3])},
+        "C": {**base, hidden: _typed("W", "W.", f"{INSIGHTS}/visible-linker")},
+    }
+    answers = {}
+    for variant, files in variants.items():
+        vault = _materialize(
+            tmp_path / variant / "vault", files, audience, scope="Notes/Insights/Withheld/**"
+        )
+        answers[variant] = _call(
+            vault, _principal(audience), "manage_memory_file",
+            operation="propose-reclassification", path=source, source_kind="article",
+        )
+
+    assert "__error__" not in answers["B"], answers["B"]
+    assert answers["A"] == answers["B"]
+    assert answers["C"] == answers["B"]

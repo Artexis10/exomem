@@ -388,7 +388,20 @@ def propose(
         domain_evidence=tuple(domain_evidence),
         destination=destination,
         relocation_required=relocation_required,
-        references=len(find_inbound_wikilinks(vault_root, rel)),
+        references=_visible_references(vault_root, rel),
+    )
+
+
+def _visible_references(vault_root: Path, rel: str) -> int:
+    """Count inbound links the writer may see. Under a governed policy a writer
+    other than the owner never learns of a link from a page withheld from it."""
+    from .governance import egress
+
+    visible = egress.governed_release_filter(vault_root)
+    return sum(
+        1
+        for match in find_inbound_wikilinks(vault_root, rel)
+        if visible is None or visible(match.path)
     )
 
 
