@@ -1,0 +1,104 @@
+name: Cloud rehearsal
+
+on:
+  pull_request:
+    paths:
+      - "infra/cloud-rehearsal/**"
+      - ".github/workflows/cloud-rehearsal.yml"
+  # The live rehearsal (P3) is the node gate; run it by hand before P4 and
+  # after any change to cellctl, the platform chart, the cell image or the
+  # pinned Substrate commit.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-rehearsal-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    name: rehearsal unit tests and pinned ruff
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Load the pinned tool versions
+        run: grep -E '^[A-Z0-9_]+=' infra/tool-versions.env >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - name: Check the rehearsal lockfile
+        working-directory: infra/cloud-rehearsal
+        run: uv lock --check
+      - name: Unit tests
+        working-directory: infra/cloud-rehearsal
+        run: uv run --frozen python -m pytest -q -p no:cacheprovider tests
+      - name: Pinned ruff
+        working-directory: infra/cloud-rehearsal
+        run: uvx --from "ruff==${RUFF_VERSION}" ruff check src tests
+
+  rehearsal:
+    name: P3 local rehearsal on disposable K3s
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Load the pinned tool versions
+        run: grep -E '^[A-Z0-9_]+=' infra/tool-versions.env >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      # The rehearsal builds three multi-GB cell images and imports each into
+      # K3s, which a stock runner's free disk does not hold alongside the
+      # preinstalled toolchains this job never uses.
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      # Substrate's gateway image pins Node 24; its web app builds with the same.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+      - name: Run the rehearsal
+        working-directory: infra/cloud-rehearsal
+        timeout-minutes: 140
+        # On a pull request the question is whether the harness works: product
+        # findings are in the report and the step summary, and exit 1 is the
+        # node-gate verdict a manual dispatch enforces. A stage that cannot be
+        # stood up, or a step that fails for any other reason, still fails here.
+        env:
+          PYTHONUNBUFFERED: "1"
+          REHEARSAL_DIAGNOSTICS_DIR: ${{ runner.temp }}/rehearsal-diagnostics
+          HARNESS_CHECK: ${{ github.event_name == 'pull_request' && '--harness-check' || '' }}
+        run: |
+          uv run --frozen exomem-cloud-rehearsal run ${HARNESS_CHECK} --report "${RUNNER_TEMP}/cloud-rehearsal-report.json"
+      - name: Summarize the report
+        if: always()
+        run: |
+          report="${RUNNER_TEMP}/cloud-rehearsal-report.json"
+          if test -f "$report"; then
+            python3 infra/cloud-rehearsal/summarize.py "$report" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No report was written." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload the report and diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cloud-rehearsal-report
+          path: |
+            ${{ runner.temp }}/cloud-rehearsal-report.json
+            ${{ runner.temp }}/rehearsal-diagnostics
+          if-no-files-found: warn
+          retention-days: 30

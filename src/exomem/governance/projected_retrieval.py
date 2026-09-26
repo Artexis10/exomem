@@ -600,7 +600,9 @@ class ProjectedLexicalIndex:
         """Rank only the selected projected corpus using deterministic BM25Okapi."""
 
         limit = _result_limit(k)
-        query_tokens = tuple(bm25.tokenize(query)) if isinstance(query, str) else ()
+        query_tokens = (
+            tuple(bm25.tokenize(query, query=True)) if isinstance(query, str) else ()
+        )
         documents = self._selected_documents(authorization)
         if not query_tokens or not documents:
             return ()

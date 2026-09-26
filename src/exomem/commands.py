@@ -6038,6 +6038,13 @@ def op_activate_context(
     record one at the conversation's next decision or stopping point. It is
     advice, at most once per half hour, and absent when proactive capture is off.
 
+    At the start of your session a packet may also carry `upkeep`: at most one
+    item the background upkeep pass proposed, such as two notes that could be
+    connected or an entity page that newer facts have outgrown. It carries its
+    own `route`, a `context_route` to read first, and a `dispose` route
+    (`triage_memory` dismiss or snooze). Consideration does not authorize
+    mutation: act through the route under its own rules, or dispose of it.
+
     Use `ask_memory` instead when you already know what you are looking for; use
     this when you do not, and follow it with `read_memory` on whatever ref the
     packet points at.
@@ -6081,7 +6088,8 @@ def op_activate_context(
             that names nothing ("continue") is then answered from THIS
             conversation's own last thread and picks first, before anything
             other conversations touched, and `recent_context` lists its pages
-            first. Only a salted hash of it is stored, on this machine.
+            first. Only a salted hash of it is stored, on this machine. It
+            also names whose session start an `upkeep` item may arrive at.
         workspace: Optional opaque key for the project or folder the
             conversation runs in, at most 256 characters, such as a hash of
             the working directory. A fresh conversation in the same workspace
@@ -6091,7 +6099,7 @@ def op_activate_context(
 
     Returns: {recent_context, anchors, roles, units, pointers, current_state,
              missing, ambiguity, budget, generation, abstained, abstention?,
-             continuity?, episode_due?}. `recent_context` is first and is present on an
+             continuity?, episode_due?, upkeep?}. `recent_context` is first and is present on an
              abstained packet too. An abstained packet always empties
              `roles`, `units`, `pointers` and `current_state` — no material
              about an anchor that did not resolve — but `anchors` (a
@@ -6140,7 +6148,8 @@ def op_activate_context(
     # names nothing (ruling S5-1), enter the packet cache key only as the
     # digest of that ranking, and are recorded by the activation log after the
     # packet exists — the session as a vault-keyed hash, the workspace not at
-    # all.
+    # all. `session` has one other reader, the upkeep carrier below, where it
+    # names the caller whose session start may carry one upkeep item.
     started = time.perf_counter()
     with state_paths_module.resolution_scope():
         bound_token = None
@@ -6163,6 +6172,12 @@ def op_activate_context(
                 session=session,
                 workspace=workspace,
             )
+            # After the guard and outside the packet cache, like `continuity`:
+            # at a caller's session start, at most one upkeep item, and only in
+            # the process whose background worker proposed it. Never raises.
+            from . import upkeep as upkeep_module
+
+            upkeep_module.for_packet(vault_root, packet, session=session)
         except Exception as error:
             query_log.log_activation_call(
                 vault_root,
@@ -7968,7 +7983,7 @@ def op_review_memory(
     Args:
         mode: attention, activation, item, audit, dispositions, vocabulary, provenance,
             evolution, compilation, stale, contradiction, unprocessed-sources,
-            relation-debt, relation-queue, adoption, plan-progress, or
+            relation-debt, relation-queue, adoption, upkeep, plan-progress, or
             write-advisory-result. `write-advisory-result` resolves exactly one
             opaque `exomem://write-advisory-result/<id>` reference returned by a
             committed write and reports only that job's current `pending`,
@@ -7991,8 +8006,12 @@ def op_review_memory(
             proposal queue grouped per run (structured agent proposals with signal
             fingerprints); approve a proposal via
             `adoption_studio(action="apply-proposal")` or dismiss via
-            `triage_memory`.
-        categories: Optional category filter for attention/activation/audit.
+            `triage_memory`. `upkeep` lists the background worker's bounded
+            upkeep proposals (default 10), each with its evidence, the governed
+            route that would act on it, and triage verbs; a proposal authorizes
+            nothing. Link items carry a relation-queue ref and source path.
+        categories: Optional category filter for attention/activation/audit, or an
+            upkeep family filter for upkeep.
         limit: Attention/activation result cap. Vocabulary review defaults to four
             items; every other mode defaults to 25. On the topic evolution route, caps
             returned timelines; the path route returns one selected chain and does
@@ -8016,8 +8035,9 @@ def op_review_memory(
         state: For attention/activation, open (default), all, snoozed, or dismissed.
             Vocabulary review uses open for actionable work or all for decision history;
             each response is a non-exhaustive bounded pass.
-        ref: Stable `exomem://review/<id>` reference for item mode, or the
-            opaque `exomem://write-advisory-result/<id>` reference for
+        ref: Stable `exomem://review/<id>` reference for item mode (an
+            `exomem://review/upkeep/<id>` ref revalidates that one upkeep item), or
+            the opaque `exomem://write-advisory-result/<id>` reference for
             write-advisory-result mode. Required by both. For a vocabulary
             relation-type question, optionally provide a current relation-queue
             candidate ref alongside its source path and your meaning question.
@@ -8099,12 +8119,18 @@ def op_review_memory(
         )
     if family is not None:
         raise ValueError("INVALID_REVIEW_ARGUMENTS: family is only supported by vocabulary review")
-    if limit is None:
-        limit = 25
     if continuation is not None:
         raise ValueError(
             "INVALID_REVIEW_ARGUMENTS: continuation is only supported by vocabulary review"
         )
+    if mode == "upkeep":
+        from . import upkeep as upkeep_module
+
+        return upkeep_module.review(
+            vault_root, state=state, categories=categories, limit=limit
+        )
+    if limit is None:
+        limit = 25
     if mode == "plan-progress":
         # `path` is a collection selector here, not a memory identifier, so it
         # is passed through before the page-oriented resolution below.
@@ -8123,6 +8149,12 @@ def op_review_memory(
     if mode == "item":
         if not ref:
             raise ValueError("INVALID_REVIEW: item mode requires `ref`")
+        from . import upkeep as upkeep_module
+
+        if upkeep_module.is_upkeep_ref(ref):
+            # Before the attention scan: an upkeep item revalidates from its
+            # own pages and never runs the whole-vault union.
+            return upkeep_module.item(vault_root, ref)
         return attention_module.item_by_ref(vault_root, ref).as_dict()
     if mode == "write-advisory-result":
         return deferred_write_advisory_module.resolve_result(vault_root, ref)
@@ -8175,8 +8207,8 @@ def op_review_memory(
     raise ValueError(
         "INVALID_MODE: review_memory mode must be attention, activation, item, audit, "
         "dispositions, provenance, evolution, compilation, stale, contradiction, "
-        "unprocessed-sources, relation-debt, relation-queue, adoption, plan-progress, "
-        "vocabulary, or write-advisory-result"
+        "unprocessed-sources, relation-debt, relation-queue, adoption, upkeep, "
+        "plan-progress, vocabulary, or write-advisory-result"
     )
 
 
@@ -8203,7 +8235,9 @@ def op_review_item_context(
         ref: Stable `exomem://review/<id>` reference. An
             `exomem://review/adoption/<id>` ref returns the bounded Adoption
             Studio proposal context (proposal record, live binding check, and
-            target-page summary) instead.
+            target-page summary) instead. An `exomem://review/upkeep/<id>` ref
+            returns one upkeep item's revalidated proposal with bounded
+            excerpts of its subject and evidence pages and its route.
         expected_fingerprint: Optional reviewed fingerprint; a mismatch asks the
             caller to refresh instead of presenting stale context.
         max_body_chars: Maximum target body characters.
@@ -8237,6 +8271,26 @@ def op_review_item_context(
         )
     if continuation is not None:
         raise ValueError("INVALID_REVIEW_CONTEXT_ARGUMENTS: continuation requires a vocabulary ref")
+    from . import upkeep as upkeep_module
+
+    if upkeep_module.is_upkeep_ref(ref):
+        if (
+            max_graph_nodes != 30
+            or max_graph_edges != 60
+            or max_history != 10
+            or max_evolution_versions != 10
+        ):
+            raise ValueError(
+                "INVALID_UPKEEP_CONTEXT_ARGUMENTS: upkeep context accepts only "
+                "expected_fingerprint, max_body_chars, and max_related_pages"
+            )
+        return upkeep_module.context(
+            vault_root,
+            ref,
+            expected_fingerprint=expected_fingerprint,
+            max_body_chars=max_body_chars,
+            max_related_pages=max_related_pages,
+        )
     if adoption_proposals_module.is_adoption_ref(ref):
         return adoption_proposals_module.assemble_context(
             vault_root,
@@ -8613,7 +8667,9 @@ def op_triage_memory(
             `exomem://review/adoption/<id>` ref triages an Adoption Studio
             proposal instead, keyed the same way (`review_id:fingerprint`). An
             `exomem://review/family/<family>` ref addresses a whole signal
-            FAMILY instead of one item.
+            FAMILY instead of one item. An `exomem://review/upkeep/<id>` ref
+            dismisses, snoozes or reopens one upkeep proposal, bound to its
+            current fingerprint.
         action: dismiss, snooze, or reopen for an item; quiet, off, or normal
             for a family. `quiet` drops that family from the default review
             union, every due-state carrier and the write-path advisories while
@@ -8706,6 +8762,18 @@ def op_triage_memory(
     if adoption_proposals_module.is_adoption_ref(ref):
         _refuse_pairless_stance(ref, action)
         return adoption_proposals_module.triage(
+            vault_root,
+            ref=ref,
+            action=action,
+            until=until,
+            why=why,
+            expected_fingerprint=expected_fingerprint,
+        )
+    from . import upkeep as upkeep_module
+
+    if upkeep_module.is_upkeep_ref(ref):
+        _refuse_pairless_stance(ref, action)
+        return upkeep_module.triage(
             vault_root,
             ref=ref,
             action=action,

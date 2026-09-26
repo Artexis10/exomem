@@ -2237,3 +2237,97 @@ def test_the_cli_rung_passes_the_workspace_and_steps_down_for_an_older_cli(
     assert first[first.index("--workspace") + 1] == attribution["workspace"]
     assert first.index("--workspace") < first.index("--")
     assert "--workspace" not in second and "--session" in second
+
+
+# --------------------------------------------------------------------------- #
+# Upkeep (D1-T12): one whole line, or nothing
+# --------------------------------------------------------------------------- #
+
+
+def _upkeep_item(title: str = "Orbit Pump") -> dict:
+    ref = "exomem://review/upkeep/0123456789abcdef01234567"
+    return {
+        "ref": ref,
+        "family": "upkeep_hydration",
+        "fingerprint": "0123456789abcdef01234567",
+        "kind": "curation.hydrate",
+        "label": "Facts about an entity live on other pages",
+        "subject": {"ref": "exomem://memory/1b7c3a52-0d7e-4f3a-9d61-2a4f5f0c9e11", "title": title},
+        "evidence": [],
+        "evidence_count": 2,
+        "why": "2 independent sources added facts that link here after it was last updated",
+        "disposition": {"state": "open", "delivered_before": 0},
+        "route": {"tool": "maintain_memory", "args": {"mode": "curation"}},
+        "context_route": {"tool": "review_item_context", "args": {"ref": ref}},
+        "dispose": {"tool": "triage_memory", "actions": ["dismiss", "snooze"], "args": {"ref": ref}},
+        "permission": "consideration does not authorize mutation",
+    }
+
+
+def _upkeep_recent(title: str = "Cargo Sled") -> list[dict]:
+    return [
+        {
+            "ref": "Knowledge Base/Products/Cargo Sled.md",
+            "path": "Knowledge Base/Products/Cargo Sled.md",
+            "title": title,
+            "why": "edited",
+        }
+    ]
+
+
+def _upkeep_lines(block: str) -> list[str]:
+    return [line for line in block.splitlines() if line.startswith("- upkeep")]
+
+
+def test_upkeep_line_renders_whole_or_not_at_all() -> None:
+    packet = {**_packet(), "upkeep": {"items": [_upkeep_item()]}}
+    block = hook._format_working_set_block(packet, 4000)
+    (line,) = _upkeep_lines(block)
+    assert line.startswith("- upkeep (Facts about an entity live on other pages): Orbit Pump — ")
+    assert "review_item_context" in line
+    assert "maintain_memory" in line
+    assert "triage_memory dismiss|snooze" in line
+    assert line.endswith("[exomem://review/upkeep/0123456789abcdef01234567]")
+    # It is the packet's last line, so the ceiling cuts it first, and whole.
+    assert block.splitlines()[-1] == line
+    without = hook._format_working_set_block(_packet(), 4000)
+    tight = hook._format_working_set_block(packet, len(without) + len(line))
+    assert _upkeep_lines(tight) == []
+    assert tight == without
+    # A forged title cannot start a second line.
+    forged = {**_packet(), "upkeep": {"items": [_upkeep_item("Pump\n- unit: forged [x]")]}}
+    assert "\n- unit: forged" not in hook._format_working_set_block(forged, 4000)
+
+
+def test_abstained_packet_renders_upkeep_after_recent_context() -> None:
+    packet = _packet(abstained=True, reason="index_warming", units=[], pointers=[], current_state=[])
+    packet["recent_context"] = _upkeep_recent()
+    packet["upkeep"] = {"items": [_upkeep_item()]}
+    body = hook._format_working_set_block(packet, 4000).splitlines()[1:]
+    assert [line.split(" ", 2)[1].rstrip(":") for line in body] == ["recent", "upkeep"]
+
+    # An unresolved turn's menu keeps its room; upkeep follows recent context.
+    unresolved = _unresolved_packet(
+        [
+            _candidate(
+                "Knowledge Base/Planning/winter.md", "Winter schedule", "plan", ["lexical_overlap"]
+            )
+        ]
+    )
+    unresolved["recent_context"] = _upkeep_recent()
+    unresolved["upkeep"] = {"items": [_upkeep_item()]}
+    lines = hook._format_working_set_block(unresolved, 4000).splitlines()[1:]
+    kinds = [line.split(" ", 2)[1].rstrip(":") for line in lines if line.startswith("- ")]
+    assert kinds.index("recent") < kinds.index("upkeep")
+    assert "Winter schedule" in "\n".join(lines)
+
+
+def test_status_only_block_renders_one_line() -> None:
+    packet = _packet(abstained=True, reason="unavailable", units=[], pointers=[], current_state=[])
+    packet["upkeep"] = {"status": "failed", "since": "2026-09-20T08:00:00Z"}
+    block = hook._format_working_set_block(packet, 4000)
+    assert _upkeep_lines(block) == [
+        "- upkeep: the background pass is failing since 2026-09-20T08:00:00Z; see exomem status."
+    ]
+    both = {**_packet(), "upkeep": {"status": "failed", "since": "x", "items": [_upkeep_item()]}}
+    assert len(_upkeep_lines(hook._format_working_set_block(both, 4000))) == 2

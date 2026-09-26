@@ -23,6 +23,7 @@ staying hidden the way a 10-file fixture did.
 from __future__ import annotations
 
 import random
+import uuid
 from pathlib import Path
 
 # KB sub-folders the synthetic notes are spread across — a realistic slice of the
@@ -33,8 +34,19 @@ FOLDERS: tuple[str, ...] = (
 )
 
 
+#: Namespace for the deterministic note ids `gen_dense_vault(ids=True)` writes.
+_NOTE_IDS = uuid.UUID("2d0b6c1e-8f4a-4c3e-9b1d-7a5e3f2c1b0d")
+
+
 def gen_dense_vault(
-    root: Path, n: int, links_per_note: int = 25, seed: int = 7
+    root: Path,
+    n: int,
+    links_per_note: int = 25,
+    seed: int = 7,
+    *,
+    sources: int = 0,
+    relations: bool = False,
+    ids: bool = False,
 ) -> list[str]:
     """Write `n` densely cross-linked KB notes under `root`; return their rels.
 
@@ -46,11 +58,29 @@ def gen_dense_vault(
 
     Deterministic in `(n, links_per_note, seed)`. Writes only under
     ``root/Knowledge Base/`` — the caller owns `root` (typically a tmp dir).
+
+    Three opt-in shapes real vaults have, off by default so every existing
+    caller writes byte-identical notes: `sources=k` writes k Source pages and
+    has note i cite ``Sources/report-(i % k)`` (one-Source clusters of n/k
+    notes); `relations` adds a ``## Relations`` line to the next note; `ids`
+    gives every note a deterministic ``exomem_id``.
     """
     rng = random.Random(seed)
     kb = root / "Knowledge Base"
     for f in FOLDERS:
         (kb / f).mkdir(parents=True, exist_ok=True)
+    if sources:
+        (kb / "Sources").mkdir(parents=True, exist_ok=True)
+        for s in range(sources):
+            (kb / "Sources" / f"report-{s:03d}.md").write_text(
+                "---\n"
+                "type: source\n"
+                f"title: Report {s:03d}\n"
+                "captured: 2026-01-15\n"
+                "---\n\n"
+                f"# Report {s:03d}\n\nRaw notes from the field.\n",
+                encoding="utf-8",
+            )
     rels: list[str] = []
     names: list[str] = []
     for i in range(n):
@@ -66,17 +96,24 @@ def gen_dense_vault(
                 link_lines.append(f"- see [[{rels[t][:-3]}]] for context")
             else:
                 link_lines.append(f"- ref [[{names[t]}]] inline")
+        identity = f"exomem_id: {uuid.uuid5(_NOTE_IDS, rel)}\n" if ids else ""
+        cited = f'sources:\n  - "[[Sources/report-{i % sources:03d}]]"\n' if sources else ""
+        authored = (
+            f"\n## Relations\n\n- relates_to [[{rels[(i + 1) % n][:-3]}]]\n" if relations else ""
+        )
         (root / rel).write_text(
             "---\n"
+            f"{identity}"
             "type: insight\n"
             f"title: Note {i} about topic {names[i]}\n"
             "tags: [synthetic, graph, dense]\n"
             f"updated: 2026-02-{(i % 28) + 1:02d}\n"
+            f"{cited}"
             "---\n\n"
             f"# Note {i}\n\n"
             "Prose paragraph so the note is realistically sized and body text "
             "gives BM25 something to rank on. topic topic topic.\n\n"
-            "## Related\n\n" + "\n".join(link_lines) + "\n",
+            "## Related\n\n" + "\n".join(link_lines) + "\n" + authored,
             encoding="utf-8",
         )
     return rels

@@ -1,0 +1,15 @@
+# K3s agent (add-cloud-node-provisioning N4). Joins over the private network
+# with the dedicated agent token; carries nothing a server needs.
+server: {{ ("https://" ~ k3s_server_private_ip ~ ":6443") | to_json }}
+token: {{ k3s_agent_join_token | to_json }}
+node-name: {{ inventory_hostname | to_json }}
+node-ip: {{ private_node_ip | to_json }}
+flannel-iface: {{ k3s_resolved_private_interface | to_json }}
+node-label:
+  - {{ k3s_agent_node_label | to_json }}
+protect-kernel-defaults: true
+kubelet-arg:
+  - image-gc-high-threshold=75
+  - image-gc-low-threshold=65
+  - container-log-max-size=10Mi
+  - container-log-max-files=3

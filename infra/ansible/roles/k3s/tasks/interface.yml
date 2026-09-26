@@ -1,0 +1,30 @@
+---
+- name: Discover the interface bound to the declared private node IP
+  ansible.builtin.set_fact:
+    k3s_private_interface_candidates: >-
+      {{
+        ansible_facts["interfaces"]
+        | map("extract", ansible_facts)
+        | selectattr("ipv4", "defined")
+        | selectattr("ipv4.address", "equalto", private_node_ip)
+        | map(attribute="device")
+        | list
+      }}
+  changed_when: false
+
+- name: Validate the private network interface
+  ansible.builtin.assert:
+    that:
+      - private_node_ip | length > 0
+      - k3s_private_interface | length > 0 or k3s_private_interface_candidates | length == 1
+    fail_msg: Exactly one interface must carry the declared private node IP.
+
+- name: Select the K3s private network interface
+  ansible.builtin.set_fact:
+    k3s_resolved_private_interface: >-
+      {{
+        k3s_private_interface
+        if k3s_private_interface | length > 0
+        else k3s_private_interface_candidates[0]
+      }}
+  changed_when: false

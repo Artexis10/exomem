@@ -590,6 +590,7 @@ def reset_caches_for_tests() -> None:
     with _CACHE_LOCK:
         _PACKET_CACHE.clear()
         _BUILDS.clear()
+        _REEMBED_SCHEDULED.clear()
         _INLINE_LOCKS.clear()
     working_set_index.reset_collection_manifests_for_tests()
 
@@ -642,7 +643,43 @@ def ensure_index(
     if freshness_stamp and index.freshness_stamp() != freshness_stamp:
         refreshed = refresh_index(index, freshness_stamp=freshness_stamp)
         return READY, index, not refreshed
+    if _managed():
+        _schedule_reembed(root, index, freshness_stamp=freshness_stamp)
     return READY, index, False
+
+
+#: (vault, fingerprint) pairs a re-embed was already scheduled for in this process.
+_REEMBED_SCHEDULED: set[tuple[str, str]] = set()
+
+
+def _schedule_reembed(
+    root: Path, index: working_set_index.WorkingSetIndex, *, freshness_stamp: str = ""
+) -> None:
+    """Schedule one background build when the resident activation encoder has
+    no vectors in the index: it changed, or its first build found it cold.
+
+    The vault may not change for days, and an inline pass never re-embeds
+    under a new encoder, so without this the semantic evidence would read
+    `absent` until the next write. Once per vault and fingerprint per process:
+    a build that cannot embed is not retried on every request.
+    """
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return
+    try:
+        from . import embeddings
+
+        resident = embeddings.activation_fingerprint()
+        if resident is None or index.vector_fingerprint() == resident:
+            return
+    except Exception:  # noqa: BLE001 - the vector lane is optional by contract
+        log.debug("activation encoder state unavailable", exc_info=True)
+        return
+    key = (str(root.absolute()), resident)
+    with _CACHE_LOCK:
+        if key in _REEMBED_SCHEDULED:
+            return
+        _REEMBED_SCHEDULED.add(key)
+    _schedule_build(root, freshness_stamp=freshness_stamp)
 
 
 def lexical_evidence(
@@ -660,7 +697,8 @@ def lexical_evidence(
         return [], "available"
     try:
         # A full-page match on the same single name word is not a second fact.
-        # Retain two distinct content stems; exact aliases still resolve alone.
+        # Require two distinct content units (words or unspaced runs); exact
+        # aliases still resolve alone.
         content_turn = " ".join(
             token for token in working_set_index.tokens_of(working_set_index.normalize(turn))
             if token not in working_set_index.STOPWORDS
@@ -770,17 +808,45 @@ def content_stems(turn: str) -> tuple[str, ...]:
     there are talking about the same word. Used for the rarity lookup and
     the corroboration list, which compare against the catalogue's STORED
     stems directly; never for the ranking query, which stems what it is
-    given (see `content_words`).
+    given (see `content_words`). Query side: an accented word is its surface
+    form only, so rarity is read on what the turn wrote, not on the folded
+    variant the index also stores.
     """
     from . import bm25 as bm25_module
 
-    return tuple(dict.fromkeys(bm25_module.tokenize(content_words(turn))))
+    return tuple(dict.fromkeys(bm25_module.tokenize(content_words(turn), query=True)))
+
+
+def pairable_stems(turn: str) -> tuple[str, ...]:
+    """`content_stems` without the stems of unspaced runs, which never pair
+    (see `adjacent_rare_pairs`), so the carry never pays a rarity lookup for
+    them."""
+    from . import bm25 as bm25_module
+
+    return tuple(
+        dict.fromkeys(
+            stem
+            for unit in bm25_module.token_units(content_words(turn), query=True)
+            if not unit.run
+            for stem in unit.stems
+        )
+    )
 
 
 #: What ends a proximity window. Sentence-ending punctuation and a line
 #: break; a comma deliberately does not, being punctuation inside a phrase
-#: rather than between two of them.
-_SENTENCE_BREAK = re.compile(r"[.!?;\n\r]+")
+#: rather than between two of them. The split reads the raw turn, so each
+#: script's own sentence end is named: the Devanagari danda and double
+#: danda, the Greek question mark, the Arabic question mark and full stop,
+#: the Armenian full stop, the Ethiopic full stop, the CJK full stop, the
+#: halfwidth ideographic full stop, and the fullwidth full stop, semicolon,
+#: ! and ?.
+_SENTENCE_BREAK = re.compile(
+    "[.!?;\n\r।॥;؟۔։።。｡．；！？]+"
+)
+#: The joiners `working_set_index.tokens_of` admits inside a term. The parts
+#: they join are separate words of one compound.
+_TOKEN_JOINERS = re.compile(r"['\-]+")
 
 
 def adjacent_rare_pairs(
@@ -808,7 +874,19 @@ def adjacent_rare_pairs(
 
     One raw token may carry several stems ("girvan-slot", "o'brien"), and
     all of them are placed at that token's position: a compound is the
-    phrase said as tightly as a phrase can be said.
+    phrase said as tightly as a phrase can be said. But a pair needs two
+    WORDS: the stems of one word ("jätka" and its folded variant) are one
+    thing said once, never a phrase with itself. The raw token is split on
+    its joiners first, so the parts of a joined compound still pair at
+    distance zero.
+
+    An UNSPACED RUN (Han, kana, Hangul, Thai and the other bigram-indexed
+    scripts) contributes nothing: the carry stays off for those scripts.
+    A run's bigrams sit at one token position, and two runs side by side
+    share particles and endings (日は, です, 니다) with every page in their
+    script, so pairing them named pages the turn never mentioned —
+    "明日は、散歩です" carried a weather note — and cost |A|x|B| pair
+    groups, a minute of activation for a long Japanese turn.
 
     Each pair is returned once, sorted, so the caller's query sees a stable
     set.
@@ -823,19 +901,25 @@ def adjacent_rare_pairs(
     # Split the RAW text: `normalize` folds case and width but keeps the
     # punctuation, and splitting per sentence is what keeps a window from
     # reaching across one.
+    unit_id = 0
     for sentence in _SENTENCE_BREAK.split(str(turn)):
-        placed: list[tuple[int, str]] = []
+        placed: list[tuple[int, int, str]] = []
         for index, token in enumerate(
             working_set_index.tokens_of(working_set_index.normalize(sentence))
         ):
-            for stem in bm25_module.tokenize(token):
-                if stem in wanted:
-                    placed.append((index, stem))
-        for position, (left_at, left) in enumerate(placed):
-            for right_at, right in placed[position + 1 :]:
+            for part in _TOKEN_JOINERS.split(token):
+                for unit in bm25_module.token_units(part, query=True):
+                    unit_id += 1
+                    if unit.run:
+                        continue
+                    for stem in dict.fromkeys(unit.stems):
+                        if stem in wanted:
+                            placed.append((index, unit_id, stem))
+        for position, (left_at, left_unit, left) in enumerate(placed):
+            for right_at, right_unit, right in placed[position + 1 :]:
                 if right_at - left_at > span:
                     break
-                if left != right:
+                if left != right and left_unit != right_unit:
                     first, second = sorted((left, right))
                     pairs.add((first, second))
     return tuple(sorted(pairs))
@@ -937,7 +1021,10 @@ def carry_candidates(
     from . import lexstore
 
     try:
-        stems = content_stems(turn)
+        # Only stems that can pair are worth a rarity lookup: an unspaced
+        # run's bigrams never pair, and on a 1,600-page Japanese vault a long
+        # Japanese turn spent 0.65-0.83 s looking them up.
+        stems = pairable_stems(turn)
         if len(stems) < working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS:
             return (), "available"
         rare, corpus_pages, state = rare_turn_terms(
@@ -1059,7 +1146,11 @@ def _schedule_build(vault_root: Path, *, freshness_stamp: str = "") -> None:
 
     def _warm() -> None:
         try:
-            working_set_index.WorkingSetIndex(root).update(freshness_stamp=freshness_stamp or None)
+            # The one pass that may load a cold activation encoder: it runs off
+            # the request thread, which never loads a model.
+            working_set_index.WorkingSetIndex(root).update(
+                freshness_stamp=freshness_stamp or None, load_encoder=True
+            )
         except Exception:  # noqa: BLE001 - the optional stage stays soft-failing
             log.warning("activation index background build failed", exc_info=True)
         finally:
@@ -1216,7 +1307,15 @@ def serve(
         continuity_refs=continuity_refs,
         heat_digest=heat_digest,
     )
-    cache_identity = (str(root.absolute()), key, lexical_state, index.token())
+    # The band depends on the audience under a governed policy, so one audience's
+    # banded packet is never served to another (`working_set.band_audience_allowed`).
+    cache_identity = (
+        str(root.absolute()),
+        key,
+        lexical_state,
+        index.token(),
+        working_set.band_audience_allowed(root),
+    )
     with _CACHE_LOCK:
         cached = _PACKET_CACHE.get(cache_identity)
         if cached is not None:

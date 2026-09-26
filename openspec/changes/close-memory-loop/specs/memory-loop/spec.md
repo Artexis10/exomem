@@ -297,11 +297,35 @@ Activation SHALL use the derived anchor signature vectors for optional semantic
 corroboration instead of unconditionally invoking ordinary full-vault hybrid
 recall. It SHALL NOT load full note-chunk or multimodal vector matrices on the
 activation path. Ordinary recall behaviour SHALL remain unchanged. One query
-encode MAY use the configured resident encoder only under nonblocking model
-admission; activation SHALL NOT load a cold model or wait behind another model
-operation. Existing categorical evidence and ambiguity rules SHALL apply to
-all candidates, including competitors of an exact match. Vector evidence alone
-SHALL NOT resolve an anchor.
+encode MAY use the resident activation encoder, identified by a recorded
+fingerprint, only under nonblocking model admission; activation SHALL NOT load a
+cold model or wait behind another model operation. Signature vectors made under
+another fingerprint SHALL NOT be compared with the turn, and an index update on
+a request thread SHALL NOT load a model. Existing categorical evidence and
+ambiguity rules SHALL apply to all candidates, including competitors of an
+exact match. Vector evidence alone SHALL NOT resolve an anchor.
+
+Vector evidence SHALL be a corpus-relative band. An anchor's signature SHALL
+earn `vector_band` only when its similarity to the turn is an outlier against
+the turn's own similarities to the whole catalogue: at or above the median plus
+a robust spread multiplied by the level the largest of that many unrelated
+similarities exceeds at a declared chance rate. That rate is nominal: the
+measured share of turns banding an unrelated anchor was 3-4% with independent
+Gaussian nulls at 50-80 anchors, 8.5-12.7% with the served encoder at 60-200
+anchors and about 6% at 1,000-2,000, and none for content-free turns, so a band
+alone SHALL NOT resolve an anchor. When more anchors clear than the
+rare-term anchor cap, none SHALL band. A catalogue below a declared population
+floor, or one whose similarities have no spread, SHALL yield no band and SHALL
+NOT be encoded against. Similarity SHALL NOT reorder the recent-context block.
+In a script written without spaces, an anchor name of at least two characters,
+wholly in the script of the turn's unspaced run, contained in that run and rare
+by the anchor-name yardstick MAY grant rare-term evidence, never exact-alias
+evidence; a name whose every occurrence lies inside a longer contained name
+SHALL be consumed by it. Because the band is an aggregate over the whole anchor
+catalogue, withheld anchors included, under a non-empty governed policy it SHALL
+run only for owner-bound principals: every other principal SHALL receive
+semantic evidence `audience_restricted` and no `vector_band` contact, decided
+before any similarity is computed.
 
 Lean activation SHALL retain bounded own-page lexical retrieval evidence from
 the maintained full-page FTS catalogue restricted to anchor paths. Anchor
@@ -311,10 +335,13 @@ its paths become evidence, SHALL NOT rebuild or apply a foreground delta, and
 SHALL NOT fall back to an in-process corpus scan. Its readiness result SHALL be
 reported as `generation.lexical_evidence`; incomplete publication SHALL remain
 non-cacheable. Title/alias overlap alone SHALL NOT be relabelled as retrieval.
-Lexical corroboration SHALL match at least two distinct content stems from the
+Lexical corroboration SHALL match at least two distinct content units from the
 turn after the shared stopword filter, with that predicate applied before the
-ranked result limit. Repeated or inflected forms of one stem SHALL NOT provide
-the second match. This restriction SHALL NOT change ordinary recall.
+ranked result limit. A unit is one word or one unspaced run (a CJK sentence
+written without spaces); its stems, such as an accented word's folded variant
+or a run's character bigrams, count once, and a run counts only when most of
+its content bigrams match. Repeated or inflected forms of one stem SHALL NOT
+provide the second match. This restriction SHALL NOT change ordinary recall.
 Categorical lexical-overlap evidence SHALL additionally require genuine name
 contact: two or more of the shared broad terms among the anchor's own
 authored title/alias terms. A single shared authored term SHALL NOT by
@@ -353,7 +380,11 @@ foreground repair. Managed-service warm latency and offline cold filesystem
 proof SHALL be reported separately.
 
 Packet generation metadata SHALL identify semantic evidence as ready, disabled,
-absent, warming, busy, unavailable or unnecessary for an explicit agent choice.
+absent, uncalibrated, audience_restricted, warming, busy, unavailable or
+unnecessary for an explicit
+agent choice. Every state other than ready and that agent choice SHALL serve the
+same anchors, statuses, evidence and recent-context block as disabled semantic
+evidence.
 Transiently incomplete evidence SHALL NOT create a reusable packet cache entry.
 Every packet SHALL still cross the current governance release plane, including
 cached packets and packets without semantic evidence. End-to-end latency
@@ -379,6 +410,65 @@ fast abstention or compiler-only timing.
 - **WHEN** a signature is semantically similar but has no independently deciding
   worded evidence or valid continuity qualification
 - **THEN** it remains partial and supplies no context-role material
+
+#### Scenario: A turn in another language names an anchor's rare name
+
+- **WHEN** a German or Russian turn contains the invented name of an
+  English-authored anchor and is about that anchor
+- **THEN** the anchor earns `rare_term` and `vector_band` and resolves
+- **AND** with semantic evidence off the same turn leaves it partial
+
+#### Scenario: A turn similar to many anchors earns no band
+
+- **WHEN** more anchors clear the band for one turn than the rare-term anchor
+  cap
+- **THEN** no anchor earns `vector_band` from that turn
+
+#### Scenario: A catalogue too small to calibrate yields no band
+
+- **WHEN** the catalogue holds fewer signatures than the population floor
+- **THEN** semantic evidence is `uncalibrated`, the turn is not encoded and no
+  anchor earns `vector_band`
+
+#### Scenario: A changed encoder never compares two vector spaces
+
+- **WHEN** the resident activation encoder's fingerprint differs from the one
+  the stored signature vectors were made under
+- **THEN** semantic evidence is `absent` and no stored vector is compared with
+  the turn
+- **AND** only a background pass re-embeds the catalogue; a request never loads
+  a model to do it
+
+#### Scenario: A CJK turn contains an anchor's name
+
+- **WHEN** a Japanese turn written without spaces contains a rare anchor's
+  two-character name
+- **THEN** the anchor earns `rare_term`, never `exact_alias`, and resolves with
+  a band and stays partial without one
+- **AND** the same name inside an unrelated compound, with no band, stays partial
+
+#### Scenario: A same-language unrelated anchor earns no band
+
+- **WHEN** a Russian turn is about an English-authored page and the catalogue
+  holds an unrelated Russian-authored anchor
+- **THEN** that anchor earns no `vector_band` for sharing the turn's language
+
+#### Scenario: A restricted caller learns nothing from the band about a withheld anchor
+
+- **WHEN** a vault under a governed policy holds an anchor withheld from a
+  non-owner caller, and that anchor would change the band's population, floor,
+  median or width for the caller's turn
+- **THEN** the caller's semantic evidence is `audience_restricted`, no anchor
+  earns `vector_band`, and its packet is identical to the one it would receive
+  from the same vault without the withheld anchor
+- **AND** the owner, or any caller of an ungoverned vault, still receives the band
+
+#### Scenario: Semantic evidence never reorders the recent block
+
+- **WHEN** a turn is similar to a recent page below the recency menu, or is a
+  content-free turn in another language
+- **THEN** `recent_context` is the recency block, identical with semantic
+  evidence on, off or degraded
 
 #### Scenario: A lean installation reaches a resource through its contents
 
@@ -455,8 +545,16 @@ measured as a document frequency at or below `max(3, ceil(0.5% of the indexed
 pages in scope))` over the same catalogue the ranking uses, navigation pages not
 counted toward a stem's frequency, and raw-material pages counted neither toward
 a stem's frequency nor among the indexed pages. A hit SHALL additionally satisfy a proximity
-condition: two of its matched distinctive stems occur within a declared token
-window of each other, within one sentence of the turn. Distance SHALL be
+condition: two of its matched distinctive stems from two different words occur
+within a declared token window of each other, within one sentence of the turn.
+The stems of one word SHALL NOT pair with each other, and rarity SHALL be read
+on the turn's surface forms; the parts of a joined compound (`girvan-slot`) are
+separate words and pair at distance zero. An unspaced run (a script indexed as
+bigrams: Han, kana, Hangul, Thai and the like) SHALL contribute no pairable
+stem, so a turn written in those scripts is never carried and SHALL NOT run the
+ranking query. This is a stated limit: two runs share particles and endings
+with every page in their script, and pairing them would need a position model
+over character offsets. Distance SHALL be
 measured over the turn's own tokens, function words included; sentence-ending
 punctuation and line breaks SHALL end a window and a comma SHALL NOT. A
 number of distinctive stems occurring anywhere in the turn SHALL NOT by
@@ -527,8 +625,17 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
 - **WHEN** a turn that resolves no anchor shares exactly two distinctive
   stems with a page and says them further apart than the declared window
 - **THEN** that page is not a candidate and the turn abstains `unresolved`
-- **AND** the same two stems said as a phrase DO make it a candidate, as do
-  three of that page's distinctive stems sitting anywhere in the turn
+- **AND** the same two stems said as a phrase DO make it a candidate
+
+#### Scenario: One word is not a phrase, and an unspaced run never pairs
+
+- **WHEN** a turn is a single accented word that appears on exactly one page
+  of a measurable corpus
+- **THEN** no page is carried: the word and its folded variant are one word
+  and never pair with each other
+- **AND** a turn written in an unspaced script carries no page, whether it is
+  one Japanese run or two runs ("明日は、散歩です", "오늘은 회의입니다")
+  sharing only particles and endings with a page, and it runs no ranking query
 
 #### Scenario: A stub sharing only ordinary words is not named
 

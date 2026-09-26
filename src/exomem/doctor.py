@@ -2085,9 +2085,9 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
     # identifies the vector space. A benchmark contender is disqualified when it
     # cannot show it is serving semantically (docs/benchmark-fairness-contract.md),
     # and until now an ONNX install had no way to show that from doctor.
-    from . import embedding_backend
-
-    fingerprint = embedding_backend.fingerprint(embeddings.MODEL_NAME)
+    # The resident encoder's own fingerprint, which for a served model names
+    # the exact bytes it runs; the probe above just loaded it.
+    fingerprint = embeddings._vector_space()
     try:
         metadata, _matrix = index.all_vectors()
         vector_count: int | None = len(metadata)

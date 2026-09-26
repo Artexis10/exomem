@@ -1085,3 +1085,243 @@ def test_explicit_identity_only_mechanisms_remain_binding_optional(mechanism: st
     report = run_audit({}, manifest=manifest, fixtures=())
 
     assert report.verdict == "no_verdict"
+
+
+# -- multilingual rows (step 4, T9) ----------------------------------------
+#
+# The multilingual set is scored by its own module from a PAIR of packets per
+# turn (semantic on, semantic off); nothing above changes. Every check reads
+# the packets the product served, so none of these can credit what a packet
+# never did.
+
+_ML_PATHS = {
+    "gold": "Knowledge Base/Products/Gold.md",
+    "poison": "Knowledge Base/Products/Poison.md",
+    "other": "Knowledge Base/Products/Other.md",
+}
+
+
+def _ml_case(case_id: str):
+    from epistemic.corpora.context_activation_multilingual import case_by_id
+
+    return case_by_id(case_id)
+
+
+def _ml_key_to_path(case) -> dict[str, str]:
+    mapping = {key: _ML_PATHS["gold"] for key in case.gold}
+    mapping.update({key: _ML_PATHS["poison"] for key in (*case.poison, *case.never_resolved)})
+    return mapping
+
+
+def _ml_packet(*anchors, recent=(), abstained=None, generation=None, **extra) -> dict:
+    items = [{"path": path, "status": status, "evidence": list(evidence)} for path, status, evidence in anchors]
+    resolved = any(item["status"] == "resolved" for item in items)
+    packet = {
+        "anchors": items,
+        "recent_context": [{"path": path} for path in recent],
+        "abstained": (not resolved) if abstained is None else abstained,
+        "generation": generation or {"semantic_evidence": "ready"},
+        "ambiguity": [],
+        "units": [],
+        "pointers": [],
+        "current_state": [],
+    }
+    packet.update(extra)
+    return packet
+
+
+def test_multilingual_named_case_passes_on_band_plus_word_and_partial_off() -> None:
+    from membench.utility.context_activation_multilingual import score_multilingual_case
+
+    case = _ml_case("M1-de")
+    gold = _ML_PATHS["gold"]
+    row = score_multilingual_case(
+        case,
+        _ml_packet((gold, "resolved", ("rare_term", "vector_band"))),
+        _ml_packet((gold, "partial", ("rare_term",)), generation={"semantic_evidence": "disabled"}),
+        key_to_path=_ml_key_to_path(case),
+    )
+    assert row.passed, row.failure_reasons
+    assert (row.observed_status_on, row.observed_status_off) == ("resolved", "partial")
+    assert row.gold_resolved is True
+
+
+def test_multilingual_status_counts_an_abstained_partial_as_partial() -> None:
+    from membench.utility.context_activation_multilingual import case_status
+
+    assert case_status(_ml_packet((_ML_PATHS["gold"], "partial", ("rare_term",)), abstained=True)) == "partial"
+    assert case_status(_ml_packet(abstained=True)) == "unresolved"
+    assert turn_status(packet_from_dict({"anchors": [], "abstained": True})) == "unresolved"
+
+
+def test_multilingual_band_alone_resolution_fails_the_case() -> None:
+    from membench.utility.context_activation_multilingual import score_multilingual_case
+
+    case = _ml_case("M1-de")
+    gold = _ML_PATHS["gold"]
+    row = score_multilingual_case(
+        case,
+        _ml_packet((gold, "resolved", ("vector_band",))),
+        _ml_packet((gold, "partial", ("rare_term",))),
+        key_to_path=_ml_key_to_path(case),
+    )
+    assert not row.passed
+    assert any("vector_band alone" in reason for reason in row.failure_reasons)
+
+
+def test_multilingual_twin_resolving_anything_is_false_activation() -> None:
+    from membench.utility.context_activation_multilingual import score_multilingual_case
+
+    twin = _ml_case("N1-de")
+    other = _ML_PATHS["other"]
+    row = score_multilingual_case(
+        twin,
+        _ml_packet((other, "resolved", ("rare_term", "lexical_overlap"))),
+        _ml_packet(),
+        key_to_path=_ml_key_to_path(twin),
+    )
+    assert not row.passed
+    assert any("twin false activation (on)" in reason for reason in row.failure_reasons)
+
+
+def test_multilingual_menu_rank_comes_only_from_the_served_menu() -> None:
+    """A promotion the packet never made cannot be credited: the gold absent
+    from both menus is no rank on either arm and a gain of zero."""
+    from membench.utility.context_activation_multilingual import (
+        multilingual_report,
+        score_multilingual_case,
+    )
+
+    case = _ml_case("M2-de")
+    recent = (_ML_PATHS["other"],)
+    row = score_multilingual_case(
+        case,
+        _ml_packet(recent=recent),
+        _ml_packet(recent=recent),
+        key_to_path=_ml_key_to_path(case),
+    )
+    assert (row.gold_menu_rank_on, row.gold_menu_rank_off) == (None, None)
+    assert row.passed, row.failure_reasons
+    assert multilingual_report([row], encoder={})["summary"]["menu_gain"] == 0
+
+    promoted = score_multilingual_case(
+        case,
+        _ml_packet(recent=(_ML_PATHS["gold"], *recent)),
+        _ml_packet(recent=recent),
+        key_to_path=_ml_key_to_path(case),
+    )
+    assert (promoted.gold_menu_rank_on, promoted.gold_menu_rank_off) == (1, None)
+
+
+def test_multilingual_poison_promoted_or_banded_is_caught() -> None:
+    from membench.utility.context_activation_multilingual import (
+        multilingual_report,
+        score_multilingual_case,
+    )
+
+    case = _ml_case("M4-ru")
+    poison = _ML_PATHS["poison"]
+    recent = (_ML_PATHS["other"],)
+    row = score_multilingual_case(
+        case,
+        _ml_packet((poison, "partial", ("vector_band",)), recent=(poison, *recent)),
+        _ml_packet(recent=recent),
+        key_to_path=_ml_key_to_path(case),
+    )
+    assert row.poison_banded == (poison,)
+    assert row.poison_promoted == (poison,)
+    assert not row.passed
+    assert multilingual_report([row], encoder={})["summary"]["false_band_rate"] == 1.0
+
+
+def test_multilingual_content_free_menu_must_match_across_arms() -> None:
+    from membench.utility.context_activation_multilingual import score_multilingual_case
+
+    case = _ml_case("M3-de")
+    row = score_multilingual_case(
+        case,
+        _ml_packet(recent=(_ML_PATHS["gold"], _ML_PATHS["other"])),
+        _ml_packet(recent=(_ML_PATHS["other"], _ML_PATHS["gold"])),
+        key_to_path={},
+    )
+    assert not row.passed
+    assert any("content-free" in reason for reason in row.failure_reasons)
+
+
+def test_multilingual_degraded_packet_must_equal_the_off_packet() -> None:
+    from membench.utility.context_activation_multilingual import (
+        multilingual_report,
+        score_multilingual_case,
+    )
+
+    case = _ml_case("M3-ru")
+    off = _ml_packet(recent=(_ML_PATHS["other"],), generation={"semantic_evidence": "disabled"})
+    cold = _ml_packet(recent=(_ML_PATHS["other"],), generation={"semantic_evidence": "unavailable"})
+    drifted = _ml_packet((_ML_PATHS["gold"], "partial", ("rare_term",)), recent=(_ML_PATHS["other"],))
+    same = score_multilingual_case(case, off, off, key_to_path={}, degraded=[cold])
+    assert same.degrade_identical and same.passed
+    different = score_multilingual_case(case, off, off, key_to_path={}, degraded=[drifted])
+    assert not different.degrade_identical and not different.passed
+    assert multilingual_report([same, different], encoder={})["summary"]["degrade_identical"] is False
+
+
+def test_multilingual_carry_fragment_that_carries_fails() -> None:
+    from membench.utility.context_activation_multilingual import score_multilingual_case
+
+    case = _ml_case("M7-de")
+    carried = _ml_packet(
+        (_ML_PATHS["poison"], "retrieval_carried", ("retrieval",)),
+        abstained=False,
+        generation={"semantic_evidence": "ready", "carried_by": "retrieval"},
+    )
+    row = score_multilingual_case(case, carried, carried, key_to_path=_ml_key_to_path(case))
+    assert not row.passed
+    assert any("single word carried" in reason for reason in row.failure_reasons)
+    assert any("poison carried" in reason for reason in row.failure_reasons)
+
+
+def test_multilingual_residual_row_is_reported_never_failed() -> None:
+    from membench.utility.context_activation_multilingual import score_multilingual_case
+
+    case = _ml_case("M8-de")
+    resolved = _ml_packet((_ML_PATHS["gold"], "resolved", ("rare_term", "lexical_overlap")))
+    row = score_multilingual_case(case, resolved, _ml_packet(), key_to_path=_ml_key_to_path(case))
+    assert row.scored is False
+    assert row.passed is True
+    assert row.failure_reasons, "the residual still reports what it saw"
+
+
+def test_multilingual_report_takes_semantic_ms_from_the_served_timings() -> None:
+    from membench.utility.context_activation_multilingual import (
+        multilingual_report,
+        score_multilingual_case,
+    )
+
+    case = _ml_case("M3-ja")
+    timed = _ml_packet(timings={"stages": {"working_set.semantic": {"ms": 12.5}}})
+    row = score_multilingual_case(case, timed, _ml_packet(), key_to_path={}, encode_ms=7.0)
+    report = multilingual_report([row], encoder={"model": "m"})
+    assert report["summary"]["semantic_ms"] == {"p50": 12.5, "p95": 12.5, "n": 1}
+    assert report["summary"]["encode_ms"]["p95"] == 7.0
+    assert report["encoder"] == {"model": "m"}
+    assert set(report) == {"encoder", "arms", "per_case", "summary"}
+
+
+def test_multilingual_latency_rows_are_ceil_rank_percentiles_over_every_case() -> None:
+    from membench.utility.context_activation_multilingual import (
+        multilingual_report,
+        score_multilingual_case,
+    )
+
+    case = _ml_case("M3-ja")
+    rows = [
+        score_multilingual_case(
+            case,
+            _ml_packet(timings={"stages": {"working_set.semantic": {"ms": float(ms)}}}),
+            _ml_packet(),
+            key_to_path={},
+        )
+        for ms in (40, 10, 30, 20, 100, 50, 60, 70, 80, 90)
+    ]
+    semantic = multilingual_report(rows, encoder={})["summary"]["semantic_ms"]
+    assert semantic == {"p50": 50.0, "p95": 100.0, "n": 10}

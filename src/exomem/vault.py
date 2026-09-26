@@ -689,6 +689,35 @@ def _lock_key(vault_root: Path, namespace: str) -> tuple[str, str]:
     return root, hashlib.sha256(f"{root}\0{namespace}".encode()).hexdigest()
 
 
+def _require_real_lock_directory(info: os.stat_result) -> None:
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or _is_reparse(info):
+        raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unsafe")
+
+
+def _clear_inherited_setgid(directory: Path, info: os.stat_result) -> os.stat_result:
+    """chmod the lstat'd directory to 0700 through a no-follow descriptor."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(directory, flags)
+    except OSError as error:
+        raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unsafe") from error
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory changed")
+        os.fchmod(descriptor, 0o700)
+    except OSError as error:
+        raise VaultLockError(
+            "VAULT_LOCK_DIRECTORY", "lock directory mode could not be made private"
+        ) from error
+    finally:
+        os.close(descriptor)
+    try:
+        return directory.lstat()
+    except OSError as error:
+        raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unreadable") from error
+
+
 def _private_lock_directory() -> Path:
     owner = os.getuid() if hasattr(os, "getuid") else None
     suffix = str(owner) if owner is not None else os.environ.get("USERNAME", "user")
@@ -703,9 +732,14 @@ def _private_lock_directory() -> Path:
         info = directory.lstat()
     except OSError as error:
         raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unreadable") from error
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or _is_reparse(info):
-        raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unsafe")
+    _require_real_lock_directory(info)
     if owner is not None:
+        # A setgid parent (a pod fsGroup makes the /tmp emptyDir 02777) hands
+        # S_ISGID to the mkdir above, and the emptyDir keeps it across restarts.
+        # Owner-only plus exactly that bit is cleared, never tolerated.
+        if info.st_uid == owner and stat.S_IMODE(info.st_mode) == 0o700 | stat.S_ISGID:
+            info = _clear_inherited_setgid(directory, info)
+            _require_real_lock_directory(info)
         if info.st_uid != owner or stat.S_IMODE(info.st_mode) != 0o700:
             raise VaultLockError(
                 "VAULT_LOCK_DIRECTORY",

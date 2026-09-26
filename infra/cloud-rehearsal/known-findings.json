@@ -1,0 +1,4 @@
+{
+  "description": "Product findings the rehearsal is expected to record on the real cell image until their owners fix them. With --harness-check, a failure passes only when its step is listed here and its failure message contains the listed text; with each_problem, every one of the step's \"; \"-joined problems must contain it. Any other failing or blocked step, or a listed step failing for a different reason, fails the check. An entry whose step now passes is reported so it can be removed.",
+  "steps": {}
+}
