@@ -1584,14 +1584,20 @@ def persist_commit(observed: ObservedCommit | None) -> None:
     if not observed.events:
         return
 
-    def work() -> list[object]:
+    def work() -> None:
         append(observed.root, observed.events)
-        return []
 
     try:
         from . import writer_lease
 
-        if writer_lease.defer_until_terminal_persisted(work):
+        # The housekeeping channel, not `defer_until_terminal_persisted`:
+        # this reports nothing about derived-index custody, and that queue's
+        # mere non-emptiness is read elsewhere as "derived work is
+        # outstanding for this write" (review: merge fallout -- sharing it
+        # marked every governed write `derived_sync: "pending"` and wrapped
+        # its response in derived-acknowledgement diagnostics, whether or
+        # not any real derived fan-out ran).
+        if writer_lease.defer_housekeeping_until_terminal_persisted(work):
             return
         work()
     except Exception:  # noqa: BLE001 - heat never fails a commit
