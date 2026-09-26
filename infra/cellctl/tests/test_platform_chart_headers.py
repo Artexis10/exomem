@@ -327,6 +327,96 @@ def test_the_cloudflare_tunnel_keeps_a_single_web_port_while_websecure_rides_hos
     deployment = _find(documents, "Deployment", "platform-header-test-traefik")
     ports = {port["name"]: port for port in deployment["spec"]["template"]["spec"]["containers"][0]["ports"]}
     assert ports["websecure"]["hostPort"] == 443
+    assert {name for name, port in ports.items() if "hostPort" in port} == {"websecure"}
+    args = deployment["spec"]["template"]["spec"]["containers"][0]["args"]
+    assert not any(arg.lower().startswith("--entrypoints.websecure.forwardedheaders.trustedips") for arg in args)
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cellctl_is_a_single_nonroot_read_only_recreate_deployment() -> None:
+    deployment = _find(_helm_template(), "Deployment", "cellctl")
+    spec = deployment["spec"]
+    assert spec["replicas"] == 1
+    assert spec["strategy"] == {"type": "Recreate"}
+    pod = spec["template"]["spec"]
+    assert pod["securityContext"]["runAsNonRoot"] is True
+    (container,) = pod["containers"]
+    assert container["securityContext"]["readOnlyRootFilesystem"] is True
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cloud_workload_images_and_cell_admission_are_digest_pinned() -> None:
+    import json
+    import re
+
+    documents = _helm_template()
+    values = yaml.safe_load((PLATFORM_CHART / "values.validation.yaml").read_text(encoding="utf-8"))
+    for name, configured_image in (
+        ("cellctl", values["cellctl"]["image"]),
+        ("exomem-cloud-gateway", values["cloudGateway"]["image"]),
+    ):
+        deployment = _find(documents, "Deployment", name)
+        (container,) = deployment["spec"]["template"]["spec"]["containers"]
+        assert container["image"] == configured_image
+        assert re.fullmatch(r"[^\s]+@sha256:[a-f0-9]{64}", container["image"])
+
+    policy = _find(documents, "ValidatingAdmissionPolicy", "exomem-cellctl-scope")
+    (image_rule,) = [v for v in policy["spec"]["validations"] if "digest-pinned" in v["message"]]
+    repository = values["cellctl"]["cellImageRepository"]
+    expression = image_rule["expression"]
+    assert "containers.all(c, c.image.matches(" in expression
+    assert "initContainers.all(c, c.image.matches(" in expression
+    image_patterns = re.findall(r'c\.image\.matches\(("(?:\\.|[^"])*")\)', expression)
+    assert len(image_patterns) == 2
+    assert image_patterns[0] == image_patterns[1]
+    pinned_cell_image = re.compile(json.loads(image_patterns[0]))
+    assert pinned_cell_image.search(f"{repository}@sha256:{'a' * 64}")
+    assert not pinned_cell_image.search(f"{repository}:latest")
+    assert not pinned_cell_image.search(f"{repository}@sha256:{'a' * 63}")
+    assert not pinned_cell_image.search(f"other/{repository}@sha256:{'a' * 64}")
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cloud_storage_class_uses_the_encryption_secret_and_deletes_volumes() -> None:
+    from cellctl.manifests import STORAGE_CLASS
+
+    storage = _find(_helm_template(), "StorageClass", STORAGE_CLASS)
+    assert storage["provisioner"] == "csi.hetzner.cloud"
+    assert storage["reclaimPolicy"] == "Delete"
+    assert storage["parameters"] == {
+        "csi.storage.k8s.io/fstype": "ext4",
+        "csi.storage.k8s.io/node-publish-secret-name": "exomem-cloud-volume-encryption",
+        "csi.storage.k8s.io/node-publish-secret-namespace": "exomem-platform",
+    }
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cloud_gateway_certificate_uses_namespaced_cloudflare_dns01() -> None:
+    documents = _helm_template()
+    values = yaml.safe_load((PLATFORM_CHART / "values.validation.yaml").read_text(encoding="utf-8"))
+    hostname = values["cloudGateway"]["hostname"]
+    assert hostname == values["cloudIngress"]["hostname"]
+    assert hostname not in {
+        values["provisioner"]["controlHostname"],
+        values["provisioner"]["transferHostname"],
+    }
+
+    issuer = _find(documents, "Issuer", "exomem-cloud-dns01")
+    certificate = _find(documents, "Certificate", "exomem-cloud-gateway")
+    assert issuer["metadata"]["namespace"] == certificate["metadata"]["namespace"] == "exomem-cloud"
+    assert issuer["spec"]["acme"]["solvers"] == [{
+        "selector": {"dnsNames": [hostname]},
+        "dns01": {"cloudflare": {"apiTokenSecretRef": {
+            "name": "exomem-cloudflare-dns-token", "key": "token",
+        }}},
+    }]
+    assert certificate["spec"]["issuerRef"] == {"name": issuer["metadata"]["name"], "kind": "Issuer"}
+    assert certificate["spec"]["dnsNames"] == [hostname]
+    assert certificate["spec"]["secretName"] == "exomem-cloud-gateway-tls"
+    route = _find(documents, "IngressRoute", "exomem-cloud-gateway")
+    assert route["metadata"]["namespace"] == certificate["metadata"]["namespace"]
+    assert route["spec"]["routes"][0]["match"] == f"Host(`{hostname}`)"
+    assert route["spec"]["tls"]["secretName"] == certificate["spec"]["secretName"]
 
 
 # The Substrate gateway's environment contract (substrate main,
