@@ -114,7 +114,7 @@ def delete_file(
 
     try:
         abs_path, rel_path = resolve_under_vault(
-            vault_root, path, must_exist=True, must_be_file=True
+            vault_root, path, must_exist=True, must_be_file=True, refuse_withheld=True
         )
     except VaultPathError as e:
         raise DeleteFileError(code=e.code, reason=e.reason) from e
@@ -229,8 +229,19 @@ def delete_file(
                 n = kb_prefix() + n
             expected_set.add(n)
 
-    # Inbound-link check (with `expected_dead_inbound` filtering).
-    inbound_all = find_inbound_wikilinks(vault_root, rel_path)
+    # Inbound-link check (with `expected_dead_inbound` filtering). For a
+    # writer other than the owner under a governed policy, only links from
+    # pages it may see are counted, listed and logged: a link from a page
+    # withheld from it is orphaned as `force_orphan` would, and the owner's
+    # audit reports it.
+    from .governance import egress
+
+    visible = egress.governed_release_filter(vault_root)
+    inbound_all = [
+        match
+        for match in find_inbound_wikilinks(vault_root, rel_path)
+        if visible is None or visible(match.path)
+    ]
     inbound_ignored = [m for m in inbound_all if m.path in expected_set]
     inbound = [m for m in inbound_all if m.path not in expected_set]
 

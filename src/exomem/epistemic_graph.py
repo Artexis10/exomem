@@ -17,7 +17,7 @@ import sqlite3
 import threading
 import time
 import weakref
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -7457,8 +7457,19 @@ def graph_context(
     max_nodes: int = 40,
     max_edges: int = 80,
     traversal_profile: str | None = None,
+    keep: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
-    """Return a bounded, read-only graph neighborhood for a path or query."""
+    """Return a bounded, read-only graph neighborhood for a path or query.
+
+    `keep` is the caller's release decision (`None` for the owner). A page it
+    refuses is treated like an excluded page: never a seed, a neighbour, an
+    edge endpoint or an edge author, and never a hop on the way to another
+    page, so the neighbourhood and its caps are what the caller could reach.
+    """
+
+    def _allowed(rel_path: str) -> bool:
+        return _recall_path_allowed(vault_root, rel_path) and (keep is None or keep(rel_path))
+
     idx = EpistemicGraphIndex(vault_root)
     entity_type_registry = load_entity_types(vault_root)
     profile_registry = traversal_profiles.load_profiles(vault_root, registry=idx.registry)
@@ -7586,9 +7597,7 @@ def graph_context(
                 p for p in current_parent_paths if not _records_suppressed_path(vault_root, p)
             ]
             canonical_seeds = [
-                seed
-                for seed in canonical_seeds
-                if _recall_path_allowed(vault_root, str(seed.get("path") or ""))
+                seed for seed in canonical_seeds if _allowed(str(seed.get("path") or ""))
             ]
             for code, count in parent_drift_counts.items():
                 drift_counts[code] = max(drift_counts.get(code, 0), count)
@@ -7655,9 +7664,7 @@ def graph_context(
         # An `excluded` page is never a seed — by path OR by query — mirroring
         # find's hit-assembly filter (find.py:2601), which this lane otherwise
         # bypasses.
-        seeds = [
-            seed for seed in seeds if _recall_path_allowed(vault_root, str(seed.get("path") or ""))
-        ]
+        seeds = [seed for seed in seeds if _allowed(str(seed.get("path") or ""))]
         if not seeds:
             empty: dict[str, Any] = {
                 "available": True,
@@ -7733,16 +7740,26 @@ def graph_context(
                     }
             return {"matched_via": matched_via}
 
+        # A reader other than the owner walks its own view of link resolution.
+        link_view = (
+            None if keep is None else _VisibleLinkView(vault_root, conn, keep, idx.registry)
+        )
         frontier = set(seen_nodes)
         for _ in range(max(0, depth)):
             if not frontier:
                 break
-            rows, inspection_overflow = _neighbor_edges(
-                conn,
-                frontier,
-                set(),
-                limit=max(0, edge_inspection_budget - inspected_edges),
-            )
+            if link_view is None:
+                rows, inspection_overflow = _neighbor_edges(
+                    conn,
+                    frontier,
+                    set(),
+                    limit=max(0, edge_inspection_budget - inspected_edges),
+                )
+            else:
+                rows, inspection_overflow = link_view.neighbor_edges(
+                    frontier,
+                    limit=max(0, edge_inspection_budget - inspected_edges),
+                )
             inspected_edges += len(rows)
             edge_inspection_cap_hit = edge_inspection_cap_hit or inspection_overflow
             rows.sort(key=lambda edge: _edge_priority(edge, profile, idx.registry))
@@ -7755,6 +7772,7 @@ def graph_context(
                     vault_root,
                     edge,
                     endpoint_overrides=seed_node_overrides,
+                    keep=keep,
                 ):
                     continue
                 status = edge.get("registry_status")
@@ -7798,9 +7816,7 @@ def graph_context(
                         continue
                     node = _node_by_key(conn, key)
                     endpoint_nodes[key] = node
-                    if node is not None and not _recall_path_allowed(
-                        vault_root, str(node.get("path") or "")
-                    ):
+                    if node is not None and not _allowed(str(node.get("path") or "")):
                         endpoint_excluded = True
                     elif node is None:
                         placeholder_path = _path_for_node_key(conn, key)
@@ -7847,7 +7863,7 @@ def graph_context(
             _entity_family_metadata(node, entity_type_registry)
             for node in _nodes_by_keys(conn, seen_nodes)
             if _current_record(node, parent_path=str(node.get("path") or ""))
-            and _recall_path_allowed(vault_root, str(node.get("path") or ""))
+            and _allowed(str(node.get("path") or ""))
         ]
         present_node_keys = {str(node["node_key"]) for node in nodes}
         nodes.extend(
@@ -9098,7 +9114,9 @@ def _edges_for_page(
     source_hash: str | None = None,
     parent_state: semantic_index.SemanticParentIndexState | None = None,
     resolver: vault_module.WikilinkResolver | None = None,
+    visible: Callable[[str], bool] | None = None,
 ) -> list[GraphEdge]:
+    """Every edge `page` authors. `visible` resolves its links in a reader's view."""
     registry = registry or relation_registry.load_registry(vault_root)
     source_hash = source_hash or vault_module.content_hash(page.body)
     project = _page_project(page.frontmatter)
@@ -9159,7 +9177,7 @@ def _edges_for_page(
             target = target.split("|", 1)[0].split("#", 1)[0].strip()
             try:
                 canonical, warning = vault_module.normalize_wikilink(
-                    target, vault_root, resolver=resolver, strict=False
+                    target, vault_root, resolver=resolver, strict=False, visible=visible
                 )
             except Exception:  # noqa: BLE001 - malformed links are ignored
                 continue
@@ -9252,9 +9270,10 @@ def _edges_for_page(
         project=project,
         page_type=page.page_type,
         source_hash=source_hash,
+        visible=visible,
     )
     for observation in _body_wikilink_observations(
-        vault_root, page.body, skip_lines=canonical_lines, resolver=resolver
+        vault_root, page.body, skip_lines=canonical_lines, resolver=resolver, visible=visible
     ):
         edges.append(
             page_edge(
@@ -9287,13 +9306,14 @@ def _relation_line_edges(
     project: str | None = None,
     page_type: str | None = None,
     source_hash: str = "",
+    visible: Callable[[str], bool] | None = None,
 ) -> tuple[list[GraphEdge], set[int]]:
     edges: list[GraphEdge] = []
     canonical_lines: set[int] = set()
     for relation in relations:
         try:
             canonical, warning = vault_module.normalize_wikilink(
-                relation.target, vault_root, resolver=resolver, strict=False
+                relation.target, vault_root, resolver=resolver, strict=False, visible=visible
             )
         except Exception:  # noqa: BLE001 - malformed links are ignored
             continue
@@ -9349,6 +9369,7 @@ def _body_wikilink_observations(
     *,
     skip_lines: set[int],
     resolver: vault_module.WikilinkResolver,
+    visible: Callable[[str], bool] | None = None,
 ) -> list[dict[str, Any]]:
     """First authored occurrence and spelling for each resolved body target."""
     out: list[dict[str, Any]] = []
@@ -9362,7 +9383,7 @@ def _body_wikilink_observations(
             continue
         try:
             canonical, warning = vault_module.normalize_wikilink(
-                target, vault_root, resolver=resolver, strict=False
+                target, vault_root, resolver=resolver, strict=False, visible=visible
             )
         except Exception:  # noqa: BLE001 - malformed links are ignored
             continue
@@ -10037,6 +10058,184 @@ def _neighbor_edges(
     return [_edge_row_to_dict(row) for row in rows[:limit]], overflow
 
 
+#: Edge origins whose target a wikilink resolution chose. Frontmatter and
+#: unit/block structure edges name their target outright.
+_RESOLVED_LINK_ORIGINS = frozenset({"wikilink", "markdown_relation", "semantic_relation"})
+
+
+def _link_candidates(resolver: vault_module.WikilinkResolver, raw_target: str) -> set[str]:
+    """Every page (`.md`) a wikilink target could resolve to over the whole vault.
+
+    The same keys `normalize_wikilink` consults: a full or KB-relative path,
+    then, for a bare name, the pages sharing its stem or its title.
+    """
+    cleaned = vault_module._strip_wikilink_brackets(raw_target)
+    cleaned = cleaned.split("|", 1)[0].split("#", 1)[0].strip()
+    cleaned = cleaned.removesuffix(".md").strip().strip("/")
+    if not cleaned:
+        return set()
+    found = {
+        candidate
+        for candidate in (cleaned, kb_prefix() + cleaned)
+        if candidate in resolver.full_paths
+    }
+    if "/" not in cleaned:
+        found.update(resolver.stems.get(cleaned, ()))
+        found.update(resolver.titles.get(cleaned.lower(), ()))
+    return {f"{candidate}.md" for candidate in found}
+
+
+class _VisibleLinkView:
+    """Wikilink resolution as a reader other than the owner would see it.
+
+    The graph resolves every link over the whole vault when it is built, so a
+    page the reader may not see can change how a visible page's link resolves:
+    a shared stem or title makes it ambiguous, a matching stem wins it. For
+    such a reader this view re-resolves, lazily and only for the pages a
+    request touches, exactly the links whose candidate set includes a page the
+    reader may not see, as the vault without those pages would resolve them.
+    Only those candidates are decided. The owner never builds one, so the
+    owner's reads and their cost are unchanged.
+    """
+
+    def __init__(
+        self,
+        vault_root: Path,
+        conn: sqlite3.Connection,
+        keep: Callable[[str], bool],
+        registry: relation_registry.RelationRegistry,
+    ) -> None:
+        self.vault_root = Path(vault_root)
+        self.conn = conn
+        self.keep = keep
+        self.registry = registry
+        self._resolver: vault_module.WikilinkResolver | None = None
+        self._changes: dict[str, bool] = {}
+        self._edges: dict[str, list[dict[str, Any]] | None] = {}
+        self._evidence: dict[str, dict[str, dict[str, Any]]] = {}
+
+    def _shared_resolver(self) -> vault_module.WikilinkResolver:
+        """The recall resolver the graph itself is built with, read once per view."""
+        if self._resolver is None:
+            self._resolver = find_module.recall_resolver_snapshot(self.vault_root)
+        return self._resolver
+
+    def target_changes(self, raw_target: str) -> bool:
+        """True when a page this link could resolve to is one the reader may not see."""
+        changed = self._changes.get(raw_target)
+        if changed is None:
+            changed = any(
+                not self.keep(candidate)
+                for candidate in sorted(_link_candidates(self._shared_resolver(), raw_target))
+            )
+            self._changes[raw_target] = changed
+        return changed
+
+    def page_edges(self, rel_path: str) -> list[dict[str, Any]] | None:
+        """`rel_path`'s link edges in the reader's view, or `None` when unchanged."""
+        if rel_path in self._edges:
+            return self._edges[rel_path]
+        targets = [
+            str(row[0])
+            for row in self.conn.execute(
+                "SELECT DISTINCT raw_target FROM graph_dependencies WHERE source_path = ? "
+                "ORDER BY raw_target",
+                (rel_path,),
+            )
+        ]
+        edges = (
+            self._derive(rel_path)
+            if any(self.target_changes(target) for target in targets)
+            else None
+        )
+        self._edges[rel_path] = edges
+        return edges
+
+    def _derive(self, rel_path: str) -> list[dict[str, Any]]:
+        path = self.vault_root / rel_path
+        try:
+            raw_bytes = vault_module.read_bytes_without_pinning(path)
+            raw = raw_bytes.decode("utf-8")
+            page = find_module._parse_page(
+                path,
+                path.stat().st_mtime,
+                self.vault_root,
+                content=raw_bytes,
+                resolved_relative=rel_path,
+            )
+        except (OSError, UnicodeDecodeError):
+            return []
+        if page is None:
+            return []
+        state = semantic_index.current_parent_index_state(self.vault_root, path, source=raw)
+        edges = _edges_for_page(
+            self.vault_root,
+            page,
+            state.document,
+            registry=self.registry,
+            source_hash=vault_module.content_hash(raw),
+            parent_state=state,
+            resolver=self._shared_resolver(),
+            visible=self.keep,
+        )
+        resolved = [edge for edge in edges if edge.origin in _RESOLVED_LINK_ORIGINS]
+        self._evidence[rel_path] = {
+            edge.edge_key: json.loads(
+                json.dumps(edge.review_evidence or {}, ensure_ascii=False, sort_keys=True)
+            )
+            for edge in resolved
+        }
+        return [json.loads(json.dumps(edge.as_dict(), sort_keys=True)) for edge in resolved]
+
+    def inbound_sources(self, rel_path: str) -> set[str]:
+        """Visible pages whose links to `rel_path`'s names resolve differently here."""
+        keys = _dependency_changed_keys({rel_path}, self._shared_resolver())
+        return {
+            source
+            for source, raw_target in EpistemicGraphIndex._dependency_sources_for_keys(
+                self.conn, keys
+            )
+            if source != rel_path and self.target_changes(raw_target) and self.keep(source)
+        }
+
+    def neighbor_edges(
+        self, frontier: set[str], *, limit: int
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """`_neighbor_edges` with the reader's re-resolved link edges in place."""
+        rows, _overflow = _neighbor_edges(self.conn, frontier, set(), limit=_VIEW_ROW_LIMIT)
+        pages = {
+            path
+            for path in (_path_for_node_key(self.conn, key) for key in sorted(frontier))
+            if path
+        }
+        affected: set[str] = set()
+        for page in sorted(pages):
+            if self.page_edges(page) is not None:
+                affected.add(page)
+            for source in sorted(self.inbound_sources(page)):
+                if self.page_edges(source) is not None:
+                    affected.add(source)
+        if affected:
+            by_key = {
+                str(row["edge_key"]): row
+                for row in rows
+                if not (
+                    row.get("source_path") in affected
+                    and row.get("origin") in _RESOLVED_LINK_ORIGINS
+                )
+            }
+            for source in sorted(affected):
+                for edge in self.page_edges(source) or ():
+                    if edge["src_key"] in frontier or edge["dst_key"] in frontier:
+                        by_key.setdefault(str(edge["edge_key"]), edge)
+            rows = [by_key[key] for key in sorted(by_key)]
+        return rows[:limit], len(rows) > limit
+
+
+#: Rows a reader's view reads before re-applying the caller's inspection cap.
+_VIEW_ROW_LIMIT = 100_000
+
+
 def _edge_inspection_budget(*, max_nodes: int, max_edges: int) -> int:
     """Bound raw adjacency work while leaving room for filtered/stale edges."""
     return max(1, (max_nodes + max_edges) * EDGE_INSPECTION_MULTIPLIER)
@@ -10081,23 +10280,30 @@ def _edge_recall_allowed(
     edge: dict[str, Any],
     *,
     endpoint_overrides: dict[str, dict[str, Any]] | None = None,
+    keep: Callable[[str], bool] | None = None,
 ) -> bool:
     """Reject an edge before it can reconstruct a suppressed endpoint.
 
     Collision recovery may have revalidated a current semantic-unit node whose
     key is still owned by a stale graph row.  Only that bounded graph-context
     recovery path supplies an override; ordinary public reads remain tied to
-    the sidecar's stored endpoint rows.
+    the sidecar's stored endpoint rows. `keep` is the caller's release
+    decision: an edge a withheld page authored, or one that ends on a withheld
+    page, is rejected like an excluded one.
     """
+
+    def _allowed(rel_path: str) -> bool:
+        return _recall_path_allowed(vault_root, rel_path) and (keep is None or keep(rel_path))
+
     source = str(edge.get("source_path") or "")
-    if not _recall_path_allowed(vault_root, source):
+    if not _allowed(source):
         return False
     for key in (str(edge.get("src_key") or ""), str(edge.get("dst_key") or "")):
         node = endpoint_overrides.get(key) if endpoint_overrides is not None else None
         if node is None:
             node = _node_by_key(conn, key)
         if node is not None:
-            if not _recall_path_allowed(vault_root, str(node.get("path") or "")):
+            if not _allowed(str(node.get("path") or "")):
                 return False
         else:
             path = _path_for_node_key(conn, key)

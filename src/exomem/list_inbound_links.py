@@ -10,6 +10,7 @@ touch) or `delete_file` (to know what would break). Matches three forms:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,7 +48,10 @@ class ListInboundLinksError(Exception):
 
 
 def list_inbound_links(
-    vault_root: Path, *, target: str
+    vault_root: Path,
+    *,
+    target: str,
+    visible: Callable[[str], bool] | None = None,
 ) -> ListInboundLinksResult:
     if not target or not target.strip():
         raise ListInboundLinksError(
@@ -68,7 +72,7 @@ def list_inbound_links(
         # handles the bare form.
         target_norm = raw
 
-    matches = find_inbound_wikilinks(vault_root, target_norm)
+    matches = find_inbound_wikilinks(vault_root, target_norm, visible=visible)
     return ListInboundLinksResult(
         target=target_norm,
         inbound=[m.as_dict() for m in matches],

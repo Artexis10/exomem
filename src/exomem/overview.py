@@ -92,6 +92,10 @@ class _DirStat:
     fm_total_rec: int = 0
     wl_rec: int = 0
     ml_rec: int = 0
+    # files the release walk removed, direct and recursive: a folder that held
+    # only those reads as absent, not as an empty folder
+    pruned_direct: int = 0
+    pruned_rec: int = 0
 
 
 def _resolve_subtree(root: Path, path: str) -> tuple[Path, str]:
@@ -255,6 +259,7 @@ def overview(
             # sample, a size ranking or a junk list. Pruned silently: a
             # "hidden N" marker would itself be the oracle.
             if release_keep is not None and not release_keep(child_rel):
+                st.pruned_direct += 1
                 continue
             fpath = Path(dirpath) / fn
             try:
@@ -319,6 +324,7 @@ def overview(
         st.fm_total_rec += st.fm_total
         st.wl_rec += st.wikilinks
         st.ml_rec += st.md_links
+        st.pruned_rec += st.pruned_direct
         if rp:
             parent = rp.rsplit("/", 1)[0] if "/" in rp else ""
             pst = dirstats[parent]
@@ -329,6 +335,7 @@ def overview(
             pst.fm_total_rec += st.fm_total_rec
             pst.wl_rec += st.wl_rec
             pst.ml_rec += st.ml_rec
+            pst.pruned_rec += st.pruned_rec
 
     # select shown folders: depth cap rolls deeper folders into ancestors,
     # breadth cap keeps the busiest children with an explicit omitted count
@@ -398,12 +405,23 @@ def overview(
             kb["files"] = kb_stat.files_rec if kb_stat else 0
 
     root_stat = dirstats[""]
+    # Totals are counted after the release walk: a folder that held only
+    # withheld files is not a folder the caller can see, so it is neither
+    # counted nor measured for depth. (Nothing is pruned for a caller who may
+    # see everything, so these are the unfiltered totals for them.)
+    absent = {
+        rp for rp, st in dirstats.items() if rp and st.files_rec == 0 and st.pruned_rec > 0
+    }
+    if absent:
+        max_depth_seen = max(
+            (st.depth for rp, st in dirstats.items() if rp not in absent), default=0
+        )
     return {
         "scope_note": SCOPE_NOTE,
         "root": rel,
         "totals": {
             "files": root_stat.files_rec,
-            "dirs": len(dirstats) - 1,
+            "dirs": len(dirstats) - 1 - len(absent),
             "markdown": root_stat.md_rec,
             "binary": root_stat.bin_rec,
             "bytes": total_bytes,

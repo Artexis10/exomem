@@ -77,6 +77,7 @@ from .vault import (
     resolve_filename_slug,
     rotate_log_if_needed,
     unique_path,
+    writer_link_visibility,
     yaml_scalar,
 )
 
@@ -1319,6 +1320,7 @@ def _normalize_sources(
     """
     if not sources:
         return [], []
+    visible = writer_link_visibility(vault_root)
     out: list[str] = []
     seen: set[str] = set()
     warnings: list[str] = []
@@ -1342,7 +1344,7 @@ def _normalize_sources(
                 warning = "stable source reference is unavailable"
         else:
             canonical, warning = normalize_wikilink(
-                cleaned, vault_root, resolver=resolver, strict=False
+                cleaned, vault_root, resolver=resolver, strict=False, visible=visible
             )
             if warning:
                 canonical = cleaned
@@ -1383,6 +1385,7 @@ def _normalize_bridge_sources(
                 vault_root,
                 resolver=resolver,
                 strict=False,
+                visible=writer_link_visibility(vault_root),
             )
             if warning or not canonical:
                 raise NoteError(

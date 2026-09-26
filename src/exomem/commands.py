@@ -2197,6 +2197,11 @@ def _require_supported_projected_find_request(
         )
 
 
+#: Hit signals ranked or counted over the whole corpus, before any page is
+#: decided: a caller other than the owner does not receive them (see `op_find`).
+_CORPUS_RANK_SIGNALS = ("bm25_rank", "vector_rank", "keyword_rank", "clip_rank", "graph_in_degree")
+
+
 def op_find(
     vault_root: Path,
     query: str = "",
@@ -2470,6 +2475,22 @@ def op_find(
             explain=explain,
         )
     auto_rerank = rerank is None and find_module.auto_rerank_allowed_by_policy()
+    # A caller other than the owner receives no retrieval diagnostics. Lane
+    # statuses, fusion weights, raw scores, the emit count, per-lane ranks,
+    # graph in-degree and the keyword-fallback marker are computed over the
+    # whole corpus before any page is decided, so each moves with pages the
+    # caller may not see. The hits themselves are unchanged.
+    restricted = (
+        projection_runtime is None
+        and egress_module.restricted_release_filter(vault_root, purpose=purpose) is not None
+    )
+    if restricted:
+        explain = False
+        # Graph hops, in-degree and graph enrichment follow link resolution
+        # over the whole vault, and the shared recall cache is keyed by
+        # `graph`, so such a caller recalls without the graph lane.
+        graph = False
+        graph_enrich = False
     compute_profile: dict[str, str | bool] = {}
     if explain:
         from . import mode as mode_module
@@ -2699,6 +2720,15 @@ def op_find(
             compact=(detail == "compact"),
             withheld_paths=release.withheld_paths,
         )
+        if restricted:
+            for hit in hit_dicts:
+                signals = hit.get("signals")
+                if not isinstance(signals, dict):
+                    continue
+                for name in _CORPUS_RANK_SIGNALS:
+                    signals.pop(name, None)
+                if not signals:
+                    hit.pop("signals", None)
         if projection_runtime is None:
             ref_index = memory_refs_module.ReferenceIndex(vault_root)
             # The recall serializer is the one caller the no-walk contract
@@ -2754,6 +2784,9 @@ def op_find(
     # keyword. Distinct from `warming`: warming is the transient, expected boot
     # window; `degraded` means a lane broke (e.g. a corrupt embedding sidecar or
     # a crashing model) and the fallback should be investigated, not waited out.
+    if restricted:
+        # Whether any lane matched is decided over the whole corpus.
+        failed = [component for component in failed if component != "keyword"]
     degraded_marker: list[str] | None = sorted(set(failed)) if failed else None
     # Advisory, and present only when the budget actually cost the caller
     # something: a block that always appeared would be a response-shape change
@@ -3281,6 +3314,7 @@ def op_graph_context(
         max_nodes=max_nodes,
         max_edges=max_edges,
         traversal_profile=traversal_profile,
+        keep=egress_module.restricted_release_filter(vault_root, purpose=purpose),
     )
     # A neighborhood is provenance: a sub-notice page must not appear as a
     # seed, a node, or an edge endpoint (design D4 / graph-find-ranking).
@@ -3316,6 +3350,12 @@ def op_suggest_relations(
         candidate includes from/to, relation_type, method, and evidence.
         `mutated` is always false.
     """
+    # Under a governed policy relation proposals are the owner's, like the
+    # relation queue they feed: their candidates are resolved over the whole
+    # vault. Another audience is refused before the path is resolved.
+    refusal = egress_module.owner_only_aggregate(vault_root)
+    if refusal is not None:
+        return refusal
     if path:
         path = _resolve_memory_identifier(vault_root, path)
     return epistemic_graph_module.suggest_relations(
@@ -3491,6 +3531,9 @@ def op_audit(
         presentation/truncation facts. Full detail preserves raw findings.
     """
     audit_module.validate_presentation_controls(detail, legacy_sample_limit)
+    refusal = egress_module.owner_only_aggregate(vault_root)
+    if refusal is not None:
+        return refusal
     report = audit_module.audit(
         vault_root,
         categories=categories,
@@ -4453,12 +4496,15 @@ def op_replace(
 
 
 def _replacement_predecessor_hash(vault_root: Path, old_path: str) -> str:
+    unavailable = f"OLD_NOT_FOUND: replacement predecessor is unavailable: {old_path}"
+    # A predecessor the caller may not see is unavailable exactly as a missing
+    # one is, and is never read.
+    if egress_module.write_target_withheld(vault_root, old_path):
+        raise ValueError(unavailable)
     try:
         return hashlib.sha256((Path(vault_root) / old_path).read_bytes()).hexdigest()
     except OSError as error:
-        raise ValueError(
-            f"OLD_NOT_FOUND: replacement predecessor is unavailable: {old_path}"
-        ) from error
+        raise ValueError(unavailable) from error
 
 
 def _replacement_review_hash(
@@ -5358,6 +5404,11 @@ def op_move_file(
     return result.as_dict()
 
 
+_FOLDER_DELETE_REFUSAL = (
+    "AUDIENCE_RESTRICTED: folder deletes are served to the owner only under a governed policy"
+)
+
+
 def op_delete(
     vault_root: Path,
     path: str,
@@ -5418,12 +5469,34 @@ def op_delete(
             APPEND_ONLY; CURATED_PROTECTED; SUPERSEDED_HISTORY;
             INBOUND_LINKS; TRASH_FAILED; (dir) NOT_A_DIR; NOT_EMPTY.
     """
+    # Under a governed policy a folder is deleted by the owner only: a folder
+    # can hold pages the writer may not see, and every answer about them
+    # (counts, refusals, what was trashed) would move with them. One refusal
+    # for a folder the writer may see, whatever it holds; a declared
+    # recursive delete is refused before anything is read. A folder holding
+    # only pages withheld from the writer does not exist for it, as its
+    # listing says, and is answered as a missing path.
+    keep = egress_module.governed_release_filter(vault_root)
+    restricted = keep is not None
+    if restricted and recursive:
+        raise ValueError(_FOLDER_DELETE_REFUSAL)
     path = _resolve_memory_identifier(vault_root, path)
     try:
-        abs_path, _rel = resolve_under_vault(vault_root, path)
+        abs_path, rel = resolve_under_vault(vault_root, path)
         is_dir = abs_path.is_dir()
     except VaultPathError:
         is_dir = False  # let the file backend raise the precise path error
+    if restricted and is_dir:
+        from . import list_directory as list_directory_module
+
+        if not list_directory_module._withheld_target(
+            vault_root, rel, keep, True, {}, is_dir=True
+        ):
+            raise ValueError(_FOLDER_DELETE_REFUSAL)
+        if confirm:
+            requested = str(path).strip().replace("\\", "/").lstrip("/")
+            raise ValueError(f"NOT_FOUND: path does not exist: {requested}")
+        is_dir = False  # the file backend's unconfirmed refusal, as for a missing path
     try:
         if is_dir:
             result = delete_directory_module.delete_directory(
@@ -5582,8 +5655,13 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
     """
     requested = str(target)
     target = _resolve_memory_identifier(vault_root, target)
+    # The caller's view (`None` for the owner): a bare link counts when the
+    # target's basename is unique among the pages the caller may see.
+    visible = egress_module.visible_page_filter(vault_root)
     try:
-        result = list_inbound_links_module.list_inbound_links(vault_root, target=target)
+        result = list_inbound_links_module.list_inbound_links(
+            vault_root, target=target, visible=visible
+        )
     except list_inbound_links_module.ListInboundLinksError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
     payload = result.as_dict()
@@ -5609,6 +5687,15 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
         payload["target"] = requested.strip().replace("\\", "/").lstrip("/")
         payload["inbound"] = []
         payload["count"] = 0
+        return payload
+    # The count is the length of the list the caller receives: a link from a
+    # page it may not see is decided here, before counting, rather than left
+    # for the entry filter to drop beside a count that still includes it.
+    if visible is not None:
+        payload["inbound"] = [
+            row for row in payload["inbound"] if visible(str(row.get("path") or ""))
+        ]
+        payload["count"] = len(payload["inbound"])
     return payload
 
 
@@ -6192,6 +6279,7 @@ def op_activate_context(
         finally:
             if bound_token is not None:
                 request_budget_module.reset_current(bound_token)
+    _withhold_vault_generation(vault_root, packet, purpose=purpose)
     query_log.log_activation_call(
         vault_root,
         packet=packet,
@@ -6200,6 +6288,24 @@ def op_activate_context(
         duration_ms=round((time.perf_counter() - started) * 1000, 3),
     )
     return packet
+
+
+#: Packet generation fields that move with every file in the vault: the
+#: freshness key counts and digests them, and the index generation advances on
+#: every write. A reader other than the owner does not receive them.
+_VAULT_GENERATION_FIELDS = ("freshness_key", "index_generation")
+
+
+def _withhold_vault_generation(vault_root: Path, packet: Any, *, purpose: str | None) -> None:
+    generation = packet.get("generation") if isinstance(packet, dict) else None
+    if (
+        isinstance(generation, dict)
+        and any(name in generation for name in _VAULT_GENERATION_FIELDS)
+        and egress_module.restricted_release_filter(vault_root, purpose=purpose) is not None
+    ):
+        packet["generation"] = {
+            key: value for key, value in generation.items() if key not in _VAULT_GENERATION_FIELDS
+        }
 
 
 def _op_activate_context_body(
@@ -6575,11 +6681,17 @@ def _op_activate_context_body(
     # marker saying a section lost something. A timing side channel that discloses
     # strictly less than a documented field is not the thing to spend a request
     # budget closing.
-    if anchor and (guarded is None or _abstention_reason(guarded) == "withheld"):
+    # The guard answers an L0 anchor as `unresolved` and a notice-level one as
+    # `withheld`; either way the override's one anchor is gone.
+    if anchor and (
+        guarded is None or _abstention_reason(guarded) in {"withheld", "unresolved"}
+    ):
         raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
     if guarded is None:
         return _abstain("withheld", generation=packet.get("generation") or generation_stub)
     packet = guarded
+    # Before the token is minted: it carries the index generation too.
+    _withhold_vault_generation(vault_root, packet, purpose=purpose)
     token = working_set_runtime_module.mint_continuity(
         packet, identity=working_set_runtime_module.identity_for(vault_root)
     )
@@ -7089,7 +7201,14 @@ def op_observe_memory(
             "INVALID_PATH: observe_memory requires a governed KB-relative path or reference"
         )
     try:
-        resolved_path = memory_refs_module.resolve_identifier_read_only(vault_root, path)
+        if raw_path.lower().startswith(
+            memory_refs_module.REF_PREFIX
+        ) and egress_module.restricted_release_filter(vault_root) is not None:
+            # A reference only a page withheld from the caller holds resolves as
+            # an unknown one, before anything is loaded or validated.
+            resolved_path = egress_module.resolve_visible_identifier(vault_root, path)
+        else:
+            resolved_path = memory_refs_module.resolve_identifier_read_only(vault_root, path)
     except memory_refs_module.ReferenceError as error:
         raise ValueError(f"{error.code}: {error.reason}") from error
     if raw_path.lower().startswith(("exomem://vault/", "exomem://source/")) and not (
@@ -9109,6 +9228,12 @@ def op_connect_memory(
             requested_relation=requested_relation,
             edit_memory=_accept_relations_edit,
         )
+    if operation == "suggest-relations":
+        # Relation proposals are owner work under a governed policy (see
+        # `op_suggest_relations`); refused before the path is resolved.
+        refusal = egress_module.owner_only_aggregate(vault_root)
+        if refusal is not None:
+            return refusal
     if path:
         path = _resolve_memory_identifier(vault_root, path)
     if target:
@@ -9929,6 +10054,19 @@ def op_schema_memory(
         supported=operation == "save-entity-types"
         or (subject == "relations" and operation == "save-relations"),
     )
+    if subject in {"categories", "relations", "contract"} and (
+        operation == "infer"
+        or (
+            operation == "diff"
+            and proposal is None
+            and not (subject == "contract" and compare_to)
+        )
+    ):
+        # Inferring from the corpus (directly, or as the other side of a
+        # diff) reduces every page; it is the owner's under a governed policy.
+        refusal = egress_module.owner_only_aggregate(vault_root)
+        if refusal is not None:
+            return {"subject": subject, **refusal}
     if subject == "entity-types" and operation == "resolve-entity-type":
         if (
             any(

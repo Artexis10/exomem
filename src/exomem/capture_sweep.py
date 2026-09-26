@@ -262,7 +262,9 @@ def recent_writes(key: tuple[str, str, str] | None) -> list[str]:
         return list(_RECENT.get(key, ()))
 
 
-def hints(page_state: Any, corpus: Any = None) -> dict[str, list[str]]:
+def hints(
+    page_state: Any, corpus: Any = None, visible: Any = None
+) -> dict[str, list[str]]:
     """Bounded, best-effort names the committed page reaches for without a page.
 
     One digest-cached registry file read and nothing else. The wikilinks were
@@ -275,6 +277,9 @@ def hints(page_state: Any, corpus: Any = None) -> dict[str, list[str]]:
     Nothing is promised. A first mention in plain prose with no wikilink is not
     detected, and detecting it would need exactly the semantic judgement this
     design refuses to put on the server. The block is useful without it.
+
+    `visible` is the writer's own view (`vault.writer_link_visibility`): a
+    name that matches only pages the writer may not see is unpaged for it.
     """
     if corpus is None:
         return {}
@@ -296,7 +301,7 @@ def hints(page_state: Any, corpus: Any = None) -> dict[str, list[str]]:
                 continue
             seen.add(identity)
             resolution = semantic_contract._resolve_reference_wikilink_from_context(
-                corpus, raw_target
+                corpus, raw_target, visible
             )
             if resolution.status != "unresolved":
                 continue
@@ -346,7 +351,12 @@ def block(
         written = recent_writes(key)
         if written:
             payload["written_recently"] = written
-        mentions = hints(page_state, corpus).get("unpaged_mentions") or []
+        visible = None
+        if vault_root is not None:
+            from .vault import writer_link_visibility
+
+            visible = writer_link_visibility(Path(vault_root))
+        mentions = hints(page_state, corpus, visible).get("unpaged_mentions") or []
         if mentions:
             payload["unpaged_mentions"] = mentions
         return payload

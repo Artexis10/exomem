@@ -65,7 +65,7 @@ from . import membership as membership_module
 from . import policy as policy_module
 from .decisions import Decision, decide
 from .policy import DISCLOSURE_MAX, DISCLOSURE_MIN, Policy
-from .principal import OWNER_AUDIENCE, RequestPrincipal, effective_principal
+from .principal import OWNER_AUDIENCE, RequestPrincipal, current_principal, effective_principal
 
 log = logging.getLogger(__name__)
 
@@ -971,9 +971,15 @@ def _withheld_keys(withheld_paths: frozenset[str]) -> tuple[frozenset[str], froz
 
 
 def _string_names_withheld(
-    value: str, withheld_paths: frozenset[str], *, reference_field: bool = False
+    value: str,
+    withheld_paths: frozenset[str],
+    *,
+    reference_field: bool = False,
+    exempt_stems: frozenset[str] = frozenset(),
 ) -> bool:
     full, stems = _withheld_keys(withheld_paths)
+    if exempt_stems:
+        stems = stems - exempt_stems
 
     def _hit(candidate: str, *, is_wikilink_target: bool = False) -> bool:
         # `_canonical_references` (plural): a PLAIN candidate containing
@@ -1007,7 +1013,11 @@ def _string_names_withheld(
 
 
 def _names_withheld(
-    value: Any, withheld_paths: frozenset[str], *, reference_field: bool = False
+    value: Any,
+    withheld_paths: frozenset[str],
+    *,
+    reference_field: bool = False,
+    exempt_stems: frozenset[str] = frozenset(),
 ) -> bool:
     """True when `value` mentions any withheld path, in any reference form,
     at any nesting depth.
@@ -1022,15 +1032,22 @@ def _names_withheld(
     if not withheld_paths:
         return False
     if isinstance(value, str):
-        return _string_names_withheld(value, withheld_paths, reference_field=reference_field)
+        return _string_names_withheld(
+            value, withheld_paths, reference_field=reference_field, exempt_stems=exempt_stems
+        )
     if isinstance(value, Mapping):
         return any(
-            _names_withheld(v, withheld_paths, reference_field=reference_field)
+            _names_withheld(
+                v, withheld_paths, reference_field=reference_field, exempt_stems=exempt_stems
+            )
             for v in value.values()
         )
     if isinstance(value, (list, tuple, set, frozenset)):
         return any(
-            _names_withheld(v, withheld_paths, reference_field=reference_field) for v in value
+            _names_withheld(
+                v, withheld_paths, reference_field=reference_field, exempt_stems=exempt_stems
+            )
+            for v in value
         )
     return False
 
@@ -2238,7 +2255,9 @@ def guard_seed(payload: dict[str, Any], withheld_paths: frozenset[str]) -> dict[
     """
     if not withheld_paths:
         return payload
-    dropped_keys: set[str] = set()
+    # A page's own node key, so an edge to a withheld page that was not
+    # returned as a node (a capped neighbour, a placeholder) is dropped too.
+    dropped_keys: set[str] = {f"file:{path}" for path in withheld_paths}
     nodes = payload.get("nodes")
     if isinstance(nodes, list):
         kept_nodes = []
@@ -2322,6 +2341,19 @@ def guard_graph_context(
         for node in (payload.get(section) or [])
         if isinstance(node, Mapping) and node.get("path")
     }
+    if not (who.resolved and who.audience_id == OWNER_AUDIENCE):
+        # An edge may name a page that was not returned as a node: a capped
+        # neighbour, or a target the node list never carried. Decide the page
+        # behind every `file:` endpoint that exists, so the edge cannot outlive
+        # the node it points at. A key that names no file is a placeholder for
+        # an unresolved link, not a page, and is left to the link's own text.
+        for edge in payload.get("edges") or []:
+            if not isinstance(edge, Mapping):
+                continue
+            for field_name in ("src_key", "dst_key"):
+                key = str(edge.get(field_name) or "")
+                if key.startswith("file:") and (vault_root / key[5:]).is_file():
+                    candidate_paths.add(key[5:])
     withheld = {
         rel_path
         for rel_path in candidate_paths
@@ -2861,7 +2893,17 @@ def guard_working_set(
     # nothing to say, which is what `lane_truncated` and `budget` already refuse to
     # do. The marker names no path and no name: it says a section lost something,
     # which is what the caller needs to know and the most it may be told.
-    if removed and isinstance(guarded.get("missing"), list):
+    #
+    # Only for material released above L0. An L0 item is omitted silently
+    # (`LEVEL_NONE`): a marker saying a section lost something would tell the
+    # caller that something it may not know of exists, which is the answer a
+    # vault without that item never gives. The markers name no path, so they
+    # are kept whenever any removed material was released at a notice level.
+    noticed = any(
+        (decision := decisions.get(path)) is not None and decision.level > LEVEL_NONE
+        for path in withheld
+    )
+    if removed and noticed and isinstance(guarded.get("missing"), list):
         guarded["missing"].extend(
             {"role": section, "reason": "withheld"} for section in sorted(removed)
         )
@@ -2872,7 +2914,10 @@ def guard_working_set(
     # goes with it, since a unit's only warrant was the anchor it hung from.
     if packet.get("anchors") and not guarded["anchors"] and not guarded.get("abstained"):
         guarded["abstained"] = True
-        guarded["abstention"] = {"reason": "withheld"}
+        # At L0 the turn resolved nothing the caller may know of, which is
+        # what `unresolved` says; `withheld` is for material released at a
+        # notice level, which the caller may know exists.
+        guarded["abstention"] = {"reason": "withheld" if noticed else "unresolved"}
         for section in ("units", "pointers", "current_state", "roles"):
             guarded[section] = []
         # `missing` is deliberately NOT cleared: its markers are the only thing
@@ -3956,7 +4001,6 @@ def annotate_page(
     # sub-notice item (D3 applies the strip at EVERY level, not just below
     # full), so decide the items this page points at before answering.
     referenced: set[str] = set()
-    bare_stems: set[str] = set()
     frontmatter = page.get("frontmatter")
     if isinstance(frontmatter, Mapping):
         targets: set[str] = set()
@@ -3968,40 +4012,28 @@ def annotate_page(
             # wikilinks — so collecting only `.md`-suffixed strings decided
             # nothing for the form the vault actually stores.
             targets.update(_iter_reference_targets(value))
-            bare_stems.update(_iter_reference_stems(value))
         if targets:
             referenced.update(_resolve_reference_targets(vault_root, targets))
+    # A bare link (`links.outbound` stores the stems the body links) is not
+    # resolved here: the strip below never removes one, so there is nothing
+    # to decide for it. See `_strip_page_provenance`.
     for name in _PAGE_PROVENANCE_FIELDS:
         referenced.update(_iter_path_strings(page.get(name)))
-        # These fields store BARE stems (`links.outbound` is a wikilink list)
-        # and `_iter_path_strings` only yields `.md`-suffixed strings, so a
-        # stem never entered `referenced`, was never decided, and the strip
-        # below had nothing to match. Gathered across ALL fields and resolved
-        # ONCE — resolving per field meant five corpus walks per page.
-        bare_stems.update(_iter_reference_stems(page.get(name)))
-    if bare_stems:
-        referenced.update(_resolve_reference_stems(vault_root, bare_stems))
-    withheld = frozenset(
-        rel
-        for rel in referenced
-        if rel != rel_path
-        and (
-            (
-                ref_decision := _decide_path(
-                    vault_root,
-                    rel,
-                    policy=policy,
-                    audience=who.audience_id,
-                    purpose=declared_purpose,
-                    grants_hash=grants_hash,
-                    authorization_session=who.authorization_session_id,
-                    authorization_context=who.verified_authorization_session,
-                )
-            )
-            is None
-            or ref_decision.level < RELEASE_FLOOR
+
+    def _below_floor(rel: str) -> bool:
+        ref_decision = _decide_path(
+            vault_root,
+            rel,
+            policy=policy,
+            audience=who.audience_id,
+            purpose=declared_purpose,
+            grants_hash=grants_hash,
+            authorization_session=who.authorization_session_id,
+            authorization_context=who.verified_authorization_session,
         )
-    )
+        return ref_decision is None or ref_decision.level < RELEASE_FLOOR
+
+    withheld = frozenset(rel for rel in referenced if rel != rel_path and _below_floor(rel))
     if level == LEVEL_EXCERPT:
         body = parsed.body if snapshot_content is not None else str(page.get("body") or "")
         body = redact_withheld_references(
@@ -4032,25 +4064,6 @@ def annotate_page(
             direct_page=True,
         )
     return _attach_raw_content(out, snapshot_content) if include_raw else out
-
-
-def _iter_reference_stems(value: Any) -> Iterable[str]:
-    """Bare, non-path strings inside a reference container.
-
-    Unwrapped first: a reference field stores `[[stem]]` at least as often as
-    a bare `stem`, and the bracketed form was compared against filename stems
-    with its brackets still attached, so it never matched anything.
-    """
-    if isinstance(value, str):
-        candidate, _ = _unwrap_reference(value)
-        if candidate and "/" not in candidate and not candidate.lower().endswith(".md"):
-            yield candidate
-    elif isinstance(value, Mapping):
-        for item in value.values():
-            yield from _iter_reference_stems(item)
-    elif isinstance(value, (list, tuple, set, frozenset)):
-        for item in value:
-            yield from _iter_reference_stems(item)
 
 
 def _iter_reference_targets(value: Any) -> Iterable[str]:
@@ -4096,33 +4109,31 @@ def _resolve_reference_targets(vault_root: Path, targets: Iterable[str]) -> set[
     return out
 
 
-def _resolve_reference_stems(vault_root: Path, stems: Iterable[str]) -> set[str]:
-    """Map bare wikilink stems onto the vault paths they name."""
-    wanted = {s.casefold() for s in stems}
-    if not wanted:
-        return set()
-    found: set[str] = set()
-    for page in Path(vault_root).rglob("*.md"):
-        if page.stem.casefold() in wanted and page.is_file():
-            found.add(str(page.relative_to(Path(vault_root))).replace("\\", "/"))
-    return found
-
-
-def _strip_page_provenance(page: dict[str, Any], withheld_paths: frozenset[str]) -> dict[str, Any]:
+def _strip_page_provenance(
+    page: dict[str, Any],
+    withheld_paths: frozenset[str],
+) -> dict[str, Any]:
     if not withheld_paths:
         return page
+    # A bare link names no page by itself: it is listed exactly as the reader
+    # would see an unresolved one in a vault without the withheld page, and
+    # the page body already shows it. A path, or a link carrying a folder,
+    # names a location and is removed when that location is withheld.
+    names = functools.partial(_names_withheld, exempt_stems=_withheld_keys(withheld_paths)[1])
+
     frontmatter = page.get("frontmatter")
     if isinstance(frontmatter, Mapping):
         clean_fm = dict(frontmatter)
         for name in _FRONTMATTER_PROVENANCE_FIELDS:
             value = clean_fm.get(name)
             if isinstance(value, list):
-                kept = [v for v in value if not _names_withheld(v, withheld_paths)]
-                if kept:
+                kept = [v for v in value if not names(v, withheld_paths)]
+                # An empty list names nothing, so it stays as written.
+                if kept or not value:
                     clean_fm[name] = kept
                 else:
                     clean_fm.pop(name, None)
-            elif value is not None and _names_withheld(value, withheld_paths):
+            elif value is not None and names(value, withheld_paths):
                 clean_fm.pop(name, None)
         page["frontmatter"] = clean_fm
     for name in _PAGE_PROVENANCE_FIELDS:
@@ -4133,22 +4144,22 @@ def _strip_page_provenance(page: dict[str, Any], withheld_paths: frozenset[str])
         # is a reference — see `_names_withheld(reference_field=...)`.
         ref = True
         if isinstance(value, list):
-            kept = [v for v in value if not _names_withheld(v, withheld_paths, reference_field=ref)]
+            kept = [v for v in value if not names(v, withheld_paths, reference_field=ref)]
             page[name] = kept
         elif isinstance(value, Mapping):
             page[name] = {
                 key: (
-                    [v for v in item if not _names_withheld(v, withheld_paths, reference_field=ref)]
+                    [v for v in item if not names(v, withheld_paths, reference_field=ref)]
                     if isinstance(item, list)
                     else item
                 )
                 for key, item in value.items()
                 if not (
                     not isinstance(item, list)
-                    and _names_withheld(item, withheld_paths, reference_field=ref)
+                    and names(item, withheld_paths, reference_field=ref)
                 )
             }
-        elif _names_withheld(value, withheld_paths, reference_field=ref):
+        elif names(value, withheld_paths, reference_field=ref):
             page.pop(name, None)
     return page
 
@@ -5656,6 +5667,145 @@ def release_walk_filter(
     return keep
 
 
+def restricted_release_filter(
+    vault_root: Path,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> Any:
+    """`release_walk_filter` for a bound caller other than the owner, else `None`.
+
+    A derived structure (a relation proposal, a context pack, a timeline, a
+    listing) decides its candidates before it counts, ranks or emits them, so
+    what it returns reads as if the withheld pages were absent. The owner
+    keeps exactly the answer and the cost it had: its reads still pass the
+    dispatcher's entry filter, as before, and nothing here decides for it.
+    """
+    who = principal if principal is not None else current_principal()
+    if who is None:
+        # A library call outside any request: no surface bound a caller, so
+        # there is no audience to decide for and the leaf answers as it always
+        # did. Every surface binds a principal before the dispatcher, whose
+        # entry filter still decides for the unbound floor.
+        return None
+    if who.resolved and who.audience_id == OWNER_AUDIENCE:
+        return None
+    return release_walk_filter(vault_root, principal=who, purpose=purpose)
+
+
+#: The reason a whole-vault aggregate gives an audience it is not served to;
+#: the same value the relation census uses.
+AUDIENCE_RESTRICTED = "audience_restricted"
+
+
+def owner_only_aggregate(
+    vault_root: Path,
+    *,
+    principal: RequestPrincipal | None = None,
+) -> dict[str, Any] | None:
+    """The refusal a whole-vault aggregate gives a caller other than the owner.
+
+    An audit, a schema inferred from the corpus, or a coverage block reduces
+    every page, so no filter applied to its result can remove what a page the
+    caller may not see contributed. Under a governed policy it is therefore
+    served to the owner only, as the relation census is; every other bound
+    audience receives `available: false` with `reason: "audience_restricted"`,
+    decided from the principal and the policy before anything is read. Under
+    an empty policy, for the owner, and for a call no surface bound, this is
+    `None` and the aggregate is served as before.
+
+    What it prevents: counts, findings and denominators that move with pages
+    the caller may not see. When it fires wrongly a restricted caller gets no
+    aggregate; that caller pays, and the owner never does.
+    """
+    who = principal if principal is not None else current_principal()
+    if who is None or (who.resolved and who.audience_id == OWNER_AUDIENCE):
+        return None
+    if policy_module.load(Path(vault_root)).empty:
+        return None
+    return {"available": False, "reason": AUDIENCE_RESTRICTED}
+
+
+def governed_release_filter(
+    vault_root: Path,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> Any:
+    """`restricted_release_filter` under a governed policy only, else `None`.
+
+    For the write doors whose answers change for a caller other than the
+    owner (folder deletes, a move's report, an occupied entity's refusal):
+    on a vault with no policy they answer every caller as before, even when
+    an erased page's tombstone makes the release filter decide a path.
+    """
+    if owner_only_aggregate(vault_root, principal=principal) is None:
+        return None
+    return restricted_release_filter(vault_root, principal=principal, purpose=purpose)
+
+
+def write_target_withheld(
+    vault_root: Path,
+    rel_path: str,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> bool:
+    """True when a write door must answer as if an existing file were absent.
+
+    A write door (edit, observe, replace, append, move, delete, reclassify)
+    decides its target before resolving or mutating it. For a caller other
+    than the owner, a file it may not see is answered exactly as a file that
+    does not exist, and is never touched. What this prevents: a restricted
+    writer learning a withheld page exists, or changing it, by naming it. When
+    it fires wrongly the writer cannot edit a page it could not read either;
+    that writer pays, and the owner never does (`False` for the owner and on
+    an ungoverned vault).
+    """
+    keep = restricted_release_filter(vault_root, principal=principal, purpose=purpose)
+    if keep is None:
+        return False
+    rel = str(rel_path or "").replace("\\", "/").strip().lstrip("/")
+    try:
+        exists = bool(rel) and (Path(vault_root) / rel).is_file()
+    except OSError:
+        return False
+    return exists and not keep(rel)
+
+
+def visible_page_filter(
+    vault_root: Path,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> Callable[[str], bool] | None:
+    """`restricted_release_filter` for references that may name no page.
+
+    A derived candidate can point at a target that does not exist (an
+    unresolved link, a placeholder). That is not a page, so nothing can be
+    withheld and the reference is kept, exactly as in a vault without the
+    withheld pages. A reference to an existing or erased page is decided.
+    """
+    keep = restricted_release_filter(vault_root, principal=principal, purpose=purpose)
+    if keep is None:
+        return None
+    root = Path(vault_root)
+
+    def visible(rel_path: str) -> bool:
+        rel = str(rel_path or "").strip()
+        if not rel:
+            return True
+        if not lifecycle.is_tombstoned(root, rel):
+            try:
+                if not (root / rel).is_file():
+                    return True
+            except OSError:
+                return False
+        return keep(rel)
+
+    return visible
+
+
 def release_allows_download(
     vault_root: Path,
     rel_path: str,
@@ -5751,7 +5901,53 @@ _ENTRY_PATH_FIELDS = (
     "ordering_path",
     "resource",
     "resource_path",
+    # Derived graph and review structures: relation endpoints, pair members,
+    # timeline anchors, and graph node keys (`file:<path>`). A proposed
+    # relation names its target in `to`, a tension pair in `a`/`b`, and a
+    # graph edge in `src_key`/`dst_key`, each as surely as `path` does.
+    "to",
+    "from",
+    "a",
+    "b",
+    "topic_anchor",
+    "chain_id",
+    "src_key",
+    "dst_key",
 )
+
+#: An unlisted key whose NAME says it carries an identifier is decided as if it
+#: were listed. The enumeration above is what we have seen; this is the rule
+#: for what we have not, so a new derived field such as `shared_source` or
+#: `seed_key` fails closed on arrival instead of waiting to be noticed. A
+#: non-path value in such a field is never decided, so the rule costs nothing
+#: where it does not apply.
+_IDENTIFIER_KEY_SUFFIXES = ("_path", "_key", "_anchor", "_source", "_target", "_ref")
+
+#: Free-text fields whose wikilinks name pages, such as a proposed relation
+#: bullet. An entry whose text links a withheld page is dropped whole: the
+#: text is the proposal, and rewriting it would propose something else.
+_ENTRY_TEXT_FIELDS = ("bullet",)
+
+#: Prefixes that wrap a vault path in an identifier: a graph node key and the
+#: vault/source URIs.
+_IDENTIFIER_PATH_PREFIXES = ("file:", *_EXOMEM_PATH_PREFIXES)
+
+
+def _is_identifier_key(key: Any) -> bool:
+    """True when a mapping key names a field that carries a vault identifier."""
+    if not isinstance(key, str):
+        return False
+    return key in _ENTRY_PATH_FIELDS or key.endswith(_IDENTIFIER_KEY_SUFFIXES)
+
+
+def _strip_identifier_prefix(value: str) -> str:
+    """The path inside a `file:` node key or an `exomem://vault/` URI."""
+    stripped = value.strip()
+    lowered = stripped.casefold()
+    for prefix in _IDENTIFIER_PATH_PREFIXES:
+        if lowered.startswith(prefix):
+            return unquote(stripped[len(prefix) :])
+    return value
 
 
 def _decode_pathish(value: str) -> str | None:
@@ -5857,6 +6053,8 @@ def _entry_candidate_paths(entry: Any, directory: str | None = None) -> list[str
     found: list[str] = []
 
     def _add(value: Any) -> None:
+        if isinstance(value, str):
+            value = _strip_identifier_prefix(value)
         full = _path_like(value)
         if full is not None:
             found.append(full)
@@ -5869,6 +6067,13 @@ def _entry_candidate_paths(entry: Any, directory: str | None = None) -> list[str
                 raw = value.strip().replace("\\", "/").strip("/")
                 if raw and raw != full and raw.lower().endswith(".md"):
                     found.append(raw)
+            # A reference field names a page the way a wikilink does: without
+            # its extension, and possibly with a heading or alias. Decide the
+            # page it names, not only the literal (which names no file).
+            if not full.lower().endswith(".md"):
+                target = full.split("#", 1)[0].split("|", 1)[0].rstrip()
+                if target:
+                    found.append(f"{target}.md")
             return
         bare = _bare_name(value)
         if bare is None:
@@ -5880,8 +6085,12 @@ def _entry_candidate_paths(entry: Any, directory: str | None = None) -> list[str
 
     _add(entry)
     if isinstance(entry, Mapping):
-        for name in _ENTRY_PATH_FIELDS:
-            _add(entry.get(name))
+        for name, value in entry.items():
+            if _is_identifier_key(name):
+                _add(value)
+            elif name in _ENTRY_TEXT_FIELDS and isinstance(value, str):
+                for target in _WIKILINK_ANYWHERE.findall(value):
+                    _add(target)
     return found
 
 
@@ -5923,7 +6132,12 @@ def _reconcile_attention_counts(payload: Any) -> Any:
     if not all(isinstance(item, Mapping) for item in items):
         return payload
     summary: dict[str, int] = {}
-    states: dict[str, int] = {}
+    # Every state the surface reports keeps its key, so the summary's shape
+    # does not change with what was filtered.
+    previous_states = payload.get("state_summary")
+    states: dict[str, int] = (
+        dict.fromkeys(previous_states, 0) if isinstance(previous_states, Mapping) else {}
+    )
     for item in items:
         for reason in item.get("reasons", ()):
             if isinstance(reason, Mapping) and isinstance(reason.get("category"), str):
@@ -5983,14 +6197,16 @@ def filter_withheld_entries(
     def _permitted(rel_path: str) -> bool:
         """True when this vault item may be named. Non-vault paths are NOT
         decided here — see `_is_vault_item`."""
+        # A payload names the same page in many fields; decide it once per
+        # call. Every stored verdict already reflects the tombstone check.
+        cached = verdicts.get(rel_path)
+        if cached is not None:
+            return cached
         if lifecycle.is_tombstoned(vault_root, rel_path):
             verdicts[rel_path] = False
             return False
         if fail_closed:
             return False
-        cached = verdicts.get(rel_path)
-        if cached is not None:
-            return cached
         decision = _decide_path(
             vault_root,
             rel_path,
@@ -6016,6 +6232,8 @@ def filter_withheld_entries(
         return allowed
 
     resolved_items: dict[str, str | None] = {}
+    # One listing per directory per call: (exact names, first name per casefold).
+    listings: dict[Path, tuple[frozenset[str], dict[str, str]] | None] = {}
 
     def _resolve_vault_item(rel_path: str) -> str | None:
         """The real vault-relative path this reference names, or `None`.
@@ -6060,20 +6278,22 @@ def filter_withheld_entries(
         current = vault_root
         real: list[str] = []
         for part in parts:
-            folded = part.casefold()
-            exact: str | None = None
-            insensitive: str | None = None
-            try:
-                with os.scandir(current) as entries:
-                    for entry in entries:
-                        if entry.name == part:
-                            exact = entry.name
-                            break
-                        if insensitive is None and entry.name.casefold() == folded:
-                            insensitive = entry.name
-            except OSError:
+            if current not in listings:
+                try:
+                    with os.scandir(current) as entries:
+                        names = [entry.name for entry in entries]
+                except OSError:
+                    listings[current] = None
+                else:
+                    first: dict[str, str] = {}
+                    for name in names:
+                        first.setdefault(name.casefold(), name)
+                    listings[current] = (frozenset(names), first)
+            listing = listings[current]
+            if listing is None:
                 return None
-            match = exact if exact is not None else insensitive
+            exact_names, by_casefold = listing
+            match = part if part in exact_names else by_casefold.get(part.casefold())
             if match is None:
                 return None
             real.append(match)
@@ -6183,7 +6403,7 @@ def filter_withheld_entries(
                 # through its KEYS, which no amount of value filtering reaches.
                 if _path_like(key) is not None and not _keep({"path": key}, here):
                     continue
-                if key in _ENTRY_PATH_FIELDS and not _keep(value, here):
+                if _is_identifier_key(key) and not _keep(value, here):
                     continue
                 # …and a map VALUE that is itself an entry gets the same
                 # predicate a list entry gets. Without this, the whole check

@@ -1,0 +1,2514 @@
+"""Derived identifiers are decided before a restricted caller receives them.
+
+The release plane decides a page when a surface names it in an entry field it
+knows about. Several derived structures carry a page identifier in fields the
+plane did not inspect (`to`, `from`, graph node keys, pair members, timeline
+anchors) or computed their answer over the whole vault before any decision.
+These tests build twin vaults and ask the same questions of each as a
+restricted caller:
+
+- **B** holds no withheld page;
+- **A** holds one withheld page that collides with, or links to, visible pages;
+- **C** holds one withheld page that touches nothing visible.
+
+The restricted answers must not name a withheld page, and where the withheld
+page cannot change what the caller may see, the answers must be identical.
+Each case runs for the `external` audience and for a verified principal, since
+a rule names the audience it restricts exactly.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from exomem import commands, epistemic_graph, writer_lease
+from exomem import find as find_module
+from exomem.governance import egress
+from exomem.governance.principal import (
+    RequestPrincipal,
+    library_scope,
+    owner_principal,
+    request_scope,
+)
+
+KB = "Knowledge Base"
+NOTES = f"{KB}/Notes"
+WITHHELD_DIR = f"{NOTES}/Withheld"
+SCOPE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+RULE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FB0"
+FIXED_MTIME = 1_780_000_000
+PRINCIPAL_AUDIENCE = "principal:" + "ab" * 32
+AUDIENCES = ("external", PRINCIPAL_AUDIENCE)
+_COMMANDS = {command.name: command for command in commands.PRODUCT_COMMANDS}
+
+
+def _page(h1: str, body: str, **frontmatter: Any) -> str:
+    lines = ["---"]
+    for key, value in frontmatter.items():
+        lines.append(f"{key}: {value if isinstance(value, str) else json.dumps(value)}")
+    lines += ["---", f"# {h1}", "", body, ""]
+    return "\n".join(lines)
+
+
+def _filler() -> dict[str, str]:
+    files = {
+        f"{NOTES}/filler-{word}.md": _page(
+            f"Filler {word.title()}", f"A note about {word} logistics {index}.", type="insight"
+        )
+        for index, word in enumerate(("orchard", "harbor", "lantern", "meadow"))
+    }
+    files[f"{NOTES}/lonely.md"] = _page("Lonely", "A page nobody links.", type="insight")
+    return files
+
+
+def _govern(vault: Path, audience: str, scope: str = "Notes/Withheld/**") -> None:
+    """Withhold `scope` (one glob, or several separated by commas) at L0."""
+    governance = vault / KB / "_Governance"
+    (governance / "scopes").mkdir(parents=True, exist_ok=True)
+    (governance / "rules").mkdir(parents=True, exist_ok=True)
+    paths = json.dumps([glob.strip() for glob in scope.split(",")])
+    (governance / "scopes" / "withheld.yaml").write_text(
+        f"governance_version: 1\nid: {SCOPE_ID}\nname: Withheld\npaths: {paths}\n",
+        encoding="utf-8",
+    )
+    (governance / "rules" / "withheld.yaml").write_text(
+        f'governance_version: 1\nid: {RULE_ID}\nscope_ids: ["{SCOPE_ID}"]\n'
+        f"audience: {audience}\nceiling: {egress.LEVEL_NONE}\n",
+        encoding="utf-8",
+    )
+
+
+def _reset() -> None:
+    from exomem.governance import membership, policy
+
+    policy._CACHE.clear()
+    policy._LAST_GOOD.clear()
+    membership.clear_memo()
+    egress.clear_decision_memo()
+    find_module.clear_cache()
+
+
+def _materialize(
+    vault: Path, files: dict[str, str], audience: str, scope: str = "Notes/Withheld/**"
+) -> Path:
+    for rel, text in files.items():
+        target = vault / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    _govern(vault, audience, scope)
+    for dirpath, _dirnames, filenames in os.walk(vault):
+        for name in filenames:
+            os.utime(os.path.join(dirpath, name), (FIXED_MTIME, FIXED_MTIME))
+    _reset()
+    with library_scope():
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    _reset()
+    return vault
+
+
+def _twins(
+    tmp_path: Path,
+    base: dict[str, str],
+    withheld: dict[str, str],
+    audience: str,
+) -> dict[str, Path]:
+    """Build B (no withheld page), A (`withheld`) and C (a neutral withheld page)."""
+    neutral = {
+        f"{WITHHELD_DIR}/unrelated-draft.md": _page(
+            "Unrelated Draft", "Withheld body text.", type="insight"
+        )
+    }
+    return {
+        "B": _materialize(tmp_path / "B" / "vault", dict(base), audience),
+        "A": _materialize(tmp_path / "A" / "vault", {**base, **withheld}, audience),
+        "C": _materialize(tmp_path / "C" / "vault", {**base, **neutral}, audience),
+    }
+
+
+def _principal(audience: str) -> RequestPrincipal:
+    return RequestPrincipal(audience_id=audience, surface="mcp", resolved=True)
+
+
+def _call(vault: Path, principal: RequestPrincipal | None, command: str, **kwargs: Any) -> Any:
+    _reset()
+    try:
+        if principal is None:
+            with library_scope():
+                result = writer_lease.invoke_command(_COMMANDS[command], vault, **kwargs)
+        else:
+            with request_scope(principal):
+                result = writer_lease.invoke_command(_COMMANDS[command], vault, **kwargs)
+    except Exception as error:  # noqa: BLE001 - the error text is part of the answer
+        result = {"__error__": type(error).__name__, "message": str(error)}
+    text = json.dumps(result, sort_keys=True, default=str).replace(str(vault), "<vault>")
+    return json.loads(text)
+
+
+def _text(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, ensure_ascii=False)
+
+
+def _names_withheld(value: Any) -> bool:
+    text = _text(value)
+    return "Withheld" in text or "Hidden Draft" in text
+
+
+# ---------------------------------------------------------------------------
+# Identifier fields the backstop decides
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def governed(tmp_path: Path) -> Path:
+    files = {
+        f"{NOTES}/open.md": _page("Open", "Visible text.", type="insight"),
+        f"{WITHHELD_DIR}/secret.md": _page("Secret", "Withheld text.", type="insight"),
+    }
+    return _materialize(tmp_path / "vault", files, "external")
+
+
+_SECRET = f"{WITHHELD_DIR}/secret.md"
+_OPEN = f"{NOTES}/open.md"
+
+
+@pytest.mark.parametrize(
+    ("field", "secret", "visible"),
+    [
+        ("to", _SECRET, _OPEN),
+        ("from", _SECRET, _OPEN),
+        ("a", _SECRET, _OPEN),
+        ("b", _SECRET, _OPEN),
+        ("topic_anchor", _SECRET, _OPEN),
+        ("chain_id", _SECRET, _OPEN),
+        ("src_key", f"file:{_SECRET}", f"file:{_OPEN}"),
+        ("dst_key", f"file:{_SECRET}", f"file:{_OPEN}"),
+        # An identifier-shaped field the list does not name is decided too.
+        ("shared_source", _SECRET, _OPEN),
+        ("anchor_path", _SECRET, _OPEN),
+        ("seed_key", f"file:{_SECRET}", f"file:{_OPEN}"),
+        # A reference field may carry the path without its extension, or as a
+        # vault URI.
+        ("to", _SECRET.removesuffix(".md"), _OPEN.removesuffix(".md")),
+        ("target_ref", "exomem://vault/" + _SECRET.replace(" ", "%20"), "exomem://vault/" + _OPEN),
+    ],
+)
+def test_an_identifier_field_naming_a_withheld_page_drops_its_entry(
+    governed: Path, field: str, secret: str, visible: str
+) -> None:
+    payload = {"items": [{field: secret, "n": 1}, {field: visible, "n": 2}]}
+
+    out = egress.filter_withheld_entries(
+        governed, payload, principal=_principal("external")
+    )
+
+    assert out == {"items": [{field: visible, "n": 2}]}
+
+
+def test_a_bullet_linking_a_withheld_page_drops_its_entry(governed: Path) -> None:
+    payload = {
+        "items": [
+            {"bullet": f"- relates_to [[{_SECRET.removesuffix('.md')}]]", "n": 1},
+            {"bullet": f"- relates_to [[{_OPEN.removesuffix('.md')}|open]]", "n": 2},
+        ]
+    }
+
+    out = egress.filter_withheld_entries(
+        governed, payload, principal=_principal("external")
+    )
+
+    assert out == {"items": [payload["items"][1]]}
+
+
+def test_non_path_values_in_identifier_fields_are_kept(governed: Path) -> None:
+    payload = {
+        "items": [
+            {"from": "open", "to": "closed", "a": 0.5, "b": None, "chain_id": "chain-1"},
+            {"src_key": "block:0123456789abcdef", "dst_key": "unit:abc", "edge_key": "edge:1"},
+        ]
+    }
+
+    out = egress.filter_withheld_entries(
+        governed, payload, principal=_principal("external")
+    )
+
+    assert out == payload
+
+
+def test_the_owner_keeps_every_identifier(governed: Path) -> None:
+    payload = {"items": [{"to": _SECRET}, {"dst_key": f"file:{_SECRET}"}]}
+
+    out = egress.filter_withheld_entries(
+        governed, payload, principal=owner_principal(surface="mcp")
+    )
+
+    assert out == payload
+
+
+# ---------------------------------------------------------------------------
+# End to end: no restricted derived surface names the withheld page
+# ---------------------------------------------------------------------------
+
+
+def _stem_beats_title() -> tuple[dict[str, str], dict[str, str]]:
+    """A visible title `gamma` loses to a withheld stem `gamma`."""
+    base = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page(
+            "Alpha",
+            "See [[gamma]] for background on the rollout.\n\n## Relations\n\n- supports [[gamma]]\n",
+            type="insight",
+        ),
+        f"{NOTES}/g-page.md": _page("gamma", "Gamma rollout background.", type="insight", title="gamma"),
+    }
+    withheld = {f"{WITHHELD_DIR}/gamma.md": _page("Hidden Draft", "Withheld body text.", type="insight")}
+    return base, withheld
+
+
+def _supersede() -> tuple[dict[str, str], dict[str, str]]:
+    """A withheld page supersedes a visible one."""
+    base = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page("Alpha", "See [[beta]].", type="insight"),
+        f"{NOTES}/beta.md": _page("Beta", "Beta rollout background.", type="insight"),
+    }
+    withheld = {
+        f"{WITHHELD_DIR}/newer.md": _page(
+            "Hidden Draft",
+            "Withheld body text about beta rollout.",
+            type="insight",
+            supersedes='"[[Knowledge Base/Notes/beta]]"',
+        )
+    }
+    return base, withheld
+
+
+_DERIVED_SURFACES: dict[str, tuple[str, dict[str, Any]]] = {
+    "suggest-relations": (
+        "connect_memory",
+        {"operation": "suggest-relations", "path": f"{NOTES}/alpha.md"},
+    ),
+    "graph-context": ("connect_memory", {"operation": "graph-context", "path": f"{NOTES}/alpha.md"}),
+    "context": ("connect_memory", {"operation": "context", "path": f"{NOTES}/alpha.md"}),
+    "graph-context-query": ("connect_memory", {"operation": "graph-context", "query": "gamma"}),
+    "relation-queue": ("review_memory", {"mode": "relation-queue"}),
+}
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_no_restricted_derived_surface_names_a_colliding_withheld_page(
+    tmp_path: Path, audience: str
+) -> None:
+    base, withheld = _stem_beats_title()
+    vault = _materialize(tmp_path / "vault", {**base, **withheld}, audience)
+    principal = _principal(audience)
+
+    for label, (command, kwargs) in _DERIVED_SURFACES.items():
+        answer = _call(vault, principal, command, **kwargs)
+        assert "__error__" not in answer, (label, answer)
+        assert not _names_withheld(answer), (label, answer)
+
+    # The owner still sees the page the link resolves to.
+    owner = _call(vault, None, "connect_memory", operation="suggest-relations", path=f"{NOTES}/alpha.md")
+    assert f"{WITHHELD_DIR}/gamma.md" in _text(owner)
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_no_restricted_timeline_is_anchored_on_a_withheld_page(
+    tmp_path: Path, audience: str
+) -> None:
+    base, withheld = _supersede()
+    vault = _materialize(tmp_path / "vault", {**base, **withheld}, audience)
+
+    answer = _call(vault, _principal(audience), "review_memory", mode="evolution", query="beta")
+
+    assert "__error__" not in answer, answer
+    assert not _names_withheld(answer), answer
+
+
+# ---------------------------------------------------------------------------
+# Connect context and graph-context decide what they assemble
+# ---------------------------------------------------------------------------
+
+
+def _inbound_linker() -> tuple[dict[str, str], dict[str, str]]:
+    """A withheld page mentions visible pages and contradicts one of them."""
+    base = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page("Alpha", "Alpha rollout notes.", type="insight"),
+        f"{NOTES}/beta.md": _page("Beta", "Beta rollout background.", type="insight"),
+    }
+    withheld = {
+        f"{WITHHELD_DIR}/linker.md": _page(
+            "Hidden Draft",
+            f"Mentions [[{NOTES}/beta]] and [[{NOTES}/lonely]].\n\n## Relations\n\n"
+            f"- supports [[{NOTES}/beta]]\n- contradicts [[{NOTES}/alpha]]\n",
+            type="insight",
+        )
+    }
+    return base, withheld
+
+
+_CONTEXT_SURFACES: dict[str, dict[str, Any]] = {
+    "graph-context-query": {"operation": "graph-context", "query": "beta"},
+    "context-query": {"operation": "context", "query": "beta"},
+    "graph-context-alpha-depth-2": {
+        "operation": "graph-context",
+        "path": f"{NOTES}/alpha.md",
+        "depth": 2,
+    },
+    "context-beta": {"operation": "context", "path": f"{NOTES}/beta.md"},
+    "context-withheld-path": {"operation": "context", "path": f"{WITHHELD_DIR}/linker.md"},
+}
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_context_reads_as_if_the_withheld_page_were_absent(
+    tmp_path: Path, audience: str
+) -> None:
+    base, withheld = _inbound_linker()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    principal = _principal(audience)
+
+    answers = {
+        variant: {
+            label: _call(vault, principal, "connect_memory", **kwargs)
+            for label, kwargs in _CONTEXT_SURFACES.items()
+        }
+        for variant, vault in vaults.items()
+    }
+
+    for label in _CONTEXT_SURFACES:
+        assert _text(answers["A"][label]) == _text(answers["B"][label]), label
+        assert _text(answers["C"][label]) == _text(answers["B"][label]), label
+    assert answers["A"]["context-withheld-path"]["message"].startswith("NOT_FOUND")
+    # The owner still receives the withheld page as a neighbour of beta.
+    owner = _call(vaults["A"], None, "connect_memory", operation="context", path=f"{NOTES}/beta.md")
+    assert f"{WITHHELD_DIR}/linker.md" in _text(owner)
+
+
+# ---------------------------------------------------------------------------
+# Relation proposals decide each target before emitting it
+# ---------------------------------------------------------------------------
+
+_SOURCE = f"{KB}/Sources/source-one"
+
+
+def _shared_source() -> tuple[dict[str, str], dict[str, str]]:
+    """A withheld page cites the same source as a visible page."""
+    base = {
+        **_filler(),
+        f"{_SOURCE}.md": _page("Source One", "Raw source text.", type="source"),
+        f"{NOTES}/alpha.md": _page(
+            "Alpha", "Alpha conclusions.", type="insight", sources=f'["[[{_SOURCE}]]"]'
+        ),
+        f"{NOTES}/beta.md": _page("Beta", "Beta background.", type="insight"),
+    }
+    withheld = {
+        f"{WITHHELD_DIR}/merger-memo.md": _page(
+            "Hidden Draft", "Withheld body text.", type="insight", sources=f'["[[{_SOURCE}]]"]'
+        )
+    }
+    return base, withheld
+
+
+_QUEUE_FIELDS = ("groups", "shown", "pages_shown", "filtered", "items_truncated", "status")
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_relation_proposals_read_as_if_the_withheld_page_were_absent(
+    tmp_path: Path, audience: str
+) -> None:
+    base, withheld = _shared_source()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    principal = _principal(audience)
+
+    answers = {}
+    for variant, vault in vaults.items():
+        queue = _call(vault, principal, "review_memory", mode="relation-queue")
+        answers[variant] = {
+            "suggest": _call(
+                vault,
+                principal,
+                "connect_memory",
+                operation="suggest-relations",
+                path=f"{NOTES}/alpha.md",
+            ),
+            "queue": {field: queue.get(field) for field in _QUEUE_FIELDS},
+        }
+
+    assert not _names_withheld(answers["A"])
+    assert _text(answers["A"]) == _text(answers["B"])
+    assert _text(answers["C"]) == _text(answers["B"])
+    owner = _call(
+        vaults["A"], None, "connect_memory", operation="suggest-relations", path=f"{NOTES}/alpha.md"
+    )
+    assert f"{WITHHELD_DIR}/merger-memo.md" in _text(owner)
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_guessed_relation_ref_to_a_withheld_page_reads_as_absent(
+    tmp_path: Path, audience: str
+) -> None:
+    from exomem import relation_queue, review_state
+
+    base, withheld = _shared_source()
+    vaults = {
+        "B": _materialize(tmp_path / "B" / "vault", dict(base), audience),
+        "A": _materialize(tmp_path / "A" / "vault", {**base, **withheld}, audience),
+    }
+    guess = "|".join(
+        (
+            f"{NOTES}/alpha.md",
+            f"{WITHHELD_DIR}/merger-memo.md",
+            "relates_to",
+            "shared_sources",
+        )
+    )
+    ref = relation_queue.relation_review_ref(review_state.item_id(f"relation:{guess}"))
+
+    answers = {
+        variant: _call(
+            vault,
+            _principal(audience),
+            "triage_memory",
+            ref=ref,
+            action="dismiss",
+            source_path=f"{NOTES}/alpha.md",
+        )
+        for variant, vault in vaults.items()
+    }
+
+    assert _text(answers["A"]) == _text(answers["B"])
+    # Relation review is the owner's under a governed policy: refused before
+    # the reference is resolved, whatever it names.
+    assert answers["B"]["message"].startswith("AUDIENCE_RESTRICTED")
+
+
+# ---------------------------------------------------------------------------
+# Evolution timelines are built over visible pages only
+# ---------------------------------------------------------------------------
+
+
+def _visible_pointer() -> tuple[dict[str, str], dict[str, str]]:
+    """A visible page names its withheld successor; the successor names it back."""
+    base = {
+        **_filler(),
+        f"{NOTES}/beta.md": _page(
+            "Beta",
+            "Beta rollout background.",
+            type="insight",
+            status="superseded",
+            superseded_by=f'["[[{WITHHELD_DIR}/newer]]"]',
+        ),
+    }
+    withheld = {
+        f"{WITHHELD_DIR}/newer.md": _page(
+            "Hidden Draft",
+            "Withheld body text about beta rollout.",
+            type="insight",
+            supersedes=f'["[[{NOTES}/beta]]"]',
+        )
+    }
+    return base, withheld
+
+
+_EVOLUTION_SURFACES: dict[str, dict[str, Any]] = {
+    "query": {"mode": "evolution", "query": "beta rollout"},
+    "path": {"mode": "evolution", "path": f"{NOTES}/beta.md"},
+    "withheld-path": {"mode": "evolution", "path": f"{WITHHELD_DIR}/newer.md"},
+}
+
+
+@pytest.mark.parametrize("scenario", ["supersedes-visible", "visible-pointer"])
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_evolution_reads_as_if_the_withheld_page_were_absent(
+    tmp_path: Path, audience: str, scenario: str
+) -> None:
+    base, withheld = _supersede() if scenario == "supersedes-visible" else _visible_pointer()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    principal = _principal(audience)
+
+    answers = {
+        variant: {
+            label: _call(vault, principal, "review_memory", **kwargs)
+            for label, kwargs in _EVOLUTION_SURFACES.items()
+        }
+        for variant, vault in vaults.items()
+    }
+
+    # A refusal echoes the caller's own spelling of the path it asked for.
+    assert not _names_withheld({k: v for k, v in answers["A"].items() if k != "withheld-path"})
+    for label in _EVOLUTION_SURFACES:
+        assert _text(answers["A"][label]) == _text(answers["B"][label]), label
+        assert _text(answers["C"][label]) == _text(answers["B"][label]), label
+    owner = _call(vaults["A"], None, "review_memory", mode="evolution", query="beta rollout")
+    assert f"{WITHHELD_DIR}/newer.md" in _text(owner["timelines"]), owner
+
+
+# ---------------------------------------------------------------------------
+# A restricted writer's links resolve over the pages it may see
+# ---------------------------------------------------------------------------
+
+_GUESSES = (
+    "Probe page. Guesses: [[beta]] [[project-zeta-plan]] [[Hidden Plan]] "
+    f"[[{WITHHELD_DIR}/project-zeta-plan]] [[nonexistent-guess]] [[other]].\n\n"
+    "## Observations\n\n- [operating constraint] Keep retries bounded #reliability\n"
+)
+
+
+def _writer_fixture() -> tuple[dict[str, str], dict[str, str]]:
+    base = {
+        f"{NOTES}/beta.md": _page("Beta", "Beta background.", type="insight"),
+        f"{NOTES}/other.md": _page("Other", "Other background.", type="insight"),
+    }
+    withheld = {
+        f"{WITHHELD_DIR}/beta.md": _page("Hidden Draft", "Withheld body text.", type="insight"),
+        f"{WITHHELD_DIR}/project-zeta-plan.md": _page(
+            "Hidden Plan", "Withheld body text.", type="insight", title="Hidden Plan"
+        ),
+    }
+    return base, withheld
+
+
+def _written(vault: Path, principal: RequestPrincipal | None) -> dict[str, Any]:
+    from exomem import capture_sweep
+
+    capture_sweep.reset_state()
+    answer = _call(vault, principal, "remember", content=_GUESSES, title="Probe Page", note_type="insight")
+    assert "__error__" not in answer, answer
+    body = (vault / answer["path"]).read_text(encoding="utf-8").split("\n---\n", 1)[1]
+    sweep = answer.get("capture_sweep") or {}
+    return {
+        "path": answer["path"],
+        "warnings": answer.get("warnings"),
+        "unpaged_mentions": sweep.get("unpaged_mentions"),
+        "body": body,
+    }
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_writer_resolves_links_as_if_the_withheld_page_were_absent(
+    tmp_path: Path, audience: str
+) -> None:
+    base, withheld = _writer_fixture()
+    vaults = _twins(tmp_path, base, withheld, audience)
+
+    written = {variant: _written(vault, _principal(audience)) for variant, vault in vaults.items()}
+
+    # The writer's own guesses stay as it wrote them; none is rewritten onto a
+    # withheld page, and the warnings and unpaged mentions match the twin.
+    assert _text(written["A"]) == _text(written["B"])
+    assert _text(written["C"]) == _text(written["B"])
+    assert "[[Knowledge Base/Notes/beta]]" in written["B"]["body"]
+
+
+@pytest.mark.parametrize("detail", ["compact", "legacy"])
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_writers_relations_are_judged_over_its_view(
+    tmp_path: Path, audience: str, detail: str
+) -> None:
+    """The semantic contract resolves the written page's relation targets over
+    the pages the writer may see, as its body links are resolved."""
+    base = {**_filler(), f"{NOTES}/beta.md": _page("Beta", "Beta background.", type="insight")}
+    withheld = {
+        f"{WITHHELD_DIR}/secret.md": _page("Hidden Draft", "Withheld body text.", type="insight"),
+        f"{WITHHELD_DIR}/beta.md": _page("Hidden Beta", "Withheld body text.", type="insight"),
+    }
+    vaults = _twins(tmp_path, base, withheld, audience)
+    body = (
+        "Probe body.\n\n## Relations\n\n- supports [[secret]]\n- supports [[beta]]\n\n"
+        "## Observations\n\n- [finding] Retries stay bounded #reliability\n"
+        "  - relations: supports: [[secret]]\n"
+    )
+
+    answers = {
+        variant: _VOLATILE_TEXT.sub(
+            "<v>",
+            _text(
+                _call(
+                    vault,
+                    _principal(audience),
+                    "remember",
+                    content=body,
+                    title="Probe Page",
+                    note_type="insight",
+                    response_detail=detail,
+                )
+            ),
+        )
+        for variant, vault in vaults.items()
+    }
+
+    assert '"__error__"' not in answers["A"], answers["A"]
+    assert answers["A"] == answers["B"]
+    assert answers["C"] == answers["B"]
+
+
+_UNIT = "\n\n## Observations\n\n- [operating constraint] Keep retries bounded #reliability\n"
+
+
+def _drafted_fixture() -> tuple[dict[str, str], dict[str, str]]:
+    base = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page(
+            "Alpha", f"Alpha.{_UNIT}\n## Relations\n\n- supports [[{NOTES}/beta]]\n", type="insight"
+        ),
+        f"{NOTES}/beta.md": _page(
+            "Beta", f"Beta.{_UNIT}\n## Relations\n\n- supports [[{NOTES}/alpha]]\n", type="insight"
+        ),
+    }
+    withheld = {
+        f"{WITHHELD_DIR}/memo.md": _page(
+            "Memo", f"Withheld body text.{_UNIT}\n## Relations\n\n- supports [[Nimbus Plan]]\n",
+            type="insight",
+        )
+    }
+    return base, withheld
+
+
+@pytest.mark.parametrize("detail", ["compact", "full"])
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_draft_is_judged_without_what_withheld_pages_author(
+    tmp_path: Path, audience: str, detail: str
+) -> None:
+    """A relation a withheld page authors toward the draft, and a body link only
+    a withheld page answers, neither qualify the draft nor show in its review."""
+    base, withheld = _drafted_fixture()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    drafts = {
+        "inbound": ("Nimbus Plan", f"Draft page.{_UNIT}"),
+        "body-link": ("Other Guess", f"Draft page, see [[Memo]].{_UNIT}"),
+    }
+
+    def drafted(vault: Path, title: str, content: str) -> str:
+        answer = _call(
+            vault,
+            _principal(audience),
+            "remember",
+            content=content,
+            title=title,
+            note_type="insight",
+            validate_only=True,
+            response_detail=detail,
+        )
+        answer.pop("draft_token", None)  # carries its issue time
+        return _VOLATILE_TEXT.sub("<v>", _text(answer))
+
+    for label, (title, content) in drafts.items():
+        answers = {variant: drafted(vault, title, content) for variant, vault in vaults.items()}
+
+        assert '"__error__"' not in answers["A"], (label, answers["A"])
+        assert answers["A"] == answers["B"], label
+        assert answers["C"] == answers["B"], label
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_writers_first_page_bootstraps_as_in_an_empty_vault(
+    tmp_path: Path, audience: str
+) -> None:
+    """A writer that sees no governed page bootstraps its first one, whether or
+    not a governed page withheld from it exists."""
+    base = {f"{KB}/Sources/s1.md": _page("S", "Raw.", type="source")}
+    withheld = {
+        f"{WITHHELD_DIR}/memo.md": _page(
+            "Memo", f"Withheld body text.{_UNIT}", type="insight", status="active"
+        )
+    }
+    vaults = _twins(tmp_path, base, withheld, audience)
+
+    def drafted(vault: Path, principal: RequestPrincipal | None) -> dict[str, Any]:
+        answer = _call(
+            vault, principal, "remember", content=f"First page.{_UNIT}", title="First Page",
+            note_type="insight", validate_only=True, response_detail="full",
+        )
+        answer.pop("draft_token", None)  # carries its issue time
+        return answer
+
+    answers = {
+        variant: _VOLATILE_TEXT.sub("<v>", _text(drafted(vault, _principal(audience))))
+        for variant, vault in vaults.items()
+    }
+
+    assert '"__error__"' not in answers["B"], answers["B"]
+    assert '"bootstrap"' in answers["B"], answers["B"]
+    assert answers["A"] == answers["B"]
+    assert answers["C"] == answers["B"]
+    assert '"bootstrap"' not in _text(drafted(vaults["A"], None))
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_moves_review_carry_reads_over_its_view(
+    tmp_path: Path, audience: str
+) -> None:
+    """Whether a linking page's relation review carries across a move is
+    decided over the mover's view: a relation a withheld page authors toward
+    it does not count."""
+    from exomem import semantic_contract, semantic_writes
+
+    linking = f"{INSIGHTS}/linking.md"
+    base = {
+        **_filler(),
+        linking: _page("Linking", f"Links [[{INSIGHTS}/moved]].{_UNIT}", type="insight",
+                       status="active"),
+        f"{INSIGHTS}/moved.md": _page("Moved", "Moved page.", type="insight", status="active"),
+    }
+    withheld = {
+        f"{WITHHELD_DIR}/memo.md": _page(
+            "Memo", f"Withheld body text.{_UNIT}\n## Relations\n\n- supports [[{linking[:-3]}]]\n",
+            type="insight",
+        )
+    }
+    vaults = _twins(tmp_path, base, withheld, audience)
+
+    def signature(vault: Path, principal: RequestPrincipal | None) -> str:
+        _reset()
+        with library_scope() if principal is None else request_scope(principal):
+            corpus = semantic_contract.build_corpus_context(vault)
+            return repr(semantic_writes._review_carry_signature(corpus, linking))
+
+    restricted = {variant: signature(vault, _principal(audience)) for variant, vault in vaults.items()}
+    assert restricted["A"] == restricted["B"]
+    assert restricted["C"] == restricted["B"]
+    assert signature(vaults["A"], None) != signature(vaults["B"], None)
+
+
+_SCOPED_REGISTRY = (
+    "schema_version: 1\nextensions:\n  science.replicates:\n    parent: supports\n"
+    "    description: Replicates\n    aliases: [replicates]\n    source_kinds: [file]\n"
+    "    target_kinds: [file]\n"
+)
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_drafts_registry_scope_reads_over_its_view(
+    tmp_path: Path, audience: str
+) -> None:
+    """A relation scoped to file targets is judged against the target the
+    writer's view resolves: one only a withheld page answers is unresolved."""
+    base = {
+        **_filler(),
+        f"{KB}/_Schema/relation-registry.yaml": _SCOPED_REGISTRY,
+        f"{NOTES}/beta.md": _page("Beta", f"Beta.{_UNIT}", type="insight", status="active"),
+    }
+    withheld = {
+        f"{WITHHELD_DIR}/memo.md": _page(
+            "Hidden Target", f"Withheld body text.{_UNIT}", type="insight", title="Hidden Target"
+        )
+    }
+    vaults = _twins(tmp_path, base, withheld, audience)
+    content = (
+        f"Draft page, see [[{NOTES}/beta]].{_UNIT}\n## Relations\n\n"
+        "- replicates [[Hidden Target]]\n"
+    )
+
+    def drafted(vault: Path, principal: RequestPrincipal | None) -> str:
+        answer = _call(
+            vault, principal, "remember", content=content, title="Draft Page",
+            note_type="insight", validate_only=True, response_detail="full",
+        )
+        answer.pop("draft_token", None)  # carries its issue time
+        return _VOLATILE_TEXT.sub("<v>", _text(answer))
+
+    answers = {variant: drafted(vault, _principal(audience)) for variant, vault in vaults.items()}
+
+    assert '"__error__"' not in answers["B"], answers["B"]
+    assert "scope_violation" in answers["B"], answers["B"]
+    assert answers["A"] == answers["B"]
+    assert answers["C"] == answers["B"]
+    assert "scope_violation" not in drafted(vaults["A"], None)
+
+
+def test_the_owner_still_judges_a_draft_by_every_page(tmp_path: Path) -> None:
+    base, withheld = _drafted_fixture()
+    vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")
+
+    answer = _call(
+        vault, None, "remember", content=f"Draft page.{_UNIT}", title="Nimbus Plan",
+        note_type="insight", validate_only=True, response_detail="full",
+    )
+
+    assert answer["committable_without_review"] is True, answer
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_write_builds_the_owners_corpus(tmp_path: Path, audience: str) -> None:
+    """The corpus a write builds also feeds the graph it publishes, so the
+    written page's facts resolve over every page whoever writes it; only the
+    judgement of the draft is made over the writer's view."""
+    from exomem import semantic_contract
+
+    base, withheld = _writer_fixture()
+    vault = _materialize(tmp_path / "vault", {**base, **withheld}, audience)
+    body = (
+        "Probe body, see [[Hidden Plan]] and [[beta]].\n\n## Relations\n\n"
+        f"- supports [[Hidden Plan]]\n- supports [[{NOTES}/other]]{_UNIT}"
+    )
+    path = f"{NOTES}/probe-page.md"
+    source = _page("Probe Page", body, type="insight")
+
+    def facts(principal: RequestPrincipal | None) -> list[dict[str, Any]]:
+        _reset()
+        with library_scope() if principal is None else request_scope(principal):
+            corpus = semantic_contract.build_corpus_context(vault)
+            state = semantic_contract.build_page_state(
+                vault, path, source, relation_registry=corpus.registry
+            )
+            after = corpus.with_candidate(state)
+        return [fact.as_dict() for fact in after.relation_facts if fact.authored_path == path]
+
+    owner = facts(None)
+    assert any(f"{WITHHELD_DIR}/project-zeta-plan" in _text(fact) for fact in owner)
+    assert facts(_principal(audience)) == owner
+
+
+def _suggestion_fixture() -> tuple[dict[str, str], dict[str, str]]:
+    base = {
+        **_filler(),
+        f"{NOTES}/rollout-notes.md": _page(
+            "Rollout Notes", "Rollout background and rollout plan basics.", type="insight"
+        ),
+    }
+    withheld = {
+        f"{WITHHELD_DIR}/rollout-plan.md": _page(
+            "Rollout Plan",
+            "Rollout plan rollout background rollout plan rollout. "
+            f"[[{NOTES}/lonely]] [[{NOTES}/filler-harbor]]",
+            type="insight",
+        )
+    }
+    return base, withheld
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_link_suggestions_read_as_if_the_withheld_page_were_absent(
+    tmp_path: Path, audience: str
+) -> None:
+    """Suggested links rank over the pages the caller may see, with no graph
+    lane and no whole-corpus rank numbers, for every caller of the ranking."""
+    from exomem import corpus_aware
+
+    base, withheld = _suggestion_fixture()
+    vaults = _twins(tmp_path, base, withheld, audience)
+
+    def suggested(vault: Path) -> str:
+        draft = _call(
+            vault, _principal(audience), "connect_memory", operation="suggest-links",
+            draft_title="Rollout plan", draft_body="rollout background rollout plan",
+        )
+        page = _call(
+            vault, _principal(audience), "connect_memory", operation="suggest-links",
+            path=f"{NOTES}/rollout-notes.md",
+        )
+        _reset()
+        with request_scope(_principal(audience)):
+            direct = corpus_aware.suggest_related(
+                vault, title="Rollout plan", body="rollout background rollout plan"
+            )
+        return _text([draft, page, [item.as_dict() for item in direct]])
+
+    answers = {variant: suggested(vault) for variant, vault in vaults.items()}
+
+    assert '"__error__"' not in answers["A"], answers["A"]
+    assert answers["A"] == answers["B"]
+    assert answers["C"] == answers["B"]
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_link_suggestions_fetch_once_whatever_is_withheld(
+    tmp_path: Path, audience: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One recall of a fixed size, however many withheld pages match: the
+    work does not measure how much is withheld."""
+    from exomem import corpus_aware
+
+    base = {
+        f"{NOTES}/v-{index}.md": _page(
+            f"Visible {index}", f"A short mention of zephyr pricing {index}.", type="insight"
+        )
+        for index in range(6)
+    }
+    calls: list[int] = []
+    real_find = find_module.find
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        calls.append(int(kwargs.get("limit") or 0))
+        return real_find(*args, **kwargs)
+
+    fetched = {}
+    for density in (0, 20, 45):
+        withheld = {
+            f"{WITHHELD_DIR}/w-{index:03d}.md": _page(
+                f"Zephyr Pricing {index}",
+                f"Zephyr pricing zephyr pricing zephyr pricing model {index}.",
+                type="insight",
+            )
+            for index in range(density)
+        }
+        vault = _materialize(tmp_path / str(density) / "vault", {**base, **withheld}, audience)
+        _reset()
+        monkeypatch.setattr(find_module, "find", counted)
+        calls.clear()
+        with request_scope(_principal(audience)):
+            corpus_aware.suggest_related(
+                vault, title="Zephyr pricing", body="zephyr pricing model"
+            )
+        monkeypatch.setattr(find_module, "find", real_find)
+        fetched[density] = list(calls)
+
+    assert fetched[0] == fetched[20] == fetched[45], fetched
+    assert len(fetched[0]) == 1, fetched
+
+
+def test_the_owner_writer_still_resolves_over_every_page(tmp_path: Path) -> None:
+    base, withheld = _writer_fixture()
+    vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")
+
+    written = _written(vault, None)
+
+    assert "Hidden Plan" not in written["body"]
+    assert f"[[{WITHHELD_DIR}/project-zeta-plan]]" in written["body"]
+    assert any(f"{WITHHELD_DIR}/beta" in warning for warning in written["warnings"])
+
+
+# ---------------------------------------------------------------------------
+# Entity identity is decided before it is reported
+# ---------------------------------------------------------------------------
+
+PEOPLE = f"{KB}/Entities/People"
+
+
+def _entities() -> tuple[dict[str, str], dict[str, str]]:
+    base = {
+        f"{PEOPLE}/other-person.md": _page(
+            "Other Person", "A visible person.", type="entity", entity_type="person",
+            status="active", title="Other Person",
+        ),
+        f"{NOTES}/meeting.md": _page("Meeting", "Met with Other Person.", type="insight"),
+    }
+    withheld = {
+        f"{PEOPLE}/private-dana-example.md": _page(
+            "Dana Example", "Withheld body text.", type="entity", entity_type="person",
+            status="active", title="Dana Example", aliases='["D. Example"]',
+        )
+    }
+    return base, withheld
+
+
+def _entity_view(answer: Any) -> Any:
+    if not isinstance(answer, dict) or "__error__" in answer:
+        return answer
+    return {key: answer.get(key) for key in ("status", "candidates", "omitted_candidate_count", "path", "code")}
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_entity_identity_reads_as_if_the_withheld_entity_were_absent(
+    tmp_path: Path, audience: str
+) -> None:
+    base, withheld = _entities()
+    vaults = {
+        variant: _materialize(
+            tmp_path / variant / "vault",
+            {**base, **(withheld if variant == "A" else {})},
+            audience,
+            scope="Entities/People/private-*",
+        )
+        for variant in ("B", "A")
+    }
+    principal = _principal(audience)
+
+    answers = {}
+    for variant, vault in vaults.items():
+        answers[variant] = {
+            name: _entity_view(
+                _call(vault, principal, "connect_memory", operation="resolve-entity", name=name)
+            )
+            for name in ("Dana Example", "DANA example", "D. Example", "Nobody Here")
+        }
+        answers[variant]["create"] = _entity_view(
+            _call(
+                vault,
+                principal,
+                "connect_memory",
+                operation="create-entity",
+                entity_type="person",
+                name="D. Example",
+                summary="A person met once.",
+            )
+        )
+
+    assert "Dana" not in _text(list(answers["A"].values()))
+    assert _text(answers["A"]) == _text(answers["B"])
+    assert answers["A"]["Dana Example"]["status"] == "no_match"
+
+
+# ---------------------------------------------------------------------------
+# Directory listings collapse what the caller may not see
+# ---------------------------------------------------------------------------
+
+
+_BROWSE_SURFACES: dict[str, dict[str, Any]] = {
+    "list-notes": {"mode": "list", "path": NOTES},
+    "list-notes-recursive": {"mode": "list", "path": NOTES, "recursive": True},
+    "list-withheld-folder": {"mode": "list", "path": WITHHELD_DIR},
+    "list-withheld-file": {"mode": "list", "path": f"{WITHHELD_DIR}/linker.md"},
+    "overview": {"mode": "overview"},
+    "overview-notes": {"mode": "overview", "path": NOTES},
+}
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_browsing_reads_as_if_the_withheld_folder_were_absent(
+    tmp_path: Path, audience: str
+) -> None:
+    base, withheld = _inbound_linker()
+    vaults = {
+        "B": _materialize(tmp_path / "B" / "vault", dict(base), audience),
+        "A": _materialize(tmp_path / "A" / "vault", {**base, **withheld}, audience),
+    }
+    principal = _principal(audience)
+
+    answers = {
+        variant: {
+            label: _call(vault, principal, "browse_memory", **kwargs)
+            for label, kwargs in _BROWSE_SURFACES.items()
+        }
+        for variant, vault in vaults.items()
+    }
+
+    # A refusal echoes the caller's own spelling of the path it asked for.
+    assert not _names_withheld(
+        {k: v for k, v in answers["A"].items() if not k.startswith("list-withheld")}
+    )
+    for label in _BROWSE_SURFACES:
+        assert _text(answers["A"][label]) == _text(answers["B"][label]), label
+    owner = _call(vaults["A"], None, "browse_memory", mode="list", path=NOTES)
+    assert WITHHELD_DIR in _text(owner)
+
+
+# ---------------------------------------------------------------------------
+# Write doors decide their target before resolving or mutating it
+# ---------------------------------------------------------------------------
+
+_WITHHELD_TARGET = f"{WITHHELD_DIR}/target.md"
+_WITHHELD_SOURCE = f"{KB}/Sources/Withheld/private-source.md"
+_WRITE_SCOPE = "Notes/Withheld/**, Sources/Withheld/**"
+
+
+def _write_door_fixture() -> tuple[dict[str, str], dict[str, str]]:
+    base = {
+        f"{NOTES}/alpha.md": _page("Alpha", "Alpha conclusions.", type="insight"),
+        f"{KB}/Sources/open-source.md": _page("Open Source", "Raw text.", type="source"),
+    }
+    withheld = {
+        _WITHHELD_TARGET: _page(
+            "Hidden Draft",
+            "Withheld body text.\n\n## Observations\n\n- [finding] A withheld finding\n",
+            type="insight",
+            exomem_id="0192f0a4-6b7c-4d8e-9f10-a1b2c3d4e5f6",
+        ),
+        _WITHHELD_SOURCE: _page(
+            "Hidden Source", "Withheld raw text.", type="source", ingested_into="[]"
+        ),
+    }
+    return base, withheld
+
+
+_WRITE_DOORS: dict[str, tuple[str, dict[str, Any]]] = {
+    "edit-replace-string": (
+        "edit_memory",
+        {
+            "path": _WITHHELD_TARGET,
+            "why": "fix",
+            "operation": {"kind": "replace_string", "old_string": "Withheld", "new_string": "X"},
+        },
+    ),
+    "edit-bare-path": (
+        "edit_memory",
+        {
+            "path": "Notes/Withheld/target",
+            "why": "fix",
+            "operation": {"kind": "replace_tags", "tags": ["x"]},
+        },
+    ),
+    "observe-add": (
+        "observe_memory",
+        {"path": _WITHHELD_TARGET, "operation": "add", "category": "finding", "content": "New."},
+    ),
+    "replace": (
+        "replace_memory",
+        {
+            "old_path": _WITHHELD_TARGET,
+            "content": "Replacement.\n\n## Observations\n\n- [finding] Replaced\n",
+            "title": "Replacement Page",
+            "reason": "supersede",
+        },
+    ),
+    "append": (
+        "manage_memory_file",
+        {"operation": "append", "path": _WITHHELD_TARGET, "content": "More text."},
+    ),
+    "move": (
+        "manage_memory_file",
+        {"operation": "move", "old_path": _WITHHELD_TARGET, "new_path": f"{NOTES}/moved.md"},
+    ),
+    "delete": (
+        "manage_memory_file",
+        {"operation": "delete", "path": _WITHHELD_TARGET, "confirm": True},
+    ),
+    "delete-folder": (
+        "manage_memory_file",
+        {"operation": "delete", "path": WITHHELD_DIR, "confirm": True, "recursive": True},
+    ),
+    "observe-by-reference": (
+        "observe_memory",
+        {
+            "path": "exomem://memory/0192f0a4-6b7c-4d8e-9f10-a1b2c3d4e5f6",
+            "operation": "add",
+            "category": "finding",
+            "content": "New.",
+        },
+    ),
+    "reclassify": (
+        "manage_memory_file",
+        {
+            "operation": "reclassify",
+            "path": _WITHHELD_SOURCE,
+            "source_kind": "article",
+            "reason": "correct",
+        },
+    ),
+    "remember-cites-withheld-source": (
+        "remember",
+        {
+            "content": "A cited note.\n\n## Observations\n\n- [finding] Cited\n",
+            "title": "Cited Note",
+            "note_type": "insight",
+            "sources": [f"[[{_WITHHELD_SOURCE.removesuffix('.md')}]]"],
+        },
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_WRITE_DOORS))
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_write_door_answers_a_withheld_target_as_an_absent_one(
+    tmp_path: Path, audience: str, door: str
+) -> None:
+    base, withheld = _write_door_fixture()
+    vaults = {
+        "B": _materialize(tmp_path / "B" / "vault", dict(base), audience, scope=_WRITE_SCOPE),
+        "A": _materialize(
+            tmp_path / "A" / "vault", {**base, **withheld}, audience, scope=_WRITE_SCOPE
+        ),
+    }
+    before = {rel: (vaults["A"] / rel).read_bytes() for rel in withheld}
+    command, kwargs = _WRITE_DOORS[door]
+
+    answers = {
+        variant: _call(vault, _principal(audience), command, **kwargs)
+        for variant, vault in vaults.items()
+    }
+
+    assert _text(answers["A"]) == _text(answers["B"])
+    assert {rel: (vaults["A"] / rel).read_bytes() for rel in withheld} == before
+
+
+_OCCUPANT = "occupied.md"
+_CREATION_DOORS: dict[str, tuple[str, dict[str, Any]]] = {
+    "create": (
+        "manage_memory_file",
+        {"operation": "create", "path": "{D}/" + _OCCUPANT, "content": "# New\n\nText.\n"},
+    ),
+    "create-overwrite": (
+        "manage_memory_file",
+        {
+            "operation": "create",
+            "path": "{D}/" + _OCCUPANT,
+            "content": "# New\n\nText.\n",
+            "overwrite": True,
+        },
+    ),
+    "create-folder": ("manage_memory_file", {"operation": "create", "path": "{D}", "kind": "folder"}),
+    "move-destination": (
+        "manage_memory_file",
+        {"operation": "move", "old_path": f"{NOTES}/alpha.md", "new_path": "{D}/" + _OCCUPANT},
+    ),
+}
+
+
+def _occupied_answer(vault: Path, principal: RequestPrincipal, door: str, folder: str) -> str:
+    command, kwargs = _CREATION_DOORS[door]
+    args = {k: v.replace("{D}", folder) if isinstance(v, str) else v for k, v in kwargs.items()}
+    return _text(_call(vault, principal, command, **args)).replace(folder, "{D}")
+
+
+@pytest.mark.parametrize("door", sorted(_CREATION_DOORS))
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_withheld_occupant_is_refused_as_any_occupied_path(
+    tmp_path: Path, audience: str, door: str
+) -> None:
+    """DOCUMENTED RESIDUAL: a creation door reveals that a path is occupied by
+    refusing it. The refusal for a withheld occupant is the door's ordinary
+    occupied-path refusal, and the withheld page is never changed."""
+    visible_dir = f"{NOTES}/Visible"
+    occupant = _page("Hidden Draft", "Withheld body text.", type="insight")
+    files = {
+        f"{NOTES}/alpha.md": _page("Alpha", "Alpha conclusions.", type="insight"),
+        f"{WITHHELD_DIR}/{_OCCUPANT}": occupant,
+        f"{visible_dir}/{_OCCUPANT}": _page("Open Draft", "Open body text.", type="insight"),
+    }
+    principal = _principal(audience)
+    withheld_vault = _materialize(tmp_path / "w" / "vault", files, audience)
+    visible_vault = _materialize(tmp_path / "v" / "vault", files, audience)
+    # The ordinary occupied-path refusal: without `overwrite` for the
+    # overwrite door, which succeeds on a visible occupant.
+    ordinary = "create" if door == "create-overwrite" else door
+
+    withheld = _occupied_answer(withheld_vault, principal, door, WITHHELD_DIR)
+    visible = _occupied_answer(visible_vault, principal, ordinary, visible_dir)
+
+    assert withheld == visible
+    assert '"__error__"' in withheld
+    assert (withheld_vault / WITHHELD_DIR / _OCCUPANT).read_text(encoding="utf-8") == occupant
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_an_entity_destination_a_withheld_entity_holds_is_refused_as_any_occupied_one(
+    tmp_path: Path, audience: str
+) -> None:
+    person = f"{KB}/Entities/People/Wanda Grey.md"
+    entity = _page("Wanda Grey", "A person.", type="entity", entity_type="person", title="Wanda Grey")
+    answers = {}
+    for which, scope, text in (
+        ("withheld", "Entities/People/**", entity),
+        ("visible", "Notes/Withheld/**", _page("Scratch", "Not an entity.", type="note")),
+    ):
+        vault = _materialize(tmp_path / which / "vault", {person: text}, audience, scope=scope)
+        answers[which] = _call(
+            vault,
+            _principal(audience),
+            "connect_memory",
+            operation="create-entity",
+            name="Wanda Grey",
+            entity_type="person",
+            summary="A person.",
+        )
+        assert (vault / person).read_text(encoding="utf-8") == text
+
+    assert answers["withheld"] == answers["visible"]
+    assert answers["withheld"]["message"].startswith("ENTITY_EXISTS")
+
+
+_FOLDERS = {
+    "visible": f"{NOTES}/Open",
+    "mixed": f"{NOTES}/Mixed",
+    "withheld-only": WITHHELD_DIR,
+    "missing": f"{NOTES}/Nowhere",
+}
+
+
+@pytest.mark.parametrize("recursive", [True, False])
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_writer_deletes_no_folder(
+    tmp_path: Path, audience: str, recursive: bool
+) -> None:
+    """One refusal for a folder the writer may see, whatever it holds; a
+    folder holding only withheld pages answers as a missing path, as listing
+    it does; file deletes are unchanged."""
+    files = {
+        f"{NOTES}/alpha.md": _page("Alpha", "Alpha conclusions.", type="insight"),
+        f"{NOTES}/Open/open.md": _page("Open", "Open text.", type="insight"),
+        f"{NOTES}/Mixed/open.md": _page("Open", "Open text.", type="insight"),
+        f"{WITHHELD_DIR}/hidden.md": _page("Hidden Draft", "Withheld body text."),
+    }
+    vault = _materialize(
+        tmp_path / "vault", files, audience, scope="Notes/Withheld/**,Notes/Mixed/hidden.md"
+    )
+    (vault / NOTES / "Mixed" / "hidden.md").write_text(
+        _page("Hidden Draft", "Withheld body text."), encoding="utf-8"
+    )
+    principal = _principal(audience)
+
+    def delete(folder: str, **kwargs: Any) -> Any:
+        answer = _call(
+            vault, principal, "manage_memory_file", operation="delete", path=folder,
+            recursive=recursive, **kwargs,
+        )
+        return _text(answer).replace(folder, "<folder>")
+
+    answers = {label: delete(folder, confirm=True) for label, folder in _FOLDERS.items()}
+    unconfirmed = {label: delete(folder) for label, folder in _FOLDERS.items()}
+
+    refused = _text(
+        {
+            "__error__": "ValueError",
+            "message": "AUDIENCE_RESTRICTED: folder deletes are served to the owner only "
+            "under a governed policy",
+        }
+    )
+    assert answers["visible"] == answers["mixed"] == refused, answers
+    assert answers["withheld-only"] == answers["missing"], answers
+    assert unconfirmed["withheld-only"] == unconfirmed["missing"], unconfirmed
+    if recursive:
+        assert answers["missing"] == refused, answers
+    else:
+        assert "NOT_FOUND" in answers["missing"], answers
+        listed = _call(vault, principal, "browse_memory", mode="list", path=WITHHELD_DIR)
+        assert "NOT_FOUND" in _text(listed), listed
+    assert sorted(p.name for p in (vault / NOTES / "Mixed").iterdir()) == ["hidden.md", "open.md"]
+    assert (vault / WITHHELD_DIR / "hidden.md").is_file()
+    deleted = _call(
+        vault, principal, "manage_memory_file", operation="delete", path=f"{NOTES}/alpha.md", confirm=True
+    )
+    assert "__error__" not in deleted, deleted
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_tombstones_alone_leave_a_non_owners_writes_as_the_owners(
+    tmp_path: Path, audience: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write-door rulings hold under a governed policy only: on a vault
+    with no policy, an erased page's tombstone changes nothing for a caller
+    other than the owner, who may delete a folder."""
+    from exomem.governance import lifecycle
+
+    files = {
+        f"{NOTES}/alpha.md": _page("Alpha", "Alpha conclusions."),
+        f"{NOTES}/linker.md": _page("Linker", f"See [[{NOTES}/alpha]] and [[alpha]]."),
+        f"{NOTES}/Open/open.md": _page("Open", "Open text.", type="insight"),
+        f"{KB}/Entities/People/Wanda Grey.md": _page(
+            "Wanda Grey", "A person.", type="entity", entity_type="person", title="Wanda Grey"
+        ),
+    }
+    monkeypatch.setattr(
+        lifecycle, "tombstoned_paths", lambda _root: frozenset({f"{NOTES}/erased.md"})
+    )
+
+    def answers(name: str, principal: RequestPrincipal) -> list[str]:
+        vault = tmp_path / name / "vault"
+        for rel, text in files.items():
+            (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+            (vault / rel).write_text(text, encoding="utf-8")
+        _reset()
+        with library_scope():
+            epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+        moved = _call(
+            vault, principal, "manage_memory_file", operation="move",
+            old_path=f"{NOTES}/alpha.md", new_path=f"{NOTES}/alpha-moved.md",
+            response_detail="legacy",
+        )
+        entity = _call(
+            vault, principal, "connect_memory", operation="create-entity",
+            name="Wanda Grey", entity_type="person", summary="A person.",
+        )
+        deleted = _call(
+            vault, principal, "manage_memory_file", operation="delete",
+            path=f"{NOTES}/Open", confirm=True, recursive=True,
+        )
+        assert "__error__" not in deleted, deleted
+        assert not (vault / NOTES / "Open").exists()
+        return [_VOLATILE_TEXT.sub("<v>", _text(value)) for value in (moved, entity)]
+
+    assert answers("other", _principal(audience)) == answers("owner", owner_principal())
+
+
+#: Run-specific values in a write's answer: request and receipt ids, hashes,
+#: and timestamps.
+_VOLATILE_TEXT = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,}"
+    r"|\d{4}-\d\d-\d\d[T ][\d:.+Z]+"
+)
+
+
+@pytest.mark.parametrize("detail", ["legacy", "full", "compact"])
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_move_reports_the_links_it_may_see(
+    tmp_path: Path, audience: str, detail: str
+) -> None:
+    """Every linking page is rewritten; the report covers the visible ones."""
+    base = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page("Alpha", "Alpha conclusions."),
+        f"{NOTES}/linker.md": _page("Linker", "See [[Knowledge Base/Notes/alpha]] and [[alpha]]."),
+    }
+    hidden = f"{WITHHELD_DIR}/hidden-linker.md"
+    withheld = {hidden: _page("Hidden Draft", "Also [[Knowledge Base/Notes/alpha]] and [[alpha]].")}
+    vaults = _twins(tmp_path, base, withheld, audience)
+
+    answers = {
+        variant: _VOLATILE_TEXT.sub(
+            "<v>",
+            _text(
+                _call(
+                    vault,
+                    _principal(audience),
+                    "manage_memory_file",
+                    operation="move",
+                    old_path=f"{NOTES}/alpha.md",
+                    new_path=f"{NOTES}/alpha-moved.md",
+                    response_detail=detail,
+                )
+            ),
+        )
+        for variant, vault in vaults.items()
+    }
+
+    assert '"__error__"' not in answers["A"], answers["A"]
+    assert answers["A"] == answers["B"] == answers["C"]
+    assert "[[Knowledge Base/Notes/alpha-moved]]" in (vaults["A"] / hidden).read_text(
+        encoding="utf-8"
+    )
+
+
+INSIGHTS = f"{NOTES}/Insights"
+
+
+def _typed(h1: str, body: str, relation_to: str) -> str:
+    return _page(
+        h1, f"{body}{_UNIT}\n## Relations\n\n- supports [[{relation_to}]]\n",
+        type="insight", status="active",
+    )
+
+
+def _semantic_move_fixture() -> dict[str, str]:
+    return {
+        **_filler(),
+        f"{INSIGHTS}/alpha.md": _typed("Alpha", "Alpha.", f"{INSIGHTS}/beta"),
+        f"{INSIGHTS}/beta.md": _typed("Beta", "Beta.", f"{INSIGHTS}/alpha"),
+        f"{INSIGHTS}/gamma.md": _typed("Gamma", "Gamma.", f"{INSIGHTS}/alpha"),
+    }
+
+
+@pytest.mark.parametrize("detail", [None, "compact", "full", "legacy"])
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
+    tmp_path: Path, audience: str, detail: str | None
+) -> None:
+    """The answer carries nothing the rewrite of a withheld linking page
+    produced: no graph or index outcome, no contract result for it, and the
+    same shape on every later move, of that page or another."""
+    scope = "Notes/Withheld/**, Notes/Insights/Withheld/**"
+    base = {
+        **_semantic_move_fixture(),
+        f"{INSIGHTS}/solo.md": _typed("Solo", "Solo.", f"{INSIGHTS}/alpha"),
+        f"{KB}/log.md": "# Log\n\n",
+    }
+    hidden = f"{INSIGHTS}/Withheld/linker.md"
+    variants = {
+        "B": base,
+        "A": {**base, hidden: _typed("Linker", f"Links [[{INSIGHTS}/gamma]].", f"{INSIGHTS}/alpha")},
+        "C": {**base, hidden: _typed("Linker", f"Links [[{INSIGHTS}/alpha]].", f"{INSIGHTS}/alpha")},
+    }
+    vaults = {
+        variant: _materialize(tmp_path / variant / "vault", files, audience, scope=scope)
+        for variant, files in variants.items()
+    }
+    extra = {} if detail is None else {"response_detail": detail}
+
+    moves = (("gamma", "gamma-x"), ("gamma-x", "gamma-y"), ("solo", "solo-x"))
+
+    def moved(vault: Path) -> list[str]:
+        return [
+            _VOLATILE_TEXT.sub(
+                "<v>",
+                _text(
+                    _call(
+                        vault, _principal(audience), "manage_memory_file", operation="move",
+                        old_path=f"{INSIGHTS}/{old}.md", new_path=f"{INSIGHTS}/{new}.md", **extra,
+                    )
+                ),
+            )
+            for old, new in moves
+        ] + [
+            # The activity log is readable by the mover: its line carries the
+            # figures the mover may see.
+            _VOLATILE_TEXT.sub(
+                "<v>",
+                _text(_call(vault, _principal(audience), "read_memory", path=f"{KB}/log.md")["body"]),
+            )
+        ]
+
+    answers = {variant: moved(vault) for variant, vault in vaults.items()}
+
+    assert '"__error__"' not in _text(answers["A"]), answers["A"]
+    for step in range(len(moves) + 1):
+        assert answers["A"][step] == answers["B"][step], step
+        assert answers["C"][step] == answers["B"][step], step
+    assert f"[[{INSIGHTS}/gamma-y]]" in (vaults["A"] / hidden).read_text(encoding="utf-8")
+
+
+_CLOSURE_TARGETS = {
+    "compliant": _typed("Target X", "P.", f"{INSIGHTS}/alpha"),
+    "non-compliant": _page("Target X", "P.", type="insight", status="active"),
+}
+
+
+@pytest.mark.parametrize("target", sorted(_CLOSURE_TARGETS))
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_move_judges_no_page_only_a_withheld_relation_reaches(
+    tmp_path: Path, audience: str, target: str
+) -> None:
+    """A visible page whose standing a move changes only through a relation a
+    withheld page authors is neither judged nor reported for the mover."""
+    scope = "Notes/Insights/Withheld/**"
+    base = {
+        f"{INSIGHTS}/alpha.md": _typed("Alpha", "A.", f"{INSIGHTS}/target-x"),
+        f"{INSIGHTS}/target-x.md": _CLOSURE_TARGETS[target],
+        f"{INSIGHTS}/zeta.md": _typed("Zeta", "Z.", f"{INSIGHTS}/alpha"),
+    }
+    hidden = f"{INSIGHTS}/Withheld/w.md"
+    variants = {
+        "B": base,
+        "A": {**base, hidden: _page(
+            "W", f"W.{_UNIT}\n## Relations\n\n- supports [[target-x]]\n"
+            f"- supports [[{INSIGHTS}/alpha]]\n", type="insight", status="active",
+        )},
+        "C": {**base, hidden: _typed("W", "W.", f"{INSIGHTS}/alpha")},
+    }
+
+    for detail in (None, "compact", "full", "legacy"):
+        extra = {} if detail is None else {"response_detail": detail}
+        answers = {}
+        for variant, files in variants.items():
+            vault = _materialize(
+                tmp_path / str(detail) / variant / "vault", files, audience, scope=scope
+            )
+            answers[variant] = _VOLATILE_TEXT.sub(
+                "<v>",
+                _text(
+                    _call(
+                        vault, _principal(audience), "manage_memory_file", operation="move",
+                        old_path=f"{INSIGHTS}/zeta.md",
+                        new_path=f"{INSIGHTS}/Other/target-x.md", **extra,
+                    )
+                ),
+            )
+        assert answers["A"] == answers["B"], (detail, answers["A"])
+        assert answers["C"] == answers["B"], detail
+
+
+_UNREWRITTEN_CASES = {
+    # A withheld page's bare link changes resolution because the move makes a
+    # visible stem ambiguous; it links nothing the move rewrites.
+    "ambiguous": ("target-x", "Other/target-x", True),
+    "ambiguous-no-rewrite": ("target-x", "Other/target-x", False),
+    # A move that names the stem a withheld page's bare link guesses, and one
+    # that names another.
+    "guessed": ("quartz-ledger", "Scratch/quartz-ledger", True),
+    "wrong-guess": ("quartz-ledger", "Scratch/other-guess", True),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_UNREWRITTEN_CASES))
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_withheld_page_the_move_does_not_rewrite_never_blocks_it(
+    tmp_path: Path, audience: str, case: str
+) -> None:
+    """A non-compliant withheld page whose own link a move re-resolves, but
+    whose bytes it does not rewrite, is not asserted against the mover."""
+    link, destination, update = _UNREWRITTEN_CASES[case]
+    scope = "Notes/Insights/Withheld/**"
+    base = {
+        f"{INSIGHTS}/alpha.md": _typed("Alpha", "A.", f"{INSIGHTS}/target-x"),
+        f"{INSIGHTS}/target-x.md": _typed("Target X", "P.", f"{INSIGHTS}/alpha"),
+        f"{INSIGHTS}/zeta.md": _typed("Zeta", "Z.", f"{INSIGHTS}/alpha"),
+    }
+    hidden = f"{INSIGHTS}/Withheld/w.md"
+
+    def non_compliant(target: str) -> str:
+        return _page("W", f"W.\n\n## Relations\n\n- supports [[{target}]]\n",
+                     type="insight", status="active")
+
+    variants = {
+        "B": base,
+        "A": {**base, hidden: non_compliant(link)},
+        "C": {**base, hidden: non_compliant(f"{INSIGHTS}/alpha")},
+    }
+    for detail in (None, "compact", "full", "legacy"):
+        extra = {} if detail is None else {"response_detail": detail}
+        answers = {}
+        for variant, files in variants.items():
+            vault = _materialize(
+                tmp_path / str(detail) / variant / "vault", files, audience, scope=scope
+            )
+            answers[variant] = _VOLATILE_TEXT.sub(
+                "<v>",
+                _text(
+                    _call(
+                        vault, _principal(audience), "manage_memory_file", operation="move",
+                        old_path=f"{INSIGHTS}/zeta.md",
+                        new_path=f"{INSIGHTS}/{destination}.md",
+                        update_wikilinks=update, **extra,
+                    )
+                ),
+            )
+            if variant != "B":
+                assert (vault / hidden).read_text(encoding="utf-8") == files[hidden]
+        assert '"__error__"' not in answers["B"], (detail, answers["B"])
+        assert answers["A"] == answers["B"], (detail, answers["A"])
+        assert answers["C"] == answers["B"], detail
+
+
+_GUESSED = "quartz-ledger"
+
+
+def _withheld_linkers(target: str) -> dict[str, tuple[str, str]]:
+    """Withheld pages linking `target`: one the move cannot rewrite cleanly
+    because its contract refuses, one in an append-only tree, and one it can."""
+    return {
+        "non-compliant": (
+            f"{INSIGHTS}/Withheld/w.md",
+            _page("W", f"W.\n\n## Relations\n\n- supports [[{target}]]\n",
+                  type="insight", status="active"),
+        ),
+        "sources": (
+            f"{KB}/Sources/Withheld/s.md",
+            _page("Clipped", f"Mentions [[{target}]] in passing.", type="source"),
+        ),
+        "compliant": (f"{INSIGHTS}/Withheld/w.md", _typed("W", "W.", target)),
+    }
+
+
+@pytest.mark.parametrize("guess", [_GUESSED, "other-guess"])
+@pytest.mark.parametrize("linker", ["non-compliant", "sources", "compliant"])
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_move_skips_a_withheld_linker_it_cannot_rewrite_cleanly(
+    tmp_path: Path, audience: str, linker: str, guess: str
+) -> None:
+    """Moving a page onto a guessed name and away again reads the same whether
+    or not a withheld page links that name. A withheld linker the move cannot
+    rewrite cleanly is left as it is and its link dangles, which the owner's
+    audit reports; one it can rewrite is rewritten."""
+    from exomem import audit as audit_module
+
+    scope = "Notes/Insights/Withheld/**, Sources/Withheld/**"
+    base = {
+        f"{INSIGHTS}/alpha.md": _typed("Alpha", "A.", f"{INSIGHTS}/zeta"),
+        f"{INSIGHTS}/zeta.md": _typed("Zeta", "Z.", f"{INSIGHTS}/alpha"),
+    }
+    hidden, text = _withheld_linkers(_GUESSED)[linker]
+    _neutral_path, neutral = _withheld_linkers(f"{INSIGHTS}/alpha")[linker]
+    variants = {"B": base, "A": {**base, hidden: text}, "C": {**base, hidden: neutral}}
+    moves = ((f"{INSIGHTS}/zeta.md", f"{INSIGHTS}/Scratch/{guess}.md"),
+             (f"{INSIGHTS}/Scratch/{guess}.md", f"{INSIGHTS}/Scratch/moved-on.md"))
+
+    for detail in (None, "compact", "full", "legacy"):
+        extra = {} if detail is None else {"response_detail": detail}
+        answers = {}
+        for variant, files in variants.items():
+            vault = _materialize(
+                tmp_path / str(detail) / variant / "vault", files, audience, scope=scope
+            )
+            answers[variant] = [
+                _VOLATILE_TEXT.sub(
+                    "<v>",
+                    _text(
+                        _call(
+                            vault, _principal(audience), "manage_memory_file", operation="move",
+                            old_path=old, new_path=new, update_wikilinks=True, **extra,
+                        )
+                    ),
+                )
+                for old, new in moves
+            ]
+            if variant == "A":
+                stored = (vault / hidden).read_text(encoding="utf-8")
+                if linker == "compliant" and guess == _GUESSED:
+                    assert "moved-on]]" in stored and _GUESSED not in stored, stored
+                else:
+                    assert stored == text
+                    if guess == _GUESSED and detail is None:
+                        _reset()
+                        with library_scope():
+                            report = audit_module.audit(
+                                vault, categories=["broken_wikilink", "forward_reference"]
+                            )
+                        assert any(
+                            finding.path == hidden and _GUESSED in finding.detail
+                            for finding in report.findings
+                        ), [finding.as_dict() for finding in report.findings]
+        assert '"__error__"' not in _text(answers["B"]), (detail, answers["B"])
+        assert answers["A"] == answers["B"], (detail, answers["A"])
+        assert answers["C"] == answers["B"], detail
+
+
+@pytest.mark.parametrize("guess", [_GUESSED, "other-guess"])
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_file_delete_counts_the_links_it_may_see(
+    tmp_path: Path, audience: str, guess: str
+) -> None:
+    """Deleting a page moved onto a guessed name reads the same whether or not
+    a withheld page links that name: the inbound refusal, the forced delete
+    and the activity log count only the links the writer may see. The
+    withheld link is orphaned as `force_orphan` would, and the owner's audit
+    reports it."""
+    from exomem import audit as audit_module
+
+    scope = "Notes/Insights/Withheld/**"
+    base = {
+        f"{INSIGHTS}/alpha.md": _typed("Alpha", "A.", f"{INSIGHTS}/zeta"),
+        f"{INSIGHTS}/zeta.md": _typed("Zeta", "Z.", f"{INSIGHTS}/alpha"),
+        f"{KB}/log.md": "# Log\n\n",
+    }
+    hidden = f"{INSIGHTS}/Withheld/w.md"
+    variants = {
+        "B": base,
+        "A": {**base, hidden: _typed("W", "W.", _GUESSED)},
+        "C": {**base, hidden: _typed("W", "W.", f"{INSIGHTS}/alpha")},
+    }
+    target = f"{INSIGHTS}/Scratch/{guess}.md"
+
+    for detail in (None, "compact", "full", "legacy"):
+        extra = {} if detail is None else {"response_detail": detail}
+        answers = {}
+        for variant, files in variants.items():
+            vault = _materialize(
+                tmp_path / str(detail) / variant / "vault", files, audience, scope=scope
+            )
+            principal = _principal(audience)
+            steps = [
+                _call(vault, principal, "manage_memory_file", operation="move",
+                      old_path=f"{INSIGHTS}/zeta.md", new_path=target, **extra),
+                _call(vault, principal, "manage_memory_file", operation="delete",
+                      path=target, confirm=True, **extra),
+                _call(vault, principal, "manage_memory_file", operation="delete",
+                      path=target, confirm=True, force_orphan=True, **extra),
+                _call(vault, principal, "read_memory", path=f"{KB}/log.md")["body"],
+            ]
+            answers[variant] = [
+                re.sub(r"_trash/[\d-]+/\d{6}-", "_trash/<v>-", _VOLATILE_TEXT.sub("<v>", _text(step)))
+                for step in steps
+            ]
+            if variant == "A" and guess == _GUESSED and detail is None:
+                assert (vault / hidden).read_text(encoding="utf-8") == files[hidden]
+                _reset()
+                with library_scope():
+                    report = audit_module.audit(
+                        vault, categories=["broken_wikilink", "forward_reference"]
+                    )
+                assert any(
+                    finding.path == hidden and _GUESSED in finding.detail
+                    for finding in report.findings
+                ), [finding.as_dict() for finding in report.findings]
+        assert "INBOUND_LINKS" in answers["B"][1], (detail, answers["B"][1])
+        assert answers["A"] == answers["B"], (detail, answers["A"])
+        assert answers["C"] == answers["B"], detail
+
+
+def test_the_owner_is_still_refused_a_linker_it_cannot_rewrite(tmp_path: Path) -> None:
+    base = {
+        f"{INSIGHTS}/alpha.md": _typed("Alpha", "A.", f"{INSIGHTS}/zeta"),
+        f"{INSIGHTS}/zeta.md": _typed("Zeta", "Z.", f"{INSIGHTS}/alpha"),
+    }
+    for linker in ("non-compliant", "sources"):
+        hidden, text = _withheld_linkers(f"{INSIGHTS}/zeta")[linker]
+        vault = _materialize(
+            tmp_path / linker / "vault", {**base, hidden: text}, "external",
+            scope="Notes/Insights/Withheld/**, Sources/Withheld/**",
+        )
+        answer = _call(
+            vault, None, "manage_memory_file", operation="move",
+            old_path=f"{INSIGHTS}/zeta.md", new_path=f"{INSIGHTS}/zeta-x.md",
+            update_wikilinks=True,
+        )
+        assert answer.get("__error__"), (linker, answer)
+        assert (vault / hidden).read_text(encoding="utf-8") == text
+
+
+def test_the_owner_still_writes_to_a_page_withheld_from_others(tmp_path: Path) -> None:
+    base, withheld = _write_door_fixture()
+    vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external", scope=_WRITE_SCOPE)
+    command, kwargs = _WRITE_DOORS["append"]
+
+    answer = _call(vault, None, command, **kwargs)
+
+    assert "__error__" not in answer, answer
+    assert "More text." in (vault / _WITHHELD_TARGET).read_text(encoding="utf-8")
+
+
+def test_a_call_no_surface_bound_keeps_the_write_it_had(tmp_path: Path) -> None:
+    """An in-process call outside any request has no audience to decide for.
+
+    The derived and write-door filters apply to a bound caller other than the
+    owner; with nothing bound they stand aside, and the dispatcher's entry
+    filter still decides what such a call may read.
+    """
+    base, withheld = _write_door_fixture()
+    vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external", scope=_WRITE_SCOPE)
+    command, kwargs = _WRITE_DOORS["append"]
+    _reset()
+
+    assert egress.restricted_release_filter(vault) is None
+    assert egress.write_target_withheld(vault, _WITHHELD_TARGET) is False
+    writer_lease.invoke_command(_COMMANDS[command], vault, **kwargs)
+
+    assert "More text." in (vault / _WITHHELD_TARGET).read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Counts and ranks follow the filtered list; whole-vault aggregates are the owner's
+# ---------------------------------------------------------------------------
+
+_RESTRICTED = {"available": False, "reason": "audience_restricted"}
+_VOLATILE_KEYS = frozenset({"first_surfaced_at"})
+
+
+def _stable(value: Any) -> Any:
+    """Drop per-vault timestamps that differ between two otherwise equal runs."""
+    if isinstance(value, dict):
+        return {k: _stable(v) for k, v in value.items() if k not in _VOLATILE_KEYS}
+    if isinstance(value, list):
+        return [_stable(v) for v in value]
+    return value
+
+
+_REVIEW_MODES = ("attention", "activation", "relation-debt", "stale", "contradiction")
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_review_ranks_read_as_if_the_withheld_page_were_absent(
+    tmp_path: Path, audience: str
+) -> None:
+    base, withheld = _inbound_linker()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    principal = _principal(audience)
+
+    answers = {
+        variant: {
+            mode: _stable(_call(vault, principal, "review_memory", mode=mode))
+            for mode in _REVIEW_MODES
+        }
+        for variant, vault in vaults.items()
+    }
+
+    for mode in _REVIEW_MODES:
+        assert "__error__" not in answers["A"][mode], answers["A"][mode]
+        assert _text(answers["A"][mode]) == _text(answers["B"][mode]), mode
+        assert _text(answers["C"][mode]) == _text(answers["B"][mode]), mode
+    ranks = [
+        reason["rank"]
+        for item in answers["A"]["relation-debt"]["items"]
+        for reason in item["reasons"]
+    ]
+    assert ranks == list(range(1, len(ranks) + 1))
+    assert answers["A"]["activation"]["coverage"] == _RESTRICTED
+    owner = _call(vaults["A"], None, "review_memory", mode="activation")
+    assert owner["coverage"]["eligible_pages"] > 0
+
+
+_AGGREGATES: dict[str, tuple[str, dict[str, Any]]] = {
+    "review-audit": ("review_memory", {"mode": "audit", "detail": "full"}),
+    "maintain-audit": ("maintain_memory", {"mode": "audit", "detail": "full"}),
+    "infer-relations": ("schema_memory", {"operation": "infer", "subject": "relations"}),
+    "infer-categories": ("schema_memory", {"operation": "infer", "subject": "categories"}),
+    "diff-relations-corpus": ("schema_memory", {"operation": "diff", "subject": "relations"}),
+    "diff-categories-corpus": ("schema_memory", {"operation": "diff", "subject": "categories"}),
+}
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_whole_vault_aggregates_are_served_to_the_owner_only(
+    tmp_path: Path, audience: str
+) -> None:
+    base, withheld = _inbound_linker()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    principal = _principal(audience)
+
+    answers = {
+        variant: {
+            label: _call(vault, principal, command, **kwargs)
+            for label, (command, kwargs) in _AGGREGATES.items()
+        }
+        for variant, vault in vaults.items()
+    }
+
+    for label in _AGGREGATES:
+        assert {k: answers["A"][label].get(k) for k in _RESTRICTED} == _RESTRICTED, label
+        assert _text(answers["A"][label]) == _text(answers["B"][label]), label
+        assert _text(answers["C"][label]) == _text(answers["B"][label]), label
+    owner = {
+        label: _call(vaults["A"], None, command, **kwargs)
+        for label, (command, kwargs) in _AGGREGATES.items()
+    }
+    assert "findings" in owner["review-audit"]
+    assert "page_count" in owner["infer-categories"]
+    assert all(answer.get("available") is not False for answer in owner.values())
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_relation_queue_totals_are_the_owners_under_a_governed_policy(
+    tmp_path: Path, audience: str
+) -> None:
+    base, withheld = _inbound_linker()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    principal = _principal(audience)
+
+    answers = {
+        variant: _call(vault, principal, "review_memory", mode="relation-queue")
+        for variant, vault in vaults.items()
+    }
+
+    assert answers["A"] == answers["B"] == answers["C"] == _RESTRICTED
+    owner = _call(vaults["A"], None, "review_memory", mode="relation-queue")
+    assert owner["coverage"]["eligible_pages"] > 0
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_inbound_link_counts_follow_the_listed_links(tmp_path: Path, audience: str) -> None:
+    base, withheld = _inbound_linker()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    principal = _principal(audience)
+
+    answers = {
+        variant: {
+            target: _call(vault, principal, "connect_memory", operation="inbound-links", target=target)
+            for target in (f"{NOTES}/lonely.md", f"{NOTES}/beta.md")
+        }
+        for variant, vault in vaults.items()
+    }
+
+    assert _text(answers["A"]) == _text(answers["B"])
+    assert _text(answers["C"]) == _text(answers["B"])
+    for answer in answers["A"].values():
+        assert answer["count"] == len(answer["inbound"])
+    owner = _call(
+        vaults["A"], None, "connect_memory", operation="inbound-links", target=f"{NOTES}/lonely.md"
+    )
+    assert owner["count"] == 1
+
+
+def _term_only_withheld() -> tuple[dict[str, str], dict[str, str]]:
+    """Only a withheld page contains the query term; a visible page shares a second term."""
+    base = {
+        **_filler(),
+        f"{NOTES}/visible.md": _page(
+            "Visible Note", "Quarterly review mentions pricing once.", type="insight"
+        ),
+    }
+    withheld = {
+        f"{WITHHELD_DIR}/memo.md": _page(
+            "Memo", "Confidential zephyrine pricing terms for the review.", type="insight"
+        )
+    }
+    return base, withheld
+
+
+_ASK_SURFACES: dict[str, dict[str, Any]] = {
+    "compact": {"query": "zephyrine", "limit": 5},
+    "explain": {"query": "zephyrine", "limit": 5, "explain": True},
+    "full": {"query": "pricing review", "limit": 5, "detail": "full"},
+    "explain-shared": {"query": "pricing review", "limit": 5, "explain": True},
+}
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_recall_diagnostics_read_as_if_the_withheld_page_were_absent(
+    tmp_path: Path, audience: str
+) -> None:
+    base, withheld = _term_only_withheld()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    principal = _principal(audience)
+
+    answers = {}
+    for variant, vault in vaults.items():
+        _call(vault, principal, "ask_memory", **_ASK_SURFACES["compact"])  # warm
+        answers[variant] = {
+            label: _call(vault, principal, "ask_memory", **kwargs)
+            for label, kwargs in _ASK_SURFACES.items()
+        }
+
+    for label in _ASK_SURFACES:
+        answer = answers["A"][label]
+        assert "__error__" not in _text(answer), answer
+        assert "retrieval_profile" not in _text(answer), answer
+        assert "ranking_explanation" not in _text(answer), answer
+        assert _text(answer) == _text(answers["B"][label]), label
+        assert _text(answers["C"][label]) == _text(answers["B"][label]), label
+    owner = _call(vaults["A"], None, "ask_memory", **_ASK_SURFACES["explain"])
+    assert "retrieval_profile" in owner
+
+
+# ---------------------------------------------------------------------------
+# Visible links resolve for a restricted reader as the vault it sees would
+# ---------------------------------------------------------------------------
+
+_LINKS_TO = "See [[{t}]] for background on the rollout.\n\n## Relations\n\n- supports [[{t}]]\n"
+
+
+def _stem_collision() -> tuple[dict[str, str], dict[str, str]]:
+    """A withheld page shares the stem a visible link names."""
+    base = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page("Alpha", _LINKS_TO.format(t="beta"), type="insight"),
+        f"{NOTES}/beta.md": _page("Beta", "Beta rollout background.", type="insight"),
+    }
+    withheld = {f"{WITHHELD_DIR}/beta.md": _page("Hidden Draft", "Withheld body text.", type="insight")}
+    return base, withheld
+
+
+def _title_collision() -> tuple[dict[str, str], dict[str, str]]:
+    """A withheld page shares the title a visible link names."""
+    base = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page("Alpha", _LINKS_TO.format(t="Beta Topic"), type="insight"),
+        f"{NOTES}/2026-01-01-beta-topic.md": _page(
+            "Beta Topic", "Beta topic rollout background.", type="insight", title="Beta Topic"
+        ),
+    }
+    withheld = {
+        f"{WITHHELD_DIR}/other-page.md": _page(
+            "Beta Topic", "Withheld body text.", type="insight", title="Beta Topic"
+        )
+    }
+    return base, withheld
+
+
+_LINK_SCENARIOS = {
+    "stem": (_stem_collision, f"{NOTES}/beta.md"),
+    "title": (_title_collision, f"{NOTES}/2026-01-01-beta-topic.md"),
+    "stem-beats-title": (_stem_beats_title, f"{NOTES}/g-page.md"),
+}
+
+
+def _link_surfaces(target: str) -> dict[str, tuple[str, dict[str, Any]]]:
+    alpha = f"{NOTES}/alpha.md"
+    return {
+        "graph-context-alpha": ("connect_memory", {"operation": "graph-context", "path": alpha}),
+        "graph-context-alpha-2": (
+            "connect_memory",
+            {"operation": "graph-context", "path": alpha, "depth": 2},
+        ),
+        "graph-context-target": ("connect_memory", {"operation": "graph-context", "path": target}),
+        "context-alpha": ("connect_memory", {"operation": "context", "path": alpha}),
+        "inbound-target": ("connect_memory", {"operation": "inbound-links", "target": target}),
+        "suggest-alpha": ("connect_memory", {"operation": "suggest-relations", "path": alpha}),
+        "relation-queue": ("review_memory", {"mode": "relation-queue"}),
+        "read-alpha": ("read_memory", {"path": alpha, "links": True}),
+        "read-target": ("read_memory", {"path": target, "links": True}),
+    }
+
+
+@pytest.mark.parametrize("scenario", sorted(_LINK_SCENARIOS))
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_link_resolution_reads_as_if_the_withheld_page_were_absent(
+    tmp_path: Path, audience: str, scenario: str
+) -> None:
+    fixture, target = _LINK_SCENARIOS[scenario]
+    base, withheld = fixture()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    principal = _principal(audience)
+    surfaces = _link_surfaces(target)
+
+    answers = {
+        variant: {
+            label: _call(vault, principal, command, **kwargs)
+            for label, (command, kwargs) in surfaces.items()
+        }
+        for variant, vault in vaults.items()
+    }
+
+    assert not _names_withheld(answers["A"])
+    for label in surfaces:
+        assert "__error__" not in answers["A"][label], answers["A"][label]
+        assert _text(answers["A"][label]) == _text(answers["B"][label]), label
+        assert _text(answers["C"][label]) == _text(answers["B"][label]), label
+    edges = answers["A"]["graph-context-alpha"]["graph"]["edges"]
+    assert any(edge["dst_key"] == f"file:{target}" for edge in edges), edges
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_an_empty_provenance_list_stays_as_written(tmp_path: Path, audience: str) -> None:
+    base = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page(
+            "Alpha", "See [[zeta-plan]] for background.", type="insight", sources=[]
+        ),
+    }
+    withheld = {f"{WITHHELD_DIR}/zeta-plan.md": _page("Hidden Draft", "Withheld body text.")}
+    vaults = _twins(tmp_path, base, withheld, audience)
+
+    answers = {
+        variant: _call(
+            vault, _principal(audience), "read_memory", path=f"{NOTES}/alpha.md", links=True
+        )
+        for variant, vault in vaults.items()
+    }
+
+    assert answers["A"]["frontmatter"]["sources"] == []
+    assert _text(answers["A"]["frontmatter"]) == _text(answers["B"]["frontmatter"])
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_bare_link_only_a_withheld_page_answers_reads_as_unresolved(
+    tmp_path: Path, audience: str
+) -> None:
+    """The link is listed as an unresolved one is when the page is absent."""
+    base = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page(
+            "Alpha",
+            "See [[secret]] and [[beta]] for background.",
+            type="insight",
+            sources=["[[secret]]"],
+        ),
+        f"{NOTES}/beta.md": _page("Beta", "Beta rollout background.", type="insight"),
+    }
+    withheld = {f"{WITHHELD_DIR}/secret.md": _page("Hidden Draft", "Withheld body text.")}
+    vaults = _twins(tmp_path, base, withheld, audience)
+
+    answers = {
+        variant: _call(
+            vault, _principal(audience), "read_memory", path=f"{NOTES}/alpha.md", links=True
+        )
+        for variant, vault in vaults.items()
+    }
+
+    assert answers["B"]["links"]["outbound"] == ["secret", "beta"]
+    assert _text(answers["A"]) == _text(answers["B"])
+    assert _text(answers["C"]) == _text(answers["B"])
+
+
+_RECALL_GRAPH_SURFACES = {
+    "ask-enrich-full": ("ask_memory", {"query": "Alpha", "graph_enrich": True, "detail": "full"}),
+    "ask-enrich": ("ask_memory", {"query": "alpha rollout", "graph_enrich": True}),
+    "ask-deep": ("ask_memory", {"query": "Alpha", "deep": True, "graph_enrich": True}),
+    "context-query": ("connect_memory", {"operation": "context", "query": "Alpha"}),
+    "evolution": ("review_memory", {"mode": "evolution", "query": "Alpha"}),
+}
+
+
+@pytest.mark.parametrize("scenario", sorted(_LINK_SCENARIOS))
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_recall_runs_no_graph_lane(tmp_path: Path, audience: str, scenario: str) -> None:
+    """Graph hops follow whole-vault link resolution, so a restricted caller
+    under a governed policy recalls without them."""
+    fixture, _target = _LINK_SCENARIOS[scenario]
+    base, withheld = fixture()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    principal = _principal(audience)
+
+    answers = {
+        variant: {
+            label: _stable(_call(vault, principal, command, **kwargs))
+            for label, (command, kwargs) in _RECALL_GRAPH_SURFACES.items()
+        }
+        for variant, vault in vaults.items()
+    }
+
+    assert not _names_withheld(answers["A"])
+    for label in _RECALL_GRAPH_SURFACES:
+        assert "__error__" not in answers["A"][label], answers["A"][label]
+        assert _text(answers["A"][label]) == _text(answers["B"][label]), label
+        assert _text(answers["C"][label]) == _text(answers["B"][label]), label
+    assert "graph_hop" not in _text(answers["A"])
+
+
+def test_the_owner_still_recalls_through_the_graph_lane(tmp_path: Path) -> None:
+    base, withheld = _stem_collision()
+    base[f"{NOTES}/alpha.md"] = _page(
+        "Alpha", _LINKS_TO.format(t="Knowledge Base/Notes/beta"), type="insight"
+    )
+    vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")
+
+    owner = _call(vault, None, "ask_memory", query="Alpha", graph_enrich=True, detail="full")
+
+    assert "graph_hop" in _text(owner), owner
+
+
+def _relation_review_fixture() -> tuple[dict[str, str], dict[str, str]]:
+    base = {
+        **_filler(),
+        f"{NOTES}/alpha.md": _page("Alpha", _LINKS_TO.format(t="beta"), type="insight"),
+        f"{NOTES}/beta.md": _page("Beta", "Beta rollout background.", type="insight"),
+    }
+    withheld = {f"{WITHHELD_DIR}/other-page.md": _page("Hidden Draft", "Withheld body text.")}
+    return base, withheld
+
+
+def _relation_review_calls(ref: str) -> dict[str, tuple[str, dict[str, Any]]]:
+    alpha = f"{NOTES}/alpha.md"
+    return {
+        "queue": ("review_memory", {"mode": "relation-queue"}),
+        "suggest-visible": ("connect_memory", {"operation": "suggest-relations", "path": alpha}),
+        "suggest-withheld": (
+            "connect_memory",
+            {"operation": "suggest-relations", "path": f"{WITHHELD_DIR}/other-page.md"},
+        ),
+        "suggest-missing": (
+            "connect_memory",
+            {"operation": "suggest-relations", "path": f"{NOTES}/no-such-page.md"},
+        ),
+        "triage": (
+            "triage_memory",
+            {"ref": ref, "action": "dismiss", "source_path": alpha},
+        ),
+        "accept": (
+            "connect_memory",
+            {
+                "operation": "accept-relation",
+                "ref": ref,
+                "path": alpha,
+                "expected_hash": "0" * 64,
+                "why": "reviewed",
+            },
+        ),
+    }
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_relation_review_is_the_owners_under_a_governed_policy(
+    tmp_path: Path, audience: str
+) -> None:
+    """The relation queue, relation proposals and their triage and accept are
+    owner work: another audience is refused before anything is read."""
+    from exomem import relation_queue
+
+    base, withheld = _relation_review_fixture()
+    vaults = _twins(tmp_path, base, withheld, audience)
+    owner_queue = _call(vaults["A"], None, "review_memory", mode="relation-queue")
+    item = next(
+        item for group in owner_queue["groups"] for item in group["items"]
+    )
+    calls = _relation_review_calls(item["ref"])
+
+    answers = {
+        variant: {
+            label: _call(vault, _principal(audience), command, **kwargs)
+            for label, (command, kwargs) in calls.items()
+        }
+        for variant, vault in vaults.items()
+    }
+
+    refused = {"available": False, "reason": "audience_restricted"}
+    for label in ("queue", "suggest-visible", "suggest-withheld", "suggest-missing"):
+        assert answers["A"][label] == refused, (label, answers["A"][label])
+    for label in ("triage", "accept"):
+        assert answers["A"][label]["message"].startswith("AUDIENCE_RESTRICTED"), answers["A"][label]
+    assert _text(answers["A"]) == _text(answers["B"]) == _text(answers["C"])
+    assert relation_queue.is_relation_ref(item["ref"])
+    with request_scope(_principal(audience)):
+        direct = commands.op_suggest_relations(vaults["A"], path=f"{NOTES}/alpha.md")
+    assert direct == refused
+
+
+def test_the_owner_still_reviews_relations_under_a_governed_policy(tmp_path: Path) -> None:
+    base, withheld = _relation_review_fixture()
+    vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")
+
+    queue = _call(vault, None, "review_memory", mode="relation-queue")
+    suggested = _call(
+        vault, None, "connect_memory", operation="suggest-relations", path=f"{NOTES}/alpha.md"
+    )
+
+    assert queue["status"] == "available" and queue["groups"], queue
+    assert "__error__" not in suggested and "available" not in suggested, suggested
+
+
+def test_the_owner_still_resolves_links_over_every_page(tmp_path: Path) -> None:
+    base, withheld = _stem_collision()
+    vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")
+
+    owner = _call(
+        vault, None, "connect_memory", operation="graph-context", path=f"{NOTES}/alpha.md"
+    )
+
+    # Over the whole vault the bare link is ambiguous, so no edge reaches beta.
+    assert not any(
+        edge["dst_key"] == f"file:{NOTES}/beta.md" for edge in owner["graph"]["edges"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# Activation resolves a turn over the anchors the caller may see
+# ---------------------------------------------------------------------------
+
+
+def _hub(h1: str, body: str, **frontmatter: Any) -> str:
+    return _page(h1, body, type="hub", tags=["hub"], **frontmatter)
+
+
+def _activation_base(hub: str) -> dict[str, str]:
+    return {
+        **_filler(),
+        f"{NOTES}/orion-status.md": _page(
+            "Orion Status",
+            f"The Orion Program launch slipped two weeks. [[{NOTES}/orion-program]]",
+            type="insight",
+        ),
+        f"{NOTES}/orion-program.md": hub,
+    }
+
+
+_PROGRAM_HUB = _hub(
+    "Orion Program", f"Hub for the Orion Program. [[{NOTES}/orion-status]]", title="Orion Program"
+)
+_ACTIVATION_SCENARIOS: dict[str, tuple[str, dict[str, str]]] = {
+    "same-title": (
+        _PROGRAM_HUB,
+        {f"{WITHHELD_DIR}/orion-private.md": _hub("Orion Program", "Withheld body text.", title="Orion Program")},
+    ),
+    "rarity": (
+        _PROGRAM_HUB,
+        {
+            f"{WITHHELD_DIR}/orion-side-{index}.md": _hub(
+                f"Orion Side {index}", "Withheld body text.", title=f"Orion Side {index}"
+            )
+            for index in range(3)
+        },
+    ),
+    "derived-alias": (
+        _hub(
+            "Orion — Launch Plan",
+            f"Hub for the Orion launch. [[{NOTES}/orion-status]]",
+            title="Orion — Launch Plan",
+        ),
+        {f"{WITHHELD_DIR}/orion-private.md": _hub("Orion", "Withheld body text.", title="Orion")},
+    ),
+    "alias": (
+        _hub(
+            "Orion Program",
+            f"Hub for the Orion Program. [[{NOTES}/orion-status]]",
+            title="Orion Program",
+            aliases=["OP-7"],
+        ),
+        {
+            f"{WITHHELD_DIR}/orion-private.md": _hub(
+                "Private Thing", "Withheld body text.", title="Private Thing", aliases=["OP-7"]
+            )
+        },
+    ),
+    "withheld-only": (
+        _PROGRAM_HUB,
+        {
+            f"{WITHHELD_DIR}/nimbus-plan.md": _hub(
+                "Nimbus Plan", "Withheld body text.", title="Nimbus Plan"
+            )
+        },
+    ),
+}
+_TURNS = (
+    "What is the status of the Orion Program?",
+    "orion",
+    "Tell me about OP-7",
+    "What slipped in the Orion launch?",
+    "What is in the Nimbus Plan?",
+)
+
+
+def _activated(vault: Path, principal: RequestPrincipal | None) -> dict[str, Any]:
+    from exomem import lexstore, working_set_index, working_set_runtime
+
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).reset()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    answers = {}
+    for turn in _TURNS:
+        packet = _call(vault, principal, "activate_context", turn=turn)
+        answers[turn] = {
+            key: value
+            for key, value in packet.items()
+            if key not in {"timings", "continuity", "generation"}
+        }
+        answers[turn]["generation"] = sorted((packet.get("generation") or {}).keys())
+    return answers
+
+
+@pytest.mark.parametrize("scenario", sorted(_ACTIVATION_SCENARIOS))
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_activation_reads_as_if_the_withheld_anchor_were_absent(
+    tmp_path: Path, audience: str, scenario: str
+) -> None:
+    hub, withheld = _ACTIVATION_SCENARIOS[scenario]
+    vaults = _twins(tmp_path, _activation_base(hub), withheld, audience)
+    principal = _principal(audience)
+
+    answers = {variant: _activated(vault, principal) for variant, vault in vaults.items()}
+
+    assert not _names_withheld(answers["A"])
+    for turn in _TURNS:
+        packet = answers["A"][turn]
+        assert "freshness_key" not in packet["generation"]
+        assert (packet.get("abstention") or {}).get("reason") != "withheld", packet
+        assert not [m for m in packet.get("missing") or () if m.get("reason") == "withheld"]
+        assert _text(packet) == _text(answers["B"][turn]), turn
+        assert _text(answers["C"][turn]) == _text(answers["B"][turn]), turn
+
+
+def test_the_owner_still_activates_a_page_withheld_from_others(tmp_path: Path) -> None:
+    hub, withheld = _ACTIVATION_SCENARIOS["withheld-only"]
+    vault = _materialize(tmp_path / "vault", {**_activation_base(hub), **withheld}, "external")
+
+    answers = _activated(vault, None)
+
+    packet = answers["What is in the Nimbus Plan?"]
+    assert [anchor["path"] for anchor in packet["anchors"]] == [f"{WITHHELD_DIR}/nimbus-plan.md"]
+    assert "freshness_key" in packet["generation"]
+    assert "index_generation" in packet["generation"]
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_packet_and_its_token_carry_no_index_generation(
+    tmp_path: Path, audience: str
+) -> None:
+    """The index generation advances on every write, withheld pages included."""
+    from exomem import lexstore, working_set_index, working_set_runtime
+
+    hub, withheld = _ACTIVATION_SCENARIOS["same-title"]
+    vault = _materialize(tmp_path / "vault", {**_activation_base(hub), **withheld}, audience)
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).reset()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+
+    turn = "What is the status of the Orion Program?"
+    restricted = _call(vault, _principal(audience), "activate_context", turn=turn)
+    owner = _call(vault, None, "activate_context", turn=turn)
+    # The token as minted, before the dispatcher's terminal filter.
+    _reset()
+    with request_scope(_principal(audience)):
+        minted = commands.op_activate_context(vault, turn=turn)
+
+    assert owner["generation"]["index_generation"] > 0
+    assert "index_generation" not in restricted["generation"]
+    assert "index_generation" not in minted["generation"]
+    decoded = working_set_runtime.decode_continuity(minted.get("continuity"))
+    assert decoded is not None and decoded["generation"] == 0, minted.get("continuity")
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_reclassification_proposal_counts_the_links_it_may_see(
+    tmp_path: Path, audience: str
+) -> None:
+    """A proposal to reclassify a visible Source reports the references the
+    writer may see, so a withheld page linking that Source leaves no trace."""
+    source = f"{KB}/Sources/Web/target-source.md"
+    base = {
+        source: _page("Target Source", "Body.", type="source", source_type="article"),
+        f"{INSIGHTS}/visible-linker.md": _typed("Visible", "V.", source[:-3]),
+    }
+    hidden = f"{INSIGHTS}/Withheld/w.md"
+    variants = {
+        "B": base,
+        "A": {**base, hidden: _typed("W", "W.", source[:-3])},
+        "C": {**base, hidden: _typed("W", "W.", f"{INSIGHTS}/visible-linker")},
+    }
+    answers = {}
+    for variant, files in variants.items():
+        vault = _materialize(
+            tmp_path / variant / "vault", files, audience, scope="Notes/Insights/Withheld/**"
+        )
+        answers[variant] = _call(
+            vault, _principal(audience), "manage_memory_file",
+            operation="propose-reclassification", path=source, source_kind="article",
+        )
+
+    assert "__error__" not in answers["B"], answers["B"]
+    assert answers["A"] == answers["B"]
+    assert answers["C"] == answers["B"]

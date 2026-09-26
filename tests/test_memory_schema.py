@@ -818,10 +818,16 @@ def test_infer_census_is_refused_to_a_restricted_caller_on_every_path(
         for scope in ({}, {"project": "atlas"}):
             reset()
             with request_scope(external):
+                # Under a governed policy a restricted caller is refused the
+                # whole inference, a whole-vault aggregate like the census.
                 census = commands.op_schema_memory(
                     vault, operation="infer", subject="relations", **scope
-                )["census"]
-            assert census == {"available": False, "reason": "audience_restricted"}, (
+                )
+            assert census == {
+                "subject": "relations",
+                "available": False,
+                "reason": "audience_restricted",
+            }, (
                 built,
                 scope,
             )

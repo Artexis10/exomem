@@ -40,6 +40,7 @@ from .vault import (
     render_wikilink_target,
     resolve_filename_slug,
     rotate_log_if_needed,
+    writer_link_visibility,
     yaml_scalar,
 )
 
@@ -89,6 +90,25 @@ class LinkError(Exception):
         if self.candidates:
             value["candidates"] = self.candidates
         return value
+
+
+def _entity_exists_reason(vault_root: Path, rel_entity: str) -> str:
+    """The occupied-destination refusal, naming no path to a restricted writer.
+
+    For a writer other than the owner the destination may be occupied by a
+    page it may not see; the refusal is then the same whatever occupies it.
+    """
+    from .governance import egress
+
+    if egress.governed_release_filter(vault_root) is not None:
+        return (
+            "an entity page already exists at this name's path. Entities are "
+            "create-only via `link`; use `replace` to supersede."
+        )
+    return (
+        f"{rel_entity!r} already exists. Entities are create-only via `link`; "
+        "use `replace` to supersede."
+    )
 
 
 def _legacy_link(
@@ -182,9 +202,8 @@ def _legacy_link(
         raise LinkError(
             code="ENTITY_EXISTS",
             missing=["name"],
-            reason=(
-                f"{entity_path.relative_to(vault_root).as_posix()!r} already exists. "
-                "Entities are create-only via `link`; use `replace` to supersede."
+            reason=_entity_exists_reason(
+                vault_root, entity_path.relative_to(vault_root).as_posix()
             ),
         )
 
@@ -511,6 +530,7 @@ def _normalize_connections(
     """
     if not connections:
         return [], []
+    visible = writer_link_visibility(vault_root)
     out: list[str] = []
     seen: set[str] = set()
     warnings: list[str] = []
@@ -519,7 +539,7 @@ def _normalize_connections(
         if not c:
             continue
         canonical, warning = normalize_wikilink(
-            c, vault_root, resolver=resolver, strict=False
+            c, vault_root, resolver=resolver, strict=False, visible=visible
         )
         if warning:
             warnings.append(warning)
@@ -694,12 +714,7 @@ def link(
         vault_root, entity_path.relative_to(vault_root).as_posix()
     )
     if entity_path.exists():
-        raise LinkError(
-            "ENTITY_EXISTS",
-            ["name"],
-            f"{rel_entity!r} already exists. Entities are create-only via `link`; "
-            "use `replace` to supersede.",
-        )
+        raise LinkError("ENTITY_EXISTS", ["name"], _entity_exists_reason(vault_root, rel_entity))
     rel_entity_no_ext = rel_entity.removesuffix(".md")
     resolver = find_module.writer_resolver_snapshot(vault_root)
     resolver.add_pending(rel_entity_no_ext, title=display_name)

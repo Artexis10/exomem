@@ -25,6 +25,7 @@ from exomem import (
     freshness,
     lexstore,
     memory_refs,
+    working_set,
     working_set_heat,
     working_set_index,
     working_set_runtime,
@@ -374,6 +375,28 @@ def test_a_withheld_hot_page_is_absent_for_a_guest(heat_vault: Path) -> None:
     served = {item.get("path") for item in packet["anchors"]}
     served |= {entry["path"] for entry in packet["recent_context"]}
     assert CARRY_PAGE not in served
+
+
+def test_a_direct_compile_ranks_recent_context_over_the_guests_view(heat_vault: Path) -> None:
+    """`compile_packet` narrows heat to the reader's view itself, for every
+    field that ranks it, not only the one the hot-page carry reads. A caller
+    that skips `working_set_runtime.serve`'s pre-filter must still get a
+    `recent_context` in which a withheld page is absent."""
+    _traced_commit(heat_vault, [SLED])
+    _traced_commit(heat_vault, [CARRY_PAGE])
+    write_scope(heat_vault, paths="Knowledge Base/Notes/Research/*", name="Research")
+    write_rule(heat_vault, ceiling=0)
+    _reset_caches()
+    working_set_runtime.reset_caches_for_tests()
+
+    with request_scope(_external()):
+        packet = working_set.compile_packet(
+            heat_vault,
+            turn="continue",
+            index=working_set_index.WorkingSetIndex(heat_vault),
+        )
+
+    assert CARRY_PAGE not in {entry["path"] for entry in packet["recent_context"]}
 
 
 def test_a_named_rare_anchor_wins_over_the_hottest_page(heat_vault: Path) -> None:
