@@ -347,7 +347,9 @@ def _augment_deletion_observation(
 
     namespace_absent_confirmed = not observation.namespace_exists
     namespace = namespace_name(row.cell_id)
-    no_pv_claims_namespace = cluster.pv_absent_for_namespace(namespace)
+    # Probe in deletion order: an unavailable later service must not block
+    # an earlier cleanup action. Unreached proofs stay false (fail closed).
+    no_pv_claims_namespace = namespace_absent_confirmed and cluster.pv_absent_for_namespace(namespace)
     # Hetzner is asked only once the namespace and every PV claim are gone,
     # since the volume cannot be released before that.
     hetzner_volume_absent = row.volume_id is None or (
@@ -358,9 +360,11 @@ def _augment_deletion_observation(
     pv_absent_confirmed = no_pv_claims_namespace and hetzner_volume_absent
 
     prefix = f"cells/{row.cell_id}/"
-    backup_objects_absent_confirmed = len(object_storage.list_object_versions(prefix)) == 0
+    backup_objects_absent_confirmed = pv_absent_confirmed and len(object_storage.list_object_versions(prefix)) == 0
 
-    b2_key_absent_confirmed = row.b2_key_id is None or object_storage.key_absent(row.b2_key_id)
+    b2_key_absent_confirmed = backup_objects_absent_confirmed and (
+        row.b2_key_id is None or object_storage.key_absent(row.b2_key_id)
+    )
 
     return dataclass_replace(
         observation,

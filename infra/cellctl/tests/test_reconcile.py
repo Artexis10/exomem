@@ -270,6 +270,67 @@ def _row(**overrides: object) -> CellRow:
     return CellRow(**defaults)
 
 
+async def test_namespace_deletion_does_not_wait_for_later_absence_checks(
+    cell_db: CellDatabase, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "tenant-a", desired_state="deleted")
+    cluster = FakeClusterGateway()
+    cluster.observations[cell_id] = _served()
+    b2 = FakeB2()
+
+    def unavailable(*args: object) -> bool:
+        raise RuntimeError("later deletion service unavailable")
+
+    monkeypatch.setattr(cluster, "pv_absent_for_namespace", unavailable)
+    monkeypatch.setattr(b2, "list_object_versions", unavailable)
+    monkeypatch.setattr(b2, "key_absent", unavailable)
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    try:
+        await reconcile.reconcile_once(
+            connection, cluster, b2, FakeHetznerVolumeProvider(),
+            _secrets_config(), _cluster_config(),
+        )
+        assert namespace_name(cell_id) in cluster.deleted_namespaces
+        row = (await db.select_all_rows(connection))[0]
+        assert row.observed_state == "deleting"
+        assert row.ready is False
+    finally:
+        await connection.close()
+
+
+@pytest.mark.parametrize("remaining_storage", ["pv", "volume", "objects"])
+def test_deletion_proofs_stop_at_first_remaining_resource(
+    remaining_storage: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cluster = FakeClusterGateway()
+    b2 = FakeB2()
+    hetzner = FakeHetznerVolumeProvider()
+    row = _row(volume_id="vol-1", b2_key_id="key-1")
+
+    def unavailable(*args: object) -> bool:
+        raise RuntimeError("later deletion service unavailable")
+
+    if remaining_storage == "pv":
+        cluster.pv_claims.add(namespace_name(row.cell_id))
+        monkeypatch.setattr(hetzner, "get_volume", unavailable)
+    elif remaining_storage == "volume":
+        hetzner.add_volume(VolumeInfo(volume_id="vol-1", server_id="node-1", labels={}))
+    else:
+        b2.seed_object(f"cells/{row.cell_id}/snapshot-1")
+    if remaining_storage != "objects":
+        monkeypatch.setattr(b2, "list_object_versions", unavailable)
+    monkeypatch.setattr(b2, "key_absent", unavailable)
+
+    observation = _augment_deletion_observation(
+        ClusterObservation(), row, cluster, b2, hetzner,
+    )
+    assert observation.namespace_absent_confirmed is True
+    assert observation.pv_absent_confirmed is (remaining_storage == "objects")
+    assert observation.backup_objects_absent_confirmed is False
+    assert observation.b2_key_absent_confirmed is False
+
+
 def test_pv_absence_check_blocks_on_a_pv_still_claimed_by_the_namespace() -> None:
     # D10 amendment: a PV whose claimRef still names the cell's namespace
     # blocks deletion even though no Hetzner volume id was ever recorded.
