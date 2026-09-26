@@ -873,6 +873,52 @@ def test_restricted_link_suggestions_read_as_if_the_withheld_page_were_absent(
     assert answers["C"] == answers["B"]
 
 
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_restricted_link_suggestions_fetch_once_whatever_is_withheld(
+    tmp_path: Path, audience: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One recall of a fixed size, however many withheld pages match: the
+    work does not measure how much is withheld."""
+    from exomem import corpus_aware
+
+    base = {
+        f"{NOTES}/v-{index}.md": _page(
+            f"Visible {index}", f"A short mention of zephyr pricing {index}.", type="insight"
+        )
+        for index in range(6)
+    }
+    calls: list[int] = []
+    real_find = find_module.find
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        calls.append(int(kwargs.get("limit") or 0))
+        return real_find(*args, **kwargs)
+
+    fetched = {}
+    for density in (0, 20, 45):
+        withheld = {
+            f"{WITHHELD_DIR}/w-{index:03d}.md": _page(
+                f"Zephyr Pricing {index}",
+                f"Zephyr pricing zephyr pricing zephyr pricing model {index}.",
+                type="insight",
+            )
+            for index in range(density)
+        }
+        vault = _materialize(tmp_path / str(density) / "vault", {**base, **withheld}, audience)
+        _reset()
+        monkeypatch.setattr(find_module, "find", counted)
+        calls.clear()
+        with request_scope(_principal(audience)):
+            corpus_aware.suggest_related(
+                vault, title="Zephyr pricing", body="zephyr pricing model"
+            )
+        monkeypatch.setattr(find_module, "find", real_find)
+        fetched[density] = list(calls)
+
+    assert fetched[0] == fetched[20] == fetched[45], fetched
+    assert len(fetched[0]) == 1, fetched
+
+
 def test_the_owner_writer_still_resolves_over_every_page(tmp_path: Path) -> None:
     base, withheld = _writer_fixture()
     vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")

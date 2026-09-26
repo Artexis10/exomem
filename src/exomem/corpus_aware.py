@@ -49,7 +49,6 @@ HUB_WEIGHT = 0.15  # weight on log1p(graph_in_degree) when re-ranking suggestion
 DUP_THRESHOLD = 0.90  # default min doc-doc cosine for a near-dup; override via EXOMEM_DUP_THRESHOLD
 CONTRADICTION_FLOOR = 0.82  # default lower edge of the contradiction band [floor, dup_threshold); override via EXOMEM_CONTRADICTION_FLOOR
 RELATED_OVERFETCH = 3  # fetch limit * this from find(), then re-rank + trim
-_RELEASED_POOL_ROUNDS = 4  # bounds the re-fetches a restricted caller's pool may take
 
 # Lead-body word budget for the synthesized "what is this about" query.
 _QUERY_LEAD_WORDS = 400
@@ -665,33 +664,26 @@ def suggest_related(
     # A caller other than the owner ranks over the pages it may see: no graph
     # lane (hops and in-degree follow links over the whole vault), no withheld
     # hit, and no rank number computed over the whole corpus, as `op_find`.
+    # It makes one fetch of the fixed over-fetch pool `op_find` uses, so the
+    # work does not depend on how many withheld pages match; when withheld
+    # pages fill that pool the caller receives fewer suggestions.
     keep = egress.restricted_release_filter(vault_root)
     wanted = limit * RELATED_OVERFETCH
-    pool = wanted
-    for _round in range(_RELEASED_POOL_ROUNDS):
-        try:
-            hits = find_module.find(
-                vault_root,
-                query=query,
-                limit=pool,
-                mode="hybrid",
-                graph=keep is None,
-                scope=scope,
-                prefer_compiled=True,
-            )
-        except Exception as e:  # noqa: BLE001 — suggestions are best-effort
-            log.debug("suggest_related find() failed: %s", e)
-            return []
-        if keep is None:
-            break
-        released = [h for h in hits if keep(h.path)]
-        if len(released) >= wanted or len(hits) < pool:
-            break
-        # Withheld hits took pool slots: widen the pool so the visible
-        # candidates are the ones a vault without those pages would rank.
-        pool += wanted - len(released)
+    try:
+        hits = find_module.find(
+            vault_root,
+            query=query,
+            limit=wanted if keep is None else egress.pool_limit(wanted),
+            mode="hybrid",
+            graph=keep is None,
+            scope=scope,
+            prefer_compiled=True,
+        )
+    except Exception as e:  # noqa: BLE001 — suggestions are best-effort
+        log.debug("suggest_related find() failed: %s", e)
+        return []
     if keep is not None:
-        hits = released[:wanted]
+        hits = [h for h in hits if keep(h.path)][:wanted]
 
     eligible = []
     for h in hits:
