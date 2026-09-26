@@ -35,10 +35,12 @@ Record the applicable retention bound from the deployed local and remote
 snapshot policies, including storage lifecycle or retention settings, when
 reporting deletion. Do not infer a time bound from a snapshot count alone or
 claim immediate erasure of snapshot copies. Handle snapshot restoration as a
-separate operator recovery: prevent a restored cluster from serving deleted
-cells until deletion state has been reconciled against the authoritative
-control database. Do not prune shared cluster snapshots as part of one cell's
-deletion.
+separate operator recovery: keep the restored cluster quarantined, check its
+cell resources against the authoritative control database, and separately
+remove and verify the absence of resources resurrected for deleted cells before
+reopening ingress. `cellctl` skips rows already observed as deleted; waiting for
+its ordinary reconciliation does not perform this recovery cleanup. Do not
+prune shared cluster snapshots as part of one cell's deletion.
 
 ## Preconditions
 
