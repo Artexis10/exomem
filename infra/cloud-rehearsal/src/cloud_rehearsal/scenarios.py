@@ -40,11 +40,9 @@ from .build import BuiltImages
 from .http import Resolver
 from .infra import BACKUP_BUCKET, Stack
 from .mcp_client import (
-    PKCE_FULL_GRAMMAR,
     BrowserSession,
     HeadlessBrowser,
     TenantClient,
-    pkce_grammar,
     raw_mcp_post,
 )
 from .platform import CLOUD_NAMESPACE
@@ -108,7 +106,7 @@ async def main():
 
 asyncio.run(main())
 """
-SUBSTRATE_REPO = "substrate-systems/substrate#181"
+SUBSTRATE_REPO = "substrate-systems/substrate"
 
 
 @dataclass
@@ -465,39 +463,22 @@ async def step_2_provision(ctx: Context, record: StepRecord) -> None:
 
 async def step_3_oauth_mcp(ctx: Context, record: StepRecord) -> None:
     _require(ctx.a.session)
-    # First, a verifier using the whole RFC 7636 grammar, as the MCP SDKs
-    # generate them. If Substrate refuses it, that is recorded as a defect and
-    # the connector continues with the base64url subset (equally valid), so
-    # the later steps still run.
-    pkce_defect: CrossLaneDefect | None = None
+    # The stock MCP Python SDK client: its PKCE verifiers use the whole RFC
+    # 7636 grammar, and it redirects to a 127.0.0.1 loopback.
     ctx.a.client = TenantClient(ctx.resolver, ctx.browser, ctx.a.session, ctx.substrate.redirect_uri)
-    try:
-        with pkce_grammar(PKCE_FULL_GRAMMAR):
-            tools = await first_session(ctx.a.client, record)
-        record.evidence["pkce_full_rfc7636_grammar"] = "accepted"
-    except Exception as error:  # noqa: BLE001 - classified below
-        detail = _flatten(error)
-        record.evidence["pkce_full_rfc7636_grammar"] = f"refused: {detail[:300]}"
-        if "invalid_grant" not in detail:
-            raise
-        pkce_defect = CrossLaneDefect(
-            "Substrate's token endpoint refuses an RFC 7636-valid PKCE verifier containing '.' or '~' "
-            "(isPkceVerifier: /^[A-Za-z0-9_-]{43,128}$/); the MCP Python SDK draws verifiers from the full "
-            "unreserved set, so its token exchange fails on ~98% of attempts",
-            component="Substrate src/lib/exomem-hosted/oauth.ts PKCE_VALUE", owner=SUBSTRATE_REPO,
-            evidence={"token_response": "400 invalid_grant", "substrate_log": "exomem_oauth_token_rejection stage=code_shape verifier_wellformed=false"},
-        )
-        await ctx.a.client.aclose()
-        ctx.a.client = TenantClient(ctx.resolver, ctx.browser, ctx.a.session, ctx.substrate.redirect_uri)
-        tools = await first_session(ctx.a.client, record)
+    tools = await first_session(ctx.a.client, record)
     if ctx.a.client.authorizations != 1 or not ctx.a.client.access_token:
         raise StepFailure("the connector did not complete exactly one OAuth authorization")
+    if ctx.a.client.verifier_seen is None:
+        raise StepFailure("no PKCE code_verifier was seen at the token endpoint")
     exposed = CLOUD_EXCLUSIONS & set(tools)
     record.evidence.update(
         {
             "oauth": {
                 "discovery": "gateway 401 -> protected-resource metadata -> Substrate authorization-server metadata",
                 "grant": "authorization_code + PKCE S256 with resource, pinned public client",
+                "redirect_uri": ctx.a.client.redirect_uri,
+                "pkce_verifier": ctx.a.client.verifier_seen,
                 "authorizations": ctx.a.client.authorizations,
             },
             "tool_count": len(tools),
@@ -517,8 +498,6 @@ async def step_3_oauth_mcp(ctx: Context, record: StepRecord) -> None:
             ctx.report.sample("tools_list_warm", seconds)
     if ctx.a.client.authorizations != 1:
         raise StepFailure("warm sessions re-ran the authorization instead of reusing the token")
-    if pkce_defect is not None:
-        raise pkce_defect
 
 
 async def step_4_capture(ctx: Context, record: StepRecord) -> None:

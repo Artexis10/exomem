@@ -46,7 +46,8 @@
 
 ## 3. cellctl, manifests and ingress (lane B)
 
-- [ ] 3.1 Scaffold `infra/cellctl/` as a Python package with its own pyproject and tests, plus `tests/fixtures/exomem_cloud_schema.sql` copied from Substrate migration `0056` (every C1 column, including the write-once key columns and the hold columns) and the grants script
+- [x] 3.1 Scaffold `infra/cellctl/` as a Python package with its own pyproject and tests, plus `tests/fixtures/exomem_cloud_schema.sql` copied from Substrate migration `0056` (every C1 column, including the write-once key columns and the hold columns) and the grants script
+  Evidence (#1368): `infra/cellctl/pyproject.toml`; `tests/test_fixture_schema.py` (`test_generation_bumps_only_on_desired_column_change`, `test_cellctl_role_cannot_write_desired_columns`, `test_gateway_role_cannot_write_desired_state`); fixtures refreshed from Substrate `2b38730` (#1387).
 - [ ] 3.2 Write red-first unit tests for the rendered manifests (D5):
   - Pod Security labels, quota, and a default-deny policy with gateway-only ingress;
   - no runtime egress (not even DNS), and backup egress limited to 443 plus DNS;
@@ -78,13 +79,14 @@
   - per-cell prefix-restricted B2 keys stored write-once as `b2_key_id` and `b2_key_wrapped`, deleting the losing key on a race;
   - Secrets rendered from the row on every pass, never read back.
   Test that plaintext keys never reach the database, and that one cell's key cannot read another cell's prefix.
-- [ ] 3.6 Implement backups (D8):
+- [x] 3.6 Implement backups (D8):
   - the nightly stop-backup-start window under a `backup` hold, with its deadline;
   - the pre-upgrade backup;
   - Jobs on the cell image as UID 10001 with the pod-level `fsGroup` and a cache emptyDir;
   - retention and `last_backup_*` writes;
-  - a restore Job using `--delete`;
-  - the operator export runbook: restore into a scratch namespace and produce the tenant's vault archive.
+  - a restore Job using `--delete`.
+  The operator export runbook moved to 6.4 (deferred).
+  Evidence (#1368): `tests/test_decide.py` (`test_nightly_backup_due_respects_the_window_the_interval_and_the_backoff`, `test_nightly_backup_deadline_miss_restarts_cell_with_backup_failed_and_sets_backoff`, `test_a_successful_pre_upgrade_backup_also_records_last_backup`), `tests/test_jobs.py` (`test_backup_job_runs_as_uid_10001_with_fsgroup`, `test_backup_job_mounts_the_volume_read_only_with_a_cache_emptydir`, `test_backup_job_backs_up_vault_and_host_with_retention`, `test_restore_job_uses_delete_and_writes_the_volume`); the live K3s suite, run 36199720123 on `feat/cloud-cellctl` `24fcb49`, the head that merged as #1368.
 - [ ] 3.7 Implement verified deletion (D10) in this order:
   1. namespace;
   2. PV and Hetzner `volume_id`;
@@ -92,7 +94,8 @@
   4. the per-cell B2 key, by `b2_key_id`;
   5. the wrapped keys.
   A failed observation stays `deleting`. Document the etcd snapshot residual in the runbook.
-- [ ] 3.8 Implement capacity publication (D9), with `cell_slots` = limit − headroom − non-cell attachments
+- [x] 3.8 Implement capacity publication (D9), with `cell_slots` = limit − headroom − non-cell attachments
+  Evidence (#1368): `capacity.py`; `tests/test_capacity.py` (`test_cell_slots_subtracts_headroom_and_non_cell_attachments`, `test_fallback_limit_is_used_when_the_node_has_no_allocatable_count`), `tests/test_db.py::test_write_capacity_inserts_then_updates`, `tests/test_reconcile.py::test_a_vanished_node_gets_zero_slots_and_a_rejoining_node_its_count_back`.
 - [ ] 3.9 Add platform chart entries:
   - cellctl, single replica, `Recreate`, with the RBAC in D4 and the `ValidatingAdmissionPolicy` on its ServiceAccount (cell namespaces only, restricted labels, digest-pinned images from the cell repository);
   - the gateway Deployment and Service consuming the Substrate gateway image digest, rendering exactly the gateway's environment contract (C3), with a chart test pinning that set;
@@ -189,7 +192,10 @@
   - capture p95 of 1.71 s against its 1 s target.
 
   All other targets were met: provisioning 24.7 s, upgrade 46.0 s, warm `initialize` p95 0.017 s, `tools/list` p95 0.050 s, cited recall p95 0.44 s.
+
+  Run with Substrate `2b38730` (#181 and #183) and the stock MCP Python SDK OAuth client (#1387, head `4366d87`): 12 of 12 steps passed, `gate_blockers` was empty and `gates_node` was true on the PR's harness check. Provisioning 24.7 s, upgrade 46.9 s, warm `initialize` p95 0.019 s, `tools/list` p95 0.061 s, cited recall p95 0.77 s; capture p95 2.12 s, informational per 5.4. 5.4 still needs the manual dispatch on `main`.
 - [ ] 5.4 A manual dispatch of the `Cloud rehearsal` workflow on `main`, with the cell image built from `Dockerfile --target cloud`, writes a valid report with `outcome.gates_node` true. P4 does not start until it does.
+  Ruling: on a CI runner, capture p95 is reported as measured and informational and does not hold `gates_node`; its 1 s target is for the node, where it is re-measured at P4 owner acceptance (6.3), and a runtime lane takes it if it misses there.
 
 ## 6. Node deployment and owner acceptance (P4)
 
@@ -205,6 +211,7 @@
   5. image upgrade and recall;
   6. backup present in B2;
   7. token refresh after 15 minutes.
+- [ ] 6.4 Operator export runbook: restore into a scratch namespace and produce the tenant vault archive; needed before P5 friends. Moved from 3.6, where it was deferred; the P3 rehearsal's step 11 restores into a scratch namespace with cellctl's renderers as a stand-in.
 
 ## 7. Retirement (R)
 

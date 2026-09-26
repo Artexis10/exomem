@@ -6,7 +6,7 @@ image; runs the twelve P3 steps in order; writes a JSON report with the
 5.3 measurements; and tears everything down.
 
 Exit codes: 0 when the report gates the node (every step passed, every
-target met, a valid rehearsal); 1 when it recorded product findings; 2 when
+gating target met, a valid rehearsal); 1 when it recorded product findings; 2 when
 the rehearsal itself failed (a stage could not be stood up, or a step raised
 something other than a recorded finding, or, with `--harness-check`, a
 step failed that the known-findings baseline does not name). `--harness-check`
@@ -346,7 +346,8 @@ def _print_summary(report: Report, path: Path) -> None:
     for step in data["steps"]:
         print(f"[rehearsal]   {step['number']:>2} {step['name']:<34} {step['status']}")
     for name, measurement in data["measurements"].items():
-        print(f"[rehearsal]   {name:<34} {measurement['observed']} (target {measurement['comparison']} {measurement['target']}, met={measurement['met']})")
+        gating = "" if measurement.get("gating", True) else ", informational"
+        print(f"[rehearsal]   {name:<34} {measurement['observed']} (target {measurement['comparison']} {measurement['target']}, met={measurement['met']}{gating})")
     print(f"[rehearsal] outcome: {json.dumps(data['outcome'])}")
     if data["cross_lane_defects"]:
         print(f"[rehearsal] cross-lane defects: {len(data['cross_lane_defects'])}")

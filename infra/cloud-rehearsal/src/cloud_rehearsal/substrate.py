@@ -39,9 +39,10 @@ from .infra import PG_DATABASE, PG_ROLES, Stack
 from .shell import run, wait_for
 
 SUBSTRATE_REPOSITORY = "https://github.com/substrate-systems/substrate.git"
-# PR #181 (feat/cloud-deletion-finish): Cloud deletion finish, paid Cloud
-# activation and the gateway's tenant-status grant. Bump deliberately.
-SUBSTRATE_COMMIT = "75fedbf63c7a8936f4a1412b33148c96e79bd6bc"
+# Substrate main with #181 (Cloud deletion finish, paid Cloud activation, the
+# gateway's tenant-status grant) and #183 (RFC 7636 verifiers, 127.0.0.1
+# loopback redirects). Bump deliberately.
+SUBSTRATE_COMMIT = "2b387300e7a69786b8d507e15ce5141b9371eab2"
 NODE_IMAGE = "node:24.18.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7"
 MCP_PATH = "/mcp"
 MCP_URL = f"https://{tls.MCP_HOST}{MCP_PATH}"
@@ -258,7 +259,7 @@ def start(stack: Stack, source: Path, pki: tls.RehearsalPki, cell_image_reposito
         secrets=substrate_secrets,
         owner_dsn=stack.postgres.dsn("substrate_owner", from_host=True),
         cell_image_repository=cell_image_repository,
-        redirect_uri="http://localhost:53682/callback",
+        redirect_uri="http://127.0.0.1:53682/callback",
     )
 
 

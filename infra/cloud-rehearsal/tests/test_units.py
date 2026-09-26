@@ -63,6 +63,16 @@ def test_a_report_gates_the_node_only_when_everything_passed() -> None:
         assert run.to_json()["outcome"]["gates_node"] is False
 
 
+def test_capture_p95_is_reported_but_does_not_hold_the_node_gate() -> None:
+    run = _passing_report()
+    run.samples["capture"] = [2.0] * 20
+    document = run.to_json()
+    capture = document["measurements"]["capture_p95_seconds"]
+    assert capture["met"] is False and capture["gating"] is False and "P4" in capture["note"]
+    assert document["outcome"]["all_targets_met"] is True
+    assert document["outcome"]["gates_node"] is True
+
+
 def test_harness_check_fails_only_on_unknown_findings(tmp_path: Path) -> None:
     from cloud_rehearsal.__main__ import _compare_with_known_findings
 
@@ -202,3 +212,22 @@ def test_dist_info_is_matched_by_distribution_name() -> None:
 
     assert _dist_name("urllib3-2.5.0.dist-info") == _dist_name("urllib3-2.2.3.dist-info")
     assert _dist_name("python_dateutil-2.9.0.dist-info") == "python-dateutil"
+
+
+def test_the_token_request_observer_records_the_verifier_shape_not_the_verifier() -> None:
+    import asyncio
+
+    import httpx
+
+    from cloud_rehearsal.mcp_client import TenantClient
+
+    client = TenantClient.__new__(TenantClient)
+    client.verifier_seen = None
+    verifier = "a" * 40 + ".b~" + "c" * 40
+    request = httpx.Request(
+        "POST", "https://substrate.rehearsal.test/api/exomem/oauth/token",
+        data={"grant_type": "authorization_code", "code_verifier": verifier},
+    )
+    asyncio.run(client._observe_token_request(request))
+    assert client.verifier_seen == {"length": len(verifier), "uses_dot_or_tilde": True}
+    assert verifier not in str(client.verifier_seen)
