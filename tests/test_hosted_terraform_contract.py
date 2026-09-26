@@ -71,7 +71,8 @@ def test_foundation_defaults_are_cost_safe_and_admin_cidrs_are_explicit() -> Non
     assert 'cidr != "0.0.0.0/0" && cidr != "::/0"' in variables
 
     assert 'port        = "22"' in firewall
-    for public_port in ('"80"', '"443"', '"6443"'):
+    assert 'port        = "443"' in firewall
+    for public_port in ('"80"', '"6443"'):
         assert public_port not in firewall
     assert "source_ips  = var.admin_ssh_cidrs" in firewall
 
@@ -89,7 +90,7 @@ def test_foundation_defaults_are_cost_safe_and_admin_cidrs_are_explicit() -> Non
     assert re.search(r"value\s*=\s*8\.99", outputs)
 
 
-def test_cloudflare_tunnel_has_exact_control_transfer_and_optional_gateway_ingress() -> None:
+def test_cloudflare_tunnel_keeps_legacy_routes_and_gateway_uses_direct_tls() -> None:
     cloudflare = (FOUNDATION / "cloudflare.tf").read_text(encoding="utf-8")
     assert "cloudflare_zero_trust_tunnel_cloudflared" in cloudflare
     assert "cloudflare_zero_trust_access_service_token" in cloudflare
@@ -99,17 +100,21 @@ def test_cloudflare_tunnel_has_exact_control_transfer_and_optional_gateway_ingre
     assert "var.control_hostname" in cloudflare
     assert "var.transfer_hostname" in cloudflare
     expected_traefik = "http://exomem-platform-traefik.exomem-platform.svc.cluster.local:80"
-    assert cloudflare.count(expected_traefik) == 3
+    assert cloudflare.count(expected_traefik) == 2
     assert "traefik.kube-system.svc.cluster.local" not in cloudflare
-    # 3 CNAME records on the Tunnel (control, transfer, optional gateway)
-    # plus the control database's own DNS-only A record (D12).
+    # Control and transfer stay on the legacy tunnel. The optional Cloud
+    # gateway and control database use their nodes' DNS-only A records.
     assert cloudflare.count("cloudflare_dns_record") == 4
     assert 'type    = "CNAME"' in cloudflare
     assert "proxied = true" in cloudflare
     assert "proxied = false" in cloudflare
-    assert 'var.gateway_hostname == "" ? [] : [' in cloudflare
+    assert 'var.gateway_hostname == "" ? [] : [' not in cloudflare
     assert 'var.gateway_hostname == "" ? 0 : 1' in cloudflare
-    assert "http_host_header = var.gateway_hostname" in cloudflare
+    assert "http_host_header = var.gateway_hostname" not in cloudflare
+    gateway_dns = cloudflare.split('resource "cloudflare_dns_record" "gateway"', 1)[1].split('resource ', 1)[0]
+    assert 'type    = "A"' in gateway_dns
+    assert "content = hcloud_primary_ip.node.ip_address" in gateway_dns
+    assert "proxied = false" in gateway_dns
     variables = (FOUNDATION / "variables.tf").read_text(encoding="utf-8")
     gateway = variables.split('variable "gateway_hostname"', 1)[1].split('variable ', 1)[0]
     assert 'default     = ""' in gateway
