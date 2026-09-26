@@ -55,7 +55,7 @@
   - the `cell-init` init container;
   - readiness on `/health/ready`, liveness on `/health`;
   - the encrypted `reclaimPolicy: Delete` class.
-- [x] 3.3 Implement the reconcile loop (D4):
+- [ ] 3.3 Implement the reconcile loop (D4):
   - poll, plus `LISTEN` on a direct session;
   - server-side apply under field manager `cellctl`;
   - readiness from pod conditions;
@@ -64,7 +64,6 @@
   - observed writes and generation matching;
   - transient retry, identity-conflict failure and the init deadline.
   Test against a disposable Postgres with the fixture schema.
-  Evidence (#1368): `reconcile.py`, `decide.py`; `tests/test_reconcile.py` (`test_run_loop_wakes_on_an_insert_notification_for_a_fresh_row`, `test_a_throttled_routine_apply_is_transient_and_retried_next_pass`, `test_a_converged_cell_whose_pod_turns_not_ready_is_observed_not_ready_and_back`), `tests/test_decide.py` (hold, generation, conflict and init-deadline tests), `tests/test_k8s_client.py`; `conftest.py` `cell_db`.
 - [ ] 3.4 Implement the rollout (D6) and prove each property:
   - target and initial-image selection, including `last_good_image` set at first provisioning and `NO_GOOD_IMAGE` while paused with none;
   - one attempt at a time, by priority;
@@ -87,7 +86,7 @@
   - retention and `last_backup_*` writes;
   - a restore Job using `--delete`.
   The operator export runbook moved to 6.4 (deferred).
-  Evidence (#1368): `tests/test_decide.py` (`test_nightly_backup_due_respects_the_window_the_interval_and_the_backoff`, `test_nightly_backup_deadline_miss_restarts_cell_with_backup_failed_and_sets_backoff`, `test_a_successful_pre_upgrade_backup_also_records_last_backup`), `tests/test_jobs.py` (`test_backup_job_runs_as_uid_10001_with_fsgroup`, `test_backup_job_mounts_the_volume_read_only_with_a_cache_emptydir`, `test_backup_job_backs_up_vault_and_host_with_retention`, `test_restore_job_uses_delete_and_writes_the_volume`); live K3s run 36199720123.
+  Evidence (#1368): `tests/test_decide.py` (`test_nightly_backup_due_respects_the_window_the_interval_and_the_backoff`, `test_nightly_backup_deadline_miss_restarts_cell_with_backup_failed_and_sets_backoff`, `test_a_successful_pre_upgrade_backup_also_records_last_backup`), `tests/test_jobs.py` (`test_backup_job_runs_as_uid_10001_with_fsgroup`, `test_backup_job_mounts_the_volume_read_only_with_a_cache_emptydir`, `test_backup_job_backs_up_vault_and_host_with_retention`, `test_restore_job_uses_delete_and_writes_the_volume`); the live K3s suite, run 36199720123 on `feat/cloud-cellctl` `24fcb49`, the head that merged as #1368.
 - [ ] 3.7 Implement verified deletion (D10) in this order:
   1. namespace;
   2. PV and Hetzner `volume_id`;
