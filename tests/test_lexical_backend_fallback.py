@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -55,6 +56,32 @@ def _fill_corpus(root: Path, n: int = 8) -> None:
         _write_page(root, f"Knowledge Base/filler-{i}.md", fillers[i % len(fillers)])
 
 
+def _wait_for_lexical_repair_idle(timeout: float = 30.0) -> None:
+    """Drain any background lexical repair thread a test provoked.
+
+    `bm25.search()`/`find()` can schedule `lexstore._schedule_repair`'s
+    detached rebuild thread, which calls back into `fts5_available()` on its
+    own schedule. A test that monkeypatches `_probe_fts5` (e.g. to force the
+    unavailable-FTS5 shape) races that thread: if it probes and memoizes
+    after this fixture's post-yield `reset_memo()` but before `monkeypatch`
+    reverts the patch, the process-global probe memo is left poisoned for
+    every later test. Waiting for `_REPAIRS_IN_FLIGHT` to empty — the same
+    pattern `tests/test_read_after_write_visibility.py` uses — makes the
+    repair finish (and stop touching the patch) while it is still this
+    test's own monkeypatch, before teardown resets the memo.
+    """
+    deadline = time.monotonic() + timeout
+    wake = threading.Event()
+    while True:
+        with lexstore._REPAIRS_LOCK:
+            if not lexstore._REPAIRS_IN_FLIGHT:
+                return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            pytest.fail("lexical repair worker did not become idle")
+        wake.wait(min(0.01, remaining))
+
+
 @pytest.fixture(autouse=True)
 def _fresh_state(monkeypatch: pytest.MonkeyPatch):
     lexstore.reset_memo()
@@ -64,6 +91,7 @@ def _fresh_state(monkeypatch: pytest.MonkeyPatch):
     find_module.reset_degradation_counts()
     monkeypatch.delenv("EXOMEM_LEXICAL_BACKEND", raising=False)
     yield
+    _wait_for_lexical_repair_idle()
     lexstore.reset_memo()
     lexstore.clear_stores()
     bm25.clear_cache()
