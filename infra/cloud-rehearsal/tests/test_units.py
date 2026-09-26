@@ -212,3 +212,22 @@ def test_dist_info_is_matched_by_distribution_name() -> None:
 
     assert _dist_name("urllib3-2.5.0.dist-info") == _dist_name("urllib3-2.2.3.dist-info")
     assert _dist_name("python_dateutil-2.9.0.dist-info") == "python-dateutil"
+
+
+def test_the_token_request_observer_records_the_verifier_shape_not_the_verifier() -> None:
+    import asyncio
+
+    import httpx
+
+    from cloud_rehearsal.mcp_client import TenantClient
+
+    client = TenantClient.__new__(TenantClient)
+    client.verifier_seen = None
+    verifier = "a" * 40 + ".b~" + "c" * 40
+    request = httpx.Request(
+        "POST", "https://substrate.rehearsal.test/api/exomem/oauth/token",
+        data={"grant_type": "authorization_code", "code_verifier": verifier},
+    )
+    asyncio.run(client._observe_token_request(request))
+    assert client.verifier_seen == {"length": len(verifier), "uses_dot_or_tilde": True}
+    assert verifier not in str(client.verifier_seen)

@@ -469,12 +469,16 @@ async def step_3_oauth_mcp(ctx: Context, record: StepRecord) -> None:
     tools = await first_session(ctx.a.client, record)
     if ctx.a.client.authorizations != 1 or not ctx.a.client.access_token:
         raise StepFailure("the connector did not complete exactly one OAuth authorization")
+    if ctx.a.client.verifier_seen is None:
+        raise StepFailure("no PKCE code_verifier was seen at the token endpoint")
     exposed = CLOUD_EXCLUSIONS & set(tools)
     record.evidence.update(
         {
             "oauth": {
                 "discovery": "gateway 401 -> protected-resource metadata -> Substrate authorization-server metadata",
                 "grant": "authorization_code + PKCE S256 with resource, pinned public client",
+                "redirect_uri": ctx.a.client.redirect_uri,
+                "pkce_verifier": ctx.a.client.verifier_seen,
                 "authorizations": ctx.a.client.authorizations,
             },
             "tool_count": len(tools),

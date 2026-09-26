@@ -24,7 +24,7 @@ Trigger it by hand before P4.
 
 Exit codes:
 - **0:** the report gates the node.
-- **1:** the run recorded product findings (a failed step or a missed target).
+- **1:** the run recorded product findings (a failed step or a missed gating target).
 - **2:** the rehearsal itself failed. Either a stage could not be stood up, or a step raised something other than a recorded finding.
 
 `--harness-check` turns 1 into 0. Pull-request CI uses it, because there the question is whether the harness works, and the findings are in the report and the job summary. A manual dispatch of the workflow is the strict node gate.
