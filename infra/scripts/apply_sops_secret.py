@@ -139,6 +139,7 @@ def _validate_plaintext(raw: bytes, destination: Destination, version: str) -> b
     )
     if not valid:
         raise SecretApplyError("SOPS plaintext has an invalid Kubernetes shape")
+    assert isinstance(string_data, dict)
     if destination.key_sets:
         try:
             validate_values(string_data, destination.key_sets)

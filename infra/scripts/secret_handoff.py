@@ -12,7 +12,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -662,7 +662,7 @@ def _assert_sops_destination_shape(
         keys = destination.key_sets and set(plaintext["stringData"]) or {destination.fields["key"]}
         if not isinstance(string_data, dict) or set(string_data) != keys:
             raise HandoffError("SOPS output failed the destination shape check")
-        sensitive_values = string_data.values()
+        sensitive_values: Iterable[Any] = string_data.values()
     elif destination.kind == "sops_escrow":
         sensitive_values = (encrypted_payload.get(destination.fields["secret_key"]),)
     else:
