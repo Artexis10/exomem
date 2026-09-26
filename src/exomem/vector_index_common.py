@@ -28,6 +28,9 @@ def vec_gate(index: VectorIndexState, conn: sqlite3.Connection) -> bool:
     """
     if index._vec_failed or vecstore.backend() == "numpy":
         return False
+    prepare = getattr(index, "_vec_prepare", None)
+    if prepare is not None and not prepare(conn):
+        return False
     if not index._vec.try_load(conn):
         return False
     quant = vecstore.quant_mode() == "binary"

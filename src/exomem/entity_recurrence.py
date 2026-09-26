@@ -626,41 +626,12 @@ def _origin_ref(page: Any) -> str:
 
 def _origin_refs(pages: tuple[Any, ...]) -> dict[str, str]:
     """Collapse overlapping Source declarations into derivative components."""
-    parent = list(range(len(pages)))
+    from . import provenance
 
-    def find(index: int) -> int:
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    def union(left: int, right: int) -> None:
-        left_root = find(left)
-        right_root = find(right)
-        if left_root != right_root:
-            parent[max(left_root, right_root)] = min(left_root, right_root)
-
-    sources_by_index = tuple(_source_refs(page) for page in pages)
-    first_by_source: dict[str, int] = {}
-    for index, sources in enumerate(sources_by_index):
-        for source in sorted(sources):
-            previous = first_by_source.setdefault(source, index)
-            union(index, previous)
-
-    component_sources: dict[int, set[str]] = {}
-    for index, sources in enumerate(sources_by_index):
-        if sources:
-            component_sources.setdefault(find(index), set()).update(sources)
-
-    origins: dict[str, str] = {}
-    for index, page in enumerate(pages):
-        sources = sources_by_index[index]
-        origins[str(page.rel_path)] = (
-            "source:" + _digest(sorted(component_sources[find(index)]))
-            if sources
-            else _origin_ref(page)
-        )
-    return origins
+    return provenance.origin_keys(
+        {str(page.rel_path): _source_refs(page) for page in pages},
+        fallback={str(page.rel_path): _origin_ref(page) for page in pages},
+    )
 
 
 def _cue_snapshot(

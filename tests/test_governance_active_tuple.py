@@ -32,6 +32,7 @@ from exomem import (
     media_jobs,
     media_processing,
     preserve,
+    recall_space,
     reserved_paths,
     scene_frames,
     semantic_contract,
@@ -7216,11 +7217,15 @@ def test_preserve_binary_rebuilds_vector_measurements_before_v4_activation(
     )
     embedded: list[str] = []
 
+    # An empty active family takes the recall encoder's declared width
+    # (1,024 for bge-m3 on a personal server), so the fake encodes at it.
+    width = recall_space.declared_dim(embeddings.MODEL_NAME)
+
     def embed_target(texts: list[str], *, is_query: bool = False):
         assert is_query is False
         embedded.extend(texts)
         return tuple(
-            tuple(float(index + 1) for _component in range(embeddings.VECTOR_DIM))
+            tuple(float(index + 1) for _component in range(width))
             for index, _text in enumerate(texts)
         )
 

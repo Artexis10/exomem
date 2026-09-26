@@ -159,6 +159,11 @@ def default_slots() -> list[ResourceSlot]:
             is_model=True,
         ),
         ResourceSlot(
+            "activation", lambda: e._ACTIVATION_MODEL is not None,
+            e.ACTIVATION_GUARD.inflight, e.ACTIVATION_GUARD.last_activity, e.unload_activation_model,
+            is_model=True,
+        ),
+        ResourceSlot(
             "reranker", lambda: e._RERANKER is not None,
             e.RERANKER_GUARD.inflight, e.RERANKER_GUARD.last_activity, e.unload_reranker,
             is_model=True,

@@ -568,9 +568,9 @@ def test_a_governed_policy_serves_the_census_to_the_owner_only(
                     vault, operation="census", subject="relations", detail="keys"
                 ),
                 relation_census.sample(vault, size=5),
-                commands.op_schema_memory(vault, operation="infer", subject="relations")[
-                    "census"
-                ],
+                _infer_census(
+                    commands.op_schema_memory(vault, operation="infer", subject="relations")
+                ),
             ]
         _reset_governance_caches()
         with request_scope(owner_principal(surface="mcp")):
@@ -606,18 +606,32 @@ def _govern(vault: Path, *, compiles: bool) -> None:
         )
 
 
+def _infer_census(result: dict[str, object]) -> object:
+    """The census view `infer` gives the caller.
+
+    Under a governed policy a caller other than the owner is refused the whole
+    inference, which is a whole-vault aggregate like the census; the owner and
+    a call no surface bound receive the inference with its `census` field.
+    """
+    if "census" in result:
+        return result["census"]
+    return {"available": result["available"], "reason": result["reason"]}
+
+
 def _every_census_surface(vault: Path) -> dict[str, object]:
     return {
         "census": commands.op_schema_memory(vault, operation="census", subject="relations"),
         "keys": commands.op_schema_memory(
             vault, operation="census", subject="relations", detail="keys"
         ),
-        "infer": commands.op_schema_memory(vault, operation="infer", subject="relations")[
-            "census"
-        ],
-        "infer_project": commands.op_schema_memory(
-            vault, operation="infer", subject="relations", project="project-one"
-        )["census"],
+        "infer": _infer_census(
+            commands.op_schema_memory(vault, operation="infer", subject="relations")
+        ),
+        "infer_project": _infer_census(
+            commands.op_schema_memory(
+                vault, operation="infer", subject="relations", project="project-one"
+            )
+        ),
         "sample": relation_census.sample(vault, size=5),
         "infer_counts": relation_census.infer_counts(
             vault, page_type=None, start=None, end=None

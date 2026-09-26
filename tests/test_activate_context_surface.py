@@ -332,10 +332,21 @@ def test_attribution_is_accepted_and_never_changes_the_packet(
         activation_vault, turn=TURN, client="claude-code", session="ep-" + "a1" * 16
     )
 
+    # A session with no history of its own gets exactly the vault's packet.
     assert json.dumps(_without_token(plain), sort_keys=True) == json.dumps(
         _without_token(attributed), sort_keys=True
     )
-    assert served[0] == served[1], "attribution must not reach resolution or the cache key"
+    # Re-based for ruling S5-1 (the heat is scoped to the caller's thread
+    # first): attribution now reaches `serve`, so the caller's own session can
+    # rank first, but only as derived keys. Nothing else about the request
+    # differs, and the raw session id and client never reach it.
+    assert served[0].get("attribution") is None
+    held = served[1]["attribution"]
+    assert held.client == "claude-code"
+    assert held.session and "a1" * 16 not in held.session
+    assert {key: value for key, value in served[0].items() if key != "attribution"} == {
+        key: value for key, value in served[1].items() if key != "attribution"
+    }
     assert not {"client", "session"} & set(served[1])
 
 
@@ -357,6 +368,8 @@ def test_attribution_is_accepted_on_every_door(
     for argv in (
         ["activate", TURN, "--client", "codex", "--session", "abc", "--json"],
         ["activate_context", TURN, "--client", "codex", "--session", "abc", "--json"],
+        ["activate", TURN, "--session", "abc", "--workspace", "0f" * 12, "--json"],
+        ["activate_context", TURN, "--session", "abc", "--workspace", "0f" * 12, "--json"],
     ):
         code, out = _run_cli(argv, capsys)
         assert code == 0, out
@@ -365,11 +378,20 @@ def test_attribution_is_accepted_on_every_door(
     client = _rest_client(monkeypatch)
     response = client.post(
         "/api/activate_context",
-        json={"turn": TURN, "client": "claude-code", "session": "abc"},
+        json={"turn": TURN, "client": "claude-code", "session": "abc", "workspace": "0f" * 12},
         headers={"Authorization": "Bearer sekret"},
     )
     assert response.status_code == 200, response.text
 
     product = {command.name: command for command in commands.PRODUCT_COMMANDS}
     names = [param.name for param in product["activate_context"].params]
-    assert {"client", "session"} <= set(names)
+    assert {"client", "session", "workspace"} <= set(names)
+
+
+def test_the_server_instructions_skip_a_turn_a_hook_already_activated() -> None:
+    """Round-2 ruling Q1: the skip clause names the injected working set, so
+    the agent does not repeat the hook's keyed call without its keys."""
+    text = server.SERVER_INSTRUCTIONS
+    assert "a turn whose Exomem working set a hook already injected" in text
+    assert "call again only to set `anchor`" in text
+

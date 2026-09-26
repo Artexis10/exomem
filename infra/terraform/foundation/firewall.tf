@@ -10,6 +10,14 @@ resource "hcloud_firewall" "alpha" {
     source_ips  = var.admin_ssh_cidrs
   }
 
+  rule {
+    description = "Public Cloud MCP TLS terminated on the fleet node"
+    direction   = "in"
+    protocol    = "tcp"
+    port        = "443"
+    source_ips  = ["0.0.0.0/0", "::/0"]
+  }
+
   lifecycle {
     prevent_destroy = true
   }

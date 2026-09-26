@@ -928,6 +928,9 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
         # An ambient owner binding would turn remote-principal fixtures into
         # the owner; tests that exercise it set it themselves.
         "EXOMEM_OWNER_OAUTH_SUBJECT",
+        # An operator's exported dreamer setting would start a background
+        # worker in every runtime fixture; dreamer tests set it themselves.
+        "EXOMEM_DREAMER",
     ):
         monkeypatch.delenv(_var, raising=False)
     monkeypatch.setenv("EXOMEM_DISABLE_RELEVANCE_CHECK", "1")

@@ -717,3 +717,34 @@ def test_resolution_is_permutation_invariant() -> None:
     first = rr.resolve_referents(cue=cue, hits=(h1, h2), entities=(a, b), edges=()).as_dict()
     second = rr.resolve_referents(cue=cue, hits=(h2, h1), entities=(b, a), edges=()).as_dict()
     assert first == second
+
+
+def test_attribute_overlap_reads_accent_folded_and_script_stemmed_words() -> None:
+    folded = _entity(tags=("Zürich",), relationship="colleague")
+    out = _resolve("which zurich colleague", entities=(folded,))
+    evidence = next(e for e in out.candidates[0].evidence if e.kind == "attribute")
+    assert set(evidence.detail["matched"]) == {"colleague", "zurich"}
+
+    cyrillic = _entity(tags=("книги",), relationship="colleague")
+    out = _resolve("which книгами colleague", entities=(cyrillic,))
+    evidence = next(e for e in out.candidates[0].evidence if e.kind == "attribute")
+    assert set(evidence.detail["matched"]) == {"colleague", "книгами"}
+
+
+@pytest.mark.parametrize(
+    ("query", "descriptor_token"),
+    [("which zurich friend", "zürich"), ("which 東京 friend", "東京")],
+)
+def test_qualifier_seed_reads_folded_and_cjk_descriptor_tokens(
+    query: str, descriptor_token: str
+) -> None:
+    rr = _rr()
+    entity = _entity(relationship="friend")
+    anchor = "Knowledge Base/Notes/Research/lake-trip.md"
+    out = _resolve(
+        query,
+        entities=(entity,),
+        hits=(_hit(anchor, descriptor_tokens=(descriptor_token,)),),
+        edges=(rr.EdgeFact(anchor, entity.path, "about_entity", "outbound", "entity"),),
+    )
+    assert {e.kind for e in out.resolved[0].evidence} == {"attribute", "graph"}

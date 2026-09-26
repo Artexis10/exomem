@@ -587,3 +587,49 @@ def test_context_keeps_a_provenance_page_cursor_while_paging_within_that_page(
     assert [entry["ref"] for entry in second["evidence"]] == ["checkpoint-b"]
     assert second["evidence_continuation"] == "next-checkpoint-page"
     assert calls == [checkpoint, checkpoint]
+
+
+@pytest.mark.parametrize("escape", ["parent", "absolute"])
+def test_a_path_hint_outside_the_vault_is_never_statted_or_read(tmp_path, monkeypatch, escape):
+    """A sidecar path hint locates a point read inside the vault or nowhere."""
+    import os
+    import pathlib
+
+    from test_governance_egress import write_rule, write_scope
+
+    vault = tmp_path / "vault"
+    current, paths = setup_item(vault)
+    # A governed policy, so every release is decided from the page itself.
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    outside = tmp_path / "outside" / "private-note.md"
+    outside.parent.mkdir()
+    outside.write_text("---\ntype: note\n---\nA file that is not part of the vault.\n")
+    hint = "../outside/private-note.md" if escape == "parent" else str(outside)
+    ref = paths["a"]
+    item = {**current.to_dict(), "paths": {ref: hint}}
+
+    touched = []
+    marker = str(outside.parent)
+
+    def spy(name, real):
+        def watched(target, *args, **kwargs):
+            where = os.path.normpath(os.path.abspath(os.fsdecode(os.fspath(target))))
+            if where.startswith(marker):
+                touched.append((name, where))
+            return real(target, *args, **kwargs)
+
+        return watched
+
+    monkeypatch.setattr(pathlib.Path, "stat", spy("stat", pathlib.Path.stat))
+    monkeypatch.setattr(pathlib.Path, "read_bytes", spy("read_bytes", pathlib.Path.read_bytes))
+    monkeypatch.setattr(pathlib.Path, "open", spy("open", pathlib.Path.open))
+    monkeypatch.setattr(os, "stat", spy("os.stat", os.stat))
+    monkeypatch.setattr(os, "open", spy("os.open", os.open))
+
+    with library_scope():
+        assert review._visible(vault, item) is False
+        with pytest.raises(ValueError, match="VOCABULARY_ITEM_NOT_FOUND"):
+            review._read(vault, item, ref)
+
+    assert touched == []

@@ -21,3 +21,28 @@ durability:
   databaseBackup:
     proofTenantId: tenant-owner-proof
     proofCellId: cell-owner-proof
+cellctl:
+  enabled: true
+  image: ghcr.io/substrate-systems/exomem-cellctl@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  cellImageRepository: ghcr.io/substrate-systems/exomem-cloud-cell
+  b2BucketName: exomem-cloud-backups
+  b2BucketId: b2-bucket-id-example
+  b2AccountId: b2-account-id-example
+  b2Endpoint: https://s3.us-west-002.backblazeb2.com
+  initDeadlineMinutes: 10
+  databaseEgressCidrs:
+    - 10.0.1.5/32
+cloudGateway:
+  enabled: true
+  image: ghcr.io/substrate-systems/substrate-gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  hostname: mcp.example.test
+  publicBaseUrl: https://app.example.test
+  trustedIngressSourceValue: validation-only-ingress-source-value-0123456789
+  databaseEgressCidrs:
+    - 10.0.1.5/32
+cloudIngress:
+  enabled: true
+  hostname: mcp.example.test
+  acmeEmail: ops@example.test
+cert-manager:
+  enabled: true

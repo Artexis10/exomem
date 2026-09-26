@@ -311,6 +311,25 @@ openssl rand -base64 48 | infra/scripts/secret_handoff.py \
   --source stdin
 ```
 
+`k3s_agent_token` (openspec `add-cloud-node-provisioning`) follows the same
+pattern. It is mandatory once any K3s agent is inventoried, and it must differ
+from the server token. Agents present only this token, CA-pinned, and never
+see the server token:
+
+```bash
+openssl rand -base64 48 | infra/scripts/secret_handoff.py \
+  --matrix "$matrix" \
+  --repository-root "$repo_root" \
+  --secret k3s_agent_token \
+  --version v1 \
+  --destination ansible.hosted-node.k3s-agent-token.active \
+  --destination escrow.k3s-agent-token.active \
+  --source stdin
+```
+
+Once it exists, add `--vars infra/secrets/ansible/k3s-agent-token.v1.sops.json`
+to every wrapper invocation below (see `node-pool.md`).
+
 The database-backup B2 key also has an exact SOPS Ansible-var destination. None
 of these host-bootstrap values becomes a general cluster Secret.
 

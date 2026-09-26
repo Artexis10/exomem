@@ -14,17 +14,19 @@ the new location. Returns the count of touched files.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import hashlib
 import logging
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import reserved_paths, semantic_index, semantic_writes, source_taxonomy
+from . import working_set_heat
 from .governance import catalog_publication, graph_producer
 from .kbdir import kb_dirname
 from .vault import (
@@ -211,7 +213,7 @@ def move_file(
     """
     try:
         old_abs, old_rel = resolve_under_vault(
-            vault_root, old_path, must_exist=True, must_be_file=True
+            vault_root, old_path, must_exist=True, must_be_file=True, refuse_withheld=True
         )
     except VaultPathError as e:
         raise MoveFileError(code=e.code, reason=e.reason) from e
@@ -426,6 +428,20 @@ def move_file(
     warnings: list[str] = []
     files_touched: list[str] = []
     wikilinks_updated = 0
+    # Every linking page is rewritten, including pages the mover may not see,
+    # so the vault stays consistent; the counts and paths reported to a mover
+    # other than the owner cover the pages it may see. The activity log keeps
+    # the full figures.
+    from .governance import egress
+
+    visible = egress.governed_release_filter(vault_root)
+    reported_touched: list[str] = []
+    reported_updated = 0
+    # For such a mover, a withheld linker the move cannot rewrite cleanly is
+    # left as it is, so its link dangles exactly as with
+    # `update_wikilinks=false`; the owner's audit reports it. Its change count
+    # is kept here so the full figures drop it too.
+    hidden_changes: dict[str, int] = {}
 
     # Stage inbound-link rewrites. The file itself moves with one filesystem
     # rename so bytes of any type are preserved without a copy/unlink window.
@@ -456,6 +472,10 @@ def move_file(
                 # the opposite of what the guard is for.
                 if rel.rsplit("/", 1)[-1] == "index.md":
                     append_tree = None
+                if visible is not None and not visible(rel):
+                    if append_tree:
+                        continue
+                    hidden_changes[rel] = n_changed
                 if append_tree:
                     raise MoveFileError(
                         code="APPEND_ONLY",
@@ -471,6 +491,9 @@ def move_file(
                 )
                 files_touched.append(rel)
                 wikilinks_updated += n_changed
+                if visible is None or visible(rel):
+                    reported_touched.append(rel)
+                    reported_updated += n_changed
 
     def validation_result(
         *, source_hash: str, destination_hash: str
@@ -493,8 +516,8 @@ def move_file(
             MoveFileResult(
                 old_path=old_rel,
                 new_path=new_rel,
-                wikilinks_updated=wikilinks_updated,
-                files_touched=list(files_touched),
+                wikilinks_updated=reported_updated,
+                files_touched=list(reported_touched),
                 warnings=list(warnings),
             ),
             tuple(before),
@@ -516,10 +539,17 @@ def move_file(
         new_rel_no_ext = (
             new_rel.removesuffix(".md") if new_rel.endswith(".md") else new_rel
         )
+        # The activity log is readable by other audiences: for a mover other
+        # than the owner it carries the figures that mover may see.
+        logged_updated, logged_files = (
+            (wikilinks_updated, len(files_touched))
+            if visible is None
+            else (reported_updated, len(reported_touched))
+        )
         body = (
             f"Moved {old_rel!r} → {new_rel!r} via exomem Tier 2. "
-            f"wikilinks_updated={wikilinks_updated} across "
-            f"{len(files_touched)} file(s)."
+            f"wikilinks_updated={logged_updated} across "
+            f"{logged_files} file(s)."
         )
         if src_curated or dst_curated:
             body += f" allow_curated=true (tree: {src_curated or dst_curated})."
@@ -564,23 +594,49 @@ def move_file(
                         )
                     files_touched.append(old_rel)
                     wikilinks_updated += source_changes
+                    reported_touched.append(old_rel)
+                    reported_updated += source_changes
             if content_transform is not None:
                 moved_source = content_transform(moved_source)
             log_rel_no_ext, log_body, log_plan = plan_activity_log()
             destination_guard = PathGuard.capture(
                 vault_root, new_rel, leaf_policy="absent"
             )
-            preflight = semantic_writes.preflight_move(
-                vault_root,
-                old_path=old_rel,
-                new_path=new_rel,
-                source=source,
-                moved_source=moved_source,
-                source_guard=source_guard,
-                destination_guard=destination_guard,
-                rewrites=writes,
-                content_transform=content_transform,
-            )
+            def run_preflight() -> semantic_writes.MovePreflight:
+                return semantic_writes.preflight_move(
+                    vault_root,
+                    old_path=old_rel,
+                    new_path=new_rel,
+                    source=source,
+                    moved_source=moved_source,
+                    source_guard=source_guard,
+                    destination_guard=destination_guard,
+                    rewrites=writes,
+                    content_transform=content_transform,
+                )
+
+            preflight = run_preflight()
+            while visible is not None:
+                # A withheld linker whose rewrite its contract would refuse
+                # is skipped, and the move is judged again without it.
+                refused = {
+                    item.after.path
+                    for item in preflight.evaluations
+                    if item.after.path in hidden_changes
+                    and item.contract_result.should_block
+                }
+                if not refused:
+                    break
+                writes[:] = [
+                    write
+                    for write in writes
+                    if write.path.relative_to(vault_root).as_posix() not in refused
+                ]
+                for rel in refused:
+                    files_touched.remove(rel)
+                    wikilinks_updated -= hidden_changes.pop(rel)
+                log_rel_no_ext, log_body, log_plan = plan_activity_log()
+                preflight = run_preflight()
             semantic_states = {
                 item.after.path: semantic_index.from_semantic_page_state(item.after)
                 for item in preflight.evaluations
@@ -663,34 +719,43 @@ def move_file(
                 ]
                 if catalog_target is not None:
                     combined.extend(log_plan.writes)
-                _held_rename(vault_root, old_rel, new_rel)
-                # The bytes follow the page inside the same transaction. A
-                # rollback below undoes both, so a failure can never leave an
-                # artifact split across two trees.
-                if paired_binary is not None:
-                    try:
-                        _held_rename(vault_root, *paired_binary)
-                    except MoveFileError:
-                        _held_rename(vault_root, new_rel, old_rel)
-                        raise
+                # The moved page is the move's one piece of work, on its new
+                # path; the link rewrites around it earn nothing (review F1).
+                heat_move = working_set_heat.begin_commit(vault_root, [new_abs])
+                try:
+                    _held_rename(vault_root, old_rel, new_rel)
+                    # The bytes follow the page inside the same transaction.
+                    # A rollback below undoes both, so a failure can never
+                    # leave an artifact split across two trees.
+                    if paired_binary is not None:
+                        try:
+                            _held_rename(vault_root, *paired_binary)
+                        except MoveFileError:
+                            _held_rename(vault_root, new_rel, old_rel)
+                            raise
+                except BaseException:
+                    working_set_heat.abandon_commit(heat_move)
+                    raise
                 try:
                     if combined:
                         batch_fanout_paths[:] = [write.path for write in combined]
-                        batch_atomic_write(
-                            combined,
-                            vault_root=vault_root,
-                            required_guards=required_guards,
-                            index_reports=batch_index_reports,
-                            semantic_states={
-                                write.path.relative_to(vault_root).as_posix(): semantic_states[
-                                    write.path.relative_to(vault_root).as_posix()
-                                ]
-                                for write in combined
-                                if write.path.relative_to(vault_root).as_posix()
-                                in semantic_states
-                            },
-                        )
+                        with working_set_heat.primary_paths(()):
+                            batch_atomic_write(
+                                combined,
+                                vault_root=vault_root,
+                                required_guards=required_guards,
+                                index_reports=batch_index_reports,
+                                semantic_states={
+                                    write.path.relative_to(vault_root).as_posix(): semantic_states[
+                                        write.path.relative_to(vault_root).as_posix()
+                                    ]
+                                    for write in combined
+                                    if write.path.relative_to(vault_root).as_posix()
+                                    in semantic_states
+                                },
+                            )
                 except Exception as error:
+                    working_set_heat.abandon_commit(heat_move)
                     log.exception(
                         "move_file: link-update batch failed for %s -> %s",
                         old_rel,
@@ -706,11 +771,33 @@ def move_file(
                             f"failed: {rollback_error}"
                         ) from error
                     raise
+                heat_moved.append(working_set_heat.observe_commit(heat_move))
 
+            if visible is not None:
+                # A page withheld from this mover whose bytes the move does not
+                # rewrite stays in the closure for publication, but is never
+                # asserted against the move: its standing is the owner's to
+                # review.
+                rewritten = {
+                    write.path.relative_to(vault_root).as_posix() for write in writes
+                }
+                preflight = dataclasses.replace(
+                    preflight,
+                    waived_blockers=frozenset(
+                        item.after.path
+                        for item in preflight.evaluations
+                        if not visible(item.after.path) and item.after.path not in rewritten
+                    ),
+                )
+            heat_moved: list[working_set_heat.ObservedCommit | None] = []
             committed = semantic_writes.commit_move(
                 vault_root, preflight=preflight, mutate=mutate
             )
+            for observed in heat_moved:
+                working_set_heat.persist_commit(observed)
             semantic = committed.as_dict()
+            if visible is not None:
+                semantic = _visible_semantic(semantic, preflight.evaluations, visible)
         except semantic_writes.SemanticWriteError as error:
             raise MoveFileError(code=error.code, reason=error.reason) from error
         except PathGuardError as error:
@@ -763,7 +850,9 @@ def move_file(
         _held_rename(vault_root, old_rel, new_rel)
         try:
             if writes:
-                batch_atomic_write(writes, vault_root=vault_root)
+                # Link rewrites are the move's bookkeeping, nobody's work.
+                with working_set_heat.primary_paths(()):
+                    batch_atomic_write(writes, vault_root=vault_root)
         except Exception as e:
             log.exception(
                 "move_file: link-update batch failed for %s -> %s", old_rel, new_rel
@@ -879,12 +968,76 @@ def move_file(
     return MoveFileResult(
         old_path=old_rel,
         new_path=new_rel,
-        wikilinks_updated=wikilinks_updated,
-        files_touched=files_touched,
+        wikilinks_updated=reported_updated,
+        files_touched=reported_touched,
         warnings=warnings,
         semantic=semantic,
-        index=index_feedback,
+        # The index outcome covers every rewritten page, so a mover other
+        # than the owner receives none.
+        index=index_feedback if visible is None else None,
     )
+
+
+def _visible_semantic(
+    semantic: dict[str, Any], evaluations: Any, visible: Callable[[str], bool]
+) -> dict[str, Any]:
+    """The move's semantic block over the pages a restricted mover may see."""
+    shown = [item for item in evaluations if visible(item.after.path)]
+    identities = {item.after.identity for item in shown}
+    return {
+        **semantic,
+        "affected_paths": [item.after.path for item in shown],
+        "contract_results": {
+            key: value
+            for key, value in semantic.get("contract_results", {}).items()
+            if key in identities
+        },
+        "lifecycle_states": {
+            key: value
+            for key, value in semantic.get("lifecycle_states", {}).items()
+            if key in identities
+        },
+    }
+
+
+_GRAPH_SYNC_FIELDS = frozenset(
+    {"graph_sync", "graph_sync_code", "graph_sync_checkpoint", "graph_sync_remediation"}
+)
+
+
+def restricted_mover_terminal(
+    vault_root: Path,
+    result: Any,
+    *,
+    committed: Callable[[Any], Mapping[str, Any]],
+) -> Any:
+    """A move's terminal as a mover other than the owner receives it.
+
+    Every linking page is rewritten, including pages withheld from the mover,
+    and what those rewrites leave behind shapes the answer: a rewrite the
+    mover may not see can turn a completed graph update into a pending repair,
+    and whether the move wrote any bytes decides whether its leaf comes back
+    wrapped in the committed terminal. Such a mover therefore always receives
+    the committed terminal (`committed` wraps a bare leaf) and no graph
+    outcome, so its answer, in every response detail and on every later
+    move, is the same whether or not a withheld page linked the moved one.
+    The durable terminal keeps the graph outcome.
+    """
+    from .governance import egress
+
+    if not isinstance(result, Mapping) or egress.governed_release_filter(vault_root) is None:
+        return result
+    if "leaf_result" not in result and "new_path" in result and "old_path" in result:
+        result = committed(result)
+
+    def _without(value: Mapping[str, Any]) -> dict[str, Any]:
+        return {key: item for key, item in value.items() if key not in _GRAPH_SYNC_FIELDS}
+
+    terminal = _without(result)
+    leaf = terminal.get("leaf_result")
+    if isinstance(leaf, Mapping):
+        terminal["leaf_result"] = _without(leaf)
+    return terminal
 
 
 def _rewrite_wikilinks(text: str, old_rel: str, new_rel: str) -> tuple[str, int]:

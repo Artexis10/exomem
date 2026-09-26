@@ -45,6 +45,9 @@ _TRUE = frozenset({"1", "true", "yes", "on"})
 _FALSE = frozenset({"", "0", "false", "no", "off"})
 _KNOWN_FEATURES = frozenset({"diarization", "embeddings", "file-watcher", "media", "vision"})
 _HOSTED_CLEARED_ENV = (
+    # A cell is sized for the one recall encoder; an inherited activation model
+    # would load a second, larger one beside it.
+    "EXOMEM_ACTIVATION_MODEL",
     "EXOMEM_BASE_URL",
     "EXOMEM_CF_ACCESS_AUD",
     "EXOMEM_CF_ACCESS_TEAM_DOMAIN",
@@ -65,6 +68,7 @@ _HOSTED_CLEARED_ENV = (
     "GITHUB_CLIENT_SECRET",
     # The legacy spelling too: `env_compat.promote_legacy()` runs again after
     # this clearing and would otherwise copy it back to the canonical name.
+    "KB_MCP_ACTIVATION_MODEL",
     "KB_MCP_OWNER_OAUTH_SUBJECT",
 )
 

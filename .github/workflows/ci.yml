@@ -317,21 +317,27 @@ jobs:
     name: retrieval quality (golden gate, embeddings)
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # A cold cache fetches bge-m3 and, until its artefact is published, builds
+    # the int8 artefact on the runner (minutes, ~9 GB peak) before the
+    # multilingual activation acceptance runs; a warm cache needs neither. The
+    # dense recall acceptance adds about four minutes of sidecar builds.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      # Cache the downloaded bge model between runs — the first run downloads
-      # ~0.5 GB, later runs restore it so the gate stays fast. Keyed on the
-      # model rev pinned in eval_retrieval.py so a model bump busts the cache.
+      # Cache the downloaded models between runs, with the served bge-m3 int8
+      # artefact the activation acceptance loads (fetched or host-built into
+      # ~/.cache/huggingface/exomem-artifacts). The first run downloads them;
+      # later runs restore them so the gate stays fast. Keyed on the pinned
+      # revisions and the artefact digest, so a pin bump busts the cache.
       - name: Cache HuggingFace models
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-bge-base-en-v1.5-reranker-base
+          key: hf-bge-base-en-v1.5-reranker-base-bge-m3-5617a9f6-int8-7b9a0b3b
       - name: Golden retrieval quality gate (hybrid ranking, live vectors)
         # Runs the embeddings-marked suite (tests/test_retrieval_golden.py):
         # builds the sidecar over the fixture KB and asserts hybrid NDCG@10 / MRR
@@ -415,6 +421,8 @@ jobs:
       - name: Certify exact-capacity hidden-corpus vector CPU routes
         env:
           EXOMEM_GOVERNANCE_TIMING_PROFILE: vectors-cpu-torch-v1
+          # The profile certifies the English torch model hosted cells serve.
+          EXOMEM_RECALL_MODEL: BAAI/bge-base-en-v1.5
           EXOMEM_GOVERNANCE_TIMING_ROUTE: ${{ matrix.route }}
           EXOMEM_DISABLE_MEDIA_EXTRACTION: "1"
           EXOMEM_DISABLE_CLIP: "1"

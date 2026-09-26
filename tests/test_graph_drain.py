@@ -1209,3 +1209,49 @@ def test_a_write_signal_still_starts_the_quiet_window(
     drain_thread.start()
     drain_thread.join(timeout=5.0)
     assert seen == [marked], "a signal from the drain's own thread moved the quiet window"
+
+
+def test_debt_pending_is_read_only_and_matches_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dreamer's gate reads graph debt; it must never raise or repair any."""
+    writes: list[str] = []
+    monkeypatch.setattr(
+        deferred_index,
+        "mark_graph_full_rebuild",
+        lambda *_a, **_k: writes.append("marker"),
+    )
+    monkeypatch.setattr(
+        epistemic_graph,
+        "recover_suspended_graph",
+        lambda *_a, **_k: writes.append("recover"),
+    )
+    monkeypatch.setattr(
+        graph_drain, "_request_full_rebuild", lambda *_a, **_k: writes.append("rebuild")
+    )
+    for queued, barrier, unavailable in [
+        (False, False, False),
+        (True, False, False),
+        (False, True, False),
+        (False, False, True),
+    ]:
+        monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root, v=queued: v)
+        monkeypatch.setattr(graph_drain, "_barrier_pending", lambda _root, v=barrier: v)
+        monkeypatch.setattr(
+            graph_drain, "_availability_pending", lambda _root, v=unavailable: v
+        )
+        assert graph_drain.debt_pending(tmp_path) is graph_drain._pending(tmp_path)
+        assert graph_drain.debt_pending(tmp_path) is any((queued, barrier, unavailable))
+    # A standing whole-vault marker is debt even with an empty per-path queue.
+    monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root: False)
+    monkeypatch.setattr(graph_drain, "_barrier_pending", lambda _root: False)
+    monkeypatch.setattr(graph_drain, "_availability_pending", lambda _root: False)
+    monkeypatch.setattr(graph_drain, "_marker_pending", lambda _root: True)
+    assert graph_drain.debt_pending(tmp_path) is True
+
+    def explode(_root: Path) -> bool:
+        raise RuntimeError("unreadable")
+
+    monkeypatch.setattr(graph_drain, "_marker_pending", explode)
+    assert graph_drain.debt_pending(tmp_path) is True
+    assert writes == []

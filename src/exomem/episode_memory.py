@@ -21,7 +21,15 @@ from pathlib import Path
 from typing import Any
 
 from . import add as add_module
-from . import curation, episode_capture, episode_nudge, memory_refs, query_log, source_taxonomy
+from . import (
+    curation,
+    episode_capture,
+    episode_nudge,
+    memory_refs,
+    query_log,
+    source_taxonomy,
+    working_set_heat,
+)
 from .episode_model import EpisodeError
 from .episode_recovery import EpisodeInputOwner
 from .governance import egress
@@ -187,11 +195,12 @@ def record(
         episode=episode, about=about, when=when, audience=audience, **fields
     )
     about_skipped = 0
+    about_paths: dict[str, str] = {}
     if recap.about:
-        visible = egress.visible_memory_refs(
+        about_paths = egress.visible_memory_ref_paths(
             vault_root, recap.about, principal=effective_principal()
         )
-        kept = [ref for ref in recap.about if ref in visible]
+        kept = [ref for ref in recap.about if ref in about_paths]
         about_skipped = len(recap.about) - len(kept)
         if about_skipped:
             recap = episode_capture.prepare(
@@ -199,6 +208,20 @@ def record(
             )
 
     source, idempotent = _write(vault_root, source_schema, recap, when, audience)
+    if not idempotent:
+        # A recorded conversation is heat (step 5, design section 5): the
+        # recap is a contact for the recent-context block and each page it is
+        # about a deliberate act, under the recorder's own episode key, which
+        # is the session key the hooks pass. A retry wrote nothing and
+        # records nothing.
+        working_set_heat.note_episode(
+            vault_root,
+            source["path"],
+            [about_paths[ref] for ref in recap.about if ref in about_paths],
+            attribution=working_set_heat.attribution_for(
+                vault_root, client=client, session=recap.key
+            ),
+        )
     revision: int | None
     try:
         bound = owner.bind_committed_input(

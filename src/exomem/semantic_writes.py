@@ -1135,10 +1135,20 @@ class MovePreflight:
     source_guard: vault.PathGuard
     destination_guard: vault.PathGuard
     mutated: Literal[False] = False
+    #: Pages judged for the closure and publication but not asserted against
+    #: this move (see `move_file`: a page withheld from a mover other than the
+    #: owner whose bytes the move does not rewrite).
+    waived_blockers: frozenset[str] = frozenset()
+
+    @property
+    def blocking_evaluations(self) -> tuple[MovePageEvaluation, ...]:
+        return tuple(
+            item for item in self.evaluations if item.after.path not in self.waived_blockers
+        )
 
     @property
     def should_block(self) -> bool:
-        return any(item.contract_result.should_block for item in self.evaluations)
+        return any(item.contract_result.should_block for item in self.blocking_evaluations)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -2766,8 +2776,21 @@ def _move_state_map(
 def _move_dependency_signature(
     corpus: semantic_contract.SemanticCorpusContext,
     path: str,
+    *,
+    visible: Callable[[str], bool] | None = None,
+    resolver: vault.WikilinkResolver | None = None,
 ) -> tuple[Any, ...]:
+    """What a page's standing in a move depends on.
+
+    For a mover other than the owner (`visible` is its view), the facts it may
+    judge (see `writer_view_relations`): a page whose standing changes only
+    through a relation a withheld page authors does not enter the move's
+    closure, so it is neither judged nor reported for that mover.
+    """
     state = corpus.pages[path]
+    outbound, inbound, _visible = semantic_contract.writer_view_relations(
+        state, corpus, visible=visible, resolver=resolver
+    )
 
     def fact_signature(fact: semantic_contract.RelationFact) -> tuple[Any, ...]:
         qualification = semantic_contract.qualify_relation(
@@ -2792,8 +2815,8 @@ def _move_dependency_signature(
         state.status,
         state.page_type,
         state.projects,
-        tuple(fact_signature(fact) for fact in corpus.outbound.get(path, ())),
-        tuple(fact_signature(fact) for fact in corpus.inbound.get(path, ())),
+        tuple(fact_signature(fact) for fact in outbound),
+        tuple(fact_signature(fact) for fact in inbound),
     )
 
 
@@ -2802,6 +2825,10 @@ def _review_carry_signature(
     path: str,
 ) -> tuple[Any, ...]:
     state = corpus.pages[path]
+    # For a writer other than the owner, the facts it may judge (see
+    # `writer_view_relations`): a relation a withheld page authors does not
+    # decide whether a review carries.
+    outbound, inbound, _visible = semantic_contract.writer_view_relations(state, corpus)
 
     def target_identity(fact: semantic_contract.RelationFact) -> tuple[str, str] | None:
         resolved = (fact.resolved_target_path or "").split("#", 1)[0]
@@ -2811,11 +2838,7 @@ def _review_carry_signature(
         return target.identity_kind, target.identity
 
     def facts(direction: str) -> tuple[tuple[Any, ...], ...]:
-        values = (
-            corpus.outbound.get(path, ())
-            if direction == "outbound"
-            else corpus.inbound.get(path, ())
-        )
+        values = outbound if direction == "outbound" else inbound
         result: list[tuple[Any, ...]] = []
         for fact in values:
             qualification = semantic_contract.qualify_relation(
@@ -2871,13 +2894,27 @@ def _move_evaluation_pairs(
     # inbound/outbound qualifying sets, and registry disposition inputs. Iterate
     # to a fixed point so later dependency dimensions can extend this without a
     # one-hop assumption; the hard bound is the finite final corpus.
+    # A mover other than the owner is judged over its view, decided once.
+    visible = vault.writer_link_visibility(after_corpus.vault_root)
+    resolvers: dict[str, vault.WikilinkResolver | None] = {"before": None, "after": None}
+    if visible is not None:
+        resolvers = {
+            "before": vault.WikilinkResolver.from_entries(
+                before_corpus.vault_root, before_corpus.resolver_entries
+            ),
+            "after": vault.WikilinkResolver.from_entries(
+                after_corpus.vault_root, after_corpus.resolver_entries
+            ),
+        }
     for _ in range(len(after_corpus.pages) + 1):
         added = False
         for path in sorted(after_corpus.eligible_compiled_paths):
             if path in pairs or path not in before_corpus.pages:
                 continue
-            if _move_dependency_signature(before_corpus, path) != _move_dependency_signature(
-                after_corpus, path
+            if _move_dependency_signature(
+                before_corpus, path, visible=visible, resolver=resolvers["before"]
+            ) != _move_dependency_signature(
+                after_corpus, path, visible=visible, resolver=resolvers["after"]
             ):
                 pairs[path] = path
                 added = True
@@ -3216,10 +3253,10 @@ def commit_move(
     if preflight.should_block:
         raise SemanticWriteError(
             "SEMANTIC_CONTRACT_BLOCKED",
-            _blocking_reason_for_evaluations(preflight.evaluations),
+            _blocking_reason_for_evaluations(preflight.blocking_evaluations),
             tuple(
                 finding
-                for item in preflight.evaluations
+                for item in preflight.blocking_evaluations
                 for finding in item.contract_result.blocking_findings
             ),
         )

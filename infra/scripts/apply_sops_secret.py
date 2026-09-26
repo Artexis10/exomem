@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import re
 import subprocess
@@ -11,6 +12,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from secret_keysets import KeySetError, loads_unique_json, validate_key_sets, validate_values
 
 _VERSION = re.compile(r"(?:^|\.)v([1-9][0-9]*)(?:\.|$)")
 
@@ -24,7 +27,8 @@ class Destination:
     target: str
     namespace: str
     secret_name: str
-    key: str
+    key: str | None
+    key_sets: tuple[frozenset[str], ...] = ()
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -39,12 +43,12 @@ def _parser() -> argparse.ArgumentParser:
 
 def _load_destination(matrix_path: Path, destination_id: str) -> Destination:
     try:
-        document = json.loads(matrix_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        document = loads_unique_json(matrix_path.read_bytes())
+    except (OSError, KeySetError) as exc:
         raise SecretApplyError("secret destination matrix is invalid") from exc
     if not isinstance(document, dict) or document.get("schema_version") != 1:
         raise SecretApplyError("secret destination matrix is invalid")
-    matches: list[dict[str, Any]] = []
+    matches: list[tuple[dict[str, Any], str]] = []
     secrets = document.get("secrets")
     if isinstance(secrets, dict):
         for secret in secrets.values():
@@ -52,20 +56,32 @@ def _load_destination(matrix_path: Path, destination_id: str) -> Destination:
             if isinstance(destinations, dict) and destination_id in destinations:
                 candidate = destinations[destination_id]
                 if isinstance(candidate, dict):
-                    matches.append(candidate)
+                    matches.append((candidate, secret.get("value_shape", "line")))
     if len(matches) != 1:
         raise SecretApplyError("secret destination is not uniquely allowlisted")
-    item = matches[0]
+    item, value_shape = matches[0]
     if item.get("kind") != "sops_k8s_secret" or item.get("slot") != "active":
         raise SecretApplyError("secret destination is not an active Kubernetes Secret")
-    required = ("target", "namespace", "kubernetes_secret", "key")
+    required = ("target", "namespace", "kubernetes_secret")
     if any(not isinstance(item.get(field), str) or not item[field] for field in required):
+        raise SecretApplyError("secret destination is invalid")
+    key_sets: tuple[frozenset[str], ...] = ()
+    key = item.get("key")
+    if value_shape == "json-object":
+        if "key" in item:
+            raise SecretApplyError("secret destination is invalid")
+        try:
+            key_sets = validate_key_sets(item.get("key_sets"))
+        except KeySetError as exc:
+            raise SecretApplyError("secret destination is invalid") from exc
+    elif not isinstance(key, str) or not key or "key_sets" in item:
         raise SecretApplyError("secret destination is invalid")
     return Destination(
         target=item["target"],
         namespace=item["namespace"],
         secret_name=item["kubernetes_secret"],
-        key=item["key"],
+        key=key,
+        key_sets=key_sets,
     )
 
 
@@ -89,8 +105,8 @@ def _validate_artifact(destination: Destination, artifact: Path, version: str) -
     if not matches:
         raise SecretApplyError("ciphertext artifact does not match its destination")
     try:
-        encrypted = json.loads(resolved.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        encrypted = loads_unique_json(resolved.read_bytes())
+    except (OSError, KeySetError) as exc:
         raise SecretApplyError("ciphertext artifact is invalid") from exc
     if not isinstance(encrypted, dict) or not isinstance(encrypted.get("sops"), dict):
         raise SecretApplyError("ciphertext artifact has no SOPS metadata")
@@ -99,14 +115,15 @@ def _validate_artifact(destination: Destination, artifact: Path, version: str) -
 
 def _validate_plaintext(raw: bytes, destination: Destination, version: str) -> bytes:
     try:
-        document = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        document = loads_unique_json(raw)
+    except KeySetError as exc:
         raise SecretApplyError("SOPS plaintext has an invalid Kubernetes shape") from exc
     expected_labels = {
         "app.kubernetes.io/managed-by": "exomem-secret-handoff",
         "exomem.io/secret-version": version,
     }
     metadata = document.get("metadata") if isinstance(document, dict) else None
+    string_data = document.get("stringData") if isinstance(document, dict) else None
     valid = (
         isinstance(document, dict)
         and set(document) == {"apiVersion", "kind", "metadata", "type", "stringData"}
@@ -118,14 +135,59 @@ def _validate_plaintext(raw: bytes, destination: Destination, version: str) -> b
         and metadata.get("name") == destination.secret_name
         and metadata.get("namespace") == destination.namespace
         and metadata.get("labels") == expected_labels
-        and isinstance(document.get("stringData"), dict)
-        and set(document["stringData"]) == {destination.key}
-        and isinstance(document["stringData"][destination.key], str)
-        and bool(document["stringData"][destination.key])
+        and isinstance(string_data, dict)
     )
     if not valid:
         raise SecretApplyError("SOPS plaintext has an invalid Kubernetes shape")
+    assert isinstance(string_data, dict)
+    if destination.key_sets:
+        try:
+            validate_values(string_data, destination.key_sets)
+        except KeySetError as exc:
+            raise SecretApplyError("SOPS plaintext has an invalid Kubernetes shape") from exc
+    elif (
+        set(string_data) != {destination.key}
+        or not isinstance(string_data[destination.key], str)
+        or not string_data[destination.key]
+    ):
+        raise SecretApplyError("SOPS plaintext has an invalid Kubernetes shape")
+    try:
+        document["data"] = {
+            key: base64.b64encode(value.encode("utf-8")).decode("ascii")
+            for key, value in string_data.items()
+        }
+    except UnicodeEncodeError as exc:
+        raise SecretApplyError("SOPS plaintext has an invalid Kubernetes shape") from exc
+    del document["stringData"]
     return json.dumps(document, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n"
+
+
+def _verify_live_keys(kubectl: str, destination: Destination, expected: set[str]) -> None:
+    try:
+        result = subprocess.run(
+            [
+                kubectl,
+                "get",
+                "secret",
+                destination.secret_name,
+                "--namespace",
+                destination.namespace,
+                '-o=go-template={{range $key, $value := .data}}{{$key}}{{"\\n"}}{{end}}',
+            ],
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SecretApplyError("Kubernetes Secret key verification failed") from exc
+    if result.returncode != 0:
+        raise SecretApplyError("Kubernetes Secret key verification failed")
+    try:
+        keys = result.stdout.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise SecretApplyError("Kubernetes Secret key verification failed") from exc
+    if len(keys) != len(expected) or set(keys) != expected:
+        raise SecretApplyError("Kubernetes Secret key verification failed")
 
 
 def main() -> int:
@@ -137,7 +199,15 @@ def main() -> int:
         artifact = _validate_artifact(destination, args.artifact, version)
         try:
             decrypt = subprocess.run(
-                [args.sops, "decrypt", "--input-type", "json", "--output-type", "json", str(artifact)],
+                [
+                    args.sops,
+                    "decrypt",
+                    "--input-type",
+                    "json",
+                    "--output-type",
+                    "json",
+                    str(artifact),
+                ],
                 capture_output=True,
                 check=False,
                 timeout=30,
@@ -147,6 +217,7 @@ def main() -> int:
         if decrypt.returncode != 0:
             raise SecretApplyError("SOPS decrypt failed")
         plaintext.extend(_validate_plaintext(decrypt.stdout, destination, version))
+        expected_keys = set(json.loads(plaintext)["data"])
         try:
             applied = subprocess.run(
                 [
@@ -166,6 +237,7 @@ def main() -> int:
             raise SecretApplyError("Kubernetes secret apply failed") from exc
         if applied.returncode != 0:
             raise SecretApplyError("Kubernetes secret apply failed")
+        _verify_live_keys(args.kubectl, destination, expected_keys)
     except (SecretApplyError, FileNotFoundError) as exc:
         print(str(exc), file=sys.stderr)
         return 2

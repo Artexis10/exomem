@@ -6,7 +6,7 @@ import logging
 import os
 from collections.abc import Callable, Mapping
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +49,12 @@ class CandidateBundle:
     raw_fused_score_by_path: dict[str, float]
     adjusted_score_by_path: dict[str, float]
     multiplier_chain_by_path: dict[str, list[dict[str, float | str]]] | None
+    #: Why the request crosses scripts, or None (see `_lexical_visibility`).
+    lexical_crossing: str | None = None
+    #: Pages whose lexical votes fusion withheld, with the rank each lexical
+    #: lane gave them before it did (`WITHHELD_REASON`). The lane rankings above
+    #: are the ones fusion used, so they no longer hold these pages.
+    lexical_votes_withheld: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 def empty_bundle(
@@ -142,6 +148,35 @@ def collapse_frame_children(
     return out
 
 
+LexicalVisibility = find_policy.LexicalVisibility
+_LEXICALLY_VISIBLE = find_policy.LEXICALLY_VISIBLE
+CROSSING_VOTES_WITHHELD = find_policy.CROSSING_VOTES_WITHHELD
+CROSSING_UNMATCHED = find_policy.CROSSING_UNMATCHED
+WITHHELD_REASON = find_policy.WITHHELD_REASON
+
+
+def _lexical_visibility(
+    *,
+    query: str,
+    vector_ranking: list[str],
+    lexical_rankings: tuple[list[str], ...],
+    lane_weights: tuple[float, ...],
+    rrf_k: int,
+    window: int,
+    page_of: PageOf,
+) -> LexicalVisibility:
+    """The dense-lead guard (`find_policy.lexical_visibility`) over parsed pages."""
+    return find_policy.lexical_visibility(
+        query=query,
+        vector_ranking=vector_ranking,
+        lexical_rankings=lexical_rankings,
+        lane_weights=lane_weights,
+        rrf_k=rrf_k,
+        window=window,
+        view_of=page_of,
+    )
+
+
 def collect_candidates(
     vault_root: Path,
     *,
@@ -182,7 +217,16 @@ def collect_candidates(
     consume it. The keyword lane is excluded because it arrives from the
     caller's own provider already shadowed. Default None is a strict no-op.
     """
-    from . import bm25, embeddings, epistemic_graph, fusion, lexstore, readiness, runtime_resources
+    from . import (
+        bm25,
+        embeddings,
+        epistemic_graph,
+        fusion,
+        lexstore,
+        readiness,
+        recall_space,
+        runtime_resources,
+    )
 
     usage_map: dict[str, float] = {}
     if prefer_used:
@@ -236,11 +280,13 @@ def collect_candidates(
                 with _span(timings, "vector.index", source=find_types.SOURCE_INDEX):
                     idx = embeddings.get_embedding_index(vault_root)
                 with _span(timings, "vector.embed"):
-                    query_vec = (
-                        query_vector_provider()
-                        if query_vector_provider is not None
-                        else embeddings.embed_texts([query], is_query=True)[0]
-                    )
+                    if query_vector_provider is not None:
+                        encoded_for, query_vec = query_vector_provider()
+                    else:
+                        encoded_for = getattr(idx, "identity", None)
+                        with recall_space.encoding_for(idx):
+                            query_vec = embeddings.embed_texts([query], is_query=True)[0]
+                recall_space.require_same_space(idx, encoded_for, query_vec)
                 with _span(timings, "vector.search"):
                     chunk_hits = idx.search(
                         query_vec,
@@ -261,7 +307,7 @@ def collect_candidates(
                     lane_statuses["vector"] = {
                         "status": "participated" if vector_ranking else "available_nonmatching",
                         "backend": type(idx).__name__,
-                        "model": embeddings.MODEL_NAME,
+                        "model": recall_space.serving_model(idx),
                         "metric": {
                             "name": "cosine_similarity",
                             "direction": "higher",
@@ -281,6 +327,32 @@ def collect_candidates(
                 timings.error("vector", e)
         except runtime_resources.ModelBusyError:
             raise
+        except recall_space.ServingEncoderCold as e:
+            if capture_trace:
+                lane_statuses["vector"] = {
+                    "status": "warming",
+                    "reason": recall_space.ServingEncoderCold.reason,
+                    "model": embeddings.MODEL_NAME,
+                }
+            log.info("vector search deferred (%s); ranking without the dense lane", e)
+            if timings is not None:
+                timings.skipped("vector")
+            if degraded_out is not None:
+                degraded_out.append("embeddings")
+        except recall_space.VectorSpaceMismatch as e:
+            # The sidecar holds another encoder's vectors: the dense lane is
+            # absent until it is rebuilt in this space, and the others serve.
+            if capture_trace:
+                lane_statuses["vector"] = {
+                    "status": "unavailable",
+                    "reason": recall_space.VectorSpaceMismatch.reason,
+                    "model": embeddings.MODEL_NAME,
+                }
+            log.info("vector search unavailable (%s); ranking without the dense lane", e)
+            if timings is not None:
+                timings.skipped("vector")
+            if degraded_out is not None:
+                degraded_out.append("embeddings")
         except Exception as e:  # noqa: BLE001 - vector search is best-effort
             if capture_trace:
                 lane_statuses["vector"] = {
@@ -551,12 +623,43 @@ def collect_candidates(
         recall_paths=recall_paths,
     )
     keyword_ranking = _eligible(keyword_ranking)
+    visibility = _LEXICALLY_VISIBLE
+    if mode != "vector" and vector_ranking:
+        guard_weights = config.intent_weights(intent or find_policy.classify_intent(query))
+        with _span(timings, "lexical_guard"):
+            visibility = _lexical_visibility(
+                query=query_norm,
+                vector_ranking=vector_ranking,
+                lexical_rankings=(bm25_ranking, keyword_ranking),
+                lane_weights=tuple(guard_weights[:3]),
+                rrf_k=config.rrf_k,
+                window=candidate_k,
+                page_of=page_of,
+            )
     if capture_trace and mode != "vector":
         lane_statuses["keyword"] = {
             "status": "participated" if keyword_ranking else "available_nonmatching",
             "backend": "case_insensitive_substring",
             "metric": {"name": "rank", "direction": "lower", "rounding": "none"},
         }
+    lexical_votes_withheld: dict[str, dict[str, int]] = {}
+    if visibility.withheld:
+        for lane_name, ranking in (("bm25", bm25_ranking), ("keyword", keyword_ranking)):
+            for rank, path in enumerate(ranking, start=1):
+                if path in visibility.withheld:
+                    lexical_votes_withheld.setdefault(path, {})[lane_name] = rank
+        bm25_ranking = [path for path in bm25_ranking if path not in visibility.withheld]
+        keyword_ranking = [path for path in keyword_ranking if path not in visibility.withheld]
+        if capture_trace:
+            for lane_name in ("bm25", "keyword"):
+                count = sum(1 for lanes in lexical_votes_withheld.values() if lane_name in lanes)
+                if count and lane_name in lane_statuses:
+                    # Additive and undeclared in `retrieval_models.LaneProfile`
+                    # so the published outputSchema does not move.
+                    lane_statuses[lane_name]["votes_withheld"] = {
+                        "count": count,
+                        "reason": WITHHELD_REASON,
+                    }
     rankings = [
         r
         for r in (vector_ranking, bm25_ranking, keyword_ranking, clip_ranking)
@@ -856,4 +959,6 @@ def collect_candidates(
         raw_fused_score_by_path=raw_fused_score_by_path,
         adjusted_score_by_path=adjusted_score_by_path,
         multiplier_chain_by_path=multiplier_chain_by_path,
+        lexical_crossing=visibility.crossing,
+        lexical_votes_withheld=lexical_votes_withheld,
     )

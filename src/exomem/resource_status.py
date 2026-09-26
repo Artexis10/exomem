@@ -98,6 +98,18 @@ def _deferred_work(vault_root: Path | None) -> dict[str, Any]:
     return index_sync.deferred_work_status(vault_root)
 
 
+def _recall_reembed(vault_root: Path | None) -> dict[str, Any] | None:
+    """Which vector space serves recall, and a re-embed's progress when one runs."""
+    if vault_root is None:
+        return None
+    try:
+        from . import recall_migration
+
+        return recall_migration.status(vault_root)
+    except Exception as exc:  # noqa: BLE001 - status must never break collection
+        return {"state": "unknown", "error": type(exc).__name__}
+
+
 def cuda_accounting_if_initialized() -> dict[str, Any]:
     """CUDA accounting without importing torch or creating a context."""
     torch = sys.modules.get("torch")
@@ -181,7 +193,7 @@ def runtime_info() -> dict[str, Any]:
 
 def collect(vault_root: Path | None = None) -> dict[str, Any]:
     """Collect process-local resource status without allocating heavy resources."""
-    from . import media_jobs, runtime_resources
+    from . import dreamer, media_jobs, runtime_resources
 
     policy = mode.resolved()
     return {
@@ -193,10 +205,12 @@ def collect(vault_root: Path | None = None) -> dict[str, Any]:
         "models": _model_residency(),
         "caches": _cache_residency(),
         "deferred_work": _deferred_work(vault_root),
+        "recall_reembed": _recall_reembed(vault_root),
         "media": media_jobs.status(vault_root),
         "compute": runtime_resources.status(),
         "asr": asr_runtime_status(),
         "cuda": cuda_accounting_if_initialized(),
+        "dreamer": dreamer.status(),
     }
 
 

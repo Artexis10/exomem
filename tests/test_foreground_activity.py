@@ -349,3 +349,41 @@ def _hold_foreground(vault, entered: threading.Event, release: threading.Event) 
 def _acquire_activity_lock(acquired: threading.Event) -> None:
     with foreground_activity._LOCK:
         acquired.set()
+
+
+def test_idle_seconds_counts_from_the_last_foreground_exit(tmp_path, monkeypatch) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    clock = [1000.0]
+    monkeypatch.setattr(foreground_activity.time, "monotonic", lambda: clock[0])
+    with foreground_activity.foreground_scope(vault):
+        clock[0] = 1010.0
+    clock[0] = 1045.5
+    assert foreground_activity.idle_seconds(vault) == pytest.approx(35.5)
+    # A different spelling of the same vault shares the stamp.
+    assert foreground_activity.idle_seconds(vault / ".." / "vault") == pytest.approx(35.5)
+    # A nested scope only stamps when it returns to the outermost level.
+    with foreground_activity.foreground_scope(vault):
+        with foreground_activity.foreground_scope(vault):
+            clock[0] = 1100.0
+        clock[0] = 1200.0
+    clock[0] = 1230.0
+    assert foreground_activity.idle_seconds(vault) == pytest.approx(30.0)
+
+
+def test_idle_is_zero_while_a_foreground_scope_is_live(tmp_path) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    entered = threading.Event()
+    release = threading.Event()
+    thread = threading.Thread(target=lambda: _hold_foreground(vault, entered, release), daemon=True)
+    thread.start()
+    try:
+        assert entered.wait(5)
+        assert foreground_activity.idle_seconds(vault) == 0.0
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive()
+    assert foreground_activity.idle_seconds(vault) >= 0.0
+    assert foreground_activity.idle_seconds(vault) < 5.0

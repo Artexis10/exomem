@@ -26,6 +26,7 @@ disk is not the one this binary writes.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -95,7 +96,11 @@ log = logging.getLogger(__name__)
 #: covers both commits in this round since C3 needs one for the SAME table
 #: and a schema version is an all-or-nothing per-round bump, not a per-word
 #: one.
-SCHEMA_VERSION = 8
+#: v9 (step 4, T7): signature vectors are stored with the digest of the
+#: signature they embed, and the sidecar records the encoder fingerprint they
+#: were made with (`index_meta`). A v8 sidecar's vectors name no encoder, so
+#: they are wiped rather than read under whatever encoder is resident now.
+SCHEMA_VERSION = 9
 SIDECAR_NAME = ".working-set.sqlite"
 DISABLE_ENV = "EXOMEM_DISABLE_WORKING_SET"
 _TRUE = frozenset({"1", "true", "yes", "on"})
@@ -115,6 +120,10 @@ ANCHOR_KINDS: tuple[str, ...] = (
 #: hubs than this has a structure problem the index should not paper over, and
 #: the bound is what keeps a cold build inside an unmanaged request budget.
 MAX_ANCHORS = 2000
+#: Signatures an inline (request-thread) index update may encode, with an
+#: already resident encoder. A background pass has no bound. The rest stay
+#: vectorless until a later pass, which costs them `vector_band`, not a request.
+INLINE_VECTOR_ENCODE_LIMIT = 64
 MAX_PLAN_ITEMS = 200
 MAX_LINKS_PER_ANCHOR = 40
 SIGNATURE_MAX_CHARS = 600
@@ -1232,6 +1241,9 @@ def _resolve_links(
 
 _CACHE_LOCK = threading.Lock()
 _ROW_CACHE: dict[Path, tuple[tuple[int, int, int], tuple[AnchorRow, ...]]] = {}
+#: The signature-vector matrix, read once per write token: (fingerprint the
+#: vectors were made with, anchor ids, read-only L2-normalised float32 matrix).
+_MATRIX_CACHE: dict[Path, tuple[tuple[int, int, int], tuple[str | None, tuple[str, ...], Any]]] = {}
 
 
 # --------------------------------------------------------------------------- #
@@ -1594,7 +1606,7 @@ class WorkingSetIndex:
         )
         conn.execute(
             "CREATE TABLE IF NOT EXISTS anchor_vectors "
-            "(anchor_id TEXT PRIMARY KEY, vector BLOB NOT NULL)"
+            "(anchor_id TEXT PRIMARY KEY, signature_digest TEXT NOT NULL DEFAULT '', vector BLOB NOT NULL)"
         )
         try:
             conn.execute(
@@ -1651,6 +1663,14 @@ class WorkingSetIndex:
             )
             conn.commit()
         elif int(stored[0]) != SCHEMA_VERSION:
+            # A table whose columns changed is recreated, not just emptied. The
+            # digest defaults to '' so the previous release's two-column insert
+            # still succeeds after a rollback; an empty digest never matches.
+            conn.execute("DROP TABLE IF EXISTS anchor_vectors")
+            conn.execute(
+                "CREATE TABLE anchor_vectors "
+                "(anchor_id TEXT PRIMARY KEY, signature_digest TEXT NOT NULL DEFAULT '', vector BLOB NOT NULL)"
+            )
             self._wipe(conn)
 
     def _wipe(self, conn: sqlite3.Connection) -> None:
@@ -1683,6 +1703,7 @@ class WorkingSetIndex:
         conn.commit()
         with _CACHE_LOCK:
             _ROW_CACHE.pop(self.path, None)
+            _MATRIX_CACHE.pop(self.path, None)
 
     # -- reads -------------------------------------------------------------- #
 
@@ -1840,6 +1861,69 @@ class WorkingSetIndex:
             return {}
         return {str(term): int(count) for term, count in rows}
 
+    def vector_matrix(self, fingerprint: str | None) -> tuple[tuple[str, ...], Any]:
+        """Anchor ids and their L2-normalised signature matrix, for `fingerprint`.
+
+        Read once per write token and shared read-only. Empty, `((), None)`,
+        when no vectors exist or another encoder made them: two vector spaces
+        never meet, and a background pass re-embeds under the new one.
+        """
+        if fingerprint is None:
+            return (), None
+        stored_fingerprint, ids, matrix = self._matrix_entry()
+        if matrix is None or stored_fingerprint != fingerprint:
+            return (), None
+        return ids, matrix
+
+    def vector_fingerprint(self) -> str | None:
+        """The fingerprint the stored signature vectors were made under, or None
+        when there are none. Read from the same cached entry as the matrix."""
+        stored_fingerprint, _ids, matrix = self._matrix_entry()
+        return stored_fingerprint if matrix is not None else None
+
+    def _matrix_entry(self) -> tuple[str | None, tuple[str, ...], Any]:
+        conn = self._connect()
+        if conn is None:
+            return None, (), None
+        token = sidecar_store.read_meta_token(conn)
+        with _CACHE_LOCK:
+            cached = _MATRIX_CACHE.get(self.path)
+        if cached is not None and cached[0] == token:
+            return cached[1]
+        entry = self._read_matrix(conn)
+        with _CACHE_LOCK:
+            _MATRIX_CACHE[self.path] = (token, entry)
+        return entry
+
+    def _read_matrix(self, conn: sqlite3.Connection) -> tuple[str | None, tuple[str, ...], Any]:
+        # One read snapshot for the fingerprint and the rows: a writer that
+        # re-embeds under another encoder between two autocommit reads would
+        # otherwise hand this reader its vectors under the old fingerprint.
+        own = not conn.in_transaction
+        if own:
+            conn.execute("BEGIN")
+        try:
+            stored = conn.execute(
+                "SELECT value FROM index_meta WHERE key = 'activation_encoder_fingerprint'"
+            ).fetchone()
+            rows = conn.execute(
+                "SELECT anchor_id, vector FROM anchor_vectors ORDER BY anchor_id"
+            ).fetchall()
+        finally:
+            if own:
+                conn.rollback()
+        if stored is None or not rows:
+            return (str(stored[0]) if stored else None), (), None
+        import numpy as np
+
+        vectors = [(str(anchor_id), np.frombuffer(blob, dtype=np.float32)) for anchor_id, blob in rows]
+        width = vectors[0][1].shape[0]
+        kept = [(anchor_id, vector) for anchor_id, vector in vectors if vector.shape[0] == width]
+        matrix = np.vstack([vector for _anchor_id, vector in kept]).astype(np.float32)
+        matrix = matrix / np.maximum(np.linalg.norm(matrix, axis=1, keepdims=True), 1e-12)
+        matrix.setflags(write=False)
+        return str(stored[0]), tuple(anchor_id for anchor_id, _vector in kept), matrix
+
     def vectors(self) -> dict[str, Any]:
         """Signature embeddings, or `{}` when the backend produced none."""
         conn = self._connect()
@@ -1857,15 +1941,28 @@ class WorkingSetIndex:
 
     # -- writes ------------------------------------------------------------- #
 
-    def rebuild(self, *, freshness_stamp: str | None = None) -> dict[str, Any]:
-        """Derive every anchor from the vault and replace the catalogue."""
-        return self._write(full=True, freshness_stamp=freshness_stamp)
+    def rebuild(self, *, freshness_stamp: str | None = None, load_encoder: bool = False) -> dict[str, Any]:
+        """Derive every anchor from the vault and replace the catalogue.
 
-    def update(self, *, freshness_stamp: str | None = None) -> dict[str, Any]:
-        """Bring the catalogue to the current vault state, bumping only on change."""
-        return self._write(full=False, freshness_stamp=freshness_stamp)
+        `load_encoder` is for a background pass only: it may load a cold
+        activation encoder to embed signatures. Without it, signatures are
+        embedded only by an encoder that is already resident, a bounded number
+        per pass (`INLINE_VECTOR_ENCODE_LIMIT`), so a request thread never loads
+        a model and never pays for a whole catalogue.
+        """
+        return self._write(full=True, freshness_stamp=freshness_stamp, load_encoder=load_encoder)
 
-    def _write(self, *, full: bool, freshness_stamp: str | None = None) -> dict[str, Any]:
+    def update(self, *, freshness_stamp: str | None = None, load_encoder: bool = False) -> dict[str, Any]:
+        """Bring the catalogue to the current vault state, bumping only on change.
+
+        Also brings the signature vectors up to date, re-embedding only the
+        anchors whose signature changed (see `rebuild` for `load_encoder`).
+        """
+        return self._write(full=False, freshness_stamp=freshness_stamp, load_encoder=load_encoder)
+
+    def _write(
+        self, *, full: bool, freshness_stamp: str | None = None, load_encoder: bool = False
+    ) -> dict[str, Any]:
         if disabled():
             return {"anchors": 0, "generation": 0, "disabled": True}
         conn = self._connect()
@@ -1896,6 +1993,27 @@ class WorkingSetIndex:
             stored_names = conn.execute("SELECT COUNT(*) FROM page_names").fetchone()
             wanted_names = sum(len(paths) for paths in page_names.values())
             changed = int(stored_names[0] if stored_names else 0) != wanted_names
+        plan = self._plan_vectors(conn, candidates, load_encoder=load_encoder)
+        if not changed and plan is not None and plan.changed:
+            # The catalogue did not move but its vectors did: an encoder became
+            # resident, changed, or caught up on a bounded inline pass.
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                self._apply_vectors(conn, plan)
+                if freshness_stamp is not None:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO index_meta (key, value) VALUES ('freshness_key', ?)",
+                        (freshness_stamp,),
+                    )
+                generation = sidecar_store.bump_meta(conn, "generation")
+                vector_token = sidecar_store.read_meta_token(conn)
+                conn.commit()
+            except sqlite3.Error:
+                conn.rollback()
+                log.warning("activation index vector write failed", exc_info=True)
+                return {"anchors": len(existing), "generation": 0, "unavailable": True}
+            _publish_pending_manifests(self.vault_root, generation, token=vector_token)
+            return {"anchors": len(existing), "generation": generation, "vectors": len(plan.rows)}
         if not changed:
             # The vault did not move, so the rows and the generation must not
             # either; only the stamp advances, so the next request stops asking.
@@ -1913,7 +2031,6 @@ class WorkingSetIndex:
                 "generation": unchanged_token[1],
                 "unchanged": True,
             }
-        vectors = _signature_vectors(candidates)
         try:
             conn.execute("BEGIN IMMEDIATE")
             for table in (
@@ -1921,12 +2038,16 @@ class WorkingSetIndex:
                 "anchor_aliases",
                 "anchor_categories",
                 "anchor_links",
-                "anchor_vectors",
                 "anchor_term_rows",
                 "page_names",
                 "term_anchor_counts",
             ):
                 conn.execute(f"DELETE FROM {table}")
+            if plan is None:
+                conn.execute("DELETE FROM anchor_vectors")
+                conn.execute("DELETE FROM index_meta WHERE key = 'activation_encoder_fingerprint'")
+            else:
+                self._apply_vectors(conn, plan)
             self._delete_fts(conn)
             for candidate in candidates:
                 conn.execute(
@@ -1956,12 +2077,6 @@ class WorkingSetIndex:
                     [(candidate.anchor_id, term) for term in candidate.terms],
                 )
                 self._insert_fts(conn, candidate)
-                blob = vectors.get(candidate.anchor_id)
-                if blob is not None:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO anchor_vectors (anchor_id, vector) VALUES (?, ?)",
-                        (candidate.anchor_id, blob),
-                    )
             conn.executemany(
                 "INSERT OR REPLACE INTO page_names (name, path) VALUES (?, ?)",
                 sorted(
@@ -2002,6 +2117,120 @@ class WorkingSetIndex:
             _ROW_CACHE.pop(self.path, None)
         _publish_pending_manifests(self.vault_root, generation, token=written_token)
         return {"anchors": len(candidates), "generation": generation}
+
+    def _plan_vectors(
+        self, conn: sqlite3.Connection, candidates: Sequence[_Candidate], *, load_encoder: bool
+    ) -> _VectorPlan | None:
+        """The signature vectors this write should leave, encoding only what changed.
+
+        A stored vector is reused when its anchor's signature digest is
+        unchanged and the encoder in use made it. Without a resident encoder
+        (and no leave to load one) nothing is encoded: unchanged anchors keep
+        their vectors and changed ones lose theirs. A resident encoder other
+        than the one the vectors were made with is treated the same way on an
+        inline pass in a managed runtime: it never starts its own vector space
+        there, because a bounded inline pass would leave a partial population
+        for the band to calibrate on, and the runtime schedules the background
+        pass that re-embeds everything under it. Nothing schedules that pass in
+        an unmanaged runtime, so there a changed encoder is a first population:
+        the stale rows go and the bounded inline fill takes over, still with a
+        resident model only. None when embeddings are off, which leaves no
+        vectors at all.
+        """
+        if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+            return None
+        stored = {
+            str(anchor_id): (str(digest), bytes(blob))
+            for anchor_id, digest, blob in conn.execute(
+                "SELECT anchor_id, signature_digest, vector FROM anchor_vectors"
+            )
+        }
+        row = conn.execute(
+            "SELECT value FROM index_meta WHERE key = 'activation_encoder_fingerprint'"
+        ).fetchone()
+        stored_fingerprint = str(row[0]) if row else None
+        wanted = {
+            candidate.anchor_id: _signature_digest(candidate.signature)
+            for candidate in candidates
+            if candidate.signature
+        }
+        try:
+            from . import embeddings
+
+            fingerprint = embeddings.activation_fingerprint()
+        except Exception:  # noqa: BLE001 - the vector lane is optional by contract
+            log.info("activation index: encoder state unavailable", exc_info=True)
+            return _VectorPlan(rows={}, fingerprint=None, changed=bool(stored))
+
+        def reusable(space: str | None) -> dict[str, tuple[str, bytes]]:
+            if space is None or space != stored_fingerprint:
+                return {}
+            return {
+                anchor_id: stored[anchor_id]
+                for anchor_id, digest in wanted.items()
+                if anchor_id in stored and stored[anchor_id][0] == digest
+            }
+
+        if (
+            not load_encoder
+            and fingerprint is not None
+            and stored_fingerprint not in (None, fingerprint)
+            and _runtime_managed()
+        ):
+            keep = reusable(stored_fingerprint)
+            space = stored_fingerprint if keep else None
+            return _VectorPlan(
+                rows=keep, fingerprint=space, changed=keep != stored or space != stored_fingerprint
+            )
+        keep = reusable(fingerprint or stored_fingerprint)
+        missing = [c for c in candidates if c.signature and c.anchor_id not in keep]
+        new: dict[str, tuple[str, bytes]] = {}
+        if missing:
+            try:
+                if fingerprint is None and load_encoder:
+                    embeddings.get_activation_model()
+                    fingerprint = embeddings.activation_fingerprint()
+                    keep = reusable(fingerprint)
+                    missing = [c for c in candidates if c.signature and c.anchor_id not in keep]
+                if missing and fingerprint is not None:
+                    batch = missing if load_encoder else missing[:INLINE_VECTOR_ENCODE_LIMIT]
+                    import numpy as np
+
+                    texts = [c.signature for c in batch]
+                    # A request thread's pass uses a resident model or none: the
+                    # reaper may unload it between the residency check and here.
+                    matrix = (
+                        embeddings.embed_activation_passages(texts)
+                        if load_encoder
+                        else embeddings.embed_activation_passages_if_loaded(texts)
+                    )
+                    if matrix is not None and embeddings.activation_fingerprint() == fingerprint:
+                        new = {
+                            c.anchor_id: (wanted[c.anchor_id], np.asarray(vector, dtype=np.float32).tobytes())
+                            for c, vector in zip(batch, matrix, strict=True)
+                        }
+            except Exception:  # noqa: BLE001 - the vector lane is optional by contract
+                log.info("activation index: signature embeddings unavailable", exc_info=True)
+        rows = {**keep, **new}
+        space = fingerprint if fingerprint is not None else stored_fingerprint
+        if not rows:
+            space = None
+        changed = rows != stored or space != stored_fingerprint
+        return _VectorPlan(rows=rows, fingerprint=space, changed=changed)
+
+    def _apply_vectors(self, conn: sqlite3.Connection, plan: _VectorPlan) -> None:
+        conn.execute("DELETE FROM anchor_vectors")
+        conn.executemany(
+            "INSERT INTO anchor_vectors (anchor_id, signature_digest, vector) VALUES (?, ?, ?)",
+            sorted((anchor_id, digest, blob) for anchor_id, (digest, blob) in plan.rows.items()),
+        )
+        if plan.fingerprint is None:
+            conn.execute("DELETE FROM index_meta WHERE key = 'activation_encoder_fingerprint'")
+        else:
+            conn.execute(
+                "INSERT OR REPLACE INTO index_meta (key, value) VALUES ('activation_encoder_fingerprint', ?)",
+                (plan.fingerprint,),
+            )
 
     def _stamp(self, conn: sqlite3.Connection, freshness_stamp: str) -> None:
         """Record the freshness key without touching the write generation."""
@@ -2107,27 +2336,26 @@ class WorkingSetIndex:
         return candidates, edges, names, term_counts
 
 
-def _signature_vectors(candidates: Iterable[_Candidate]) -> dict[str, bytes]:
-    """Embed the structural signatures, or produce nothing at all.
+@dataclass(frozen=True)
+class _VectorPlan:
+    """The signature vectors one index write leaves: anchor id -> (signature
+    digest, float32 bytes), the encoder they belong to, and whether that
+    differs from what is stored."""
 
-    Absent is the honest answer under `EXOMEM_DISABLE_EMBEDDINGS`: a zero or
-    random vector would still score, and `vector_band` must never be faked.
-    """
-    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        return {}
-    rows = [candidate for candidate in candidates if candidate.signature]
-    if not rows:
-        return {}
+    rows: dict[str, tuple[str, bytes]]
+    fingerprint: str | None
+    changed: bool
+
+
+def _runtime_managed() -> bool:
+    """Whether a managed runtime owns this process (and schedules re-embeds)."""
     try:
-        import numpy as np
+        from . import readiness
 
-        from . import embeddings
+        return bool(readiness.runtime_managed())
+    except Exception:  # noqa: BLE001 - an unknown runtime is treated as unmanaged
+        return False
 
-        matrix = embeddings.embed_texts([row.signature for row in rows], is_query=False)
-    except Exception:  # noqa: BLE001 - the vector lane is optional by contract
-        log.info("activation index: signature embeddings unavailable", exc_info=True)
-        return {}
-    out: dict[str, bytes] = {}
-    for row, vector in zip(rows, matrix, strict=False):
-        out[row.anchor_id] = np.asarray(vector, dtype=np.float32).tobytes()
-    return out
+
+def _signature_digest(signature: str) -> str:
+    return hashlib.sha256(signature.encode("utf-8", "surrogatepass")).hexdigest()[:32]

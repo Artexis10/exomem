@@ -252,6 +252,23 @@ def _pending(vault_root: Path) -> bool:
     )
 
 
+def debt_pending(vault_root: Path) -> bool:
+    """True when the graph owes work of any kind. Read-only; never raises.
+
+    The public probe for work that must yield to graph convergence (the
+    dreamer's idle gate). Queued receipts, a standing whole-vault marker, a
+    stopped rebuild's barrier and an unreadable graph all count. It reads the
+    same predicates the drain schedules on and repairs nothing: no marker is
+    raised and no recovery is attempted. An unreadable probe answers True, the
+    direction that keeps optional work out of the way.
+    """
+    try:
+        return bool(_pending(vault_root) or _whole_vault_pending(vault_root))
+    except Exception:  # noqa: BLE001 - an unreadable probe must hold background work
+        log.debug("graph drain: debt probe unreadable", exc_info=True)
+        return True
+
+
 def _marker_pending(vault_root: Path) -> bool:
     """True when a whole-vault rebuild marker stands. Never raises."""
     from . import deferred_index

@@ -84,8 +84,19 @@ output "database_hostname" {
 }
 
 output "control_db_estimated_fixed_monthly_eur_ex_vat" {
-  # Approximate list price for cpx11 in fsn1 plus a primary IPv4; not fetched
+  # Approximate list price for cx23 in fsn1 plus a primary IPv4; not fetched
   # from the live Hetzner pricing API, unlike the alpha estimate above.
   description = "Approximate control-database server cost; excludes usage-priced B2."
-  value       = 5.36
+  value       = 5.99
+}
+
+output "k3s_agent_nodes" {
+  description = "Non-sensitive K3s agent coordinates (name, IPv4, private IP) consumed by the generated Ansible inventory."
+  value = {
+    for key, node in module.k3s_agents.nodes : key => {
+      name       = node.name
+      ipv4       = node.ipv4
+      private_ip = node.private_ip
+    }
+  }
 }

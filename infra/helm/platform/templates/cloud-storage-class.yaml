@@ -1,0 +1,20 @@
+{{- if .Values.cellctl.enabled }}
+# D5: the existing encrypted Hetzner CSI class parameters, but with
+# reclaimPolicy Delete (not Retain like the hosted `storage.className`
+# above) so D10 deletion actually destroys the tenant's volume.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.cloudStorage.className }}
+  labels:
+    app.kubernetes.io/part-of: exomem-cloud
+    exomem.io/encrypted: "true"
+provisioner: csi.hetzner.cloud
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  csi.storage.k8s.io/fstype: ext4
+  csi.storage.k8s.io/node-publish-secret-name: {{ .Values.cloudStorage.encryptionSecretName }}
+  csi.storage.k8s.io/node-publish-secret-namespace: {{ .Values.cloudStorage.encryptionSecretNamespace }}
+{{- end }}

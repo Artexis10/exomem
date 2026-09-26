@@ -852,3 +852,106 @@ def test_later_drop_is_immediately_blocked_after_runtime_start_failure(
     assert repeated.state == media_jobs.BLOCKED
     assert sidecar_path.read_bytes() == before
     assert sidecar_path.stat().st_mtime_ns == before_mtime
+
+
+def _quiet_starters(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: None)
+    monkeypatch.setattr(
+        server_runtime, "_start_compute_runtime", lambda _root: calls.append("compute")
+    )
+    monkeypatch.setattr(
+        server_runtime, "_start_graph_drain", lambda _root: calls.append("graph")
+    )
+    monkeypatch.setattr(
+        server_runtime, "_start_media_worker", lambda _root: calls.append("media")
+    )
+    monkeypatch.setattr(
+        server_runtime.LocalRuntimeActivation,
+        "_start_vocabulary_recovery",
+        lambda self, _root: calls.append("vocabulary"),
+    )
+
+
+def test_dreamer_starts_last_and_only_when_enabled(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import dreamer
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    calls: list[str] = []
+    _quiet_starters(monkeypatch, calls)
+    real_start = dreamer.start
+    monkeypatch.setattr(
+        dreamer, "start", lambda root: (calls.append("dreamer"), real_start(root))[1]
+    )
+    try:
+        # Default off: the starter runs last and starts nothing.
+        activation = server_runtime.LocalRuntimeActivation(vault)
+        activation.start()
+        activation._thread.join(5)
+        assert calls == ["compute", "graph", "media", "vocabulary", "dreamer"]
+        assert activation.dreamer is None
+        assert not dreamer.running()
+
+        calls.clear()
+        monkeypatch.setenv("EXOMEM_DREAMER", "on")
+        enabled = server_runtime.LocalRuntimeActivation(vault)
+        enabled.start()
+        enabled._thread.join(5)
+        assert calls[-1] == "dreamer"
+        assert enabled.dreamer is not None and enabled.dreamer.name == "exomem-dreamer"
+        assert dreamer.running()
+    finally:
+        dreamer.reset_for_tests()
+        readiness.reset()
+
+
+def test_standby_defers_the_dreamer_until_release(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import dreamer
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    calls: list[str] = []
+    _quiet_starters(monkeypatch, calls)
+    monkeypatch.setenv("EXOMEM_DREAMER", "on")
+    try:
+        activation = server_runtime.LocalRuntimeActivation(vault, deferred=True)
+        activation.start()
+        assert activation._thread is None
+        assert not dreamer.running()
+        activation.release()
+        activation._thread.join(5)
+        assert calls[-1:] == ["vocabulary"]
+        assert activation.dreamer is not None
+        assert dreamer.running()
+    finally:
+        dreamer.reset_for_tests()
+        readiness.reset()
+
+
+def test_shutdown_stops_the_dreamer(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import dreamer
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    calls: list[str] = []
+    _quiet_starters(monkeypatch, calls)
+    monkeypatch.setenv("EXOMEM_DREAMER", "on")
+    activation = server_runtime.LocalRuntimeActivation(vault, fallback_seconds=60.0)
+
+    async def exercise() -> None:
+        async with activation.lifespan()(SimpleNamespace()):
+            activation.start()
+            await asyncio.to_thread(activation._thread.join, 5)
+            assert dreamer.running()
+        assert not dreamer.running()
+        assert [t for t in threading.enumerate() if t.name == "exomem-dreamer"] == []
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        dreamer.reset_for_tests()
+        readiness.reset()

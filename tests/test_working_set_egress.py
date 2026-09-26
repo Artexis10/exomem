@@ -10,6 +10,7 @@ depended on a withheld neighbour.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Mapping
 from pathlib import Path
@@ -901,7 +902,9 @@ Never tow without checking [[Cargo Sled]] first.
     working_set_index.WorkingSetIndex(vault).reset()
     working_set_index.WorkingSetIndex(vault).rebuild()
 
-    write_scope(vault, paths="Products/**")
+    # Only the linked page is withheld: the anchor resolves for the caller, and
+    # the guard must resolve the prose link to decide it.
+    write_scope(vault, paths="Products/Cargo Sled.md")
     write_rule(vault, ceiling=0, audience="external")
 
     # Publication owns catalogue warming. Activation must not rebuild it just
@@ -982,6 +985,45 @@ def test_a_colliding_name_decides_every_page_that_bears_it(vault: Path) -> None:
 
     assert guarded is not None
     assert guarded["units"] == []
+
+
+def test_residual_prose_naming_a_page_a_withheld_page_shares_a_name_with_is_dropped(
+    vault: Path,
+) -> None:
+    """DOCUMENTED RESIDUAL (decide-derived-identifiers-before-egress, design Risks).
+
+    A unit whose prose names a title or stem that a visible page and a withheld
+    page share is dropped for a restricted caller, although the same unit is
+    served when the withheld page is absent. The guard decides every page that
+    bears the name and fails closed rather than resolving the name over the
+    caller's view; per-audience name tables are deferred to the owner/remote
+    audience split. This test pins the current answer so that closing the
+    residual is a deliberate change.
+    """
+    withheld = vault / "Knowledge Base" / "Notes" / "Patterns" / "Widget.md"
+    permitted = vault / "Knowledge Base" / "Notes" / "Insights" / "widget.md"
+    for path, title in ((withheld, "Widget"), (permitted, "widget")):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\ntype: pattern\nstatus: active\nupdated: 2026-09-01\n---\n\n# {title}\n\nBody.\n",
+            encoding="utf-8",
+        )
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    unit = _prose_unit("widget", ref=_unit_ref(OPEN_PATH, "shared-name"))
+
+    def guarded_units() -> list:
+        _indexed(vault)
+        packet = _packet()
+        packet["units"] = [unit]
+        with request_scope(_external()):
+            guarded = egress.guard_working_set(vault, packet, _prose_release())
+        assert guarded is not None
+        return guarded["units"]
+
+    assert guarded_units() == []
+    withheld.unlink()
+    assert guarded_units() == [unit]
 
 
 # --------------------------------------------------------------------------- #
@@ -1303,19 +1345,20 @@ def test_the_plain_normalised_spelling_still_matches(
     assert guarded["units"] == []
 
 
-def test_a_guard_removal_is_reported_per_section(vault: Path) -> None:
+@pytest.mark.parametrize("ceiling", [0, 1])
+def test_a_guard_removal_is_reported_per_section(vault: Path, ceiling: int) -> None:
     """The reviewer's shared-title case: the permitted twin loses its own anchor.
 
     Fail-closed is right for v0 — a title that a withheld page also bears cannot
-    be told apart here — but a silent removal reads exactly like a vault with
-    nothing to say, which is what `lane_truncated` and `budget` already refuse to
-    do.
+    be told apart here. Material released at a notice level is reported, since
+    the caller may know it exists; material at L0 is omitted silently, as a
+    vault without it would answer.
     """
     shared = "Shared Title"
     _titled_page(vault, "Knowledge Base/Notes/Patterns/withheld-twin.md", shared)
     _titled_page(vault, "Knowledge Base/Notes/Insights/permitted-twin.md", shared)
     write_scope(vault)
-    write_rule(vault, ceiling=0)
+    write_rule(vault, ceiling=ceiling)
     _indexed(vault)
 
     permitted = "Knowledge Base/Notes/Insights/permitted-twin.md"
@@ -1347,7 +1390,10 @@ def test_a_guard_removal_is_reported_per_section(vault: Path) -> None:
 
     assert guarded is not None
     assert [anchor["ref"] for anchor in guarded["anchors"]] == [OPEN_PATH]
-    assert {"role": "anchors", "reason": "withheld"} in guarded["missing"]
+    if ceiling:
+        assert {"role": "anchors", "reason": "withheld"} in guarded["missing"]
+    else:
+        assert [m for m in guarded["missing"] if m.get("reason") == "withheld"] == []
     # The marker names nothing.
     for marker in guarded["missing"]:
         assert set(marker) == {"role", "reason"}
@@ -1378,7 +1424,8 @@ def test_withheld_markers_survive_the_guards_own_scan(vault: Path) -> None:
     _titled_page(vault, "Knowledge Base/Notes/Patterns/anchors.md", "Anchors")
     _titled_page(vault, "Knowledge Base/Notes/Patterns/withheld.md", "Withheld")
     write_scope(vault)
-    write_rule(vault, ceiling=0)
+    # A notice level: the caller may know something was removed.
+    write_rule(vault, ceiling=1)
     _indexed(vault)
 
     packet = _prose_only_packet(_stem_of(RESTRICTED_PATH))
@@ -1393,7 +1440,7 @@ def test_withheld_markers_survive_the_guards_own_scan(vault: Path) -> None:
 
 def test_the_fully_withheld_flip_keeps_its_markers(vault: Path) -> None:
     write_scope(vault, paths="**")
-    write_rule(vault, ceiling=0)
+    write_rule(vault, ceiling=1)
     _indexed(vault)
 
     with request_scope(_external()):
@@ -1403,6 +1450,21 @@ def test_the_fully_withheld_flip_keeps_its_markers(vault: Path) -> None:
     assert guarded["abstained"] is True
     assert guarded["abstention"] == {"reason": "withheld"}
     assert {"role": "anchors", "reason": "withheld"} in guarded["missing"]
+
+
+def test_the_fully_withheld_flip_at_l0_abstains_as_unresolved(vault: Path) -> None:
+    """At L0 the turn resolved nothing the caller may know of."""
+    write_scope(vault, paths="**")
+    write_rule(vault, ceiling=0)
+    _indexed(vault)
+
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, _packet(), _prose_release())
+
+    assert guarded is not None
+    assert guarded["abstained"] is True
+    assert guarded["abstention"] == {"reason": "unresolved"}
+    assert [m for m in guarded["missing"] if m.get("reason") == "withheld"] == []
 
 
 # --------------------------------------------------------------------------- #
@@ -1505,7 +1567,8 @@ def test_an_alias_shared_by_a_withheld_and_a_permitted_page_drops_the_unit(
 
     assert guarded is not None
     assert guarded["units"] == []
-    assert {"role": "units", "reason": "withheld"} in guarded["missing"]
+    # At L0 the removal is silent.
+    assert [m for m in guarded["missing"] if m.get("reason") == "withheld"] == []
 
 
 def test_an_alias_spelling_resolves_to_every_page_bearing_it(vault: Path) -> None:
@@ -3089,7 +3152,8 @@ def test_a_withheld_recent_page_leaves_the_block_and_the_others_serve(vault: Pat
     assert guarded is not None
     assert [entry["path"] for entry in guarded["recent_context"]] == [OPEN_PATH]
     assert RESTRICTED_PATH not in str(guarded)
-    assert {"role": "recent_context", "reason": "withheld"} in guarded["missing"]
+    # At L0 the page leaves the block silently.
+    assert [m for m in guarded["missing"] if m.get("reason") == "withheld"] == []
 
 
 def test_a_recent_statement_naming_a_withheld_page_drops_its_entry(vault: Path) -> None:
@@ -3268,8 +3332,8 @@ def test_a_withheld_dominant_page_abstains_rather_than_carrying_the_runner_up(
     emptying it IS the answer. What this pins is that nothing anywhere
     reaches for a different page once the named one is withheld: a second
     page on the same topic sits in the corpus, it is named nowhere in what
-    is served, and the packet says `withheld` rather than quietly
-    substituting it.
+    is served, and the packet abstains rather than quietly substituting it.
+    At L0 it abstains as `unresolved`, exactly as it would without the page.
     """
     from test_working_set_carry import CARRY_TURN
 
@@ -3294,7 +3358,8 @@ def test_a_withheld_dominant_page_abstains_rather_than_carrying_the_runner_up(
         packet = commands.op_activate_context(vault, turn=CARRY_TURN)
 
     assert packet["abstained"] is True
-    assert packet["abstention"] == {"reason": "withheld"}
+    # L0: the carried page is omitted as an absent one would be.
+    assert packet["abstention"] == {"reason": "unresolved"}
     assert packet["anchors"] == []
     assert packet["units"] == []
     assert packet["pointers"] == []
@@ -3481,3 +3546,47 @@ def test_the_episode_key_never_causes_a_spurious_withhold(vault: Path) -> None:
 
     assert guarded is not None
     assert guarded["recent_context"] == [_episode_entry()]
+
+
+def test_upkeep_refs_cross_the_guard(vault: Path) -> None:
+    """D1-T11: the upkeep block rides after the guard, so the terminal filter
+    is what it crosses. Its refs are review, memory and source refs, not
+    vault paths: a released item passes whole. A route path naming a withheld
+    page drops that item, the backstop behind the carrier's own egress check."""
+    item = {
+        "ref": "exomem://review/upkeep/0123456789abcdef01234567",
+        "family": "upkeep_hydration",
+        "fingerprint": "0123456789abcdef01234567",
+        "kind": "curation.hydrate",
+        "label": "Facts about an entity live on other pages",
+        "subject": {"ref": "exomem://memory/1b7c3a52-0d7e-4f3a-9d61-2a4f5f0c9e11", "title": "T"},
+        "evidence": [{"ref": "exomem://source/Knowledge%20Base/Sources/s", "title": "S"}],
+        "evidence_count": 2,
+        "why": "2 independent sources added facts that link here after it was last updated",
+        "disposition": {"state": "open", "delivered_before": 0},
+        "route": {
+            "tool": "maintain_memory",
+            "args": {"mode": "curation", "curation_action": "work-item", "paths": [OPEN_PATH]},
+        },
+        "context_route": {
+            "tool": "review_item_context",
+            "args": {"ref": "exomem://review/upkeep/0123456789abcdef01234567"},
+        },
+        "dispose": {
+            "tool": "triage_memory",
+            "actions": ["dismiss", "snooze"],
+            "args": {"ref": "exomem://review/upkeep/0123456789abcdef01234567"},
+        },
+        "permission": "consideration does not authorize mutation",
+    }
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    packet = {**_packet(), "upkeep": {"items": [item]}}
+    with request_scope(_external()):
+        crossed = egress.postfilter("activate_context", packet, vault)
+    assert crossed["upkeep"] == {"items": [item]}
+
+    leaking = {**item, "route": {**item["route"], "args": {"paths": [RESTRICTED_PATH]}}}
+    with request_scope(_external()):
+        crossed = egress.postfilter("activate_context", {"upkeep": {"items": [leaking]}}, vault)
+    assert RESTRICTED_PATH not in json.dumps(crossed)

@@ -24,7 +24,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import IO, TYPE_CHECKING, Any, BinaryIO, Literal
 
 import yaml
@@ -689,6 +689,35 @@ def _lock_key(vault_root: Path, namespace: str) -> tuple[str, str]:
     return root, hashlib.sha256(f"{root}\0{namespace}".encode()).hexdigest()
 
 
+def _require_real_lock_directory(info: os.stat_result) -> None:
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or _is_reparse(info):
+        raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unsafe")
+
+
+def _clear_inherited_setgid(directory: Path, info: os.stat_result) -> os.stat_result:
+    """chmod the lstat'd directory to 0700 through a no-follow descriptor."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(directory, flags)
+    except OSError as error:
+        raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unsafe") from error
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory changed")
+        os.fchmod(descriptor, 0o700)
+    except OSError as error:
+        raise VaultLockError(
+            "VAULT_LOCK_DIRECTORY", "lock directory mode could not be made private"
+        ) from error
+    finally:
+        os.close(descriptor)
+    try:
+        return directory.lstat()
+    except OSError as error:
+        raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unreadable") from error
+
+
 def _private_lock_directory() -> Path:
     owner = os.getuid() if hasattr(os, "getuid") else None
     suffix = str(owner) if owner is not None else os.environ.get("USERNAME", "user")
@@ -703,9 +732,14 @@ def _private_lock_directory() -> Path:
         info = directory.lstat()
     except OSError as error:
         raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unreadable") from error
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or _is_reparse(info):
-        raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unsafe")
+    _require_real_lock_directory(info)
     if owner is not None:
+        # A setgid parent (a pod fsGroup makes the /tmp emptyDir 02777) hands
+        # S_ISGID to the mkdir above, and the emptyDir keeps it across restarts.
+        # Owner-only plus exactly that bit is cleared, never tolerated.
+        if info.st_uid == owner and stat.S_IMODE(info.st_mode) == 0o700 | stat.S_ISGID:
+            info = _clear_inherited_setgid(directory, info)
+            _require_real_lock_directory(info)
         if info.st_uid != owner or stat.S_IMODE(info.st_mode) != 0o700:
             raise VaultLockError(
                 "VAULT_LOCK_DIRECTORY",
@@ -4604,6 +4638,8 @@ def batch_atomic_write(
     publication and once at the rollback-capable completion point, avoiding a
     full content rehash before every destination flip.
     """
+    from . import working_set_heat
+
     with _BATCH_COMMIT_LOCK:
         if defer_graph_completion and (post_commit_fanout or vault_root is None):
             raise ValueError(
@@ -4617,21 +4653,35 @@ def batch_atomic_write(
             vault_root=vault_root,
             planned_write=PlannedWrite,
         )
-        result = _batch_atomic_write_locked(
-            augmented_writes,
-            vault_root=vault_root,
-            required_guards=required_guards,
-            completion_guards=completion_guards,
-            index_reports=index_reports,
-            semantic_states=semantic_states,
-            post_commit_fanout=post_commit_fanout,
-            commit_point=commit_point,
-            defer_graph_completion=defer_graph_completion,
-            _vocabulary_auxiliaries=_vocabulary_auxiliaries,
-            publication_intents_out=publication_intents_out,
+        # The heat projection's seam (close-memory-loop 7.3): the pages are in
+        # flight from before the first flip until their post-write signatures
+        # are known, so the watcher's echo of this commit is never classified
+        # as someone else's edit. Whose work it was is read from the mutation
+        # trace and the request's batch scope, never from timing.
+        heat_commit = working_set_heat.begin_commit(
+            vault_root, (write.path for write in caller_writes)
         )
+        try:
+            result = _batch_atomic_write_locked(
+                augmented_writes,
+                vault_root=vault_root,
+                required_guards=required_guards,
+                completion_guards=completion_guards,
+                index_reports=index_reports,
+                semantic_states=semantic_states,
+                post_commit_fanout=post_commit_fanout,
+                commit_point=commit_point,
+                defer_graph_completion=defer_graph_completion,
+                _vocabulary_auxiliaries=_vocabulary_auxiliaries,
+                publication_intents_out=publication_intents_out,
+            )
+        except BaseException:
+            working_set_heat.abandon_commit(heat_commit)
+            raise
+        observed = working_set_heat.observe_commit(heat_commit)
         curation_witness.mark_consumed(curation_witness_state)
-        return result
+    working_set_heat.persist_commit(observed)
+    return result
 
 
 def _batch_atomic_write_locked(
@@ -5695,6 +5745,17 @@ class VaultPathResolution:
     resolved_relative: str
 
 
+def _write_target_withheld(vault_root: Path, resolved: Path, vault_resolved: Path) -> bool:
+    """Whether a write door must treat this resolved file as absent."""
+    from .governance import egress
+
+    try:
+        rel = resolved.relative_to(vault_resolved).as_posix()
+    except ValueError:
+        return False
+    return egress.write_target_withheld(vault_root, rel)
+
+
 def resolve_under_vault(
     vault_root: Path,
     path: str,
@@ -5704,6 +5765,7 @@ def resolve_under_vault(
     must_be_dir: bool = False,
     must_be_under_kb: bool = False,
     return_details: bool = False,
+    refuse_withheld: bool = False,
 ) -> tuple[Path, str] | VaultPathResolution:
     """Resolve a vault-relative path; guard against escape; normalize.
 
@@ -5717,6 +5779,10 @@ def resolve_under_vault(
     `Knowledge Base/` (checked on the resolved path, so `Knowledge Base/../x`
     can't sneak a write to a vault-root sibling of KB). Governed content writers
     (`create`/`append`) set it — exomem only ever authors under `Knowledge Base/`.
+
+    `refuse_withheld` is for write doors: with `must_exist`, an existing file
+    the caller may not see (`egress.write_target_withheld`) raises exactly the
+    NOT_FOUND an absent path raises.
 
     Raises VaultPathError with code in {INVALID_PATH, NOT_FOUND,
     NOT_A_FILE, NOT_A_DIR}.
@@ -5772,7 +5838,10 @@ def resolve_under_vault(
                 ),
             ) from None
 
-    if must_exist and not candidate.exists():
+    if must_exist and (
+        not candidate.exists()
+        or (refuse_withheld and _write_target_withheld(vault_root, resolved, vault_resolved))
+    ):
         raise VaultPathError(
             code="NOT_FOUND",
             reason=f"path does not exist: {rel}",
@@ -6376,7 +6445,12 @@ def evict_inbound_index(vault_root: Path) -> bool:
         return _INBOUND_INDEX.pop(root, None) is not None
 
 
-def find_inbound_wikilinks(vault_root: Path, target_rel_path: str) -> list[InboundLink]:
+def find_inbound_wikilinks(
+    vault_root: Path,
+    target_rel_path: str,
+    *,
+    visible: Callable[[str], bool] | None = None,
+) -> list[InboundLink]:
     """Return every wikilink in the vault that resolves to `target_rel_path`.
 
     `target_rel_path` is vault-relative POSIX, with or without `.md`. Matches
@@ -6391,6 +6465,10 @@ def find_inbound_wikilinks(vault_root: Path, target_rel_path: str) -> list[Inbou
 
     Served from the process-cached inbound-link index (one read pass per
     vault revision) — results identical to scanning every file per call.
+
+    `visible` is a reader's view (see `egress.visible_page_filter`; `None`
+    for the owner): uniqueness is then counted over the pages it admits, as
+    in a vault without the others. Only a basename that is shared is decided.
     """
     target = target_rel_path.replace("\\", "/").removesuffix(".md")
     target_full = target if target.startswith(kb_prefix()) else kb_prefix() + target
@@ -6398,7 +6476,14 @@ def find_inbound_wikilinks(vault_root: Path, target_rel_path: str) -> list[Inbou
     target_basename = target.rsplit("/", 1)[-1]
 
     data = _inbound_index(vault_root)
-    basename_unique = data.stem_counts.get(target_basename, 0) == 1
+    stem_count = data.stem_counts.get(target_basename, 0)
+    if visible is not None and stem_count > 1:
+        stem_count = sum(
+            1
+            for rel in data.known_rels
+            if PurePosixPath(rel).stem == target_basename and visible(rel)
+        )
+    basename_unique = stem_count == 1
 
     candidates: list[_InboundEntry] = []
     candidates.extend(data.buckets.get(target_full, ()))
@@ -6715,12 +6800,27 @@ def render_wikilinks_for_vault(text: str, vault_root: Path) -> str:
     return new_text
 
 
+def writer_link_visibility(vault_root: Path) -> Callable[[str], bool] | None:
+    """The pages a writer's own links may resolve to, or `None` for every page.
+
+    `None` for the owner and on an ungoverned vault, so their writes resolve
+    exactly as before. For any other writer under a policy, a link resolves
+    only over the pages that writer may see: a stem, title or path that
+    matches only withheld pages resolves as it would if those pages were
+    absent, and an ambiguity names only visible pages.
+    """
+    from .governance import egress
+
+    return egress.visible_page_filter(vault_root)
+
+
 def normalize_wikilink(
     target: str,
     vault_root: Path,
     *,
     resolver: WikilinkResolver | None = None,
     strict: bool = False,
+    visible: Callable[[str], bool] | None = None,
 ) -> tuple[str, str | None]:
     """Canonicalize a wikilink target to full vault-rooted form (no `.md`).
 
@@ -6736,9 +6836,20 @@ def normalize_wikilink(
     - `strict=False`: returns the cleaned input + a warning string. The
       caller can choose to surface the warning and leave the link as a
       forward reference, or to abort.
+
+    `visible` (see `writer_link_visibility`) restricts every match to the
+    pages it admits; `None` matches over every page.
     """
     if resolver is None:
         resolver = WikilinkResolver(vault_root)
+
+    def _seen(no_ext: str) -> bool:
+        return visible is None or visible(f"{no_ext}.md")
+
+    def _matches(values: list[str] | None) -> list[str] | None:
+        if values is None or visible is None:
+            return values
+        return [value for value in values if _seen(value)] or None
 
     cleaned = _strip_wikilink_brackets(target)
     if "|" in cleaned:
@@ -6762,20 +6873,20 @@ def normalize_wikilink(
         return canonical + anchor, None
 
     # 1. Full vault-rooted (with or without explicit Knowledge Base/ prefix).
-    if cleaned in resolver.full_paths:
+    if cleaned in resolver.full_paths and _seen(cleaned):
         return cleaned + anchor, None
     if not cleaned.startswith(kb_prefix()):
         candidate = kb_prefix() + cleaned
-        if candidate in resolver.full_paths:
+        if candidate in resolver.full_paths and _seen(candidate):
             return candidate + anchor, None
 
     # 2. KB-stripped match (target looks like KB-relative).
-    if cleaned in resolver.kb_stripped:
+    if cleaned in resolver.kb_stripped and _seen(kb_prefix() + cleaned):
         return kb_prefix() + cleaned + anchor, None
 
     # 3. Bare name (no `/`): stem match first, then frontmatter title.
     if "/" not in cleaned:
-        stem_matches = resolver.stems.get(cleaned)
+        stem_matches = _matches(resolver.stems.get(cleaned))
         if stem_matches:
             if len(stem_matches) == 1:
                 return stem_matches[0] + anchor, None
@@ -6788,7 +6899,7 @@ def normalize_wikilink(
                 f"bare wikilink {target!r} matches {len(stem_matches)} files "
                 f"by stem; left unchanged. Files: {stem_matches}"
             )
-        title_matches = resolver.titles.get(cleaned.lower())
+        title_matches = _matches(resolver.titles.get(cleaned.lower()))
         if title_matches:
             if len(title_matches) == 1:
                 return title_matches[0] + anchor, None
@@ -6881,10 +6992,12 @@ def normalize_body_wikilinks(
     emitted Markdown is KB-relative when ``Knowledge Base/.obsidian`` marks the
     managed directory as the Obsidian vault root. Returns `(new_body, warnings)`.
     Unresolvable links are left as-is with a warning — forward references are
-    intentional.
+    intentional. The writer's links resolve over the pages it may see
+    (`writer_link_visibility`).
     """
     if resolver is None:
         resolver = WikilinkResolver(vault_root)
+    visible = writer_link_visibility(vault_root)
     warnings: list[str] = []
     matches = find_body_wikilinks(body)
     new_body = body
@@ -6903,7 +7016,7 @@ def normalize_body_wikilinks(
         else:
             target_only = inner.strip()
         canonical, warning = normalize_wikilink(
-            target_only, vault_root, resolver=resolver, strict=False
+            target_only, vault_root, resolver=resolver, strict=False, visible=visible
         )
         if warning:
             warnings.append(warning)

@@ -88,6 +88,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -2294,6 +2295,11 @@ def emission_ledger(vault_root: Path) -> dict[str, Any]:
 #: and the emission governor consults this registry while holding it.
 _BATCH: dict[str, int] = {}
 _BATCH_LOCK = threading.Lock()
+#: The same scopes, counted per request rather than per vault. `_BATCH` is
+#: keyed by vault root and process-wide, so a user write that runs while a
+#: batch runs on another thread would read as part of it; this depth is bound
+#: to the context the scope was entered in.
+_IN_BATCH: ContextVar[int] = ContextVar("exomem_due_state_in_batch", default=0)
 
 
 @contextmanager
@@ -2314,13 +2320,15 @@ def batch_scope(vault_root: Path | None) -> Iterator[None]:
     key = str(vault_root or "")
     with _BATCH_LOCK:
         _BATCH[key] = _BATCH.get(key, 0) + 1
+    depth = _IN_BATCH.set(_IN_BATCH.get() + 1)
     try:
         yield
     finally:
+        _IN_BATCH.reset(depth)
         with _BATCH_LOCK:
-            depth = _BATCH.get(key, 1) - 1
-            if depth > 0:
-                _BATCH[key] = depth
+            depth_left = _BATCH.get(key, 1) - 1
+            if depth_left > 0:
+                _BATCH[key] = depth_left
             else:
                 _BATCH.pop(key, None)
 
@@ -2329,6 +2337,17 @@ def batch_active(vault_root: Path | None) -> bool:
     """Whether this vault is inside a batch scope right now."""
     with _BATCH_LOCK:
         return _BATCH.get(str(vault_root or ""), 0) > 0
+
+
+def in_batch_scope() -> bool:
+    """Whether THIS request is inside a batch scope.
+
+    Request-scoped where `batch_active` is process-wide: the heat projection
+    asks whether a governed commit is part of a bulk command, and a user's own
+    write that happens to run beside a maintenance pass on another thread is
+    not.
+    """
+    return _IN_BATCH.get() > 0
 
 
 # --------------------------------------------------------------------------

@@ -12,7 +12,7 @@ import stat
 import threading
 import time
 from collections import Counter
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
@@ -1518,8 +1518,17 @@ def current_writer_resolver_entries(
 def _resolve_reference_wikilink_from_context(
     context: SemanticCorpusContext,
     raw_target: str,
+    visible: Callable[[str], bool] | None = None,
 ) -> ReferenceWikilinkResolution:
-    """Resolve against immutable context maps, preserving union ambiguity."""
+    """Resolve against immutable context maps, preserving union ambiguity.
+
+    `visible` restricts every match to the pages it admits (a writer's own
+    view, see `vault.writer_link_visibility`); `None` matches every page.
+    """
+
+    def _seen(no_ext: str) -> bool:
+        return visible is None or visible(f"{no_ext}.md")
+
     cleaned = str(raw_target or "").strip()
     if cleaned.startswith("[[") and cleaned[-2:] == "]]":
         cleaned = cleaned[2:-2].strip()
@@ -1531,9 +1540,9 @@ def _resolve_reference_wikilink_from_context(
     if "/" in cleaned:
         candidates = (cleaned, f"{vault.kb_prefix()}{cleaned}")
         for candidate in candidates:
-            if candidate in context.resolver_full_paths:
+            if candidate in context.resolver_full_paths and _seen(candidate):
                 return ReferenceWikilinkResolution("resolved", f"{candidate}.md")
-        if cleaned in context.resolver_kb_stripped:
+        if cleaned in context.resolver_kb_stripped and _seen(f"{vault.kb_prefix()}{cleaned}"):
             return ReferenceWikilinkResolution(
                 "resolved",
                 f"{vault.kb_prefix()}{cleaned}.md",
@@ -1542,6 +1551,8 @@ def _resolve_reference_wikilink_from_context(
 
     matches = set(context.resolver_stems.get(cleaned, ()))
     matches.update(context.resolver_titles.get(cleaned.lower(), ()))
+    if visible is not None:
+        matches = {match for match in matches if _seen(match)}
     if len(matches) > 1:
         return ReferenceWikilinkResolution("ambiguous")
     if not matches:
@@ -3236,10 +3247,13 @@ def _resolve_target(
     root: Path,
     raw_target: str,
     resolver: vault.WikilinkResolver,
+    visible: Callable[[str], bool] | None = None,
 ) -> tuple[str, str | None, str | None, str | None]:
     _, authored_anchor, alias = _target_parts(raw_target)
     try:
-        normalized, _ = vault.normalize_wikilink(raw_target, root, resolver=resolver, strict=True)
+        normalized, _ = vault.normalize_wikilink(
+            raw_target, root, resolver=resolver, strict=True, visible=visible
+        )
     except vault.AmbiguousWikilinkError:
         return "ambiguous", None, authored_anchor, alias
     except vault.UnresolvedWikilinkError:
@@ -3312,7 +3326,12 @@ def _derive_relation_facts(
     *,
     target_states: Mapping[str, SemanticPageState] | None = None,
     complete_authored_effects: bool = False,
+    writer_view: tuple[str, Callable[[str], bool]] | None = None,
 ) -> tuple[RelationFact, ...]:
+    """`writer_view` is `(page path, visible)`: that page's targets resolve
+    only over the pages `visible` admits (a writer's own view, see
+    `vault.writer_link_visibility`); every other page resolves over all.
+    """
     resolved_states = target_states if target_states is not None else states
     raw_facts: list[dict[str, Any]] = []
     for state in states.values():
@@ -3389,7 +3408,12 @@ def _derive_relation_facts(
     for raw in raw_facts:
         state = raw["authored"]
         target_status, resolved_target, target_anchor, target_alias = _resolve_target(
-            root, raw["raw_target"], resolver
+            root,
+            raw["raw_target"],
+            resolver,
+            writer_view[1]
+            if writer_view is not None and state.path == writer_view[0]
+            else None,
         )
         resolved_base = resolved_target.split("#", 1)[0] if resolved_target else None
         target_state = resolved_states.get(resolved_base or "")
@@ -3595,6 +3619,7 @@ class _WikilinkResolverView:
 def _qualifying_body_wikilink_targets(
     page: SemanticPageState,
     corpus: SemanticCorpusContext,
+    visible: Callable[[str], bool] | None = None,
 ) -> tuple[str, ...]:
     """Resolve body links by normalized set membership without relation facts."""
     resolver = _WikilinkResolverView(
@@ -3611,6 +3636,7 @@ def _qualifying_body_wikilink_targets(
                 corpus.vault_root,
                 resolver=resolver,  # type: ignore[arg-type]
                 strict=True,
+                visible=visible,
             )
         except (vault.AmbiguousWikilinkError, vault.UnresolvedWikilinkError):
             continue
@@ -3658,6 +3684,98 @@ def is_relation_review_current(
     )
 
 
+_DECIDE = object()
+
+
+def writer_view_relations(
+    page: SemanticPageState,
+    corpus: SemanticCorpusContext,
+    *,
+    visible: Callable[[str], bool] | None | object = _DECIDE,
+    resolver: vault.WikilinkResolver | None = None,
+) -> tuple[tuple[RelationFact, ...], tuple[RelationFact, ...], Callable[[str], bool] | None]:
+    """The page's outbound and inbound facts as the current writer may judge them.
+
+    For the owner, an ungoverned vault, or a page the writer may not see, the
+    corpus facts as they stand and `None`. For any other writer judging a page
+    it may see: the page's own targets resolve only over the pages that writer
+    may see, and a fact a page withheld from it authors is dropped, so the
+    judgement reads as it would without those pages. The corpus itself, which
+    also feeds the published graph, keeps every fact.
+
+    A caller judging many pages of one corpus passes the writer's `visible`
+    (from `vault.writer_link_visibility`) and a `resolver` built from the
+    corpus once, rather than deciding them per page.
+    """
+    outbound = corpus.outbound.get(page.path, ())
+    inbound = corpus.inbound.get(page.path, ())
+    if visible is _DECIDE:
+        visible = vault.writer_link_visibility(corpus.vault_root)
+    if visible is None or not callable(visible) or not visible(page.path):
+        return outbound, inbound, None
+    if resolver is None:
+        resolver = vault.WikilinkResolver.from_entries(corpus.vault_root, corpus.resolver_entries)
+    own = _derive_relation_facts(
+        corpus.vault_root,
+        {page.path: page},
+        resolver,
+        corpus.registry,
+        target_states=corpus.pages,
+        writer_view=(page.path, visible),
+    )
+
+    def _kept(facts: Iterable[RelationFact]) -> list[RelationFact]:
+        return [
+            fact for fact in facts if fact.authored_path != page.path and visible(fact.authored_path)
+        ]
+
+    return (
+        tuple(
+            sorted(
+                (*_kept(outbound), *(f for f in own if f.logical_source_path == page.path)),
+                key=lambda item: item.identity,
+            )
+        ),
+        tuple(
+            sorted(
+                (*_kept(inbound), *(f for f in own if f.logical_target_path == page.path)),
+                key=lambda item: item.identity,
+            )
+        ),
+        visible,
+    )
+
+
+def writer_authored_facts(
+    page: SemanticPageState,
+    corpus: SemanticCorpusContext,
+) -> tuple[RelationFact, ...]:
+    """The facts the page authors, as the current writer may judge them.
+
+    For the owner, an ungoverned vault, or a page the writer may not see, the
+    corpus facts the page authors, in corpus order. For any other writer
+    judging a page it may see, the same facts with their targets resolved
+    only over the pages that writer may see (see `writer_view_relations`).
+    """
+    visible = vault.writer_link_visibility(corpus.vault_root)
+    if visible is None or not visible(page.path):
+        return tuple(fact for fact in corpus.relation_facts if fact.authored_path == page.path)
+    resolver = vault.WikilinkResolver.from_entries(corpus.vault_root, corpus.resolver_entries)
+    return tuple(
+        sorted(
+            _derive_relation_facts(
+                corpus.vault_root,
+                {page.path: page},
+                resolver,
+                corpus.registry,
+                target_states=corpus.pages,
+                writer_view=(page.path, visible),
+            ),
+            key=lambda item: item.identity,
+        )
+    )
+
+
 def _relation_disposition(
     page: SemanticPageState,
     corpus: SemanticCorpusContext,
@@ -3668,9 +3786,10 @@ def _relation_disposition(
     before_corpus: SemanticCorpusContext,
     mode: str,
 ) -> RelationDisposition:
+    outbound, inbound, visible = writer_view_relations(page, corpus)
     directional: list[tuple[str, RelationFact]] = []
-    directional.extend(("outbound", fact) for fact in corpus.outbound.get(page.path, ()))
-    directional.extend(("inbound", fact) for fact in corpus.inbound.get(page.path, ()))
+    directional.extend(("outbound", fact) for fact in outbound)
+    directional.extend(("inbound", fact) for fact in inbound)
     rejected: list[RejectedRelationFact] = []
     qualifying: list[tuple[str, RelationFact]] = []
     for direction, fact in sorted(directional, key=lambda item: (item[0], item[1].identity)):
@@ -3682,6 +3801,8 @@ def _relation_disposition(
     review_is_current = review is not None and is_relation_review_current(review, page, corpus)
     stale_review = review is not None and not review_is_current
     other_governed = corpus.eligible_governed_paths - {page.path}
+    if visible is not None:
+        other_governed = frozenset(path for path in other_governed if visible(path))
 
     def _satisfied_actions() -> tuple[str, ...]:
         if stale_review:
@@ -3707,7 +3828,7 @@ def _relation_disposition(
     # automatically-written back-references satisfy the gate and make it vacuous.
     connectivity = [
         fact
-        for fact in corpus.outbound.get(page.path, ())
+        for fact in outbound
         if qualify_connectivity(fact, registry=corpus.registry, corpus=corpus).qualifies
     ]
     if connectivity:
@@ -3721,7 +3842,7 @@ def _relation_disposition(
             actions=_satisfied_actions(),
             qualifying_signal="connectivity",
         )
-    body_wikilink_targets = _qualifying_body_wikilink_targets(page, corpus)
+    body_wikilink_targets = _qualifying_body_wikilink_targets(page, corpus, visible)
     if body_wikilink_targets:
         return RelationDisposition(
             kind="qualifying_relation",
@@ -3786,13 +3907,20 @@ def _relation_disposition(
             review_reason=review.reason,
             review_reference=review.reference,
         )
+    before_governed = before_corpus.eligible_governed_paths
+    after_governed = corpus.eligible_governed_paths
+    if visible is not None:
+        # A writer that sees no governed page bootstraps its first one, as in
+        # a vault without the pages withheld from it.
+        before_governed = frozenset(path for path in before_governed if visible(path))
+        after_governed = frozenset(path for path in after_governed if visible(path))
     automatic_bootstrap = (
         review is None
         and mode == "precommit"
         and operation in _CREATE_LIKE
         and before is None
-        and not before_corpus.eligible_governed_paths
-        and corpus.eligible_governed_paths == frozenset({page.path})
+        and not before_governed
+        and after_governed == frozenset({page.path})
     )
     if automatic_bootstrap:
         return RelationDisposition(
@@ -3926,9 +4054,7 @@ def _registry_findings(
                 resolved_rule=resolved_rule,
             )
         )
-    for fact in corpus.relation_facts:
-        if fact.authored_path != page.path:
-            continue
+    for fact in writer_authored_facts(page, corpus):
         code: str | None = None
         detail: str | None = None
         if fact.canonical_relation is None:
@@ -3966,8 +4092,8 @@ def _observed_namespaces(
 ) -> dict[str, set[Any]]:
     required_relations: set[str] = set()
     allowed_relations: set[str] = set()
-    for fact in corpus.relation_facts:
-        if fact.authored_path != page.path or fact.origin not in _AUTHORED_SCHEMA_ORIGINS:
+    for fact in writer_authored_facts(page, corpus):
+        if fact.origin not in _AUTHORED_SCHEMA_ORIGINS:
             continue
         if fact.canonical_relation is not None:
             required_relations.add(fact.canonical_relation)

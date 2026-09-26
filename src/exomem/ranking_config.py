@@ -82,12 +82,16 @@ class RankingConfig:
     # rather than in the compiler for the same reason every other threshold is:
     # so the eval harness can sweep them without editing retrieval code.
     #
-    # `working_set_vector_strong` is the cosine at which a signature embedding
-    # is treated as naming its anchor; `..._weak` is the floor below which the
-    # lane contributes nothing. Two bands, never a score, and `vector_band`
-    # alone never resolves an anchor (design D3).
-    working_set_vector_strong: float = 0.62
-    working_set_vector_weak: float = 0.48
+    # `vector_band` is corpus-relative (`working_set_resolve.semantic_band`): a
+    # signature bands when its similarity to the turn clears the level the
+    # largest of N unrelated similarities exceeds with probability
+    # `working_set_semantic_alpha`, measured from the catalogue's own median and
+    # MAD. No cosine belongs to one model, language or vault, so none is set
+    # here. Below `working_set_semantic_min_population` signatures there is no
+    # chance level and no band (`uncalibrated`). `vector_band` alone never
+    # resolves an anchor (design D3).
+    working_set_semantic_alpha: float = 0.01
+    working_set_semantic_min_population: int = 50
     # Shared lexical terms needed before `lexical_overlap` is claimed. Two is
     # the same coverage floor `collection_claims.MIN_CLAIM_COVERAGE` uses: one
     # shared word is a coincidence, two is a reference.

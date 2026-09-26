@@ -186,6 +186,13 @@ class ParsedPage:
 
         return frozenset(bm25.tokenize(self.title + " " + self.body))
 
+    @cached_property
+    def letter_script(self) -> str | None:
+        """The script most of the page's letters are written in (`find_policy.dominant_script`)."""
+        from . import find_policy
+
+        return find_policy.dominant_script(self.title + " " + self.body)
+
 
 def _format_timestamp(seconds: float) -> str:
     """Seconds to mm:ss, or h:mm:ss past an hour."""

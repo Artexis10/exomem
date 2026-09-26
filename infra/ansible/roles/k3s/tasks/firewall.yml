@@ -1,0 +1,81 @@
+---
+# Inter-node K3s traffic (add-cloud-node-provisioning N5), admitted only from
+# the other K3s nodes' declared private addresses and only on the private
+# interface: never from the subnet, which also carries the control database.
+# Hetzner firewalls do not filter the private network, so this is the only
+# filter on it. Every rule carries k3s_firewall_comment, and every run prunes
+# commented rules whose source is no longer a peer, so the set converges to
+# k3s_firewall_peer_ips (the inventory, or the inventory minus a removed node).
+- name: Read the inter-node rules this role added earlier
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/ufw
+      - show
+      - added
+  register: k3s_firewall_added
+  changed_when: false
+
+- name: Find inter-node rules whose source is no longer a peer
+  ansible.builtin.set_fact:
+    k3s_firewall_stale: >-
+      {%- set stale = [] -%}
+      {%- for line in k3s_firewall_added.stdout_lines
+          if ("comment '" ~ k3s_firewall_comment ~ "'") in line -%}
+        {%- set found = line | regex_findall(
+              'allow in on ([^ ]+) from ([^ ]+) to any port ([0-9]+) proto (tcp|udp)') -%}
+        {%- set parsed = found[0] if found else none -%}
+        {%- if parsed and (parsed[1] not in k3s_firewall_peer_ips
+              or parsed[0] != k3s_resolved_private_interface
+              or (parsed[2] == '6443' and k3s_node_role != 'server')) -%}
+          {%- set _ = stale.append({'interface': parsed[0], 'src': parsed[1],
+                                    'port': parsed[2], 'proto': parsed[3]}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ stale }}
+  changed_when: false
+
+- name: Revoke inter-node rules for former peers
+  community.general.ufw:
+    rule: allow
+    direction: in
+    interface: "{{ item.interface }}"
+    src: "{{ item.src }}"
+    port: "{{ item.port }}"
+    proto: "{{ item.proto }}"
+    comment: "{{ k3s_firewall_comment }}"
+    delete: true
+  loop: "{{ k3s_firewall_stale }}"
+
+- name: Admit Flannel VXLAN from the other K3s nodes
+  community.general.ufw:
+    rule: allow
+    direction: in
+    interface: "{{ k3s_resolved_private_interface }}"
+    src: "{{ item }}"
+    port: "8472"
+    proto: udp
+    comment: "{{ k3s_firewall_comment }}"
+  loop: "{{ k3s_firewall_peer_ips }}"
+
+- name: Admit the kubelet port from the other K3s nodes
+  community.general.ufw:
+    rule: allow
+    direction: in
+    interface: "{{ k3s_resolved_private_interface }}"
+    src: "{{ item }}"
+    port: "10250"
+    proto: tcp
+    comment: "{{ k3s_firewall_comment }}"
+  loop: "{{ k3s_firewall_peer_ips }}"
+
+- name: Admit the K3s API from the other K3s nodes on the server
+  community.general.ufw:
+    rule: allow
+    direction: in
+    interface: "{{ k3s_resolved_private_interface }}"
+    src: "{{ item }}"
+    port: "6443"
+    proto: tcp
+    comment: "{{ k3s_firewall_comment }}"
+  loop: "{{ k3s_firewall_peer_ips }}"
+  when: k3s_node_role == 'server'

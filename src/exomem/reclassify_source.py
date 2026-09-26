@@ -142,7 +142,10 @@ def _require_source(vault_root: Path, path: str) -> tuple[str, Path]:
         raise ReclassifyError("INVALID_PATH", error.reason) from error
     except Exception as error:  # noqa: BLE001 - reported as a refusal, not a crash
         raise ReclassifyError("INVALID_PATH", str(error)) from error
-    if not absolute.is_file():
+    from .governance import egress
+
+    # A source the caller may not see is answered exactly as a missing one.
+    if not absolute.is_file() or egress.write_target_withheld(vault_root, rel):
         raise ReclassifyError("NOT_FOUND", f"no source page at {rel}.")
     return rel, absolute
 
@@ -385,7 +388,20 @@ def propose(
         domain_evidence=tuple(domain_evidence),
         destination=destination,
         relocation_required=relocation_required,
-        references=len(find_inbound_wikilinks(vault_root, rel)),
+        references=_visible_references(vault_root, rel),
+    )
+
+
+def _visible_references(vault_root: Path, rel: str) -> int:
+    """Count inbound links the writer may see. Under a governed policy a writer
+    other than the owner never learns of a link from a page withheld from it."""
+    from .governance import egress
+
+    visible = egress.governed_release_filter(vault_root)
+    return sum(
+        1
+        for match in find_inbound_wikilinks(vault_root, rel)
+        if visible is None or visible(match.path)
     )
 
 

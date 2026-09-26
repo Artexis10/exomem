@@ -340,7 +340,12 @@ def apply_live() -> dict:
     _applied_mode = resolve_mode()
     from . import embeddings, model_reaper
 
-    for unload in (embeddings.unload_model, embeddings.unload_reranker, embeddings.unload_clip_model):
+    for unload in (
+        embeddings.unload_model,
+        embeddings.unload_activation_model,
+        embeddings.unload_reranker,
+        embeddings.unload_clip_model,
+    ):
         try:
             unload()
         except Exception:  # noqa: BLE001 — a live switch must never crash the caller

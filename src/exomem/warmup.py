@@ -107,6 +107,10 @@ def warm_retrieval_catalog(vault_root: Path) -> bool:
                 require_live_projection=event_indexes,
             ):
                 return False
+            # A catalog inherited from the previous process is current but
+            # stamped in that registry's lineage; adopt it into this one so the
+            # first governed write can bless it with an ordinary delta.
+            lexstore.rebase_inherited_catalog_lineage(vault_root)
             # Bind the CAS token to this successful proof, not to the whole
             # warm operation: an earlier stale proof or completed repair may
             # legitimately advance admission before an eager retry succeeds.
@@ -303,14 +307,13 @@ def warm_caches(
         def _warm_matrix() -> None:
             import numpy as np
 
-            from . import embeddings
+            from . import embeddings, recall_space
 
-            q = np.full(
-                embeddings.VECTOR_DIM,
-                1.0 / (embeddings.VECTOR_DIM**0.5),
-                dtype=np.float32,
-            )
-            embeddings.get_embedding_index(vault_root).search(q, k=1)
+            index = embeddings.get_embedding_index(vault_root)
+            # The sidecar's own width; an index adapter without one is the legacy width.
+            dim = int(getattr(index, "dim", recall_space.LEGACY_DIM))
+            q = np.full(dim, 1.0 / (dim**0.5), dtype=np.float32)
+            index.search(q, k=1)
 
         def _warm_clip() -> None:
             import numpy as np
@@ -511,6 +514,19 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             except Exception:  # noqa: BLE001 — durable receipt survives retry
                 log.warning("deferred embed drain failed", exc_info=True)
 
+    def _preload_recall_serving() -> None:
+        # A sidecar still in another encoder's space (a re-embed not yet cut
+        # over) is served by that encoder. It loads here in every mode, before
+        # writes are admitted, so neither a query nor a write ever loads it: a
+        # write would otherwise fail to encode and leave its row stale until the
+        # cutover. Quiet mode accepts it resident for as long as the re-embed runs.
+        from . import recall_migration
+
+        _model_step(
+            "model_recall_serving",
+            lambda: recall_migration.preload_serving_encoder(vault_root),
+        )
+
     disabled = bool(os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"))
     if disabled or not preload:
         # Skip model preloads: either a lexical-only install (DISABLE_EMBEDDINGS,
@@ -522,7 +538,34 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         log.info("model preloads skipped (%s); models lazy-load on first use", reason)
         readiness.mark_ready("reranker")
         readiness.mark_ready("clip")
-        drained = readiness.mark_ready("embeddings")
+        from . import embedding_backend
+
+        served = None
+        if not disabled:
+            from . import embeddings
+
+            served = embedding_backend.served_artifact(embeddings.MODEL_NAME)
+        if served is not None and mode_name != "quiet":
+            # A served model's first load may download or build its artefact, which
+            # takes minutes; it belongs here, not in whichever request comes first.
+            # Embeddings stay not-ready until it is resident, so requests meanwhile
+            # defer to the lexical lanes instead of waiting on the load.
+            log.info("preloading the served embedding model %s", embeddings.MODEL_NAME)
+            if _preload("model_bge", embeddings.get_model, lambda m: m.encode(["warm"])):
+                _preload_recall_serving()
+                drained = readiness.mark_ready("embeddings")
+            else:
+                drained = readiness.drain_deferred("embeddings")
+        else:
+            if served is not None:
+                # Quiet mode loads no model at boot, but the artefact a later load
+                # needs is still fetched or built now, off the request path.
+                _model_step(
+                    "model_artifact", lambda: embedding_backend.ensure_served_artifact(embeddings.MODEL_NAME)
+                )
+            if not disabled:
+                _preload_recall_serving()
+            drained = readiness.mark_ready("embeddings")
         # Quiet mode: embeddings ARE available (just lazy), so replay any write
         # parked during the brief lexical warm — mirror the real-preload branch so
         # those edits aren't stranded. Under DISABLE_EMBEDDINGS there's nothing to
@@ -544,6 +587,7 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         # rest of the warm), but drain_deferred() still empties the queue so those
         # writes are replayed instead of lost.
         if bge_ok:
+            _preload_recall_serving()
             log.info("embedding model ready")
             drained = readiness.mark_ready("embeddings")
         else:
@@ -551,6 +595,14 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         _replay_deferred_embeddings(drained)
         if drained:
             log.info("drained %d deferred write-embed batch(es)", len(drained))
+
+        if not embeddings.activation_encoder_is_shared():
+            # A separate activation encoder is never loaded by activation itself
+            # (its query encode is resident-only), so warm-up is what makes it
+            # resident; the shared topology is the recall model just preloaded.
+            log.info("preloading activation encoder %s", embeddings.activation_model_name())
+            if _preload("model_activation", embeddings.get_activation_model, lambda m: m.encode(["warm"])):
+                log.info("activation encoder ready")
 
         if embeddings.ranking_enabled():
             log.info("preloading reranker %s", embeddings.RERANKER_NAME)

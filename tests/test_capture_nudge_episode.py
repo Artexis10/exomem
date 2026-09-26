@@ -373,4 +373,10 @@ def test_an_older_service_that_refuses_attribution_still_serves_the_packet(
     )
 
     assert packet == {"abstained": True, "ok": 1}
-    assert ["client" in body for body in bodies] == [True, False]
+    # Stepped down one field at a time: first without the workspace key a
+    # service older than it refuses, then without attribution at all.
+    assert [("client" in body, "workspace" in body) for body in bodies] == [
+        (True, True),
+        (True, False),
+        (False, False),
+    ]

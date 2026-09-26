@@ -30,6 +30,10 @@ log = logging.getLogger(__name__)
 REGISTRY_VERSION = 1
 
 _SQLITE_SUFFIXES = ("", "-wal", "-shm", "-journal")
+#: A recall sidecar named for the vector space it holds (`index_paths.space_sidecar_name`).
+_EMBEDDINGS_SPACE_RE = re.compile(
+    r"^\.embeddings\.[0-9a-f]{16}\.sqlite(?:-(?:wal|shm|journal))?$", re.ASCII
+)
 _REVIEW_TEMP_RE = re.compile(r"^\.\.review-state\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII)
 _DUE_TEMP_RE = re.compile(
     r"^\.\.due-state(?:-emission)?\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII
@@ -359,7 +363,8 @@ _REGISTRY = (
         "embeddings-store",
         "embedding_index",
         StatePlacement.EXTERNAL_STATE,
-        exact=_sqlite_family(".embeddings.sqlite"),
+        exact=(*_sqlite_family(".embeddings.sqlite"), ".embeddings.active"),
+        patterns=(_EMBEDDINGS_SPACE_RE,),
     ),
     InternalStateDescriptor(
         "clip-store",

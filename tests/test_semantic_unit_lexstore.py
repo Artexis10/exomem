@@ -232,3 +232,42 @@ def test_parent_delete_removes_every_lexical_unit_row(tmp_path: Path) -> None:
         )
         == []
     )
+
+
+def test_in_process_unit_rung_matches_the_catalogue_for_cjk_and_folded_queries(
+    tmp_path: Path,
+) -> None:
+    """The unit lane trusts indexed scores only when the in-process rung finds
+    the same match set; tokenizer v2 must keep the two sides in step."""
+    from types import SimpleNamespace
+
+    contents = {
+        "tower": "東京タワーの高さ",
+        "minutes": "会議の議事録",
+        "delivery": "Zölvarn prüft die Lieferung",
+        "plain": "Zolvarn plans the rollout",
+    }
+    path = _write_page(
+        tmp_path,
+        "".join(f"- [config] {text} ^{key}\n" for key, text in contents.items()),
+    )
+    _seed(tmp_path, [path])
+    lexstore.ensure_fresh(tmp_path)
+    records = {
+        key: (None, SimpleNamespace(content=text), index)
+        for index, (key, text) in enumerate(contents.items())
+    }
+    for query, expected in (
+        ("東京タワー", {"tower"}),
+        ("議事録", {"minutes"}),
+        ("zolvarn", {"delivery", "plain"}),
+        ("Zölvarn", {"delivery"}),
+    ):
+        hits = lexstore.search_semantic_units(tmp_path, query, k=10, scope="kb")
+        assert hits is not None
+        indexed = {
+            key for hit in hits for key, text in contents.items() if text in hit.content
+        }
+        assert indexed == expected, query
+        assert find_module._unit_text_match_refs(records, query) == expected, query
+        assert set(find_module._python_unit_scores(records, query)) == expected, query

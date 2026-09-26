@@ -74,7 +74,12 @@ def append_to_file(
 
     try:
         abs_path, rel_path = resolve_under_vault(
-            vault_root, path, must_exist=True, must_be_file=True, must_be_under_kb=True
+            vault_root,
+            path,
+            must_exist=True,
+            must_be_file=True,
+            must_be_under_kb=True,
+            refuse_withheld=True,
         )
     except VaultPathError as e:
         raise AppendError(code=e.code, reason=e.reason) from e

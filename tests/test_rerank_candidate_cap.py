@@ -450,3 +450,15 @@ def test_rest_cli_descriptors_and_product_forwarding_include_candidate_cap(
     captured = capsys.readouterr()
     assert code == 0, captured.err
     assert json.loads(captured.out.strip().splitlines()[-1])["success"] is True
+
+
+def test_should_rerank_counts_unspaced_runs_as_query_words() -> None:
+    """An ASCII query still counts whitespace words; a word mixing a spaced
+    part and an unspaced run counts each, so a mixed-script query is not
+    "one word" just because it has no spaces."""
+    from exomem import find_policy
+
+    assert find_policy.should_rerank([], "one two three four five")
+    assert not find_policy.should_rerank([], "a-b c d e")
+    assert find_policy.should_rerank([], "Python入門ガイド 東京 タワー 高さ")
+    assert not find_policy.should_rerank([], "東京タワーの高さは何メートルですか")

@@ -28,6 +28,7 @@ user makes the call, so visibility beats silent graph mutation.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import os
@@ -36,7 +37,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import call_spans
+from . import call_spans, recall_space
 from .kbdir import kb_prefix
 from .vault import content_hash
 
@@ -677,13 +678,16 @@ def _canon(path: str) -> str:
     return p.lower()
 
 
-def _why(hit) -> str:
-    """One-line rationale assembled from the hit's ranking signals."""
+def _why(hit, *, ranks: bool = True) -> str:
+    """One-line rationale assembled from the hit's ranking signals.
+
+    `ranks=False` names the lanes without their whole-corpus rank numbers.
+    """
     bits: list[str] = []
     if hit.vector_rank:
-        bits.append(f"semantic #{hit.vector_rank}")
+        bits.append(f"semantic #{hit.vector_rank}" if ranks else "semantic")
     if hit.bm25_rank:
-        bits.append(f"keyword #{hit.bm25_rank}")
+        bits.append(f"keyword #{hit.bm25_rank}" if ranks else "keyword")
     if hit.graph_in_degree:
         hub = " (hub)" if hit.graph_in_degree >= 3 else ""
         bits.append(f"{hit.graph_in_degree} shared link(s){hub}")
@@ -733,6 +737,7 @@ def suggest_related(
     suggested edge, since you can't act on a read-only/out-of-KB link.
     """
     from . import find as find_module
+    from .governance import egress
 
     lead = " ".join((body or "").split()[:_QUERY_LEAD_WORDS])
     query = f"{title}\n\n{lead}".strip() or (title or "").strip()
@@ -742,19 +747,29 @@ def suggest_related(
     self_canon = _canon(self_path) if self_path else None
     excluded = {_canon(e) for e in (existing_links or set())}
 
+    # A caller other than the owner ranks over the pages it may see: no graph
+    # lane (hops and in-degree follow links over the whole vault), no withheld
+    # hit, and no rank number computed over the whole corpus, as `op_find`.
+    # It makes one fetch of the fixed over-fetch pool `op_find` uses, so the
+    # work does not depend on how many withheld pages match; when withheld
+    # pages fill that pool the caller receives fewer suggestions.
+    keep = egress.restricted_release_filter(vault_root)
+    wanted = limit * RELATED_OVERFETCH
     try:
         hits = find_module.find(
             vault_root,
             query=query,
-            limit=limit * RELATED_OVERFETCH,
+            limit=wanted if keep is None else egress.pool_limit(wanted),
             mode="hybrid",
-            graph=True,
+            graph=keep is None,
             scope=scope,
             prefer_compiled=True,
         )
     except Exception as e:  # noqa: BLE001 — suggestions are best-effort
         log.debug("suggest_related find() failed: %s", e)
         return []
+    if keep is not None:
+        hits = [h for h in hits if keep(h.path)][:wanted]
 
     eligible = []
     for h in hits:
@@ -775,7 +790,11 @@ def suggest_related(
     ranked = sorted(enumerate(eligible), key=_score, reverse=True)
     return [
         RelatedSuggestion(
-            path=h.path, title=h.title, type=h.type, why=_why(h), excerpt=h.excerpt
+            path=h.path,
+            title=h.title,
+            type=h.type,
+            why=_why(h, ranks=keep is None),
+            excerpt=h.excerpt,
         )
         for _, h in ranked[:limit]
     ]
@@ -829,7 +848,10 @@ def _best_cosine_per_file(
         # fields are what the duration alone cannot say: on 0.84.1 an
         # `embeddings.encode` of 15.6 s with `count=1` sat entirely outside
         # `index.embeddings`, and this is the caller it belonged to.
-        with call_spans.span("advisory.best_cosine", {}) as measured:
+        with (
+            call_spans.span("advisory.best_cosine", {}) as measured,
+            contextlib.ExitStack() as in_space,
+        ):
             chunks = embeddings.chunk_text(title, body)
             if not chunks:
                 if measured is not None:
@@ -837,6 +859,8 @@ def _best_cosine_per_file(
                     measured["chars"] = 0
                 return {}
             idx = embeddings.get_embedding_index(vault_root)
+            # The draft is encoded for the sidecar it is scored against.
+            in_space.enter_context(recall_space.encoding_for(idx))
             stored = (
                 embeddings._stored_text_vectors(idx, published_path)[0]
                 if published_path
