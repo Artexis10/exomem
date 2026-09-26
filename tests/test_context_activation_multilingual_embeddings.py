@@ -49,7 +49,7 @@ from exomem import (  # noqa: E402
     lexstore,
     ranking_config,
     readiness,
-    working_set,
+    working_set_heat,
     working_set_index,
     working_set_runtime,
 )
@@ -118,8 +118,20 @@ def _measure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Measured:
 
     root = tmp_path / "multilingual"
     manifest = build_corpus(root)
-    real_recent = working_set._recent_mtimes
-    monkeypatch.setattr(working_set, "_recent_mtimes", lambda _root: dict(manifest.recency))
+    # The recent-context block reads the heat projection, not file times
+    # (step 5): seed it directly with one `work` event per fixture page, at
+    # the manifest's own explicit mtimes-as-ts_ns. Written to THIS root's own
+    # sidecar, so -- unlike the old root-agnostic monkeypatch -- it never
+    # needs restoring before the English corpus below is built on a
+    # different root (review: merge fallout from step 5).
+    working_set_heat.reset_for_tests()
+    assert working_set_heat.append(
+        root,
+        sorted(
+            working_set_heat.HeatEvent(ts_ns, path, "work", origin="fixture")
+            for path, ts_ns in manifest.recency.items()
+        ),
+    )
     working_set_runtime.reset_caches_for_tests()
     working_set_index.WorkingSetIndex(root).rebuild(load_encoder=True)
     lexstore.ensure_fresh(root)
@@ -143,9 +155,9 @@ def _measure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Measured:
             packet = commands.op_activate_context(root, turn=case.turn, include_timings=True)
             semantic_ms.append(float(packet["timings"]["stages"]["working_set.semantic"]["ms"]))
 
-    # The English corpus carries its own recency on disk, and its turns are
-    # timed by nobody.
-    monkeypatch.setattr(working_set, "_recent_mtimes", real_recent)
+    # The English corpus carries its own recency on disk, in its own vault
+    # root's heat sidecar -- untouched by the seeding above -- and its turns
+    # are timed by nobody.
     monkeypatch.setattr(embeddings, "embed_activation_query_if_loaded", real_query)
     english_root = tmp_path / "english"
     english_manifest = english_set.build_corpus(english_root)
