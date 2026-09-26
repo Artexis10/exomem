@@ -70,17 +70,6 @@ class MoveFileResult:
         }
 
 
-#: What a mover other than the owner is told when rewriting the links of a
-#: page withheld from it would be refused, whatever refuses it (an
-#: append-only tree or that page's semantic contract). That such a refusal
-#: exists is a documented residual; it names no finding, type, tree or path.
-_LINK_REWRITE_REFUSAL = (
-    "LINK_REWRITE_REFUSED",
-    "updating inbound wikilinks would rewrite a linking page this move may not change. "
-    "Retry with `update_wikilinks=false`.",
-)
-
-
 @dataclass
 class MoveFileError(Exception):
     code: str
@@ -447,6 +436,11 @@ def move_file(
     visible = egress.governed_release_filter(vault_root)
     reported_touched: list[str] = []
     reported_updated = 0
+    # For such a mover, a withheld linker the move cannot rewrite cleanly is
+    # left as it is, so its link dangles exactly as with
+    # `update_wikilinks=false`; the owner's audit reports it. Its change count
+    # is kept here so the full figures drop it too.
+    hidden_changes: dict[str, int] = {}
 
     # Stage inbound-link rewrites. The file itself moves with one filesystem
     # rename so bytes of any type are preserved without a copy/unlink window.
@@ -477,8 +471,10 @@ def move_file(
                 # the opposite of what the guard is for.
                 if rel.rsplit("/", 1)[-1] == "index.md":
                     append_tree = None
-                if append_tree and visible is not None and not visible(rel):
-                    raise MoveFileError(*_LINK_REWRITE_REFUSAL)
+                if visible is not None and not visible(rel):
+                    if append_tree:
+                        continue
+                    hidden_changes[rel] = n_changed
                 if append_tree:
                     raise MoveFileError(
                         code="APPEND_ONLY",
@@ -598,17 +594,41 @@ def move_file(
             destination_guard = PathGuard.capture(
                 vault_root, new_rel, leaf_policy="absent"
             )
-            preflight = semantic_writes.preflight_move(
-                vault_root,
-                old_path=old_rel,
-                new_path=new_rel,
-                source=source,
-                moved_source=moved_source,
-                source_guard=source_guard,
-                destination_guard=destination_guard,
-                rewrites=writes,
-                content_transform=content_transform,
-            )
+            def run_preflight() -> semantic_writes.MovePreflight:
+                return semantic_writes.preflight_move(
+                    vault_root,
+                    old_path=old_rel,
+                    new_path=new_rel,
+                    source=source,
+                    moved_source=moved_source,
+                    source_guard=source_guard,
+                    destination_guard=destination_guard,
+                    rewrites=writes,
+                    content_transform=content_transform,
+                )
+
+            preflight = run_preflight()
+            while visible is not None:
+                # A withheld linker whose rewrite its contract would refuse
+                # is skipped, and the move is judged again without it.
+                refused = {
+                    item.after.path
+                    for item in preflight.evaluations
+                    if item.after.path in hidden_changes
+                    and item.contract_result.should_block
+                }
+                if not refused:
+                    break
+                writes[:] = [
+                    write
+                    for write in writes
+                    if write.path.relative_to(vault_root).as_posix() not in refused
+                ]
+                for rel in refused:
+                    files_touched.remove(rel)
+                    wikilinks_updated -= hidden_changes.pop(rel)
+                log_rel_no_ext, log_body, log_plan = plan_activity_log()
+                preflight = run_preflight()
             semantic_states = {
                 item.after.path: semantic_index.from_semantic_page_state(item.after)
                 for item in preflight.evaluations
@@ -739,8 +759,7 @@ def move_file(
                 # A page withheld from this mover whose bytes the move does not
                 # rewrite stays in the closure for publication, but is never
                 # asserted against the move: its standing is the owner's to
-                # review. A withheld linker the move does rewrite and would
-                # leave non-compliant refuses it with one generic answer.
+                # review.
                 rewritten = {
                     write.path.relative_to(vault_root).as_posix() for write in writes
                 }
@@ -752,11 +771,6 @@ def move_file(
                         if not visible(item.after.path) and item.after.path not in rewritten
                     ),
                 )
-                if any(
-                    item.contract_result.should_block and not visible(item.after.path)
-                    for item in preflight.blocking_evaluations
-                ):
-                    raise MoveFileError(*_LINK_REWRITE_REFUSAL)
             committed = semantic_writes.commit_move(
                 vault_root, preflight=preflight, mutate=mutate
             )

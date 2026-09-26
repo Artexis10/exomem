@@ -1647,42 +1647,107 @@ def test_a_withheld_page_the_move_does_not_rewrite_never_blocks_it(
         assert answers["C"] == answers["B"], detail
 
 
-_HIDDEN_LINKERS = {
-    "append-only": (
-        f"{KB}/Sources/Withheld/capture.md",
-        _page("Capture", f"Captured text linking [[{INSIGHTS}/beta]].", type="source"),
-    ),
-    "contract": (
-        f"{WITHHELD_DIR}/legacy-linker.md",
-        _page("Legacy", f"Links [[{INSIGHTS}/beta]].", type="insight"),
-    ),
-}
+_GUESSED = "quartz-ledger"
 
 
+def _withheld_linkers(target: str) -> dict[str, tuple[str, str]]:
+    """Withheld pages linking `target`: one the move cannot rewrite cleanly
+    because its contract refuses, one in an append-only tree, and one it can."""
+    return {
+        "non-compliant": (
+            f"{INSIGHTS}/Withheld/w.md",
+            _page("W", f"W.\n\n## Relations\n\n- supports [[{target}]]\n",
+                  type="insight", status="active"),
+        ),
+        "sources": (
+            f"{KB}/Sources/Withheld/s.md",
+            _page("Clipped", f"Mentions [[{target}]] in passing.", type="source"),
+        ),
+        "compliant": (f"{INSIGHTS}/Withheld/w.md", _typed("W", "W.", target)),
+    }
+
+
+@pytest.mark.parametrize("guess", [_GUESSED, "other-guess"])
+@pytest.mark.parametrize("linker", ["non-compliant", "sources", "compliant"])
 @pytest.mark.parametrize("audience", AUDIENCES)
-def test_a_withheld_linker_refuses_a_restricted_move_with_one_generic_answer(
-    tmp_path: Path, audience: str
+def test_a_restricted_move_skips_a_withheld_linker_it_cannot_rewrite_cleanly(
+    tmp_path: Path, audience: str, linker: str, guess: str
 ) -> None:
-    """That such a refusal exists is a documented residual; it names no
-    finding, type, tree or path, and reads the same whatever refused."""
-    scope = "Notes/Withheld/**, Sources/Withheld/**"
-    answers = {}
-    for label, (path, text) in _HIDDEN_LINKERS.items():
-        vault = _materialize(
-            tmp_path / label / "vault", {**_semantic_move_fixture(), path: text}, audience,
-            scope=scope,
-        )
-        answers[label] = _call(
-            vault, _principal(audience), "manage_memory_file", operation="move",
-            old_path=f"{INSIGHTS}/beta.md", new_path=f"{INSIGHTS}/beta-x.md",
-        )
-        assert (vault / INSIGHTS / "beta.md").is_file(), label
+    """Moving a page onto a guessed name and away again reads the same whether
+    or not a withheld page links that name. A withheld linker the move cannot
+    rewrite cleanly is left as it is and its link dangles, which the owner's
+    audit reports; one it can rewrite is rewritten."""
+    from exomem import audit as audit_module
 
-    assert answers["append-only"] == answers["contract"], answers
-    message = answers["contract"].get("message", "")
-    assert answers["contract"].get("__error__"), answers
-    for detail in ("COMPILED", "SEMANTIC", "insight", "Sources", "Withheld", "withheld", "legacy"):
-        assert detail not in message, (detail, message)
+    scope = "Notes/Insights/Withheld/**, Sources/Withheld/**"
+    base = {
+        f"{INSIGHTS}/alpha.md": _typed("Alpha", "A.", f"{INSIGHTS}/zeta"),
+        f"{INSIGHTS}/zeta.md": _typed("Zeta", "Z.", f"{INSIGHTS}/alpha"),
+    }
+    hidden, text = _withheld_linkers(_GUESSED)[linker]
+    _neutral_path, neutral = _withheld_linkers(f"{INSIGHTS}/alpha")[linker]
+    variants = {"B": base, "A": {**base, hidden: text}, "C": {**base, hidden: neutral}}
+    moves = ((f"{INSIGHTS}/zeta.md", f"{INSIGHTS}/Scratch/{guess}.md"),
+             (f"{INSIGHTS}/Scratch/{guess}.md", f"{INSIGHTS}/Scratch/moved-on.md"))
+
+    for detail in (None, "compact", "full", "legacy"):
+        extra = {} if detail is None else {"response_detail": detail}
+        answers = {}
+        for variant, files in variants.items():
+            vault = _materialize(
+                tmp_path / str(detail) / variant / "vault", files, audience, scope=scope
+            )
+            answers[variant] = [
+                _VOLATILE_TEXT.sub(
+                    "<v>",
+                    _text(
+                        _call(
+                            vault, _principal(audience), "manage_memory_file", operation="move",
+                            old_path=old, new_path=new, update_wikilinks=True, **extra,
+                        )
+                    ),
+                )
+                for old, new in moves
+            ]
+            if variant == "A":
+                stored = (vault / hidden).read_text(encoding="utf-8")
+                if linker == "compliant" and guess == _GUESSED:
+                    assert "moved-on]]" in stored and _GUESSED not in stored, stored
+                else:
+                    assert stored == text
+                    if guess == _GUESSED and detail is None:
+                        _reset()
+                        with library_scope():
+                            report = audit_module.audit(
+                                vault, categories=["broken_wikilink", "forward_reference"]
+                            )
+                        assert any(
+                            finding.path == hidden and _GUESSED in finding.detail
+                            for finding in report.findings
+                        ), [finding.as_dict() for finding in report.findings]
+        assert '"__error__"' not in _text(answers["B"]), (detail, answers["B"])
+        assert answers["A"] == answers["B"], (detail, answers["A"])
+        assert answers["C"] == answers["B"], detail
+
+
+def test_the_owner_is_still_refused_a_linker_it_cannot_rewrite(tmp_path: Path) -> None:
+    base = {
+        f"{INSIGHTS}/alpha.md": _typed("Alpha", "A.", f"{INSIGHTS}/zeta"),
+        f"{INSIGHTS}/zeta.md": _typed("Zeta", "Z.", f"{INSIGHTS}/alpha"),
+    }
+    for linker in ("non-compliant", "sources"):
+        hidden, text = _withheld_linkers(f"{INSIGHTS}/zeta")[linker]
+        vault = _materialize(
+            tmp_path / linker / "vault", {**base, hidden: text}, "external",
+            scope="Notes/Insights/Withheld/**, Sources/Withheld/**",
+        )
+        answer = _call(
+            vault, None, "manage_memory_file", operation="move",
+            old_path=f"{INSIGHTS}/zeta.md", new_path=f"{INSIGHTS}/zeta-x.md",
+            update_wikilinks=True,
+        )
+        assert answer.get("__error__"), (linker, answer)
+        assert (vault / hidden).read_text(encoding="utf-8") == text
 
 
 def test_the_owner_still_writes_to_a_page_withheld_from_others(tmp_path: Path) -> None:
