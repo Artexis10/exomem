@@ -3746,6 +3746,36 @@ def writer_view_relations(
     )
 
 
+def writer_authored_facts(
+    page: SemanticPageState,
+    corpus: SemanticCorpusContext,
+) -> tuple[RelationFact, ...]:
+    """The facts the page authors, as the current writer may judge them.
+
+    For the owner, an ungoverned vault, or a page the writer may not see, the
+    corpus facts the page authors, in corpus order. For any other writer
+    judging a page it may see, the same facts with their targets resolved
+    only over the pages that writer may see (see `writer_view_relations`).
+    """
+    visible = vault.writer_link_visibility(corpus.vault_root)
+    if visible is None or not visible(page.path):
+        return tuple(fact for fact in corpus.relation_facts if fact.authored_path == page.path)
+    resolver = vault.WikilinkResolver.from_entries(corpus.vault_root, corpus.resolver_entries)
+    return tuple(
+        sorted(
+            _derive_relation_facts(
+                corpus.vault_root,
+                {page.path: page},
+                resolver,
+                corpus.registry,
+                target_states=corpus.pages,
+                writer_view=(page.path, visible),
+            ),
+            key=lambda item: item.identity,
+        )
+    )
+
+
 def _relation_disposition(
     page: SemanticPageState,
     corpus: SemanticCorpusContext,
@@ -4024,9 +4054,7 @@ def _registry_findings(
                 resolved_rule=resolved_rule,
             )
         )
-    for fact in corpus.relation_facts:
-        if fact.authored_path != page.path:
-            continue
+    for fact in writer_authored_facts(page, corpus):
         code: str | None = None
         detail: str | None = None
         if fact.canonical_relation is None:
@@ -4064,8 +4092,8 @@ def _observed_namespaces(
 ) -> dict[str, set[Any]]:
     required_relations: set[str] = set()
     allowed_relations: set[str] = set()
-    for fact in corpus.relation_facts:
-        if fact.authored_path != page.path or fact.origin not in _AUTHORED_SCHEMA_ORIGINS:
+    for fact in writer_authored_facts(page, corpus):
+        if fact.origin not in _AUTHORED_SCHEMA_ORIGINS:
             continue
         if fact.canonical_relation is not None:
             required_relations.add(fact.canonical_relation)

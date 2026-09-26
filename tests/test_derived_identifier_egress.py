@@ -778,6 +778,52 @@ def test_a_restricted_moves_review_carry_reads_over_its_view(
     assert signature(vaults["A"], None) != signature(vaults["B"], None)
 
 
+_SCOPED_REGISTRY = (
+    "schema_version: 1\nextensions:\n  science.replicates:\n    parent: supports\n"
+    "    description: Replicates\n    aliases: [replicates]\n    source_kinds: [file]\n"
+    "    target_kinds: [file]\n"
+)
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_drafts_registry_scope_reads_over_its_view(
+    tmp_path: Path, audience: str
+) -> None:
+    """A relation scoped to file targets is judged against the target the
+    writer's view resolves: one only a withheld page answers is unresolved."""
+    base = {
+        **_filler(),
+        f"{KB}/_Schema/relation-registry.yaml": _SCOPED_REGISTRY,
+        f"{NOTES}/beta.md": _page("Beta", f"Beta.{_UNIT}", type="insight", status="active"),
+    }
+    withheld = {
+        f"{WITHHELD_DIR}/memo.md": _page(
+            "Hidden Target", f"Withheld body text.{_UNIT}", type="insight", title="Hidden Target"
+        )
+    }
+    vaults = _twins(tmp_path, base, withheld, audience)
+    content = (
+        f"Draft page, see [[{NOTES}/beta]].{_UNIT}\n## Relations\n\n"
+        "- replicates [[Hidden Target]]\n"
+    )
+
+    def drafted(vault: Path, principal: RequestPrincipal | None) -> str:
+        answer = _call(
+            vault, principal, "remember", content=content, title="Draft Page",
+            note_type="insight", validate_only=True, response_detail="full",
+        )
+        answer.pop("draft_token", None)  # carries its issue time
+        return _VOLATILE_TEXT.sub("<v>", _text(answer))
+
+    answers = {variant: drafted(vault, _principal(audience)) for variant, vault in vaults.items()}
+
+    assert '"__error__"' not in answers["B"], answers["B"]
+    assert "scope_violation" in answers["B"], answers["B"]
+    assert answers["A"] == answers["B"]
+    assert answers["C"] == answers["B"]
+    assert "scope_violation" not in drafted(vaults["A"], None)
+
+
 def test_the_owner_still_judges_a_draft_by_every_page(tmp_path: Path) -> None:
     base, withheld = _drafted_fixture()
     vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")
