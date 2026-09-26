@@ -1159,6 +1159,45 @@ def _recent_lines(packet: dict) -> list[str]:
     return lines
 
 
+def _upkeep_lines(packet: dict) -> list[str]:
+    """The packet's upkeep block as whole lines: a failing-pass status, then the
+    one item a session start may carry.
+
+    The item line names its label, subject title and closed-template reason,
+    then says how to handle it: read `review_item_context` first, then act
+    through the item's own route or dispose of it through `triage_memory`. The
+    ref ends the line like every other, collapsed like the prose, so no field
+    of the item can start a line of its own. It is the context route's upkeep
+    ref, which both tools the line names accept; a link item's own ref is a
+    relation ref that `review_item_context` rejects.
+    """
+    block = packet.get("upkeep")
+    if not isinstance(block, dict):
+        return []
+    lines: list[str] = []
+    if block.get("status") == "failed":
+        since = " ".join(str(block.get("since") or "an unknown time").split())
+        lines.append(f"- upkeep: the background pass is failing since {since}; see exomem status.")
+    for item in block.get("items") or ():
+        if not isinstance(item, dict):
+            continue
+        subject = item.get("subject") if isinstance(item.get("subject"), dict) else {}
+        title = str(subject.get("title") or "").strip()
+        why = str(item.get("why") or "").strip()
+        route = item.get("route") if isinstance(item.get("route"), dict) else {}
+        tool = str(route.get("tool") or "its route")
+        text = (
+            f"{title} — {why}. Review with review_item_context, then act via {tool} "
+            "or triage_memory dismiss|snooze."
+        )
+        label = str(item.get("label") or "upkeep")
+        context = item.get("context_route") if isinstance(item.get("context_route"), dict) else {}
+        args = context.get("args") if isinstance(context.get("args"), dict) else {}
+        ref = str(args.get("ref") or item.get("ref") or "")
+        lines.append(_packet_line(f"upkeep ({label})", text, ref))
+    return lines
+
+
 #: The evidence kinds that mean the TURN'S OWN WORDS reached an anchor, and
 #: the ranking engine's. Spelled here rather than imported, because this hook
 #: runs as a standalone script.
@@ -1246,6 +1285,7 @@ def _packet_lines(packet: dict) -> list[str]:
         label = f"{title} — {why}" if title and why else (title or why)
         if label:
             lines.append(_packet_line("pointer", label, ref))
+    lines.extend(_upkeep_lines(packet))
     return lines
 
 
@@ -1295,10 +1335,11 @@ def _menu_block(packet: dict, menu: list[str], instruction: str, max_chars: int)
     reserve = len(instruction) + 1
     room = max_chars - reserve
     menu_kept = _bounded_lines(menu, room)
+    recent = [*_recent_lines(packet), *_upkeep_lines(packet)]
     if not menu_kept:
-        return _bounded_block(_recent_lines(packet), max_chars)
+        return _bounded_block(recent, max_chars)
     menu_cost = sum(1 + len(line) for line in menu_kept)
-    recent_kept = _bounded_lines(_recent_lines(packet), room - menu_cost)
+    recent_kept = _bounded_lines(recent, room - menu_cost)
     return "\n".join([_WORKING_SET_HEADER, *recent_kept, *menu_kept]) + f"\n{instruction}"
 
 
@@ -1467,7 +1508,7 @@ def _format_working_set_block(packet: dict, max_chars: int) -> str:
             return _format_ambiguity_block(packet, max_chars)
         if reason == "unresolved":
             return _format_unresolved_block(packet, max_chars)
-        return _bounded_block(_recent_lines(packet), max_chars)
+        return _bounded_block([*_recent_lines(packet), *_upkeep_lines(packet)], max_chars)
     return _bounded_resolved_block(packet, max_chars)
 
 

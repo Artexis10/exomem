@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 53a9629a10cd89199e87076af9f3dfa282d011d96aac55b2afcd9b4d14019be7
+  skill_contract: 065b0212c104eb198a06e792dfc1bbea2e9e8480a10639087727bb6b2b57e6f2
   version: "0.32.0"
 ---
 
@@ -118,7 +118,9 @@ Call `activate_context` with the user's turn verbatim before answering a substan
 
 What comes back is bounded working memory, or an abstention with its reason; an
 `ambiguous` packet names the competing senses and runs no lane, so choosing one
-is yours and guessing is not. Use the packet and current conversation first.
+is yours and guessing is not. At a session start the packet may carry one
+`upkeep` item: act through its route or dismiss it with a reason; nothing is
+applied for you. Use the packet and current conversation first.
 When relevant knowledge is still missing, use
 `ask_memory(detail="compact", rerank=false)`, then `read_memory` for
 selected hits. Use `ask_memory(deep=true)` for a bounded synthesis context, and
