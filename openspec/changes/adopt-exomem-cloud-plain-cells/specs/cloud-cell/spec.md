@@ -194,6 +194,12 @@ No candidate, lock, fixture or promotion artifact SHALL be required to release.
 
 ### Requirement: Each cell is backed up consistently, encrypted with its own key
 
+The controller's object-storage key-management credential SHALL belong to a
+dedicated Cloud backup account, separate from personal, legacy recovery,
+control-database and cluster snapshot storage accounts. A child key's bucket
+and prefix restrictions MUST NOT be treated as limiting its parent's
+key-management authority.
+
 cellctl SHALL back up each cell nightly and before every image change. The cell SHALL be stopped during the copy, so the copy is crash-consistent. A backup that misses its deadline SHALL restart the cell and record `BACKUP_FAILED`.
 
 A backup SHALL:
@@ -204,6 +210,12 @@ A backup SHALL:
 The wrapped data key and the wrapped per-cell object-storage key SHALL be stored once on the cell row, so that a stateless controller can re-render the cell's Secret and delete the key later.
 
 A restore into a new namespace SHALL produce a cell that answers recall, reports the same governance schema as its source cell, and accepts a governed write.
+
+#### Scenario: Preparing the Cloud backup controller
+
+- **WHEN** an operator prepares the Cloud controller's key-management credential
+- **THEN** its account contains only Cloud backup storage
+- **AND** the existing durability account's key-management credential is not supplied to the controller
 
 #### Scenario: Restore drill
 

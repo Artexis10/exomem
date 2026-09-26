@@ -290,6 +290,7 @@ Nothing else pins a release: no candidates, locks, fixtures or adoption PRs. A C
 
 ### D7. Secrets
 
+- **Backup account boundary.** The Cloud controller's B2 key-management identity belongs to a dedicated Cloud backup account. It does not share the account holding personal, legacy recovery, database, or etcd backups. `writeKeys` can mint unrestricted credentials; prefix restrictions protect the child credentials, not the parent account. Provision a private Cloud bucket without Object Lock or upload-age expiry that would break restic retention or D10 deletion. Keep its provider credentials and Terraform state separate from the existing durability root. No existing backup account or bucket is migrated as part of this preparation.
 - **Cell bearer** (contract C4): `base64url_nopad(HMAC-SHA256(cell_token_key[v], "exomem-cloud-cell-token-v1:" + cell_id))`. The gateway and cellctl both hold `cell_token_key`. No bearer is stored in the database.
 - **Key encoding.** A `cell_token_key` is 32 bytes written as 64 hex characters. The Secret `exomem-cloud-cell-token-key` holds `current` (and during a rotation `previous`) in that form, and both readers take the same entry: the gateway as `EXOMEM_CLOUD_CELL_TOKEN_KEY`, cellctl as `CELLCTL_CELL_TOKEN_KEY_CURRENT`. cellctl refuses any other form at settings load, so the two can never derive bearers from different bytes.
 - **Bearer rotation:**
@@ -582,8 +583,53 @@ The gateway gates on desired state, not on the observed `ready` column. An event
 5. **P5, friends**, after the owner confirms.
 6. **R, retire.** Delete the hosted-only runtime modules, provisioner v1, the old chart pieces, locks and plugin candidates. Remove the superseded change directories and the `hosted-*` canonical specs with the code they describe. Delete Neon after seven clean days.
 
-**Rollback before P4** is a no-op. **After P4**, restore the database from the retained Neon export.
+### Preparation and personal endpoint preservation
+
+Preparation is authorized separately from deployment and cutover. It may produce
+reviewed code, encrypted artifacts, offline renders, read-only inventories and
+rollback instructions. It does not restart or stop the personal service, alter
+its tunnel or connectors, repoint DNS, or apply Cloud infrastructure.
+
+The existing personal endpoint remains available until a replacement endpoint
+has passed the same clients' authenticated read and write checks. A hostname
+change is not a vault migration: the personal vault, custody, service identity
+and external state root stay in place. Identify those live boundaries before
+preparing a host-specific command. Do not infer them from an old handoff.
+
+The replacement personal hostname must have working TLS. For a zone using
+first-level wildcard coverage, choose a first-level sibling rather than an
+extra nested label. Record the Cloud hostname, personal replacement hostname,
+exact `/mcp` URLs and connector inventory in the private deployment inputs.
+
+Before any later hostname cutover, retain the original DNS record and tunnel
+configuration, establish how the locally managed tunnel can add the second
+hostname without stopping the personal service, and verify both routes. Keep
+the old personal route until every named client has passed acceptance on the
+replacement. Moving the original DNS record into Terraform ownership is itself
+a state mutation and belongs to the agreed cutover, not preparation.
+
+The operational packet is [Cloud migration preparation](../../../docs/runbooks/cloud-migration-preparation.md).
+
+### Rollback boundaries
+
+- During preparation, leave production unchanged; revert only preparation artifacts.
+- Before repointing the original hostname, personal clients can keep using their
+  original configuration. Remove an unaccepted replacement route only in an
+  agreed window, without stopping the underlying service.
+- After repointing DNS, restore the captured original DNS record and personal
+  tunnel route if endpoint acceptance fails. Quiesce new Cloud admission before
+  routing changes. Retain all Cloud volumes, wrapped keys and backups; do not
+  translate rollback into tenant deletion.
+- A Cloud workload failure is recovered using its pinned previous image and
+  D6 restore procedure. It does not require restoring the control database.
+- A control-database rollback is a separate incident procedure: preserve writes
+  made after cutover and choose a verified pgBackRest recovery point. The retained
+  Neon export is a cutover-time snapshot, not a safe unconditional rollback once
+  the new database has accepted writes. Never restore it merely to undo a hostname
+  or gateway change.
 
 ## Open Questions
 
-- The exact MCP hostname and brand domain for Exomem Cloud. This is configuration, set at P4.
+- The deployment inputs must record the chosen MCP hostname and the accepted
+  personal replacement endpoint before P4. Their activation remains a separate
+  cutover decision.

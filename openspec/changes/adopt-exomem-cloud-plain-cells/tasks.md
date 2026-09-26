@@ -201,7 +201,15 @@
 
 ## 6. Node deployment and owner acceptance (P4)
 
-- [ ] 6.1 Scale the old platform's in-cluster gateway, provisioner and workers to zero before the window (Substrate D8 step 1). Then apply the control server and run the database cutover under the Substrate runbook, which sets Neon read-only, lists every consumer, restores with `--no-owner --no-acl`, and runs the grants script. Then verify Endstate and Exomem.
+- [ ] 6.0 Prepare the migration packet before any live deployment or hostname change:
+  - identify the personal service manager, interpreter, state root and locally managed tunnel configuration without modifying them;
+  - record both MCP URLs and all personal connector clients, with read/write and reauthentication checks;
+  - prepare the configuration and inputs for a dedicated Cloud B2 account and private bucket with separate provider/state ownership; this task does not authorize provisioning or reuse of the existing durability account's key manager;
+  - bind every required platform Secret to the destination matrix, seal exact key sets and verify recovery custody without activating them;
+  - resolve published image digests from the final reviewed release and render the complete platform change against captured live values;
+  - prepare original DNS/tunnel snapshots, Terraform ownership reconciliation and phase-specific rollback;
+  - retain the preparation-only boundary until the owner agrees a deployment/cutover window.
+- [ ] 6.1 At the start of the agreed deployment window, scale the old platform's in-cluster gateway, provisioner and workers to zero (Substrate D8 step 1). Then apply the control server and run the database cutover under the Substrate runbook, which sets Neon read-only, lists every consumer, restores with `--no-owner --no-acl`, and runs the grants script. Then verify Endstate and Exomem. If the database cutover has already completed, verify its closure evidence and current live state rather than repeating it.
   - Role apply on the control server starts every unit; `systemctl is-active` for postgresql, pgbouncer, the certbot and pgbackrest timers.
   - A pgbackrest full backup to B2 completes and the restore-verify timer's script passes against B2 before the Neon cutover.
 - [ ] 6.2 Deploy cellctl and the gateway beside the old platform, and set `cell_image`
