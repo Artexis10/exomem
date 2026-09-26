@@ -107,7 +107,11 @@ RUN uv pip install --python /app/.venv/bin/python "torch>=2.12" --index-url http
 # Only the bi-encoder is fetched, and only in the form the runtime reads.
 ########################################################################
 FROM builder-lean AS builder-hosted
-ENV HF_HOME=/opt/exomem-models
+# A cell encodes recall with the English model until a node encoder serves the
+# multilingual one; name it here, where no cell flag is set, so the build
+# fetches the model its cells load.
+ENV HF_HOME=/opt/exomem-models \
+    EXOMEM_RECALL_MODEL=BAAI/bge-base-en-v1.5
 # Resolve the model through the very backend the cell serves with, so the build
 # fetches exactly what that runtime opens — the ONNX export, the fast tokenizer,
 # and the sequence config — and never a torch serialization there is no loader
@@ -242,6 +246,7 @@ ENV PATH=/app/.venv/bin:$PATH \
     TRANSFORMERS_OFFLINE=1 \
     EXOMEM_DISABLE_RANKING=1 \
     EXOMEM_EMBED_BACKEND=onnx \
+    EXOMEM_RECALL_MODEL=BAAI/bge-base-en-v1.5 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 

@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from .. import find_corpus, reserved_paths, vault
+from .. import find_corpus, recall_space, reserved_paths, vault
 from . import (
     authorization_custody,
     membership,
@@ -710,7 +710,7 @@ def _target_vector_measurements(
     expected_dimension = (
         active_root.vector_dimension
         if active_root.vector_dimension is not None
-        else embeddings.VECTOR_DIM
+        else recall_space.declared_dim(embeddings.MODEL_NAME)
     )
     if (
         len(target_dimensions) > 1

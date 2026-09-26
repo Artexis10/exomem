@@ -160,6 +160,9 @@ def test_hf_hub_offline_forces_offline_even_with_a_cold_cache(
 def test_torch_encoder_loads_cached_weights_offline(
     hub: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A served model always runs its ONNX artefact; the torch lane is the
+    # English model's (tests/test_recall_switch.py).
+    monkeypatch.setattr(embeddings, "MODEL_NAME", "BAAI/bge-base-en-v1.5")
     _cache(hub, embeddings.MODEL_NAME)
     spy = _Spy()
     monkeypatch.setitem(sys.modules, "sentence_transformers", _fake_sentence_transformers(spy))

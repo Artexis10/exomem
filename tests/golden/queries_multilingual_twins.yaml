@@ -1,0 +1,20 @@
+# Language-bias twins (recall-multilingual-twins-v1), two more per language.
+#
+# The first twin of each language is in queries_multilingual.yaml. Each row
+# asks, in its language, about a topic only an English golden-fixture page
+# covers; the poison is a same-language page (recall_multilingual_twins.py)
+# that shares a word with the query and is about something else.
+#
+# Every name and place is invented.
+
+- {language: de, kind: language_bias, query: "Notschalter für die Freigabe riskanter Versionen", gold: ["fixture:Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases.md"], poison: ["de:urlaubsfreigabe"]}
+- {language: de, kind: language_bias, query: "Warum schreibt die Datenbank zuerst ins Protokoll", gold: ["fixture:Knowledge Base/Entities/Concepts/Write-Ahead Log.md"], poison: ["de:hausprotokoll"]}
+
+- {language: ru, kind: language_bias, query: "аварийный выключатель для рискованных релизов", gold: ["fixture:Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases.md"], poison: ["ru:vyklyuchatel"]}
+- {language: ru, kind: language_bias, query: "журнал упреждающей записи в базе данных", gold: ["fixture:Knowledge Base/Entities/Concepts/Write-Ahead Log.md"], poison: ["ru:zhurnal"]}
+
+- {language: ja, kind: language_bias, query: "危険なリリースを止めるキルスイッチ", gold: ["fixture:Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases.md"], poison: ["ja:switch"]}
+- {language: ja, kind: language_bias, query: "データベースの先行書き込みログ", gold: ["fixture:Knowledge Base/Entities/Concepts/Write-Ahead Log.md"], poison: ["ja:diary"]}
+
+- {language: et, kind: language_bias, query: "hädaseiskamise lüliti riskantsete väljalasete jaoks", gold: ["fixture:Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases.md"], poison: ["et:valguslyliti"]}
+- {language: et, kind: language_bias, query: "andmebaasi eelkirjutuse logi", gold: ["fixture:Knowledge Base/Entities/Concepts/Write-Ahead Log.md"], poison: ["et:kylastuslogi"]}

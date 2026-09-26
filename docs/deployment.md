@@ -830,6 +830,65 @@ release pinning, rollout, and rollback. Exomem deliberately has no cross-machine
 auto-updater, and the readiness contract is independent of Syncthing or any other
 replication product.
 
+## Recall model and re-embedding
+
+A personal server encodes recall with `BAAI/bge-m3`, served from a pinned int8
+ONNX artefact on CPU, and activation shares that one instance (about 0.65 GB
+resident). The first load builds the artefact from the pinned export: a 2.2 GB
+download and a quantisation that peaks near 9 GB in a child process. A hosted or
+cloud cell keeps `BAAI/bge-base-en-v1.5`. `EXOMEM_RECALL_MODEL` names the model
+explicitly.
+
+Every recall sidecar records the model, fingerprint and width of the vectors it
+holds, and nothing reads it with another encoder. When the recall model changes,
+the installed sidecar keeps serving with the model that wrote it while the
+service builds a sidecar for the new model beside it
+(`.embeddings.<16 hex>.sqlite` in the vault's state directory). The build runs
+in the background, one passage at a time, and resumes after a restart. Pages
+written meanwhile are picked up. When it finishes, the service switches
+`.embeddings.active` to the new sidecar in one atomic write and releases the old
+model; the old sidecar is deleted by the next start. Until then both models are
+resident.
+
+- Progress: `exomem doctor` (`embeddings.reembed`, read from disk) and
+  `exomem status` (`recall_reembed`: pages done, seconds per 1,000 chunks, ETA).
+- `EXOMEM_RECALL_REEMBED=off` builds nothing and keeps the old sidecar serving.
+- Both models are resident while the build runs, in every mode, quiet included:
+  warm-up loads the old model before writes are admitted so a write never
+  finds it cold. `EXOMEM_RECALL_REEMBED=off` is the way to keep one model.
+- Rolling back to `BAAI/bge-base-en-v1.5` after a later start has retired the
+  old sidecar re-embeds the whole vault into the English space, the same way.
+- `exomem index` maintains whichever sidecar is serving, with its own model.
+- The sidecar for bge-m3 is about a third larger: 1,024 dimensions against 768.
+
+## Reranking and languages
+
+The cross-encoder reranker reorders a query's top candidates. It runs on explicit
+`rerank=True`, or automatically in performance mode on an accelerated device; CPU
+services leave it off by default. `EXOMEM_DISABLE_RANKING` turns it off entirely.
+
+Each reranker declares what it can judge, and recall keeps the fused order outside
+it, explicit `rerank=True` included (`retrieval_profile.rerank.reason` says why).
+Governed projected recall applies the same gate.
+
+| Reranker | Scripts | Across languages | Notes |
+|---|---|---|---|
+| `BAAI/bge-reranker-base` (default) | Latin, Han | no | Trained on English and Chinese. Skipped for a query written mostly in another script (`query_script_not_covered`). Also skipped when the best dense match shares no content word with the query and either the query's words matched pages in another script than that match (`cross_language_not_covered`) or matched nothing while the query itself is in another script than that match (`cross_script_lead_not_covered`). |
+| `BAAI/bge-reranker-v2-m3` (opt-in) | all (assumed) | yes (assumed) | Select it with `EXOMEM_RANKING_MODEL=BAAI/bge-reranker-v2-m3`. Its model card says only that it is multilingual. The all-scripts, cross-language declaration is an assumption that has not been measured here. Its cost is a design estimate, not a measurement: about 1.3-1.8 GB more memory and roughly 45 s per 30-pair rerank on 2 CPU cores. So it is meant for accelerated hosts. |
+
+A reranker without a declaration is not gated: the owner configured it and is
+trusted with it. The declaration is looked up by the exact model name, so a local
+path or a mirror of `BAAI/bge-reranker-base` is undeclared and not gated either.
+
+The gate works by script, not by language, because no language is detected.
+Two consequences follow:
+
+- A German or Estonian query whose answer is an English page is Latin on both
+  sides, so nothing marks it as crossing and the default reranker runs. On the
+  multilingual fixture this reranking can put a same-language look-alike above
+  the English answer. This is an open gap.
+- A Japanese query written mostly in kanji reads as Han and is reranked.
+
 ## GPU notes (CUDA / Blackwell / Apple Silicon MPS)
 
 Blackwell GPUs (RTX 50-series, compute capability 12.0 / `sm_120`) need CUDA

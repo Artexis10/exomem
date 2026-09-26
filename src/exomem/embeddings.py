@@ -1,7 +1,8 @@
 """Local vector embeddings for hybrid search.
 
-Loads `BAAI/bge-base-en-v1.5` lazily (heavy import — torch +
-sentence-transformers stays off the keyword-mode hot path). Chunks each
+Loads the recall encoder lazily (`MODEL_NAME`: `BAAI/bge-m3` on a personal
+server, `BAAI/bge-base-en-v1.5` on a hosted or cloud cell; the heavy import
+stays off the keyword-mode hot path). Chunks each
 KB page paragraph-wise with title prepended, normalizes vectors so
 cosine = dot product, and persists to a per-machine sqlite sidecar
 (`.embeddings.sqlite` under the machine-local state root; see `state_paths`).
@@ -40,17 +41,22 @@ from . import (
     index_paths,
     model_cache,
     recall_policy,
+    recall_space,
     runtime_resources,
     vecstore,
 )
 from .clip_index import CLIP_DIM, ClipIndex
-from .embedding_index import VECTOR_DIM, EmbeddingIndex
+from .embedding_index import VECTOR_DIM as VECTOR_DIM  # the legacy width, re-exported
+from .embedding_index import EmbeddingIndex
 from .vector_index_common import vec_gate as _vec_gate
 
 log = logging.getLogger(__name__)
 
 
-MODEL_NAME = "BAAI/bge-base-en-v1.5"
+#: The recall encoder (`recall_space.configured_recall_model`). A sidecar written
+#: by another encoder keeps serving with that one until `recall_migration` has
+#: re-embedded it into this one's space.
+MODEL_NAME = recall_space.configured_recall_model()
 # The cross-encoder reranker is a stateless scorer (no stored vectors / sidecar dim),
 # so it can be swapped freely without a re-index. EXOMEM_RANKING_MODEL (legacy alias
 # EXOMEM_RERANKER_MODEL) overrides; EXOMEM_DISABLE_RANKING turns it off entirely (a
@@ -909,12 +915,94 @@ def rerank_pairs(query: str, passages: list[str]) -> np.ndarray:
     return scores.astype(np.float32, copy=False)
 
 
+#: Character cap for a paragraph the whitespace-word cap cannot bound: one written
+#: mostly without spaces between words (Han, kana, Hangul, Thai, ...), one carrying
+#: more unspaced text than this, or one holding a single "word" longer than this
+#: (a pasted blob, a path chain). 500 characters stay under the 512-token encoder
+#: limit (about 290-330 bge-m3 tokens for CJK prose).
+MAX_UNSPACED_CHARS_PER_CHUNK = 500
+_SENTENCE_END_MARKS = frozenset("。！？.!?")
+
+
+def _needs_character_cap(paragraph: str) -> bool:
+    """True when the whitespace-word cap cannot bound this paragraph's length."""
+    import unicodedata
+
+    from . import text_scripts
+
+    limit = MAX_UNSPACED_CHARS_PER_CHUNK
+    if len(paragraph) <= limit:
+        return False
+    if max(len(word) for word in paragraph.split()) > limit:
+        return True
+    token_chars = 0
+    unspaced = 0
+    for character in paragraph:
+        if unicodedata.category(character)[0] in "LNM":
+            token_chars += 1
+            unspaced += text_scripts.is_scriptio_continua(character)
+    return unspaced * 2 > token_chars or unspaced > limit
+
+
+def _hard_cut_point(text: str, limit: int) -> int:
+    """Where to cut `text` (longer than `limit`) so the head is at most `limit` characters.
+
+    At the last whitespace inside the limit when there is one (Thai separates
+    phrases with spaces); otherwise at the limit, stepped back so the tail never
+    starts with a combining mark cut off its base letter.
+    """
+    import unicodedata
+
+    for at in range(limit, 0, -1):
+        if text[at].isspace():
+            return at
+    at = limit
+    while at > 1 and unicodedata.category(text[at])[0] == "M":
+        at -= 1
+    return at
+
+
+def _split_by_characters(paragraph: str) -> list[str]:
+    """Pack sentences into pieces of at most `MAX_UNSPACED_CHARS_PER_CHUNK` characters.
+
+    A sentence ends after one of `。！？.!?`. A sentence longer than the cap is cut
+    at `_hard_cut_point`. Pieces are stripped of surrounding whitespace.
+    """
+    limit = MAX_UNSPACED_CHARS_PER_CHUNK
+    sentences: list[str] = []
+    start = 0
+    for at, character in enumerate(paragraph):
+        if character in _SENTENCE_END_MARKS:
+            sentences.append(paragraph[start : at + 1])
+            start = at + 1
+    if start < len(paragraph):
+        sentences.append(paragraph[start:])
+    pieces: list[str] = []
+    current = ""
+    for sentence in sentences:
+        if len(current) + len(sentence) > limit and current:
+            pieces.append(current)
+            current = ""
+        while len(sentence) > limit:
+            at = _hard_cut_point(sentence, limit)
+            pieces.append(sentence[:at])
+            sentence = sentence[at:]
+        current += sentence
+    if current:
+        pieces.append(current)
+    return [piece.strip() for piece in pieces if piece.strip()]
+
+
 def chunk_text(title: str, body: str) -> list[str]:
     """Paragraph-split body with title prepended for retrieval context.
 
     - Split on blank-line paragraph boundaries.
     - Drop empty/whitespace-only chunks.
     - Truncate overlong chunks at word boundary so the tokenizer doesn't lop.
+    - A paragraph the word cap cannot bound (mostly unspaced text, more unspaced
+      text than the cap, or a single word longer than the cap) is split instead,
+      into pieces of at most `MAX_UNSPACED_CHARS_PER_CHUNK` characters at sentence
+      ends, else at the last space, else at the cap off any combining mark.
     - Always prepend the title and a blank line so embeddings of orphan paragraphs still
       carry the document's topic.
     """
@@ -925,6 +1013,9 @@ def chunk_text(title: str, body: str) -> list[str]:
     paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
     out: list[str] = []
     for p in paragraphs:
+        if _needs_character_cap(p):
+            out.extend(f"{title}\n\n{piece}" if title else piece for piece in _split_by_characters(p))
+            continue
         words = p.split()
         if len(words) > MAX_WORDS_PER_CHUNK:
             p = " ".join(words[:MAX_WORDS_PER_CHUNK])
@@ -1006,7 +1097,7 @@ def encode_batch_size(model) -> int:
 
 
 def embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
-    """Batch-encode texts → float32 `(N, 768)`, L2-normalized for cosine.
+    """Batch-encode texts → float32 `(N, dim)`, L2-normalized for cosine.
 
     The span carries what was encoded, not just how long it took. On the 0.84.1
     personal service one write recorded `embeddings.encode` at 15.6 s with a
@@ -1054,7 +1145,11 @@ def _encode_caller() -> str:
 
 def _embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     if not texts:
-        return np.zeros((0, VECTOR_DIM), dtype=np.float32)
+        return np.zeros((0, recall_space.current_dim()), dtype=np.float32)
+    selected = recall_space.selected_model()
+    if selected is not None and selected != MODEL_NAME:
+        # A sidecar still in another encoder's space, served by that encoder.
+        return recall_space.encode_with_previous(selected, texts, is_query=is_query)
     model = get_model()
     query_prefix, passage_prefix = _prefixes(model, MODEL_NAME)
     prefix = query_prefix if is_query else passage_prefix
@@ -1358,19 +1453,28 @@ def vector_backend_active(vault_root: Path) -> bool:
         conn.close()
 
 
-def get_embedding_index(vault_root: Path) -> EmbeddingIndex:
+def get_embedding_index(vault_root: Path, *, path: Path | None = None) -> EmbeddingIndex:
     """Return the process-shared `EmbeddingIndex` for this vault.
 
     ALL production call sites (find, warm-up, writers, audit) must go through this
     so the in-memory matrix cache is shared and survives across calls — the whole
     reason find() stops paying a full reload per query. Tests may still construct
     `EmbeddingIndex` directly to exercise the class in isolation.
+
+    `path` names a sidecar that does not serve recall (one a re-embed is
+    building): it has no shared matrix to keep, and gets an instance of its own.
     """
     key = str(Path(vault_root).resolve())
+    # The serving sidecar can change (a new vector space cut over), and the
+    # shared instance follows it: the old one and its matrix are dropped.
+    serving = index_paths.sidecar_path(vault_root)
+    if path is not None and Path(path) != serving:
+        return EmbeddingIndex(vault_root, path=Path(path))
+    path = serving
     with _INDEX_CACHE_LOCK:
         idx = _INDEX_CACHE.get(key)
-        if idx is None:
-            idx = EmbeddingIndex(vault_root)
+        if idx is None or idx.path != path:
+            idx = EmbeddingIndex(vault_root, path=path)
             _INDEX_CACHE[key] = idx
         return idx
 
@@ -1670,7 +1774,8 @@ def upsert_after_write_status(
         stored_chunks, stored_units = _stored_text_vectors(index, rel_path)
         if chunks:
             try:
-                vectors = _embed_live_chunks_reusing(chunks, stored_chunks)
+                with recall_space.encoding_for(index):
+                    vectors = _embed_live_chunks_reusing(chunks, stored_chunks)
                 if not still_current():
                     index.purge_paths_if_present([rel_path])
                     failure_code = failure_code or "embedding_input_drifted"
@@ -1708,9 +1813,10 @@ def upsert_after_write_status(
             state = semantic_index.current_parent_index_state(vault_root, md)
             units = [unit for unit in state.document.units if unit.unit_ref is not None]
             if units:
-                unit_vectors = _embed_live_chunks_reusing(
-                    [unit.content for unit in units], stored_units
-                )
+                with recall_space.encoding_for(index):
+                    unit_vectors = _embed_live_chunks_reusing(
+                        [unit.content for unit in units], stored_units
+                    )
                 if not still_current():
                     index.purge_paths_if_present([rel_path])
                     failure_code = failure_code or "embedding_input_drifted"
@@ -1807,6 +1913,9 @@ def _vector_space() -> str:
     fingerprint, which for a served model names the exact bytes it runs. An
     encoder with no profile (none loaded, or a substitute) is named by the
     model it stands for."""
+    selected = recall_space.selected_model()
+    if selected is not None and selected != MODEL_NAME:
+        return recall_space.previous_space(selected)
     profile = getattr(_MODEL, "profile", None)
     if isinstance(profile, embedding_backend.EncoderProfile):
         return profile.fingerprint()
@@ -1862,7 +1971,7 @@ def remember_passage_vectors(
             if stamp != passage_memo_stamp():
                 return
             for key, row in zip(keys, rows, strict=True):
-                if row.shape != (VECTOR_DIM,):
+                if row.ndim != 1 or not row.size:
                     continue
                 row.setflags(write=False)
                 _PASSAGE_MEMO[key] = (stamp, row)
@@ -1946,7 +2055,7 @@ def _embed_live_chunks(chunks: list[str]) -> np.ndarray:
         for offset in range(0, len(chunks), limit)
     ]
     if not parts:
-        return np.zeros((0, VECTOR_DIM), dtype=np.float32)
+        return np.zeros((0, recall_space.current_dim()), dtype=np.float32)
     if len(parts) == 1:
         return np.asarray(parts[0], dtype=np.float32)
     return np.concatenate(parts, axis=0)
@@ -1981,7 +2090,7 @@ def published_generation_vectors(
     different generation and must not borrow the previous one's vectors.
     """
     if not chunks:
-        return np.zeros((0, VECTOR_DIM), dtype=np.float32)
+        return np.zeros((0, recall_space.current_dim()), dtype=np.float32)
     try:
         index = get_embedding_index(vault_root)
         metadata, matrix = index.all_vectors()
@@ -2061,7 +2170,8 @@ def prepare_generation_vectors(
             log.debug("generation vectors need a model that did not load: %s", e)
             return None
         try:
-            vectors, reused = _embed_live_chunks(chunks), False
+            with recall_space.encoding_for(get_embedding_index(vault_root)):
+                vectors, reused = _embed_live_chunks(chunks), False
         except Exception as e:  # noqa: BLE001 - one bad encode must not fail a worker
             log.debug("generation vectors could not be encoded for %s: %s", rel_path, e)
             return None
@@ -2273,7 +2383,8 @@ def index_incremental(
         flat: list[str] = []
         for _rp, chs, _m in group:
             flat.extend(chs)
-        vectors = embed_texts(flat, is_query=False)
+        with recall_space.encoding_for(index, load=True):
+            vectors = embed_texts(flat, is_query=False)
         offset = 0
         for rp, chs, m in group:
             n = len(chs)
@@ -2311,11 +2422,12 @@ def index_incremental(
             for unit in state.document.units
             if unit.unit_ref is not None
         ]
-        vectors = (
-            embed_texts(texts, is_query=False)
-            if texts
-            else np.zeros((0, VECTOR_DIM), dtype=np.float32)
-        )
+        with recall_space.encoding_for(index, load=True):
+            vectors = (
+                embed_texts(texts, is_query=False)
+                if texts
+                else np.zeros((0, index.dim), dtype=np.float32)
+            )
         offset = 0
         for state, mtime in group:
             count = sum(

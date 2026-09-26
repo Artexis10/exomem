@@ -34,8 +34,11 @@ SCORE_TOLERANCE = 1e-6
 
 
 @pytest.fixture(autouse=True)
-def _clean_memo() -> None:
+def _clean_memo(monkeypatch: pytest.MonkeyPatch) -> None:
     """Each test starts and ends with an empty shared-index memo."""
+    # These tests write the English model's 768-d vectors; a personal server now
+    # encodes recall with the multilingual one (tests/test_recall_switch.py).
+    monkeypatch.setattr(embeddings, "MODEL_NAME", "BAAI/bge-base-en-v1.5")
     embeddings.clear_embedding_indexes()
     yield
     embeddings.clear_embedding_indexes()

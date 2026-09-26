@@ -32,6 +32,7 @@ from . import (
     find_types,
     freshness,
     recall_policy,
+    recall_space,
     request_budget,
     runtime_resources,
     structured_filters,
@@ -227,6 +228,12 @@ _RECALL_PATH_CACHE: OrderedDict[
 _RECALL_PATH_CACHE_LOCK = threading.Lock()
 _RECALL_PATH_CACHE_SIZE = 32
 MAX_RERANK_CANDIDATES = 300
+#: Why a reranker that cannot judge across languages is skipped, by the way
+#: fusion saw the request cross scripts (`find_candidates.CROSSING_*`).
+_RERANK_CROSSING_REASONS = {
+    find_candidates.CROSSING_VOTES_WITHHELD: "cross_language_not_covered",
+    find_candidates.CROSSING_UNMATCHED: "cross_script_lead_not_covered",
+}
 _FOREGROUND_LEXICAL_REPAIR_PAGE_CAP = 64
 _FIND_CACHE_DELTA_PATH_CAP = 64
 
@@ -1528,7 +1535,13 @@ def find(
         if not query_vector_ready:
             from . import embeddings
 
-            query_vector = embeddings.embed_texts([query], is_query=True)[0]
+            # Encoded for the serving sidecar, or refused before encoding. The
+            # sidecar's identity travels with the vector, so a lane that finds
+            # another sidecar serving by then refuses it (`require_same_space`).
+            index = embeddings.get_embedding_index(vault_root)
+            encoded_for = getattr(index, "identity", None)
+            with recall_space.encoding_for(index):
+                query_vector = (encoded_for, embeddings.embed_texts([query], is_query=True)[0])
             query_vector_ready = True
         return query_vector
 
@@ -2295,7 +2308,7 @@ def _vector_unit_candidates(
     query_vector_provider: Callable[[], Any] | None = None,
 ) -> tuple[list[Any], dict[str, Any], str]:
     """Return bounded vector candidates without opening every Markdown parent."""
-    model_name = "BAAI/bge-base-en-v1.5"
+    model_name = recall_space.recall_model()
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return (
             [],
@@ -2314,11 +2327,13 @@ def _vector_unit_candidates(
 
         index = embeddings.get_embedding_index(vault_root)
         with _span(timings, "vector.unit.embed"):
-            query_vector = (
-                query_vector_provider()
-                if query_vector_provider is not None
-                else embeddings.embed_texts([query], is_query=True)[0]
-            )
+            if query_vector_provider is not None:
+                encoded_for, query_vector = query_vector_provider()
+            else:
+                encoded_for = getattr(index, "identity", None)
+                with recall_space.encoding_for(index):
+                    query_vector = embeddings.embed_texts([query], is_query=True)[0]
+        recall_space.require_same_space(index, encoded_for, query_vector)
         hits = index.search_semantic_units(
             query_vector,
             k=candidate_limit,
@@ -2329,7 +2344,7 @@ def _vector_unit_candidates(
         profile = {
             "status": "participated" if hits else "available_nonmatching",
             "backend": type(index).__name__,
-            "model": embeddings.MODEL_NAME,
+            "model": recall_space.serving_model(index),
             "metric": {
                 "name": "cosine_similarity",
                 "direction": "higher",
@@ -2347,6 +2362,28 @@ def _vector_unit_candidates(
         )
     except runtime_resources.ModelBusyError:
         raise
+    except recall_space.ServingEncoderCold as error:
+        log.info("semantic-unit vector search deferred (%s); using lexical ranking", error)
+        if degraded_out is not None:
+            degraded_out.append("embeddings")
+        return (
+            [],
+            {"status": "warming", "reason": recall_space.ServingEncoderCold.reason, "model": model_name},
+            "kb",
+        )
+    except recall_space.VectorSpaceMismatch as error:
+        log.info("semantic-unit vector search unavailable (%s); using lexical ranking", error)
+        if degraded_out is not None:
+            degraded_out.append("embeddings")
+        return (
+            [],
+            {
+                "status": "unavailable",
+                "reason": recall_space.VectorSpaceMismatch.reason,
+                "model": model_name,
+            },
+            "kb",
+        )
     except Exception as error:  # noqa: BLE001 - vector lane soft-falls back
         log.warning("semantic-unit vector search failed: %s; using lexical ranking", error)
         _record_degradation("vector")
@@ -2630,7 +2667,7 @@ def _find_semantic_units(
             vector_profile = {
                 "status": "failed",
                 "reason": "incomplete_exact_candidates",
-                "model": vector_profile.get("model", "BAAI/bge-base-en-v1.5"),
+                "model": vector_profile.get("model", recall_space.recall_model()),
             }
             _record_degradation("vector")
             if failed_out is not None and "vector" not in failed_out:
@@ -2653,7 +2690,7 @@ def _find_semantic_units(
             vector_profile = {
                 "status": "failed",
                 "reason": "stale_candidates",
-                "model": vector_profile.get("model", "BAAI/bge-base-en-v1.5"),
+                "model": vector_profile.get("model", recall_space.recall_model()),
             }
             _record_degradation("vector")
             if failed_out is not None and "vector" not in failed_out:
@@ -4545,6 +4582,23 @@ def _find_semantic(
     if do_rerank and not embeddings.ranking_enabled():
         do_rerank = False  # EXOMEM_DISABLE_RANKING — hard off, even for explicit rerank=True
         rerank_outcome = {"decision": "skipped", "reason": "hard_disabled"}
+
+    if do_rerank:
+        # A reranker judges only what it declares it can: the script most of the
+        # query is written in, and a query against a passage in another language
+        # only if it is cross-lingual. Outside that it reorders by the wrong
+        # signal (find_policy._RERANKER_COVERAGE), so the fused order stands,
+        # explicit rerank=True included.
+        coverage = find_policy.reranker_coverage(embeddings.RERANKER_NAME)
+        if not find_policy.reranker_reads_query(coverage, query):
+            do_rerank = False
+            rerank_outcome = {"decision": "skipped", "reason": "query_script_not_covered"}
+        elif bundle.lexical_crossing is not None and not coverage.cross_lingual:
+            do_rerank = False
+            rerank_outcome = {
+                "decision": "skipped",
+                "reason": _RERANK_CROSSING_REASONS[bundle.lexical_crossing],
+            }
 
     if do_rerank and readiness.should_defer("reranker"):
         # Background warm-up owns the reranker load right now — calling

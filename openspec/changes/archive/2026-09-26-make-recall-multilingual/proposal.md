@@ -8,6 +8,8 @@ Recall is English-only below the encoder. `bm25.tokenize` keeps only `[a-z0-9]+`
 
 The lexical half needs no model. It can land on every install, lean or hybrid, personal or hosted.
 
+Below the tokenizer, the recall encoder `BAAI/bge-base-en-v1.5` is English: a query in German, Russian, Japanese or Estonian does not find the English page that answers it (cross-language recall@10 is 0 on the multilingual fixture), and activation already runs a second, multilingual model on personal hosts.
+
 ## What Changes
 
 - **Tokenizer v2**, the single function behind `bm25.tokenize`:
@@ -21,13 +23,18 @@ The lexical half needs no model. It can land on every install, lean or hybrid, p
 - **Every tokenizer caller** reads the query side or the index side explicitly: find's coverage gates, excerpt anchoring, the unit lane, rerank's word count, governed projected retrieval, referent attributes and activation's lexical evidence.
 - **Acceptance fixtures**: a multilingual golden set beside the English golden fixture, and an invented Japanese-only vault built through the product writers.
 
-The dense half (one multilingual encoder for recall and activation, the fingerprinted sidecar and its blue/green migration) follows in this change after its model decision. It adds its own requirements then.
+- **One multilingual encoder on a personal server.** Recall encodes with `BAAI/bge-m3` on ONNX Runtime int8, the instance activation already uses, so one model is resident. A hosted or cloud cell keeps `BAAI/bge-base-en-v1.5` until a node encoder serves it; `EXOMEM_RECALL_MODEL` names the model explicitly.
+- **A sidecar records its vector space.** Model, fingerprint and width live in the sidecar; the width is read from there everywhere, and vectors of two spaces never meet.
+- **Blue/green re-embed.** An installed vault keeps serving dense recall from its English sidecar, with the English encoder, while a bge-m3 sidecar builds beside it in the background; an atomic pointer swap cuts over. `EXOMEM_RECALL_REEMBED=off` holds the old space.
+- **Chunking** splits unspaced text into pieces of at most 500 characters, so no chunk exceeds the encoder's 512 tokens; English chunks are unchanged.
+- **Fusion and rerank.** A lexical lane withholds its vote from an other-script partial match when the dense lead is lexically invisible, and a rerank is skipped where the reranker cannot read the query's script or crossing.
+- **Dense acceptance** in the embeddings job: the English golden gate against the English model's baseline, the multilingual hybrid arms and the Japanese-only vault.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `multilingual-recall`: the lexical token contract, script-keyed stemming, the index-side accent fold, unit counting, the catalogue declaration and rebuild, and the lexical acceptance bars.
+- `multilingual-recall`: the lexical token contract, script-keyed stemming, the index-side accent fold, unit counting, the catalogue declaration and rebuild, and the lexical acceptance bars; the recall encoder per deployment, the sidecar's vector-space record, the blue/green re-embed, unspaced chunking, the dense-lead guard, the rerank coverage gate and the dense acceptance bars.
 
 ### Modified Capabilities
 
@@ -38,4 +45,7 @@ None in the lexical half. `close-memory-loop`'s memory-loop delta, still active,
 - **Code:** `bm25.py`, new `text_scripts.py`, `lexstore.py`, `find.py`, `find_policy.py`, `find_results.py`, `referent_resolution.py`, `governance/projected_retrieval.py`, and activation's carry in `working_set_runtime.py`.
 - **State:** one background rebuild of each vault's lexical catalogue on upgrade, which also removes rebuild temps a killed build left behind. Until it publishes, `find` answers `RETRIEVAL_INDEX_WARMING` on a vault of more than 64 pages (a smaller unmanaged vault rebuilds inline), and activation's lexical stage reports `stale`, as for any rebuild.
 - **English:** an all-ASCII vault gets identical tokens, index and scores, and punctuation, symbols, spaces and format characters separate exactly as before. English tokens change only where the text holds non-ASCII letters or marks, or numbers such as ² and ½ that NFKC turns into digits. The golden fixture ranks identically on both lexical backends.
-- **No model, no new dependency.** Snowball's Russian, Greek and Armenian stemmers ship in the existing `snowballstemmer` package. Nothing is default-on that was off.
+- **No model, no new dependency** in the lexical half. Snowball's Russian, Greek and Armenian stemmers ship in the existing `snowballstemmer` package.
+- **Dense code:** `recall_space.py`, `recall_migration.py`, `embedding_index.py`, `vecstore.py`, `index_paths.py`, `claims.py`, `warmup.py`, `embeddings.py` (chunking and the recall encoder), `find.py`, `find_candidates.py`, `find_policy.py`, `doctor.py` and `resource_status.py`.
+- **Dense state:** on a personal server's first start after upgrade, a background build of `.embeddings.<16 hex>.sqlite` (a third larger: 1,024 dimensions), then an atomic switch of `.embeddings.active`; the old sidecar is removed by a later start. The owner's vault is estimated at 10-20 h of background CPU. Both encoders are resident until the cutover.
+- **English dense:** golden NDCG@10 0.9312 and recall@10 0.9483 against the English model's 0.9326 and 0.9655; the one query behind the recall drop keeps its best page first.
