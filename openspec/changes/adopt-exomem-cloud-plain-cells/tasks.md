@@ -159,8 +159,8 @@
 
 ## 5. Local rehearsal (P3)
 
-- [ ] 5.1 Write one command that stands up disposable K3s, Postgres with the real Substrate migrations, Substrate, the gateway, cellctl and the real cell image
-- [ ] 5.2 The command runs:
+- [x] 5.1 Write one command that stands up disposable K3s, Postgres with the real Substrate migrations, Substrate, the gateway, cellctl and the real cell image
+- [x] 5.2 The command runs:
   1. invite;
   2. provision, in under 3 minutes;
   3. OAuth MCP `tools/list`;
@@ -174,7 +174,22 @@
   11. backup and scratch restore, with a governed write;
   12. deletion with absence proofs.
   It writes a machine-readable report.
-- [ ] 5.3 Measure warm p95 initialize and list, capture and cited recall, provisioning time and per-cell upgrade time, and record them in the report
+- [x] 5.3 Measure warm p95 initialize and list, capture and cited recall, provisioning time and per-cell upgrade time, and record them in the report. The targets that gate the node:
+  - warm p95 `initialize` and `tools/list` at most 500 ms each;
+  - p95 capture and cited recall at most 1 s each;
+  - provisioning under 3 minutes (5.2);
+  - an upgrade under 60 s per cell, including its pre-upgrade backup.
+
+  The command is `infra/cloud-rehearsal` (`uv run --frozen exomem-cloud-rehearsal run`). The `Cloud rehearsal` workflow runs it on a GitHub runner with the cell image built from `Dockerfile --target cloud`. These boxes record that the command, its steps and its measurements exist. They do not record that the node gate passed: that is the report's `outcome.gates_node`, which a manual dispatch of the workflow must show true before P4.
+
+  First run on a real image (#1378, head `65bad18`): 9 of 12 steps passed. Steps 9 and 10 failed on the runtime's readiness after a read_only → running recovery; #1386 fixed it.
+
+  Run on `main` with #1368, #1384 and #1386 and no product overlays (#1378, head `78957a8`): 11 of 12 steps passed and `gates_node` was false. What keeps the node gate closed:
+  - step 3, Substrate's PKCE verifier grammar, a cross-lane finding and the only entry in `infra/cloud-rehearsal/known-findings.json`;
+  - capture p95 of 1.71 s against its 1 s target.
+
+  All other targets were met: provisioning 24.7 s, upgrade 46.0 s, warm `initialize` p95 0.017 s, `tools/list` p95 0.050 s, cited recall p95 0.44 s.
+- [ ] 5.4 A manual dispatch of the `Cloud rehearsal` workflow on `main`, with the cell image built from `Dockerfile --target cloud`, writes a valid report with `outcome.gates_node` true. P4 does not start until it does.
 
 ## 6. Node deployment and owner acceptance (P4)
 
