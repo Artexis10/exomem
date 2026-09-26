@@ -1734,6 +1734,15 @@ def compile_packet(
     if heat is None:
         with _span(timings, "working_set.heat"):
             heat = working_set_heat.profile(root)
+    # Withheld equals absent for heat too (review F2), in every field that
+    # ranks it: the hot-page carry below and `recent_context` alike. A reader
+    # other than the owner ranks only the pages its view lets it see. `heat`
+    # may already be a caller-supplied released view
+    # (`working_set_runtime.serve`); narrowing it again is a no-op for that
+    # caller and the only guard for a direct one.
+    visible = _reader_view(root, purpose)
+    if visible is not None:
+        heat = working_set_heat.released_view(heat, visible)
     # "Missing or stale profiles SHALL report their state": `current` (live
     # watcher, complete delta), `partial` (no watcher: governed activity only),
     # `seeded`, `behind` (a reconcile is pending) or `empty`. The session start
@@ -1781,22 +1790,11 @@ def compile_packet(
             # A reader other than the owner resolves the turn over the anchors
             # it may see: the ones the turn's words can reach are decided, and
             # name-term counts and derived short names follow its view.
-            visible = _reader_view(root, purpose)
             decided_ids: frozenset[str] = frozenset()
             if visible is not None:
                 rows, term_counts, decided_ids = working_set_resolve.audience_view(
                     analysis, rows, term_counts, visible
                 )
-            # Withheld equals absent for heat too (review F2): a restricted
-            # reader's hot-page carry and recency evidence rank only the pages
-            # its own view already lets it see, exactly as anchor resolution
-            # does above. `heat` may already be a caller-supplied released
-            # view (`working_set_runtime.serve`); narrowing it again here is
-            # a no-op for that caller and the only guard for a direct one.
-            heat_view = (
-                heat if visible is None else working_set_heat.released_view(heat, visible)
-            )
-
             def _candidates(rows: tuple[working_set_resolve.AnchorFacts, ...]) -> tuple:
                 nonlocal hot
                 # Computed once per request, like `used_paths`, and for the
@@ -1812,7 +1810,7 @@ def compile_packet(
                         continuity_refs=continuity_refs,
                         continuity_minted_ns=continuity_minted_ns,
                         continuity_passed=passed,
-                        profile=heat_view,
+                        profile=heat,
                         attribution=attribution,
                         marks=marks,
                     )
