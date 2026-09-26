@@ -2049,21 +2049,30 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
             "so it can't be probed.",
             f"Install it with `uv sync --extra {extra}` to enable hybrid search.",
         )
-    from . import embeddings, model_cache
+    from . import embeddings, model_cache, recall_space
 
-    if not _model_cached(_hf_hub_dir(), model_cache.snapshot_dirname(embeddings.MODEL_NAME)):
+    index = embeddings.get_embedding_index(vault_root)
+    # The probe encodes with the encoder that serves this sidecar: the recall
+    # encoder, or the one that wrote it while a re-embed has not cut over.
+    model = recall_space.serving_model(index)
+    if not _model_cached(_hf_hub_dir(), model_cache.snapshot_dirname(model)):
         # doctor must never trigger a download — skip the live probe rather than
         # let embed_texts() fetch the model over the network.
         return _check(
             "embeddings.sidecar",
             "warn",
-            f"Embedding sidecar exists but {embeddings.MODEL_NAME} is not in the local HF "
+            f"Embedding sidecar exists but {model} is not in the local HF "
             "cache, so the live probe was skipped (doctor never downloads).",
             "Run `exomem warm` to fetch the model, then re-run doctor for the live probe.",
         )
     try:
-        index = embeddings.get_embedding_index(vault_root)
-        query_vec = embeddings.embed_texts(["knowledge"], is_query=True)[0]
+        with recall_space.encoding_for(index, load=True):
+            query_vec = embeddings.embed_texts(["knowledge"], is_query=True)[0]
+            # The resident encoder's own fingerprint, which for a served model
+            # names the exact bytes it runs; the probe just loaded it. Read
+            # inside the block so a sidecar still served by its previous
+            # encoder reports that encoder's space.
+            fingerprint = embeddings._vector_space()
         hits = index.search(query_vec, k=1)
     except Exception as e:  # noqa: BLE001 — diagnostic boundary
         return _check(
@@ -2085,9 +2094,6 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
     # identifies the vector space. A benchmark contender is disqualified when it
     # cannot show it is serving semantically (docs/benchmark-fairness-contract.md),
     # and until now an ONNX install had no way to show that from doctor.
-    from . import embedding_backend
-
-    fingerprint = embedding_backend.fingerprint(embeddings.MODEL_NAME)
     try:
         metadata, _matrix = index.all_vectors()
         vector_count: int | None = len(metadata)
@@ -2103,7 +2109,8 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
             "backend": backend,
             "vector_count": vector_count,
             "fingerprint": fingerprint,
-            "model": embeddings.MODEL_NAME,
+            "model": model,
+            "dim": getattr(getattr(index, "identity", None), "dim", None),
         },
     )
 
@@ -2117,6 +2124,47 @@ def _hf_hub_dir() -> Path:
     from . import model_cache
 
     return model_cache.hub_dir()
+
+
+def _check_recall_reembed(vault_root: Path | None) -> DoctorCheck | None:
+    """Which vector space serves recall, and how far a re-embed into the recall
+    encoder's space has come. Read from the sidecars on disk; loads no model."""
+    if vault_root is None:
+        return None
+    from . import recall_migration
+
+    try:
+        state = recall_migration.disk_status(vault_root)
+    except Exception as e:  # noqa: BLE001 — diagnostic boundary
+        return _check("embeddings.reembed", "warn", f"Recall sidecars could not be read: {e}")
+    serving = state.get("serving")
+    if serving is None:
+        return None
+    building = state.get("building")
+    if not building:
+        return _check(
+            "embeddings.reembed",
+            "pass",
+            f"Recall serves {serving['model']} vectors ({serving['dim']}-d) from {serving['sidecar']}.",
+            details=state,
+        )
+    if state.get("reembed") == "off":
+        return _check(
+            "embeddings.reembed",
+            "warn",
+            f"Recall serves {serving['model']} vectors while a sidecar for {building['model']} "
+            f"is partly built ({building['paths_done']}/{state['paths_total']} pages); "
+            "EXOMEM_RECALL_REEMBED=off keeps it from finishing.",
+            "Unset EXOMEM_RECALL_REEMBED to let the service finish and cut over.",
+            details=state,
+        )
+    return _check(
+        "embeddings.reembed",
+        "pass",
+        f"Recall serves {serving['model']} vectors while the service re-embeds into "
+        f"{building['model']}: {building['paths_done']}/{state['paths_total']} pages built.",
+        details=state,
+    )
 
 
 def _model_cached(hub: Path, dirname: str) -> bool:
@@ -3437,6 +3485,9 @@ def doctor(
         sidecar = _check_embedding_sidecar(vault_root)
         if sidecar is not None:
             checks.append(sidecar)
+        reembed = _check_recall_reembed(vault_root)
+        if reembed is not None:
+            checks.append(reembed)
 
     if profile in ("standard", "media"):
         checks.extend([

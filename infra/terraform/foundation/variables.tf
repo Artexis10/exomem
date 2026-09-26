@@ -211,3 +211,16 @@ variable "pgbouncer_public_port" {
     error_message = "pgbouncer_public_port must be an unprivileged TCP port."
   }
 }
+
+variable "k3s_agent_nodes" {
+  # One entry is one K3s agent server (add-cloud-node-provisioning N1). Adding
+  # or removing an entry is the whole Terraform change; the module validates
+  # addresses against the subnet and the two reserved node addresses. Run
+  # infra/ansible/remove-agent.yml BEFORE removing an entry.
+  description = "K3s agent nodes keyed by a short DNS-label suffix: { private_ip, server_type }."
+  type = map(object({
+    private_ip  = string
+    server_type = string
+  }))
+  default = {}
+}

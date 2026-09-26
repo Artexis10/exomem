@@ -1358,6 +1358,146 @@ def test_an_agent_picked_page_holds_the_same_ceilings(
     assert calls.unattributable == 0, calls.report()
 
 
+def test_a_referential_turn_with_a_full_heat_ring_holds_the_same_ceilings(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
+) -> None:
+    """The heat projection at its bounds: a ring of `RING_MAX` events and a
+    pending external fold of `MAX_FOLD_PATHS` changed pages. The fold is
+    string work over the registry's delta and one sidecar write, and the
+    ranking reads the ring, so "continue" pays the same ceilings as every
+    other warm request and enumerates nothing."""
+    from exomem import working_set_heat
+
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _write_collection(vault)
+    now = time.time()
+    pages = sorted((vault / "Knowledge Base").rglob("*.md"))
+    for index, page in enumerate(pages):
+        os.utime(page, (now - 10_000 - index * 2, now - 10_000 - index * 2))
+    _warm_activation(vault, warm_managed_cell)
+    # The first request seeds the projection and sets the fold's checkpoint.
+    commands.op_activate_context(vault, turn=TURN)
+    _drain_background_walks()
+
+    now_ns = time.time_ns()
+    rels = [page.relative_to(vault).as_posix() for page in pages]
+    ring = [
+        working_set_heat.HeatEvent(
+            now_ns - 3_600 * 10**9 + index * 10**6,
+            rels[index % len(rels)] if index % 2 else f"Knowledge Base/Notes/Ring/ring-{index}.md",
+            "read" if index % 3 else "work",
+            origin="ring",
+        )
+        for index in range(working_set_heat.RING_MAX)
+    ]
+    sled = "Knowledge Base/Products/Cargo Sled.md"
+    assert working_set_heat.append(vault, ring)
+    assert working_set_heat.append(
+        vault, [working_set_heat.HeatEvent(now_ns - 60 * 10**9, sled, "work", origin="edit_memory")]
+    )
+    assert len(working_set_heat.load(vault).events) == working_set_heat.RING_MAX
+
+    # A pending external fold at its cap: pages another device synced, each
+    # its own edit (six seconds apart, so none is a burst), all older than the
+    # user's own work on the sled. Injected where the fold classifies the
+    # registry's delta, so no other consumer of the registry sees them.
+    synced = {
+        f"Knowledge Base/Notes/Synced/synced-{index}.md": (
+            now_ns - 20_000 * 10**9 + index * 6 * 10**9,
+            now_ns - 20_000 * 10**9 + index * 6 * 10**9,
+            100,
+        )
+        for index in range(working_set_heat.MAX_FOLD_PATHS)
+    }
+    real_classify = working_set_heat._classify
+    folds: list[int] = []
+
+    def classify_with_a_sync(vault_root, fold, changed, deleted, *, now_ns):
+        folds.append(len(synced))
+        return real_classify(vault_root, fold, {**changed, **synced}, deleted, now_ns=now_ns)
+
+    monkeypatch.setattr(working_set_heat, "_classify", classify_with_a_sync)
+
+    scheduled = _no_background_walks(monkeypatch)
+    calls = _FilesystemCalls(vault)
+    calls.install(monkeypatch)
+
+    packet = commands.op_activate_context(vault, turn="continue")
+
+    # Measured first: reading the sidecar back below is the test's cost.
+    assert calls.enumerations <= WARM_REQUEST_ENUMERATION_CEILING, calls.report()
+    assert calls.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, calls.report()
+    assert calls.unattributable == 0, calls.report()
+    assert scheduled == [], scheduled
+    assert folds == [working_set_heat.MAX_FOLD_PATHS], "the fold must run at its cap"
+    assert packet["abstained"] is False, (
+        "the projection must resolve, or this proves nothing",
+        packet.get("abstention"),
+    )
+    assert [item["path"] for item in packet["anchors"] if item["status"] == "resolved"] == [sled]
+    assert packet["units"] or packet["current_state"], "its lanes must actually run"
+    assert packet["recent_context"], "and the block must be on"
+    folded = [event for event in working_set_heat.load(vault).events if event.origin == "external"]
+    assert len(folded) == working_set_heat.MAX_FOLD_PATHS, "and it folded every page it was given"
+
+
+def test_the_semantic_lane_holds_the_same_ceilings(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
+) -> None:
+    """Step 4: with a resident activation encoder, a catalogue large enough to
+    calibrate the band and a turn that bands its anchor, a warm request pays
+    the same ceilings. The signature matrix is read from the index the request
+    already holds, once per write, and the turn is one call into a model that
+    is already resident: nothing is enumerated and no page is read for it."""
+    from test_activation_signature_evidence import (
+        FINGERPRINT,
+        QUERY,
+        _plant_background,
+        _PlantedEncoder,
+    )
+
+    from exomem import embeddings
+
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _write_collection(vault)
+    _plant_background(vault)
+    warm_managed_cell(vault)
+    reserved_paths._baseline_identity_catalogue(vault)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    refused: list[str] = []
+    for name in ("get_model", "embed_texts", "get_activation_model"):
+        monkeypatch.setattr(embeddings, name, lambda *_a, _name=name, **_k: refused.append(_name))
+    monkeypatch.setattr(embeddings, "embed_activation_passages", _PlantedEncoder().passages)
+    monkeypatch.setattr(embeddings, "activation_fingerprint", lambda: FINGERPRINT)
+    monkeypatch.setattr(embeddings, "embed_activation_query_if_loaded", lambda _text: QUERY)
+    # The background pass embeds the signatures, as `_schedule_build` does.
+    stamp = working_set_runtime._key_text(
+        find_module.FreshnessSnapshot(vault).projection_key("kb")
+    )
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild(freshness_stamp=stamp, load_encoder=True)
+    _drain_background_walks()
+
+    scheduled = _no_background_walks(monkeypatch)
+    calls = _FilesystemCalls(vault)
+    calls.install(monkeypatch)
+
+    packet = commands.op_activate_context(vault, turn=TURN)
+
+    assert scheduled == [], scheduled
+    assert packet["generation"]["semantic_evidence"] == "ready"
+    sled = next(item for item in packet["anchors"] if item["title"] == "Cargo Sled")
+    assert "vector_band" in sled["evidence"], "the band must actually run, or this proves nothing"
+    assert refused == []
+    assert calls.enumerations <= WARM_REQUEST_ENUMERATION_CEILING, calls.report()
+    assert calls.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, calls.report()
+    assert calls.unattributable == 0, calls.report()
+    assert WARM_REQUEST_ENUMERATION_CEILING == 8
+    assert WARM_REQUEST_FILESYSTEM_CALL_CEILING == 1200
+
+
 def _write_episodes(vault: Path, count: int, *, start: int = 0) -> list[Path]:
     """`count` recaps of distinct conversations, oldest first, a second apart."""
     from exomem import episode_capture
@@ -1383,12 +1523,117 @@ def _write_episodes(vault: Path, count: int, *, start: int = 0) -> list[Path]:
     return written
 
 
+def _governance_enumerations(calls: _FilesystemCalls) -> int:
+    return sum(1 for path in calls.enumerated if "/_Governance" in path.replace(os.sep, "/"))
+
+
+def test_a_keyed_turn_on_a_governed_vault_pays_nothing_for_its_threads(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
+) -> None:
+    """Review F7: a keyed caller whose workspace holds nine other sessions'
+    threads, on a governed vault, re-loaded the policy for every thread page
+    (186 enumerations of the governance tree, 1,296 calls). The release
+    decision is taken once per request now, and a thread is cut at
+    `CONTINUITY_MAX_REFS` pages.
+
+    Governed activation already enumerates the governance tree on 0.93.0
+    (12 enumerations for a named turn, 18 for "continue", before any heat
+    existed): that pre-existing cost is not this test's subject. What is: the
+    keyed call pays no more of it than the keyless one, nothing else in the
+    vault is enumerated, and the calls stay under the ceiling."""
+    from test_governance_egress import write_rule, write_scope
+
+    from exomem import working_set_heat
+
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _write_collection(vault)
+    write_scope(vault, paths="Knowledge Base/Notes/Research/*", name="Research")
+    write_rule(vault, ceiling=0)
+    now = time.time()
+    pages = sorted((vault / "Knowledge Base").rglob("*.md"))
+    for index, page in enumerate(pages):
+        os.utime(page, (now - 10_000 - index * 2, now - 10_000 - index * 2))
+    _warm_activation(vault, warm_managed_cell)
+    commands.op_activate_context(vault, turn=TURN)
+    _drain_background_walks()
+    rels = [page.relative_to(vault).as_posix() for page in pages]
+    working_pages = [rel for rel in rels if "/_" not in rel and "index" not in rel][:45]
+    now_ns = time.time_ns()
+    assert working_set_heat.append(
+        vault,
+        [
+            working_set_heat.HeatEvent(
+                now_ns - 3_600 * 10**9 + index * 10**6,
+                rels[index % len(rels)],
+                "read" if index % 3 else "work",
+                origin="ring",
+            )
+            for index in range(working_set_heat.RING_MAX)
+        ],
+    )
+    for n in range(9):
+        other = working_set_heat.attribution_for(
+            vault, session=f"other-conversation-{n}", workspace="shared-project"
+        )
+        working_set_heat.note_session(
+            vault,
+            working_set_heat.SessionMark(
+                session=other.session,
+                workspace=other.workspace,
+                client="claude-code",
+                paths=tuple(working_pages[n * 5 : (n + 1) * 5]),
+                minted_ns=now_ns - n,
+                seen_ns=now_ns - n,
+            ),
+        )
+
+    def measure(**keys: str) -> _FilesystemCalls:
+        with monkeypatch.context() as patch:
+            scheduled = _no_background_walks(patch)
+            calls = _FilesystemCalls(vault)
+            calls.install(patch)
+            commands.op_activate_context(vault, turn="continue", **keys)
+        assert scheduled == [], scheduled
+        return calls
+
+    keyless = measure()
+    keyed = measure(session="own-conversation", workspace="shared-project", client="claude-code")
+
+    assert _governance_enumerations(keyed) <= _governance_enumerations(keyless), (
+        keyless.report(),
+        keyed.report(),
+    )
+    assert keyed.enumerations - _governance_enumerations(keyed) == 0, keyed.report()
+    assert keyed.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, keyed.report()
+    assert keyed.unattributable == 0, keyed.report()
+
+
+def _fresh_projection(vault: Path) -> None:
+    """Seed the heat projection from the registry the warm-up just built, as a
+    cell first serving this vault state does.
+
+    Re-based for the projection: the warm-up re-seeds the freshness registry,
+    which a live projection meets as a restart (its reconcile runs in the
+    background on a managed cell, and its watermark by design does not take a
+    page backdated to before it as new work). A test that builds two vault
+    states in one vault gives each its own projection rather than measuring
+    that restart."""
+    from exomem import working_set_heat
+
+    working_set_heat.reset_for_tests()
+    sidecar = working_set_heat.sidecar_path(vault)
+    for suffix in ("", "-wal", "-shm"):
+        sidecar.with_name(sidecar.name + suffix).unlink(missing_ok=True)
+    working_set_heat.profile(vault)
+
+
 def test_episode_recaps_hold_the_ceilings_at_ten_and_at_five_hundred(
     vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
 ) -> None:
-    """Episode entries come off the freshness map the block already copies and
-    the at-most-eight cached reads it already makes: a vault with fifty times
-    the recaps pays the same enumerations and a flat number of calls."""
+    """Episode entries come off the heat projection the block already ranks
+    and the at-most-eight cached reads it already makes: a vault with fifty
+    times the recaps pays the same enumerations and a flat number of calls."""
     _seed_structure(vault)
     _seed_planning(vault)
     _write_collection(vault)
@@ -1402,6 +1647,7 @@ def test_episode_recaps_hold_the_ceilings_at_ten_and_at_five_hundred(
         os.utime(newest, (now - 60, now - 60))
         _warm_activation(vault, warm_managed_cell)
         _drain_background_walks()
+        _fresh_projection(vault)
         with monkeypatch.context() as patch:
             scheduled = _no_background_walks(patch)
             calls = _FilesystemCalls(vault)
@@ -1427,3 +1673,61 @@ def test_episode_recaps_hold_the_ceilings_at_ten_and_at_five_hundred(
     # two-sided band measured request noise (447 against 373 calls, 2026-09-23)
     # rather than growth.
     assert many.total <= few.total + 20, (few.report(), many.report())
+
+
+def test_a_session_start_with_upkeep_holds_the_same_ceilings(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
+) -> None:
+    """D1-T11: a session start that attaches an upkeep item reads the dreamer's
+    sidecar read-only and a few live signatures from memory. It enumerates
+    nothing and pays the same ceilings as every other warm request."""
+    import dreamer_fixture
+
+    from exomem import dreamer, dreamer_store, upkeep
+
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _write_collection(vault)
+    _warm_activation(vault, warm_managed_cell)
+    _drain_background_walks()
+    pages = sorted(
+        path.relative_to(vault).as_posix()
+        for path in (vault / "Knowledge Base").rglob("*.md")
+        if "_Schema" not in path.parts and "Records" not in path.parts
+    )
+    dreamer_fixture.plant_deliverable(vault, pages[0], pages[1:3], now=time.time())
+    monkeypatch.setattr(dreamer, "delivering", lambda: True)
+
+    def measure(carrier: bool) -> tuple[dict, _FilesystemCalls]:
+        upkeep.reset_delivery_state()
+        dreamer_store.clear_reader_memo()
+        with monkeypatch.context() as patch:
+            if not carrier:
+                patch.setattr(dreamer, "delivering", lambda: False)
+            scheduled = _no_background_walks(patch)
+            calls = _FilesystemCalls(vault)
+            calls.install(patch)
+            packet = commands.op_activate_context(vault, turn=TURN)
+        assert scheduled == [], scheduled
+        return packet, calls
+
+    first, cold = measure(carrier=False)
+    carried, with_upkeep = measure(carrier=True)
+    plain, without = measure(carrier=False)
+    assert "upkeep" not in first and "upkeep" not in plain
+    assert carried["upkeep"]["items"], carried.get("upkeep")
+    assert carried["abstained"] is False, carried.get("abstention")
+    for calls in (cold, with_upkeep, without):
+        assert calls.enumerations <= WARM_REQUEST_ENUMERATION_CEILING, calls.report()
+        assert calls.total <= WARM_REQUEST_FILESYSTEM_CALL_CEILING, calls.report()
+        assert calls.unattributable == 0, calls.report()
+    # Against the same request without it: no enumeration, and a handful of
+    # calls (the sidecar's existence check, the envelope's config read and the
+    # release filter's policy read).
+    assert with_upkeep.enumerations == without.enumerations, (without.report(), with_upkeep.report())
+    # Measured +28 (2026-09-24): the release filter's policy and tombstone
+    # reads, the sidecar's existence check, the config read and one scope-key
+    # resolution for the batched signature lookup.
+    assert with_upkeep.total <= without.total + 40, (without.report(), with_upkeep.report())
+    assert WARM_REQUEST_ENUMERATION_CEILING == 8
+    assert WARM_REQUEST_FILESYSTEM_CALL_CEILING == 1200

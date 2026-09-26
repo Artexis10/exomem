@@ -21,7 +21,7 @@
     }
   },
   "activate_context": {
-    "description": "Compile durable context for a raw conversational turn, without a query.\n\nCall this ONCE at the start of a substantive turn, before deciding what to\nsearch for. Pass the user's words verbatim — this is not a search query and\nmust not be rewritten into one. It returns a bounded working-memory packet:\nwhich durable anchors the turn is about (entities, resources, hubs, Records\ncollections, active plans, projects), the context roles it filled, short\nprovenance-bearing units, pointers to what did not fit the budget, and the\ncurrent state of any resource whose collection records one.\n\nEvery packet leads with `recent_context`: up to eight pages this vault has\nrecently been worked on — edited, read, captured as a session, recorded as a\nconversation recap, or left open in Planning — each with its title, why it\nis recent, the date of that contact and, where the page carries one, its own\nauthored `status` or `summary` line. A recap entry (`why: \"episode\"`) is the\nnewest revision of one conversation's `episode_memory` record and carries\nthat conversation's `episode` key; follow it with `read_memory`. That line is the page's, not a current-state reading: these\npages are chosen by recency rather than by the turn, so the block never\nqueries a Records collection the turn did not name. `current_state[]`\nremains the carrier for the resolved anchors' governed state.\nIt is served whether or not the turn resolved anything, so a fresh session\nopening on \"continue\" receives the thread it is picking up. `as_of` dates\nthe CONTACT, not the event the page describes.\n\nRead-only and abstaining by construction. It writes nothing, changes no\n`ask_memory`/`find` result, runs no model beyond the retrieval scorers recall\nalready runs, and returns `abstained: true` with a reason rather than guessing\nwhen the turn resolves nothing (`unresolved`), names two competing senses\n(`ambiguous`), is served while the derived index is still warming\n(`index_warming`), or is switched off (`disabled`). An ambiguous turn lists\nboth anchors under `ambiguity` and runs no role lane — you pick the sense and\ncall again with `anchor` set to the ref you mean.\n\nA turn that named no anchor but whose own distinctive words clearly reach one\ncompiled page is served from that page instead of abstaining, and says so:\nits single `anchors[]` entry has `kind: \"page\"` and `status:\n\"retrieval_carried\"`, and `generation.carried_by` is `\"retrieval\"`. Read that\nas \"nothing was named; recall alone put this here\" — no anchor was resolved,\nyet the packet's continuity token names that page, so a following\n\"continue\" resumes it; a turn with nothing distinctive in it abstains\n`unresolved` rather than guessing between pages. Naming that\nSAME page yourself with `anchor` instead resolves it outright, at `status:\n\"resolved\"` and `generation.carried_by: \"agent_choice\"` — your choice, not\nrecall's guess.\n\nWhen a turn names SEVERAL pages this way, nothing is carried and the packet\nabstains `unresolved`, listing them under `anchors[]` at `status:\n\"retrieval_named\"`. That is not `ambiguity`, which reports two anchors that\nboth resolved: nothing resolved here. Call again with `anchor` set to the\nref you mean — an ordinary compiled page takes it exactly as a page reached\nby `retrieval_carried` above does — and that page's own units are served.\n\nOn the MCP door a packet may also carry `episode_due`: after several\nactivations with no `episode_memory` record from this caller, it asks you to\nrecord one at the conversation's next decision or stopping point. It is\nadvice, at most once per half hour, and absent when proactive capture is off.\n\nUse `ask_memory` instead when you already know what you are looking for; use\nthis when you do not, and follow it with `read_memory` on whatever ref the\npacket points at.",
+    "description": "Compile durable context for a raw conversational turn, without a query.\n\nCall this ONCE at the start of a substantive turn, before deciding what to\nsearch for. Pass the user's words verbatim — this is not a search query and\nmust not be rewritten into one. It returns a bounded working-memory packet:\nwhich durable anchors the turn is about (entities, resources, hubs, Records\ncollections, active plans, projects), the context roles it filled, short\nprovenance-bearing units, pointers to what did not fit the budget, and the\ncurrent state of any resource whose collection records one.\n\nEvery packet leads with `recent_context`: up to eight pages this vault has\nrecently been worked on — edited, read, captured as a session, recorded as a\nconversation recap, or left open in Planning — each with its title, why it\nis recent, the date of that contact and, where the page carries one, its own\nauthored `status` or `summary` line. A recap entry (`why: \"episode\"`) is the\nnewest revision of one conversation's `episode_memory` record and carries\nthat conversation's `episode` key; follow it with `read_memory`. That line is the page's, not a current-state reading: these\npages are chosen by recency rather than by the turn, so the block never\nqueries a Records collection the turn did not name. `current_state[]`\nremains the carrier for the resolved anchors' governed state.\nIt is served whether or not the turn resolved anything, so a fresh session\nopening on \"continue\" receives the thread it is picking up. `as_of` dates\nthe CONTACT, not the event the page describes. With `session` or\n`workspace` passed, this conversation's own pages come first.\n\nA turn that names nothing (\"continue\", \"where were we\") is answered from\nrecent work: the thread your `continuity` token names, else what was last\nworked on, picked with `anchor`, or named by a recorded episode, in this\nconversation first, then its workspace, then the vault. Reads rank below\nany of those, and a maintenance batch counts as nobody's work. An anchor\nreached this way resolves with `recency` in its evidence. A single\nordinary page reached this way is served as `kind: \"page\"`, `status:\n\"resolved\"`, evidence `[\"recency\"]` and `generation.carried_by:\n\"recency\"`; a page tied with anything else abstains `ambiguous`, listing\nboth, for you to pick with `anchor`.\n\nRead-only and abstaining by construction. It writes nothing, changes no\n`ask_memory`/`find` result, runs no model beyond the retrieval scorers recall\nalready runs, and returns `abstained: true` with a reason rather than guessing\nwhen the turn resolves nothing (`unresolved`), names two competing senses\n(`ambiguous`), is served while the derived index is still warming\n(`index_warming`), or is switched off (`disabled`). An ambiguous turn lists\nboth anchors under `ambiguity` and runs no role lane — you pick the sense and\ncall again with `anchor` set to the ref you mean.\n\nA turn that named no anchor but whose own distinctive words clearly reach one\ncompiled page is served from that page instead of abstaining, and says so:\nits single `anchors[]` entry has `kind: \"page\"` and `status:\n\"retrieval_carried\"`, and `generation.carried_by` is `\"retrieval\"`. Read that\nas \"nothing was named; recall alone put this here\" — no anchor was resolved,\nyet the packet's continuity token names that page, so a following\n\"continue\" resumes it; a turn with nothing distinctive in it abstains\n`unresolved` rather than guessing between pages. Naming that\nSAME page yourself with `anchor` instead resolves it outright, at `status:\n\"resolved\"` and `generation.carried_by: \"agent_choice\"` — your choice, not\nrecall's guess.\n\nWhen a turn names SEVERAL pages this way, nothing is carried and the packet\nabstains `unresolved`, listing them under `anchors[]` at `status:\n\"retrieval_named\"`. That is not `ambiguity`, which reports two anchors that\nboth resolved: nothing resolved here. Call again with `anchor` set to the\nref you mean — an ordinary compiled page takes it exactly as a page reached\nby `retrieval_carried` above does — and that page's own units are served.\n\nOn the MCP door a packet may also carry `episode_due`: after several\nactivations with no `episode_memory` record from this caller, it asks you to\nrecord one at the conversation's next decision or stopping point. It is\nadvice, at most once per half hour, and absent when proactive capture is off.\n\nAt the start of your session a packet may also carry `upkeep`: at most one\nitem the background upkeep pass proposed, such as two notes that could be\nconnected or an entity page that newer facts have outgrown. It carries its\nown `route`, a `context_route` to read first, and a `dispose` route\n(`triage_memory` dismiss or snooze). Consideration does not authorize\nmutation: act through the route under its own rules, or dispose of it.\n\nUse `ask_memory` instead when you already know what you are looking for; use\nthis when you do not, and follow it with `read_memory` on whatever ref the\npacket points at.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -86,7 +86,7 @@
             }
           ],
           "default": null,
-          "description": "Optional lowercase label for the calling client, e.g. `claude-code`, `codex` or `chatgpt`. Recorded in a host-local activation log only; an invalid label is ignored, never refused."
+          "description": "Optional lowercase label for the calling client, e.g. `claude-code`, `codex` or `chatgpt`. Recorded host-locally only; an invalid label is ignored, never refused."
         },
         "session": {
           "anyOf": [
@@ -98,7 +98,19 @@
             }
           ],
           "default": null,
-          "description": "Optional opaque conversation identifier, at most 256 characters, such as the `episode` key an `episode_memory` record returned. Only a vault-keyed hash of it is recorded. Neither argument ever changes the packet."
+          "description": "Optional opaque conversation identifier, at most 256 characters, such as the `episode` key an `episode_memory` record returned. Pass the same one on every turn of a conversation: a turn that names nothing (\"continue\") is then answered from THIS conversation's own last thread and picks first, before anything other conversations touched, and `recent_context` lists its pages first. Only a salted hash of it is stored, on this machine. It also names whose session start an `upkeep` item may arrive at."
+        },
+        "workspace": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional opaque key for the project or folder the conversation runs in, at most 256 characters, such as a hash of the working directory. A fresh conversation in the same workspace continues that workspace's thread before the rest of the vault's. Only a salted hash of it is stored. Omitting both keys ranks by the whole vault's recent work."
         },
         "authorization_session_credential": {
           "anyOf": [
@@ -2593,7 +2605,7 @@
             }
           ],
           "default": null,
-          "description": "Up to 3 `exomem://` refs of pages the conversation concerned. Refs you cannot see are dropped and counted in `about_skipped`."
+          "description": "Up to 3 `exomem://` refs of pages the conversation concerned. Recording marks them as this conversation's latest work, so a following \"continue\" resumes them. Refs you cannot see are dropped and counted in `about_skipped`."
         },
         "client": {
           "anyOf": [
@@ -6236,7 +6248,7 @@
       "additionalProperties": false,
       "properties": {
         "ref": {
-          "description": "Stable `exomem://review/<id>` reference. An `exomem://review/adoption/<id>` ref returns the bounded Adoption Studio proposal context (proposal record, live binding check, and target-page summary) instead.",
+          "description": "Stable `exomem://review/<id>` reference. An `exomem://review/adoption/<id>` ref returns the bounded Adoption Studio proposal context (proposal record, live binding check, and target-page summary) instead. An `exomem://review/upkeep/<id>` ref returns one upkeep item's revalidated proposal with bounded excerpts of its subject and evidence pages and its route.",
           "type": "string"
         },
         "expected_fingerprint": {
@@ -6319,7 +6331,7 @@
       "properties": {
         "mode": {
           "default": "attention",
-          "description": "attention, activation, item, audit, dispositions, vocabulary, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, adoption, plan-progress, or write-advisory-result. `write-advisory-result` resolves exactly one opaque `exomem://write-advisory-result/<id>` reference returned by a committed write and reports only that job's current `pending`, `ready`, `failed`, or `superseded` state; it requires `ref`, has no list, browse, search, rank, count, continuation, or implicit-current form, and a malformed, unknown, unauthorized, or expired reference returns the shared not-found outcome. `plan-progress` reports, for each committed Planning item declaring `progress_evidence`, the counts its bound Records views return; it is derived and read-only, and it scores nothing. `dispositions` lists every signal family a user has set to `quiet` or `off` through `triage_memory`, with its reason code, why, timestamp, origin, and per-family manual dismissal count; a quiet family is silent on the carriers, not clean. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`. `adoption` returns the read-only Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints); approve a proposal via `adoption_studio(action=\"apply-proposal\")` or dismiss via `triage_memory`.",
+          "description": "attention, activation, item, audit, dispositions, vocabulary, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, adoption, upkeep, plan-progress, or write-advisory-result. `write-advisory-result` resolves exactly one opaque `exomem://write-advisory-result/<id>` reference returned by a committed write and reports only that job's current `pending`, `ready`, `failed`, or `superseded` state; it requires `ref`, has no list, browse, search, rank, count, continuation, or implicit-current form, and a malformed, unknown, unauthorized, or expired reference returns the shared not-found outcome. `plan-progress` reports, for each committed Planning item declaring `progress_evidence`, the counts its bound Records views return; it is derived and read-only, and it scores nothing. `dispositions` lists every signal family a user has set to `quiet` or `off` through `triage_memory`, with its reason code, why, timestamp, origin, and per-family manual dismissal count; a quiet family is silent on the carriers, not clean. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`. `adoption` returns the read-only Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints); approve a proposal via `adoption_studio(action=\"apply-proposal\")` or dismiss via `triage_memory`. `upkeep` lists the background worker's bounded upkeep proposals (default 10), each with its evidence, the governed route that would act on it, and triage verbs; a proposal authorizes nothing. Link items carry a relation-queue ref and source path.",
           "type": "string"
         },
         "categories": {
@@ -6335,7 +6347,7 @@
             }
           ],
           "default": null,
-          "description": "Optional category filter for attention/activation/audit."
+          "description": "Optional category filter for attention/activation/audit, or an upkeep family filter for upkeep."
         },
         "limit": {
           "anyOf": [
@@ -6456,7 +6468,7 @@
             }
           ],
           "default": null,
-          "description": "Stable `exomem://review/<id>` reference for item mode, or the opaque `exomem://write-advisory-result/<id>` reference for write-advisory-result mode. Required by both. For a vocabulary relation-type question, optionally provide a current relation-queue candidate ref alongside its source path and your meaning question. This reviews both endpoints and returns the exact application route."
+          "description": "Stable `exomem://review/<id>` reference for item mode (an `exomem://review/upkeep/<id>` ref revalidates that one upkeep item), or the opaque `exomem://write-advisory-result/<id>` reference for write-advisory-result mode. Required by both. For a vocabulary relation-type question, optionally provide a current relation-queue candidate ref alongside its source path and your meaning question. This reviews both endpoints and returns the exact application route."
         },
         "detail": {
           "default": "actionable",
@@ -6843,7 +6855,7 @@
       "additionalProperties": false,
       "properties": {
         "ref": {
-          "description": "Stable `exomem://review/<id>` reference from review_memory. An `exomem://review/adoption/<id>` ref triages an Adoption Studio proposal instead, keyed the same way (`review_id:fingerprint`). An `exomem://review/family/<family>` ref addresses a whole signal FAMILY instead of one item.",
+          "description": "Stable `exomem://review/<id>` reference from review_memory. An `exomem://review/adoption/<id>` ref triages an Adoption Studio proposal instead, keyed the same way (`review_id:fingerprint`). An `exomem://review/family/<family>` ref addresses a whole signal FAMILY instead of one item. An `exomem://review/upkeep/<id>` ref dismisses, snoozes or reopens one upkeep proposal, bound to its current fingerprint.",
           "type": "string"
         },
         "action": {

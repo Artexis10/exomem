@@ -28,6 +28,7 @@ user makes the call, so visibility beats silent graph mutation.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import os
@@ -36,7 +37,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import call_spans
+from . import call_spans, recall_space
 from .kbdir import kb_prefix
 from .vault import content_hash
 
@@ -762,7 +763,10 @@ def _best_cosine_per_file(
         # fields are what the duration alone cannot say: on 0.84.1 an
         # `embeddings.encode` of 15.6 s with `count=1` sat entirely outside
         # `index.embeddings`, and this is the caller it belonged to.
-        with call_spans.span("advisory.best_cosine", {}) as measured:
+        with (
+            call_spans.span("advisory.best_cosine", {}) as measured,
+            contextlib.ExitStack() as in_space,
+        ):
             chunks = embeddings.chunk_text(title, body)
             if not chunks:
                 if measured is not None:
@@ -770,6 +774,8 @@ def _best_cosine_per_file(
                     measured["chars"] = 0
                 return {}
             idx = embeddings.get_embedding_index(vault_root)
+            # The draft is encoded for the sidecar it is scored against.
+            in_space.enter_context(recall_space.encoding_for(idx))
             stored = (
                 embeddings._stored_text_vectors(idx, published_path)[0]
                 if published_path

@@ -54,7 +54,14 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
-from . import embeddings, index_paths, reserved_paths, semantic_units, sidecar_store
+from . import (
+    embeddings,
+    index_paths,
+    recall_space,
+    reserved_paths,
+    semantic_units,
+    sidecar_store,
+)
 from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
@@ -334,6 +341,10 @@ class ClaimIndex:
         self.path = sidecar_path(vault_root)
         self._cache: _ClaimCache | None = None
         self._lock = threading.RLock()
+        #: The vector space the claim vectors are in, as the last connection read
+        #: it. Claims are encoded by the recall encoder and follow it: rows of
+        #: another space are never served, and the next write replaces them.
+        self._identity: recall_space.SpaceIdentity | None = None
 
     def _connect(self, path: Path | None = None) -> sqlite3.Connection:
         with reserved_paths._subsystem_authority_scope("claims"):
@@ -383,6 +394,7 @@ class ClaimIndex:
             "complete INTEGER NOT NULL)"
         )
         if target == self.path:
+            self._identity = recall_space.read_identity(conn, tables=("claims",))
             try:
                 reserved_paths._publish_sqlite_owner_family(
                     self.vault_root,
@@ -395,8 +407,39 @@ class ClaimIndex:
                 raise
         return conn
 
+    def _space_current(self) -> bool:
+        """Whether the stored claim vectors are in the recall encoder's space now.
+
+        Reads the record the last connection left; call after one.
+        """
+        identity = self._identity
+        if identity is None:
+            return True
+        model = recall_space.recall_model()
+        return identity.accepts(model, recall_space.resident_fingerprint(model))
+
+    def _connected_space_current(self) -> bool:
+        if not self.path.exists():
+            return True
+        conn = self._connect()
+        conn.close()
+        return self._space_current()
+
+    def _admit(self, conn: sqlite3.Connection, dim: int) -> None:
+        """Inside a write transaction: drop rows of another space, record this one."""
+        recorded = self._identity if self._space_current() else None
+        if recorded is None and self._identity is not None:
+            conn.execute("DELETE FROM claims")
+            self._invalidate_recall_identity(conn)
+            recall_space.clear_identity(conn)
+        self._identity = recall_space.admit(conn, recorded, dim)
+
     def checksums(self) -> dict[str, str]:
-        """`{file_path: checksum}` — the incremental-skip map for a re-index."""
+        """`{file_path: checksum}` — the incremental-skip map for a re-index.
+
+        Empty while the stored vectors are in another space than the recall
+        encoder's, so every claim is re-encoded.
+        """
         if not self.path.exists():
             return {}
         conn = self._connect()
@@ -404,6 +447,8 @@ class ClaimIndex:
             rows = conn.execute("SELECT file_path, checksum FROM claims").fetchall()
         finally:
             conn.close()
+        if not self._space_current():
+            return {}
         return {fp: cs for fp, cs in rows}
 
     def get_row(
@@ -419,6 +464,8 @@ class ClaimIndex:
         if candidate.exists() and not recall_policy.is_recall_candidate(self.vault_root, candidate):
             return None
         if self._recall_identity_current() is False:
+            return None
+        if not self._connected_space_current():
             return None
         return self._get_row_unchecked(file_path)
 
@@ -458,6 +505,7 @@ class ClaimIndex:
         conn = self._connect()
         try:
             with conn:
+                self._admit(conn, int(np.asarray(rows[0][3]).shape[0]))
                 conn.executemany(
                     "INSERT OR REPLACE INTO claims "
                     "(file_path, claim_text, checksum, vector, page_type, status, file_mtime) "
@@ -530,8 +578,8 @@ class ClaimIndex:
         # `(metadata, matrix)` is cached until the sidecar's write generation
         # advances, not its mtime. `metadata[i]` is `(file_path, claim_text,
         # page_type, status)` and `matrix[i]` is the claim vector.
-        if not self.path.exists():
-            return [], np.zeros((0, embeddings.VECTOR_DIM), dtype=np.float32)
+        if not self.path.exists() or not self._connected_space_current():
+            return [], np.zeros((0, recall_space.current_dim()), dtype=np.float32)
         # Snapshot the cache tuple ONCE: another thread may swap or null it between
         # reads. This fast path takes no lock — the common case.
         c = self._cache
@@ -561,11 +609,15 @@ class ClaimIndex:
         from . import find as find_module
         from . import recall_policy
 
-        if not self.path.exists() or self._recall_identity_current() is False:
-            return [], np.zeros((0, embeddings.VECTOR_DIM), dtype=np.float32)
+        if (
+            not self.path.exists()
+            or self._recall_identity_current() is False
+            or not self._connected_space_current()
+        ):
+            return [], np.zeros((0, recall_space.current_dim()), dtype=np.float32)
         kb = self.vault_root / kb_dirname()
         if not kb.is_dir():
-            return [], np.zeros((0, embeddings.VECTOR_DIM), dtype=np.float32)
+            return [], np.zeros((0, recall_space.current_dim()), dtype=np.float32)
         admitted = [
             _vault_relative(self.vault_root, path)
             for path in find_module._walk_md(kb)
@@ -574,7 +626,7 @@ class ClaimIndex:
         ]
         paths = [path for path in admitted if path is not None]
         if not paths:
-            return [], np.zeros((0, embeddings.VECTOR_DIM), dtype=np.float32)
+            return [], np.zeros((0, recall_space.current_dim()), dtype=np.float32)
         metadata: list[tuple[str, str, str | None, str | None]] = []
         vectors: list[np.ndarray] = []
         conn = self._connect()
@@ -593,7 +645,7 @@ class ClaimIndex:
         finally:
             conn.close()
         if not vectors:
-            return [], np.zeros((0, embeddings.VECTOR_DIM), dtype=np.float32)
+            return [], np.zeros((0, recall_space.current_dim()), dtype=np.float32)
         return metadata, np.stack(vectors, axis=0)
 
     def _recall_identity_current(self) -> bool | None:
@@ -749,7 +801,7 @@ class ClaimIndex:
         if not rows:
             return _ClaimCache(
                 epoch, gen, instance, mtime, [],
-                np.zeros((0, embeddings.VECTOR_DIM), dtype=np.float32),
+                np.zeros((0, recall_space.current_dim()), dtype=np.float32),
             )
         metadata: list[tuple[str, str, str | None, str | None]] = []
         vectors: list[np.ndarray] = []
@@ -809,7 +861,7 @@ class ClaimIndex:
         vecs = (
             embeddings.embed_texts([p[3] for p in pending], is_query=False)
             if pending
-            else np.zeros((0, embeddings.VECTOR_DIM), dtype=np.float32)
+            else np.zeros((0, recall_space.current_dim()), dtype=np.float32)
         )
         # The post-encode direct projection check catches all corpus changes,
         # including an admitted page that was absent/non-claim during the first
@@ -837,7 +889,12 @@ class ClaimIndex:
         try:
             with conn:
                 conn.execute("DELETE FROM claims")
+                recall_space.clear_identity(conn)
+                self._identity = None
                 if rows:
+                    self._identity = recall_space.admit(
+                        conn, None, int(np.asarray(rows[0][3]).shape[0])
+                    )
                     conn.executemany(
                         "INSERT INTO claims "
                         "(file_path, claim_text, checksum, vector, page_type, status, file_mtime) "

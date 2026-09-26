@@ -1102,3 +1102,95 @@ def test_lane_result_caps_cover_the_repository_catalog_capacity():
     assert graph.rank_by_in_degree(
         k=projections.MAX_GOVERNED_CATALOG_ITEMS
     ) == (variant.item_identity,)
+
+
+def _cross_language_runtime(monkeypatch):
+    """An English gold the dense lane ranks first, invisible to a Russian query,
+    and a Russian look-alike that shares one word with the query."""
+    gold = _variant(
+        "Knowledge Base/retry-with-backoff.md",
+        "e" * 64,
+        "Retries wait an exponentially growing delay before the next attempt.",
+    )
+    poison = _variant(
+        "Knowledge Base/povtornaya-proverka.md",
+        "f" * 64,
+        "Повторная проверка знаний проходит в пятницу.",
+    )
+    runtime = _runtime(
+        (_item(gold), _item(poison)),
+        vectors=(_vector(gold, (1.0, 0.0)), _vector(poison, (0.8, 0.6))),
+    )
+    monkeypatch.setattr(embeddings, "embed_texts", lambda texts, *, is_query: [[1.0, 0.0]])
+    return gold, poison, runtime
+
+
+def test_projected_fusion_keeps_a_cross_script_dense_lead_above_a_partial_match(
+    monkeypatch, tmp_path
+):
+    gold, poison, runtime = _cross_language_runtime(monkeypatch)
+    result = projection_runtime.find_projected_hits(
+        tmp_path,
+        runtime,
+        query="повторные попытки с задержкой",
+        limit=2,
+        mode="hybrid",
+        graph=False,
+        rerank=False,
+        principal=principal.owner_principal(surface="library"),
+        purpose=None,
+    )
+    assert [hit.path for hit in result.hits] == [gold.item_identity, poison.item_identity]
+    assert result.hits[1].bm25_rank is None
+
+
+def test_projected_rerank_keeps_the_fused_order_outside_the_rerankers_coverage(
+    monkeypatch, tmp_path
+):
+    gold, poison, runtime = _cross_language_runtime(monkeypatch)
+    scored: list[str] = []
+
+    def rerank_pairs(query: str, passages: list[str]):
+        scored.append(query)
+        return [float(index) for index in range(len(passages))]
+
+    monkeypatch.setattr(embeddings, "rerank_pairs", rerank_pairs)
+    # Cyrillic is outside the default reranker's scripts; the Han query is
+    # inside them but its dense lead is an English page it shares nothing with.
+    for query in ("повторные попытки с задержкой", "重试退避"):
+        result = projection_runtime.find_projected_hits(
+            tmp_path,
+            runtime,
+            query=query,
+            limit=2,
+            mode="hybrid",
+            graph=False,
+            rerank=True,
+            principal=principal.owner_principal(surface="library"),
+            purpose=None,
+        )
+        assert all(hit.rerank_raw_score is None for hit in result.hits)
+    assert scored == []
+
+
+def test_projected_rerank_still_runs_inside_the_rerankers_coverage(monkeypatch, tmp_path):
+    gold, _poison, runtime = _cross_language_runtime(monkeypatch)
+    scored: list[str] = []
+
+    def rerank_pairs(query: str, passages: list[str]):
+        scored.append(query)
+        return [float(index) for index in range(len(passages))]
+
+    monkeypatch.setattr(embeddings, "rerank_pairs", rerank_pairs)
+    projection_runtime.find_projected_hits(
+        tmp_path,
+        runtime,
+        query="exponentially growing delay",
+        limit=2,
+        mode="hybrid",
+        graph=False,
+        rerank=True,
+        principal=principal.owner_principal(surface="library"),
+        purpose=None,
+    )
+    assert scored == ["exponentially growing delay"]

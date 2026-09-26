@@ -1354,6 +1354,23 @@ def _admit_after_bounded_runtime_repair(vault_root: Path, repaired: object) -> N
         _mark_runtime_retrieval_ready_if_current(vault_root)
 
 
+def rebase_inherited_catalog_lineage(vault_root: Path) -> tuple[str, ...]:
+    """Make an inherited, proven-current catalog a delta origin for this process.
+
+    Warm-up calls this after it proves the catalog it inherited, so the first
+    governed write after a worker replacement stays an O(delta) upsert instead
+    of stranding a scope behind a foreign checkpoint (see
+    `LexicalStore.rebase_inherited_checkpoints`).
+    """
+    if not maintained_content_index_enabled():
+        return ()
+    try:
+        return get_store(vault_root).rebase_inherited_checkpoints()
+    except Exception as error:  # noqa: BLE001 - a later write hands off to repair
+        log.info("inherited catalog lineage rebase skipped (%s)", error)
+        return ()
+
+
 def _mark_runtime_retrieval_unavailable_if_current(vault_root: Path) -> None:
     """Revoke configured-runtime admission before scheduling catalog recovery."""
     if not _is_configured_runtime_vault(vault_root):
@@ -2962,6 +2979,12 @@ class LexicalStore:
         # the publication barrier by exact-checkpoint equality, and single-use:
         # cleared when the batch finishes, whatever the outcome.
         self._reconciled_source_proofs: dict[str, object] = {}
+        # Live scopes a bounded mutation applied rows to but could not bless,
+        # because no event history bridges the stored checkpoint to the live
+        # one. No later event can bless them either, so the caller hands them
+        # to the repair owner once the publication barrier is released.
+        # Guarded by `_lock`; consumed and cleared by that hand-off.
+        self._stranded_scopes: set[str] = set()
         self._failed = False  # runtime-retired for this process
         self._last_rebuild_result: str | None = None
         self._lock = threading.Lock()
@@ -4741,7 +4764,8 @@ class LexicalStore:
             # then the event that makes both scopes current. Re-prove after the
             # publication barrier is released so managed retrieval cannot stay
             # unavailable forever despite an exact-current catalog.
-            _admit_after_bounded_runtime_repair(self.vault_root, applied)
+            if not self._hand_off_stranded_scopes():
+                _admit_after_bounded_runtime_repair(self.vault_root, applied)
             self._note_pending_publication(list(paths), [])
         return applied
 
@@ -4788,7 +4812,8 @@ class LexicalStore:
         if not applied:
             _schedule_runtime_catalog_repair(self.vault_root)
         else:
-            _admit_after_bounded_runtime_repair(self.vault_root, applied)
+            if not self._hand_off_stranded_scopes():
+                _admit_after_bounded_runtime_repair(self.vault_root, applied)
             self._note_pending_publication(list(paths), list(rel_paths))
         return applied
 
@@ -4931,7 +4956,8 @@ class LexicalStore:
         if not applied:
             _schedule_runtime_catalog_repair(self.vault_root)
         else:
-            _admit_after_bounded_runtime_repair(self.vault_root, applied)
+            if not self._hand_off_stranded_scopes():
+                _admit_after_bounded_runtime_repair(self.vault_root, applied)
             self._note_pending_publication([], list(rel_paths))
         return applied
 
@@ -5029,6 +5055,7 @@ class LexicalStore:
         from . import freshness as freshness_module
 
         witnessed: dict[str, tuple[object, bool]] = {}
+        stranded: set[str] = set()
         for scope in ("kb", "vault"):
             checkpoint, stored = targets[scope]
             if (
@@ -5041,11 +5068,19 @@ class LexicalStore:
                 witnessed[scope] = (checkpoint, False)
             elif stored is None:
                 self._witnessed.pop(scope, None)
+                stranded.add(scope)
             else:
                 delta = freshness_module.recall_delta_since(self.vault_root, scope, stored)
-                if (
-                    not delta.complete
-                    or delta.to != checkpoint
+                if not delta.complete:
+                    # No retained history bridges the stored origin (a foreign
+                    # registry's checkpoint nobody adopted, or history this
+                    # registry no longer holds), so no later batch can bless
+                    # this scope either. Unlike an uncovered delta, which the
+                    # watcher's own batch covers shortly, this needs repair.
+                    self._witnessed.pop(scope, None)
+                    stranded.add(scope)
+                elif (
+                    delta.to != checkpoint
                     or not (set(delta.changed) | set(delta.deleted)) <= requested_paths
                 ):
                     self._witnessed.pop(scope, None)
@@ -5055,7 +5090,110 @@ class LexicalStore:
                 else:
                     self._witnessed[scope] = checkpoint
                     witnessed[scope] = (checkpoint, False)
+        if stranded:
+            with self._lock:
+                self._stranded_scopes |= stranded
         return witnessed
+
+    def rebase_inherited_checkpoints(self) -> tuple[str, ...]:
+        """Re-stamp an inherited, exactly-current catalog in this registry's lineage.
+
+        A replacement process inherits a catalog whose stored checkpoints name
+        the previous registry instance. Admission compares projected state
+        (`_checkpoint_state`), so that catalog is served as current, but no
+        delta can be read from a foreign origin nobody adopted: the first
+        bounded write would apply its rows and leave the scope unblessed. Where
+        the stored state equals this registry's live state, the rows already
+        describe exactly the live checkpoint, so stamping that checkpoint is
+        the same attestation `_bless` makes after a write: the rows are
+        untouched, and admission trusts nothing it did not already trust.
+
+        Only the serving process's repair owner calls this (warm-up after a
+        successful proof); a standby publishes nothing. A busy barrier, or any
+        scope that is not state-equal, is left as it is: a later write then
+        hands that scope to repair instead. Returns the scopes re-stamped.
+        """
+        from . import freshness as freshness_module
+        from .vault import VaultLockError
+
+        if self._failed or not self.path.exists():
+            return ()
+        with _REPAIRS_LOCK:
+            if self.vault_root.resolve() in _REPAIRS_IN_FLIGHT:
+                # A repair publishes this process's own lineage anyway, and a
+                # checkpoint changed under it would void its publication.
+                return ()
+        rebased: list[str] = []
+        try:
+            # Warm-up runs off the request path, so it can wait out a start-up
+            # watcher batch rather than leave the first write to the repair.
+            with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_BACKGROUND):
+                conn = self._connect()
+                try:
+                    if not self._schema_is_current(conn):
+                        return ()
+                    identity = catalog_semantic_identity(self.vault_root)
+                    if self._meta_catalog_identity(conn) != identity:
+                        return ()
+                    for scope in ("kb", "vault"):
+                        if not freshness_module.recall_is_live(self.vault_root, scope):
+                            continue
+                        live = freshness_module.recall_checkpoint(self.vault_root, scope)
+                        stored = self._meta_checkpoint(conn, scope)
+                        if (
+                            live is None
+                            or stored is None
+                            or stored.instance_id == live.instance_id
+                            or _checkpoint_state(stored) is None
+                            or _checkpoint_state(stored) != _checkpoint_state(live)
+                        ):
+                            continue
+                        self._bless(conn, scope, live, identity=identity)
+                        rebased.append(scope)
+                finally:
+                    conn.close()
+        except (VaultLockError, sqlite3.Error) as error:
+            log.info("inherited catalog lineage left as is (%s)", error)
+        return tuple(rebased)
+
+    def _hand_off_stranded_scopes(self) -> bool:
+        """Give scopes no event can bless to the managed repair owner.
+
+        Runs after the publication barrier is released. Without it a managed
+        runtime stays unavailable for good: the health probe's read-only proof
+        revokes admission for the stranded scope, and nothing it or this
+        successful mutation does would ever schedule the repair that restores
+        it. Offline callers keep the read path's own verify-or-rebuild heal.
+        """
+        from . import freshness as freshness_module
+        from . import readiness
+
+        with self._lock:
+            flagged = set(self._stranded_scopes)
+            self._stranded_scopes.clear()
+        if not flagged or not readiness.runtime_managed():
+            return False
+        # The record is only a hint: a repair or a later bless may have healed
+        # the scope since (the repair worker's targeted retry records a
+        # stranding without handing it off). Re-prove it read-only now so a
+        # healed catalogue is never revoked and rebuilt on a stale record.
+        still_stranded = False
+        for scope in flagged:
+            if not freshness_module.recall_is_live(self.vault_root, scope):
+                continue
+            stored = self.published_recall_checkpoint(scope)
+            if (
+                stored is None
+                or not freshness_module.recall_delta_since(
+                    self.vault_root, scope, stored
+                ).complete
+            ):
+                still_stranded = True
+                break
+        if not still_stranded:
+            return False
+        _schedule_runtime_catalog_repair(self.vault_root)
+        return True
 
     def _prepare_reconcile_source_proof(
         self, paths: list[Path], rel_paths: list[str]

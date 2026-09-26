@@ -1,13 +1,58 @@
 ---
-- name: Harden and bootstrap the Exomem private-alpha node
+# Every K3s node first gets the same base hardening and its converged
+# inter-node firewall, so that no agent's join can race a peer that has not
+# admitted it yet (add-cloud-node-provisioning N4/N5).
+- name: Harden every Exomem K3s node and converge its inter-node firewall
   hosts: hosted_nodes
   become: true
   gather_facts: true
   serial: 1
   any_errors_fatal: true
 
+  pre_tasks:
+    # add-cloud-node-provisioning N6: a host remove-agent.yml stopped is
+    # awaiting its Terraform destroy; leave it untouched rather than rejoin it.
+    - name: Look for the K3s agent removal marker
+      ansible.builtin.stat:
+        path: /etc/rancher/k3s/removed
+        get_checksum: false
+        get_mime: false
+        get_attributes: false
+      register: k3s_removed_marker
+
+    - name: Skip a removed agent until its server is destroyed
+      ansible.builtin.meta: end_host
+      when: k3s_removed_marker.stat.exists
+
   roles:
     - base
+
+  tasks:
+    - name: Converge the K3s inter-node firewall
+      ansible.builtin.include_role:
+        name: k3s
+        tasks_from: inter_node.yml
+
+- name: Bootstrap the Exomem K3s server
+  hosts: hosted_nodes:!k3s_agents
+  become: true
+  gather_facts: true
+  serial: 1
+  any_errors_fatal: true
+
+  roles:
+    - k3s
+
+- name: Join the Exomem K3s agents
+  hosts: k3s_agents
+  become: true
+  gather_facts: true
+  serial: 1
+  any_errors_fatal: true
+  vars:
+    k3s_node_role: agent
+
+  roles:
     - k3s
 
 - name: Harden and provision the Exomem control database server

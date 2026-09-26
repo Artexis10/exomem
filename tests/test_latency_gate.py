@@ -693,6 +693,56 @@ def test_working_set_compiler_stays_bounded_at_scale(tmp_path: Path, model_free)
     assert len(json.dumps(packet)) < 24_000
 
 
+@pytest.mark.timeout(300)
+def test_working_set_compiler_with_an_upkeep_item_stays_bounded(
+    tmp_path: Path, model_free, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D1-T11: a session start that carries an upkeep item pays the same
+    ceiling. Every measured call is a session start, so every one reads the
+    sidecar, checks signatures, builds the release filter and attaches.
+
+    Timed end to end around `op_activate_context`: the carrier attaches after
+    the compiler stamps `timings["total_ms"]`, so that number cannot see it."""
+    import dreamer_fixture
+    from synth_vault import gen_entity_overlay
+
+    from exomem import commands, dreamer, dreamer_store, upkeep, working_set_runtime
+
+    vault = _build_dense_vault(tmp_path, N_NOTES)
+    gen_entity_overlay(vault, 500, seed=19)
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
+    _measure_working_set(vault)  # builds the index and warms the lanes
+    pages = sorted(
+        path.relative_to(vault).as_posix()
+        for path in (vault / "Knowledge Base").rglob("*.md")
+    )[:3]
+    dreamer_fixture.plant_deliverable(vault, pages[0], pages[1:], now=time.time())
+    monkeypatch.setattr(dreamer, "delivering", lambda: True)
+
+    def call() -> tuple[float, dict]:
+        working_set_runtime.reset_caches_for_tests()
+        upkeep.reset_delivery_state()
+        dreamer_store.clear_reader_memo()
+        started = time.perf_counter()
+        packet = commands.op_activate_context(vault, turn=WORKING_SET_TURN, include_timings=True)
+        return (time.perf_counter() - started) * 1000.0, packet
+
+    _wall_ms, packet = call()
+    assert packet["upkeep"]["items"], packet.get("upkeep")
+    samples = []
+    for _ in range(3):
+        wall_ms, measured = call()
+        assert measured["upkeep"]["items"], "a sample did not time the carrier"
+        samples.append(wall_ms)
+    request_ms = statistics.median(samples)
+    assert request_ms < CEIL_WORKING_SET_MS, (
+        f"activation with an upkeep item took {request_ms:.1f}ms end to end @ {N_NOTES} "
+        f"notes (ceiling {CEIL_WORKING_SET_MS:.1f}ms)"
+    )
+    assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
+
+
 @pytest.mark.timeout(600)
 def test_working_set_compiler_does_not_scale_linearly(tmp_path: Path, model_free) -> None:
     from synth_vault import gen_entity_overlay
@@ -716,4 +766,101 @@ def test_working_set_compiler_does_not_scale_linearly(tmp_path: Path, model_free
     assert large_ms < bound, (
         f"context compiler scaled {small_ms:.1f}ms @ {N_NOTES} to "
         f"{large_ms:.1f}ms @ {N_NOTES_LARGE} (bound {bound:.1f}ms)"
+    )
+
+
+#: Distinct pages the full ring's events fall on, the same at every corpus
+#: size, so the ratio measures the corpus and not a differently shaped ring.
+RING_PAGES = 512
+
+
+def _measure_referential_working_set(vault: Path) -> tuple[float, dict]:
+    """Return (warm median ms, one packet) for "continue" against a heat ring
+    at `RING_MAX` events over `RING_PAGES` pages, the scaled contact's page
+    the newest work.
+
+    One read lands before every measured call, so each one rebuilds the
+    profile from the full ring rather than serving a cached aggregation: the
+    steady state of a session that reads between turns.
+    """
+    from exomem import commands, working_set_heat, working_set_index, working_set_runtime
+
+    person = next((vault / "Knowledge Base/Entities/People").glob("synthetic-person-00007-*.md"))
+    _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_heat.reset_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    # Seeds the projection: the registry is copied once per sidecar.
+    commands.op_activate_context(vault, turn=WORKING_SET_TURN)
+
+    pages = sorted(
+        path.relative_to(vault).as_posix()
+        for path in (vault / "Knowledge Base" / "Notes").rglob("*.md")
+    )[:RING_PAGES]
+    assert len(pages) == RING_PAGES
+    now_ns = time.time_ns()
+    ring = [
+        working_set_heat.HeatEvent(
+            now_ns - 3_600 * 10**9 + index * 10**6,
+            pages[index % len(pages)],
+            "read" if index % 3 else "work",
+            origin="ring",
+        )
+        for index in range(working_set_heat.RING_MAX)
+    ]
+    working_set_heat.append(vault, ring)
+    target = person.relative_to(vault).as_posix()
+    working_set_heat.append(
+        vault, [working_set_heat.HeatEvent(now_ns - 60 * 10**9, target, "work", origin="edit_memory")]
+    )
+
+    def call(index: int) -> dict:
+        working_set_heat.append(
+            vault,
+            [
+                working_set_heat.HeatEvent(
+                    now_ns - 1_800 * 10**9 + index, pages[index % len(pages)], "read", origin="read"
+                )
+            ],
+        )
+        working_set_runtime.reset_caches_for_tests()
+        return commands.op_activate_context(vault, turn="continue", include_timings=True)
+
+    packet = call(0)
+    samples = [_compiler_ms(call(index)["timings"]) for index in range(1, 4)]
+    return statistics.median(samples), packet
+
+
+@pytest.mark.timeout(900)
+def test_referential_working_set_stays_under_ceiling_with_a_full_ring(
+    tmp_path: Path, model_free
+) -> None:
+    """Step 5's projection at its bound: a full ring is aggregated and ranked
+    on every referential turn, so "continue" must stay under the compiler
+    ceiling at 2k and 8k notes and must not scale with the corpus."""
+    from synth_vault import gen_entity_overlay
+
+    measured: dict[int, tuple[float, dict]] = {}
+    for notes, overlay in ((N_NOTES, 125), (N_NOTES_LARGE, 500)):
+        vault = _build_dense_vault(tmp_path, notes)
+        gen_entity_overlay(vault, overlay, seed=29)
+        measured[notes] = _measure_referential_working_set(vault)
+
+    for notes, (compiler_ms, packet) in measured.items():
+        assert packet["abstained"] is False, (notes, packet.get("abstention"))
+        assert any("recency" in item["evidence"] for item in packet["anchors"]), notes
+        assert compiler_ms < CEIL_WORKING_SET_MS, (
+            f"referential activation took {compiler_ms:.1f}ms @ {notes} notes with a full "
+            f"ring (ceiling {CEIL_WORKING_SET_MS:.1f}ms)"
+        )
+    small_ms, large_ms = measured[N_NOTES][0], measured[N_NOTES_LARGE][0]
+    bound = max(small_ms * CEIL_WORKING_SET_RATIO, small_ms + WORKING_SET_RATIO_SLACK_MS)
+    assert large_ms < bound, (
+        f"referential activation scaled {small_ms:.1f}ms @ {N_NOTES} to "
+        f"{large_ms:.1f}ms @ {N_NOTES_LARGE} with a full ring (bound {bound:.1f}ms)"
+    )
+    sys.stderr.write(
+        f"\nreferential working set, full ring: {small_ms:.1f}ms @ {N_NOTES}, "
+        f"{large_ms:.1f}ms @ {N_NOTES_LARGE} (bound {bound:.1f}ms)\n"
     )

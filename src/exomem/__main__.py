@@ -105,6 +105,7 @@ _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
         "status",
         "warm",
         "mode",
+        "dreamer",
         "prominence",
         "backfill-media",
         "index",
@@ -259,6 +260,8 @@ def _dispatch_main(raw: list[str]) -> int:
         return _warm_main(raw[1:])
     if raw and raw[0] == "mode":
         return _mode_main(raw[1:])
+    if raw and raw[0] == "dreamer":
+        return _dreamer_main(raw[1:])
     if raw and raw[0] == "prominence":
         return _prominence_main(raw[1:])
     if raw and raw[0] == "backfill-media":
@@ -940,6 +943,71 @@ def _mode_main(argv: list[str]) -> int:
     print(f"Compute mode set to '{persisted}'  ({path})")
     print("A running exomem server applies it live within ~10s (or restart to apply now).")
     print("CLI ops (exomem index / warm) use it on their next run.")
+    return 0
+
+
+def _dreamer_main(argv: list[str]) -> int:
+    """Show or set the dreamer (background upkeep) operator setting.
+
+    There is deliberately no run-once subcommand: a second process driving the
+    pass against a live service is exactly what the live-cell rules forbid.
+    """
+    from . import dreamer
+
+    parser = argparse.ArgumentParser(
+        prog="exomem dreamer",
+        description="Show or set the dreamer, the default-off background worker that "
+        "proposes bounded upkeep. on | off | pause | resume write the `dreamer` key in "
+        "the per-machine config file, which a running server's worker re-reads within one "
+        "poll; a server started with the dreamer off has no worker, so `on` takes effect "
+        "at its next restart. EXOMEM_DREAMER in the service environment overrides it.",
+    )
+    parser.add_argument("action", choices=("status", "on", "off", "pause", "resume"))
+    parser.add_argument(
+        "--vault",
+        default=None,
+        help="vault root whose recorded dreamer health to include (status only)",
+    )
+    parser.add_argument("--json", action="store_true", help="emit stable JSON (status only)")
+    args = parser.parse_args(argv)
+
+    if args.action == "status":
+        vault_root = Path(args.vault).expanduser() if args.vault else None
+        status = dreamer.status(vault_root)
+        if args.json:
+            print(json.dumps(status))
+        else:
+            print(f"dreamer: {status['setting']}  (state: {status['state']})")
+            if status.get("waiting_reason"):
+                print(f"  waiting: {status['waiting_reason']}")
+            if status.get("sidecar") is not None:
+                print(f"  recorded health: {json.dumps(status['sidecar'])}")
+        return 0
+    value = {"on": "on", "off": "off", "pause": "paused", "resume": "on"}[args.action]
+    try:
+        path = dreamer.write_setting(value)
+    except OSError:
+        from . import mode as mode_mod
+
+        print(
+            f"dreamer: could not persist {mode_mod.config_path()}; grant Modify permission "
+            "to the invoking account or change EXOMEM_CONFIG_PATH",
+            file=sys.stderr,
+        )
+        return 1
+    effective = dreamer.setting()
+    print(f"Dreamer set to '{value}'  ({path})")
+    if effective != value:
+        print(f"EXOMEM_DREAMER in this environment overrides it: effective '{effective}'.")
+    if value == "on":
+        # The worker thread is what re-reads the setting, and a server started
+        # with the dreamer off never created one.
+        print(
+            "A running exomem server whose worker is running applies it within one poll "
+            "(about 30s); a server started with the dreamer off starts it at its next restart."
+        )
+    else:
+        print("A running exomem server applies it within one poll (about 30s).")
     return 0
 
 
@@ -2682,6 +2750,9 @@ def _activate_main(argv: list[str]) -> int:
     parser.add_argument(
         "--session", default=None, help="opaque conversation id, recorded only as a hash"
     )
+    parser.add_argument(
+        "--workspace", default=None, help="opaque project key, recorded only as a hash"
+    )
     parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
     args = parser.parse_args(argv)
 
@@ -2700,6 +2771,8 @@ def _activate_main(argv: list[str]) -> int:
         core += ["--client", args.client]
     if args.session:
         core += ["--session", args.session]
+    if args.workspace:
+        core += ["--workspace", args.workspace]
     return _core_op_main(_with_json(core, args.json))
 
 

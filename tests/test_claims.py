@@ -24,6 +24,7 @@ from exomem import (
     claims,
     corpus_aware,
     embeddings,
+    recall_space,
     sidecar_store,
 )
 from exomem import (
@@ -612,6 +613,10 @@ def test_claim_legacy_sidecar_migrates_and_mtime_fallback_invalidates(
     """A pre-meta `.claims.sqlite` reads generation 0; the meta table migrates in
     on first connect, the cache retains mtime-keyed invalidation (version-skew
     fallback) until a gen-bumping write, and an mtime bump still invalidates."""
+    # A sidecar from before the record was written by the English model; a
+    # personal server now encodes recall with the multilingual one
+    # (tests/test_recall_switch.py).
+    monkeypatch.setattr(embeddings, "MODEL_NAME", "BAAI/bge-base-en-v1.5")
     vault = _fresh_vault(tmp_path)
     idx = claims.ClaimIndex(vault)
     _make_legacy_claims_sidecar(
@@ -662,5 +667,5 @@ def test_rebuild_all_builds_real_claim_vectors(vault: Path, monkeypatch) -> None
     assert n >= 1
     row = idx.get_row("Knowledge Base/Notes/Insights/real.md")
     assert row is not None
-    assert row[1].shape == (embeddings.VECTOR_DIM,)
+    assert row[1].shape == (recall_space.declared_dim(embeddings.MODEL_NAME),)
     assert np.isfinite(row[1]).all()

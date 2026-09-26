@@ -16,12 +16,33 @@ Corrections and observed capture/activation misses SHALL produce reviewable evid
 
 ### Requirement: Hot profiles remain bounded derived projections
 
-The system SHALL provide a compact hot profile derived from authorized canonical knowledge with source provenance, explicit budgets and currency. Corrections, expiry, deletion, supersession and access changes SHALL invalidate affected profile material. Missing or stale profiles SHALL report their state and SHALL NOT become an alternate canonical store or bypass disclosure checks.
+The system SHALL provide a compact hot profile derived from authorized canonical knowledge with source provenance, explicit budgets and currency. Its sources SHALL be typed events recorded by origin where each act happens — governed work outside any batch, admitted picks, recorded episodes, reads, citations, and external edits judged by the write-burst rule — held in a bounded, machine-local, disposable ring, carrying the caller's attribution only as salted, audience-scoped derivations, and never re-derived from file times. Its budgets SHALL be declared: a bounded ring, a bounded external fold per request, a bounded seed, and at most a declared few page reads per request. It SHALL decay by displacement and by the working-session window, never by a clock. Corrections, expiry, deletion, supersession and access changes SHALL invalidate affected profile material. Missing or stale profiles SHALL report their state — `current`, `partial`, `seeded`, `behind` or `empty` — and SHALL NOT become an alternate canonical store or bypass disclosure checks: the profile is never served, every referent or entry drawn from it SHALL cross the reader's guard per request, and for a caller other than the owner it SHALL be ranked only over the pages released to that caller, so a withheld page and an absent one are indistinguishable in everything the caller receives.
 
 #### Scenario: A profiled preference is corrected or hidden
 
 - **WHEN** its canonical source changes or current access no longer permits disclosure
 - **THEN** subsequent packets omit or refresh the affected profile entry and never serve the stale value as current
+
+#### Scenario: A pick corrects the referent
+
+- **WHEN** a referential turn resolved one anchor and the agent then picks another page for the same conversation
+- **THEN** the next referential turn resolves the picked page, the pick being the latest deliberate act
+
+#### Scenario: A session ends and its heat expires
+
+- **WHEN** the latest act is older than the working-session gap and the user then reads a page
+- **THEN** the older work no longer supplies the referent, the new session does, and nothing was removed by a clock
+
+#### Scenario: A deleted or superseded page leaves the profile
+
+- **WHEN** the hottest page is deleted, archived or superseded
+- **THEN** it is never offered as a referent or a recent-context entry, and the next eligible page leads
+
+#### Scenario: A page the caller may not see leaves no trace
+
+- **WHEN** the page that leads the profile, or any page in it, is one the caller may not read
+- **THEN** the caller's profile is ranked only over the pages released to it, so its referent, recent-context block and reported profile state and session start are exactly what they would be had that page never been touched, and no `withheld` abstention arises from activity it may not see
+- **AND** a referent the turn itself names still abstains `withheld` when it may not be released
 
 ### Requirement: Priors cannot override grounded resolution
 
@@ -32,11 +53,18 @@ Activation priors SHALL be bounded derived ranking signals with provenance, vers
 - **WHEN** a high-frequency prior conflicts with a resolved explicit task anchor
 - **THEN** grounded task relevance wins and irrelevant history cannot consume the entire context budget
 
+#### Scenario: A page read many times is not hotter for it
+
+- **WHEN** one page has been read many times and another was worked on once, more recently
+- **THEN** the page worked on leads the referent, because the profile ranks the latest act and counts nothing, and repeated serving of a packet adds no heat
+
 ### Requirement: Dreamer proposes bounded consolidation off the interactive path
 
 The dreamer SHALL provide deterministic, delta-driven or idle-scheduled consolidation proposals using bounded indexed evidence. Candidate families SHALL include supported alias/anchor, category/convention, link, hydration and profile improvements. The active agent SHALL remain the semantic decider and canonical writers SHALL enforce current authority. Background execution SHALL be default-off and provide pause/quiet controls, explicit work/time/memory bounds, checkpointed continuation, evidence-version invalidation and deduplication. It SHALL NOT perform autonomous canonical writes or be required for online capture/recall.
 
 Eligible proposals SHALL enter the existing bounded review/activation carrier at an ordinary supported lifecycle boundary without requiring an explicit review request. Delivery SHALL respect current quiet/defer settings and existing budgets. Tool-only clients SHALL expose the same proposals with best-effort initiation. Acceptance SHALL establish next-session delivery and authorized agent disposition, not only queue creation.
+
+The background worker SHALL write only its own disposable sidecar. It SHALL NOT write the vault, take the writer lease or mutation guard, enqueue graph debt, mark freshness pending, build or repair an index, or load or run a model. It SHALL run only while the service is idle and the graph owes no work, SHALL yield to any request between pages, and SHALL take its changed pages from the freshness registry's delta or a diff against its persisted page signatures, never from a filesystem walk or a whole-vault snapshot. A caller SHALL receive at most one proposal per session start.
 
 #### Scenario: An idle pass finds repeated disconnected knowledge
 
@@ -56,6 +84,64 @@ Eligible proposals SHALL enter the existing bounded review/activation carrier at
 - **THEN** online capture and recall continue under their normal contracts and optional work remains resumable
 - **AND** quieting proposals cannot hide non-quietable integrity failures
 
+#### Scenario: The dreamer is off by default
+
+- **WHEN** no operator setting enables it
+- **THEN** no worker thread starts, no sidecar is created, and activation, recall and capture are byte-identical to a build without it
+
+#### Scenario: Background work never creates write churn
+
+- **WHEN** the worker processes pages during an ordinary session
+- **THEN** it writes no vault file, takes no writer lease or mutation guard, raises no graph debt, marks no freshness pending, builds or repairs no index and loads no model
+- **AND** it starts no tick while writes are landing, and a write burst's latency, graph availability and drain outcomes match a run with it off
+
+#### Scenario: A restart resumes from recorded signatures without a walk
+
+- **WHEN** the service restarts with pages changed while it was down
+- **THEN** the worker finds them by diffing the live freshness map against its recorded signatures and enumerates no directory
+
+#### Scenario: An upkeep item arrives once at a caller's session start
+
+- **WHEN** a caller's first activation of a session occurs and a settled, egress-admitted proposal exists
+- **THEN** that packet carries at most one upkeep item with its evidence, route, review route and triage verbs
+- **AND** later activations in the same session carry none
+
+#### Scenario: A delivered item is disposed of through existing verbs without a whole-vault scan
+
+- **WHEN** the agent reviews, triages or follows the route of a delivered item
+- **THEN** the item and its context are revalidated from its own subject and evidence pages only, a triage decision binds to its current fingerprint, and the next worker pass resolves an item whose route was applied
+
+#### Scenario: An ignored item stops recurring until its evidence changes
+
+- **WHEN** an item is delivered twice without a disposition, or is dismissed
+- **THEN** no later session receives it again until its supporting evidence changes and the detector reproduces it
+- **AND** dismissing one direction of a proposed link holds the pair
+
+#### Scenario: A failing dreamer is visible
+
+- **WHEN** the worker fails repeatedly
+- **THEN** a session-start packet carries a status-only upkeep block naming when it began failing, and operator status reports it
+
+#### Scenario: Ambiguity is reported, never proposed over
+
+- **WHEN** a family meets an identity ambiguity
+- **THEN** it proposes nothing for it and reports the ambiguity under the existing audit category that owns the defect
+
+### Requirement: Upkeep rides the activation packet as an optional bounded block
+
+A caller-session-start activation packet MAY carry an `upkeep` block holding at most one proposal. The item SHALL be counted in the packet's `used_chars`, SHALL pass the same egress release decision as any unit so that a withheld page never appears in it nor in any count, SHALL be omitted whole rather than truncated, and SHALL be served only while every evidence signature equals the live one. The block SHALL NOT be `due_state` and SHALL NOT read or advance the due-state emission ledger. It SHALL be skipped when the request budget is spent, when structural suggestions are off, when the caller cannot be keyed, and on any error. A vault SHALL receive at most one item per 10 minutes across callers, a caller at most 3 per day, and one item at most two deliveries, the second at least a week after the first and to another caller.
+
+#### Scenario: Upkeep never makes a turn late or leaks
+
+- **WHEN** a session-start activation carries an upkeep item on a governed vault
+- **THEN** the request enumerates no directory and stays within the activation ceilings
+- **AND** an item whose subject is withheld from this audience is skipped with nothing about it in the packet
+
+#### Scenario: A missing or locked sidecar attaches nothing
+
+- **WHEN** the sidecar is absent, locked or unreadable at a session start
+- **THEN** the packet carries no upkeep item and the request does not wait
+
 ### Requirement: Frozen verifiers are optional review labels only
 
 Any frozen verifier SHALL obey the existing canonical `frozen-verifiers` admission and effects requirements, remain default-off, version-pinned, separately admitted and limited to review labels with abstention. It SHALL NOT author knowledge, select canonical identity, control retrieval/ranking, gate capture or define policy. Failure, abstention or resource pressure SHALL remove optional assistance without changing online semantics. CPU-first admission SHALL measure quality, false positives and resource interference; GPU use SHALL require separately verified co-tenant capacity. Programme acceptance SHALL include an admission decision with evidence, not mandatory model enablement.
@@ -65,3 +151,8 @@ Any frozen verifier SHALL obey the existing canonical `frozen-verifiers` admissi
 - **WHEN** optional verification abstains, fails or emits a disputed label
 - **THEN** the active agent can inspect original evidence and the ordinary governed workflow remains available
 - **AND** the label cannot directly change a canonical fact, authority decision or retrieval result
+
+#### Scenario: Verifier labels do not reach upkeep
+
+- **WHEN** an admitted verifier is enabled while upkeep proposals are produced and delivered
+- **THEN** no upkeep family, carrier or review surface calls the verifier, and upkeep output is identical to a run with it disabled

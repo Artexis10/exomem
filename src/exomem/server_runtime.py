@@ -203,6 +203,8 @@ class LocalRuntimeActivation:
         self.file_watcher: Any | None = None
         self.derived_drain: Any | None = None
         self.vocabulary_recovery: Any | None = None
+        self.recall_reembed: Any | None = None
+        self.dreamer: Any | None = None
 
     def release(self) -> None:
         """Hand this process the ownership a standby refused, then activate."""
@@ -268,6 +270,10 @@ class LocalRuntimeActivation:
             ("graph drain", _start_graph_drain),
             ("media", self._start_media_worker),
             ("vocabulary recovery", self._start_vocabulary_recovery),
+            ("recall re-embed", self._start_recall_reembed),
+            # Last: upkeep is the least important background work and must
+            # never contend with admission, the watcher or graph convergence.
+            ("dreamer", self._start_dreamer),
         )
         for label, starter in starters:
             if self._shutdown.is_set():
@@ -351,6 +357,11 @@ class LocalRuntimeActivation:
                 stop()
             except Exception:  # noqa: BLE001 - shutdown still has to join activation
                 log.warning("%s runtime shutdown failed", label, exc_info=True)
+        if self.dreamer is not None:
+            try:
+                _stop_dreamer()
+            except Exception:  # noqa: BLE001 - shutdown still has to join activation
+                log.warning("dreamer runtime shutdown failed", exc_info=True)
 
     def _start_component(self, label: str, starter: Callable[[Path], Any]) -> None:
         try:
@@ -379,8 +390,20 @@ class LocalRuntimeActivation:
         self.vocabulary_recovery = thread
         thread.start()
 
+    def _start_recall_reembed(self, vault_root: Path) -> None:
+        """Bring the recall sidecar into the recall encoder's space, off-request.
+
+        Stops between batches when the process shuts down; a restart resumes.
+        """
+        from . import recall_migration
+
+        self.recall_reembed = recall_migration.start(vault_root, self._shutdown)
+
     def _start_file_watcher(self, vault_root: Path) -> None:
         self.file_watcher = _start_file_watcher(vault_root)
+
+    def _start_dreamer(self, vault_root: Path) -> None:
+        self.dreamer = _start_dreamer(vault_root)
 
     def _finish_file_watcher_startup(self, _vault_root: Path) -> None:
         watcher = self.file_watcher
@@ -902,6 +925,30 @@ def _start_graph_drain(vault_root: Path) -> Any | None:
     except Exception as exc:  # noqa: BLE001 - convergence must not break startup
         log.warning("graph drain start failed: %s", exc)
         return None
+
+
+def _start_dreamer(vault_root: Path) -> Any | None:
+    """Start the default-off upkeep worker, or nothing.
+
+    Local service only. A hosted cell never reaches this starter, and a cloud
+    cell declines here: both would need their own worker registration and
+    review before a background proposal worker runs for a tenant.
+    """
+    from . import cloud_cell, dreamer
+
+    if cloud_cell.cloud_mode_enabled():
+        return None
+    try:
+        return dreamer.start(vault_root)
+    except Exception as exc:  # noqa: BLE001 - upkeep must never break startup
+        log.warning("dreamer start failed: %s", exc)
+        return None
+
+
+def _stop_dreamer() -> None:
+    from . import dreamer
+
+    dreamer.stop(timeout=2.0)
 
 
 def _start_derived_drain(vault_root: Path) -> Any | None:

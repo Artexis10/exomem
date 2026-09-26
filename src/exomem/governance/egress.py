@@ -1865,27 +1865,39 @@ def visible_memory_refs(
     says nothing about which of them exist. An unknown, withheld or ambiguous
     ref is simply absent from the answer, and the three are indistinguishable.
     """
+    return frozenset(
+        visible_memory_ref_paths(vault_root, values, principal=principal, purpose=purpose)
+    )
+
+
+def visible_memory_ref_paths(
+    vault_root: Path,
+    values: Iterable[str],
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> dict[str, str]:
+    """`visible_memory_refs` with the one visible page each ref names, from the
+    same single scan: `{ref: vault-relative path}`."""
     wanted = {
         value: memory_id
         for value in dict.fromkeys(str(item or "").strip() for item in values)
         if (memory_id := memory_refs.parse_memory_ref(value)) is not None
     }
     if not wanted:
-        return frozenset()
+        return {}
     found = memory_refs.paths_for_ids_read_only(Path(vault_root), wanted.values())
-    return frozenset(
-        value
-        for value, memory_id in wanted.items()
-        if len(
-            _visible_candidates(
-                Path(vault_root),
-                found.get(memory_id, ()),
-                principal=principal,
-                purpose=purpose,
-            )
+    out: dict[str, str] = {}
+    for value, memory_id in wanted.items():
+        visible = _visible_candidates(
+            Path(vault_root),
+            found.get(memory_id, ()),
+            principal=principal,
+            purpose=purpose,
         )
-        == 1
-    )
+        if len(visible) == 1:
+            out[value] = visible[0]
+    return out
 
 
 def _scope_label(policy: Policy, decision: Decision) -> str | None:
@@ -2578,6 +2590,57 @@ def quick_page_visible(
         # means genuinely undecidable, never merely absent.
         return False
     return decision.level >= RELEASE_FLOOR
+
+
+def page_release_filter(
+    vault_root: Path,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> Callable[[str], bool] | None:
+    """`quick_page_visible` for many pages in one request, or `None` when
+    every page is released (an ungoverned vault with no tombstone).
+
+    The policy, the tombstones, the principal, the grants hash and the
+    declared purpose are resolved once, and each page costs only its own
+    memoized decision (`_decide_path`). Answers exactly what
+    `quick_page_visible` answers per page, so the per-page policy reload that
+    re-signs the governance tree on every call is paid once, not per page."""
+    root = Path(vault_root)
+    policy, _release_gate_active = gate_state(root)
+    who = principal if principal is not None else effective_principal()
+    memo: dict[str, bool] = {}
+    if policy.empty:
+        tombstones = lifecycle.tombstoned_paths(root)
+        if not tombstones:
+            return None
+        if lifecycle.FAIL_CLOSED_TOMBSTONE in tombstones:
+            return lambda _rel_path: False
+        return lambda rel_path: lifecycle._normalize_rel(rel_path) not in tombstones
+    if policy.blocked or not who.resolved:
+        return lambda _rel_path: False
+    grants_hash = _grants_hash(policy)
+    declared_purpose = _declared_purpose(root, who, purpose)
+
+    def released(rel_path: str) -> bool:
+        if rel_path in memo:
+            return memo[rel_path]
+        decision = None
+        if not lifecycle.is_tombstoned(root, rel_path):
+            decision = _decide_path(
+                root,
+                rel_path,
+                policy=policy,
+                audience=who.audience_id,
+                purpose=declared_purpose,
+                grants_hash=grants_hash,
+                authorization_session=who.authorization_session_id,
+                authorization_context=who.verified_authorization_session,
+            )
+        memo[rel_path] = decision is not None and decision.level >= RELEASE_FLOOR
+        return memo[rel_path]
+
+    return released
 
 
 def guard_working_set(

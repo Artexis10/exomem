@@ -31,6 +31,10 @@ jobs:
             ~/.cache/torch
           key: heavy-media-tiny-whisper-clip-v1
       - name: Run real media product smoke
+        env:
+          # The smoke proves the media lanes; recall's text model stays the one
+          # its model cache holds.
+          EXOMEM_RECALL_MODEL: BAAI/bge-base-en-v1.5
         run: >-
           uv run --frozen --extra embeddings --extra media
           python scripts/smoke-media-pipeline.py --require-all

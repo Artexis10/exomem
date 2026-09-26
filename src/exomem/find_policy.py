@@ -6,7 +6,10 @@ import heapq
 import math
 import re
 from collections.abc import Callable, Set
+from dataclasses import dataclass
 from datetime import date, timedelta
+from functools import lru_cache
+from typing import Any, NamedTuple
 
 from .find_types import Hit
 from .ranking_config import DEFAULT_RANKING, RankingConfig
@@ -596,3 +599,231 @@ def should_rerank(
     overlap = len(set(vec) & set(bm))
     disagreement = 1.0 - overlap / max(len(vec), len(bm))
     return disagreement > 0.5
+
+
+@dataclass(frozen=True)
+class RerankerCoverage:
+    """What a reranker can judge, declared per model as data.
+
+    `scripts` names the letter scripts it reads (None: every script), as
+    `dominant_script` reads them. `cross_lingual` says whether it can judge a
+    query against a passage written in another language.
+    """
+
+    scripts: frozenset[str] | None
+    cross_lingual: bool
+
+
+#: `BAAI/bge-reranker-base` was trained on English and Chinese. On the
+#: multilingual recall fixture over bge-m3 recall (2026-09-23) it improved
+#: English (golden NDCG@10 0.931 -> 0.962) and left same-language Latin queries
+#: whole, but moved a Russian gold from rank 1 to 3 and another out of the top
+#: ten, and on German and Estonian queries answered by an English page it put
+#: the same-language look-alike first again. `BAAI/bge-reranker-v2-m3` is the
+#: multilingual opt-in for accelerated hosts (`EXOMEM_RANKING_MODEL`). Its card
+#: says only "multilingual": the all-scripts, cross-lingual declaration below is
+#: an assumption, not measured here. Coverage is by script, not by language:
+#: a Latin-script query answered by an English page (German, Estonian) is not
+#: gated, and a kanji-dominant Japanese query reads as Han.
+_RERANKER_COVERAGE: dict[str, RerankerCoverage] = {
+    "BAAI/bge-reranker-base": RerankerCoverage(frozenset({"latin", "han"}), cross_lingual=False),
+    "BAAI/bge-reranker-v2-m3": RerankerCoverage(None, cross_lingual=True),
+}
+#: A reranker the owner configured without a declaration is trusted as configured.
+#: The lookup is by exact name, so a local path or mirror of a declared model is
+#: undeclared too.
+_UNDECLARED_RERANKER = RerankerCoverage(None, cross_lingual=True)
+
+#: Block-name markers that split the declared unspaced blocks into scripts; any
+#: other unspaced block (CJK, Kangxi, the ideographic planes) is Han.
+_UNSPACED_SCRIPT_MARKERS = (
+    ("Hiragana", "kana"),
+    ("Katakana", "kana"),
+    ("Kana", "kana"),
+    ("Hangul", "hangul"),
+    ("Thai", "thai"),
+    ("Lao", "lao"),
+    ("Khmer", "khmer"),
+    ("Myanmar", "myanmar"),
+)
+
+
+def reranker_coverage(model_name: str) -> RerankerCoverage:
+    """The declared coverage of `model_name`; an undeclared reranker is not gated."""
+    return _RERANKER_COVERAGE.get(model_name, _UNDECLARED_RERANKER)
+
+
+@lru_cache(maxsize=4096)
+def _letter_script(character: str) -> str:
+    from . import text_scripts
+
+    if text_scripts.is_scriptio_continua(character):
+        code_point = ord(character)
+        for start, end, name in text_scripts.SCRIPTIO_CONTINUA_BLOCKS:
+            if start <= code_point <= end:
+                for marker, script in _UNSPACED_SCRIPT_MARKERS:
+                    if marker in name:
+                        return script
+                return "han"
+    return text_scripts.uniform_letter_script(character) or "other"
+
+
+_ASCII_LETTER = re.compile(r"[A-Za-z]")
+_NON_ASCII = re.compile(r"[^\x00-\x7f]+")
+
+
+def dominant_script(text: str) -> str | None:
+    """The script most of the text's letters are written in; None with no letters.
+
+    Read from the declared Unicode blocks in `text_scripts`, after NFKC, so a
+    full-width Latin letter is Latin. Scripts the table does not declare read as
+    "other". No language is detected. ASCII letters are counted in bulk, so an
+    English page costs one regex pass.
+    """
+    import unicodedata
+
+    normalized = unicodedata.normalize("NFKC", text or "")
+    counts: dict[str, int] = {}
+    ascii_letters = len(_ASCII_LETTER.findall(normalized))
+    if ascii_letters:
+        counts["latin"] = ascii_letters
+    for run in _NON_ASCII.findall(normalized):
+        for character in run:
+            if unicodedata.category(character).startswith("L"):
+                script = _letter_script(character)
+                counts[script] = counts.get(script, 0) + 1
+    if not counts:
+        return None
+    return min(counts, key=lambda script: (-counts[script], script))
+
+
+def reranker_reads_query(coverage: RerankerCoverage, query: str) -> bool:
+    """True when the reranker declares the script most of the query is written in."""
+    if coverage.scripts is None:
+        return True
+    script = dominant_script(query)
+    return script is None or script in coverage.scripts
+
+
+#: The dense lead is lexically invisible and fusion withheld a vote for a page
+#: in another script than the lead: the query's words lead into another script.
+CROSSING_VOTES_WITHHELD = "lexical_votes_across_scripts"
+#: The dense lead is lexically invisible, no lexical candidate holds a content
+#: word of the query, and the query is written in another script than the lead.
+CROSSING_UNMATCHED = "query_script_differs_from_dense_lead"
+#: Why fusion withheld a lexical vote, as the explain trace reports it.
+WITHHELD_REASON = "other_script_than_dense_lead"
+
+
+class LexicalVisibility(NamedTuple):
+    """What fusion learned about the lexical lanes against the dense lead."""
+
+    #: Lexical-lane candidates whose votes fusion withholds.
+    withheld: frozenset[str]
+    #: Why the request crosses scripts (`CROSSING_*`), or None when it does not.
+    crossing: str | None
+
+    @property
+    def crosses_language(self) -> bool:
+        return self.crossing is not None
+
+
+LEXICALLY_VISIBLE = LexicalVisibility(frozenset(), None)
+
+
+def lexical_visibility(
+    *,
+    query: str,
+    vector_ranking: list[str],
+    lexical_rankings: tuple[list[str], ...],
+    lane_weights: tuple[float, ...],
+    rrf_k: int,
+    window: int,
+    view_of: Callable[[str], Any],
+) -> LexicalVisibility:
+    """Which lexical votes fusion withholds, and whether the request crosses scripts.
+
+    `view_of(identity)` returns an object with `stem_set` (query-comparable
+    index stems) and `letter_script` (`dominant_script` of its text), read
+    lazily, or None when the identity cannot be read: a parsed page in `find`,
+    a projection's search fields in governed projected recall.
+
+    The dense lane is the only lane that can match a page written in another
+    language than the query. When its strongest candidate shares no content word
+    with the query, the lexical lanes cannot see that page at all, and their
+    votes rank other pages by vocabulary overlap with the query. Where those
+    pages are written in another script than the dense lead -- the query's own,
+    when the lead is in another -- reciprocal-rank fusion would let one partial
+    match plus a weaker dense vote outrank the dense lead.
+
+    So, with the dense lead lexically invisible, a lexical lane stops voting for
+    a page that (a) holds only some of the query's content words and (b) is
+    written mostly in another letter script than the dense lead
+    (`dominant_script`, the table the rerank coverage gate reads).
+    The page keeps its dense and other votes. Words are counted as the
+    degraded-retention gate counts them (`query_word_stem_groups`),
+    function words excluded. There is no threshold and no language detection: a
+    lead in the query's own script never costs a same-script page its vote, so
+    an English vault ranks exactly as before. A Latin-script query whose answer
+    is an English page (German, Estonian) is not protected by this rule.
+
+    Only candidates that can reach the fused window are read. The walk follows
+    the fusion of the dense and lexical lanes (`lexical_rankings` weighted by
+    `lane_weights`, the dense lane first) and stops once `window` pages have kept
+    their votes. Withholding only lowers the withheld page's score, so the pages
+    that keep their votes rank among themselves exactly as in this walk, and a
+    page the walk did not reach cannot enter the first `window` of the fusion.
+    Lanes fused later (graph, temporal, CLIP) and the post-fusion multipliers
+    are not in the walk; the window is the depth that multiplier pass reads.
+
+    The request crosses scripts, with the dense lead invisible, when a vote was
+    withheld (`CROSSING_VOTES_WITHHELD`), or when no candidate in the window
+    holds any content word of the query and the query itself is written in
+    another script than the lead (`CROSSING_UNMATCHED`). A query that matches
+    nothing in the lead's own script (an English paraphrase under an English
+    lead) does not cross. A reranker that cannot judge across languages is
+    skipped on a crossing request. The caller skips this in vector mode, where
+    no lexical lane ran and there is no evidence either way.
+    """
+    if not vector_ranking:
+        return LEXICALLY_VISIBLE
+    lexical = {path for lane in lexical_rankings for path in lane}
+    groups = query_word_stem_groups(query)
+    content_words = sum(1 for _stems, is_function, _required in groups if not is_function)
+    if not content_words:
+        return LEXICALLY_VISIBLE
+    lead_path = vector_ranking[0]
+    lead = view_of(lead_path)
+    if lead is None or stem_word_coverage(lead.stem_set, groups)[2]:
+        return LEXICALLY_VISIBLE
+    lead_script = lead.letter_script
+    # Only a query in another script than the lead can cross by matching nothing,
+    # so only then must same-script candidates be read for a content word.
+    unmatched_can_cross = dominant_script(query) != lead_script
+    from . import fusion
+
+    order = fusion.reciprocal_rank_fusion_weighted(
+        [vector_ranking, *lexical_rankings], list(lane_weights), k=rrf_k
+    )
+    withheld: set[str] = set()
+    any_content_match = False
+    kept = 0
+    for path, _score in order:
+        if kept >= window:
+            break
+        if path in lexical and path != lead_path:
+            page = view_of(path)
+            if page is not None:
+                other_script = page.letter_script != lead_script
+                if other_script or (unmatched_can_cross and not any_content_match):
+                    matched = stem_word_coverage(page.stem_set, groups)[2]
+                    any_content_match = any_content_match or matched > 0
+                    if other_script and matched < content_words:
+                        withheld.add(path)
+                        continue
+        kept += 1
+    if withheld:
+        return LexicalVisibility(frozenset(withheld), CROSSING_VOTES_WITHHELD)
+    if unmatched_can_cross and not any_content_match:
+        return LexicalVisibility(frozenset(), CROSSING_UNMATCHED)
+    return LEXICALLY_VISIBLE

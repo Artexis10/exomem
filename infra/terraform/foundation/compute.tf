@@ -126,3 +126,20 @@ resource "hcloud_server" "control" {
     prevent_destroy = true
   }
 }
+
+# K3s agent pool (add-cloud-node-provisioning). Same location, image, key and
+# subnet as the fleet node; its own firewall admits only 443 and administrator
+# SSH. The existing server stays the only K3s server.
+module "k3s_agents" {
+  source = "./modules/k3s-agents"
+
+  nodes                = var.k3s_agent_nodes
+  subnet_id            = hcloud_network_subnet.alpha.id
+  subnet_cidr          = var.private_subnet_cidr
+  reserved_private_ips = [var.private_node_ip, var.control_db_private_ip]
+  location             = var.server_location
+  image                = var.server_image
+  ssh_key_ids          = [hcloud_ssh_key.admin.id]
+  admin_ssh_cidrs      = var.admin_ssh_cidrs
+  labels               = local.common_labels
+}

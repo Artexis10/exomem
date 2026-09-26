@@ -689,6 +689,35 @@ def _lock_key(vault_root: Path, namespace: str) -> tuple[str, str]:
     return root, hashlib.sha256(f"{root}\0{namespace}".encode()).hexdigest()
 
 
+def _require_real_lock_directory(info: os.stat_result) -> None:
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or _is_reparse(info):
+        raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unsafe")
+
+
+def _clear_inherited_setgid(directory: Path, info: os.stat_result) -> os.stat_result:
+    """chmod the lstat'd directory to 0700 through a no-follow descriptor."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(directory, flags)
+    except OSError as error:
+        raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unsafe") from error
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory changed")
+        os.fchmod(descriptor, 0o700)
+    except OSError as error:
+        raise VaultLockError(
+            "VAULT_LOCK_DIRECTORY", "lock directory mode could not be made private"
+        ) from error
+    finally:
+        os.close(descriptor)
+    try:
+        return directory.lstat()
+    except OSError as error:
+        raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unreadable") from error
+
+
 def _private_lock_directory() -> Path:
     owner = os.getuid() if hasattr(os, "getuid") else None
     suffix = str(owner) if owner is not None else os.environ.get("USERNAME", "user")
@@ -703,9 +732,14 @@ def _private_lock_directory() -> Path:
         info = directory.lstat()
     except OSError as error:
         raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unreadable") from error
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or _is_reparse(info):
-        raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unsafe")
+    _require_real_lock_directory(info)
     if owner is not None:
+        # A setgid parent (a pod fsGroup makes the /tmp emptyDir 02777) hands
+        # S_ISGID to the mkdir above, and the emptyDir keeps it across restarts.
+        # Owner-only plus exactly that bit is cleared, never tolerated.
+        if info.st_uid == owner and stat.S_IMODE(info.st_mode) == 0o700 | stat.S_ISGID:
+            info = _clear_inherited_setgid(directory, info)
+            _require_real_lock_directory(info)
         if info.st_uid != owner or stat.S_IMODE(info.st_mode) != 0o700:
             raise VaultLockError(
                 "VAULT_LOCK_DIRECTORY",
@@ -4604,6 +4638,8 @@ def batch_atomic_write(
     publication and once at the rollback-capable completion point, avoiding a
     full content rehash before every destination flip.
     """
+    from . import working_set_heat
+
     with _BATCH_COMMIT_LOCK:
         if defer_graph_completion and (post_commit_fanout or vault_root is None):
             raise ValueError(
@@ -4617,21 +4653,35 @@ def batch_atomic_write(
             vault_root=vault_root,
             planned_write=PlannedWrite,
         )
-        result = _batch_atomic_write_locked(
-            augmented_writes,
-            vault_root=vault_root,
-            required_guards=required_guards,
-            completion_guards=completion_guards,
-            index_reports=index_reports,
-            semantic_states=semantic_states,
-            post_commit_fanout=post_commit_fanout,
-            commit_point=commit_point,
-            defer_graph_completion=defer_graph_completion,
-            _vocabulary_auxiliaries=_vocabulary_auxiliaries,
-            publication_intents_out=publication_intents_out,
+        # The heat projection's seam (close-memory-loop 7.3): the pages are in
+        # flight from before the first flip until their post-write signatures
+        # are known, so the watcher's echo of this commit is never classified
+        # as someone else's edit. Whose work it was is read from the mutation
+        # trace and the request's batch scope, never from timing.
+        heat_commit = working_set_heat.begin_commit(
+            vault_root, (write.path for write in caller_writes)
         )
+        try:
+            result = _batch_atomic_write_locked(
+                augmented_writes,
+                vault_root=vault_root,
+                required_guards=required_guards,
+                completion_guards=completion_guards,
+                index_reports=index_reports,
+                semantic_states=semantic_states,
+                post_commit_fanout=post_commit_fanout,
+                commit_point=commit_point,
+                defer_graph_completion=defer_graph_completion,
+                _vocabulary_auxiliaries=_vocabulary_auxiliaries,
+                publication_intents_out=publication_intents_out,
+            )
+        except BaseException:
+            working_set_heat.abandon_commit(heat_commit)
+            raise
+        observed = working_set_heat.observe_commit(heat_commit)
         curation_witness.mark_consumed(curation_witness_state)
-        return result
+    working_set_heat.persist_commit(observed)
+    return result
 
 
 def _batch_atomic_write_locked(

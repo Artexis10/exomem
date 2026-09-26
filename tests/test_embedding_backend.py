@@ -32,6 +32,8 @@ EQUIVALENCE_TEXTS = [
     "🧠🔬 emoji only 🚀",
     "repeat " * 300,
     "\n\nnewlines\n\tand\ttabs\n\n",
+    # BERT deletes these control characters and joins the words either side.
+    "field\x1crecord\x1dgroup\x1eunit\x1fnext\x85line",
     "SELECT * FROM notes WHERE id = 42; -- code-shaped text",
     "The quick brown fox jumps over the lazy dog. " * 20,
 ]
@@ -132,7 +134,13 @@ def test_providers_always_end_in_cpu() -> None:
 
 
 @pytest.mark.skipif(not RUN_EQUIVALENCE, reason="set RUN_EMBED_EQUIVALENCE_TEST=1")
-def test_onnx_and_torch_produce_interchangeable_vectors() -> None:
+@pytest.mark.parametrize(
+    "model_name",
+    # Recall's CLS-pooled model, and the mean-pooled XLM-R activation encoder
+    # whose padding token is `<pad>` (id 1), not BERT's `[PAD]` (id 0).
+    ["BAAI/bge-base-en-v1.5", "intfloat/multilingual-e5-small"],
+)
+def test_onnx_and_torch_produce_interchangeable_vectors(model_name: str) -> None:
     """Same model, two runtimes: vectors must be substitutable without re-indexing.
 
     Asserts the property that actually matters — that an existing vault's vectors
@@ -142,16 +150,14 @@ def test_onnx_and_torch_produce_interchangeable_vectors() -> None:
     pytest.importorskip("sentence_transformers")
     pytest.importorskip("onnxruntime")
 
-    from exomem.embeddings import MODEL_NAME
-
-    torch_encoder = embedding_backend.load_encoder(MODEL_NAME, backend=embedding_backend.TORCH)
-    onnx_encoder = embedding_backend.load_encoder(MODEL_NAME, backend=embedding_backend.ONNX)
+    torch_encoder = embedding_backend.load_encoder(model_name, backend=embedding_backend.TORCH)
+    onnx_encoder = embedding_backend.load_encoder(model_name, backend=embedding_backend.ONNX)
 
     left = torch_encoder.encode(EQUIVALENCE_TEXTS, batch_size=8)
     right = onnx_encoder.encode(EQUIVALENCE_TEXTS, batch_size=8)
 
     assert left.shape == right.shape
-    assert left.shape[1] == 768
+    assert torch_encoder.profile.fingerprint() == onnx_encoder.profile.fingerprint()
     assert right.dtype == np.float32
     assert np.allclose(np.linalg.norm(right, axis=1), 1.0, atol=1e-5)
 

@@ -15,12 +15,17 @@ _PAUSE_INCREMENT_SECONDS = 0.005
 _LOCK = threading.RLock()
 _LOCAL = threading.local()
 _FOREGROUND: dict[Path, dict[int, int]] = {}
+#: Monotonic time the last foreground holder of each vault left. A vault with no
+#: stamp has been idle since this process started.
+_LAST_EXIT: dict[Path, float] = {}
+_STARTED = time.monotonic()
 
 
 def _reset_in_forked_child() -> None:
     """Discard parent thread activity without acquiring its possibly held lock."""
-    global _FOREGROUND, _LOCAL, _LOCK
+    global _FOREGROUND, _LAST_EXIT, _LOCAL, _LOCK
     _FOREGROUND = {}
+    _LAST_EXIT = {}
     _LOCAL = threading.local()
     _LOCK = threading.RLock()
 
@@ -107,6 +112,7 @@ def foreground_scope(vault_root: os.PathLike[str] | str) -> Iterator[None]:
                         holders.pop(thread_id, None)
                     if not holders:
                         _FOREGROUND.pop(canonical, None)
+                        _LAST_EXIT[canonical] = time.monotonic()
 
 
 @contextmanager
@@ -141,6 +147,41 @@ def foreground_active(vault_root: os.PathLike[str] | str) -> bool:
         return False
     with _LOCK:
         return bool(_FOREGROUND.get(canonical))
+
+
+def idle_seconds(vault_root: os.PathLike[str] | str) -> float:
+    """Seconds since the last foreground invocation on this vault ended.
+
+    0.0 while one is live. A vault no foreground has touched in this process
+    has been idle since the process started. One dict read under the lock the
+    foreground scope already takes, so a background gate can poll it freely.
+    """
+    canonical = _canonical(vault_root)
+    if canonical is None:
+        return 0.0
+    now = time.monotonic()
+    with _LOCK:
+        if _FOREGROUND.get(canonical):
+            return 0.0
+        last = _LAST_EXIT.get(canonical, _STARTED)
+    return max(0.0, now - last)
+
+
+def foreground_since(vault_root: os.PathLike[str] | str, since: float) -> bool:
+    """True when a foreground invocation is live now or ended after `since`.
+
+    `since` is a `time.monotonic()` value. A background tick samples it at its
+    start and asks before every unit of work, so a request that arrived and
+    finished between two units still stops the tick.
+    """
+    canonical = _canonical(vault_root)
+    if canonical is None:
+        return True
+    with _LOCK:
+        if _FOREGROUND.get(canonical):
+            return True
+        last = _LAST_EXIT.get(canonical)
+    return last is not None and last >= since
 
 
 def background_active(vault_root: os.PathLike[str] | str) -> bool:

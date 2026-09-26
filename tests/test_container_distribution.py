@@ -47,6 +47,24 @@ def test_dockerfile_has_a_fixed_nonroot_immutable_hosted_target() -> None:
     assert "VOLUME" not in hosted
 
 
+def test_hosted_image_bakes_and_serves_the_model_a_cell_encodes_with() -> None:
+    """A personal server encodes recall with bge-m3; a cell keeps the English
+    model until a node encoder serves it. The hosted build stage resolves
+    `embeddings.MODEL_NAME` outside any cell, so without the explicit model it
+    would fetch bge-m3 (a multi-gigabyte artefact build) for an image whose
+    cells never load it, and its offline gate would fail the English width.
+    Every process in the hosted and cloud images names the cell's model too."""
+    from exomem import recall_space
+
+    cell_model = recall_space.configured_recall_model({"EXOMEM_HOSTED_CELL": "1"})
+    text = _read("Dockerfile")
+    builder = text.split("FROM builder-lean AS builder-hosted", 1)[1].split("\nFROM ", 1)[0]
+    hosted = text.split("FROM python:3.12-slim AS hosted", 1)[1].split("\nFROM ", 1)[0]
+
+    for stage in (builder, hosted):
+        assert f"{recall_space.RECALL_MODEL_ENV}={cell_model}" in stage
+
+
 def test_dockerfile_cloud_target_sets_pod_local_log_dir_and_disables_fastmcp_egress() -> None:
     """D1.2 "Log directory" and D2: the cloud stage's own defaults, not just the
     manifest, must keep runtime logs off the tenant volume and avoid FastMCP's
@@ -88,7 +106,7 @@ def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> 
     automatic = _workflow_job(text, "publish-image", "publish-existing-image")
     manual = _workflow_job(text, "publish-existing-image", "publish-existing-pypi")
 
-    for job, image_attestations in ((automatic, 3), (manual, 2)):
+    for job, image_attestations in ((automatic, 4), (manual, 2)):
         proof_step = job.split(
             "\n      - name: Verify the hosted runtime image and signed candidate\n", 1
         )[1].split("\n      - name:", 1)[0]
@@ -103,7 +121,8 @@ def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> 
             in job
         )
         assert "org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}" in job
-        # The hosted image and its candidate bundle, plus the cloud image on release.
+        # The hosted image and its candidate bundle, plus the cloud and cellctl
+        # images on release.
         assert job.count(ATTEST_ACTION) == image_attestations
         assert "subject-name: ghcr.io/artexis10/exomem" in job
         assert "subject-digest: ${{ steps.hosted-build.outputs.digest }}" in job
@@ -428,3 +447,38 @@ def test_unix_upgrade_documents_why_it_skips_the_cuda_repair() -> None:
 
     assert "cu132" not in upgrade
     assert "CUDA" in upgrade and "Windows" in upgrade
+
+
+def test_release_workflow_publishes_attested_cellctl_image_by_digest() -> None:
+    # The platform chart consumes cellctl by digest (cellctl.image), on the
+    # same release trigger as the Cloud cell image.
+    text = _read(".github/workflows/release-please.yml")
+    automatic = _workflow_job(text, "publish-image", "publish-existing-image")
+    cellctl = automatic.split("\n      - name: Build and push Exomem Cloud cellctl image", 1)[1]
+
+    assert "id: cellctl-build" in cellctl
+    assert "context: infra/cellctl" in cellctl
+    assert "file: infra/cellctl/Dockerfile" in cellctl
+    assert "ghcr.io/artexis10/exomem-cellctl:${{ steps.meta.outputs.version }}" in cellctl
+    assert "ghcr.io/artexis10/exomem-cellctl:${{ steps.meta.outputs.source_commit }}" in cellctl
+    assert "subject-name: ghcr.io/artexis10/exomem-cellctl" in cellctl
+    assert "subject-digest: ${{ steps.cellctl-build.outputs.digest }}" in cellctl
+    assert 'cellctl_image="ghcr.io/artexis10/exomem-cellctl@${CELLCTL_DIGEST}"' in cellctl
+    assert "gh release edit" in cellctl
+
+
+def test_cellctl_dockerfile_is_digest_pinned_nonroot_and_frozen() -> None:
+    dockerfile = _read("infra/cellctl/Dockerfile")
+
+    assert re.search(r"^ARG PYTHON_IMAGE=python:3\.12-slim@sha256:[0-9a-f]{64}$", dockerfile, re.M)
+    assert [line for line in dockerfile.splitlines() if line.startswith("FROM ")] == [
+        "FROM ${PYTHON_IMAGE} AS build",
+        "FROM ${PYTHON_IMAGE}",
+    ]
+    assert "--require-hashes" in dockerfile
+    assert "uv sync --frozen --no-dev --no-install-project --compile-bytecode" in dockerfile
+    assert "USER 1000:1000" in dockerfile
+    assert 'ENTRYPOINT ["python3", "-m", "cellctl.main"]' in dockerfile
+    # Nothing is built from an unpinned build backend.
+    assert "--no-editable" not in dockerfile and "hatchling" not in dockerfile
+    assert "PYTHONDONTWRITEBYTECODE=1" in dockerfile
