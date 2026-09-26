@@ -46,7 +46,8 @@
 
 ## 3. cellctl, manifests and ingress (lane B)
 
-- [ ] 3.1 Scaffold `infra/cellctl/` as a Python package with its own pyproject and tests, plus `tests/fixtures/exomem_cloud_schema.sql` copied from Substrate migration `0056` (every C1 column, including the write-once key columns and the hold columns) and the grants script
+- [x] 3.1 Scaffold `infra/cellctl/` as a Python package with its own pyproject and tests, plus `tests/fixtures/exomem_cloud_schema.sql` copied from Substrate migration `0056` (every C1 column, including the write-once key columns and the hold columns) and the grants script
+  Evidence (#1368): `infra/cellctl/pyproject.toml`; `tests/test_fixture_schema.py` (`test_generation_bumps_only_on_desired_column_change`, `test_cellctl_role_cannot_write_desired_columns`, `test_gateway_role_cannot_write_desired_state`); fixtures refreshed from Substrate `2b38730` (#1387).
 - [ ] 3.2 Write red-first unit tests for the rendered manifests (D5):
   - Pod Security labels, quota, and a default-deny policy with gateway-only ingress;
   - no runtime egress (not even DNS), and backup egress limited to 443 plus DNS;
@@ -54,7 +55,7 @@
   - the `cell-init` init container;
   - readiness on `/health/ready`, liveness on `/health`;
   - the encrypted `reclaimPolicy: Delete` class.
-- [ ] 3.3 Implement the reconcile loop (D4):
+- [x] 3.3 Implement the reconcile loop (D4):
   - poll, plus `LISTEN` on a direct session;
   - server-side apply under field manager `cellctl`;
   - readiness from pod conditions;
@@ -63,6 +64,7 @@
   - observed writes and generation matching;
   - transient retry, identity-conflict failure and the init deadline.
   Test against a disposable Postgres with the fixture schema.
+  Evidence (#1368): `reconcile.py`, `decide.py`; `tests/test_reconcile.py` (`test_run_loop_wakes_on_an_insert_notification_for_a_fresh_row`, `test_a_throttled_routine_apply_is_transient_and_retried_next_pass`, `test_a_converged_cell_whose_pod_turns_not_ready_is_observed_not_ready_and_back`), `tests/test_decide.py` (hold, generation, conflict and init-deadline tests), `tests/test_k8s_client.py`; `conftest.py` `cell_db`.
 - [ ] 3.4 Implement the rollout (D6) and prove each property:
   - target and initial-image selection, including `last_good_image` set at first provisioning and `NO_GOOD_IMAGE` while paused with none;
   - one attempt at a time, by priority;
@@ -78,13 +80,14 @@
   - per-cell prefix-restricted B2 keys stored write-once as `b2_key_id` and `b2_key_wrapped`, deleting the losing key on a race;
   - Secrets rendered from the row on every pass, never read back.
   Test that plaintext keys never reach the database, and that one cell's key cannot read another cell's prefix.
-- [ ] 3.6 Implement backups (D8):
+- [x] 3.6 Implement backups (D8):
   - the nightly stop-backup-start window under a `backup` hold, with its deadline;
   - the pre-upgrade backup;
   - Jobs on the cell image as UID 10001 with the pod-level `fsGroup` and a cache emptyDir;
   - retention and `last_backup_*` writes;
-  - a restore Job using `--delete`;
-  - the operator export runbook: restore into a scratch namespace and produce the tenant's vault archive.
+  - a restore Job using `--delete`.
+  The operator export runbook moved to 6.4 (deferred).
+  Evidence (#1368): `tests/test_decide.py` (`test_nightly_backup_due_respects_the_window_the_interval_and_the_backoff`, `test_nightly_backup_deadline_miss_restarts_cell_with_backup_failed_and_sets_backoff`, `test_a_successful_pre_upgrade_backup_also_records_last_backup`), `tests/test_jobs.py` (`test_backup_job_runs_as_uid_10001_with_fsgroup`, `test_backup_job_mounts_the_volume_read_only_with_a_cache_emptydir`, `test_backup_job_backs_up_vault_and_host_with_retention`, `test_restore_job_uses_delete_and_writes_the_volume`); live K3s run 36199720123.
 - [ ] 3.7 Implement verified deletion (D10) in this order:
   1. namespace;
   2. PV and Hetzner `volume_id`;
@@ -92,7 +95,8 @@
   4. the per-cell B2 key, by `b2_key_id`;
   5. the wrapped keys.
   A failed observation stays `deleting`. Document the etcd snapshot residual in the runbook.
-- [ ] 3.8 Implement capacity publication (D9), with `cell_slots` = limit − headroom − non-cell attachments
+- [x] 3.8 Implement capacity publication (D9), with `cell_slots` = limit − headroom − non-cell attachments
+  Evidence (#1368): `capacity.py`; `tests/test_capacity.py` (`test_cell_slots_subtracts_headroom_and_non_cell_attachments`, `test_fallback_limit_is_used_when_the_node_has_no_allocatable_count`), `tests/test_db.py::test_write_capacity_inserts_then_updates`, `tests/test_reconcile.py::test_a_vanished_node_gets_zero_slots_and_a_rejoining_node_its_count_back`.
 - [ ] 3.9 Add platform chart entries:
   - cellctl, single replica, `Recreate`, with the RBAC in D4 and the `ValidatingAdmissionPolicy` on its ServiceAccount (cell namespaces only, restricted labels, digest-pinned images from the cell repository);
   - the gateway Deployment and Service consuming the Substrate gateway image digest, rendering exactly the gateway's environment contract (C3), with a chart test pinning that set;
@@ -206,6 +210,7 @@
   5. image upgrade and recall;
   6. backup present in B2;
   7. token refresh after 15 minutes.
+- [ ] 6.4 Operator export runbook: restore into a scratch namespace and produce the tenant vault archive; needed before P5 friends. Moved from 3.6, where it was deferred; the P3 rehearsal's step 11 restores into a scratch namespace with cellctl's renderers as a stand-in.
 
 ## 7. Retirement (R)
 
