@@ -50,7 +50,7 @@ from exomem import (
     lexstore,
     ranking_config,
     readiness,
-    working_set,
+    working_set_heat,
     working_set_index,
     working_set_resolve,
     working_set_runtime,
@@ -120,7 +120,22 @@ _RUNS: dict[str, Runs] = {}
 
 def _compute(root: Path, monkeypatch: pytest.MonkeyPatch) -> Runs:
     manifest = build_corpus(root)
-    monkeypatch.setattr(working_set, "_recent_mtimes", lambda _root: dict(manifest.recency))
+    # The recent-context block now reads the heat projection, not file times
+    # (step 5): seed it directly with one `work` event per fixture page, at
+    # the manifest's own explicit mtimes-as-ts_ns, so recency stays exactly
+    # what the manifest schedules instead of the live filesystem clock. Every
+    # fixture page here classifies as `edited` (`working_set._recent_reason_for`:
+    # none are under `Sources/Sessions/` or the episode prefix), and a `work`
+    # event's own reason is `edited` too, so this reproduces the old uniform
+    # mtime-derived ordering exactly (review: merge fallout from step 5).
+    working_set_heat.reset_for_tests()
+    assert working_set_heat.append(
+        root,
+        sorted(
+            working_set_heat.HeatEvent(ts_ns, path, "work", origin="fixture")
+            for path, ts_ns in manifest.recency.items()
+        ),
+    )
     path_to_key = {path: key for key, path in manifest.key_to_path.items()}
     working_set_runtime.reset_caches_for_tests()
     index = working_set_index.WorkingSetIndex(root)

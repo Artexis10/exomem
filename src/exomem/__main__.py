@@ -2750,6 +2750,9 @@ def _activate_main(argv: list[str]) -> int:
     parser.add_argument(
         "--session", default=None, help="opaque conversation id, recorded only as a hash"
     )
+    parser.add_argument(
+        "--workspace", default=None, help="opaque project key, recorded only as a hash"
+    )
     parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
     args = parser.parse_args(argv)
 
@@ -2768,6 +2771,8 @@ def _activate_main(argv: list[str]) -> int:
         core += ["--client", args.client]
     if args.session:
         core += ["--session", args.session]
+    if args.workspace:
+        core += ["--workspace", args.workspace]
     return _core_op_main(_with_json(core, args.json))
 
 

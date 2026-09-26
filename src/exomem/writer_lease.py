@@ -358,11 +358,66 @@ def _drain_post_terminal_fanout(queue: list[Any]) -> tuple[list[Any], bool]:
     return reports, failed
 
 
+#: Housekeeping a leaf moved out of its own critical section, to be run once
+#: this mutation's terminal is durable -- the same deferral `_ACTIVE_
+#: POST_TERMINAL_FANOUT` gives derived-index work, but for a registrant that
+#: reports nothing about derived custody. Kept as a SEPARATE queue on purpose:
+#: `post_terminal_fanout`'s mere non-emptiness is read in several places as
+#: "real derived-index work is outstanding for this write" (whether to mark
+#: the terminal `derived_sync: "pending"`, whether an acknowledgement is
+#: owed). A housekeeping registrant sharing that queue would make every one
+#: of those reads wrong for every write it touches, not just its own
+#: response (review: merge fallout -- heat's commit-seam append did exactly
+#: this by reusing `defer_until_terminal_persisted`).
+_ACTIVE_POST_TERMINAL_HOUSEKEEPING: ContextVar[list[Callable[[], None]] | None] = ContextVar(
+    "exomem_active_post_terminal_housekeeping", default=None
+)
+
+
+def defer_housekeeping_until_terminal_persisted(work: Callable[[], None]) -> bool:
+    """Queue `work` to run after this mutation's terminal is persisted.
+
+    For housekeeping with no derived-custody implications -- nothing here
+    ever marks a terminal `derived_sync: "pending"` or wraps it in derived-
+    acknowledgement diagnostics, unlike `defer_until_terminal_persisted`.
+    Returns False exactly as that function does: no mutation to defer to (a
+    CLI caller, a watcher, a direct test), so the caller does the work inline.
+    """
+    queue = _ACTIVE_POST_TERMINAL_HOUSEKEEPING.get()
+    if queue is None:
+        return False
+    queue.append(work)
+    return True
+
+
+def _drain_post_terminal_housekeeping(queue: list[Callable[[], None]]) -> None:
+    """Run every deferred housekeeping item once, in order, swallowing failures."""
+    while queue:
+        work = queue.pop(0)
+        try:
+            work()
+        except Exception:  # noqa: BLE001 - the canonical terminal is already durable
+            logger.warning("post-terminal housekeeping failed", exc_info=True)
+
+
 def _with_post_terminal_fanout_acknowledgement(
     result: Any, reports: list[Any], *, drain_failed: bool
 ) -> Any:
-    """Project observed non-graph media fan-out into the durable terminal."""
+    """Project observed non-graph media fan-out into the durable terminal.
+
+    A no-op when nothing was actually drained. `post_terminal_fanout` is a
+    shared queue of deferred CALLABLES, not derived-index reports: a
+    registrant that has nothing to report about derived custody -- heat's own
+    commit-seam append (`working_set_heat.persist_commit`) queues one on
+    every governed write and its callable always returns `[]` -- must never
+    dress an ordinary write up with `derived_sync`/`advisory_sync`/nested
+    `diagnostics` fields that promise custody tracking nothing here actually
+    performed. Only media's real fan-out ever returns a non-empty report list
+    (review: merge fallout -- heat's registrant made this run unconditionally
+    on every write once it started sharing the queue)."""
     if not isinstance(result, Mapping) or result.get("state") != "committed":
+        return result
+    if not reports and not drain_failed:
         return result
 
     from . import index_sync
@@ -4109,6 +4164,9 @@ class LeaseManager:
         # guard. Drained by `idempotency.run`'s post-persistence acknowledgement
         # hook, strictly after the terminal is durable.
         post_terminal_fanout: list[Any] = []
+        # Housekeeping with no derived-custody implications, drained the same
+        # way but never read as a sign that acknowledgement is owed.
+        post_terminal_housekeeping: list[Callable[[], None]] = []
         fast_ack_session = (
             _FastAcknowledgementSession(
                 vault_root=receipt_vault_root,
@@ -4189,6 +4247,9 @@ class LeaseManager:
                 else None
             )
             post_terminal_token = _ACTIVE_POST_TERMINAL_FANOUT.set(post_terminal_fanout)
+            housekeeping_token = _ACTIVE_POST_TERMINAL_HOUSEKEEPING.set(
+                post_terminal_housekeeping
+            )
             try:
                 with operation_context(
                     receipt_vault_root,
@@ -4251,6 +4312,7 @@ class LeaseManager:
             finally:
                 commit_state["observed"] = _ACTIVE_MUTATION_COMMITTED.get()
                 _ACTIVE_POST_TERMINAL_FANOUT.reset(post_terminal_token)
+                _ACTIVE_POST_TERMINAL_HOUSEKEEPING.reset(housekeeping_token)
                 if fast_ack_token is not None:
                     _ACTIVE_FAST_ACK_SESSION.reset(fast_ack_token)
                 _ACTIVE_LEASE_MANAGER.reset(manager_token)
@@ -4876,6 +4938,8 @@ class LeaseManager:
             return finish_fast_ack_and_graph(result)
 
         def finish_after_terminal_persistence(result: Any) -> Any:
+            if post_terminal_housekeeping:
+                _drain_post_terminal_housekeeping(post_terminal_housekeeping)
             if post_terminal_fanout:
                 reports, drain_failed = _drain_post_terminal_fanout(
                     post_terminal_fanout
@@ -5452,6 +5516,13 @@ def active_mutation_request_id() -> str | None:
     """Return the current content-free request identity for commit attribution."""
     trace = _ACTIVE_MUTATION_TRACE.get()
     return trace[0] if trace is not None else None
+
+
+def active_mutation_trace() -> tuple[str, str, str] | None:
+    """`(request_id, command, receipt)` of the mutation this code runs inside,
+    or `None` outside one (a CLI helper, the watcher, a direct call). The heat
+    projection reads the command name as the origin of a governed commit."""
+    return _ACTIVE_MUTATION_TRACE.get()
 
 
 def active_mutation_committed() -> bool:

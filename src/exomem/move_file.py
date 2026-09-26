@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from . import reserved_paths, semantic_index, semantic_writes, source_taxonomy
+from . import working_set_heat
 from .governance import catalog_publication, graph_producer
 from .kbdir import kb_dirname
 from .vault import (
@@ -663,34 +664,43 @@ def move_file(
                 ]
                 if catalog_target is not None:
                     combined.extend(log_plan.writes)
-                _held_rename(vault_root, old_rel, new_rel)
-                # The bytes follow the page inside the same transaction. A
-                # rollback below undoes both, so a failure can never leave an
-                # artifact split across two trees.
-                if paired_binary is not None:
-                    try:
-                        _held_rename(vault_root, *paired_binary)
-                    except MoveFileError:
-                        _held_rename(vault_root, new_rel, old_rel)
-                        raise
+                # The moved page is the move's one piece of work, on its new
+                # path; the link rewrites around it earn nothing (review F1).
+                heat_move = working_set_heat.begin_commit(vault_root, [new_abs])
+                try:
+                    _held_rename(vault_root, old_rel, new_rel)
+                    # The bytes follow the page inside the same transaction.
+                    # A rollback below undoes both, so a failure can never
+                    # leave an artifact split across two trees.
+                    if paired_binary is not None:
+                        try:
+                            _held_rename(vault_root, *paired_binary)
+                        except MoveFileError:
+                            _held_rename(vault_root, new_rel, old_rel)
+                            raise
+                except BaseException:
+                    working_set_heat.abandon_commit(heat_move)
+                    raise
                 try:
                     if combined:
                         batch_fanout_paths[:] = [write.path for write in combined]
-                        batch_atomic_write(
-                            combined,
-                            vault_root=vault_root,
-                            required_guards=required_guards,
-                            index_reports=batch_index_reports,
-                            semantic_states={
-                                write.path.relative_to(vault_root).as_posix(): semantic_states[
-                                    write.path.relative_to(vault_root).as_posix()
-                                ]
-                                for write in combined
-                                if write.path.relative_to(vault_root).as_posix()
-                                in semantic_states
-                            },
-                        )
+                        with working_set_heat.primary_paths(()):
+                            batch_atomic_write(
+                                combined,
+                                vault_root=vault_root,
+                                required_guards=required_guards,
+                                index_reports=batch_index_reports,
+                                semantic_states={
+                                    write.path.relative_to(vault_root).as_posix(): semantic_states[
+                                        write.path.relative_to(vault_root).as_posix()
+                                    ]
+                                    for write in combined
+                                    if write.path.relative_to(vault_root).as_posix()
+                                    in semantic_states
+                                },
+                            )
                 except Exception as error:
+                    working_set_heat.abandon_commit(heat_move)
                     log.exception(
                         "move_file: link-update batch failed for %s -> %s",
                         old_rel,
@@ -706,10 +716,14 @@ def move_file(
                             f"failed: {rollback_error}"
                         ) from error
                     raise
+                heat_moved.append(working_set_heat.observe_commit(heat_move))
 
+            heat_moved: list[working_set_heat.ObservedCommit | None] = []
             committed = semantic_writes.commit_move(
                 vault_root, preflight=preflight, mutate=mutate
             )
+            for observed in heat_moved:
+                working_set_heat.persist_commit(observed)
             semantic = committed.as_dict()
         except semantic_writes.SemanticWriteError as error:
             raise MoveFileError(code=error.code, reason=error.reason) from error
@@ -763,7 +777,9 @@ def move_file(
         _held_rename(vault_root, old_rel, new_rel)
         try:
             if writes:
-                batch_atomic_write(writes, vault_root=vault_root)
+                # Link rewrites are the move's bookkeeping, nobody's work.
+                with working_set_heat.primary_paths(()):
+                    batch_atomic_write(writes, vault_root=vault_root)
         except Exception as e:
             log.exception(
                 "move_file: link-update batch failed for %s -> %s", old_rel, new_rel

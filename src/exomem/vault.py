@@ -4638,6 +4638,8 @@ def batch_atomic_write(
     publication and once at the rollback-capable completion point, avoiding a
     full content rehash before every destination flip.
     """
+    from . import working_set_heat
+
     with _BATCH_COMMIT_LOCK:
         if defer_graph_completion and (post_commit_fanout or vault_root is None):
             raise ValueError(
@@ -4651,21 +4653,35 @@ def batch_atomic_write(
             vault_root=vault_root,
             planned_write=PlannedWrite,
         )
-        result = _batch_atomic_write_locked(
-            augmented_writes,
-            vault_root=vault_root,
-            required_guards=required_guards,
-            completion_guards=completion_guards,
-            index_reports=index_reports,
-            semantic_states=semantic_states,
-            post_commit_fanout=post_commit_fanout,
-            commit_point=commit_point,
-            defer_graph_completion=defer_graph_completion,
-            _vocabulary_auxiliaries=_vocabulary_auxiliaries,
-            publication_intents_out=publication_intents_out,
+        # The heat projection's seam (close-memory-loop 7.3): the pages are in
+        # flight from before the first flip until their post-write signatures
+        # are known, so the watcher's echo of this commit is never classified
+        # as someone else's edit. Whose work it was is read from the mutation
+        # trace and the request's batch scope, never from timing.
+        heat_commit = working_set_heat.begin_commit(
+            vault_root, (write.path for write in caller_writes)
         )
+        try:
+            result = _batch_atomic_write_locked(
+                augmented_writes,
+                vault_root=vault_root,
+                required_guards=required_guards,
+                completion_guards=completion_guards,
+                index_reports=index_reports,
+                semantic_states=semantic_states,
+                post_commit_fanout=post_commit_fanout,
+                commit_point=commit_point,
+                defer_graph_completion=defer_graph_completion,
+                _vocabulary_auxiliaries=_vocabulary_auxiliaries,
+                publication_intents_out=publication_intents_out,
+            )
+        except BaseException:
+            working_set_heat.abandon_commit(heat_commit)
+            raise
+        observed = working_set_heat.observe_commit(heat_commit)
         curation_witness.mark_consumed(curation_witness_state)
-        return result
+    working_set_heat.persist_commit(observed)
+    return result
 
 
 def _batch_atomic_write_locked(

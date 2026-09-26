@@ -131,6 +131,7 @@ from . import vocabulary_workflow as vocabulary_workflow_module
 from . import workflow_contracts as workflow_contracts_module
 from . import workflow_skills as workflow_skills_module
 from . import working_set as working_set_module
+from . import working_set_heat as working_set_heat_module
 from . import working_set_index as working_set_index_module
 from . import working_set_runtime as working_set_runtime_module
 from .command_surface import (
@@ -3078,6 +3079,7 @@ def op_fetch(
         frontmatter_only=False,
         include_history=False,
     )
+    working_set_heat_module.note_selection(vault_root, [page.path], "read")
     out = {
         "id": page.path,
         "title": _title_from_page(page.path, page.frontmatter, page.body),
@@ -3960,6 +3962,7 @@ def op_get(
         frontmatter_only=frontmatter_only,
         include_history=include_history,
     )
+    working_set_heat_module.note_selection(vault_root, [out["path"]], "read")
     if include_history:
         with call_spans_module.span("read.history", {}) as measured:
             out["history"] = vault.read_log_entries(vault_root, out["path"])
@@ -4445,6 +4448,7 @@ def op_replace(
         raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
     if written_path := getattr(result, "new_path", None):
         query_log.log_write_call(tool="replace", written_path=written_path, cited_sources=sources)
+        working_set_heat_module.note_citations(vault_root, sources or ())
     return result.as_dict()
 
 
@@ -4936,6 +4940,7 @@ def op_note(
         raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
     if written_path := getattr(result, "path", None):
         query_log.log_write_call(tool="note", written_path=written_path, cited_sources=sources)
+        working_set_heat_module.note_citations(vault_root, sources or ())
     return result.as_dict()
 
 
@@ -5962,6 +5967,7 @@ def op_activate_context(
     include_timings: bool = False,
     client: str | None = None,
     session: str | None = None,
+    workspace: str | None = None,
 ) -> dict:
     """Compile durable context for a raw conversational turn, without a query.
 
@@ -5985,7 +5991,19 @@ def op_activate_context(
     remains the carrier for the resolved anchors' governed state.
     It is served whether or not the turn resolved anything, so a fresh session
     opening on "continue" receives the thread it is picking up. `as_of` dates
-    the CONTACT, not the event the page describes.
+    the CONTACT, not the event the page describes. With `session` or
+    `workspace` passed, this conversation's own pages come first.
+
+    A turn that names nothing ("continue", "where were we") is answered from
+    recent work: the thread your `continuity` token names, else what was last
+    worked on, picked with `anchor`, or named by a recorded episode, in this
+    conversation first, then its workspace, then the vault. Reads rank below
+    any of those, and a maintenance batch counts as nobody's work. An anchor
+    reached this way resolves with `recency` in its evidence. A single
+    ordinary page reached this way is served as `kind: "page"`, `status:
+    "resolved"`, evidence `["recency"]` and `generation.carried_by:
+    "recency"`; a page tied with anything else abstains `ambiguous`, listing
+    both, for you to pick with `anchor`.
 
     Read-only and abstaining by construction. It writes nothing, changes no
     `ask_memory`/`find` result, runs no model beyond the retrieval scorers recall
@@ -6062,13 +6080,22 @@ def op_activate_context(
             identically and no packet is built.
         include_timings: Include per-stage timings for diagnostics.
         client: Optional lowercase label for the calling client, e.g.
-            `claude-code`, `codex` or `chatgpt`. Recorded in a host-local
-            activation log only; an invalid label is ignored, never refused.
+            `claude-code`, `codex` or `chatgpt`. Recorded host-locally only; an
+            invalid label is ignored, never refused.
         session: Optional opaque conversation identifier, at most 256
             characters, such as the `episode` key an `episode_memory` record
-            returned. Only a vault-keyed hash of it is recorded. Neither
-            argument changes the packet's material; `session` only says whose
-            session start an `upkeep` item may arrive at.
+            returned. Pass the same one on every turn of a conversation: a turn
+            that names nothing ("continue") is then answered from THIS
+            conversation's own last thread and picks first, before anything
+            other conversations touched, and `recent_context` lists its pages
+            first. Only a salted hash of it is stored, on this machine. It
+            also names whose session start an `upkeep` item may arrive at.
+        workspace: Optional opaque key for the project or folder the
+            conversation runs in, at most 256 characters, such as a hash of
+            the working directory. A fresh conversation in the same workspace
+            continues that workspace's thread before the rest of the vault's.
+            Only a salted hash of it is stored. Omitting both keys ranks by
+            the whole vault's recent work.
 
     Returns: {recent_context, anchors, roles, units, pointers, current_state,
              missing, ambiguity, budget, generation, abstained, abstention?,
@@ -6079,7 +6106,10 @@ def op_activate_context(
              `partial`, `retrieval_named` or competing `ambiguity` candidate),
              `ambiguity` and `missing` may still be populated.
              `generation.continuity` reports whether a token you passed was
-             `applied`, `stale` or `absent`.
+             `applied`, `stale` or `absent`. `generation.hot_profile` reports
+             the recent-work projection's `state` (`current`, `partial`,
+             `seeded`, `behind` or `empty`) and `session_start`, the date
+             its current working session began.
     """
     # `RequestBudget` is bound in exactly one place, the MCP dispatch
     # middleware: `request_budget.current()` is always None on the REST and
@@ -6113,11 +6143,13 @@ def op_activate_context(
     # that abstains still resolved placement several times on its way there,
     # and the abstention paths are the ones a struggling server takes most.
     #
-    # `client` and `session` stop HERE: they are recorded by the activation
-    # log after the packet exists and never reach resolution, the packet's
-    # material, its cache key or the continuity token. `session` has one other
-    # reader, the upkeep carrier below, where it names the caller whose session
-    # start may carry one upkeep item.
+    # `client`, `session` and `workspace` never reach resolution or the
+    # continuity token. They rank the heat projection's tiers for a turn that
+    # names nothing (ruling S5-1), enter the packet cache key only as the
+    # digest of that ranking, and are recorded by the activation log after the
+    # packet exists — the session as a vault-keyed hash, the workspace not at
+    # all. `session` has one other reader, the upkeep carrier below, where it
+    # names the caller whose session start may carry one upkeep item.
     started = time.perf_counter()
     with state_paths_module.resolution_scope():
         bound_token = None
@@ -6136,6 +6168,9 @@ def op_activate_context(
                 continuity=continuity,
                 anchor=anchor,
                 include_timings=include_timings,
+                client=client,
+                session=session,
+                workspace=workspace,
             )
             # After the guard and outside the packet cache, like `continuity`:
             # at a caller's session start, at most one upkeep item, and only in
@@ -6175,6 +6210,9 @@ def _op_activate_context_body(
     continuity: str | None = None,
     anchor: str | None = None,
     include_timings: bool = False,
+    client: str | None = None,
+    session: str | None = None,
+    workspace: str | None = None,
 ) -> dict:
     """`op_activate_context`'s implementation, called with a budget already
     bound (either the caller's MCP budget, or the door budget the public
@@ -6468,6 +6506,15 @@ def _op_activate_context_body(
             raise
         except Exception:  # noqa: BLE001 - an optimization that fails just does not apply
             log.debug("agent-picked-page early visibility check unavailable", exc_info=True)
+    # The caller's derived keys, once: ruling S5-1's tiers, the pick's own
+    # attribution and the session's last served thread all use the same one.
+    attribution = (
+        working_set_heat_module.attribution_for(
+            vault_root, client=client, session=session, workspace=workspace
+        )
+        if client or session or workspace
+        else None
+    )
     packet = working_set_runtime_module.serve(
         vault_root,
         turn=turn,
@@ -6482,6 +6529,7 @@ def _op_activate_context_body(
         evidence_token=evidence_token,
         freshness_snapshot=snapshot,
         lexical_seconds=lexical_seconds,
+        attribution=attribution,
     )
     # An override that resolved nothing named no anchor of this index. Refused
     # here, before the guard, with the same words a withheld ref gets below —
@@ -6537,6 +6585,49 @@ def _op_activate_context_body(
     )
     if token:
         packet["continuity"] = token
+    if anchor:
+        # The agent's admitted choice is a deliberate act (design D6): after the
+        # guard, so a refused or withheld pick never reaches here. Serving a
+        # packet is never heat; only this seam and the read and citation seams
+        # record a selection.
+        working_set_heat_module.note_selection(
+            vault_root,
+            [
+                str(item.get("path") or "")
+                for item in packet.get("anchors") or ()
+                if isinstance(item, Mapping) and item.get("status") == "resolved"
+            ],
+            "pick",
+            attribution=attribution,
+            ts_ns=working_set_runtime_module.continuity_minted_ns(token) if token else None,
+        )
+    if attribution is not None and attribution.session:
+        # The session's last served thread (ruling S5-1): what its token names,
+        # after the guard, so a compacted or resumed conversation that lost its
+        # token still continues its own work. Never an event in the ring:
+        # serving is not heat for anyone else's ranking.
+        working_set_heat_module.note_session(
+            vault_root,
+            working_set_heat_module.SessionMark(
+                session=attribution.session,
+                workspace=attribution.workspace,
+                client=attribution.client,
+                paths=tuple(
+                    str(item.get("path") or "")
+                    for item in (packet.get("anchors") or ())
+                    if token
+                    and isinstance(item, Mapping)
+                    and item.get("status") in working_set_runtime_module.MINTED_STATUSES
+                    and item.get("path")
+                ),
+                minted_ns=(
+                    working_set_runtime_module.continuity_minted_ns(token) or time.time_ns()
+                    if token
+                    else 0
+                ),
+                seen_ns=time.time_ns(),
+            ),
+        )
     # After the guard and never cached: advice to this caller about recording
     # its conversation, not material about the vault, and it names no page.
     episode_due = episode_nudge_module.on_activation(vault_root)
@@ -6646,6 +6737,7 @@ def op_read_memory(
             frontmatter_only=False,
             include_history=False,
         )
+        working_set_heat_module.note_selection(vault_root, [page.path], "read")
         return semantic_unit_read_module.read_semantic_unit(
             vault_root,
             page=page,
@@ -7321,6 +7413,8 @@ def op_episode_memory(
         said: Up to 3 verbatim user statements worth keeping, 300 characters
             each.
         about: Up to 3 `exomem://` refs of pages the conversation concerned.
+            Recording marks them as this conversation's latest work, so a
+            following "continue" resumes them.
             Refs you cannot see are dropped and counted in `about_skipped`.
         client: Optional lowercase client label, e.g. `claude-code` or
             `chatgpt`.
