@@ -12,12 +12,14 @@ import re
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from secret_keysets import KeySetError, loads_unique_json, parse_json_object, validate_key_sets
 
 _VERSION = re.compile(r"v[1-9][0-9]*\Z")
 _SAFE_NAME = re.compile(r"[a-zA-Z0-9_.-]+\Z")
@@ -44,6 +46,7 @@ class DestinationSpec:
     kind: str
     slot: str
     fields: dict[str, str]
+    key_sets: tuple[frozenset[str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -90,8 +93,8 @@ def _require_string(value: Any, label: str) -> str:
 
 def load_matrix(path: Path) -> HandoffMatrix:
     try:
-        document = json.loads(path.read_bytes())
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        document = loads_unique_json(path.read_bytes())
+    except (OSError, KeySetError) as exc:
         raise HandoffError("secret matrix is unreadable or invalid") from exc
     if not isinstance(document, dict) or document.get("schema_version") != 1:
         raise HandoffError("secret matrix version is unsupported")
@@ -170,7 +173,7 @@ def load_matrix(path: Path) -> HandoffMatrix:
         if not isinstance(raw_destinations, dict) or not raw_destinations:
             raise HandoffError(f"secret matrix has no destinations for {name}")
         value_shape = raw_secret.get("value_shape", "line")
-        if value_shape not in {"line", "file"}:
+        if value_shape not in {"line", "file", "json-object"}:
             raise HandoffError(f"secret matrix has an invalid value shape for {name}")
 
         sources: list[SourceSpec] = []
@@ -193,6 +196,8 @@ def load_matrix(path: Path) -> HandoffMatrix:
             ):
                 raise HandoffError(f"secret matrix has invalid source kind for {name}")
             seen_source_kinds.add(kind)
+            if value_shape == "json-object" and kind not in {"stdin", "bws"}:
+                raise HandoffError(f"secret matrix has invalid source kind for {name}")
             root = raw_source.get("root")
             output = raw_source.get("output")
             bindings = raw_source.get("bindings")
@@ -241,15 +246,18 @@ def load_matrix(path: Path) -> HandoffMatrix:
                 "previous",
             }:
                 raise HandoffError(f"secret matrix has invalid destination policy for {name}")
+            raw_key_sets = raw_destination.get("key_sets")
+            has_key_sets = "key_sets" in raw_destination
             fields = {
                 key: value
                 for key, value in raw_destination.items()
-                if key not in {"kind", "slot"} and isinstance(value, str)
+                if key not in {"kind", "slot", "key_sets"} and isinstance(value, str)
             }
-            if len(fields) != len(raw_destination) - 2:
+            if len(fields) != len(raw_destination) - 2 - has_key_sets:
                 raise HandoffError(f"secret matrix has invalid destination fields for {name}")
+            key_sets: tuple[frozenset[str], ...] = ()
             if kind == "vercel_env":
-                if set(fields) != {"project", "environment", "name"}:
+                if has_key_sets or set(fields) != {"project", "environment", "name"}:
                     raise HandoffError(f"secret matrix has invalid Vercel destination for {name}")
                 if fields["project"] not in vercel_projects:
                     raise HandoffError(f"secret matrix has unknown Vercel project for {name}")
@@ -258,12 +266,21 @@ def load_matrix(path: Path) -> HandoffMatrix:
                 _require_string(fields["name"], "Vercel variable")
             else:
                 expected_fields = {
-                    "sops_k8s_secret": {"target", "namespace", "kubernetes_secret", "key"},
+                    "sops_k8s_secret": {"target", "namespace", "kubernetes_secret"}
+                    | ({"key_sets"} if value_shape == "json-object" else {"key"}),
                     "sops_escrow": {"target", "secret_key"},
                     "sops_ansible_vars": {"target", "variable"},
                 }[kind]
-                if set(fields) != expected_fields:
+                actual_fields = set(fields) | ({"key_sets"} if has_key_sets else set())
+                if actual_fields != expected_fields:
                     raise HandoffError(f"secret matrix has invalid SOPS destination for {name}")
+                if has_key_sets:
+                    try:
+                        key_sets = validate_key_sets(raw_key_sets)
+                    except KeySetError as exc:
+                        raise HandoffError(
+                            f"secret matrix has invalid key sets for {name}"
+                        ) from exc
                 target = fields["target"]
                 if (
                     not target.endswith(".sops.json")
@@ -279,7 +296,8 @@ def load_matrix(path: Path) -> HandoffMatrix:
                 if kind == "sops_k8s_secret":
                     _require_string(fields["namespace"], "Kubernetes namespace")
                     _require_string(fields["kubernetes_secret"], "Kubernetes Secret")
-                    _require_string(fields["key"], "Kubernetes Secret key")
+                    if not key_sets:
+                        _require_string(fields["key"], "Kubernetes Secret key")
                     kubernetes_object = (fields["namespace"], fields["kubernetes_secret"])
                     if kubernetes_object in kubernetes_objects:
                         raise HandoffError(f"secret matrix reuses a Kubernetes Secret for {name}")
@@ -293,6 +311,7 @@ def load_matrix(path: Path) -> HandoffMatrix:
                 kind=kind,
                 slot=slot,
                 fields=fields,
+                key_sets=key_sets,
             )
         secrets[name] = SecretSpec(
             name=name,
@@ -301,7 +320,7 @@ def load_matrix(path: Path) -> HandoffMatrix:
             value_shape=value_shape,
         )
     for secret in secrets.values():
-        if secret.value_shape != "file":
+        if secret.value_shape not in {"file", "json-object"}:
             continue
         offenders = sorted(
             destination.destination_id
@@ -310,7 +329,7 @@ def load_matrix(path: Path) -> HandoffMatrix:
         )
         if offenders:
             raise HandoffError(
-                f"secret matrix routes file-shaped {secret.name} outside a Kubernetes Secret"
+                f"secret matrix routes {secret.value_shape}-shaped {secret.name} outside a Kubernetes Secret"
             )
     return HandoffMatrix(
         schema_version=1,
@@ -340,6 +359,8 @@ def _normalize_secret(value: bytes, value_shape: str = "line") -> bytes:
         raise HandoffError("secret source has an invalid value")
     if value_shape == "file" and b"\r" in value:
         raise HandoffError("secret source has an invalid value")
+    if value_shape == "json-object":
+        return value
     # Provider exports may substitute display text for a write-only value.
     # Classify the whole value without changing the bytes of a genuine secret.
     if value.decode("utf-8", errors="replace").strip().casefold() in _REDACTION_PLACEHOLDERS:
@@ -638,14 +659,18 @@ def _assert_sops_destination_shape(
     _assert_same_container_shape(plaintext, encrypted_payload)
     if destination.kind == "sops_k8s_secret":
         string_data = encrypted_payload.get("stringData")
-        sensitive_value = (
-            string_data.get(destination.fields["key"]) if isinstance(string_data, dict) else None
-        )
+        keys = destination.key_sets and set(plaintext["stringData"]) or {destination.fields["key"]}
+        if not isinstance(string_data, dict) or set(string_data) != keys:
+            raise HandoffError("SOPS output failed the destination shape check")
+        sensitive_values: Iterable[Any] = string_data.values()
     elif destination.kind == "sops_escrow":
-        sensitive_value = encrypted_payload.get(destination.fields["secret_key"])
+        sensitive_values = (encrypted_payload.get(destination.fields["secret_key"]),)
     else:
-        sensitive_value = encrypted_payload.get(destination.fields["variable"])
-    if not isinstance(sensitive_value, str) or not sensitive_value.startswith("ENC["):
+        sensitive_values = (encrypted_payload.get(destination.fields["variable"]),)
+    if any(
+        not isinstance(value, str) or not value.startswith("ENC[") or not value.endswith("]")
+        for value in sensitive_values
+    ):
         raise HandoffError("SOPS output failed the destination shape check")
 
 
@@ -702,16 +727,19 @@ def _seal_sops_document(
         if result.returncode != 0 or not encrypted_path.is_file():
             raise HandoffError("SOPS encryption failed")
         ciphertext = encrypted_path.read_bytes()
-        try:
-            secret_text = secret.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise HandoffError("secret source must be UTF-8 text") from exc
-        escaped_secret = json.dumps(secret_text).encode("utf-8")
-        if not ciphertext or secret in ciphertext or escaped_secret in ciphertext:
+        if not ciphertext:
             raise HandoffError("SOPS output failed the ciphertext check")
+        if not destination.key_sets:
+            try:
+                secret_text = secret.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise HandoffError("secret source must be UTF-8 text") from exc
+            escaped_secret = json.dumps(secret_text).encode("utf-8")
+            if secret in ciphertext or escaped_secret in ciphertext:
+                raise HandoffError("SOPS output failed the ciphertext check")
         try:
-            encrypted_document = json.loads(ciphertext)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            encrypted_document = loads_unique_json(ciphertext)
+        except KeySetError as exc:
             raise HandoffError("SOPS output failed the destination shape check") from exc
         if not isinstance(encrypted_document, dict):
             raise HandoffError("SOPS output failed the destination shape check")
@@ -740,8 +768,8 @@ def _seal_sops_document(
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise HandoffError("SOPS verification decrypt failed") from exc
         try:
-            decrypted_document = json.loads(decrypted_result.stdout)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            decrypted_document = loads_unique_json(decrypted_result.stdout)
+        except KeySetError as exc:
             raise HandoffError("SOPS verification decrypt failed") from exc
         if decrypted_result.returncode != 0 or decrypted_document != document:
             raise HandoffError("SOPS verification decrypt failed")
@@ -771,10 +799,17 @@ def _seal_k8s_secret(
     repository_root: Path,
     sops_bin: str,
 ) -> None:
-    try:
-        value = secret.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise HandoffError("secret source must be UTF-8 text") from exc
+    if destination.key_sets:
+        try:
+            string_data = parse_json_object(secret, destination.key_sets)
+        except KeySetError as exc:
+            raise HandoffError(str(exc)) from exc
+    else:
+        try:
+            value = secret.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise HandoffError("secret source must be UTF-8 text") from exc
+        string_data = {destination.fields["key"]: value}
     document = {
         "apiVersion": "v1",
         "kind": "Secret",
@@ -787,7 +822,7 @@ def _seal_k8s_secret(
             },
         },
         "type": "Opaque",
-        "stringData": {destination.fields["key"]: value},
+        "stringData": string_data,
     }
     _seal_sops_document(
         destination=destination,
@@ -953,6 +988,12 @@ def execute_handoff(
         repository_root=repository_root,
         terraform_bin=terraform_bin,
     )
+    if secret_spec.value_shape == "json-object":
+        for destination in destinations:
+            try:
+                parse_json_object(secret, destination.key_sets)
+            except KeySetError as exc:
+                raise HandoffError(str(exc)) from exc
 
     local_destinations = [
         destination for destination in destinations if destination.kind.startswith("sops_")

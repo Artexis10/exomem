@@ -64,6 +64,8 @@ _NAMESPACE_OWNED_MARKERS = (
 
 def _load(relative: str, name: str) -> ModuleType:
     path = ROOT / relative
+    if str(path.parent) not in sys.path:
+        sys.path.insert(0, str(path.parent))
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -534,6 +536,9 @@ print(json.dumps({
 import os
 import pathlib
 import sys
+if len(sys.argv) > 1 and sys.argv[1] == 'get':
+    print('secret')
+    raise SystemExit(0)
 pathlib.Path(os.environ['KUBECTL_INPUT']).write_bytes(sys.stdin.buffer.read())
 """,
     )
@@ -562,7 +567,8 @@ pathlib.Path(os.environ['KUBECTL_INPUT']).write_bytes(sys.stdin.buffer.read())
     assert result.stdout == "Applied exomem-platform/exomem-hosted-scheduler at v2\n"
     assert "must-not-be-printed" not in result.stdout + result.stderr
     applied = json.loads(kubectl_input.read_text(encoding="utf-8"))
-    assert applied["stringData"] == {"secret": "must-not-be-printed"}
+    assert "stringData" not in applied
+    assert applied["data"] == {"secret": base64.b64encode(b"must-not-be-printed").decode()}
 
 
 def test_sops_ciphertext_validator_binds_every_leaf_to_one_destination(
@@ -614,6 +620,274 @@ def test_sops_ciphertext_validator_binds_every_leaf_to_one_destination(
     target.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(RuntimeError, match="stringData shape"):
         module.validate(matrix_path=test_matrix, artifacts=[target], root=repository)
+
+
+@pytest.mark.parametrize(
+    "fields,extra_live_key,expected_success",
+    [
+        ({"current": "hidden-alpha", "currentVersion": "v2"}, "", True),
+        (
+            {
+                "current": "hidden-beta",
+                "currentVersion": "v2",
+                "previous": "hidden-alpha",
+                "previousVersion": "v1",
+            },
+            "",
+            True,
+        ),
+        ({"current": "hidden-beta", "currentVersion": "v3"}, "previous", False),
+    ],
+)
+def test_bundle_apply_uses_data_and_checks_live_field_set(
+    tmp_path: Path, fields: dict[str, str], extra_live_key: str, expected_success: bool
+) -> None:
+    require_posix_executable_scripts()
+    artifact = tmp_path / "bundle.v2.sops.json"
+    artifact.write_text('{"sops": {}}', encoding="utf-8")
+    matrix = tmp_path / "matrix.json"
+    matrix.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "secrets": {
+                    "bundle": {
+                        "value_shape": "json-object",
+                        "destinations": {
+                            "k3s.bundle.active": {
+                                "kind": "sops_k8s_secret",
+                                "slot": "active",
+                                "target": str(artifact),
+                                "namespace": "exomem-platform",
+                                "kubernetes_secret": "bundle",
+                                "key_sets": [
+                                    ["current", "currentVersion"],
+                                    ["current", "currentVersion", "previous", "previousVersion"],
+                                ],
+                            }
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    plaintext = tmp_path / "plaintext.json"
+    plaintext.write_text(
+        json.dumps(
+            {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": {
+                    "name": "bundle",
+                    "namespace": "exomem-platform",
+                    "labels": {
+                        "app.kubernetes.io/managed-by": "exomem-secret-handoff",
+                        "exomem.io/secret-version": "v2",
+                    },
+                },
+                "type": "Opaque",
+                "stringData": fields,
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake_sops = tmp_path / "sops"
+    _write_executable(
+        fake_sops,
+        "#!/usr/bin/env python3\nimport os, pathlib, sys\nsys.stdout.buffer.write(pathlib.Path(os.environ['PLAINTEXT']).read_bytes())\n",
+    )
+    fake_kubectl = tmp_path / "kubectl"
+    applied_path = tmp_path / "applied.json"
+    _write_executable(
+        fake_kubectl,
+        """#!/usr/bin/env python3
+import json, os, pathlib, sys
+if sys.argv[1] == 'apply':
+    pathlib.Path(os.environ['APPLIED']).write_bytes(sys.stdin.buffer.read())
+else:
+    keys = list(json.loads(pathlib.Path(os.environ['APPLIED']).read_text())['data'])
+    if os.environ['EXTRA_LIVE_KEY']:
+        keys.append(os.environ['EXTRA_LIVE_KEY'])
+    print('\\n'.join(keys))
+""",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(INFRA / "scripts/apply_sops_secret.py"),
+            "--matrix",
+            str(matrix),
+            "--destination",
+            "k3s.bundle.active",
+            "--artifact",
+            str(artifact),
+            "--sops",
+            str(fake_sops),
+            "--kubectl",
+            str(fake_kubectl),
+        ],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PLAINTEXT": str(plaintext),
+            "APPLIED": str(applied_path),
+            "EXTRA_LIVE_KEY": extra_live_key,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode == 0) == expected_success
+    assert "stringData" not in json.loads(applied_path.read_text())
+    assert json.loads(applied_path.read_text())["data"] == {
+        key: base64.b64encode(value.encode()).decode() for key, value in fields.items()
+    }
+    assert all(
+        value not in result.stdout + result.stderr
+        for key, value in fields.items()
+        if key in {"current", "previous"}
+    )
+    if not expected_success:
+        assert "verification failed" in result.stderr
+        assert "Applied" not in result.stdout
+
+
+def test_bundle_ciphertext_requires_exact_encrypted_field_set(tmp_path: Path) -> None:
+    module = _load("infra/scripts/validate_sops_ciphertext.py", "bundle_ciphertext_validator")
+    repository = tmp_path / "repository"
+    target = repository / "infra/secrets/platform/bundle.v2.sops.json"
+    target.parent.mkdir(parents=True)
+    matrix = repository / "matrix.json"
+    matrix.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "secrets": {
+                    "bundle": {
+                        "value_shape": "json-object",
+                        "destinations": {
+                            "k3s.bundle.active": {
+                                "kind": "sops_k8s_secret",
+                                "slot": "active",
+                                "target": "infra/secrets/platform/bundle.{version}.sops.json",
+                                "namespace": "exomem-platform",
+                                "kubernetes_secret": "bundle",
+                                "key_sets": [
+                                    ["current", "currentVersion"],
+                                    ["current", "currentVersion", "previous", "previousVersion"],
+                                ],
+                            }
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    fixture = json.loads(
+        (ROOT / "tests/fixtures/hosted-sops/cloudflared-token.v1.sops.json").read_text()
+    )
+    encrypted = fixture["stringData"]["token"]
+    fixture["stringData"] = {"current": encrypted, "currentVersion": encrypted}
+    target.write_text(json.dumps(fixture), encoding="utf-8")
+    assert module.validate(matrix_path=matrix, artifacts=[target], root=repository) == 1
+
+    fixture["stringData"]["previous"] = encrypted
+    target.write_text(json.dumps(fixture), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="stringData shape"):
+        module.validate(matrix_path=matrix, artifacts=[target], root=repository)
+
+    fixture["stringData"]["previousVersion"] = "unsealed-version"
+    target.write_text(json.dumps(fixture), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="plaintext payload leaf"):
+        module.validate(matrix_path=matrix, artifacts=[target], root=repository)
+
+    fixture["stringData"] = {"current": encrypted, "currentVersion": encrypted}
+    duplicate = json.dumps(fixture).replace(
+        f'"current": "{encrypted}"',
+        f'"current": "unsealed-bundle-value", "current": "{encrypted}"',
+        1,
+    )
+    target.write_text(duplicate, encoding="utf-8")
+    with pytest.raises(RuntimeError, match="invalid"):
+        module.validate(matrix_path=matrix, artifacts=[target], root=repository)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "half-previous",
+        "unknown-key",
+        "nested-value",
+        "newline-value",
+        "placeholder",
+        "wrong-name",
+        "duplicate-key",
+    ],
+)
+def test_bundle_apply_rejects_malformed_decrypted_document(change: str) -> None:
+    module = _load("infra/scripts/apply_sops_secret.py", "bundle_apply_shape_test")
+    destination = module.Destination(
+        target="bundle.{version}.sops.json",
+        namespace="exomem-platform",
+        secret_name="bundle",
+        key=None,
+        key_sets=(
+            frozenset({"current", "currentVersion"}),
+            frozenset({"current", "currentVersion", "previous", "previousVersion"}),
+        ),
+    )
+    document = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": "bundle",
+            "namespace": "exomem-platform",
+            "labels": {
+                "app.kubernetes.io/managed-by": "exomem-secret-handoff",
+                "exomem.io/secret-version": "v2",
+            },
+        },
+        "type": "Opaque",
+        "stringData": {"current": "hidden-key", "currentVersion": "2"},
+    }
+    if change == "half-previous":
+        document["stringData"]["previous"] = "hidden-previous"
+    elif change == "unknown-key":
+        document["stringData"]["extra"] = "hidden-extra"
+    elif change == "nested-value":
+        document["stringData"]["current"] = {"nested": "hidden-key"}
+    elif change == "newline-value":
+        document["stringData"]["current"] = "hidden\nkey"
+    elif change == "placeholder":
+        document["stringData"]["current"] = "[REDACTED]"
+    elif change == "wrong-name":
+        document["metadata"]["name"] = "other"
+    raw = json.dumps(document, separators=(",", ":")).encode()
+    if change == "duplicate-key":
+        raw = raw.replace(b'"current":"hidden-key"', b'"current":"hidden-key","current":"other"')
+    with pytest.raises(module.SecretApplyError, match="invalid Kubernetes shape") as error:
+        module._validate_plaintext(raw, destination, "v2")
+    assert "hidden" not in str(error.value)
+
+
+def test_scalar_apply_rejects_invalid_unicode_without_exposing_value() -> None:
+    module = _load("infra/scripts/apply_sops_secret.py", "scalar_apply_unicode_test")
+    destination = module.Destination(
+        target="scalar.{version}.sops.json",
+        namespace="exomem-platform",
+        secret_name="scalar",
+        key="secret",
+    )
+    raw = (
+        b'{"apiVersion":"v1","kind":"Secret","metadata":{"name":"scalar",'
+        b'"namespace":"exomem-platform","labels":{"app.kubernetes.io/managed-by":'
+        b'"exomem-secret-handoff","exomem.io/secret-version":"v2"}},'
+        b'"type":"Opaque","stringData":{"secret":"\\ud800"}}'
+    )
+    with pytest.raises(module.SecretApplyError, match="invalid Kubernetes shape"):
+        module._validate_plaintext(raw, destination, "v2")
 
 
 def test_rotation_retirement_gate_covers_every_independent_rotation(

@@ -203,6 +203,14 @@ A backup SHALL:
 
 The wrapped data key and the wrapped per-cell object-storage key SHALL be stored once on the cell row, so that a stateless controller can re-render the cell's Secret and delete the key later.
 
+Platform credentials with multiple fields SHALL be handed off as one complete, immutable, versioned SOPS Kubernetes Secret artifact. The declared exact key sets SHALL be enforced at the matrix, source, ciphertext and decrypted apply boundaries; every sensitive field SHALL be encrypted and verification decryption SHALL reproduce the full input document before publication. A server-side apply SHALL use the validated fields as base64 Secret `data` without changing the stored ciphertext artifact. Apply SHALL verify that the live Secret contains exactly the expected data key names before reporting success, including when another field manager retains an old key; verification output SHALL contain no secret values.
+
+#### Scenario: Cell-token key rotation bundle
+
+- **WHEN** a platform Secret handoff supplies either `current` with `currentVersion`, or those two fields plus `previous` with `previousVersion`
+- **THEN** exactly those fields are published in one versioned artifact and applied together
+- **AND** an incomplete previous-version pair or an undeclared field is rejected before publication
+
 A restore into a new namespace SHALL produce a cell that answers recall, reports the same governance schema as its source cell, and accepts a governed write.
 
 #### Scenario: Restore drill

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import importlib.util
 import io
 import json
@@ -25,6 +26,8 @@ EXPECTED_VERCEL_PROJECT_ID = "prj_uMt1uqSUP5ALo0zLJvcKLBCJ7HUs"
 
 
 def _load_module():
+    if str(SCRIPT.parent) not in sys.path:
+        sys.path.insert(0, str(SCRIPT.parent))
     spec = importlib.util.spec_from_file_location("secret_handoff", SCRIPT)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -34,6 +37,8 @@ def _load_module():
 
 
 def _load_ciphertext_validator():
+    if str(SCRIPT.parent) not in sys.path:
+        sys.path.insert(0, str(SCRIPT.parent))
     path = ROOT / "infra" / "scripts" / "validate_sops_ciphertext.py"
     spec = importlib.util.spec_from_file_location("validate_sops_ciphertext_round_trip", path)
     assert spec is not None and spec.loader is not None
@@ -45,6 +50,30 @@ def _load_ciphertext_validator():
 
 def _matrix() -> dict[str, object]:
     return json.loads(MATRIX.read_text(encoding="utf-8"))
+
+
+def _bundle_matrix(tmp_path: Path, key_sets: list[list[str]]) -> Path:
+    matrix = _matrix()
+    matrix["secrets"]["cloud_bundle"] = {  # type: ignore[index]
+        "value_shape": "json-object",
+        "sources": [
+            {"kind": "stdin"},
+            {"kind": "bws", "bindings": "infra/contracts/example.json", "binding": "cloud_bundle"},
+        ],
+        "destinations": {
+            "k3s.cloud-bundle.active": {
+                "kind": "sops_k8s_secret",
+                "slot": "active",
+                "target": "infra/secrets/platform/cloud-bundle.{version}.sops.json",
+                "namespace": "exomem-platform",
+                "kubernetes_secret": "cloud-bundle",
+                "key_sets": key_sets,
+            }
+        },
+    }
+    path = tmp_path / "matrix.json"
+    path.write_text(json.dumps(matrix), encoding="utf-8")
+    return path
 
 
 def _link_vercel_project(
@@ -840,6 +869,57 @@ def test_pinned_sops_age_round_trip_preserves_json_escaped_secret(
     assert document["metadata"]["labels"]["exomem.io/secret-version"] == "v1"
 
 
+@pytest.mark.skipif(
+    os.environ.get("EXOMEM_RUN_REAL_SOPS_TESTS") != "1",
+    reason="set EXOMEM_RUN_REAL_SOPS_TESTS=1 with pinned SOPS/age binaries",
+)
+def test_pinned_sops_age_round_trip_seals_every_bundle_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_module()
+    sops_bin = os.environ.get("SOPS_BIN") or shutil.which("sops")
+    age_keygen_bin = os.environ.get("AGE_KEYGEN_BIN") or shutil.which("age-keygen")
+    assert sops_bin is not None and age_keygen_bin is not None
+    identity = tmp_path / "operator.agekey"
+    subprocess.run([age_keygen_bin, "-o", str(identity)], capture_output=True, check=True)
+    recipient = subprocess.run(
+        [age_keygen_bin, "-y", str(identity)], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    monkeypatch.setenv("SOPS_AGE_RECIPIENTS", recipient)
+    monkeypatch.setenv("SOPS_AGE_KEY_FILE", str(identity))
+    values = {
+        "keys": json.dumps({"1": base64.b64encode(bytes(range(32))).decode("ascii")}),
+        "currentVersion": "1",
+    }
+    monkeypatch.setattr(module, "_read_secret", lambda **_kwargs: json.dumps(values).encode())
+    matrix = _bundle_matrix(tmp_path, [["keys", "currentVersion"]])
+    module.execute_handoff(
+        matrix_path=matrix,
+        repository_root=tmp_path,
+        secret_name="cloud_bundle",
+        version="v1",
+        destination_ids=("k3s.cloud-bundle.active",),
+        source_kind="stdin",
+        terraform_bin="terraform",
+        sops_bin=sops_bin,
+        vercel_bin="vercel",
+        vercel_project=None,
+        dry_run=False,
+    )
+    artifact = tmp_path / "infra/secrets/platform/cloud-bundle.v1.sops.json"
+    ciphertext = json.loads(artifact.read_text())
+    assert set(ciphertext["stringData"]) == set(values)
+    assert all(value.startswith("ENC[") for value in ciphertext["stringData"].values())
+    validator = _load_ciphertext_validator()
+    assert validator.validate(matrix_path=matrix, artifacts=[artifact], root=tmp_path) == 1
+    decrypted = subprocess.run(
+        [sops_bin, "decrypt", "--input-type", "json", "--output-type", "json", str(artifact)],
+        capture_output=True,
+        check=True,
+    )
+    assert json.loads(decrypted.stdout)["stringData"] == values
+
+
 def test_cli_dry_run_validates_route_without_reading_stdin() -> None:
     # The script under test imports `fcntl` at module scope and stats the
     # mount with `os.statvfs`; Windows ships neither, so it cannot be loaded
@@ -1161,3 +1241,220 @@ def test_ansible_vars_destination_accepts_a_plain_value_without_jinja_delimiters
     )
     target = tmp_path / "infra/secrets/ansible/control-db-substrate-owner-password.v1.sops.json"
     assert target.is_file()
+
+
+@pytest.mark.parametrize(
+    "key_sets,values",
+    [
+        (
+            [
+                ["current", "currentVersion"],
+                ["current", "currentVersion", "previous", "previousVersion"],
+            ],
+            {"current": "key-a", "currentVersion": "v2"},
+        ),
+        (
+            [
+                ["current", "currentVersion"],
+                ["current", "currentVersion", "previous", "previousVersion"],
+            ],
+            {
+                "current": "key-b",
+                "currentVersion": "v2",
+                "previous": "key-a",
+                "previousVersion": "v1",
+            },
+        ),
+        ([["keys", "currentVersion"]], {"keys": "key-a", "currentVersion": "v2"}),
+        ([["keyId", "applicationKey"]], {"keyId": "id-a", "applicationKey": "key-a"}),
+    ],
+)
+def test_json_object_handoff_seals_one_complete_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    key_sets: list[list[str]],
+    values: dict[str, str],
+) -> None:
+    module = _load_module()
+    matrix = _bundle_matrix(tmp_path, key_sets)
+    monkeypatch.setenv("SOPS_AGE_RECIPIENTS", "age1testrecipient")
+    monkeypatch.setattr(
+        module.sys, "stdin", io.TextIOWrapper(io.BytesIO(json.dumps(values).encode()))
+    )
+    plaintext_by_path: dict[Path, dict[str, object]] = {}
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda command, **kwargs: _run_fake_sops(list(command), kwargs, plaintext_by_path),
+    )
+
+    module.execute_handoff(
+        matrix_path=matrix,
+        repository_root=tmp_path,
+        secret_name="cloud_bundle",
+        version="v2",
+        destination_ids=("k3s.cloud-bundle.active",),
+        source_kind="stdin",
+        terraform_bin="terraform",
+        sops_bin="sops",
+        vercel_bin="vercel",
+        vercel_project=None,
+        dry_run=False,
+    )
+
+    assert len(plaintext_by_path) == 1
+    sealed = next(iter(plaintext_by_path.values()))
+    assert sealed["stringData"] == values
+    artifact = tmp_path / "infra/secrets/platform/cloud-bundle.v2.sops.json"
+    assert artifact.is_file()
+    assert not any(value in artifact.read_text() for value in values.values())
+    with pytest.raises(module.HandoffError, match="SOPS version must be new and increasing"):
+        module.execute_handoff(
+            matrix_path=matrix,
+            repository_root=tmp_path,
+            secret_name="cloud_bundle",
+            version="v2",
+            destination_ids=("k3s.cloud-bundle.active",),
+            source_kind="stdin",
+            terraform_bin="terraform",
+            sops_bin="sops",
+            vercel_bin="vercel",
+            vercel_project=None,
+            dry_run=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        b'{"current":"a","currentVersion":"v2","previous":"b"}',
+        b'{"current":"a","currentVersion":"v2","extra":"x"}',
+        b'{"current":"a","current":"b","currentVersion":"v2"}',
+        b'{"current":{},"currentVersion":"v2"}',
+        b'{"current":"a\\nb","currentVersion":"v2"}',
+        b'{"current":"[REDACTED]","currentVersion":"v2"}',
+        b'{"current":"\\ud800","currentVersion":"v2"}',
+        b'{"current":' + b"9" * 5000 + b',"currentVersion":"v2"}',
+    ],
+)
+def test_json_object_handoff_rejects_invalid_source_before_sops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: bytes
+) -> None:
+    module = _load_module()
+    matrix = _bundle_matrix(
+        tmp_path,
+        [
+            ["current", "currentVersion"],
+            ["current", "currentVersion", "previous", "previousVersion"],
+        ],
+    )
+    monkeypatch.setattr(module.sys, "stdin", io.TextIOWrapper(io.BytesIO(source)))
+
+    def _unexpected_sops(*_args, **_kwargs):
+        raise AssertionError("invalid source reached SOPS")
+
+    monkeypatch.setattr(module.subprocess, "run", _unexpected_sops)
+    with pytest.raises(module.HandoffError, match="secret source"):
+        module.execute_handoff(
+            matrix_path=matrix,
+            repository_root=tmp_path,
+            secret_name="cloud_bundle",
+            version="v2",
+            destination_ids=("k3s.cloud-bundle.active",),
+            source_kind="stdin",
+            terraform_bin="terraform",
+            sops_bin="sops",
+            vercel_bin="vercel",
+            vercel_project=None,
+            dry_run=False,
+        )
+    assert not (tmp_path / "infra/secrets/platform/cloud-bundle.v2.sops.json").exists()
+
+
+@pytest.mark.parametrize(
+    "key_sets",
+    [
+        [],
+        [["current", "current"]],
+        [["current", "bad key"]],
+        [["current", "currentVersion"], ["currentVersion", "current"]],
+    ],
+)
+def test_json_object_matrix_rejects_undeclared_or_duplicate_key_sets(
+    tmp_path: Path, key_sets: list[list[str]]
+) -> None:
+    module = _load_module()
+    matrix = _bundle_matrix(tmp_path, key_sets)
+    with pytest.raises(module.HandoffError, match="invalid key sets"):
+        module.load_matrix(matrix)
+
+
+def test_json_object_matrix_uses_its_own_declared_key_set(tmp_path: Path) -> None:
+    module = _load_module()
+    matrix = _bundle_matrix(tmp_path, [["alpha", "beta"]])
+    destination = (
+        module.load_matrix(matrix).secrets["cloud_bundle"].destinations["k3s.cloud-bundle.active"]
+    )
+    assert destination.key_sets == (frozenset({"alpha", "beta"}),)
+
+
+def test_scalar_matrix_rejects_null_key_sets_field(tmp_path: Path) -> None:
+    module = _load_module()
+    matrix = _matrix()
+    matrix["secrets"]["cloudflare_tunnel_token"]["destinations"]["k3s.cloudflared.active"][  # type: ignore[index]
+        "key_sets"
+    ] = None
+    path = tmp_path / "matrix.json"
+    path.write_text(json.dumps(matrix))
+    with pytest.raises(module.HandoffError, match="invalid SOPS destination"):
+        module.load_matrix(path)
+
+
+@pytest.mark.parametrize("source_kind", ["prompt", "terraform"])
+def test_json_object_matrix_rejects_non_bundle_source(tmp_path: Path, source_kind: str) -> None:
+    module = _load_module()
+    matrix_path = _bundle_matrix(tmp_path, [["keyId", "applicationKey"]])
+    matrix = json.loads(matrix_path.read_text())
+    matrix["secrets"]["cloud_bundle"]["sources"].append({"kind": source_kind})
+    matrix_path.write_text(json.dumps(matrix))
+    with pytest.raises(module.HandoffError, match="invalid source kind"):
+        module.load_matrix(matrix_path)
+
+
+def test_json_object_handoff_does_not_publish_when_verification_changes_one_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_module()
+    matrix = _bundle_matrix(tmp_path, [["keyId", "applicationKey"]])
+    source = {"keyId": "hidden-id", "applicationKey": "hidden-key"}
+    monkeypatch.setenv("SOPS_AGE_RECIPIENTS", "age1testrecipient")
+    monkeypatch.setattr(
+        module.sys, "stdin", io.TextIOWrapper(io.BytesIO(json.dumps(source).encode()))
+    )
+    plaintext_by_path: dict[Path, dict[str, object]] = {}
+
+    def _runner(command, **kwargs):
+        result = _run_fake_sops(list(command), kwargs, plaintext_by_path)
+        if command[1] == "decrypt":
+            document = json.loads(result.stdout)
+            document["stringData"]["applicationKey"] = "altered"
+            return subprocess.CompletedProcess(command, 0, json.dumps(document).encode(), b"")
+        return result
+
+    monkeypatch.setattr(module.subprocess, "run", _runner)
+    with pytest.raises(module.HandoffError, match="verification decrypt") as error:
+        module.execute_handoff(
+            matrix_path=matrix,
+            repository_root=tmp_path,
+            secret_name="cloud_bundle",
+            version="v2",
+            destination_ids=("k3s.cloud-bundle.active",),
+            source_kind="stdin",
+            terraform_bin="terraform",
+            sops_bin="sops",
+            vercel_bin="vercel",
+            vercel_project=None,
+            dry_run=False,
+        )
+    assert "hidden" not in str(error.value)
+    assert not (tmp_path / "infra/secrets/platform/cloud-bundle.v2.sops.json").exists()
