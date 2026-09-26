@@ -2,6 +2,44 @@
 
 # Ordered tenant deletion
 
+## Exomem Cloud cells
+
+For a plain Cloud cell managed by `cellctl`, use the product's deletion action
+to set its row's `desired_state` to `deleted`. The legacy provisioner procedure
+below applies to the earlier hosted platform.
+
+Confirm completion in this order:
+
+1. The cell namespace is absent.
+2. No PersistentVolume claims that namespace, and the recorded Hetzner volume
+   is absent. Namespace deletion alone is not proof of volume deletion.
+3. Every B2 object version under the exact `cells/<cell_id>/` prefix is absent,
+   including hidden versions. An empty current-object listing is insufficient.
+4. The per-cell B2 application key is absent by its recorded key ID.
+5. The row reports `observed_state = deleted`, with its B2 key ID and wrapped
+   B2 and backup key material cleared.
+
+The controller retries incomplete steps. A failed provider observation is not
+proof of absence; leave the cell deleting and resolve that observation failure.
+Do not manually clear key columns, remove finalizers, or delete sibling prefixes
+to force completion.
+
+### Retained etcd snapshots
+
+K3s encrypts Secrets at rest. Existing etcd snapshots can still retain an
+encrypted copy of a deleted cell's Secret until snapshot retention expires.
+The controller's `deleted` state proves the live-resource and key-removal checks
+above; it does not prove that every historical snapshot has expired.
+
+Record the applicable retention bound from the deployed local and remote
+snapshot policies, including storage lifecycle or retention settings, when
+reporting deletion. Do not infer a time bound from a snapshot count alone or
+claim immediate erasure of snapshot copies. Handle snapshot restoration as a
+separate operator recovery: prevent a restored cluster from serving deleted
+cells until deletion state has been reconciled against the authoritative
+control database. Do not prune shared cluster snapshots as part of one cell's
+deletion.
+
 ## Preconditions
 
 Deletion is irreversible. Confirm the opaque tenant ID, final export policy,
