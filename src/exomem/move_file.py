@@ -538,10 +538,17 @@ def move_file(
         new_rel_no_ext = (
             new_rel.removesuffix(".md") if new_rel.endswith(".md") else new_rel
         )
+        # The activity log is readable by other audiences: for a mover other
+        # than the owner it carries the figures that mover may see.
+        logged_updated, logged_files = (
+            (wikilinks_updated, len(files_touched))
+            if visible is None
+            else (reported_updated, len(reported_touched))
+        )
         body = (
             f"Moved {old_rel!r} → {new_rel!r} via exomem Tier 2. "
-            f"wikilinks_updated={wikilinks_updated} across "
-            f"{len(files_touched)} file(s)."
+            f"wikilinks_updated={logged_updated} across "
+            f"{logged_files} file(s)."
         )
         if src_curated or dst_curated:
             body += f" allow_curated=true (tree: {src_curated or dst_curated})."

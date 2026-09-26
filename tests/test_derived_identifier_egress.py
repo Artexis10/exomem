@@ -1497,6 +1497,7 @@ def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
     base = {
         **_semantic_move_fixture(),
         f"{INSIGHTS}/solo.md": _typed("Solo", "Solo.", f"{INSIGHTS}/alpha"),
+        f"{KB}/log.md": "# Log\n\n",
     }
     hidden = f"{INSIGHTS}/Withheld/linker.md"
     variants = {
@@ -1524,12 +1525,19 @@ def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
                 ),
             )
             for old, new in moves
+        ] + [
+            # The activity log is readable by the mover: its line carries the
+            # figures the mover may see.
+            _VOLATILE_TEXT.sub(
+                "<v>",
+                _text(_call(vault, _principal(audience), "read_memory", path=f"{KB}/log.md")["body"]),
+            )
         ]
 
     answers = {variant: moved(vault) for variant, vault in vaults.items()}
 
     assert '"__error__"' not in _text(answers["A"]), answers["A"]
-    for step in range(len(moves)):
+    for step in range(len(moves) + 1):
         assert answers["A"][step] == answers["B"][step], step
         assert answers["C"][step] == answers["B"][step], step
     assert f"[[{INSIGHTS}/gamma-y]]" in (vaults["A"] / hidden).read_text(encoding="utf-8")
