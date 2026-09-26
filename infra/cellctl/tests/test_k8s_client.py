@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace as NS
+from unittest.mock import Mock
 
 from kubernetes.client.rest import ApiException
 
@@ -20,6 +21,28 @@ CELL_ID = "aaaaaaaaaaaaaaaa"
 NAMESPACE = f"exo-cell-{CELL_ID}"
 EARLIER_HOLD = "2026-01-01T00:00:00+00:00"
 CURRENT_HOLD = "2026-01-01T00:04:00+00:00"
+
+
+def test_apply_uses_the_cellctl_field_manager_for_server_side_apply() -> None:
+    resource = Mock()
+    client = ClusterClient.__new__(ClusterClient)
+    client._dynamic = NS(resources=NS(get=Mock(return_value=resource)))
+    manifest = {
+        "apiVersion": "apps/v1", "kind": "StatefulSet",
+        "metadata": {"name": "cell", "namespace": NAMESPACE},
+    }
+
+    client.apply(manifest)
+
+    client._dynamic.resources.get.assert_called_once_with(api_version="apps/v1", kind="StatefulSet")
+    resource.server_side_apply.assert_called_once_with(
+        body=manifest,
+        name="cell",
+        namespace=NAMESPACE,
+        field_manager="cellctl",
+        content_type="application/apply-patch+yaml",
+        force_conflicts=True,
+    )
 
 
 def _matches(labels: dict[str, str], selector: str) -> bool:

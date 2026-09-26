@@ -3,6 +3,8 @@ authorization must be refreshed on a 401, not held forever."""
 
 from __future__ import annotations
 
+import json
+
 import httpx
 
 from cellctl.storage.b2 import B2Config, B2ObjectStorage
@@ -17,6 +19,27 @@ CONFIG = B2Config(
 
 def _client(handler) -> httpx.Client:
     return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_create_prefix_key_requests_the_exact_bucket_and_cell_prefix() -> None:
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("b2_authorize_account"):
+            return httpx.Response(
+                200,
+                json={"apiInfo": {"storageApi": {"apiUrl": "https://api.example"}}, "authorizationToken": "tok"},
+            )
+        assert request.url.path.endswith("b2_create_key")
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"applicationKeyId": "cell-key", "applicationKey": "secret"})
+
+    key = B2ObjectStorage(CONFIG, client=_client(handler)).create_prefix_key("aaaaaaaaaaaaaaaa")
+
+    assert len(requests) == 1
+    assert requests[0]["bucketId"] == CONFIG.bucket_id
+    assert requests[0]["namePrefix"] == "cells/aaaaaaaaaaaaaaaa/"
+    assert key.name_prefix == requests[0]["namePrefix"]
 
 
 def test_authorize_is_cached_across_calls() -> None:
