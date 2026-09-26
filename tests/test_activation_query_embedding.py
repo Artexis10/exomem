@@ -65,6 +65,9 @@ def test_embed_query_if_loaded_uses_resident_query_encoding_options(
 ) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     _install_gate(monkeypatch)
+    # This test describes the English recall model; a personal server now
+    # encodes recall with the multilingual one (tests/test_recall_switch.py).
+    monkeypatch.setattr(embeddings, "MODEL_NAME", "BAAI/bge-base-en-v1.5")
     calls: list[tuple[list[str], dict[str, object]]] = []
 
     class Model:

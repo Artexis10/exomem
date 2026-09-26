@@ -141,6 +141,9 @@ def test_the_recall_model_keeps_its_cls_pooling_and_query_prefix_when_configs_ar
     """An ONNX cache made before profiles existed holds no pooling config. Recall's
     own model must still load exactly as it did: CLS, `[PAD]`, its query prefix."""
     _repo(tmp_path, {}, monkeypatch)
+    # This test describes the English recall model; a personal server now
+    # encodes recall with the multilingual one (tests/test_recall_switch.py).
+    monkeypatch.setattr(embeddings, "MODEL_NAME", "BAAI/bge-base-en-v1.5")
 
     profile = embedding_backend.read_profile(embeddings.MODEL_NAME)
 

@@ -17,9 +17,13 @@ Rebuild time, 3,000 generated pages, `rebuild_atomic`, two interleaved runs each
 | English, one typographic dash per page (scanner path) | 10.8 s, 9.5 s | 13.3 s (first, cold), 11.0 s | 15.1 MB → 15.1 MB |
 | Mixed: a quarter each English, German, Russian, Japanese | 9.1 s, 9.4 s | 9.4 s, 9.3 s | 14.9 MB → 19.4 MB |
 
-## 2. Dense half: one multilingual encoder (lane R-DENSE, follows)
+## 2. Dense half: one multilingual encoder (lane R-DENSE)
 
-- [ ] 2.1 Recall spike and model decision against the English and multilingual recall gates, recorded in design.md
-- [ ] 2.2 Encoder profile declarations, a fingerprint-named recall sidecar with its dimension read from metadata, and unspaced-text chunking
-- [ ] 2.3 Interactive and background encode lanes on one model, and the blue/green re-embed with its atomic cutover
-- [ ] 2.4 Dense and hybrid acceptance in the embeddings job, the rerank script-coverage gate, and the dense requirements in this change's spec
+- [x] 2.1 Recall spike and model decision against the English and multilingual recall gates, recorded in design.md (D7: `BAAI/bge-m3` on ONNX Runtime int8, one instance shared with activation)
+- [x] 2.2 Encoder profile declarations (shared with the activation lane: revision, quantisation, file format and artefact digest in the fingerprint, `max_seq` 512), a sidecar that records its vector space with its width read from that record (`tests/test_embedding_index_fingerprint.py`), and unspaced-text chunking under the encoder limit (`tests/test_embeddings_chunking.py`)
+- [x] 2.3 Interactive and background encode lanes on one model, and the blue/green re-embed with its active pointer, resumable build, catch-up, atomic cutover, later retirement and `EXOMEM_RECALL_REEMBED=off` (`tests/test_embedding_migration.py`)
+- [x] 2.4 The recall switch: bge-m3 on a personal server, the English model on a hosted or cloud cell, `EXOMEM_RECALL_MODEL`, traces and doctor naming the model whose vectors served (`tests/test_recall_switch.py`)
+- [x] 2.5 The dense-lead guard in `find` fusion (`tests/test_find_dense_lead_guard.py`) and the rerank script-coverage gate (`tests/test_reranker_coverage.py`)
+- [x] 2.6 Dense and hybrid acceptance in the embeddings job (`tests/test_recall_multilingual_embeddings.py`, numbers in design.md D13), the typed-graph golden pins moved from the fused rank to the graph lane and fusion for the one query bge-m3 ranks 12th, the embeddings job's cache key and 45-minute limit, and the dense requirements in this change's spec
+
+Follow-up, not in this change: lift typed-graph neighbours in fusion so the golden "advanced mode" neighbour returns to the top 10, with its own English no-change check.

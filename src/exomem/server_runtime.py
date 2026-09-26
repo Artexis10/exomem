@@ -203,6 +203,7 @@ class LocalRuntimeActivation:
         self.file_watcher: Any | None = None
         self.derived_drain: Any | None = None
         self.vocabulary_recovery: Any | None = None
+        self.recall_reembed: Any | None = None
         self.dreamer: Any | None = None
 
     def release(self) -> None:
@@ -269,6 +270,7 @@ class LocalRuntimeActivation:
             ("graph drain", _start_graph_drain),
             ("media", self._start_media_worker),
             ("vocabulary recovery", self._start_vocabulary_recovery),
+            ("recall re-embed", self._start_recall_reembed),
             # Last: upkeep is the least important background work and must
             # never contend with admission, the watcher or graph convergence.
             ("dreamer", self._start_dreamer),
@@ -387,6 +389,15 @@ class LocalRuntimeActivation:
         )
         self.vocabulary_recovery = thread
         thread.start()
+
+    def _start_recall_reembed(self, vault_root: Path) -> None:
+        """Bring the recall sidecar into the recall encoder's space, off-request.
+
+        Stops between batches when the process shuts down; a restart resumes.
+        """
+        from . import recall_migration
+
+        self.recall_reembed = recall_migration.start(vault_root, self._shutdown)
 
     def _start_file_watcher(self, vault_root: Path) -> None:
         self.file_watcher = _start_file_watcher(vault_root)
