@@ -47,6 +47,24 @@ def test_dockerfile_has_a_fixed_nonroot_immutable_hosted_target() -> None:
     assert "VOLUME" not in hosted
 
 
+def test_hosted_image_bakes_and_serves_the_model_a_cell_encodes_with() -> None:
+    """A personal server encodes recall with bge-m3; a cell keeps the English
+    model until a node encoder serves it. The hosted build stage resolves
+    `embeddings.MODEL_NAME` outside any cell, so without the explicit model it
+    would fetch bge-m3 (a multi-gigabyte artefact build) for an image whose
+    cells never load it, and its offline gate would fail the English width.
+    Every process in the hosted and cloud images names the cell's model too."""
+    from exomem import recall_space
+
+    cell_model = recall_space.configured_recall_model({"EXOMEM_HOSTED_CELL": "1"})
+    text = _read("Dockerfile")
+    builder = text.split("FROM builder-lean AS builder-hosted", 1)[1].split("\nFROM ", 1)[0]
+    hosted = text.split("FROM python:3.12-slim AS hosted", 1)[1].split("\nFROM ", 1)[0]
+
+    for stage in (builder, hosted):
+        assert f"{recall_space.RECALL_MODEL_ENV}={cell_model}" in stage
+
+
 def test_dockerfile_cloud_target_sets_pod_local_log_dir_and_disables_fastmcp_egress() -> None:
     """D1.2 "Log directory" and D2: the cloud stage's own defaults, not just the
     manifest, must keep runtime logs off the tenant volume and avoid FastMCP's
