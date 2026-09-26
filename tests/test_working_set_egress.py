@@ -10,6 +10,7 @@ depended on a withheld neighbour.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Mapping
 from pathlib import Path
@@ -3481,3 +3482,47 @@ def test_the_episode_key_never_causes_a_spurious_withhold(vault: Path) -> None:
 
     assert guarded is not None
     assert guarded["recent_context"] == [_episode_entry()]
+
+
+def test_upkeep_refs_cross_the_guard(vault: Path) -> None:
+    """D1-T11: the upkeep block rides after the guard, so the terminal filter
+    is what it crosses. Its refs are review, memory and source refs, not
+    vault paths: a released item passes whole. A route path naming a withheld
+    page drops that item, the backstop behind the carrier's own egress check."""
+    item = {
+        "ref": "exomem://review/upkeep/0123456789abcdef01234567",
+        "family": "upkeep_hydration",
+        "fingerprint": "0123456789abcdef01234567",
+        "kind": "curation.hydrate",
+        "label": "Facts about an entity live on other pages",
+        "subject": {"ref": "exomem://memory/1b7c3a52-0d7e-4f3a-9d61-2a4f5f0c9e11", "title": "T"},
+        "evidence": [{"ref": "exomem://source/Knowledge%20Base/Sources/s", "title": "S"}],
+        "evidence_count": 2,
+        "why": "2 independent sources added facts that link here after it was last updated",
+        "disposition": {"state": "open", "delivered_before": 0},
+        "route": {
+            "tool": "maintain_memory",
+            "args": {"mode": "curation", "curation_action": "work-item", "paths": [OPEN_PATH]},
+        },
+        "context_route": {
+            "tool": "review_item_context",
+            "args": {"ref": "exomem://review/upkeep/0123456789abcdef01234567"},
+        },
+        "dispose": {
+            "tool": "triage_memory",
+            "actions": ["dismiss", "snooze"],
+            "args": {"ref": "exomem://review/upkeep/0123456789abcdef01234567"},
+        },
+        "permission": "consideration does not authorize mutation",
+    }
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    packet = {**_packet(), "upkeep": {"items": [item]}}
+    with request_scope(_external()):
+        crossed = egress.postfilter("activate_context", packet, vault)
+    assert crossed["upkeep"] == {"items": [item]}
+
+    leaking = {**item, "route": {**item["route"], "args": {"paths": [RESTRICTED_PATH]}}}
+    with request_scope(_external()):
+        crossed = egress.postfilter("activate_context", {"upkeep": {"items": [leaking]}}, vault)
+    assert RESTRICTED_PATH not in json.dumps(crossed)

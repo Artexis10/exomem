@@ -19,10 +19,19 @@ def _read(relative: str) -> str:
     return (ANSIBLE / relative).read_text(encoding="utf-8")
 
 
+def _k3s_tasks() -> str:
+    # The role splits into per-mode task files (add-cloud-node-provisioning);
+    # contracts about "the k3s role's tasks" hold across all of them.
+    return "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((ANSIBLE / "roles/k3s/tasks").glob("*.yml"))
+    )
+
+
 def test_site_playbook_is_idempotent_by_construction_and_never_fetches_admin_state() -> None:
     site = _read("site.yml")
     base = _read("roles/base/tasks/main.yml")
-    k3s = _read("roles/k3s/tasks/main.yml")
+    k3s = _k3s_tasks()
     combined = "\n".join((site, base, k3s)).lower()
 
     assert "roles:" in site
@@ -63,7 +72,7 @@ def test_base_role_hardens_ssh_firewall_time_logging_and_disk_support() -> None:
 
 def test_k3s_role_pins_binary_and_hardens_single_server_configuration() -> None:
     defaults = _read("roles/k3s/defaults/main.yml")
-    tasks = _read("roles/k3s/tasks/main.yml")
+    tasks = _k3s_tasks()
     config = _read("roles/k3s/templates/config.yaml.j2")
     service = _read("roles/k3s/templates/k3s.service.j2")
     audit = _read("roles/k3s/files/audit-policy.yaml")
@@ -97,7 +106,7 @@ def test_k3s_role_pins_binary_and_hardens_single_server_configuration() -> None:
 
 def test_k3s_role_resolves_the_private_interface_from_the_declared_node_ip() -> None:
     defaults = _read("roles/k3s/defaults/main.yml")
-    tasks = _read("roles/k3s/tasks/main.yml")
+    tasks = _k3s_tasks()
     config = _read("roles/k3s/templates/config.yaml.j2")
 
     assert 'k3s_private_interface: ""' in defaults
@@ -164,9 +173,9 @@ def test_site_playbook_provisions_control_database_server_separately() -> None:
     assert "hosts: control_nodes" in site
     assert site.count("- base") == 2
     assert "- postgres" in site
-    # Two independent plays, so a control-database failure never touches the
-    # fleet-node play, and vice versa.
-    assert site.count("any_errors_fatal: true") == 2
+    # Independent plays, so a control-database failure never touches the
+    # fleet-node plays (harden, server, agents), and vice versa.
+    assert site.count("any_errors_fatal: true") == 4
 
 
 def test_postgres_role_pins_version_and_separates_public_from_private_roles() -> None:

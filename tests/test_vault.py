@@ -698,6 +698,131 @@ def test_vault_creation_lock_timeout_covers_thread_wait(tmp_path: Path) -> None:
     assert not thread.is_alive()
 
 
+posix_only = pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership and modes")
+
+
+def _setgid_tempdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point tempfile at a setgid parent, like a cell's fsGroup `/tmp` emptyDir."""
+    import tempfile
+
+    parent = tmp_path / "tmp"
+    parent.mkdir()
+    parent.chmod(0o2777)
+    if not parent.stat().st_mode & stat.S_ISGID:
+        pytest.skip("filesystem does not keep the setgid bit on directories")
+    monkeypatch.setenv("TMPDIR", str(parent))
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    return parent
+
+
+@posix_only
+def test_private_lock_directory_clears_setgid_inherited_on_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import init as init_module
+
+    parent = _setgid_tempdir(tmp_path, monkeypatch)
+    directory = parent.resolve() / f"exomem-locks-{os.getuid()}"
+
+    init_module.init_vault(tmp_path / "vault")
+
+    assert stat.S_IMODE(directory.lstat().st_mode) == 0o700
+
+
+@posix_only
+def test_private_lock_directory_clears_setgid_on_an_existing_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = _setgid_tempdir(tmp_path, monkeypatch)
+    directory = parent.resolve() / f"exomem-locks-{os.getuid()}"
+    directory.mkdir(mode=0o700)
+    directory.chmod(0o2700)
+    assert stat.S_IMODE(directory.lstat().st_mode) == 0o2700
+
+    assert vault._private_lock_directory() == directory
+    assert stat.S_IMODE(directory.lstat().st_mode) == 0o700
+
+
+@posix_only
+def test_private_lock_directory_refuses_a_directory_swapped_before_the_chmod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = _setgid_tempdir(tmp_path, monkeypatch)
+    directory = parent.resolve() / f"exomem-locks-{os.getuid()}"
+    directory.mkdir(mode=0o700)
+    directory.chmod(0o2700)
+    impostor = tmp_path / "impostor"
+    impostor.mkdir(mode=0o700)
+    impostor.chmod(0o2700)
+    real_open = os.open
+
+    def swapped_open(path: object, flags: int, *args: object) -> int:
+        if Path(str(path)) == directory:
+            return real_open(impostor, flags, *args)
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(vault.os, "open", swapped_open)
+
+    with pytest.raises(vault.VaultLockError) as exc:
+        vault._private_lock_directory()
+
+    assert exc.value.code == "VAULT_LOCK_DIRECTORY"
+    assert stat.S_IMODE(impostor.lstat().st_mode) == 0o2700
+    assert stat.S_IMODE(directory.lstat().st_mode) == 0o2700
+
+
+@posix_only
+@pytest.mark.parametrize("mode", [0o750, 0o2750, 0o4700, 0o1700, 0o6700, 0o701])
+def test_private_lock_directory_still_refuses_any_other_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: int
+) -> None:
+    parent = _setgid_tempdir(tmp_path, monkeypatch)
+    directory = parent.resolve() / f"exomem-locks-{os.getuid()}"
+    directory.mkdir(mode=0o700)
+    directory.chmod(mode)
+
+    with pytest.raises(vault.VaultLockError) as exc:
+        vault._private_lock_directory()
+
+    assert exc.value.code == "VAULT_LOCK_DIRECTORY"
+    assert stat.S_IMODE(directory.lstat().st_mode) == mode
+
+
+@posix_only
+def test_private_lock_directory_still_refuses_a_foreign_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = _setgid_tempdir(tmp_path, monkeypatch)
+    foreign = os.getuid() + 1
+    directory = parent.resolve() / f"exomem-locks-{foreign}"
+    directory.mkdir(mode=0o700)
+    directory.chmod(0o2700)
+    monkeypatch.setattr(vault.os, "getuid", lambda: foreign)
+
+    with pytest.raises(vault.VaultLockError) as exc:
+        vault._private_lock_directory()
+
+    assert exc.value.code == "VAULT_LOCK_DIRECTORY"
+    assert stat.S_IMODE(directory.lstat().st_mode) == 0o2700
+
+
+@posix_only
+def test_private_lock_directory_still_refuses_a_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = _setgid_tempdir(tmp_path, monkeypatch)
+    target = tmp_path / "elsewhere"
+    target.mkdir(mode=0o700)
+    target.chmod(0o2700)
+    (parent.resolve() / f"exomem-locks-{os.getuid()}").symlink_to(target)
+
+    with pytest.raises(vault.VaultLockError) as exc:
+        vault._private_lock_directory()
+
+    assert exc.value.code == "VAULT_LOCK_DIRECTORY"
+    assert stat.S_IMODE(target.lstat().st_mode) == 0o2700
+
+
 def test_guarded_reader_dispatches_to_the_windows_descriptor_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

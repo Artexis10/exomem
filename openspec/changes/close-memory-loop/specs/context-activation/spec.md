@@ -19,7 +19,9 @@ per-vault hash of `session` rather than its value, a hash identifying the vault,
 packet-derived counts. It SHALL NOT carry the turn text, and SHALL omit anchor
 identifiers when the packet is content-private. An invalid `client` or an oversize
 `session` SHALL be recorded as invalid and never refused or echoed. `client` and
-`session` SHALL NOT change any part of the packet. On the MCP door only, while
+`session` SHALL NOT change the packet's material. `session` MAY select the caller whose
+session start carries the optional `upkeep` block that the adaptive-memory-maintenance
+capability defines, and nothing else. On the MCP door only, while
 proactive capture is permitted, the packet MAY carry a one-sentence `episode_due`
 advisory after repeated activations from one caller without an episode record, at most
 once per bounded interval; it SHALL NOT appear on the CLI or REST doors, nor for a
@@ -46,7 +48,9 @@ within that interval.
 #### Scenario: Attribution never changes the packet
 - **WHEN** the same turn is submitted against the same vault state with and without
   `client` and `session`, or with an invalid label or oversize session
-- **THEN** the packets are identical apart from the continuity token each call mints
+- **THEN** the packets are identical apart from the continuity token each call mints,
+  the optional `upkeep` block, whose session start the `session` identifies, and
+  `budget.used_chars`, which counts that block's item when one is attached
 - **AND** the call is never refused over its attribution
 
 #### Scenario: The turn is never recorded

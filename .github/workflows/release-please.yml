@@ -557,6 +557,55 @@ jobs:
             echo "Cloud cell image digest: ${cloud_image}"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # The platform chart consumes cellctl by digest (cellctl.image), so it
+      # ships on the same release trigger as the cell image it rolls out.
+      - name: Build and push Exomem Cloud cellctl image (linux/amd64)
+        id: cellctl-build
+        uses: docker/build-push-action@v6
+        with:
+          context: infra/cellctl
+          file: infra/cellctl/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/artexis10/exomem-cellctl:${{ steps.meta.outputs.version }}
+            ghcr.io/artexis10/exomem-cellctl:${{ steps.meta.outputs.source_commit }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=cellctl
+          cache-to: type=gha,mode=max,scope=cellctl
+
+      - name: Attest the exact Exomem Cloud cellctl image
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-name: ghcr.io/artexis10/exomem-cellctl
+          subject-digest: ${{ steps.cellctl-build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Record the cellctl image tag and digest in the release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          CELLCTL_DIGEST: ${{ steps.cellctl-build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cellctl_image="ghcr.io/artexis10/exomem-cellctl@${CELLCTL_DIGEST}"
+          cellctl_tag="ghcr.io/artexis10/exomem-cellctl:${VERSION}"
+          existing_body=$(gh release view "$TAG" --json body -q .body)
+          {
+            printf '%s\n\n' "$existing_body"
+            echo "## Exomem Cloud cellctl image"
+            echo "- Tag: \`${cellctl_tag}\`"
+            echo "- Digest: \`${cellctl_image}\`"
+          } | gh release edit "$TAG" --notes-file -
+          {
+            echo "cellctl image tag: ${cellctl_tag}"
+            echo "cellctl image digest: ${cellctl_image}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   publish-existing-image:
     if: ${{ github.event_name == 'workflow_dispatch' && vars.GHCR_PUBLISH_ENABLED == 'true' }}
     runs-on: ubuntu-latest

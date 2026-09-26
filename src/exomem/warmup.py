@@ -107,6 +107,10 @@ def warm_retrieval_catalog(vault_root: Path) -> bool:
                 require_live_projection=event_indexes,
             ):
                 return False
+            # A catalog inherited from the previous process is current but
+            # stamped in that registry's lineage; adopt it into this one so the
+            # first governed write can bless it with an ordinary delta.
+            lexstore.rebase_inherited_catalog_lineage(vault_root)
             # Bind the CAS token to this successful proof, not to the whole
             # warm operation: an earlier stale proof or completed repair may
             # legitimately advance admission before an eager retry succeeds.

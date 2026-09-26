@@ -5,6 +5,7 @@ import argparse
 import ipaddress
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,39 @@ def _optional_public_output(document: dict[str, Any], name: str) -> str | None:
     return _public_output(document, name)
 
 
+# Terraform names every agent server exomem-agent-<key>; that name is also the
+# inventory name and, through the agent's explicit node-name, the Kubernetes
+# node name that remove-agent.yml acts on.
+_AGENT_NAME = re.compile(r"^exomem-agent-[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$")
+
+
+def _agent_hosts(document: dict[str, Any], user: str) -> dict[str, dict[str, str]]:
+    """Validated coordinates for every K3s agent, keyed by server name."""
+    if "k3s_agent_nodes" not in document:
+        return {}
+    item = document["k3s_agent_nodes"]
+    if not isinstance(item, dict) or item.get("sensitive") is not False:
+        raise ValueError("k3s_agent_nodes must be an explicit non-sensitive Terraform output")
+    nodes = item.get("value")
+    if not isinstance(nodes, dict):
+        raise ValueError("k3s_agent_nodes must be a map")
+    hosts: dict[str, dict[str, str]] = {}
+    for node in nodes.values():
+        if not isinstance(node, dict):
+            raise ValueError("each k3s_agent_nodes entry must be an object")
+        name = node.get("name")
+        if not isinstance(name, str) or not _AGENT_NAME.match(name):
+            raise ValueError("each K3s agent must be named exomem-agent-<key>")
+        if name in hosts:
+            raise ValueError("K3s agent names must be unique")
+        hosts[name] = {
+            "ansible_host": str(ipaddress.ip_address(str(node.get("ipv4")))),
+            "ansible_user": user,
+            "private_node_ip": str(ipaddress.ip_address(str(node.get("private_ip")))),
+        }
+    return hosts
+
+
 def main() -> int:
     args = _parser().parse_args()
     if args.terraform_output.stat().st_mode & 0o777 != 0o600:
@@ -53,6 +87,7 @@ def main() -> int:
             control_public_ip = str(ipaddress.ip_address(control_public_ip))
         if control_private_ip is not None:
             control_private_ip = str(ipaddress.ip_address(control_private_ip))
+        agents = _agent_hosts(document, args.user)
     except ValueError as error:
         raise SystemExit(str(error)) from error
 
@@ -67,6 +102,11 @@ def main() -> int:
             }
         }
     }
+
+    # Agents are a child group of hosted_nodes, so they inherit its group
+    # variables; site.yml's server play targets hosted_nodes:!k3s_agents.
+    if agents:
+        children["hosted_nodes"]["children"] = {"k3s_agents": {"hosts": agents}}
 
     # The control database server is optional here: not every Terraform
     # output set carries it yet (e.g. an apply that predates D12), so it is

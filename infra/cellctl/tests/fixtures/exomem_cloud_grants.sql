@@ -2,7 +2,8 @@
 -- (design D7). This script is the single implementation of:
 --
 -- 1. Schema-wide `substrate_app` DML (D7): "substrate_app receives SELECT,
---    INSERT, UPDATE and DELETE on every table in the public schema, and
+--    INSERT, UPDATE and DELETE on every table in the public schema except
+--    schema_migrations, and
 --    USAGE and SELECT on every sequence. ALTER DEFAULT PRIVILEGES FOR ROLE
 --    substrate_owner extends the same grants to tables and sequences
 --    created by later migrations. The only exceptions are C1 through C1d."
@@ -58,6 +59,12 @@ BEGIN
       'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %I TO substrate_app',
       target_schema
     );
+    -- schema_migrations belongs to the migration runner (D7). No runtime
+    -- code reads it, so the schema-wide grant just above is taken back from
+    -- it on every run.
+    IF to_regclass('schema_migrations') IS NOT NULL THEN
+      REVOKE ALL ON schema_migrations FROM substrate_app;
+    END IF;
   END IF;
 
   -- ALTER DEFAULT PRIVILEGES FOR ROLE substrate_owner: guarded on the role
@@ -207,6 +214,13 @@ BEGIN
     END IF;
     IF to_regclass('exomem_oauth_account_blocks') IS NOT NULL THEN
       GRANT SELECT (tenant_id, owner_user_id) ON exomem_oauth_account_blocks TO exomem_gateway;
+    END IF;
+    -- C310 round 2, L3: findCloudOAuthAccessToken also requires the tenant's
+    -- own status to be outside deletion_pending/deleted, so it now joins
+    -- exomem_tenants -- not a C1-C1d table, and outside the OAuth grant
+    -- above only because it predates this fix.
+    IF to_regclass('exomem_tenants') IS NOT NULL THEN
+      GRANT SELECT (id, status) ON exomem_tenants TO exomem_gateway;
     END IF;
   END IF;
 END
