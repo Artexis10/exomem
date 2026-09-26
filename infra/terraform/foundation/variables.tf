@@ -180,17 +180,17 @@ variable "control_db_server_name" {
 }
 
 variable "control_db_server_type" {
-  # cpx11 (shared-x86, 2 vCPU / 2 GiB) is Hetzner's smallest currently placeable
-  # x86 type; the cx line the fleet node uses is retired for new placement (see
-  # server_type above). The control database is metadata-sized (cell rows,
+  # cx23 (shared x86, 2 vCPU / 4 GiB) is the smallest x86 type Hetzner still
+  # sells in fsn1; cpx11 can no longer be ordered there (refused on
+  # 2026-09-26). The control database is metadata-sized (cell rows,
   # capacity, rollout state), not vault data, so this is sized to the
   # workload rather than padded for headroom that would never be used.
   description = "Small x86 Hetzner instance type for the control database server."
   type        = string
-  default     = "cpx11"
+  default     = "cx23"
 
   validation {
-    condition     = contains(["cpx11", "cpx21"], var.control_db_server_type)
+    condition     = contains(["cx23", "cx33"], var.control_db_server_type)
     error_message = "The control database server must use an approved small x86 type."
   }
 }

@@ -84,10 +84,10 @@ output "database_hostname" {
 }
 
 output "control_db_estimated_fixed_monthly_eur_ex_vat" {
-  # Approximate list price for cpx11 in fsn1 plus a primary IPv4; not fetched
+  # Approximate list price for cx23 in fsn1 plus a primary IPv4; not fetched
   # from the live Hetzner pricing API, unlike the alpha estimate above.
   description = "Approximate control-database server cost; excludes usage-priced B2."
-  value       = 5.36
+  value       = 5.99
 }
 
 output "k3s_agent_nodes" {
