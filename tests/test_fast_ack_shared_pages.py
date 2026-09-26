@@ -635,6 +635,57 @@ def test_a_new_page_deleted_by_hand_waits_until_the_lanes_lose_it(
     assert pending_recall.overlay(vault).outcome == "ready"
 
 
+@pytest.mark.parametrize("watcher_first", [False, True])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_proven_new_page_deletion_heals_after_reproof(
+    live_catalogue: Path, watcher_first: bool, legacy: bool
+) -> None:
+    vault = live_catalogue
+    rel = "Knowledge Base/Notes/Insights/deleted-after-proof.md"
+    target = vault / rel
+    content = b"---\ntitle: Deleted after proof\ntype: insight\nstatus: draft\n---\n\nBody.\n"
+    receipt = derived_receipts.prepare_batch(
+        vault,
+        batch_id="deleted-after-proof",
+        mutation_attempt_digest=hashlib.sha256(b"deleted-after-proof").hexdigest(),
+        canonical_generation="generation-deleted-after-proof",
+        checkpoint_id="checkpoint-deleted-after-proof",
+        paths=(
+            derived_receipts.DerivedBatchPath(
+                rel_path=rel,
+                before_hash=None,
+                after_hash=hashlib.sha256(content).hexdigest(),
+            ),
+        ),
+        required_components=frozenset({DerivedComponent.LEXSTORE}),
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)
+
+    def prove() -> str:
+        return derived_receipts.prove_committed(
+            vault, receipt, current_generation=receipt.canonical_generation
+        ).outcome
+
+    assert prove() == "ready"
+    if legacy:
+        # A ready receipt from before the proof-history column was added.
+        with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+            connection.execute(
+                "UPDATE derived_batches SET proven_at = NULL WHERE batch_id = ?",
+                (receipt.batch_id,),
+            )
+    index_sync.upsert_after_write(vault, [target], publish_corpus_change=True)
+    target.unlink()
+    if not watcher_first:
+        assert prove() == "reconcile_required"
+    index_sync.delete_after_remove(vault, [rel])
+    assert pending_recall.recall_lanes_hold(vault, {rel: None})
+    assert prove() == "superseded"
+    _drain_until_idle(vault)
+    assert [state for _id, state, _paths in _batches(vault)] == ["superseded"]
+
+
 def test_a_crash_cut_batch_whose_new_page_is_absent_stays_owed(
     live_catalogue: Path,
 ) -> None:
@@ -670,6 +721,11 @@ def test_a_crash_cut_batch_whose_new_page_is_absent_stays_owed(
     assert derived_receipts.prove_committed(
         vault, receipt, current_generation=receipt.canonical_generation
     ).outcome == "reconcile_required"
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT proven_at FROM derived_batches WHERE batch_id = ?",
+            (receipt.batch_id,),
+        ).fetchone() == (None,)
 
 
 def test_a_batch_whose_every_path_moved_out_of_band_retires(

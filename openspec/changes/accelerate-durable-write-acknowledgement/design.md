@@ -101,6 +101,12 @@ drainers continue until empty; new fast writers create only batch/component
 rows. This avoids rewriting thousands of legacy entries and allows a safe
 mixed-version rollout.
 
+Receipt sequence migration commits the added column, existing-row backfill,
+indexes and compatibility trigger atomically, without committing a caller's
+outer transaction. Reopening also repairs missing sequence values left by an
+interrupted older migration. Once current, ordinary receipt access must retain
+bounded lookup cost rather than scanning the full receipt history.
+
 **Alternative rejected — add semantic/graph rows only after commit.** That is
 cheap, but a process death between canonical replacement and SQLite insertion
 loses the exact work demand and recreates the defect this change is meant to
@@ -145,8 +151,10 @@ original request evaluates a prepared batch from source of truth:
   its after-state, since otherwise it may be the older batch's own torn write
   (found by the 3-writer burst, 2026-09-25). One before-state cannot be a torn
   write: a page the batch created, absent again after the batch was proven
-  committed (it is active, or published its pending custody before it
-  stranded), was deleted since. That absence is handed on through the same
+  committed, was deleted since. Successful proof records a durable fact in the
+  same transaction as activation; changing the batch to `reconcile_required`
+  cannot erase it, even if pending publication has not happened. That absence
+  is handed on through the same
   lanes test as a moved path, once both recall lanes hold it, so a page
   deleted by hand before its batch converges leaves managed recall ready with
   no operator step; its advisory result is superseded, since it describes a

@@ -45,8 +45,9 @@ already hold. A path back at its recorded before-bytes is not such a later
 state: it is covered only when a newer proven receipt, carrying live or retired
 pending custody for that path, recorded exactly those bytes (or that absence)
 as its after-state; or, for a page the receipt itself created, when the
-receipt was already proven committed (it is active, or it published its
-pending custody) and both recall lanes hold the page's absence. Plain newer
+receipt was already proven committed and both recall lanes hold the page's
+absence. Successful proof SHALL remain durable across recovery-state changes
+and restarts, including before pending custody is published. Plain newer
 coverage of the path, or the lanes holding before-bytes the receipt did not
 create, SHALL NOT cover it, since those bytes may be the receipt's own torn
 write. Rollback,
@@ -59,6 +60,12 @@ still converges the paths it owns, and is superseded as a whole only when newer
 receipts cover every path/component demand. The same per-path predicate SHALL
 hold at the acknowledgement's proof, at every re-proof before a component is
 dispatched, and at component completion.
+
+Additive receipt sequence migration SHALL atomically install its schema,
+backfill and compatibility support without committing a caller's outer
+transaction. Reopening SHALL repair missing sequence values left by an
+interrupted older migration, preserving coverage by existing proven receipts
+and bounded ordinary lookup cost.
 
 #### Scenario: Process dies after canonical replacement
 
@@ -119,6 +126,20 @@ dispatched, and at component completion.
 - **WHEN** several governed pages are each written more than once in one burst
 - **THEN** every older batch retires as `superseded` and every newest batch completes, with no batch left in `reconcile_required`
 - **AND** every pending-visibility row of the superseded batches is retired
+
+#### Scenario: Recovery before watcher removal preserves unpublished proof
+
+- **WHEN** a created page's receipt was proven committed but pending custody was not published, the page is deleted, and recovery runs before the watcher removes the stale recall entries
+- **THEN** the receipt remains owed until both recall lanes hold the absence, retaining its prior proof through recovery and restart
+- **AND** it then hands the page on without an operator step, regardless of whether recovery or watcher removal ran first
+- **AND** a receipt never proven committed does not gain proof from the page's absence
+
+#### Scenario: Interrupted sequence migration preserves receipt coverage
+
+- **WHEN** a receipt sequence migration is interrupted between adding its column and backfilling existing rows
+- **THEN** reopening completes or repairs the migration before using sequence-based coverage
+- **AND** existing completed receipts with retired pending custody still cover the same older paths
+- **AND** a caller's outer transaction remains under that caller's control
 
 ### Requirement: Post-Canonical Waiting Has One Shared Two-Second Budget
 

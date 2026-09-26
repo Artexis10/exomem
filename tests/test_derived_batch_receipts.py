@@ -2361,6 +2361,93 @@ def _ensure_accepted_parent_derived_schema(connection: sqlite3.Connection) -> No
     )
 
 
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_sequence_migration_repairs_interrupted_backfill_and_preserves_transaction(
+    tmp_path: Path, interrupted: bool
+) -> None:
+    protocol = _protocol()
+    store = tmp_path / "legacy.sqlite"
+    rel = "Knowledge Base/Notes/legacy-sequence.md"
+    with sqlite3.connect(store) as connection:
+        _ensure_accepted_parent_derived_schema(connection)
+        connection.execute(
+            "CREATE TABLE maintenance_state(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO derived_batches(schema_version, batch_id, "
+            "mutation_attempt_digest, canonical_generation, checkpoint_id, "
+            "state, created_at, updated_at) "
+            "VALUES (1, 'legacy-sequence', ?, 'generation', 'checkpoint', "
+            "'completed', 1, 1)",
+            (_hash_bytes(b"legacy-sequence"),),
+        )
+        connection.execute(
+            "INSERT INTO derived_batch_paths(batch_id, rel_path, after_hash) "
+            "VALUES ('legacy-sequence', ?, ?)",
+            (rel, _hash_bytes(b"after")),
+        )
+        connection.execute(
+            "INSERT INTO pending_recall_rows(batch_id, rel_path, "
+            "component_revision, canonical_generation, state, created_at, updated_at) "
+            "VALUES ('legacy-sequence', ?, 1, 'generation', 'retired', 1, 1)",
+            (rel,),
+        )
+    with sqlite3.connect(store) as connection:
+        if interrupted:
+            def deny_backfill(action, table, _column, _database, _trigger):
+                if action == sqlite3.SQLITE_UPDATE and table == "derived_batch_paths":
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+
+            connection.set_authorizer(deny_backfill)
+            with pytest.raises(sqlite3.DatabaseError):
+                deferred_index._ensure_derived_batch_schema(connection)
+            connection.set_authorizer(None)
+            assert "batch_seq" not in {
+                row[1] for row in connection.execute("PRAGMA table_info(derived_batch_paths)")
+            }
+        else:
+            connection.execute(
+                "ALTER TABLE derived_batch_paths ADD COLUMN batch_seq INTEGER"
+            )
+    with sqlite3.connect(store) as connection:
+        connection.execute("BEGIN")
+        connection.execute(
+            "INSERT INTO maintenance_state(key, value) VALUES ('caller', 'pending')"
+        )
+        deferred_index._ensure_derived_batch_schema(connection)
+        assert connection.in_transaction
+        assert connection.execute(
+            "SELECT batch_seq FROM derived_batch_paths WHERE batch_id = 'legacy-sequence'"
+        ).fetchone()[0] is not None
+        assert protocol._newer_custody_covers_path(connection, 0, rel)
+        connection.rollback()
+        assert connection.execute(
+            "SELECT 1 FROM maintenance_state WHERE key = 'caller'"
+        ).fetchone() is None
+        deferred_index._ensure_derived_batch_schema(connection)
+    with sqlite3.connect(store) as connection:
+        assert protocol._newer_custody_covers_path(connection, 0, rel)
+        connection.execute(
+            "INSERT INTO derived_batches(schema_version, batch_id, "
+            "mutation_attempt_digest, canonical_generation, checkpoint_id, "
+            "state, created_at, updated_at) "
+            "VALUES (1, 'old-writer-sequence', ?, 'generation', 'checkpoint', "
+            "'ready', 2, 2)",
+            (_hash_bytes(b"old-writer-sequence"),),
+        )
+        connection.execute(
+            "INSERT INTO derived_batch_paths(batch_id, rel_path, after_hash) "
+            "VALUES ('old-writer-sequence', ?, ?)",
+            (rel, _hash_bytes(b"old-writer-after")),
+        )
+        assert connection.execute(
+            "SELECT p.batch_seq = b.rowid FROM derived_batch_paths AS p "
+            "JOIN derived_batches AS b ON b.batch_id = p.batch_id "
+            "WHERE p.batch_id = 'old-writer-sequence'"
+        ).fetchone() == (1,)
+
+
 def test_accepted_parent_schema_migrates_without_losing_any_custody(
     vault: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3365,6 +3452,14 @@ def _coverage_costs(vault: Path, later_batches: int) -> dict[str, int]:
         )
         never = _hash_bytes(b"bytes no batch wrote")
         return {
+            "schema_current": _vm_steps(
+                connection,
+                lambda: protocol._receipt_schema_is_current(connection),
+            ),
+            "schema_ensure": _vm_steps(
+                connection,
+                lambda: deferred_index._ensure_derived_batch_schema(connection),
+            ),
             "covers_unique_miss": _vm_steps(
                 connection,
                 lambda: protocol._newer_custody_covers_path(connection, sequence, unique),
@@ -3393,11 +3488,12 @@ def _coverage_costs(vault: Path, later_batches: int) -> dict[str, int]:
 
 
 def test_coverage_and_census_cost_stays_flat_as_receipts_grow(tmp_path: Path) -> None:
-    """Coverage seeks by path and store sequence; the census seeks by state.
+    """Coverage, census, and schema probes stay bounded as receipts grow.
 
     Receipts are never pruned, and these queries run on every drain pass that
     re-proves a stranded batch -- the coverage ones inside the consistency
-    guard. Their cost must not grow with the receipt history.
+    guard. Ordinary receipt reads also probe schema currency. Their cost must
+    not grow with the receipt history.
     """
     small_vault = tmp_path / "small"
     large_vault = tmp_path / "large"

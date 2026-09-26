@@ -614,6 +614,9 @@ def _receipt_schema_is_current(connection: sqlite3.Connection) -> bool:
         str(row[1])
         for row in connection.execute("PRAGMA table_info(derived_batch_paths)")
     }
+    batches = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(derived_batches)")
+    }
     present = {
         str(row[0])
         for row in connection.execute(
@@ -623,14 +626,21 @@ def _receipt_schema_is_current(connection: sqlite3.Connection) -> bool:
             "'pending_visibility_generation_update', "
             "'pending_visibility_generation_delete', "
             "'derived_paths_sequence_fill', 'derived_paths_sequence', "
-            "'derived_paths_after_sequence', 'derived_batches_state')"
+            "'derived_paths_after_sequence', 'derived_paths_missing_sequence', "
+            "'derived_batches_state')"
         )
     }
     return (
         "lease_revision" in components
         and "target_rel_path" in advisory
         and "batch_seq" in paths
-        and len(present) == 8
+        and "proven_at" in batches
+        and len(present) == 9
+        and connection.execute(
+            "SELECT 1 FROM derived_batch_paths "
+            "INDEXED BY derived_paths_missing_sequence "
+            "WHERE batch_seq IS NULL LIMIT 1"
+        ).fetchone() is None
     )
 
 
@@ -1211,16 +1221,17 @@ def _handed_on(
         return frozenset()
     row = connection.execute(
         "SELECT rowid, state, EXISTS (SELECT 1 FROM pending_recall_rows AS r "
-        "WHERE r.batch_id = b.batch_id AND r.state IN ('live', 'retired')) "
+        "WHERE r.batch_id = b.batch_id AND r.state IN ('live', 'retired')), "
+        "proven_at "
         "FROM derived_batches AS b WHERE batch_id = ?",
         (batch_id,),
     ).fetchone()
     if row is None:
         return frozenset()
     sequence = int(row[0])
-    # Proven committed once: the batch is active now, or it published custody
-    # before it stranded. A first proof or a crash-cut batch is neither.
-    proven = str(row[1]) in {"ready", "completed"} or bool(row[2])
+    # The durable proof marker survives a stranded state and unpublished rows.
+    # Ready/completed state or published custody also proves legacy batches.
+    proven = row[3] is not None or str(row[1]) in {"ready", "completed"} or bool(row[2])
     handed = {
         rel
         for rel in moved
@@ -1310,8 +1321,8 @@ def _activate_proven_batch(
     connection.execute(
         "UPDATE derived_batches SET state = CASE "
         "WHEN state = 'completed' THEN state ELSE 'ready' END, updated_at = ?, "
-        "failure_code = NULL WHERE batch_id = ?",
-        (now, batch_id),
+        "proven_at = COALESCE(proven_at, ?), failure_code = NULL WHERE batch_id = ?",
+        (now, now, batch_id),
     )
 
 
@@ -1420,6 +1431,17 @@ def _prove_committed_guarded(
             all_after = all(state == "after" for state in path_states)
             all_before = all(state == "before" for state in path_states)
             current = _receipt_from_connection(connection, batch_id)
+            # Preserve a pre-upgrade batch's proof before re-proof can strand
+            # it and erase the only surviving evidence of its old ready state.
+            connection.execute(
+                "UPDATE derived_batches AS b SET proven_at = ? "
+                "WHERE batch_id = ? AND proven_at IS NULL AND "
+                "state NOT IN ('aborted', 'superseded') AND "
+                "(state IN ('ready', 'completed') OR EXISTS ("
+                "SELECT 1 FROM pending_recall_rows AS r WHERE r.batch_id = b.batch_id "
+                "AND r.state IN ('live', 'retired')))",
+                (observed_at, current.batch_id),
+            )
             if current.state == "aborted":
                 outcome = "aborted"
             elif current.state == "superseded":
