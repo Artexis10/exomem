@@ -708,6 +708,76 @@ def test_a_restricted_draft_is_judged_without_what_withheld_pages_author(
         assert answers["C"] == answers["B"], label
 
 
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_writers_first_page_bootstraps_as_in_an_empty_vault(
+    tmp_path: Path, audience: str
+) -> None:
+    """A writer that sees no governed page bootstraps its first one, whether or
+    not a governed page withheld from it exists."""
+    base = {f"{KB}/Sources/s1.md": _page("S", "Raw.", type="source")}
+    withheld = {
+        f"{WITHHELD_DIR}/memo.md": _page(
+            "Memo", f"Withheld body text.{_UNIT}", type="insight", status="active"
+        )
+    }
+    vaults = _twins(tmp_path, base, withheld, audience)
+
+    def drafted(vault: Path, principal: RequestPrincipal | None) -> dict[str, Any]:
+        answer = _call(
+            vault, principal, "remember", content=f"First page.{_UNIT}", title="First Page",
+            note_type="insight", validate_only=True, response_detail="full",
+        )
+        answer.pop("draft_token", None)  # carries its issue time
+        return answer
+
+    answers = {
+        variant: _VOLATILE_TEXT.sub("<v>", _text(drafted(vault, _principal(audience))))
+        for variant, vault in vaults.items()
+    }
+
+    assert '"__error__"' not in answers["B"], answers["B"]
+    assert '"bootstrap"' in answers["B"], answers["B"]
+    assert answers["A"] == answers["B"]
+    assert answers["C"] == answers["B"]
+    assert '"bootstrap"' not in _text(drafted(vaults["A"], None))
+
+
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_moves_review_carry_reads_over_its_view(
+    tmp_path: Path, audience: str
+) -> None:
+    """Whether a linking page's relation review carries across a move is
+    decided over the mover's view: a relation a withheld page authors toward
+    it does not count."""
+    from exomem import semantic_contract, semantic_writes
+
+    linking = f"{INSIGHTS}/linking.md"
+    base = {
+        **_filler(),
+        linking: _page("Linking", f"Links [[{INSIGHTS}/moved]].{_UNIT}", type="insight",
+                       status="active"),
+        f"{INSIGHTS}/moved.md": _page("Moved", "Moved page.", type="insight", status="active"),
+    }
+    withheld = {
+        f"{WITHHELD_DIR}/memo.md": _page(
+            "Memo", f"Withheld body text.{_UNIT}\n## Relations\n\n- supports [[{linking[:-3]}]]\n",
+            type="insight",
+        )
+    }
+    vaults = _twins(tmp_path, base, withheld, audience)
+
+    def signature(vault: Path, principal: RequestPrincipal | None) -> str:
+        _reset()
+        with library_scope() if principal is None else request_scope(principal):
+            corpus = semantic_contract.build_corpus_context(vault)
+            return repr(semantic_writes._review_carry_signature(corpus, linking))
+
+    restricted = {variant: signature(vault, _principal(audience)) for variant, vault in vaults.items()}
+    assert restricted["A"] == restricted["B"]
+    assert restricted["C"] == restricted["B"]
+    assert signature(vaults["A"], None) != signature(vaults["B"], None)
+
+
 def test_the_owner_still_judges_a_draft_by_every_page(tmp_path: Path) -> None:
     base, withheld = _drafted_fixture()
     vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")

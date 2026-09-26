@@ -1114,7 +1114,7 @@ For a caller other than the owner, a derived structure SHALL decide each candida
 
 ### Requirement: A restricted writer's links resolve over the pages it may see
 
-For a writer other than the owner under a governed policy, write-time wikilink resolution SHALL consider only pages the writer may see: stem, title and path matches in body links, `sources`, bridge sources, entity connections, draft relation suggestions, capture-sweep mentions, and the semantic contract's resolution of the written page's own relation targets and body links. The semantic contract SHALL judge a page the writer may see without the relations that pages withheld from the writer author, so they count toward neither its disposition, its review candidates, their total nor its qualifying directions, and only visible pages count as its governed peers. That judgement SHALL be made where the page is judged: the corpus a write builds, which also feeds the graph it publishes, SHALL keep the owner's resolution. A link that matches only withheld pages SHALL resolve, warn and be reported exactly as it would if those pages were absent, and an ambiguity SHALL list only visible pages. A path that names no file SHALL be unaffected. The owner's resolution SHALL be unchanged.
+For a writer other than the owner under a governed policy, write-time wikilink resolution SHALL consider only pages the writer may see: stem, title and path matches in body links, `sources`, bridge sources, entity connections, draft relation suggestions, capture-sweep mentions, and the semantic contract's resolution of the written page's own relation targets and body links. The semantic contract SHALL judge a page the writer may see without the relations that pages withheld from the writer author, so they count toward neither its disposition, its review candidates, their total nor its qualifying directions, and only visible pages count as its governed peers, including when a writer's first page is bootstrapped. Whether a linking page's relation review carries across a move SHALL be decided over the same view. That judgement SHALL be made where the page is judged: the corpus a write builds, which also feeds the graph it publishes, SHALL keep the owner's resolution. A link that matches only withheld pages SHALL resolve, warn and be reported exactly as it would if those pages were absent, and an ambiguity SHALL list only visible pages. A path that names no file SHALL be unaffected. The owner's resolution SHALL be unchanged.
 
 #### Scenario: A guess matches a withheld page
 
@@ -1125,6 +1125,11 @@ For a writer other than the owner under a governed policy, write-time wikilink r
 
 - **WHEN** a withheld page authors a relation to the title a restricted writer drafts, or the draft's body links a name only a withheld page answers
 - **THEN** the draft's validation is identical to the twin without that page, and the owner's draft still qualifies through that relation
+
+#### Scenario: A restricted writer's first visible governed page
+
+- **WHEN** a restricted writer validates a page in a vault where every governed page is withheld from it
+- **THEN** the page bootstraps exactly as in a vault with no governed page
 
 ### Requirement: Write doors decide their target before acting
 

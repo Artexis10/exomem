@@ -2802,6 +2802,10 @@ def _review_carry_signature(
     path: str,
 ) -> tuple[Any, ...]:
     state = corpus.pages[path]
+    # For a writer other than the owner, the facts it may judge (see
+    # `writer_view_relations`): a relation a withheld page authors does not
+    # decide whether a review carries.
+    outbound, inbound, _visible = semantic_contract.writer_view_relations(state, corpus)
 
     def target_identity(fact: semantic_contract.RelationFact) -> tuple[str, str] | None:
         resolved = (fact.resolved_target_path or "").split("#", 1)[0]
@@ -2811,11 +2815,7 @@ def _review_carry_signature(
         return target.identity_kind, target.identity
 
     def facts(direction: str) -> tuple[tuple[Any, ...], ...]:
-        values = (
-            corpus.outbound.get(path, ())
-            if direction == "outbound"
-            else corpus.inbound.get(path, ())
-        )
+        values = outbound if direction == "outbound" else inbound
         result: list[tuple[Any, ...]] = []
         for fact in values:
             qualification = semantic_contract.qualify_relation(

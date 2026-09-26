@@ -3865,13 +3865,20 @@ def _relation_disposition(
             review_reason=review.reason,
             review_reference=review.reference,
         )
+    before_governed = before_corpus.eligible_governed_paths
+    after_governed = corpus.eligible_governed_paths
+    if visible is not None:
+        # A writer that sees no governed page bootstraps its first one, as in
+        # a vault without the pages withheld from it.
+        before_governed = frozenset(path for path in before_governed if visible(path))
+        after_governed = frozenset(path for path in after_governed if visible(path))
     automatic_bootstrap = (
         review is None
         and mode == "precommit"
         and operation in _CREATE_LIKE
         and before is None
-        and not before_corpus.eligible_governed_paths
-        and corpus.eligible_governed_paths == frozenset({page.path})
+        and not before_governed
+        and after_governed == frozenset({page.path})
     )
     if automatic_bootstrap:
         return RelationDisposition(
