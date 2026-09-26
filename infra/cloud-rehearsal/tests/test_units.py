@@ -63,6 +63,16 @@ def test_a_report_gates_the_node_only_when_everything_passed() -> None:
         assert run.to_json()["outcome"]["gates_node"] is False
 
 
+def test_capture_p95_is_reported_but_does_not_hold_the_node_gate() -> None:
+    run = _passing_report()
+    run.samples["capture"] = [2.0] * 20
+    document = run.to_json()
+    capture = document["measurements"]["capture_p95_seconds"]
+    assert capture["met"] is False and capture["gating"] is False and "P4" in capture["note"]
+    assert document["outcome"]["all_targets_met"] is True
+    assert document["outcome"]["gates_node"] is True
+
+
 def test_harness_check_fails_only_on_unknown_findings(tmp_path: Path) -> None:
     from cloud_rehearsal.__main__ import _compare_with_known_findings
 

@@ -32,6 +32,13 @@ TARGETS: dict[str, tuple[float, bool]] = {
     "upgrade_seconds_per_cell": (60.0, True),
 }
 
+# Measured and reported, but not gating on a rehearsal runner (orchestrator
+# ruling, tasks.md 5.4): the target is for the real node, where P4 owner
+# acceptance re-measures it.
+INFORMATIONAL: dict[str, str] = {
+    "capture_p95_seconds": "measured on a shared CI runner; the 1 s target is for the node and is re-measured at P4 owner acceptance",
+}
+
 PASSED, FAILED, BLOCKED = "passed", "failed", "blocked"
 
 
@@ -105,6 +112,8 @@ class Report:
                 "comparison": "<" if TARGETS[name][1] else "<=",
                 "met": None if value is None else (value < TARGETS[name][0] if TARGETS[name][1] else value <= TARGETS[name][0]),
                 "samples": len(self.samples.get(_sample_key(name), [])) or (1 if value is not None else 0),
+                "gating": name not in INFORMATIONAL,
+                **({"note": INFORMATIONAL[name]} if name in INFORMATIONAL else {}),
             }
             for name, value in observed.items()
         }
@@ -131,7 +140,7 @@ class Report:
         passed = all(step.status == PASSED for step in self.steps) and len(self.steps) == 12
         measurements = self.measurements()
         blockers = self.gate_blockers()
-        targets_met = all(m["met"] for m in measurements.values())
+        targets_met = all(m["met"] for m in measurements.values() if m["gating"])
         return {
             "schema": SCHEMA,
             "run_id": self.run_id,

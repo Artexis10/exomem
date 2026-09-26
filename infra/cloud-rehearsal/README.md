@@ -33,7 +33,7 @@ With `--harness-check`, a failing step passes the check only when `known-finding
 
 `gates_node` is true only when all of the following hold:
 - every step passed;
-- every target was met;
+- every gating target was met (capture p95 is reported but informational on a CI runner: its 1 s target is re-measured on the node at P4 owner acceptance);
 - the run is valid;
 - no cross-lane defect was recorded;
 - no distinctive phrase reached a log;
@@ -67,7 +67,7 @@ them to local ports and trusts only that CA.
 
 1. **Invite.**
 2. **Provision** a paid tenant (A): invite redemption, checkout, then a `subscription.activated` webhook. Timed until cellctl observes the cell running and ready. The target is under 3 minutes.
-3. **OAuth MCP `tools/list`.** The MCP SDK's OAuth client runs gateway 401, discovery, PKCE with `resource`, consent and token. Warm `initialize` and `tools/list` are timed.
+3. **OAuth MCP `tools/list`.** The stock MCP Python SDK OAuth client runs gateway 401, discovery, PKCE with `resource` (verifiers from the full RFC 7636 grammar), consent, a `127.0.0.1` loopback redirect and token. Warm `initialize` and `tools/list` are timed.
 4. **Capture** (`capture_source`).
 5. **Paraphrased cited recall** (`ask_memory`).
 6. **Governed write (`remember`) after a pod kill.** Owner-only modes are checked.

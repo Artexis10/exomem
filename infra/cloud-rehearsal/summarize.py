@@ -27,7 +27,8 @@ def main(path: str) -> None:
         print(f"| {step['number']} | {step['name']} | {step['status']} | {step['seconds']} | {failure} |")
     print("\n| measurement | observed | target | met |\n|---|---|---|---|")
     for name, value in report["measurements"].items():
-        print(f"| {name} | {value['observed']} | {value['comparison']} {value['target']} | {value['met']} |")
+        met = value["met"] if value.get("gating", True) else f"{value['met']} (informational)"
+        print(f"| {name} | {value['observed']} | {value['comparison']} {value['target']} | {met} |")
     failed_stages = {name: stage for name, stage in report["stages"].items() if stage.get("status") == "failed"}
     for name, stage in failed_stages.items():
         print(f"\n**Stage {name} failed:** {stage['failure'].get('message', '')[:600]}")
