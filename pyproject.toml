@@ -77,6 +77,11 @@ embeddings = [
     # Pure C extension, plain PyPI wheel. Search soft-falls back to the in-memory numpy
     # scan when absent or when this Python's sqlite3 can't load extensions.
     "sqlite-vec>=0.1.6",
+    # The served multilingual model (bge-m3) runs as an int8 ONNX artefact that the
+    # host builds once from the pinned export: onnxruntime runs and quantises it,
+    # and its quantiser reads and writes the graph through onnx.
+    "onnxruntime>=1.20",
+    "onnx>=1.17",
 ]
 # Same bi-encoder, served by ONNX Runtime instead of PyTorch. Imports ~40 MiB against
 # torch's ~400 and holds a smaller peak, which is what decides how many hosted cells fit

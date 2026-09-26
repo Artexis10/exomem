@@ -131,10 +131,18 @@ def configure_torch(torch: Any | None = None) -> None:
         pass
 
 
-def configure_onnx_session_options(options: Any) -> None:
-    """Make ONNX's otherwise independent pools obey the common budget."""
+def configure_onnx_session_options(options: Any, *, default_threads: int | None = None) -> None:
+    """Make ONNX's otherwise independent pools obey the common budget.
+
+    `default_threads` is a session's own default while `EXOMEM_CPU_THREADS` is
+    unset, never more than the CPUs this process may use; an explicit budget
+    always wins.
+    """
     policy = resolve_policy()
-    options.intra_op_num_threads = policy.cpu_threads
+    threads = policy.cpu_threads
+    if default_threads is not None and policy.cpu_source == "default":
+        threads = max(1, min(default_threads, effective_online_cpus()))
+    options.intra_op_num_threads = threads
     options.inter_op_num_threads = 1
 
 
@@ -152,7 +160,13 @@ class ModelBusyError(RuntimeError):
 
 
 class ModelAdmissionGate:
-    """Bounded model admission with serialized, owner-thread-reentrant execution."""
+    """Bounded model admission with serialized, owner-thread-reentrant execution.
+
+    Admission and execution are separate on purpose. A bulk encode is one unit of
+    admitted work, so it holds one admission for its whole length, but it takes
+    the execution slot one batch at a time (`admission` around several
+    `execution` turns): between two batches, another caller runs.
+    """
 
     def __init__(self, capacity: int) -> None:
         self._capacity = capacity
@@ -163,31 +177,37 @@ class ModelAdmissionGate:
         self._local = threading.local()
 
     @contextlib.contextmanager
-    def execution(self, *, wait: bool = True):
-        depth = getattr(self._local, "depth", 0)
-        admitted = depth == 0
-        if admitted and not self._admitted.acquire(blocking=False):
-            raise ModelBusyError("model compute is busy; retry shortly")
-        if admitted:
+    def admission(self):
+        """Hold one admission, refusing rather than waiting when none is free.
+
+        Reentrant for its owner thread: an execution turn inside a held
+        admission is not admitted twice.
+        """
+        held = getattr(self._local, "admitted", 0)
+        if held == 0:
+            if not self._admitted.acquire(blocking=False):
+                raise ModelBusyError("model compute is busy; retry shortly")
             with self._admission_lock:
                 self._admitted_count += 1
-        acquired = False
+        self._local.admitted = held + 1
         try:
-            if not self._execution.acquire(blocking=wait):
-                raise ModelBusyError("model compute is busy; retry shortly")
-            acquired = True
-            self._local.depth = depth + 1
-            try:
-                yield
-            finally:
-                self._local.depth = depth
+            yield
         finally:
-            if acquired:
-                self._execution.release()
-            if admitted:
+            self._local.admitted = held
+            if held == 0:
                 with self._admission_lock:
                     self._admitted_count -= 1
                 self._admitted.release()
+
+    @contextlib.contextmanager
+    def execution(self, *, wait: bool = True):
+        with self.admission():
+            if not self._execution.acquire(blocking=wait):
+                raise ModelBusyError("model compute is busy; retry shortly")
+            try:
+                yield
+            finally:
+                self._execution.release()
 
     def admitted_count(self) -> int:
         with self._admission_lock:
@@ -199,15 +219,24 @@ _gate: ModelAdmissionGate | None = None
 _gate_capacity: int | None = None
 
 
-def model_execution(*, wait: bool = True):
-    """Return the process-wide model gate for an embedding, reranker, CLIP, or ASR call."""
+def _process_gate() -> ModelAdmissionGate:
     global _gate, _gate_capacity
     capacity = resolve_policy().model_admission
     with _gate_lock:
         if _gate is None or _gate_capacity != capacity:
             _gate = ModelAdmissionGate(capacity)
             _gate_capacity = capacity
-        return _gate.execution(wait=wait)
+        return _gate
+
+
+def model_execution(*, wait: bool = True):
+    """Return the process-wide model gate for an embedding, reranker, CLIP, or ASR call."""
+    return _process_gate().execution(wait=wait)
+
+
+def model_admission():
+    """One process-wide admission held across a bulk encode's execution turns."""
+    return _process_gate().admission()
 
 
 def lifespan(inner=None):

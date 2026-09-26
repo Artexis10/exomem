@@ -15,7 +15,9 @@ exercised by the unit tests and by the live operation.
 
 from __future__ import annotations
 
+import math
 import re
+import statistics
 import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -423,6 +425,133 @@ def _depossessive_token(token: str) -> str:
     return token if folded in STOPWORDS else folded
 
 
+#: Scripts written without spaces between words (scriptio continua), by
+#: declared Unicode ranges: a turn token in one of them is a run of words, and
+#: an anchor's name can sit inside it. Japanese mixes Han, Hiragana and
+#: Katakana within one word, so they are one class. Hangul is not here: Korean
+#: separates words with spaces.
+_CONTINUA_RANGES: tuple[tuple[str, int, int], ...] = (
+    ("cjk", 0x3005, 0x3007),  # 々 〆 〇
+    ("cjk", 0x3040, 0x309F),  # Hiragana
+    ("cjk", 0x30A0, 0x30FF),  # Katakana
+    ("cjk", 0x31F0, 0x31FF),  # Katakana phonetic extensions
+    ("cjk", 0x3400, 0x4DBF),  # CJK extension A
+    ("cjk", 0x4E00, 0x9FFF),  # CJK unified ideographs
+    ("cjk", 0xF900, 0xFAFF),  # CJK compatibility ideographs
+    ("cjk", 0xFF66, 0xFF9F),  # halfwidth Katakana
+    ("cjk", 0x20000, 0x323AF),  # CJK extensions B-H
+    ("thai", 0x0E00, 0x0E7F),
+    ("lao", 0x0E80, 0x0EFF),
+    ("myanmar", 0x1000, 0x109F),
+    ("myanmar", 0xA9E0, 0xA9FF),
+    ("myanmar", 0xAA60, 0xAA7F),
+    ("khmer", 0x1780, 0x17FF),
+    ("khmer", 0x19E0, 0x19FF),
+)
+
+#: The lowest code point of any unspaced-script range.
+_CONTINUA_FLOOR = min(low for _name, low, _high in _CONTINUA_RANGES)
+
+
+def _continua_class(text: str) -> str | None:
+    """The scriptio-continua class every code point of `text` belongs to, or None."""
+    found: str | None = None
+    for char in text:
+        point = ord(char)
+        cls = next((name for name, low, high in _CONTINUA_RANGES if low <= point <= high), None)
+        if cls is None or (found is not None and cls != found):
+            return None
+        found = cls
+    return found
+
+
+def _continua_runs(token: str) -> list[tuple[int, str, str]]:
+    """The token's maximal single-class scriptio-continua runs, each with its
+    offset in the token and its class. A turn token can glue a Latin word to a
+    Japanese phrase (`nameの予算を確認`); its Japanese run still holds names."""
+    # Most tokens are Latin or Cyrillic: nothing below the lowest range can
+    # belong to a run, so such a token is skipped without a per-character scan.
+    if all(ord(char) < _CONTINUA_FLOOR for char in token):
+        return []
+    runs: list[tuple[int, str, str]] = []
+    start, current = 0, None
+    for index, char in enumerate(token):
+        cls = _continua_class(char)
+        if cls != current:
+            if current is not None:
+                runs.append((start, token[start:index], current))
+            start, current = index, cls
+    if current is not None:
+        runs.append((start, token[start:], current))
+    return runs
+
+
+def _contained_names(
+    analysis: TurnAnalysis, rows: Sequence[AnchorFacts], term_counts: Mapping[str, int]
+) -> frozenset[str]:
+    """Anchors whose name sits inside one of the turn's unspaced runs (design §6.3).
+
+    A name qualifies when it is at least two code points, wholly in the run's
+    script class, contained in the run, and rare (`term_anchor_counts` at most
+    `RARE_TERM_MAX_ANCHORS`). A name all of whose occurrences lie inside
+    another anchor's longer contained name is consumed: the turn spelled the
+    longer name, not this one.
+    """
+    runs = [
+        (position, token, offset, run, cls)
+        for position, token in enumerate(analysis.tokens)
+        for offset, run, cls in _continua_runs(token)
+    ]
+    if not runs:
+        return frozenset()
+    found: dict[str, tuple[str, tuple[tuple[int, int, int], ...]]] = {}
+    for row in rows:
+        best: tuple[str, tuple[tuple[int, int, int], ...]] | None = None
+        for name in {normalize(row.title), *row.aliases} - {""}:
+            cls = _continua_class(name) if len(name) >= 2 else None
+            if cls is None:
+                continue
+            occurrences = tuple(
+                (position, offset + start, offset + start + len(name))
+                for position, token, offset, run, run_cls in runs
+                if run_cls == cls and token != name
+                for start in _occurrences(run, name)
+            )
+            if occurrences and (best is None or len(name) > len(best[0])):
+                best = (name, occurrences)
+        if best is not None:
+            found[row.anchor_id] = best
+    contained: set[str] = set()
+    for anchor_id, (name, occurrences) in found.items():
+        count = term_counts.get(name)
+        if count is None or count > RARE_TERM_MAX_ANCHORS:
+            continue
+        consumed = all(
+            any(
+                other_id != anchor_id
+                and position == other_position
+                and other_start <= start
+                and end <= other_end
+                and other_end - other_start > end - start
+                for other_id, (_other_name, other_occurrences) in found.items()
+                for other_position, other_start, other_end in other_occurrences
+            )
+            for position, start, end in occurrences
+        )
+        if not consumed:
+            contained.add(anchor_id)
+    return frozenset(contained)
+
+
+def _occurrences(text: str, name: str) -> list[int]:
+    starts: list[int] = []
+    start = text.find(name)
+    while start >= 0:
+        starts.append(start)
+        start = text.find(name, start + 1)
+    return starts
+
+
 def _clears_rare_term_length(term: str, *, acronyms: frozenset[str] = frozenset()) -> bool:
     """Is `term` long enough to be a lead?
 
@@ -564,6 +693,7 @@ def candidates_for(
     *,
     vectors: Mapping[str, Any] | None = None,
     query_vector: Any | None = None,
+    bands: Mapping[str, bool] | None = None,
     routing_targets: Sequence[Any] = (),
     retrieval_paths: frozenset[str] = frozenset(),
     used_paths: frozenset[str] = frozenset(),
@@ -577,6 +707,9 @@ def candidates_for(
     (`WorkingSetIndex.term_anchor_counts()`), the structure `rare_term`'s
     rarity check is measured against. Absent (`None`) simply means no anchor
     can earn `rare_term` this call — never a fabricated rarity.
+
+    `bands` is `vector_bands`' decision, computed where the turn is encoded;
+    without it the band is computed here from `vectors` and `query_vector`.
 
     `hot_paths` is the top of the caller's recency profile
     (`working_set.hot_profile`), passed in like `used_paths` because it is a
@@ -622,7 +755,8 @@ def candidates_for(
     )
     cue_categories = analysis.cue_categories
     claims_winner = _claims_winner(analysis, routing_targets)
-    bands = _vector_bands(rows, vectors, query_vector, config) if query_vector is not None else {}
+    if bands is None:
+        bands = _vector_bands(rows, vectors, query_vector, config) if query_vector is not None else {}
     min_terms = max(1, int(config.working_set_lexical_min_terms))
 
     # R2 (fix/activation-competing-senses), pass 1 of 2: each row's own
@@ -662,6 +796,8 @@ def candidates_for(
         if folded_term is None:
             continue
         term_positions.setdefault(folded_term, []).append(index)
+
+    contained = _contained_names(analysis, rows, term_counts)
 
     # Pass 2 of 2: the ordinary per-row evidence assembly, reusing pass 1's
     # own matched phrases rather than recomputing them.
@@ -751,6 +887,16 @@ def candidates_for(
                 )
                 if not consumed:
                     evidence.add("rare_term")
+        # An unspaced script writes a name inside a run of words, never as a
+        # token of its own: containment is its `rare_term` (design §6.3),
+        # never `exact_alias`, and like any `rare_term` it needs a second,
+        # independent contact to resolve.
+        if (
+            row.anchor_id in contained
+            and not matched_phrases
+            and not evidence & {"lexical_overlap", "rare_term"}
+        ):
+            evidence.add("rare_term")
         if bands.get(row.anchor_id):
             evidence.add("vector_band")
         if claims_winner is not None and claims_winner == row.path:
@@ -819,41 +965,112 @@ def _claims_winner(analysis: TurnAnalysis, routing_targets: Sequence[Any]) -> st
     return str(collection) if isinstance(collection, str) else None
 
 
+#: A spread below this is a population whose signatures are all alike (empty
+#: or identical), which has no chance level to measure a turn against.
+_BAND_MIN_SPREAD = 1e-6
+
+
+def semantic_band(similarities: Any, *, alpha: float, min_population: int) -> frozenset[int] | None:
+    """Rows whose similarity to the turn clears the chance maximum; None when
+    the population cannot be calibrated.
+
+    `m = median(s)`, `σ = 1.4826 · MAD(s)`, and `k(N, α) = Φ⁻¹((1-α)^(1/N))` is
+    the level the largest of N unrelated similarities exceeds with probability
+    α. Row i clears when `s_i ≥ m + k·σ`. The median and MAD are unmoved by the
+    few rows a turn is really about, and the rule is invariant to adding a
+    constant to every similarity or scaling them all, so no number in it
+    belongs to one model, one language or one vault. Fewer than
+    `min_population` rows, or a degenerate spread, has no chance level (design
+    §5.1).
+    """
+    import numpy as np
+
+    values = np.asarray(similarities, dtype="float64").reshape(-1)
+    n = int(values.size)
+    if n < max(1, int(min_population)) or not np.all(np.isfinite(values)):
+        return None
+    centre = float(np.median(values))
+    spread = 1.4826 * float(np.median(np.abs(values - centre)))
+    if spread < _BAND_MIN_SPREAD:
+        return None
+    level = statistics.NormalDist().inv_cdf(math.pow(1.0 - float(alpha), 1.0 / n))
+    return frozenset(int(i) for i in np.flatnonzero(values >= centre + level * spread))
+
+
+def vector_bands(
+    vectors: Mapping[str, Any] | None,
+    query_vector: Any,
+    config: RankingConfig | None = None,
+) -> tuple[dict[str, bool], str]:
+    """`vector_band` per signature, and whether the population was calibrated.
+
+    Every signature in `vectors` is the population the turn is measured
+    against. If more than `RARE_TERM_MAX_ANCHORS` anchors clear, none bands: a
+    turn similar to many anchors is about a topic, the same judgement that stops
+    a word naming four anchors from being rare. Returns `({}, "uncalibrated")`
+    when there is no chance level. The similarity never leaves this function.
+    """
+    if not vectors or query_vector is None:
+        return {}, "ready"
+    try:
+        import numpy as np
+
+        ids: list[str] = []
+        rows: list[Any] = []
+        width = np.asarray(query_vector).size
+        for anchor_id, vector in vectors.items():
+            candidate = np.asarray(vector, dtype="float32").reshape(-1)
+            candidate_norm = float(np.linalg.norm(candidate))
+            if candidate.size != width or candidate_norm == 0.0:
+                continue  # a malformed row costs its band, nothing else
+            ids.append(anchor_id)
+            rows.append(candidate / candidate_norm)
+        if not rows:
+            return {}, "ready"
+        matrix = np.vstack(rows)
+    except Exception:  # noqa: BLE001 - the vector lane is optional by contract
+        return {}, "ready"
+    return matrix_bands(tuple(ids), matrix, query_vector, config)
+
+
+def matrix_bands(
+    ids: Sequence[str], matrix: Any, query_vector: Any, config: RankingConfig | None = None
+) -> tuple[dict[str, bool], str]:
+    """`vector_bands` over the index's cached, L2-normalised signature matrix:
+    one matrix-vector product and a median, not a loop over rows."""
+    config = config or DEFAULT_RANKING
+    if matrix is None or not len(ids) or query_vector is None:
+        return {}, "ready"
+    try:
+        import numpy as np
+
+        query = np.asarray(query_vector, dtype="float32").reshape(-1)
+        norm = float(np.linalg.norm(query))
+        if norm == 0.0 or query.shape[0] != matrix.shape[1]:
+            return {}, "ready"
+        similarities = matrix @ (query / norm)
+    except Exception:  # noqa: BLE001 - the vector lane is optional by contract
+        return {}, "ready"
+    cleared = semantic_band(
+        similarities,
+        alpha=float(config.working_set_semantic_alpha),
+        min_population=int(config.working_set_semantic_min_population),
+    )
+    if cleared is None:
+        return {}, "uncalibrated"
+    if len(cleared) > RARE_TERM_MAX_ANCHORS:
+        cleared = frozenset()
+    return {anchor_id: index in cleared for index, anchor_id in enumerate(ids)}, "ready"
+
+
 def _vector_bands(
     rows: Sequence[AnchorFacts],
     vectors: Mapping[str, Any] | None,
     query_vector: Any,
     config: RankingConfig,
 ) -> dict[str, bool]:
-    """Band membership only. The cosine never leaves this function."""
-    if not vectors:
-        return {}
-    try:
-        import numpy as np
-
-        query = np.asarray(query_vector, dtype="float32")
-        norm = float(np.linalg.norm(query))
-        if norm == 0.0:
-            return {}
-        query = query / norm
-    except Exception:  # noqa: BLE001 - the vector lane is optional by contract
-        return {}
-    bands: dict[str, bool] = {}
-    strong = float(config.working_set_vector_strong)
-    for row in rows:
-        vector = vectors.get(row.anchor_id)
-        if vector is None:
-            continue
-        try:
-            candidate = np.asarray(vector, dtype="float32")
-            candidate_norm = float(np.linalg.norm(candidate))
-            if candidate_norm == 0.0:
-                continue
-            cosine = float(np.dot(query, candidate / candidate_norm))
-        except Exception:  # noqa: BLE001 - a malformed row costs its band, nothing else
-            continue
-        bands[row.anchor_id] = cosine >= strong
-    return bands
+    """Band membership only (`vector_bands` without its state)."""
+    return vector_bands(vectors, query_vector, config)[0]
 
 
 def add_graph_corroboration(

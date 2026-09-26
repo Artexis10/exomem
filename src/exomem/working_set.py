@@ -1046,32 +1046,80 @@ def budget_exhausted(stage: str, *, reserve: float | None = None) -> bool:
     return True
 
 
-def signature_evidence(index: working_set_index.WorkingSetIndex, turn: str):
-    """Optional semantic corroboration over anchors, never the recall corpus.
+def band_audience_allowed(vault_root: Path) -> bool:
+    """Whether this request's principal may have semantic band evidence.
+
+    The band is an aggregate over the whole anchor catalogue: its population,
+    floor, median, spread and width rule all count every anchor, withheld ones
+    included. For a caller who may not see some anchor it would be a channel,
+    since whether an anchor bands, whether the catalogue calibrates and whether
+    a band is too wide can each turn on the withheld page. So under a non-empty
+    governed policy only an owner-bound principal gets the band. What it costs:
+    other callers on governed vaults fall back to lexical contact, and none
+    exist on personal hosts today. An ungoverned vault bands for everyone, and
+    a policy that cannot be read is treated as governed.
+    """
+    try:
+        from .governance import policy as policy_module
+        from .governance import principal as principal_module
+
+        if policy_module.load(Path(vault_root)).empty:
+            return True
+        who = principal_module.effective_principal()
+        return bool(who.resolved and who.audience_id == principal_module.OWNER_AUDIENCE)
+    except Exception:  # noqa: BLE001 - an undecidable audience gets no band
+        log.debug("band audience undecidable; semantic evidence withheld", exc_info=True)
+        return False
+
+
+def signature_evidence(
+    index: working_set_index.WorkingSetIndex, turn: str
+) -> tuple[dict[str, bool], str]:
+    """Optional semantic corroboration over anchors, never the recall corpus:
+    `vector_band` per anchor, and the state of the lane.
 
     An unavailable scorer removes one evidence kind, not the structural
     resolver or its release guard. It cannot justify a cached negative result.
+    A catalogue too small to calibrate the band (`uncalibrated`) is not worth
+    an encode. The turn is encoded on the activation encoder's interactive
+    lane, read at its first `ACTIVATION_TURN_MAX_TOKENS` tokens, and measured
+    only against vectors that encoder made. A catalogue with no vectors at all
+    (an install without an encoder) is `absent`, as it always was; vectors whose
+    encoder is cold are `unavailable` (activation never loads one); vectors of
+    another encoder are `absent`.
     """
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        return {}, None, "disabled"
+        return {}, "disabled"
+    # Before any vector is read or any turn encoded: a caller the band could
+    # tell about a withheld anchor gets none of it.
+    if not band_audience_allowed(index.vault_root):
+        return {}, "audience_restricted"
     try:
-        from . import embeddings, readiness, runtime_resources
+        from . import embeddings, ranking_config, readiness, runtime_resources
 
         if readiness.should_defer("embeddings"):
-            return {}, None, "warming"
-        vectors = index.vectors()
-        if not vectors:
-            return {}, None, "absent"
+            return {}, "warming"
+        if index.vector_fingerprint() is None:
+            return {}, "absent"
+        fingerprint = embeddings.activation_fingerprint()
+        if fingerprint is None:
+            return {}, "unavailable"
+        ids, matrix = index.vector_matrix(fingerprint)
+        if matrix is None:
+            return {}, "absent"
+        config = ranking_config.DEFAULT_RANKING
+        if len(ids) < int(config.working_set_semantic_min_population):
+            return {}, "uncalibrated"
         try:
-            query_vector = embeddings.embed_query_if_loaded(turn)
+            query_vector = embeddings.embed_activation_query_if_loaded(turn)
         except runtime_resources.ModelBusyError:
-            return {}, None, "busy"
+            return {}, "busy"
         if query_vector is None:
-            return {}, None, "unavailable"
-        return vectors, query_vector, "ready"
+            return {}, "unavailable"
+        return working_set_resolve.matrix_bands(ids, matrix, query_vector, config)
     except Exception:  # noqa: BLE001 - optional scorer failure is explicit
         log.debug("activation signature evidence unavailable", exc_info=True)
-        return {}, None, "unavailable"
+        return {}, "unavailable"
 
 
 # --------------------------------------------------------------------------- #
@@ -1668,9 +1716,9 @@ def compile_packet(
         raise BudgetExhausted("working_set.semantic")
     with _span(timings, "working_set.semantic"):
         if anchor:
-            vectors, query_vector, semantic_state = {}, None, "agent_choice"
+            bands, semantic_state = {}, "agent_choice"
         else:
-            vectors, query_vector, semantic_state = signature_evidence(index, turn)
+            bands, semantic_state = signature_evidence(index, turn)
     generation["semantic_evidence"] = semantic_state
 
     if budget_exhausted("working_set.resolve"):
@@ -1703,8 +1751,7 @@ def compile_packet(
             candidates = working_set_resolve.candidates_for(
                 analysis,
                 rows,
-                vectors=vectors,
-                query_vector=query_vector,
+                bands=bands,
                 retrieval_paths=retrieval_paths,
                 routing_targets=_routing_targets(
                     root, index_token[1], index_token=index_token
