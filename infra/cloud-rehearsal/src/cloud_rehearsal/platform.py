@@ -126,9 +126,10 @@ def _find(documents: list[dict[str, Any]], kind: str, name: str) -> dict[str, An
     return next(doc for doc in documents if doc["kind"] == kind and doc["metadata"]["name"] == name)
 
 
-# What the pinned Substrate gateway reads at startup (validateGatewayEnvironment
-# and loadExomemCloudConfig), beyond DATABASE_URL and the port.
+# What the pinned Substrate gateway requires at startup: REQUIRED_GATEWAY_ENV
+# (validateGatewayEnvironment) and what loadExomemCloudConfig reads.
 GATEWAY_REQUIRED_ENV = (
+    "DATABASE_URL",
     "EXOMEM_PUBLIC_BASE_URL",
     "EXOMEM_CLOUD_MCP_URL",
     "EXOMEM_CLOUD_MCP_PATH",

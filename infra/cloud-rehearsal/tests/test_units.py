@@ -195,3 +195,10 @@ def test_pki_verifies_under_strict_x509(tmp_path: Path) -> None:
             assert wrapped.version()
     thread.join(timeout=5)
     listener.close()
+
+
+def test_dist_info_is_matched_by_distribution_name() -> None:
+    from cloud_rehearsal.build import _dist_name
+
+    assert _dist_name("urllib3-2.5.0.dist-info") == _dist_name("urllib3-2.2.3.dist-info")
+    assert _dist_name("python_dateutil-2.9.0.dist-info") == "python-dateutil"

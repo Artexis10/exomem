@@ -182,12 +182,13 @@
 
   The command is `infra/cloud-rehearsal` (`uv run --frozen exomem-cloud-rehearsal run`). The `Cloud rehearsal` workflow runs it on a GitHub runner with the cell image built from `Dockerfile --target cloud`. These boxes record that the command, its steps and its measurements exist. They do not record that the node gate passed: that is the report's `outcome.gates_node`, which a manual dispatch of the workflow must show true before P4.
 
-  First run on a real image (#1378, head `65bad18`): 9 of 12 steps passed and `gates_node` was false. The three failing steps are owned elsewhere and listed in `infra/cloud-rehearsal/known-findings.json`:
-  - step 3: Substrate's PKCE verifier grammar;
-  - step 9: runtime readiness after a read_only → running recovery;
-  - step 10: follows from step 9.
+  First run on a real image (#1378, head `65bad18`): 9 of 12 steps passed. Steps 9 and 10 failed on the runtime's readiness after a read_only → running recovery; #1386 fixed it.
 
-  Capture p95 was 2.05 s against its 1 s target. All other targets were met: provisioning 19.6 s, upgrade 48.0 s, warm `initialize` p95 0.017 s, `tools/list` p95 0.057 s, cited recall p95 0.71 s.
+  Run on `main` with #1368, #1384 and #1386 and no product overlays (#1378, head `78957a8`): 11 of 12 steps passed and `gates_node` was false. What keeps the node gate closed:
+  - step 3, Substrate's PKCE verifier grammar, a cross-lane finding and the only entry in `infra/cloud-rehearsal/known-findings.json`;
+  - capture p95 of 1.71 s against its 1 s target.
+
+  All other targets were met: provisioning 24.7 s, upgrade 46.0 s, warm `initialize` p95 0.017 s, `tools/list` p95 0.050 s, cited recall p95 0.44 s.
 - [ ] 5.4 A manual dispatch of the `Cloud rehearsal` workflow on `main`, with the cell image built from `Dockerfile --target cloud`, writes a valid report with `outcome.gates_node` true. P4 does not start until it does.
 
 ## 6. Node deployment and owner acceptance (P4)
