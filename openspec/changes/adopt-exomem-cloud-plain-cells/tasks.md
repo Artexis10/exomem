@@ -194,8 +194,10 @@
   All other targets were met: provisioning 24.7 s, upgrade 46.0 s, warm `initialize` p95 0.017 s, `tools/list` p95 0.050 s, cited recall p95 0.44 s.
 
   Run with Substrate `2b38730` (#181 and #183) and the stock MCP Python SDK OAuth client (#1387, head `4366d87`): 12 of 12 steps passed, `gate_blockers` was empty and `gates_node` was true on the PR's harness check. Provisioning 24.7 s, upgrade 46.9 s, warm `initialize` p95 0.019 s, `tools/list` p95 0.061 s, cited recall p95 0.77 s; capture p95 2.12 s, informational per 5.4. 5.4 still needs the manual dispatch on `main`.
-- [ ] 5.4 A manual dispatch of the `Cloud rehearsal` workflow on `main`, with the cell image built from `Dockerfile --target cloud`, writes a valid report with `outcome.gates_node` true. P4 does not start until it does.
+- [x] 5.4 A manual dispatch of the `Cloud rehearsal` workflow on `main`, with the cell image built from `Dockerfile --target cloud`, writes a valid report with `outcome.gates_node` true. P4 does not start until it does.
   Ruling: on a CI runner, capture p95 is reported as measured and informational and does not hold `gates_node`; its 1 s target is for the node, where it is re-measured at P4 owner acceptance (6.3), and a runtime lane takes it if it misses there.
+
+  Dispatched on `main` at `45048816` (run 36225283096, 2026-09-26): 12 of 12 steps passed, `gate_blockers` was empty and `gates_node` was true. Provisioning 25.7 s, upgrade 53.9 s per cell, warm `initialize` p95 0.019 s, `tools/list` p95 0.056 s, cited recall p95 0.52 s; capture p95 2.03 s, informational per the ruling above.
 
 ## 6. Node deployment and owner acceptance (P4)
 
