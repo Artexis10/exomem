@@ -30,7 +30,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import advisory_handoff, call_spans, corpus_aware, derived_receipts
+from . import advisory_handoff, call_spans, corpus_aware, derived_receipts, review_state
 from .derived_receipts import (
     DerivedAdvisoryCandidate,
     DerivedBatchReceipt,
@@ -277,6 +277,27 @@ def _candidates_from_emitted(
     return tuple(candidates.values())
 
 
+def _arm_published_quiet_offer(
+    vault_root: Path,
+    result_ref: str,
+    candidates: Sequence[DerivedAdvisoryCandidate],
+    emitted: list[Any],
+) -> None:
+    accepted = {(item.review_ref, item.triage_fingerprint) for item in candidates}
+    store = review_state.ReviewStateStore(vault_root)
+    for item in emitted:
+        identity = item.identity
+        if identity is None or (identity.ref, identity.fingerprint) not in accepted:
+            continue
+        try:
+            store.arm_quiet_offer(
+                item.kind,
+                carrier=(result_ref, identity.ref, identity.fingerprint),
+            )
+        except Exception as error:  # noqa: BLE001 - optional offer fails open
+            log.debug("deferred quiet offer failed open: %s", type(error).__name__)
+
+
 def _publish(
     vault_root: Path,
     claimed_status: DerivedComponentStatus,
@@ -436,8 +457,10 @@ def execute_write_advisory(
             observed=observed,
             now=now,
         )
-        if execution.outcome == "published":
-            corpus_aware.record_write_advisory_surfacing(vault_root, emitted)
+        if execution.outcome == "published" and corpus_aware.record_write_advisory_surfacing(
+            vault_root, emitted
+        ):
+            _arm_published_quiet_offer(vault_root, ref, candidates, emitted)
         if execution.outcome in {"published", "already_published", "superseded"}:
             advisory_handoff.forget_route_inputs(vault_root, batch_id)
         return execution
@@ -494,7 +517,8 @@ def execute_write_advisory(
     if execution.outcome == "published":
         # Durable now, so the signal has genuinely reached its result. A refused
         # publication deliberately leaves the once-only ledger untouched.
-        corpus_aware.record_write_advisory_surfacing(vault_root, emitted)
+        if corpus_aware.record_write_advisory_surfacing(vault_root, emitted):
+            _arm_published_quiet_offer(vault_root, ref, candidates, emitted)
     return execution
 
 
@@ -756,8 +780,34 @@ def resolve_result(
         return _projected(stored.ref, stored.state)
     if stored.state == "failed":
         return _projected(stored.ref, "failed", code=stored.failure_code)
+    advisories = _released_candidates(vault_root, stored.candidates)
+    if advisories:
+        try:
+            dispositions = review_state.ReviewStateStore(vault_root).load()["dispositions"]
+        except Exception:  # noqa: BLE001 - optional offer state fails open
+            dispositions = {}
+        for family in corpus_aware._WRITE_ADVISORY_KINDS:
+            row = dispositions.get(family)
+            carrier = (
+                row.get("_quiet_offer_carrier")
+                if isinstance(row, dict) and row.get("quiet_offered_at")
+                else None
+            )
+            if not isinstance(carrier, dict) or carrier.get("result_ref") != stored.ref:
+                continue
+            for advisory in advisories:
+                if (
+                    carrier.get("review_ref") == advisory["ref"]
+                    and carrier.get("fingerprint") == advisory["fingerprint"]
+                ):
+                    advisory["warning"] = corpus_aware.render_write_advisory_quiet_offer(
+                        advisory["warning"],
+                        advisory["ref"],
+                        advisory["fingerprint"],
+                        {"ref": review_state.family_ref(family)},
+                    )
     return _projected(
         stored.ref,
         "ready",
-        advisories=_released_candidates(vault_root, stored.candidates),
+        advisories=advisories,
     )

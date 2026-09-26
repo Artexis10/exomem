@@ -213,6 +213,14 @@ its inline sweep and takes no advisory custody.
 - **THEN** the write computes no inline duplicate or overlap sweep and returns none of its warnings
 - **AND** the ready result reached through `advisory_result_ref` carries, in order, exactly the warnings the same write returns with fast acknowledgement off
 
+#### Scenario: Deferred warnings preserve an earned quiet offer
+
+- **WHEN** a family has earned its one-time quiet offer and an advisory candidate is successfully published and recorded as surfaced
+- **THEN** its exact ready result carries the same bounded quiet-offer clause as an inline warning, after current target and counterpart authority and fingerprints are checked
+- **AND** concurrent publications in the serving process bind the offer to only one result/candidate identity; refused publication does not consume it
+- **AND** exact lookup is read-only, and replay of a published result neither recomputes its candidates nor rearms the offer
+- **AND** quiet/off decisions preserve internal offer ownership without exposing it in triage output, while explicit normal reset clears it
+
 #### Scenario: An edit that leaves the body unchanged has no advisory job
 
 - **WHEN** fast acknowledgement is active and an edit changes only frontmatter

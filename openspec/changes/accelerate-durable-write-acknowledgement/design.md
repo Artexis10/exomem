@@ -376,6 +376,20 @@ the stored result and complete the component without recomputation. Old rows
 without the additive target identity remain resolvable by their stable ref but
 fail closed with a fixed compatibility code and no candidate payload.
 
+An earned one-time family quiet offer belongs to an accepted result candidate.
+After publication and successful review surfacing, the existing review-state
+lock records the winning result reference, review reference and fingerprint
+alongside the offer marker. Refused publication consumes neither surfacing nor
+the offer. SQLite candidate strings remain immutable: exact lookup decorates
+only the winning candidate after current authority and fingerprint checks,
+using the shared bounded warning renderer and a read-only review-state snapshot.
+Unavailable optional review state leaves the stored warning usable. Quiet/off
+decisions preserve the internal ownership marker without returning it through
+triage; an explicit normal reset clears it. Published-result replay neither
+recomputes candidates nor rearms an offer. This retains the existing best-effort
+gap between publication and review surfacing and the existing in-process lock;
+it adds no cross-store transaction or cross-process exactly-once guarantee.
+
 `suggestions=true` remains synchronous because it is an explicit request for
 the enriched related-link result in the current response. It is not silently
 converted to background output. It retains the current pure-substrate boundary:

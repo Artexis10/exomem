@@ -239,12 +239,24 @@ def _render_identified_write_advisory(
 ) -> str:
     suffix = f" [review: {identity.ref}; fingerprint: {identity.fingerprint}]"
     prose = _render_write_advisory(kind, candidate)
-    offer_clause = ""
-    if quiet_offer:
-        offer_clause = (
-            " [quiet offer: ref="
-            f"{quiet_offer['ref']}; action=quiet; reason required]"
-        )
+    return render_write_advisory_quiet_offer(
+        prose + suffix, identity.ref, identity.fingerprint, quiet_offer
+    )
+
+
+def render_write_advisory_quiet_offer(
+    warning: str, review_ref: str, fingerprint: str, quiet_offer: dict | None
+) -> str:
+    """Keep the review suffix intact while fitting an optional quiet offer."""
+    suffix = f" [review: {review_ref}; fingerprint: {fingerprint}]"
+    if not warning.endswith(suffix):
+        return warning
+    prose = warning[: -len(suffix)]
+    offer_clause = (
+        f" [quiet offer: ref={quiet_offer['ref']}; action=quiet; reason required]"
+        if quiet_offer
+        else ""
+    )
     budget = _WRITE_ADVISORY_WARNING_CHARS - len(suffix)
     prose_budget = budget - len(offer_clause)
     if len(prose) > prose_budget:
