@@ -1738,6 +1738,69 @@ def test_a_restricted_move_skips_a_withheld_linker_it_cannot_rewrite_cleanly(
         assert answers["C"] == answers["B"], detail
 
 
+@pytest.mark.parametrize("guess", [_GUESSED, "other-guess"])
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_file_delete_counts_the_links_it_may_see(
+    tmp_path: Path, audience: str, guess: str
+) -> None:
+    """Deleting a page moved onto a guessed name reads the same whether or not
+    a withheld page links that name: the inbound refusal, the forced delete
+    and the activity log count only the links the writer may see. The
+    withheld link is orphaned as `force_orphan` would, and the owner's audit
+    reports it."""
+    from exomem import audit as audit_module
+
+    scope = "Notes/Insights/Withheld/**"
+    base = {
+        f"{INSIGHTS}/alpha.md": _typed("Alpha", "A.", f"{INSIGHTS}/zeta"),
+        f"{INSIGHTS}/zeta.md": _typed("Zeta", "Z.", f"{INSIGHTS}/alpha"),
+        f"{KB}/log.md": "# Log\n\n",
+    }
+    hidden = f"{INSIGHTS}/Withheld/w.md"
+    variants = {
+        "B": base,
+        "A": {**base, hidden: _typed("W", "W.", _GUESSED)},
+        "C": {**base, hidden: _typed("W", "W.", f"{INSIGHTS}/alpha")},
+    }
+    target = f"{INSIGHTS}/Scratch/{guess}.md"
+
+    for detail in (None, "compact", "full", "legacy"):
+        extra = {} if detail is None else {"response_detail": detail}
+        answers = {}
+        for variant, files in variants.items():
+            vault = _materialize(
+                tmp_path / str(detail) / variant / "vault", files, audience, scope=scope
+            )
+            principal = _principal(audience)
+            steps = [
+                _call(vault, principal, "manage_memory_file", operation="move",
+                      old_path=f"{INSIGHTS}/zeta.md", new_path=target, **extra),
+                _call(vault, principal, "manage_memory_file", operation="delete",
+                      path=target, confirm=True, **extra),
+                _call(vault, principal, "manage_memory_file", operation="delete",
+                      path=target, confirm=True, force_orphan=True, **extra),
+                _call(vault, principal, "read_memory", path=f"{KB}/log.md")["body"],
+            ]
+            answers[variant] = [
+                re.sub(r"_trash/[\d-]+/\d{6}-", "_trash/<v>-", _VOLATILE_TEXT.sub("<v>", _text(step)))
+                for step in steps
+            ]
+            if variant == "A" and guess == _GUESSED and detail is None:
+                assert (vault / hidden).read_text(encoding="utf-8") == files[hidden]
+                _reset()
+                with library_scope():
+                    report = audit_module.audit(
+                        vault, categories=["broken_wikilink", "forward_reference"]
+                    )
+                assert any(
+                    finding.path == hidden and _GUESSED in finding.detail
+                    for finding in report.findings
+                ), [finding.as_dict() for finding in report.findings]
+        assert "INBOUND_LINKS" in answers["B"][1], (detail, answers["B"][1])
+        assert answers["A"] == answers["B"], (detail, answers["A"])
+        assert answers["C"] == answers["B"], detail
+
+
 def test_the_owner_is_still_refused_a_linker_it_cannot_rewrite(tmp_path: Path) -> None:
     base = {
         f"{INSIGHTS}/alpha.md": _typed("Alpha", "A.", f"{INSIGHTS}/zeta"),
