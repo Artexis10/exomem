@@ -138,6 +138,12 @@ def _path(vault_root: Path, item: Mapping[str, Any], ref: str) -> str:
     path = item.get("paths", {}).get(ref, ref)
     if not isinstance(path, str) or "://" in path:
         raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work")
+    # Decided on the text alone, before any filesystem call: resolving an
+    # escaping hint stats its target on some Python versions (3.11's
+    # `Path.resolve` probes the result), and a hint must never touch a file
+    # outside the vault, not even to learn that it is outside.
+    if ".." in path.replace("\\", "/").split("/"):
+        raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work")
     try:
         _abs, rel = vault.resolve_under_vault(vault_root, path)
     except vault.VaultPathError as exc:
