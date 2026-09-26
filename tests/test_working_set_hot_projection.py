@@ -982,8 +982,14 @@ def test_another_processs_batch_is_its_echo_before_its_terminal(
     _edit(heat_vault, SLED, "A towed cargo sled", "A towed freight sled")
     held: list = []
     monkeypatch.setattr(
-        writer_lease, "defer_until_terminal_persisted", lambda work: held.append(work) or True
+        writer_lease,
+        "defer_housekeeping_until_terminal_persisted",
+        lambda work: held.append(work) or True,
     )
+    # Hold back anything heat defers until the terminal persists. Since the
+    # attributed row is written inline at commit, nothing the batch's echo
+    # needs may wait here; a regression that deferred it again would be held
+    # and would turn this test red.
     _backfill(heat_vault)  # rewrites the Depot Ledger page only
     with working_set_heat._LOCK:
         working_set_heat._OURS.clear()  # the service is another process
