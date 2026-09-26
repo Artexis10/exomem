@@ -3684,9 +3684,15 @@ def is_relation_review_current(
     )
 
 
+_DECIDE = object()
+
+
 def writer_view_relations(
     page: SemanticPageState,
     corpus: SemanticCorpusContext,
+    *,
+    visible: Callable[[str], bool] | None | object = _DECIDE,
+    resolver: vault.WikilinkResolver | None = None,
 ) -> tuple[tuple[RelationFact, ...], tuple[RelationFact, ...], Callable[[str], bool] | None]:
     """The page's outbound and inbound facts as the current writer may judge them.
 
@@ -3696,13 +3702,19 @@ def writer_view_relations(
     may see, and a fact a page withheld from it authors is dropped, so the
     judgement reads as it would without those pages. The corpus itself, which
     also feeds the published graph, keeps every fact.
+
+    A caller judging many pages of one corpus passes the writer's `visible`
+    (from `vault.writer_link_visibility`) and a `resolver` built from the
+    corpus once, rather than deciding them per page.
     """
     outbound = corpus.outbound.get(page.path, ())
     inbound = corpus.inbound.get(page.path, ())
-    visible = vault.writer_link_visibility(corpus.vault_root)
-    if visible is None or not visible(page.path):
+    if visible is _DECIDE:
+        visible = vault.writer_link_visibility(corpus.vault_root)
+    if visible is None or not callable(visible) or not visible(page.path):
         return outbound, inbound, None
-    resolver = vault.WikilinkResolver.from_entries(corpus.vault_root, corpus.resolver_entries)
+    if resolver is None:
+        resolver = vault.WikilinkResolver.from_entries(corpus.vault_root, corpus.resolver_entries)
     own = _derive_relation_facts(
         corpus.vault_root,
         {page.path: page},

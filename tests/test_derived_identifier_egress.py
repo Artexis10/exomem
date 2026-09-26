@@ -1489,6 +1489,56 @@ def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
     assert f"[[{INSIGHTS}/gamma-y]]" in (vaults["A"] / hidden).read_text(encoding="utf-8")
 
 
+_CLOSURE_TARGETS = {
+    "compliant": _typed("Target X", "P.", f"{INSIGHTS}/alpha"),
+    "non-compliant": _page("Target X", "P.", type="insight", status="active"),
+}
+
+
+@pytest.mark.parametrize("target", sorted(_CLOSURE_TARGETS))
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_move_judges_no_page_only_a_withheld_relation_reaches(
+    tmp_path: Path, audience: str, target: str
+) -> None:
+    """A visible page whose standing a move changes only through a relation a
+    withheld page authors is neither judged nor reported for the mover."""
+    scope = "Notes/Insights/Withheld/**"
+    base = {
+        f"{INSIGHTS}/alpha.md": _typed("Alpha", "A.", f"{INSIGHTS}/target-x"),
+        f"{INSIGHTS}/target-x.md": _CLOSURE_TARGETS[target],
+        f"{INSIGHTS}/zeta.md": _typed("Zeta", "Z.", f"{INSIGHTS}/alpha"),
+    }
+    hidden = f"{INSIGHTS}/Withheld/w.md"
+    variants = {
+        "B": base,
+        "A": {**base, hidden: _page(
+            "W", f"W.{_UNIT}\n## Relations\n\n- supports [[target-x]]\n"
+            f"- supports [[{INSIGHTS}/alpha]]\n", type="insight", status="active",
+        )},
+        "C": {**base, hidden: _typed("W", "W.", f"{INSIGHTS}/alpha")},
+    }
+
+    for detail in (None, "compact", "full", "legacy"):
+        extra = {} if detail is None else {"response_detail": detail}
+        answers = {}
+        for variant, files in variants.items():
+            vault = _materialize(
+                tmp_path / str(detail) / variant / "vault", files, audience, scope=scope
+            )
+            answers[variant] = _VOLATILE_TEXT.sub(
+                "<v>",
+                _text(
+                    _call(
+                        vault, _principal(audience), "manage_memory_file", operation="move",
+                        old_path=f"{INSIGHTS}/zeta.md",
+                        new_path=f"{INSIGHTS}/Other/target-x.md", **extra,
+                    )
+                ),
+            )
+        assert answers["A"] == answers["B"], (detail, answers["A"])
+        assert answers["C"] == answers["B"], detail
+
+
 _HIDDEN_LINKERS = {
     "append-only": (
         f"{KB}/Sources/Withheld/capture.md",

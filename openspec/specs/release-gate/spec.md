@@ -530,6 +530,14 @@ identity or authorization bearers.
 - **THEN** exactly N items are returned and the count does not reveal that any
   were withheld
 
+#### Scenario: Withheld matches fill the over-fetch pool
+
+- **WHEN** withheld items are so many among a query's candidates that the fixed
+  over-fetch pool cannot fill N, for recall or for link suggestions under a
+  governed policy
+- **THEN** fewer than N items are returned, from the same single fetch, as a
+  deterministic recall limit rather than a defect
+
 ### Requirement: Canonical audience resolution, threaded and fail-closed
 
 Every content-returning read SHALL resolve a canonical principal at its surface boundary
@@ -1114,7 +1122,7 @@ For a caller other than the owner, a derived structure SHALL decide each candida
 
 ### Requirement: A restricted writer's links resolve over the pages it may see
 
-For a writer other than the owner under a governed policy, write-time wikilink resolution SHALL consider only pages the writer may see: stem, title and path matches in body links, `sources`, bridge sources, entity connections, draft relation suggestions, capture-sweep mentions, and the semantic contract's resolution of the written page's own relation targets and body links. The semantic contract SHALL judge a page the writer may see without the relations that pages withheld from the writer author, so they count toward neither its disposition, its review candidates, their total nor its qualifying directions, and only visible pages count as its governed peers, including when a writer's first page is bootstrapped. Whether a linking page's relation review carries across a move SHALL be decided over the same view. That judgement SHALL be made where the page is judged: the corpus a write builds, which also feeds the graph it publishes, SHALL keep the owner's resolution. A link that matches only withheld pages SHALL resolve, warn and be reported exactly as it would if those pages were absent, and an ambiguity SHALL list only visible pages. A path that names no file SHALL be unaffected. The owner's resolution SHALL be unchanged.
+For a writer other than the owner under a governed policy, write-time wikilink resolution SHALL consider only pages the writer may see: stem, title and path matches in body links, `sources`, bridge sources, entity connections, draft relation suggestions, capture-sweep mentions, and the semantic contract's resolution of the written page's own relation targets and body links. The semantic contract SHALL judge a page the writer may see without the relations that pages withheld from the writer author, so they count toward neither its disposition, its review candidates, their total nor its qualifying directions, and only visible pages count as its governed peers, including when a writer's first page is bootstrapped. Whether a linking page's relation review carries across a move, and which pages a move's closure judges, SHALL be decided over the same view, so a visible page reached only through a relation a withheld page authors is neither judged nor reported for that mover. That judgement SHALL be made where the page is judged: the corpus a write builds, which also feeds the graph it publishes, SHALL keep the owner's resolution. A link that matches only withheld pages SHALL resolve, warn and be reported exactly as it would if those pages were absent, and an ambiguity SHALL list only visible pages. A path that names no file SHALL be unaffected. The owner's resolution SHALL be unchanged.
 
 #### Scenario: A guess matches a withheld page
 
@@ -1164,6 +1172,11 @@ For a writer other than the owner under a governed policy, a write door SHALL de
 
 - **WHEN** a restricted writer moves a page that a withheld page links
 - **THEN** the withheld page's link is rewritten and the move's answer, and the answer to each later move of that page or another, match the twin without that page in every response detail
+
+#### Scenario: A visible page only a withheld relation reaches
+
+- **WHEN** a restricted writer's move changes how a relation a withheld page authors resolves, and that relation alone ties a visible page to the move
+- **THEN** that visible page is neither judged nor reported, and the move's answer, in every response detail, matches the twin without the withheld page
 
 #### Scenario: A withheld linking page refuses the rewrite
 
