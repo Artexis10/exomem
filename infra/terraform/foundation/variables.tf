@@ -44,7 +44,7 @@ variable "transfer_hostname" {
 }
 
 variable "gateway_hostname" {
-  description = "Optional canonical MCP gateway origin on the existing tunnel; empty disables its DNS and route."
+  description = "Optional Cloud MCP hostname for DNS-only direct TLS to the fleet node; empty disables its DNS record. Use a dedicated hostname, not an existing desktop connector."
   type        = string
   default     = ""
 
