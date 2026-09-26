@@ -14,6 +14,7 @@ the new location. Returns the count of touched files.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import hashlib
 import logging
@@ -734,11 +735,28 @@ def move_file(
                         ) from error
                     raise
 
-            if visible is not None and any(
-                item.contract_result.should_block and not visible(item.after.path)
-                for item in preflight.evaluations
-            ):
-                raise MoveFileError(*_LINK_REWRITE_REFUSAL)
+            if visible is not None:
+                # A page withheld from this mover whose bytes the move does not
+                # rewrite stays in the closure for publication, but is never
+                # asserted against the move: its standing is the owner's to
+                # review. A withheld linker the move does rewrite and would
+                # leave non-compliant refuses it with one generic answer.
+                rewritten = {
+                    write.path.relative_to(vault_root).as_posix() for write in writes
+                }
+                preflight = dataclasses.replace(
+                    preflight,
+                    waived_blockers=frozenset(
+                        item.after.path
+                        for item in preflight.evaluations
+                        if not visible(item.after.path) and item.after.path not in rewritten
+                    ),
+                )
+                if any(
+                    item.contract_result.should_block and not visible(item.after.path)
+                    for item in preflight.blocking_evaluations
+                ):
+                    raise MoveFileError(*_LINK_REWRITE_REFUSAL)
             committed = semantic_writes.commit_move(
                 vault_root, preflight=preflight, mutate=mutate
             )

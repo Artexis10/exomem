@@ -1539,6 +1539,68 @@ def test_a_restricted_move_judges_no_page_only_a_withheld_relation_reaches(
         assert answers["C"] == answers["B"], detail
 
 
+_UNREWRITTEN_CASES = {
+    # A withheld page's bare link changes resolution because the move makes a
+    # visible stem ambiguous; it links nothing the move rewrites.
+    "ambiguous": ("target-x", "Other/target-x", True),
+    "ambiguous-no-rewrite": ("target-x", "Other/target-x", False),
+    # A move that names the stem a withheld page's bare link guesses, and one
+    # that names another.
+    "guessed": ("quartz-ledger", "Scratch/quartz-ledger", True),
+    "wrong-guess": ("quartz-ledger", "Scratch/other-guess", True),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_UNREWRITTEN_CASES))
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_withheld_page_the_move_does_not_rewrite_never_blocks_it(
+    tmp_path: Path, audience: str, case: str
+) -> None:
+    """A non-compliant withheld page whose own link a move re-resolves, but
+    whose bytes it does not rewrite, is not asserted against the mover."""
+    link, destination, update = _UNREWRITTEN_CASES[case]
+    scope = "Notes/Insights/Withheld/**"
+    base = {
+        f"{INSIGHTS}/alpha.md": _typed("Alpha", "A.", f"{INSIGHTS}/target-x"),
+        f"{INSIGHTS}/target-x.md": _typed("Target X", "P.", f"{INSIGHTS}/alpha"),
+        f"{INSIGHTS}/zeta.md": _typed("Zeta", "Z.", f"{INSIGHTS}/alpha"),
+    }
+    hidden = f"{INSIGHTS}/Withheld/w.md"
+
+    def non_compliant(target: str) -> str:
+        return _page("W", f"W.\n\n## Relations\n\n- supports [[{target}]]\n",
+                     type="insight", status="active")
+
+    variants = {
+        "B": base,
+        "A": {**base, hidden: non_compliant(link)},
+        "C": {**base, hidden: non_compliant(f"{INSIGHTS}/alpha")},
+    }
+    for detail in (None, "compact", "full", "legacy"):
+        extra = {} if detail is None else {"response_detail": detail}
+        answers = {}
+        for variant, files in variants.items():
+            vault = _materialize(
+                tmp_path / str(detail) / variant / "vault", files, audience, scope=scope
+            )
+            answers[variant] = _VOLATILE_TEXT.sub(
+                "<v>",
+                _text(
+                    _call(
+                        vault, _principal(audience), "manage_memory_file", operation="move",
+                        old_path=f"{INSIGHTS}/zeta.md",
+                        new_path=f"{INSIGHTS}/{destination}.md",
+                        update_wikilinks=update, **extra,
+                    )
+                ),
+            )
+            if variant != "B":
+                assert (vault / hidden).read_text(encoding="utf-8") == files[hidden]
+        assert '"__error__"' not in answers["B"], (detail, answers["B"])
+        assert answers["A"] == answers["B"], (detail, answers["A"])
+        assert answers["C"] == answers["B"], detail
+
+
 _HIDDEN_LINKERS = {
     "append-only": (
         f"{KB}/Sources/Withheld/capture.md",

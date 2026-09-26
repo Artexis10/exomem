@@ -1135,10 +1135,20 @@ class MovePreflight:
     source_guard: vault.PathGuard
     destination_guard: vault.PathGuard
     mutated: Literal[False] = False
+    #: Pages judged for the closure and publication but not asserted against
+    #: this move (see `move_file`: a page withheld from a mover other than the
+    #: owner whose bytes the move does not rewrite).
+    waived_blockers: frozenset[str] = frozenset()
+
+    @property
+    def blocking_evaluations(self) -> tuple[MovePageEvaluation, ...]:
+        return tuple(
+            item for item in self.evaluations if item.after.path not in self.waived_blockers
+        )
 
     @property
     def should_block(self) -> bool:
-        return any(item.contract_result.should_block for item in self.evaluations)
+        return any(item.contract_result.should_block for item in self.blocking_evaluations)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -3243,10 +3253,10 @@ def commit_move(
     if preflight.should_block:
         raise SemanticWriteError(
             "SEMANTIC_CONTRACT_BLOCKED",
-            _blocking_reason_for_evaluations(preflight.evaluations),
+            _blocking_reason_for_evaluations(preflight.blocking_evaluations),
             tuple(
                 finding
-                for item in preflight.evaluations
+                for item in preflight.blocking_evaluations
                 for finding in item.contract_result.blocking_findings
             ),
         )
