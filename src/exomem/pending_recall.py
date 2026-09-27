@@ -474,6 +474,17 @@ def _lanes_hold(vault_root: Path, expected: dict[str, str | None]) -> bool:
     return all(catalogue.get(rel, False) for rel in expected)
 
 
+def recall_lanes_hold(vault_root: Path, expected: dict[str, str | None]) -> bool:
+    """Whether both persistent recall lanes hold exactly these identities.
+
+    The overlay's lane test, the part of its retirement test that asks the
+    stores; retirement also waits for the batch's other components (see
+    :func:`_components_allow_retirement`). The receipt store asks only this to
+    hand on a path whose current bytes no receipt covers.
+    """
+    return _lanes_hold(Path(vault_root), expected)
+
+
 def _retire_settled(
     vault_root: Path, batches: Sequence[object], projection: _Projection
 ) -> bool:
@@ -486,6 +497,17 @@ def _retire_settled(
     and the clearing itself goes through the frozen exact-batch CAS.
     """
     retired = False
+    for batch in _settled_batches(vault_root, batches, projection):
+        if derived_receipts.retire_pending_visibility(vault_root, batch).outcome == "retired":
+            retired = True
+    return retired
+
+
+def _settled_batches(
+    vault_root: Path, batches: Sequence[object], projection: _Projection
+) -> list[object]:
+    """The batches whose custody both recall lanes have published (no mutation)."""
+    settled = []
     for batch in batches:
         expected: dict[str, str | None] = {}
         blocked = False
@@ -505,9 +527,39 @@ def _retire_settled(
             continue
         if not _lanes_hold(vault_root, expected):
             continue
-        if derived_receipts.retire_pending_visibility(vault_root, batch).outcome == "retired":
-            retired = True
-    return retired
+        settled.append(batch)
+    return settled
+
+
+def readonly_visibility(vault_root: Path) -> tuple[str, str | None]:
+    """The overlay outcome a managed reader would get, without retiring anything.
+
+    Doctor runs out of process and must not mutate custody. This hydrates and
+    proves the durable rows exactly as :func:`overlay` does, and treats a batch
+    the overlay's retirement pass would clear as cleared, but never runs that
+    pass. Returns ``("ready", None)`` or ``("warming", <closed code>)``.
+    """
+    root = Path(vault_root)
+    try:
+        snapshot = derived_receipts.snapshot_pending_visibility(
+            root, limit=PENDING_HYDRATION_LIMIT
+        )
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return "warming", "pending_visibility_unprovable"
+    if snapshot.outcome != "complete":
+        return "warming", snapshot.failure_code or f"pending_visibility_{snapshot.outcome}"
+    projection = _project_batches(root, snapshot.batches)
+    if projection.unprovable:
+        cleared = {
+            batch.receipt.batch_id
+            for batch in _settled_batches(root, snapshot.batches, projection)
+        }
+        remaining = [
+            batch for batch in snapshot.batches if batch.receipt.batch_id not in cleared
+        ]
+        if _project_batches(root, remaining).unprovable:
+            return "warming", "pending_visibility_unprovable"
+    return "ready", None
 
 
 def _warming(failure_code: str, generation: int = 0) -> PendingOverlay:
@@ -710,6 +762,43 @@ def note_persistent_publication(
     if _retire_settled(root, batches, projection):
         # Custody converged, so the store's pending generation has moved and
         # this projection is fenced out; the next request re-hydrates.
+        _forget(key)
+
+
+def note_components_completed(vault_root: Path, batch_ids: Iterable[str]) -> None:
+    """Derived components completed; retire whatever custody they settled.
+
+    Retirement needs both recall lanes to hold the generation *and* every
+    non-omittable component to be completed. The lanes publish inside the
+    receipt-owned fan-out, before the drain records the components that fan-out
+    proved, so the attempt :func:`note_persistent_publication` makes at that
+    moment cannot retire. Completing a component does not move the pending
+    generation fence either, so without this second attempt a cached projection
+    kept shadowing the page's vector and graph evidence until some unrelated
+    pending-row mutation happened to invalidate it.
+    """
+    named = {batch_id for batch_id in batch_ids if isinstance(batch_id, str) and batch_id}
+    if not named:
+        return
+    root = Path(vault_root)
+    key = _key(root)
+    with _STATE_LOCK:
+        state = _STATES.get(key)
+    if state is None or not derived_receipts.pending_visibility_snapshot_is_current(
+        root, state.snapshot_generation
+    ):
+        # The ordinary bounded hydration retires whatever has converged.
+        _forget(key)
+        overlay(root)
+        return
+    batches = tuple(
+        batch for batch in state.batches if batch.receipt.batch_id in named
+    )
+    if not batches:
+        return
+    # Nothing canonical moved, only component state: the fenced rows are reused.
+    projection = _reproject_named(root, batches, state.rows, set())
+    if _retire_settled(root, batches, projection):
         _forget(key)
 
 

@@ -3080,6 +3080,26 @@ def join_registered_if_settled(
 #: costs. A request deadline in scope wins whenever it is nearer.
 STANDALONE_JOIN_BUDGET_SECONDS = 15.0
 
+#: Set while the receipt-owned fan-out of a fast-acknowledged write runs. That
+#: caller starts a registered rebuild exactly as a standalone caller does, but
+#: its own durable receipt -- not a converged graph -- is its contract, and it
+#: already counts a started graph handoff as convergent. It therefore has no
+#: budget to spend waiting: a wait only held the fan-out's next component
+#: (embeddings) behind a whole-vault pass for up to the budget above.
+_STANDALONE_JOIN_WAIVED: ContextVar[bool] = ContextVar(
+    "exomem_graph_standalone_join_waived", default=False
+)
+
+
+@contextlib.contextmanager
+def standalone_join_waived():  # noqa: ANN201 - context manager
+    """Start registered rebuilds as usual, but spend no time joining them."""
+    token = _STANDALONE_JOIN_WAIVED.set(True)
+    try:
+        yield
+    finally:
+        _STANDALONE_JOIN_WAIVED.reset(token)
+
 
 def standalone_join_budget_seconds() -> float:
     """How long a standalone join may wait, in seconds from now.
@@ -3087,8 +3107,11 @@ def standalone_join_budget_seconds() -> float:
     Two bounds, and the earlier one wins, exactly as
     `writer_lease.acknowledgement_budget_deadline` composes them: this module's
     own bound, and what is left of the request budget minus its delivery reserve
-    when a request is in scope at all.
+    when a request is in scope at all. A caller inside `standalone_join_waived`
+    has no budget at all.
     """
+    if _STANDALONE_JOIN_WAIVED.get():
+        return 0.0
     from . import request_budget
 
     budget = request_budget.current()

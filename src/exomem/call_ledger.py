@@ -806,6 +806,7 @@ def derived_diagnostics(vault_root: Any) -> dict[str, Any]:
         "fast_durable_ack": "inactive",
         "due_components": 0,
         "recoverable_batches": 0,
+        "stranded_batches": 0,
         "counters": derived_counters(),
         "pending_visibility": {},
         "last_drain_pass": {},
@@ -826,6 +827,7 @@ def derived_diagnostics(vault_root: Any) -> dict[str, Any]:
         diagnostics["recoverable_batches"] = derived_receipts.recoverable_batch_count(
             root
         )
+        diagnostics["stranded_batches"] = derived_receipts.stranded_batch_count(root)
     except Exception:  # noqa: BLE001
         diagnostics["unavailable"].append("custody_depth")
     try:
