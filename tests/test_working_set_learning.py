@@ -28,6 +28,7 @@ from exomem import (
     activation_conventions,
     capture_sweep,
     commands,
+    graph_sync,
     lexstore,
     review_state,
     working_set_heat,
@@ -196,14 +197,28 @@ def _every_file(*roots: Path) -> list[Path]:
     return [path for root in roots for path in root.rglob("*") if path.is_file()]
 
 
-def test_no_turn_word_is_persisted_anywhere(learning_vault: Path) -> None:
+def test_no_turn_word_is_persisted_anywhere(
+    learning_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Both sidecars, every log and ledger in the state root, and the vault."""
+    drain_calls: list[float] = []
+    real_drain = graph_sync.drain_active_rebuilds
+
+    def observed_drain(timeout: float) -> bool:
+        drain_calls.append(timeout)
+        return real_drain(timeout=timeout)
+
+    monkeypatch.setattr(graph_sync, "drain_active_rebuilds", observed_drain)
     word = "zorblatquux"
     packet = _pick(learning_vault, f"wie steht es um {word}", SLED)
     assert word in packet["learning"]["turn_terms"], "the caller hears its own words"
     _pick(learning_vault, f"wie steht es um {word}", SLED)
     commands.op_activate_context(learning_vault, turn=f"{word} continue")
 
+    # A rebuild replaces its transient SQLite journal; enumerate only after it
+    # has finished so a disappeared journal cannot interrupt the privacy scan.
+    assert graph_sync.drain_active_rebuilds(timeout=60.0)
+    assert drain_calls == [60.0]
     state_root = Path(os.environ["EXOMEM_STATE_ROOT"])
     files = _every_file(learning_vault, state_root)
     assert working_set_heat.sidecar_path(learning_vault) in files
