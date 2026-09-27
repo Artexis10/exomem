@@ -29,6 +29,7 @@ from . import (
     project_keys,
     schema,
     source_taxonomy,
+    tag_variants,
     temporal,
 )
 from .kbdir import kb_prefix
@@ -377,7 +378,7 @@ def add(
             content_type=artifact.content_type,
         )
 
-    tags_clean = _clean_tags(tags)
+    tags_clean, _tag_warnings = tag_variants.reconcile_authored(vault_root, _clean_tags(tags))
     exomem_id = memory_refs.new_id()
 
     source_md = _render_source(

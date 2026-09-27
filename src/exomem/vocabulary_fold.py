@@ -1,17 +1,15 @@
-"""One conservative English fold for comparing vocabulary terms.
+"""One conservative fold for comparing authored vocabulary terms.
 
-`fold_term` lowercases, maps `_` and whitespace runs to `-`, and folds regular
-inflection on each hyphen-separated part: plural `-s`/`-es` (and `-ies` to
-`-y`), and `-ing`/`-ed` on stems of four or more letters. Words under four
-letters and the declared `EXCEPTIONS` are never folded. The fold is applied to
-the fixpoint, so it is idempotent: a folded term that is stored and compared
-again folds to itself.
+``fold_term`` is the single comparison key for tags, collection claims and
+routing terms. Two terms are variants of one another when their folds are
+equal. The fold is a key, never display text: callers keep whichever real
+variant they choose (for tags, the most-used one) and only compare folds.
 
-It is a comparison key, never a rewrite. Authored tags, titles and claims keep
-their spelling; two terms meet when their folds are equal. Being conservative
-matters more than being complete: a fold that merges two different words
-routes a note somewhere it does not belong, while a missed fold only leaves
-two spellings apart, as they were before.
+The fold lowercases, maps ``_`` and whitespace runs to ``-``, and removes one
+English inflection from the final hyphen segment: a plural ``-s``/``-es``, then
+an ``-ing``/``-ed`` whose stem keeps four or more letters. Words under four
+letters, non-alphabetic segments and ``EXCEPTIONS`` are never inflected, so a
+fold never changes meaning at the cost of sometimes missing a variant.
 """
 
 from __future__ import annotations
@@ -19,83 +17,91 @@ from __future__ import annotations
 import functools
 import re
 
-#: Words that end like an inflection but are not one. Deliberately small and
-#: literal; the length floor already protects most short words.
-EXCEPTIONS: frozenset[str] = frozenset(
+__all__ = ["EXCEPTIONS", "fold_term"]
+
+#: Forms whose apparent inflection carries meaning, or whose stem is a
+#: different word. They fold only by case and separator.
+EXCEPTIONS = frozenset(
     {
-        "access",
-        "address",
-        "always",
-        "analysis",
-        "atlas",
-        "basis",
-        "bonus",
-        "bus",
-        "business",
-        "campus",
-        "canvas",
-        "census",
-        "chaos",
-        "consensus",
-        "corpus",
-        "crisis",
-        "during",
-        "focus",
-        "gas",
-        "hundred",
-        "lens",
-        "news",
-        "perhaps",
-        "previous",
-        "process",
-        "series",
-        "species",
-        "status",
-        "thesis",
-        "various",
-        "virus",
+        # -s forms that are not plurals of the stem
+        "access", "address", "alias", "analysis", "arms", "atlas", "basis",
+        "bias", "business", "bus", "campus", "canvas", "chaos", "corpus",
+        "crisis", "customs", "diagnosis", "earnings", "gas", "glasses",
+        "goods", "https", "kudos", "lens", "means", "news", "process",
+        "proceedings", "rails", "savings", "series", "species", "status",
+        "surroundings", "synopsis", "thesis", "windows",
+        # -ics fields of study, not plurals of an adjective
+        "analytics", "diagnostics", "dynamics", "economics", "electronics",
+        "ethics", "genetics", "graphics", "heuristics", "linguistics",
+        "logistics", "mathematics", "physics", "politics", "robotics",
+        "semantics", "statistics",
+        # -ing nouns whose stem is a different word
+        "building", "ceiling", "clothing", "during", "evening", "funding",
+        "heading", "housing", "landing", "listing", "meeting", "morning",
+        "nothing", "painting", "drawing", "setting", "something",
+        "anything", "everything", "sibling", "wedding",
+        # -ed words that are not past forms
+        "hundred", "kindred", "naked", "sacred", "wicked",
     }
 )
 
-_MIN_WORD = 4
-_MIN_STEM = 4
 _SEPARATORS = re.compile(r"[\s_]+")
-_UNDOUBLE_KEEP = frozenset("lsz")
+_VOWELS = frozenset("aeiouy")
+# Doubled final consonants that belong to the stem (fall, pass, stuff, buzz).
+_KEPT_DOUBLES = frozenset("lsfz")
 
 
-def _undouble(stem: str) -> str:
-    if len(stem) > _MIN_STEM and stem[-1] == stem[-2] and stem[-1] not in _UNDOUBLE_KEEP:
-        return stem[:-1]
-    return stem
-
-
-def _fold_once(word: str) -> str:
-    if len(word) < _MIN_WORD or word in EXCEPTIONS or not word.isalpha():
-        return word
-    if word.endswith("ing") and len(word) - 3 >= _MIN_STEM:
-        return _undouble(word[:-3])
-    if word.endswith("ed") and not word.endswith("eed") and len(word) - 2 >= _MIN_STEM:
-        return _undouble(word[:-2])
-    if word.endswith("ies") and len(word) - 3 >= 3:
+def _plural(word: str) -> str:
+    if word.endswith("ies") and len(word) > 4:
         return word[:-3] + "y"
-    if word.endswith(("sses", "shes", "ches", "xes", "zes")):
-        return word[:-2]
+    if word.endswith("es"):
+        base = word[:-2]
+        if base.endswith(("ss", "us", "sh", "x", "zz")):
+            return base
+        if base.endswith("ch"):
+            # match-es / coach-es drop "es"; cache-s / niche-s drop only "s".
+            before = base[-3:-2]
+            single_vowel = before in _VOWELS and base[-4:-3] not in _VOWELS
+            return word[:-1] if single_vowel else base
     if word.endswith("s") and not word.endswith(("ss", "us", "is")):
         return word[:-1]
     return word
 
 
+def _verbal(word: str) -> str:
+    if word.endswith("eed"):
+        return word
+    for suffix in ("ing", "ed"):
+        if not word.endswith(suffix):
+            continue
+        stem = word[: -len(suffix)]
+        if len(stem) < 4 or not _VOWELS.intersection(stem):
+            return word
+        if len(stem) >= 5 and stem[-1] == stem[-2] and stem[-1] not in _VOWELS | _KEPT_DOUBLES:
+            stem = stem[:-1]
+        return stem
+    return word
+
+
 @functools.lru_cache(maxsize=65536)
 def _fold_word(word: str) -> str:
-    current = word
-    while True:
-        folded = _fold_once(current)
-        if folded == current:
-            return current
-        current = folded
+    for _ in range(3):
+        if len(word) < 4 or not word.isalpha() or word in EXCEPTIONS:
+            return word
+        folded = _plural(word)
+        if folded not in EXCEPTIONS:
+            folded = _verbal(folded)
+        if folded == word:
+            return word
+        word = folded
+    return word
 
 
 def fold_term(text: str) -> str:
-    """The comparison key of one vocabulary term. See the module docstring."""
-    joined = _SEPARATORS.sub("-", str(text).strip().casefold())
-    return "-".join(_fold_word(part) for part in joined.split("-"))
+    """Return the comparison key shared by every variant of ``text``."""
+    term = _SEPARATORS.sub("-", str(text).strip().lower()).strip("-")
+    if not term:
+        return ""
+    head, _, last = term.rpartition("-")
+    folded = _fold_word(last)
+    return f"{head}-{folded}" if head else folded

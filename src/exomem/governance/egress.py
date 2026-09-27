@@ -4672,6 +4672,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "backfill-ids": "dry-run-default",
         "structured-files": "apply-conditional",
         "curation": "mutation",
+        "tag-variants": "apply-conditional",
     },
     ("manage_memory_file", "operation"): {
         "list": "structure",
