@@ -70,6 +70,7 @@ from . import entity_candidates as entity_candidates_module
 from . import entity_types as entity_types_module
 from . import envelope as envelope_module
 from . import episode_memory as episode_memory_module
+from . import episode_workflow as episode_workflow_module
 from . import episode_nudge as episode_nudge_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
@@ -7644,10 +7645,89 @@ def op_capture_source(
     return out
 
 
+_EpisodeProposalArgument = Annotated[
+    dict[str, Any] | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["route", "alternatives", "evidence", "reason", "leaves"],
+                    "properties": {
+                        "route": {
+                            "enum": [
+                                "existing_page",
+                                "semantic_unit",
+                                "focused_note",
+                                "entity",
+                                "records",
+                                "planning",
+                                "experiment",
+                                "source",
+                                "evidence",
+                                "relation_only",
+                                "no_capture",
+                            ]
+                        },
+                        "target": {"type": "string"},
+                        "title": {"type": "string"},
+                        "alternatives": {
+                            "type": "array",
+                            "maxItems": 8,
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["target", "scope", "version"],
+                                "properties": {
+                                    "target": {"type": "string"},
+                                    "scope": {"type": "string"},
+                                    "version": {"type": "string"},
+                                },
+                            },
+                        },
+                        "evidence": {"enum": ["complete", "truncated", "missing"]},
+                        "reason": {"type": "string"},
+                        "leaves": {
+                            "type": "array",
+                            "maxItems": 16,
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["leaf_key", "effect_revision", "kind", "args"],
+                                "properties": {
+                                    "leaf_key": {"type": "string"},
+                                    "effect_revision": {"type": "integer", "minimum": 1},
+                                    "kind": {
+                                        "enum": [
+                                            "create-note",
+                                            "create-entity",
+                                            "accept-relation",
+                                            "edit",
+                                            "supersede",
+                                            "move",
+                                            "delete",
+                                            "recover",
+                                        ]
+                                    },
+                                    "args": {"type": "object"},
+                                },
+                            },
+                        },
+                    },
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
+]
+
+
+
 def op_episode_memory(
     vault_root: Path,
     source_schema: object,
-    action: Literal["record", "inspect"],
+    action: Literal["record", "inspect", "candidates", "prepare", "disposition", "resume"],
     episode: str | None = None,
     subject: str | None = None,
     summary: str | None = None,
@@ -7657,6 +7737,17 @@ def op_episode_memory(
     said: list[str] | None = None,
     about: list[str] | None = None,
     client: str | None = None,
+    candidate: str | None = None,
+    proposal: _EpisodeProposalArgument = None,
+    disposition: Literal[
+        "routed", "no_capture", "uncertain", "rejected", "deferred", "awaiting_authority"
+    ]
+    | None = None,
+    reason: str | None = None,
+    input_revision: int | None = None,
+    order: list[str] | None = None,
+    max_leaves: int | None = None,
+    postcommit: bool | None = None,
 ) -> dict:
     """Record what a conversation worked on, decided and left open, for the next session on any client.
 
@@ -7668,13 +7759,23 @@ def op_episode_memory(
     Recording again under the same `episode` with changed content adds a
     revision and retires the previous one; an identical retry writes nothing.
 
+    A recorded episode can also carry typed candidates for its durable
+    changes: `prepare` one candidate's destination, set its `disposition`
+    (including honest no_capture, deferred or rejected ones), and `resume`
+    to execute the routed ones. A leaf is one typed step for an existing
+    writer (the curation step kinds of `maintain_memory`), never a free-form
+    effect. `resume` refuses with `episode_workflow_disabled` unless this
+    service enables episode execution.
+
     Args:
         action: `record` writes a recap revision; `inspect` reads this
-            episode's revision history back.
+            episode's revision history back; `candidates` reads its
+            candidates; `prepare`, `disposition` and `resume` plan and
+            execute them.
         episode: The `ep-` key a previous record returned, or the one a hook
             named. Omit it on a conversation's first record and reuse the
             returned key for the rest of that conversation. Required for
-            `inspect`.
+            every other action.
         subject: What the conversation was about, one line, at most 120
             characters.
         summary: One line on where it stands, at most 180 characters.
@@ -7690,35 +7791,118 @@ def op_episode_memory(
             Refs you cannot see are dropped and counted in `about_skipped`.
         client: Optional lowercase client label, e.g. `claude-code` or
             `chatgpt`.
+        candidate: For `prepare`/`disposition`: a stable key you choose for
+            one durable change, reused when you revise it.
+        proposal: For `prepare`: {route, target?, title?, alternatives,
+            evidence, reason, leaves: [{leaf_key, effect_revision, kind,
+            args}]}. A changed leaf needs the next `effect_revision`; a
+            committed one cannot change.
+        disposition: For `disposition`: routed, no_capture, uncertain,
+            rejected, deferred or awaiting_authority.
+        reason: For `disposition`: why, in one or two sentences.
+        input_revision: For `resume`: the input revision your coverage
+            review covered, the current one.
+        order: For `resume`: leaf ids to run, in this order.
+        max_leaves: For `resume`: at most this many leaves this pass, 1 to
+            16 (default 8); the rest stay pending.
+        postcommit: For `resume`: true attests your review of the committed
+            results instead of executing anything.
 
     Returns: record -> {episode, revision, source: {ref, path, title},
         idempotent, recovery, ledger, about_skipped}; inspect -> {episode,
         revisions: [{revision, recovery}], latest_source_ref,
-        coverage_current}. Newlines, credential-shaped text and anything over
-        a cap are refused with nothing written.
+        coverage_current}; candidates/prepare/disposition -> {episode,
+        input_revision, candidates: [{candidate_key, route, disposition,
+        pending, leaves: [{leaf_id, kind, outcome, ...}]}], complete,
+        execution}; resume adds {status, executed, reconciled, blocked,
+        deferred, publication}. Newlines, credential-shaped text and anything
+        over a cap are refused with nothing written.
     """
-    if action == "inspect":
-        if any(
-            value is not None
-            for value in (subject, summary, worked_on, decided, open, said, about, client)
-        ):
+    recap = {
+        "subject": subject,
+        "summary": summary,
+        "worked_on": worked_on,
+        "decided": decided,
+        "open": open,
+        "said": said,
+        "about": about,
+        "client": client,
+    }
+    workflow = {
+        "candidate": candidate,
+        "proposal": proposal,
+        "disposition": disposition,
+        "reason": reason,
+        "input_revision": input_revision,
+        "order": order,
+        "max_leaves": max_leaves,
+        "postcommit": postcommit,
+    }
+    allowed, required = {
+        "record": (set(recap), set()),
+        "inspect": (set(), set()),
+        "candidates": (set(), set()),
+        "prepare": ({"candidate", "proposal"}, {"candidate", "proposal"}),
+        "disposition": (
+            {"candidate", "disposition", "reason"},
+            {"candidate", "disposition", "reason"},
+        ),
+        "resume": ({"input_revision", "order", "max_leaves", "postcommit"}, {"input_revision"}),
+    }.get(action, (None, None))
+    if allowed is None:
+        raise ValueError(
+            "EPISODE_INVALID: action must be record, inspect, candidates, prepare, "
+            "disposition or resume"
+        )
+    supplied = {**recap, **workflow}
+    if any(value is not None and name not in allowed for name, value in supplied.items()):
+        if action == "inspect":
             raise ValueError("EPISODE_INVALID: inspect takes only an episode key")
+        raise ValueError(f"EPISODE_INVALID: {action} takes {sorted(allowed) or 'only an episode key'}")
+    if any(supplied[name] is None for name in required):
+        raise ValueError(f"EPISODE_INVALID: {action} requires {sorted(required)}")
+    if action == "inspect":
         return episode_memory_module.inspect(vault_root, episode=episode)
-    if action != "record":
-        raise ValueError("EPISODE_INVALID: action must be record or inspect")
-    return episode_memory_module.record(
-        vault_root,
-        source_schema,
-        episode=episode,
-        subject=subject,
-        summary=summary,
-        worked_on=worked_on,
-        decided=decided,
-        open=open,
-        said=said,
-        about=about,
-        client=client,
-    )
+    if action == "record":
+        return episode_memory_module.record(
+            vault_root,
+            source_schema,
+            episode=episode,
+            subject=subject,
+            summary=summary,
+            worked_on=worked_on,
+            decided=decided,
+            open=open,
+            said=said,
+            about=about,
+            client=client,
+        )
+    if action == "candidates":
+        return episode_workflow_module.inspect(vault_root, episode=episode)
+    if action == "prepare":
+        return episode_workflow_module.prepare(
+            vault_root, episode=episode, candidate=candidate, proposal=proposal
+        )
+    if action == "disposition":
+        return episode_workflow_module.disposition(
+            vault_root,
+            episode=episode,
+            candidate=candidate,
+            disposition=disposition,
+            reason=reason,
+        )
+    from . import due_state as due_state_module
+
+    with due_state_module.batch_scope(vault_root):
+        resumed = episode_workflow_module.resume(
+            vault_root,
+            episode=episode,
+            input_revision=input_revision,
+            order=order,
+            max_leaves=max_leaves,
+            postcommit=bool(postcommit),
+        )
+    return _carrying_batch_advisories(vault_root, resumed)
 
 
 def op_compile_source(

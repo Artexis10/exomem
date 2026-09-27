@@ -4719,6 +4719,12 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
     ("episode_memory", "action"): {
         "record": "mutation",
         "inspect": "structure",
+        # Typed candidate operations (close-memory-loop 3.3). `candidates`
+        # projects identities and outcomes of the caller's own ledger.
+        "candidates": "structure",
+        "prepare": "mutation",
+        "disposition": "mutation",
+        "resume": "mutation",
     },
     ("plan_memory", "action"): {
         "inspect": "structure",
