@@ -543,8 +543,13 @@ def test_remove_preflight_refuses_when_other_nodes_lack_attachment_slots() -> No
 def test_traefik_is_pinned_to_the_control_plane_node() -> None:
     values = _yaml(ROOT / "infra/helm/platform/values.yaml")
     assert values["traefik"]["nodeSelector"] == {"node-role.kubernetes.io/control-plane": "true"}
-    # The no-surge rollout belongs with D11's hostPort, not a ClusterIP Traefik.
-    assert "updateStrategy" not in values["traefik"]
+    # The no-surge rollout belongs with D11's hostPort: a surge pod could
+    # never bind 443 beside the old one on the single server node.
+    assert values["traefik"]["ports"]["websecure"]["hostPort"] == 443
+    assert values["traefik"]["updateStrategy"] == {
+        "type": "RollingUpdate",
+        "rollingUpdate": {"maxUnavailable": 1, "maxSurge": 0},
+    }
 
 
 def test_rendered_traefik_deployment_is_pinned_to_the_control_plane() -> None:
