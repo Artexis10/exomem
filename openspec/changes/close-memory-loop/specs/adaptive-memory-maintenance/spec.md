@@ -177,7 +177,7 @@ The background worker SHALL write only its own disposable sidecar. It SHALL NOT 
 
 ### Requirement: Alias and convention upkeep are corpus-derived and audience-exact
 
-The alias/anchor family SHALL propose adding a spelling to a page's `aliases` only when other pages refer to that page by an unresolved link whose shared `vocabulary_fold.fold_term` equals one of its names, and SHALL name `edit_memory` as the route. The convention/category family SHALL propose a tag spelling choice only for a fold-equal cluster of two or more authored spellings, without the server declaring a canonical spelling. It SHALL propose a category label change only against the semantic-language registry, meaning a label that folds to exactly one registered category or reviewed alias, or one whose definition names `replaced_by`. Both families SHALL derive their evidence from page contributions held in the dreamer's own sidecar, the published graph and the parse cache. They SHALL NOT use a model, turn text, the activation miss counter, a vault write or a walk, and SHALL stay within the tick's page and CPU budgets with at most 16 names, targets, tags or labels per page and at most 32 members per fold key. A fold key that reaches two or more pages' names is an identity ambiguity and SHALL NOT be proposed over. Under a governed policy every served field, count, fingerprint and liveness check of these items SHALL be computed from released members only, so that a withheld page is indistinguishable from an absent one. Candidate identity SHALL be independent of the producer, so that a later correction producer can support the same proposal.
+The alias/anchor family SHALL propose adding a spelling to a page's `aliases` only when other pages refer to that page by an unresolved link whose shared `vocabulary_fold.fold_term` equals one of its names, and SHALL name `edit_memory` as the route. The convention/category family SHALL propose a tag spelling choice only for a fold-equal cluster of two or more authored spellings, without the server declaring a canonical spelling. It SHALL propose a category label change only against the semantic-language registry, meaning a label that folds to exactly one registered category or reviewed alias, or one whose definition names `replaced_by`. Both families SHALL derive their evidence from page contributions held in the dreamer's own sidecar, the published graph and the parse cache. They SHALL NOT use a model, turn text, the activation miss counter, a vault write or a walk, and SHALL stay within the tick's page and CPU budgets with at most 16 names, targets, tags or labels per page. A fold key carried by more than 32 pages a caller may see SHALL NOT be served to that caller, and pages withheld from that caller SHALL NOT count toward that bound. A fold key that reaches two or more pages' names is an identity ambiguity and SHALL NOT be proposed over. Under a governed policy every served field, count, fingerprint and liveness check of these items SHALL be computed from released members only, so that a withheld page is indistinguishable from an absent one. Candidate identity SHALL be independent of the producer, so that a later correction producer can support the same proposal.
 
 #### Scenario: Other notes name a page by a variant spelling
 
@@ -205,6 +205,11 @@ The alias/anchor family SHALL propose adding a spelling to a page's `aliases` on
 
 - **WHEN** the subject, a competing-name page or the majority-spelling pages are withheld from a caller
 - **THEN** item, context, triage and the carrier return exactly what they return on a vault where those pages do not exist, including the served fingerprint and every count
+
+#### Scenario: Withheld pages do not count toward the member bound
+
+- **WHEN** more than 32 pages carry a fold key but no more than 32 of them are released to a caller
+- **THEN** item, context, triage and the carrier return exactly what they return on a vault where the withheld pages do not exist
 
 #### Scenario: A reseed does not deliver half-counted clusters
 

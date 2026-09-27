@@ -238,13 +238,13 @@ Two candidate signals are not adopted in this tranche.
 **Per-item egress.** Under a governed policy, a withheld page is equal to an absent one in every served field, count, fingerprint and cache behaviour of these families' items. Four rules follow:
 
 1. The worker stores a monotone superset. A row exists whenever its predicate holds for some audience, so a withheld page can never prevent a row. Non-monotone predicates are evaluated per request, over the members the caller may see. For alias, that predicate is uniqueness of the fold key. For tags, it is which spelling is the minority.
-2. Serving reads those members through one keyed, read-only, non-waiting sidecar query per item, at most 32 members per fold key, under the caller's release filter. An item is served only when its minimum holds on released members:
+2. Serving reads those members through one keyed, read-only, non-waiting sidecar query per item, under the caller's release filter: it walks the fold key's rows in path order, skipping withheld rows, until it holds 33 released members or none remain. An item is served only when its minimum holds on released members:
    - alias: X is released, one or more referrers are released, and no other released page carries the fold key;
    - tag: two or more spellings are released, and the served subject's spelling is strictly outnumbered.
 3. The subject, the evidence, the spelling shown, every count, the served fingerprint (a `proposal_fingerprint` over the released members only), the evidence-signature liveness check and the triage and delivery bindings are all computed from released members. The owner's view and an ungoverned vault take the stored fingerprint unchanged.
-4. A fold key with more than 32 members is not served to any audience. This is the one stated boundary residual, and it can only suppress an item, never reveal one.
+4. A fold key with more than 32 members the caller may see is not served to that caller. Only released members count toward the bound. Counting withheld ones would let a caller infer that withheld pages carry the term, because the same caller would see the item on a vault where those pages do not exist. The serving read's cost grows with the withheld rows it skips, but its output never depends on them.
 
-Twin tests pin the following. A withheld subject, a withheld competing-name page and withheld majority-spelling pages each give exactly the absent-twin output through item, context, triage and the carrier.
+Twin tests pin the following. A withheld subject, a withheld competing-name page, withheld majority-spelling pages, and withheld pages that carry the term past the 32-member bound each give exactly the absent-twin output through item, context, triage and the carrier.
 
 **Budgets.** Per page:
 
