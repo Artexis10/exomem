@@ -148,12 +148,14 @@ def test_promotion_records_a_checkpoint_that_moved_under_the_standby(
     """With no migration, promotion re-compares the checkpoint pair."""
     monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
     monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
-    tokens = iter(["checkpoint-1", "checkpoint-2"])
-    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: next(tokens))
+    token = {"value": "checkpoint-1"}
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: token["value"])
     _stub_adoption(monkeypatch)
     service_standby.enter_standby()
     service_standby.register_activation(_Activation())
     service_standby.prove_graph_snapshot(tmp_path)
+    # The proof reads the token on both sides of itself; the snapshot moves after.
+    token["value"] = "checkpoint-2"
     record = service_standby.promote(tmp_path, migrated=False)
     assert record["snapshot"] == "advanced"
     assert record["revalidated"] is True

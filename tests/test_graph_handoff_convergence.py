@@ -19,13 +19,21 @@ These tests pin the handoff that does not depend on that republish:
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from test_graph_post_handoff_writes import GENERATED, NOTE_COUNT, _build_vault, _note
+from test_graph_post_handoff_writes import (
+    GENERATED,
+    NOTE_COUNT,
+    _build_vault,
+    _note,
+    _seed_live_freshness,
+)
 
 from exomem import (
     deferred_index,
@@ -40,6 +48,7 @@ from exomem import (
 from exomem.epistemic_graph import EpistemicGraphIndex
 
 CREATED = f"{GENERATED}/created-after-publication.md"
+LINKER = f"{GENERATED}/linker.md"
 REMOVED = f"{GENERATED}/generated-note-0050.md"
 
 
@@ -115,6 +124,50 @@ def _drain_to_empty(root: Path) -> None:
         index_sync.drain_graph_work(root, limit=64)
 
 
+def _build_small(vault: Path, extra: dict[str, str]) -> Path:
+    """A 40-note vault plus `extra` pages, published, for the edge oracle."""
+    generated = vault / GENERATED
+    generated.mkdir(parents=True, exist_ok=True)
+    names = [f"generated-note-{i:04d}" for i in range(40)]
+    for i, name in enumerate(names):
+        links = [names[(i + offset) % 40] for offset in (1, 7)]
+        (generated / f"{name}.md").write_text(_note(i, links), encoding="utf-8")
+    for rel, text in extra.items():
+        page = vault / rel
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(text, encoding="utf-8")
+    _seed_live_freshness(vault)
+    EpistemicGraphIndex(vault).rebuild_all()
+    epistemic_graph.clear_publication_memos()
+    return vault
+
+
+def _graph_rows(root: Path) -> tuple[set[tuple[object, ...]], list[tuple[object, ...]]]:
+    connection = sqlite3.connect(epistemic_graph.sidecar_path(root))
+    try:
+        edges = connection.execute(
+            "SELECT src_key, dst_key, relation_type, origin, source_path, "
+            "COALESCE(source_anchor, ''), metadata FROM graph_edges"
+        ).fetchall()
+        files = connection.execute(
+            "SELECT path, source_hash FROM graph_nodes WHERE kind = 'file' ORDER BY 1"
+        ).fetchall()
+    finally:
+        connection.close()
+    return set(edges), files
+
+
+def _assert_matches_a_fresh_rebuild(root: Path) -> None:
+    """Edges on every page, not only the residue's, equal a whole-vault rebuild."""
+    drained_edges, drained_files = _graph_rows(root)
+    EpistemicGraphIndex(root).rebuild_all()
+    rebuilt_edges, rebuilt_files = _graph_rows(root)
+    assert drained_files == rebuilt_files
+    missing = sorted(map(str, rebuilt_edges - drained_edges))
+    extra = sorted(map(str, drained_edges - rebuilt_edges))
+    assert not missing and not extra, f"missing={missing[:5]} extra={extra[:5]}"
+
+
 def test_a_page_created_after_the_last_publication_does_not_strand_the_standby(
     handoff_vault: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -145,6 +198,7 @@ def test_a_page_created_after_the_last_publication_does_not_strand_the_standby(
     assert _file_row(root, CREATED), "the drain never added the created page's rows"
     assert epistemic_graph.graph_drift(root) == []
     assert whole_vault_passes == [], "the handoff paid a whole-vault pass after all"
+    _assert_matches_a_fresh_rebuild(root)
 
 
 def test_a_page_removed_after_the_last_publication_is_adopted_and_its_rows_deleted(
@@ -169,6 +223,7 @@ def test_a_page_removed_after_the_last_publication_is_adopted_and_its_rows_delet
     assert not _file_row(root, REMOVED), "the removed page's rows survived the repair"
     assert epistemic_graph.graph_drift(root) == []
     assert whole_vault_passes == []
+    _assert_matches_a_fresh_rebuild(root)
 
 
 def test_a_page_still_on_disk_but_no_longer_indexed_still_declines(
@@ -190,18 +245,32 @@ def test_a_page_still_on_disk_but_no_longer_indexed_still_declines(
     assert adoption.reason == "indexed_membership_differs"
 
 
-def test_a_topology_change_the_residue_does_not_explain_still_declines(
-    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+def test_an_unexplained_non_kb_title_change_alongside_a_residue_declines(
+    vault: Path,
 ) -> None:
-    root = handoff_vault
-    _commit_unpublished_page(root)
-    monkeypatch.setattr(
-        epistemic_graph,
-        "_resolver_topology_fingerprint",
-        lambda _resolver: "not-the-published-topology",
-        raising=True,
+    """A page outside the indexed corpus has no stored title to revert to.
+
+    Its title still moves wikilink resolution for indexed pages, so a change to
+    it is a topology change the residue cannot explain, even beside a residue
+    that is otherwise bounded.
+    """
+    outsider = "Outside/outsider.md"
+    root = _build_small(
+        vault,
+        {
+            outsider: "---\ntitle: Outsider Title\n---\n\nbody\n",
+            LINKER: _note(500, []) + "\nSee [[Outsider Title]] and [[Renamed Outsider]].\n",
+        },
     )
-    adoption = EpistemicGraphIndex(root).adopt_published_snapshot()
+    index = EpistemicGraphIndex(root)
+    assert outsider in (index._recall_membership() or ()), "the resolver must see it"
+    assert outsider not in (index._indexed_recall_membership() or ())
+
+    (root / GENERATED / "residue-created.md").write_text(_note(700, []), encoding="utf-8")
+    (root / outsider).write_text("---\ntitle: Renamed Outsider\n---\n\nbody\n", encoding="utf-8")
+    freshness.rebaseline(root)
+
+    adoption = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
     assert adoption.adopted is False
     assert adoption.reason == "resolver_topology_mismatch"
 
@@ -269,7 +338,7 @@ def test_a_standby_reproof_is_rate_limited(
     assert service_standby.cutover_components()["graph_snapshot"] == "waiting"
 
 
-def test_the_standby_reproof_loop_ends_once_ready_or_discarded(
+def test_the_standby_reproof_loop_runs_until_promotion_or_discard(
     handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = handoff_vault
@@ -281,21 +350,29 @@ def test_the_standby_reproof_loop_ends_once_ready_or_discarded(
     outcome: list[bool] = []
     loop = threading.Thread(
         target=lambda: outcome.append(
-            service_standby.reprove_until_ready(root, poll_seconds=0.01)
+            service_standby.reprove_until_promoted(root, poll_seconds=0.01)
         ),
         daemon=True,
     )
     loop.start()
     EpistemicGraphIndex(root).rebuild_all()
+    deadline = time.monotonic() + 30
+    while service_standby.cutover_components()["graph_snapshot"] != "ready":
+        assert loop.is_alive(), "the re-proof loop exited before the graph was ready"
+        assert time.monotonic() < deadline, "the loop never re-proved the republished graph"
+        time.sleep(0.05)
+    # Ready is not the end: the loop keeps a proof current until promotion.
+    assert loop.is_alive()
+    service_standby.discard()
     loop.join(timeout=60)
     assert not loop.is_alive()
-    assert outcome == [True]
+    assert outcome == [True], "the loop ends holding the proof it made"
 
     # A discarded standby stops re-proving at once.
     service_standby.reset_for_tests()
     _enter_standby(monkeypatch)
     service_standby.discard()
-    assert service_standby.reprove_until_ready(root, poll_seconds=0.01) is False
+    assert service_standby.reprove_until_promoted(root, poll_seconds=0.01) is False
 
 
 def test_promotion_retires_the_full_marker_its_proof_covered(
@@ -443,3 +520,325 @@ def test_the_drain_names_the_barrier_branch_when_it_queues_whole_vault_debt(
     assert len(queued) == 1, caplog.messages
     assert "no barrier" not in queued[0], queued[0]
     assert "unpublished external epoch" in queued[0], queued[0]
+
+
+def _fresh_target(root: Path) -> None:
+    (root / GENERATED / "fresh-target.md").write_text(_note(501, []), encoding="utf-8")
+    (root / GENERATED / "other.md").write_text(
+        "---\ntype: pattern\nstatus: active\ntitle: Fresh Title\n---\n\n# Fresh Title\n\nbody\n",
+        encoding="utf-8",
+    )
+
+
+def _ambiguous_stem(root: Path) -> None:
+    other = root / "Knowledge Base" / "Other"
+    other.mkdir(parents=True, exist_ok=True)
+    (other / "generated-note-0003.md").write_text(_note(502, []), encoding="utf-8")
+
+
+def _rename(root: Path) -> None:
+    (root / GENERATED / "generated-note-0005.md").rename(root / GENERATED / "renamed-five.md")
+
+
+def _remove_linked(root: Path) -> None:
+    (root / GENERATED / "generated-note-0006.md").unlink()
+
+
+def _retitle(root: Path) -> None:
+    (root / GENERATED / "titled.md").write_text(
+        "---\ntype: pattern\nstatus: active\ntitle: Alpha Title\n---\n\nbody\n", encoding="utf-8"
+    )
+
+
+_EDGE_SHAPES = {
+    # A created page that existing links now resolve to, by stem and by title.
+    "created_gains_incoming_links": (
+        _note(500, []) + "\nSee [[fresh-target]] and [[Fresh Title]].\n",
+        _fresh_target,
+    ),
+    "created_makes_a_stem_ambiguous": (
+        _note(500, []) + "\nSee [[generated-note-0003]].\n",
+        _ambiguous_stem,
+    ),
+    "renamed_linked_page": (
+        _note(500, []) + "\nSee [[generated-note-0005]] and [[renamed-five]].\n",
+        _rename,
+    ),
+    "removed_linked_page": (_note(500, []) + "\nSee [[generated-note-0006]].\n", _remove_linked),
+    "retitled_page_retargets_links": (_note(500, []) + "\nSee [[Alpha Title]].\n", _retitle),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_EDGE_SHAPES))
+def test_an_adopted_residue_drains_to_the_edges_of_a_fresh_rebuild(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    whole_vault_passes: list[str],
+    shape: str,
+) -> None:
+    linker_text, mutate = _EDGE_SHAPES[shape]
+    extra = {LINKER: linker_text}
+    if shape == "retitled_page_retargets_links":
+        extra[f"{GENERATED}/titled.md"] = (
+            "---\ntype: pattern\nstatus: active\ntitle: Beta Title\n---\n\nbody\n"
+        )
+    root = _build_small(vault, extra)
+    whole_vault_passes.clear()
+    mutate(root)
+    freshness.rebaseline(root)
+    _enter_standby(monkeypatch)
+
+    assert service_standby.prove_graph_snapshot(root) is True, service_standby.adoption_record()
+    service_standby.promote(root, migrated=False)
+    _drain_to_empty(root)
+
+    assert EpistemicGraphIndex(root).available() is True
+    assert whole_vault_passes == []
+    _assert_matches_a_fresh_rebuild(root)
+
+
+def test_the_edge_oracle_sees_a_drain_that_does_not_widen(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative control: without widening, the oracle must find the missing edge."""
+    root = _build_small(vault, {LINKER: _note(500, []) + "\nSee [[fresh-target]].\n"})
+    monkeypatch.setattr(
+        EpistemicGraphIndex,
+        "_topology_affected_sources",
+        lambda self, conn, rels, *, resolver: set(),
+        raising=True,
+    )
+    (root / GENERATED / "fresh-target.md").write_text(_note(501, []), encoding="utf-8")
+    freshness.rebaseline(root)
+    assert EpistemicGraphIndex(root).adopt_published_snapshot().adopted is True
+    _drain_to_empty(root)
+    with pytest.raises(AssertionError, match="missing="):
+        _assert_matches_a_fresh_rebuild(root)
+
+
+def test_a_snapshot_published_during_the_proof_is_not_named_as_proved(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M1: the proof covers the snapshot it opened, not one published after it."""
+    root = handoff_vault
+    _commit_unpublished_page(root)
+    _enter_standby(monkeypatch)
+    monkeypatch.setattr(service_standby, "REPROVE_INTERVAL_SECONDS", 0.0, raising=True)
+    real = EpistemicGraphIndex.adopt_published_snapshot
+    published: list[str] = []
+
+    def proof_then_publication(self, **kwargs):
+        adoption = real(self, **kwargs)
+        if not published:
+            # The serving worker publishes S2 after the proof read S1.
+            EpistemicGraphIndex(root).rebuild_all()
+            published.append("S2")
+        return adoption
+
+    monkeypatch.setattr(
+        EpistemicGraphIndex, "adopt_published_snapshot", proof_then_publication, raising=True
+    )
+
+    assert service_standby.prove_graph_snapshot(root) is False
+    assert service_standby.proved_checkpoint() is None
+    assert service_standby.cutover_components()["graph_snapshot"] == "waiting"
+
+    # The published snapshot moved, so the waiting standby proves S2 itself.
+    assert service_standby.reprove_graph_snapshot_if_due(root) is True
+    assert service_standby.proved_checkpoint() == service_standby.snapshot_token(root)
+    assert service_standby.adoption_record() == {"residue": 0, "reason": "adopted"}
+
+
+def _land_a_batch_without_fanout(root: Path) -> None:
+    """Canonical bytes and a new checkpoint generation; the sidecar is untouched."""
+    from exomem import vault as vault_module
+
+    page = root / GENERATED / "generated-note-0011.md"
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(page, page.read_text(encoding="utf-8") + "\n- landed\n")],
+        vault_root=root,
+        post_commit_fanout=False,
+    )
+
+
+def _durable_generation(root: Path) -> int | None:
+    checkpoint = graph_sync.read_checkpoint(root)
+    return None if checkpoint is None else checkpoint.generation
+
+
+def test_a_full_marker_raised_before_its_batch_lands_is_not_retired_by_an_earlier_proof(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OQ1: a full-scope batch marks its debt before its bytes land."""
+    root = handoff_vault
+    deferred_index.mark_graph_full_rebuild(root, generation=1)
+    _commit_unpublished_page(root)
+    _enter_standby(monkeypatch)
+    before = _durable_generation(root)
+    assert service_standby.prove_graph_snapshot(root) is True
+
+    _land_a_batch_without_fanout(root)
+    assert _durable_generation(root) != before, "the batch must move the durable generation"
+    record = service_standby.promote(root, migrated=False)
+
+    assert record["snapshot"] == "current", "the sidecar did not move, only the bytes"
+    assert record["full_marker"] == "retained"
+    assert deferred_index.graph_full_rebuild_pending(root) is not None
+
+
+def test_a_proved_standby_keeps_reproving_while_the_graph_moves(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L2: a proof that saw the batch's bytes may retire the marker after all."""
+    root = handoff_vault
+    deferred_index.mark_graph_full_rebuild(root, generation=1)
+    _commit_unpublished_page(root)
+    _enter_standby(monkeypatch)
+    monkeypatch.setattr(service_standby, "REPROVE_INTERVAL_SECONDS", 0.0, raising=True)
+    assert service_standby.prove_graph_snapshot(root) is True
+
+    _land_a_batch_without_fanout(root)
+    freshness.rebaseline(root)
+    assert service_standby.reprove_graph_snapshot_if_due(root) is True
+    assert service_standby.adoption_record() == {"residue": 2, "reason": "adopted"}
+
+    record = service_standby.promote(root, migrated=False)
+    assert record["full_marker"] == "retired"
+
+
+def test_a_failed_reproof_keeps_the_proof_already_held(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = handoff_vault
+    _enter_standby(monkeypatch)
+    monkeypatch.setattr(service_standby, "REPROVE_INTERVAL_SECONDS", 0.0, raising=True)
+    assert service_standby.prove_graph_snapshot(root) is True
+    held = service_standby.proved_checkpoint()
+
+    _decline_on_an_oversized_residue(root, monkeypatch)
+    _land_a_batch_without_fanout(root)
+    assert service_standby.reprove_graph_snapshot_if_due(root) is False
+
+    assert service_standby.cutover_components()["graph_snapshot"] == "ready"
+    assert service_standby.proved_checkpoint() == held
+    assert service_standby.adoption_record() == {"residue": 0, "reason": "adopted"}
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_the_reproof_interval_runs_from_the_end_of_the_last_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L1: a 50 s proof waits max(30 s, 50 s) after it ends, not 30 s after it began."""
+    clock = _Clock()
+    monkeypatch.setattr(service_standby, "_clock", clock, raising=True)
+    moves = iter(range(1_000_000))
+    monkeypatch.setattr(service_standby, "_graph_stat", lambda _root: next(moves), raising=True)
+    monkeypatch.setattr(
+        service_standby, "_graph_snapshot_signal", lambda _root: (next(moves), "t"), raising=True
+    )
+    proofs: list[float] = []
+
+    def slow_decline(self, **_kwargs):
+        proofs.append(clock.now)
+        clock.now += 50.0
+        return epistemic_graph.SnapshotAdoption(False, reason="resolver_topology_mismatch")
+
+    monkeypatch.setattr(EpistemicGraphIndex, "adopt_published_snapshot", slow_decline, raising=True)
+    _enter_standby(monkeypatch)
+    assert service_standby.prove_graph_snapshot(tmp_path) is False  # 1000 -> 1050
+
+    clock.now = 1080.0  # 30 s after the end, 80 s after the start
+    service_standby.reprove_graph_snapshot_if_due(tmp_path)
+    assert proofs == [1000.0], "re-proved 30 s after the last proof ended, not 50"
+    clock.now = 1100.0  # max(30, 50) s after the end
+    service_standby.reprove_graph_snapshot_if_due(tmp_path)
+    assert proofs == [1000.0, 1100.0]
+
+
+def test_an_unchanged_graph_is_polled_without_opening_the_sidecar(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L1: the once-a-second poll is two stats when nothing moved."""
+    root = handoff_vault
+    _decline_on_an_oversized_residue(root, monkeypatch)
+    _enter_standby(monkeypatch)
+    monkeypatch.setattr(service_standby, "REPROVE_INTERVAL_SECONDS", 0.0, raising=True)
+    assert service_standby.prove_graph_snapshot(root) is False
+    opened: list[str] = []
+    real = service_standby._read_snapshot_token
+
+    def counted(vault_root, *, quiet):
+        opened.append("sidecar")
+        return real(vault_root, quiet=quiet)
+
+    monkeypatch.setattr(service_standby, "_read_snapshot_token", counted, raising=True)
+    for _ in range(3):
+        assert service_standby.reprove_graph_snapshot_if_due(root) is False
+    assert opened == []
+
+
+def test_an_unknown_full_rebuild_cause_is_logged_as_given(
+    handoff_vault: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """L3: a new call site's cause must never fail the enqueue it follows."""
+    caplog.set_level(logging.INFO, logger="exomem.graph_drain")
+    assert graph_drain._request_full_rebuild(handoff_vault, cause="a_new_cause") is True
+    assert any("a_new_cause" in line for line in caplog.messages), caplog.messages
+
+
+def test_a_promotion_that_raises_does_not_leave_the_standby_promoting(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L4: a promotion that failed must not stop the standby proving."""
+    root = handoff_vault
+    _enter_standby(monkeypatch)
+    assert service_standby.prove_graph_snapshot(root) is True
+
+    def refused() -> None:
+        raise RuntimeError("lease refused")
+
+    monkeypatch.setattr(service_standby, "_acquire_ownership", refused, raising=True)
+    with pytest.raises(RuntimeError, match="lease refused"):
+        service_standby.promote(root, migrated=False)
+
+    assert service_standby.promoted() is False
+    assert service_standby.prove_graph_snapshot(root) is True
+
+
+def test_rows_an_unpublished_drain_landed_carry_their_topology(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M2: a drain that withholds publication still records the topology of its rows.
+
+    Otherwise the rows gain the created page while the stored fingerprint does
+    not, and the next adoption proof declines a snapshot that matches the disk.
+    """
+    root = _build_small(vault, {})
+    created = root / GENERATED / "drained-unpublished.md"
+    created.write_text(_note(800, []), encoding="utf-8")
+    freshness.rebaseline(root)
+    real_identity = epistemic_graph._incremental_projection_identity
+    calls = iter(range(1_000_000))
+
+    def moving(vault_root):
+        # Never equal twice: the vault moved elsewhere under the drain.
+        return (real_identity(vault_root), next(calls))
+
+    monkeypatch.setattr(epistemic_graph, "_incremental_projection_identity", moving, raising=True)
+    report = EpistemicGraphIndex(root).drain_paths([created])
+    monkeypatch.setattr(
+        epistemic_graph, "_incremental_projection_identity", real_identity, raising=True
+    )
+    assert report["published"] is False
+    assert _file_row(root, f"{GENERATED}/drained-unpublished.md")
+
+    adoption = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
+    assert adoption.adopted is True, adoption.reason
+    assert adoption.residue == ()
