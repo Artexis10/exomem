@@ -332,25 +332,34 @@ def test_a_short_turn_ranks_exactly_as_before(long_turn_vault: Path) -> None:
     assert [hit.path for hit in hits] == _unbounded_paths(long_turn_vault, turn, rows)
 
 
+ZORVIK_PATH = "Knowledge Base/Projects/zorvik-survey.md"
+BENCH_PATH = "Knowledge Base/Projects/qa7700-bench.md"
+
+
+def _two_named_pages(vault: Path) -> list[SimpleNamespace]:
+    """Add a page for each rare name, each also holding the everyday word
+    `garden`; return the anchor rows with both pages in them."""
+    _write(vault / ZORVIK_PATH, _page("Zorvik Survey", "The zorvik survey covered the garden."))
+    _write(vault / BENCH_PATH, _page("Bench", "The qa7700 bench sat in the garden."))
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    frequencies = lexstore.term_document_frequencies(vault, ["garden"], scope="kb")
+    counts, pages = frequencies.value
+    assert pages >= working_set_runtime.ACTIVATION_LEXICAL_COMMON_MIN_PAGES
+    assert counts["garden"] > working_set_runtime.ACTIVATION_LEXICAL_COMMON_FRACTION * pages
+    return _rows(vault) + [
+        SimpleNamespace(path=ZORVIK_PATH, title="zorvik-survey"),
+        SimpleNamespace(path=BENCH_PATH, title="qa7700-bench"),
+    ]
+
+
 def test_a_short_turn_with_a_common_word_ranks_exactly_as_before(long_turn_vault: Path) -> None:
     """Two rare names on different pages plus one everyday word: each page
     holds one name and the everyday word, so only the everyday word lets
     either corroborate. Under the budget it is not dropped for being common,
     and both pages come back exactly as the unbounded query returns them."""
-    zorvik = "Knowledge Base/Projects/zorvik-survey.md"
-    model = "Knowledge Base/Projects/qa7700-bench.md"
-    _write(long_turn_vault / zorvik, _page("Zorvik Survey", "The zorvik survey covered the garden."))
-    _write(long_turn_vault / model, _page("Bench", "The qa7700 bench sat in the garden."))
-    lexstore.ensure_fresh(long_turn_vault)
-    working_set_runtime.reset_caches_for_tests()
-    rows = _rows(long_turn_vault) + [
-        SimpleNamespace(path=zorvik, title="zorvik-survey"),
-        SimpleNamespace(path=model, title="qa7700-bench"),
-    ]
-    frequencies = lexstore.term_document_frequencies(long_turn_vault, ["garden"], scope="kb")
-    counts, pages = frequencies.value
-    assert pages >= working_set_runtime.ACTIVATION_LEXICAL_COMMON_MIN_PAGES
-    assert counts["garden"] > working_set_runtime.ACTIVATION_LEXICAL_COMMON_FRACTION * pages
+    zorvik, model = ZORVIK_PATH, BENCH_PATH
+    rows = _two_named_pages(long_turn_vault)
     turn = "zorvik qa7700 garden"
 
     unbounded = _unbounded_paths(long_turn_vault, turn, rows)
@@ -359,6 +368,61 @@ def test_a_short_turn_with_a_common_word_ranks_exactly_as_before(long_turn_vault
     assert set(unbounded) == {zorvik, model}, unbounded
     assert state == "available"
     assert [hit.path for hit in hits] == unbounded
+
+
+def test_a_medium_turn_still_corroborates_on_its_dropped_everyday_words(
+    long_turn_vault: Path, statements: list[str]
+) -> None:
+    """The same two names and `garden`, padded with ten more everyday words
+    to thirteen units: over the budget, so the everyday words leave the
+    MATCH, but they still count toward corroboration and both named pages
+    come back as the unbounded query returns them.
+
+    The unbounded query also returns filler pages holding two or more of the
+    everyday words and neither name. The bounded MATCH asks only for the
+    names, so it never reads those rows: that is the bound, and it is the
+    whole difference between the two answers."""
+    rows = _two_named_pages(long_turn_vault)
+    padding = [word for word in COMMON_WORDS if word != "garden"][:10]
+    turn = "zorvik qa7700 garden " + " ".join(padding)
+    unbounded = _unbounded_paths(long_turn_vault, turn, rows)
+    statements.clear()
+
+    hits, state = working_set_runtime.lexical_evidence(long_turn_vault, turn, rows, limit=len(rows))
+
+    assert state == "available"
+    matches = _ranking_match_terms(statements)
+    assert len(matches) == 1 and set(matches[0]) == {"zorvik", "qa7700"}, matches
+    bounded = [hit.path for hit in hits]
+    assert set(bounded) == {ZORVIK_PATH, BENCH_PATH}, bounded
+    assert [path for path in unbounded if path in set(bounded)] == bounded
+    for path in set(unbounded) - set(bounded):
+        words = set(re.findall(r"[a-z0-9]+", (long_turn_vault / path).read_text().lower()))
+        assert not words & {"zorvik", "qa7700"}, path
+
+
+def test_the_bounded_query_corroborates_in_rank_order_and_stops_at_k(
+    long_turn_vault: Path, statements: list[str]
+) -> None:
+    """A short turn of twelve everyday words matches almost every page. The
+    ranked rows must reach the corroboration test already in bm25 order, so
+    it can stop once `k` rows qualify. A flattened plan runs the test on
+    every matched row and sorts afterwards: 86-105 ms against 15-17 ms for
+    such a turn on the 2000-page latency harness."""
+    turn = " ".join(COMMON_WORDS[40:52])
+
+    working_set_runtime.lexical_evidence(long_turn_vault, turn, _rows(long_turn_vault), limit=8)
+
+    bounded = [sql for sql in statements if ") AS c JOIN fts" in sql]
+    assert len(bounded) == 1, statements
+    conn = lexstore.get_store(long_turn_vault)._connect()
+    try:
+        plan = conn.execute("EXPLAIN QUERY PLAN " + bounded[0]).fetchall()
+    finally:
+        conn.close()
+    top = [detail for _id, parent, _unused, detail in plan if parent == 0]
+    assert any(detail.startswith("CO-ROUTINE") for detail in top), plan
+    assert "USE TEMP B-TREE FOR ORDER BY" not in top, plan
 
 
 def test_a_corroborated_page_below_many_single_unit_pages_is_still_found(vault: Path) -> None:
