@@ -610,3 +610,25 @@ interchangeably.
 
 - **WHEN** a test asserts that a write's graph outcome is `completed`
 - **THEN** it joins the active rebuild itself rather than relying on the write to have waited
+
+### Requirement: A whole-vault rebuild outcome names its reason
+
+Every whole-vault rebuild attempt SHALL log one outcome line naming the attempt's
+generation, its elapsed time and a reason: the error code of a failure, or its exception
+type when it carries none. A rebuild that found another owner holding the rebuild claim
+SHALL be logged as coalesced rather than failed, because it ran no pass and its
+durable work waits for that owner. This SHALL hold for every caller that runs a
+whole-vault pass, including start-up graph validation and the reconcile path that
+rebuilds after releasing the boundary. The drain's whole-vault request SHALL say which
+condition queued it: an unreadable graph with no barrier, or a barrier with an
+unpublished external epoch.
+
+#### Scenario: A refused rebuild claim is not reported as a failure
+
+- **WHEN** a rebuild attempt finds another owner holding the rebuild claim
+- **THEN** its outcome line says `outcome=coalesced` and names the in-progress code
+
+#### Scenario: A defeated pass names its class
+
+- **WHEN** a whole-vault pass exhausts its stabilization attempts
+- **THEN** its outcome line says `outcome=failed` and names the publication-failure code

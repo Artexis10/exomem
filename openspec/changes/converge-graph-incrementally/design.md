@@ -307,3 +307,47 @@ exist.
 Rewriting the graph sync receipt, epoch, and lineage-reset protocol. It is crash-safety
 machinery, it is correct, and it stays. This change reduces how often it is exercised,
 not what it does.
+
+## Addendum: a handoff that a stale snapshot cannot strand (2026-09-27 upgrade)
+
+The 0.93.0 to 0.95.1 managed upgrade on the personal cell fell back to a cold start.
+The serving worker published generation 5576, an agent's `episode_memory` created a page
+50 s later, and the standby's one proof at 22:00:59 declined with
+`indexed_membership_differs`. The proof ran once, so `graph_snapshot` stayed waiting until
+the 300 s warm budget expired, even though the serving worker could have republished in
+that window. It could not in fact republish: a boundary held for 28 s by the same command
+had escalated the queued per-path repair into whole-vault debt (full marker 5577), and a
+whole-vault pass of about four minutes never held still under writes every one to three
+minutes. That is the livelock 7.2 describes, and it stays parked (below).
+
+This addendum removes the handoff's dependence on that republish:
+
+- **Created and removed pages are residue.** The adoption proof already hashes every
+  admitted page. A page created or removed since the snapshot is enumerated by that same
+  proof, so it is a bounded repair exactly like a page whose bytes moved, and the drain
+  already adds rows for an appeared page and deletes rows for a vanished one, widening to
+  the topology-affected sources. A topology difference is accepted only when reverting the
+  residue paths' resolver entries to their stored titles reproduces the stored
+  fingerprint, the same reconstruction the incremental refresh uses. A snapshot row for a
+  page still on disk but no longer admitted remains a membership decline, because nothing
+  in the residue path proves the drain removes it.
+- **A waiting standby re-proves.** A decline is not final while the warm budget runs.
+  The standby re-proves when the durable generation or the published snapshot changed,
+  at most every 30 s. It reseeds its own unwatched recall registry first, and writes
+  nothing the serving worker owns.
+- **Promotion pays the whole-vault debt its proof covered.** The source proof enumerates
+  every divergence between the sidecar and disk as of the proof. A full marker observed
+  before it is therefore covered once the residue is queued, and promotion retires it
+  by compare-and-swap on the value and raise count, as a publication does. Without this
+  the promoted worker inherits the livelock: its drain works only the marker, and the
+  marker needs a pass that cannot stabilize.
+- **Rebuild outcomes name their reason.** A refused rebuild claim and a pass defeated
+  after eight minutes printed the same `outcome=failed` line with no reason, and the
+  callers that run the pass directly logged nothing. The line now carries the error code
+  and says `coalesced` for a refused claim.
+
+Steady-state convergence under writes, meaning catch-up publication of a pass whose
+movement was all recorded, is 7.2. It is not reopened here. It was built and measured on
+`fix/graph-convergence-contract` and parked by ruling on availability and latency
+regressions. The incident is new evidence for revisiting that ruling, which is a separate
+decision.
