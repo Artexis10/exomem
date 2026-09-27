@@ -1158,8 +1158,8 @@ def test_backfill_prefilter_needs_two_cheap_claim_terms() -> None:
     def page(title: str) -> SimpleNamespace:
         return SimpleNamespace(frontmatter={"type": "insight"}, title=title, tags=[])
 
-    assert audit._backfill_prefilter(page("Sync broke"), [(target, claims)]) is False
-    assert audit._backfill_prefilter(page("Login sync broke"), [(target, claims)]) is True
+    assert audit._backfill_prefilter(page("Sync broke"), [(target, claims)]) == []
+    assert audit._backfill_prefilter(page("Login sync broke"), [(target, claims)]) == [target]
 
 
 def test_only_strong_or_predicate_routes_join_the_backfill(tmp_path: Path) -> None:

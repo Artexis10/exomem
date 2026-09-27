@@ -2358,11 +2358,13 @@ def _records_routing_for_delivery(
     routing: Mapping[str, Any] | None,
     *,
     state: Any = None,
+    created: bool = True,
 ) -> dict[str, Any] | None:
     """Suppress a routed advisory when its review family is quiet or off.
 
     Given the written `state`, a strong route of a failure-shaped observation
     also carries the prominence-driven `disposition` (see `records_disposition`).
+    An edit (`created=False`) carries one only while the page is still unfiled.
     """
     if routing is None:
         return None
@@ -2386,7 +2388,11 @@ def _records_routing_for_delivery(
             from . import prominence, records_disposition
 
             extra = records_disposition.disposition(
-                vault_root, routing, state, level=prominence.effective_capture_level()
+                vault_root,
+                routing,
+                state,
+                level=prominence.effective_capture_level(),
+                created=created,
             )
         except Exception:  # noqa: BLE001 -- a disposition failure costs only the disposition
             log.debug("records routing disposition failed (non-fatal)", exc_info=True)
@@ -2431,7 +2437,12 @@ def _records_routing_facets(state: Any) -> dict[str, list[str]]:
 
 
 def _records_routing_terms(state: Any) -> list[str]:
-    """Authored title, page tags, unit tags, type, categories and projects."""
+    """Authored title, page tags and unit tags.
+
+    Type, category and project are predicates (`_records_routing_facets`), not
+    words: counted as coverage terms they let a note about one product reach a
+    collection for another through a shared `type`.
+    """
     frontmatter = getattr(state, "frontmatter", None) or {}
     page_tags = _frontmatter_strings(frontmatter, "tags")
     document = getattr(state, "document", None)
@@ -2440,11 +2451,7 @@ def _records_routing_terms(state: Any) -> list[str]:
         for unit in (getattr(document, "units", None) or ())
         for tag in (getattr(unit, "tags", None) or ())
     ]
-    facets = _records_routing_facets(state)
-    facet_terms = [
-        value for key in ("type", "category", "project") for value in facets.get(key, ())
-    ]
-    return [str(getattr(state, "title", "") or ""), *page_tags, *unit_tags, *facet_terms]
+    return [str(getattr(state, "title", "") or ""), *page_tags, *unit_tags]
 
 
 def _observation_delta(
@@ -2587,7 +2594,7 @@ def commit_existing(
     routing = _records_routing(vault_root, preflight.after)
     _observation_delta(vault_root, preflight.after, routing)
     delivered_routing = _records_routing_for_delivery(
-        vault_root, routing, state=preflight.after
+        vault_root, routing, state=preflight.after, created=False
     )
     due = _due_state_block(vault_root, preflight.path)
     sweep = _capture_sweep_block(vault_root, preflight.after, preflight.after_corpus)

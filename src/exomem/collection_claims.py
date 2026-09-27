@@ -2,14 +2,16 @@
 
 Both sides of the comparison -- a collection's claims and an observation's
 terms -- are reduced the same way before they meet: compatibility-normalised,
-split into words, stripped of closed-class function words
-(`structure_promotion.FUNCTION_WORDS`) and folded to one inflection
+split into words, stripped of closed-class function words and navigation glue
+(`structure_promotion._STOPWORDS`) and folded to one inflection
 (`vocabulary_fold.fold_term`). None of it changes authored storage; it decides
 only which spellings count as the same term.
 
 A collection may also declare `claims.match` frontmatter predicates. A page
 satisfying every predicate belongs to that collection by declaration, so it
-routes there as `strong` whatever its words share.
+routes there as `strong` whatever its words share. A page whose value for a
+declared key contradicts the declaration (another project, say) never routes
+there, not even by shared words.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from .structure_promotion import FUNCTION_WORDS, _terms
+from .structure_promotion import _STOPWORDS, _terms
 from .vocabulary_fold import fold_term
 
 MIN_CLAIM_COVERAGE = 2  # PROVISIONAL
@@ -50,11 +52,15 @@ def normalize_text(value: object) -> str:
 
 
 def normalize_terms(values: Iterable[object]) -> frozenset[str]:
-    """Return comparable claim terms: normalised, function words dropped, folded."""
+    """Return comparable claim terms: normalised, function words dropped, folded.
+
+    The folded token passes the same filter `_terms` applies to raw tokens, so
+    normalising stored terms again returns them unchanged.
+    """
     out: set[str] = set()
     for token in _terms(normalize_text(value) for value in values):
         folded = fold_term(token)
-        if len(folded) > 2 and folded not in FUNCTION_WORDS:
+        if len(folded) > 2 and folded not in _STOPWORDS and not folded.isdigit():
             out.add(folded)
     return frozenset(out)
 
@@ -94,6 +100,17 @@ def matched_predicates(
             return None
         evidence.append(f"{key}:{hits[0]}")
     return evidence
+
+
+def contradicts(target: RoutingTarget, facets: Mapping[str, frozenset[str]]) -> bool:
+    """Whether the page states a value for a declared key and none is allowed.
+
+    Silence about a key is not a contradiction: a page with no `project` can
+    still route by coverage to a collection that declares one.
+    """
+    return any(
+        facets.get(key) and not facets[key] & allowed for key, allowed in target.match.items()
+    )
 
 
 def _matches_type(value: str, kind: str) -> bool:
@@ -192,9 +209,9 @@ def route(
     """Return one strict claims winner with a subject signal, else stay silent.
 
     A collection whose `match` predicates all hold wins as `strong` before any
-    word coverage is counted; two such collections are ranked by coverage and
-    stay silent on a tie. Predicates only widen: a page that fails them still
-    routes by coverage and a subject signal exactly as before.
+    word coverage is counted. Several such collections rank by the number of
+    predicates held, then by coverage, and stay silent on a tie. Otherwise the
+    coverage route runs over every collection the page does not contradict.
     """
     raw_terms = [str(value) for value in terms]
     normalized = normalize_terms(raw_terms)
@@ -203,6 +220,7 @@ def route(
     declared = sorted(
         (
             (
+                len(evidence),
                 len(normalized & normalize_terms(target.claims)),
                 target.collection,
                 target,
@@ -211,12 +229,12 @@ def route(
             for target in targets
             if (evidence := matched_predicates(target, observed)) is not None
         ),
-        key=lambda row: (-row[0], row[1]),
+        key=lambda row: (-row[0], -row[1], row[2]),
     )
     if declared:
-        if len(declared) > 1 and declared[0][0] == declared[1][0]:
+        if len(declared) > 1 and declared[0][:2] == declared[1][:2]:
             return None
-        _coverage, _name, target, evidence = declared[0]
+        _held, _coverage, _name, target, evidence = declared[0]
         return {
             "collection": target.collection,
             "title": target.title,
@@ -228,12 +246,15 @@ def route(
             "strength": "strong",
         }
     target_claims = [(target, normalize_terms(target.claims)) for target in targets]
+    # Distinctiveness is judged against every target, contradicted or not, so
+    # excluding a collection never makes a shared term look rarer than it is.
     frequency = _claim_document_frequency([claims for _, claims in target_claims])
     total_targets = len(target_claims)
     ranked = sorted(
         (
             (len(normalized & claims), target.collection, target, claims)
             for target, claims in target_claims
+            if not contradicts(target, observed)
         ),
         key=lambda row: (-row[0], row[1]),
     )
