@@ -4,6 +4,7 @@
 {{- $lockName := include "exomem.hostedDeploymentLockName" . -}}
 {{- $lockFile := include "exomem.hostedDeploymentLockFileName" . -}}
 {{- $runtimeSelection := include "exomem.hostedRuntimeSelection" . -}}
+{{- $legacyPaused := eq (include "exomem.legacyHostedPaused" .) "true" -}}
 {{- $runtimeTarget := $lock.runtimeTarget -}}
 {{- if eq $runtimeSelection "rollback" -}}
 {{- $runtimeTarget = $lock.recordsCompatibility.rollbackRuntime.runtimeTarget -}}
@@ -60,7 +61,7 @@ metadata:
     app.kubernetes.io/name: exomem-provisioner-api
     app.kubernetes.io/part-of: exomem-hosted
 spec:
-  replicas: {{ .Values.provisioner.replicas }}
+  replicas: {{ ternary 0 .Values.provisioner.replicas $legacyPaused }}
   selector:
     matchLabels:
       app.kubernetes.io/name: exomem-provisioner-api
@@ -190,7 +191,7 @@ metadata:
     app.kubernetes.io/name: exomem-provisioner-worker
     app.kubernetes.io/part-of: exomem-hosted
 spec:
-  replicas: 1
+  replicas: {{ ternary 0 1 $legacyPaused }}
   strategy:
     type: Recreate
   selector:

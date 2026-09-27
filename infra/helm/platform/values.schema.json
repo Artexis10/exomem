@@ -4,6 +4,12 @@
   "required": ["provisioner", "admission", "scheduler", "observability", "capacityCollector", "durability"],
   "properties": {
     "runtime": false,
+    "legacyHosted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paused"],
+      "properties": {"paused": {"type": "boolean"}}
+    },
     "gateway": {
       "type": "object",
       "additionalProperties": false,
