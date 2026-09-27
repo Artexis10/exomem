@@ -2354,9 +2354,16 @@ def _records_routing(vault_root: Path, state: Any) -> dict[str, Any] | None:
 
 
 def _records_routing_for_delivery(
-    vault_root: Path, routing: Mapping[str, Any] | None
+    vault_root: Path,
+    routing: Mapping[str, Any] | None,
+    *,
+    state: Any = None,
 ) -> dict[str, Any] | None:
-    """Suppress a routed advisory when its review family is quiet or off."""
+    """Suppress a routed advisory when its review family is quiet or off.
+
+    Given the written `state`, a strong route of a failure-shaped observation
+    also carries the prominence-driven `disposition` (see `records_disposition`).
+    """
     if routing is None:
         return None
     try:
@@ -2373,7 +2380,20 @@ def _records_routing_for_delivery(
     except Exception:  # noqa: BLE001 -- disposition failure costs only advice
         log.debug("collection routing disposition read failed (non-fatal)", exc_info=True)
         return None
-    return dict(routing)
+    delivered = dict(routing)
+    if state is not None:
+        try:
+            from . import prominence, records_disposition
+
+            extra = records_disposition.disposition(
+                vault_root, routing, state, level=prominence.effective_capture_level()
+            )
+        except Exception:  # noqa: BLE001 -- a disposition failure costs only the disposition
+            log.debug("records routing disposition failed (non-fatal)", exc_info=True)
+            extra = None
+        if extra:
+            delivered.update(extra)
+    return delivered
 
 
 def _frontmatter_strings(frontmatter: Any, *names: str) -> list[str]:
@@ -2566,7 +2586,9 @@ def commit_existing(
     suggestion = _structure_suggestion(preflight.after, preflight.after_corpus)
     routing = _records_routing(vault_root, preflight.after)
     _observation_delta(vault_root, preflight.after, routing)
-    delivered_routing = _records_routing_for_delivery(vault_root, routing)
+    delivered_routing = _records_routing_for_delivery(
+        vault_root, routing, state=preflight.after
+    )
     due = _due_state_block(vault_root, preflight.path)
     sweep = _capture_sweep_block(vault_root, preflight.after, preflight.after_corpus)
     context = {
@@ -4101,7 +4123,9 @@ def commit_creation(
     suggestion = _structure_suggestion(preflight.semantic_state, preflight.corpus)
     routing = _records_routing(vault_root, preflight.semantic_state)
     _observation_delta(vault_root, preflight.semantic_state, routing)
-    delivered_routing = _records_routing_for_delivery(vault_root, routing)
+    delivered_routing = _records_routing_for_delivery(
+        vault_root, routing, state=preflight.semantic_state
+    )
     due = _due_state_block(vault_root, preflight.destination)
     sweep = _capture_sweep_block(vault_root, preflight.semantic_state, preflight.corpus)
     context = {

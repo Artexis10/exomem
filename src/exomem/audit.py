@@ -4977,6 +4977,7 @@ def _collection_candidate_finding(
     rows: list[Mapping[str, Any]],
     *,
     project_terms: Iterable[str] = (),
+    common_terms: Iterable[str] = (),
 ) -> AuditFinding | None:
     supporting_rows = sorted(
         (
@@ -5027,6 +5028,12 @@ def _collection_candidate_finding(
             "term": candidate.term,
             "units": supporting_rows,
             "project_terms": sorted({str(term) for term in project_terms}),
+            # The whole table's too-widespread terms, narrowed to the ones these
+            # units carry, so a serve recomposing from them keeps the verdict.
+            "common_terms": sorted(
+                {str(term) for term in common_terms}
+                & {str(term) for row in supporting_rows for term in row.get("terms") or ()}
+            ),
             "meta": meta,
             **meta,
         },
@@ -5088,15 +5095,19 @@ def _check_collection_candidate(
         for term in target.claims
     }
     projects = project_keys.load_project_registry(root).keys
-    candidates = collection_candidate.detect(
-        rows, covered_terms=covered, project_terms=projects
+    common = collection_candidate.common_terms(rows)
+    candidates = collection_candidate.select(
+        collection_candidate.detect(
+            rows, covered_terms=covered, project_terms=projects, common_terms=common
+        ),
+        rows,
     )
     findings = [
         finding
         for candidate in candidates
         if (
             finding := _collection_candidate_finding(
-                candidate, rows, project_terms=projects
+                candidate, rows, project_terms=projects, common_terms=common
             )
         )
         is not None

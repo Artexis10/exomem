@@ -572,7 +572,8 @@ def test_a_recurrence_appends_an_occurrence_to_the_existing_item(
     assert delivered["disposition"] == "append_occurrence"
     call = delivered["record_memory"]
     assert call["action"] == "update"
-    assert call["item_key"] == "Widget panel froze on load"
+    # The exact identity `record_memory(action="update")` takes.
+    assert call["item_key"] == "22222222-2222-4222-8222-222222222227"
     assert call["add_sources"] == ["exomem://memory/61111111-1111-4111-8111-000000000007"]
 
 
@@ -645,7 +646,9 @@ def test_a_real_recurring_domain_still_yields_its_one_candidate(tmp_path: Path) 
 
     selected = collection_candidate.select(collection_candidate.detect(rows), rows)
 
-    assert [item.term for item in selected] == ["boat-mooring"]
+    # The three terms share one set of units: one domain, one candidate.
+    (only,) = selected
+    assert set(only.domain_terms) == {"boat-mooring", "harbour-north", "berth-twelve"}
 
 
 def test_candidate_constants_are_provisional_and_bounded() -> None:
@@ -664,10 +667,14 @@ def test_candidate_population_survives_audience_recomposition() -> None:
 
     full = collection_candidate.detect(rows, terms=("boat-mooring",))
     recomposed = collection_candidate.detect(
-        domain_only, terms=("boat-mooring",), population=len(rows)
+        domain_only,
+        terms=("boat-mooring",),
+        population=len(rows),
+        common_terms=collection_candidate.common_terms(rows),
     )
 
-    assert [item.term for item in full] == [item.term for item in recomposed] == ["boat-mooring"]
+    assert full == recomposed
+    assert [item.term for item in full] == ["boat-mooring"]
 
 
 def test_served_candidates_are_capped_per_response(tmp_path: Path) -> None:

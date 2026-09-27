@@ -669,14 +669,17 @@ def _survivors_only(
             for term in target.claims
         }
         projects = component.get("project_terms") or ()
+        common = component.get("common_terms") or ()
         # Only this entry's own term is recomposed: a term's candidacy depends
         # on nothing but the units that carry it, so restricting the detector
         # is exact, and it is what turns O(terms x units) per entry into O(units).
+        # The distinctiveness verdict is the full table's, stored with the entry.
         candidates = collection_candidate.detect(
             visible_rows,
             covered_terms=covered,
             project_terms=projects,
             terms=(str(component.get("term") or ""),),
+            common_terms=common,
         )
         candidate = next(
             (item for item in candidates if item.term == component.get("term")), None
@@ -687,6 +690,7 @@ def _survivors_only(
             candidate,
             visible_rows,
             project_terms=projects,
+            common_terms=common,
         )
         if finding is None:
             return None
@@ -1132,6 +1136,34 @@ def routing_targets(
             )
         )
     return targets
+
+
+def visible_claim_items(vault_root: Path, manifest_path: str) -> list[dict[str, Any]]:
+    """One collection's projected items this audience may read. No collection read.
+
+    The claims projection already holds each item's key and its routing-relevant
+    values, so a write can compare an observation against existing items
+    without re-reading the collection. Empty on any doubt.
+    """
+    from .governance import egress as egress_module
+
+    root = Path(vault_root)
+    row = ((load(root) or {}).get("claims") or {}).get(manifest_path)
+    if not isinstance(row, Mapping) or not isinstance(row.get("items"), list):
+        return []
+    try:
+        keep = egress_module.release_walk_filter(root)
+    except Exception:  # noqa: BLE001 -- disclosure failure costs the comparison
+        return []
+    if keep is not None and not keep(manifest_path):
+        return []
+    return [
+        dict(item)
+        for item in row["items"]
+        if isinstance(item, Mapping)
+        and type(item.get("path")) is str
+        and (keep is None or keep(str(item["path"])))
+    ]
 
 
 def _routing_snapshot(
@@ -2685,6 +2717,7 @@ def _served_entries_uncached(
             role_token = "unavailable"
             for family in artifact_role_review.FAMILIES:
                 categories[family] = {}
+    candidate_rows: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
     for category in PROJECTION_CATEGORIES:
         if category in excluded:
             # A count of things the user asked not to hear about is a nag by
@@ -2740,15 +2773,29 @@ def _served_entries_uncached(
                     )
                     if effective != "open":
                         continue  # already triaged; a counter must not re-raise it
-                    rows.append(
-                        {
-                            "category": category,
-                            "ref": str(entry.get("ref") or ""),
-                            "due_since": due.isoformat(),
-                            "fingerprint": str(entry.get("fingerprint") or ""),
-                            "path": path,
-                        }
-                    )
+                    row = {
+                        "category": category,
+                        "ref": str(entry.get("ref") or ""),
+                        "due_since": due.isoformat(),
+                        "fingerprint": str(entry.get("fingerprint") or ""),
+                        "path": path,
+                    }
+                    if category == "collection_candidate":
+                        candidate_rows.append((_candidate_rank(entry, row), row))
+                        continue
+                    rows.append(row)
+    # The noise budget: at most `MAX_SERVED_CANDIDATES` collection candidates in
+    # one response, strongest and widest first. Counted after the audience
+    # filter and triage above, so a withheld or dismissed candidate never takes
+    # a slot and the next one surfaces in its place.
+    from . import collection_candidate
+
+    rows.extend(
+        row
+        for _rank, row in sorted(candidate_rows, key=lambda pair: pair[0])[
+            : collection_candidate.MAX_SERVED_CANDIDATES
+        ]
+    )
     # Dated first, oldest first; dateless last. A defect a human authored no date
     # for is reported with a floor date internally, and left to sort naively it
     # would outrank every genuinely overdue prediction in a five-slot `top`.
@@ -2761,6 +2808,18 @@ def _served_entries_uncached(
         )
     )
     return rows, horizon, asked, role_token
+
+
+def _candidate_rank(entry: Mapping[str, Any], row: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Strength, then page spread, then reference: the candidate serve order."""
+    component = entry.get("component") if isinstance(entry.get("component"), Mapping) else {}
+    meta = entry.get("meta") if isinstance(entry.get("meta"), Mapping) else {}
+    pages = {
+        str(unit.get("page"))
+        for unit in component.get("units") or ()
+        if isinstance(unit, Mapping)
+    }
+    return (meta.get("strength") != "strong", -len(pages), str(row.get("ref") or ""))
 
 
 def _excluded_families(state_payload: dict[str, Any]) -> frozenset[str]:
