@@ -119,6 +119,7 @@ def _write_failure_note(
     note_type: str = "failure",
     project: str = "widget-app",
     tags: str = "[widget-app, failure]",
+    unit: str | None = None,
 ) -> tuple[str, str]:
     relative = f"Knowledge Base/Notes/Failures/widget-failure-{index:03d}.md"
     path = tmp_path / relative
@@ -137,7 +138,8 @@ def _write_failure_note(
         "sources: []\n"
         "---\n\n"
         "## Observations\n\n"
-        f"- [failure] The panel stopped responding after load {index} ^event\n",
+        + (unit or f"- [failure] The panel stopped responding after load {index} ^event")
+        + "\n",
         encoding="utf-8",
     )
     return relative, f"exomem://memory/{exomem_id}"
@@ -312,7 +314,12 @@ def test_write_path_routing_sees_type_category_and_project(
     facets = semantic_writes._records_routing_facets(state)
     advisory = semantic_writes._records_routing(tmp_path, state)
 
-    assert facets == {"type": ["failure"], "category": ["failure"], "project": ["widget-app"]}
+    assert facets == {
+        "type": ["failure"],
+        "category": ["failure"],
+        "project": ["widget-app"],
+        "tags": ["ui"],
+    }
     assert advisory is not None and advisory["strength"] == "strong"
 
 
@@ -350,7 +357,15 @@ def _backfill_entry(projection: dict) -> dict:
 def test_creating_a_collection_backfills_one_grouped_item(tmp_path: Path) -> None:
     for index in range(1, 13):
         _write_failure_note(tmp_path, index)
-    _write_failure_note(tmp_path, 99, note_type="decision", project="other-app", tags="[ui]")
+    _write_failure_note(
+        tmp_path,
+        99,
+        title="Kitchen shelf layout",
+        note_type="decision",
+        project="home-projects",
+        tags="[kitchen]",
+        unit="- [decision] Mount the shelf above the counter ^event",
+    )
     _write_incidents(tmp_path)
 
     projection = due_state.reconcile(tmp_path, now=NOW)
@@ -434,7 +449,10 @@ def test_backfill_excludes_pages_a_record_already_reflects(tmp_path: Path) -> No
     manifest_path = _write_incidents(tmp_path)
     (manifest_path.parent / "Entries" / "panel-froze-1.md").write_text(
         "---\n"
-        "record_id: rec-1\n"
+        "type: record\n"
+        "collection_id: 21111111-1111-4111-8111-111111111111\n"
+        "record_id: 22222222-2222-4222-8222-222222222221\n"
+        "schema_version: 1\n"
         "incident: Widget panel froze on load 1\n"
         "observed_on: 2025-11-02\n"
         "sources: ['exomem://memory/61111111-1111-4111-8111-000000000001']\n"
@@ -535,7 +553,10 @@ def test_a_recurrence_appends_an_occurrence_to_the_existing_item(
     manifest_path = _write_incidents(tmp_path)
     (manifest_path.parent / "Entries" / "panel-froze.md").write_text(
         "---\n"
-        "record_id: rec-7\n"
+        "type: record\n"
+        "collection_id: 21111111-1111-4111-8111-111111111111\n"
+        "record_id: 22222222-2222-4222-8222-222222222227\n"
+        "schema_version: 1\n"
         "incident: Widget panel froze on load\n"
         "observed_on: 2026-08-01\n"
         "sources: []\n"

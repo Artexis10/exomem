@@ -177,6 +177,9 @@ TOP_LIMIT = 5
 # PROVISIONAL: tune from observed behavior, never from preference.
 OBSERVATION_GRACE_HOURS = 24
 OBSERVATION_LOOKBACK_DAYS = 90
+#: The grouped `unreflected_observations` entry that stands for every existing
+#: page a Records collection's claims newly cover. Recompute-only.
+BACKFILL_KIND = "backfill"
 
 #: Past every date a human could plausibly author, so one pass over the shipped
 #: predicates yields every obligation the vault will ever owe. See the module
@@ -504,6 +507,16 @@ def _entry(vault_root: Path, finding: Any, refs: dict[str, str]) -> dict[str, An
     }
 
 
+def observation_facets_component(
+    facets: Mapping[str, Iterable[str]] | None,
+) -> dict[str, Any]:
+    """The stored, folded page facets an observation component carries, if any."""
+    from . import collection_claims
+
+    folded = collection_claims.normalize_match(facets)
+    return {"facets": {key: sorted(values) for key, values in folded.items()}} if folded else {}
+
+
 def _entries_from_findings(
     vault_root: Path, findings: list[Any]
 ) -> dict[str, dict[str, list[dict[str, Any]]]]:
@@ -683,6 +696,15 @@ def _survivors_only(
         )
     if component.get("family") == "unreflected_observations":
         collection = str(component.get("collection") or "")
+        if component.get("kind") == BACKFILL_KIND:
+            from . import audit as audit_module
+
+            if not collection or not keep(collection):
+                return None
+            finding = audit_module.backfill_component(component, keep)
+            if finding is None:
+                return None
+            return _entry(vault_root, finding, refs([finding.path]))
         page_path = str(component.get("page_path") or "")
         if not collection or not page_path or not keep(collection) or not keep(page_path):
             return None
@@ -692,6 +714,7 @@ def _survivors_only(
         advisory = collection_claims.route(
             component.get("terms") or (),
             routing(),
+            facets=component.get("facets") or None,
         )
         if not advisory or advisory.get("collection") != collection:
             return None
@@ -715,7 +738,9 @@ def _survivors_only(
             if support is None and matched == previous:
                 return None
         finding = audit_module.unreflected_observation_component(
-            component, advisory.get("matched_terms") or ()
+            component,
+            advisory.get("matched_terms") or (),
+            advisory.get("matched_predicates") or (),
         )
         if finding is None:
             return None
@@ -1178,6 +1203,13 @@ def collection_observation_coverage(
             if rebuilt is None:
                 continue
             component = rebuilt.get("component") or {}
+            if component.get("kind") == BACKFILL_KIND:
+                open_refs.update(
+                    str(row["ref"])
+                    for row in component.get("pages") or ()
+                    if isinstance(row, Mapping) and _page_exists(Path(vault_root), str(row["path"]))
+                )
+                continue
             page_path = str(component.get("page_path") or "")
             if not page_path or not _page_exists(Path(vault_root), page_path):
                 continue
@@ -1452,8 +1484,14 @@ def apply_observation_write_delta(
     routing: Mapping[str, Any] | None,
     observed_at: dt.datetime | None = None,
     observation_aliases: Iterable[str] = (),
+    facets: Mapping[str, Iterable[str]] | None = None,
 ) -> dict[str, Any] | None:
-    """Fold one committed observation into its own structured family."""
+    """Fold one committed observation into its own structured family.
+
+    `facets` are the page's type, category, project and tags; they are stored
+    so a serve under a narrower audience re-applies `claims.match` exactly as
+    the write did.
+    """
     if not _observations_at_write_time() or not state_path(vault_root).exists():
         return None
     now = observed_at or dt.datetime.now(dt.UTC)
@@ -1489,9 +1527,12 @@ def apply_observation_write_delta(
                     )[:3],
                     "terms": sorted(collection_claims.normalize_terms(terms)),
                     "observed_at": now.isoformat(),
+                    **observation_facets_component(facets),
                 }
                 finding = audit_module.unreflected_observation_component(
-                    component, routing.get("matched_terms") or ()
+                    component,
+                    routing.get("matched_terms") or (),
+                    routing.get("matched_predicates") or (),
                 )
                 if finding is not None:
                     refs = review_state_module.refs_for_paths(
@@ -1581,7 +1622,12 @@ def _settle_observations_for_record(
             if not isinstance(component, Mapping) or component.get("family") != _OBSERVATION_FAMILY:
                 retained.append(entry)
                 continue
-            if str(component.get("collection") or "") != str(manifest.path):
+            if (
+                str(component.get("collection") or "") != str(manifest.path)
+                or component.get("kind") == BACKFILL_KIND
+            ):
+                # A grouped backfill is recompute-only: reconcile re-derives
+                # which of its pages a record now reflects.
                 retained.append(entry)
                 continue
             reflectors = [
