@@ -5,9 +5,9 @@
 - [x] 1.1 Test first: a swallowed after-commit guidance failure and a recovery failure log a
       warning naming the exception type, without the exception message.
 - [x] 1.2 Log both by exception type and raising location.
-- [x] 1.3 Reproduce `guidance_unavailable` on a realistic fixture (3,000 pages, several
-      thousand tags, legacy tag shapes, pages without semantic units) and identify the cause:
-      an unpublished graph snapshot, reported under a collapsed reason.
+- [ ] 1.3 Identify the live `guidance_unavailable` cause from the warning logs and the
+      closed reason now named in `vocabulary_sync`. Steps 1.1, 1.2 and 1.4 added logging and
+      reason naming only; no committed test reproduces the live cause.
 - [x] 1.4 Test first, then keep closed projection reasons in `vocabulary_sync`.
 
 ## 2. Shared fold
@@ -15,13 +15,18 @@
 - [x] 2.1 Test first: variant sets share one key; exceptions and short words are untouched;
       the fold is idempotent.
 - [x] 2.2 `vocabulary_fold.fold_term` and `EXCEPTIONS`.
+- [x] 2.3 Test first: a must-not-merge table (`training`/`trains`, `recording`/`records`,
+      `embedded`/`embeddings`, …) and a must-merge table; then drop `-ing`/`-ed` folding and
+      add NFKC and hyphen runs.
 
 ## 3. Write-time reconciliation
 
-- [x] 3.1 Test first: `maximal` records the canonical tag; other levels keep the authored
-      tag; an unavailable catalogue fails open.
-- [x] 3.2 Catalogue tag-usage aggregate and a briefly cached folded index.
-- [x] 3.3 Hook `note`, `edit` and `add` tag cleaning.
+- [x] 3.1 Test first: every level keeps the authored tag; `maximal` warns with the
+      canonical tag; an unavailable catalogue fails open.
+- [x] 3.2 One count source: per-page catalogue tags filtered by visibility and owned trees,
+      counted per writer normal form, ties undecided; a briefly cached index for unrestricted
+      readers, including an empty one.
+- [x] 3.3 Hook `note`, `edit`, `add` and `link` tag cleaning; `add` surfaces its warnings.
 - [x] 3.4 One-line `tag-variant/v1` advisory in the existing slot, validated on projection,
       yielding to a relation review notice and to an `off` envelope.
 
@@ -32,6 +37,14 @@
       refused; batches are bounded.
 - [x] 4.2 `maintain_memory(mode="tag-variants")`, its egress selector, and remote admission
       matching `structured-files`.
+- [x] 4.3 Test first: owned trees (Records, Planning, `_Adoption`, workflow contracts, …) are
+      never counted or rewritten; withheld pages count exactly like absent ones; 1:1 and 3:3
+      ties are never rewritten; the canonical is a written form.
+- [x] 4.4 Test first: apply plans outside the mutation guard and re-verifies batch hashes,
+      visibility and group decisions under it; the log keeps per-page before/after tags and
+      the inverse mapping, and apply refuses when it cannot be written; the splice quotes
+      YAML-ambiguous tags, keeps a `tags:` line comment, and refuses to drop a block comment or
+      change another key.
 
 ## 5. Delivery
 

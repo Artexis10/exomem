@@ -35,9 +35,9 @@ vocabulary review notice. Computing it SHALL NOT fail or alter the committed out
 
 #### Scenario: A balanced write names the canonical tag
 
-- **WHEN** a write at a non-`off`, non-`maximal` level authors `dogfooding` while `dogfood` is used on more pages
-- **THEN** the page keeps `dogfooding`
-- **AND** the response carries one `tag-variant/v1` advisory naming `dogfood`
+- **WHEN** a write at a non-`off` level authors `failure` while `failures` is used on more pages
+- **THEN** the page keeps `failure`
+- **AND** the response carries one `tag-variant/v1` advisory naming `failures`
 
 #### Scenario: Review work keeps the slot
 
