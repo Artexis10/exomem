@@ -1648,13 +1648,13 @@ def op_bootstrap(
                 "structure_suggestion_handling": "normally surface a strong one in the user's domain language, never in Exomem terms; prefer routing into an existing suitable destination, so search first; ask before restructuring unless curation was delegated; do not repeat it in one interaction; use judgement on a moderate one and prefer silence over bureaucracy. For source_classification_debt, agree a real kind with the user, then manage_memory_file(operation='reclassify', reason=...).",
                 "structure_suggestion_authority": "advisory only; the runtime detects and never creates, moves, renames, or deletes anything",
                 "records_routing": (
-                    "a committed compiled note or Evidence write may name one existing "
-                    "Records collection whose claims match the observation; this is advisory "
-                    "and never appends from the advisory alone"
+                    "a committed note or Evidence write may name one Records collection whose "
+                    "claims or claims.match cover it; never append from the advisory alone. Its "
+                    "disposition carries its own instruction"
                 ),
                 "records_routing_handling": (
-                    "read the observation, then route it into the named collection under the "
-                    "served capture disposition; resume a held candidate when one exists"
+                    "read the observation, then route it under the served capture disposition, "
+                    "a grouped backfill once; resume a held candidate when one exists"
                 ),
                 "collection_candidate": (
                     "a strong collection_candidate is a proposal: draft its schema through "

@@ -1,4 +1,16 @@
-"""Deterministic routing over audience-filtered collection claims."""
+"""Deterministic routing over audience-filtered collection claims.
+
+Both sides of the comparison -- a collection's claims and an observation's
+terms -- are reduced the same way before they meet: compatibility-normalised,
+split into words, stripped of closed-class function words
+(`structure_promotion.FUNCTION_WORDS`) and folded to one inflection
+(`vocabulary_fold.fold_term`). None of it changes authored storage; it decides
+only which spellings count as the same term.
+
+A collection may also declare `claims.match` frontmatter predicates. A page
+satisfying every predicate belongs to that collection by declaration, so it
+routes there as `strong` whatever its words share.
+"""
 
 from __future__ import annotations
 
@@ -6,13 +18,16 @@ import datetime as dt
 import re
 import unicodedata
 from collections import Counter
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 
-from .structure_promotion import _terms
+from .structure_promotion import FUNCTION_WORDS, _terms
+from .vocabulary_fold import fold_term
 
 MIN_CLAIM_COVERAGE = 2  # PROVISIONAL
 MAX_MATCHED_TERMS = 6
+#: Page facets a `claims.match` predicate may test (see structured_collections).
+MATCH_KEYS = ("type", "category", "project", "tags")
 
 _NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)")
 
@@ -25,6 +40,8 @@ class RoutingTarget:
     natural_key: tuple[str, ...]
     natural_key_types: tuple[str, ...] = ()
     natural_key_values: frozenset[str] = frozenset()
+    #: Folded `claims.match` predicates: every key must hold, any value may match.
+    match: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
 
 def normalize_text(value: object) -> str:
@@ -33,8 +50,50 @@ def normalize_text(value: object) -> str:
 
 
 def normalize_terms(values: Iterable[object]) -> frozenset[str]:
-    """Return claim terms after compatibility normalization."""
-    return _terms(normalize_text(value) for value in values)
+    """Return comparable claim terms: normalised, function words dropped, folded."""
+    out: set[str] = set()
+    for token in _terms(normalize_text(value) for value in values):
+        folded = fold_term(token)
+        if len(folded) > 2 and folded not in FUNCTION_WORDS:
+            out.add(folded)
+    return frozenset(out)
+
+
+def fold_value(value: object) -> str:
+    """One whole facet or predicate value as a comparison key."""
+    return fold_term(normalize_text(value))
+
+
+def normalize_match(values: Mapping[str, Iterable[object]] | None) -> dict[str, frozenset[str]]:
+    """Fold declared predicates, or observed facets, into comparable value sets."""
+    out: dict[str, frozenset[str]] = {}
+    for key in MATCH_KEYS:
+        raw = (values or {}).get(key)
+        if raw is None:
+            continue
+        items = [raw] if isinstance(raw, (str, bytes)) else list(raw)
+        folded = frozenset(
+            text for item in items if type(item) in {str, int, float, bool}
+            if (text := fold_value(item))
+        )
+        if folded:
+            out[key] = folded
+    return out
+
+
+def matched_predicates(
+    target: RoutingTarget, facets: Mapping[str, frozenset[str]]
+) -> list[str] | None:
+    """`key:value` evidence when every declared predicate holds, else None."""
+    if not target.match:
+        return None
+    evidence: list[str] = []
+    for key, allowed in sorted(target.match.items()):
+        hits = sorted(facets.get(key, frozenset()) & allowed)
+        if not hits:
+            return None
+        evidence.append(f"{key}:{hits[0]}")
+    return evidence
 
 
 def _matches_type(value: str, kind: str) -> bool:
@@ -125,11 +184,49 @@ def _has_subject_signal(
 
 
 def route(
-    terms: Iterable[str], targets: Iterable[RoutingTarget]
+    terms: Iterable[str],
+    targets: Iterable[RoutingTarget],
+    *,
+    facets: Mapping[str, Iterable[object]] | None = None,
 ) -> dict[str, object] | None:
-    """Return one strict claims winner with a subject signal, else stay silent."""
+    """Return one strict claims winner with a subject signal, else stay silent.
+
+    A collection whose `match` predicates all hold wins as `strong` before any
+    word coverage is counted; two such collections are ranked by coverage and
+    stay silent on a tie. Predicates only widen: a page that fails them still
+    routes by coverage and a subject signal exactly as before.
+    """
     raw_terms = [str(value) for value in terms]
     normalized = normalize_terms(raw_terms)
+    targets = list(targets)
+    observed = normalize_match(facets)
+    declared = sorted(
+        (
+            (
+                len(normalized & normalize_terms(target.claims)),
+                target.collection,
+                target,
+                evidence,
+            )
+            for target in targets
+            if (evidence := matched_predicates(target, observed)) is not None
+        ),
+        key=lambda row: (-row[0], row[1]),
+    )
+    if declared:
+        if len(declared) > 1 and declared[0][0] == declared[1][0]:
+            return None
+        _coverage, _name, target, evidence = declared[0]
+        return {
+            "collection": target.collection,
+            "title": target.title,
+            "matched_terms": sorted(normalized & normalize_terms(target.claims))[
+                :MAX_MATCHED_TERMS
+            ],
+            "matched_predicates": evidence,
+            "natural_key": list(target.natural_key),
+            "strength": "strong",
+        }
     target_claims = [(target, normalize_terms(target.claims)) for target in targets]
     frequency = _claim_document_frequency([claims for _, claims in target_claims])
     total_targets = len(target_claims)

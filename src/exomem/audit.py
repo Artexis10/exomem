@@ -86,7 +86,7 @@ import stat
 import sys
 import unicodedata
 from collections import deque
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
@@ -4461,11 +4461,19 @@ def outcome_component(
 
 
 def unreflected_observation_component(
-    component: Mapping[str, Any], matched_terms: Iterable[str]
+    component: Mapping[str, Any],
+    matched_terms: Iterable[str],
+    matched_predicates: Iterable[str] = (),
 ) -> AuditFinding | None:
-    """Compose one claimed observation finding from audience-visible terms."""
+    """Compose one claimed observation finding from audience-visible terms.
+
+    A page that satisfies a collection's `claims.match` predicates belongs to it
+    by declaration, so the predicates stand in for the two-term coverage floor
+    and join the signal version; a plain coverage route keeps its old version.
+    """
     terms = sorted({str(term) for term in matched_terms if str(term)})
-    if len(terms) < 2:
+    predicates = sorted({str(item) for item in matched_predicates if str(item)})
+    if len(terms) < 2 and not predicates:
         return None
     collection_id = str(component.get("collection_id") or "")
     observation_ref = str(component.get("observation_ref") or "")
@@ -4478,7 +4486,7 @@ def unreflected_observation_component(
 
     signal_version = hashlib.sha256(
         json.dumps(
-            [collection_id, observation_ref, terms],
+            [collection_id, observation_ref, terms, *([predicates] if predicates else [])],
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
@@ -4487,18 +4495,26 @@ def unreflected_observation_component(
     if due_at is None:
         return None
     stored_component = {
-        **dict(component),
-        "family": "unreflected_observations",
-        "matched_terms": terms,
+        key: value for key, value in component.items() if key != "matched_predicates"
     }
+    stored_component.update(
+        {
+            "family": "unreflected_observations",
+            "matched_terms": terms,
+            **({"matched_predicates": predicates} if predicates else {}),
+        }
+    )
+    title = str(component.get("collection_title") or collection)
     return AuditFinding(
         category="unreflected_observations",
         severity="info",
         path=page_path,
         detail=(
-            f"Observation {observation_ref!r} matches {len(terms)} claimed term(s) "
-            f"in {str(component.get('collection_title') or collection)!r} and has no "
-            "reflecting record."
+            f"Observation {observation_ref!r} satisfies the declared membership of {title!r} "
+            "and has no reflecting record."
+            if predicates
+            else f"Observation {observation_ref!r} matches {len(terms)} claimed term(s) "
+            f"in {title!r} and has no reflecting record."
         ),
         proposed_fix=(
             "Review the observation and, if it records durable state, append or update "
@@ -4513,18 +4529,131 @@ def unreflected_observation_component(
             "collection_id": collection_id,
             "observation_ref": observation_ref,
             "matched_terms": terms,
+            **({"matched_predicates": predicates} if predicates else {}),
         },
         component=stored_component,
     )
 
 
-def _observation_page_terms(
+#: PROVISIONAL: how many observation references a grouped backfill item names.
+BACKFILL_SAMPLE_REFS = 8
+#: PROVISIONAL: the most pre-lookback pages one recompute routes for backfill,
+#: across every collection. The bound is on parsed candidates, not on the walk:
+#: a page sharing no claim word and no declared predicate is never parsed.
+BACKFILL_MAX_PAGES = 500
+
+
+def _claims_signal(target: Any) -> str:
+    """Identity of a routing target's effective claims and declared predicates."""
+    return hashlib.sha256(
+        json.dumps(
+            [
+                sorted(str(term) for term in target.claims),
+                {key: sorted(values) for key, values in sorted(target.match.items())},
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+
+
+def backfill_component(
+    component: Mapping[str, Any], keep: Callable[[str], bool] | None = None
+) -> AuditFinding | None:
+    """Compose the ONE grouped backfill finding for a collection.
+
+    THE composer for the grouped kind, used by the recompute and by a serve
+    under a narrower audience alike, so the count and sample a withheld page
+    would change are recomposed rather than stored. The signal version is the
+    collection plus the claims it was computed against, never the page list:
+    a decision about it holds while more matching pages accumulate, and
+    changing the claims asks again.
+    """
+    collection = str(component.get("collection") or "")
+    collection_id = str(component.get("collection_id") or "")
+    claims_signal = str(component.get("claims_signal") or "")
+    if not collection or not collection_id or not claims_signal:
+        return None
+    rows = [
+        {"path": str(row["path"]), "ref": str(row["ref"])}
+        for row in component.get("pages") or ()
+        if isinstance(row, Mapping)
+        and type(row.get("path")) is str
+        and type(row.get("ref")) is str
+        and (keep is None or keep(row["path"]))
+    ]
+    if not rows:
+        return None
+    signal_version = hashlib.sha256(
+        json.dumps(
+            ["backfill", collection_id, claims_signal], separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    title = str(component.get("collection_title") or collection)
+    refs = [row["ref"] for row in rows[:BACKFILL_SAMPLE_REFS]]
+    meta = {
+        "signal_version": signal_version,
+        "review_partition": "backfill",
+        "due_since": dt.date.min.isoformat(),
+        "collection": collection,
+        "collection_id": collection_id,
+        "count": len(rows),
+        "refs": refs,
+    }
+    return AuditFinding(
+        category="unreflected_observations",
+        severity="info",
+        path=collection,
+        detail=(
+            f"{len(rows)} existing observation(s) match the claims of {title!r} and no "
+            "record reflects them."
+        ),
+        proposed_fix=(
+            "Review the named observations and file each one as a record in this "
+            "collection, citing it in sources, under the served capture disposition. "
+            "Nothing is auto-written."
+        ),
+        paths=[],
+        meta=meta,
+        component={
+            **dict(component),
+            "family": "unreflected_observations",
+            "kind": "backfill",
+            "pages": rows,
+            "count": len(rows),
+            "refs": refs,
+            "signal_version": signal_version,
+        },
+    )
+
+
+def _observation_page_signal(
     page: find_module.ParsedPage,
     *,
     language: Any,
     relations: Any,
-) -> list[str]:
-    """The authored vocabulary each write path promises to route."""
+) -> tuple[list[str], dict[str, list[str]]]:
+    """The authored vocabulary and facets each write path promises to route.
+
+    Mirrors `semantic_writes._records_routing_terms` / `_records_routing_facets`
+    so a page routes the same at write time and at recompute.
+    """
+    frontmatter = page.frontmatter or {}
+
+    def strings(*names: str) -> list[str]:
+        out: list[str] = []
+        for name in names:
+            raw = frontmatter.get(name)
+            items = [raw] if isinstance(raw, str) else raw if isinstance(raw, list) else ()
+            out.extend(str(item) for item in items if type(item) in {str, int, float, bool})
+        return [value for value in out if value.strip()]
+
+    facets = {
+        "type": strings("type"),
+        "category": strings("category"),
+        "project": strings("project", "projects"),
+        "tags": [str(tag) for tag in page.tags],
+    }
     terms = [page.title, *page.tags]
     if page.rel_path.startswith(f"{kb_prefix()}Evidence/"):
         match = re.search(
@@ -4532,17 +4661,54 @@ def _observation_page_terms(
         )
         if match:
             terms.append(match.group("body").strip())
-        return terms
-    document = semantic_units.parse_semantic_units(
-        page.body,
-        path=page.rel_path,
-        validate=False,
-        language_registry=language,
-        relation_registry=relations,
-        page_type=page.page_type,
+    else:
+        document = semantic_units.parse_semantic_units(
+            page.body,
+            path=page.rel_path,
+            validate=False,
+            language_registry=language,
+            relation_registry=relations,
+            page_type=page.page_type,
+        )
+        terms.extend(tag for unit in document.units for tag in unit.tags)
+        facets["category"].extend(unit.category for unit in document.units if unit.category)
+    facets = {key: list(dict.fromkeys(values)) for key, values in facets.items() if values}
+    terms.extend(value for key in ("type", "category", "project") for value in facets.get(key, ()))
+    return terms, facets
+
+
+def _backfill_prefilter(
+    page: find_module.ParsedPage, targets: list[tuple[Any, frozenset[str]]]
+) -> bool:
+    """Whether a pre-lookback page could route anywhere, without parsing its body."""
+    from . import collection_claims
+
+    frontmatter = page.frontmatter or {}
+    cheap_terms = collection_claims.normalize_terms(
+        [page.title, *page.tags, *(str(frontmatter.get(name) or "") for name in ("type", "category", "project"))]
     )
-    terms.extend(tag for unit in document.units for tag in unit.tags)
-    return terms
+    facets = collection_claims.normalize_match(
+        {
+            "type": frontmatter.get("type"),
+            "category": frontmatter.get("category"),
+            "project": [frontmatter.get("project"), *(frontmatter.get("projects") or [])]
+            if isinstance(frontmatter.get("projects"), list)
+            else frontmatter.get("project"),
+            "tags": list(page.tags),
+        }
+    )
+
+    def declared(target: Any) -> bool:
+        # Unit categories are unknowable without the parse this avoids, so a
+        # `category` predicate is assumed to hold here and decided after it.
+        knowable = {key: values for key, values in target.match.items() if key != "category"}
+        if not target.match:
+            return False
+        return not knowable or collection_claims.matched_predicates(
+            replace(target, match=knowable), facets
+        ) is not None
+
+    return any(cheap_terms & claims or declared(target) for target, claims in targets)
 
 
 def _observation_moment(page: find_module.ParsedPage) -> dt.datetime | None:
@@ -4663,6 +4829,15 @@ def _check_unreflected_observations(
     }
     collection_cache: dict[str, tuple[Any, Any]] = {}
     findings: list[AuditFinding] = []
+    # Existing pages older than the discovery lookback that a collection's
+    # claims cover. They are not individual entries -- that is what the
+    # lookback bounds -- but one grouped item per collection, so creating a
+    # collection or changing its claims looks back at what it now covers.
+    backfill: dict[str, list[tuple[str, str, str]]] = {}
+    backfill_budget = BACKFILL_MAX_PAGES
+    prefilter_targets = [
+        (target, collection_claims.normalize_terms(target.claims)) for target in targets
+    ]
     for page in pages:
         if not (
             page.rel_path.startswith(f"{kb_prefix()}Notes/")
@@ -4684,17 +4859,18 @@ def _check_unreflected_observations(
         artifact_path = companion.get("artifact_path") if isinstance(companion, Mapping) else None
         observed_at = _observation_moment(page)
         age = effective_now - observed_at if observed_at is not None else None
-        if (
-            age is None
-            or age < dt.timedelta(0)
-            or (
-                age > dt.timedelta(days=due_state.OBSERVATION_LOOKBACK_DAYS)
-                and observation_ref not in tracked
-            )
-        ):
+        if age is None or age < dt.timedelta(0):
             continue
-        terms = _observation_page_terms(page, language=language, relations=relations)
-        routing = collection_claims.route(terms, targets)
+        historical = (
+            age > dt.timedelta(days=due_state.OBSERVATION_LOOKBACK_DAYS)
+            and observation_ref not in tracked
+        )
+        if historical:
+            if backfill_budget <= 0 or not _backfill_prefilter(page, prefilter_targets):
+                continue
+            backfill_budget -= 1
+        terms, facets = _observation_page_signal(page, language=language, relations=relations)
+        routing = collection_claims.route(terms, targets, facets=facets)
         if routing is None:
             continue
         collection = str(routing["collection"])
@@ -4734,6 +4910,12 @@ def _check_unreflected_observations(
                         **support,
                     }
                 )
+        if historical:
+            if not reflectors:
+                backfill.setdefault(collection, []).append(
+                    (observed_at.isoformat(), page.rel_path, observation_ref)
+                )
+            continue
         if reflectors and not retain_reflected:
             continue
         component = {
@@ -4753,9 +4935,32 @@ def _check_unreflected_observations(
             else sorted({page.rel_path, observation_ref}),
             "terms": sorted(collection_claims.normalize_terms(terms)),
             "observed_at": observed_at.isoformat(),
+            **due_state.observation_facets_component(facets),
             "reflecting_records": reflectors,
         }
-        finding = unreflected_observation_component(component, matched)
+        finding = unreflected_observation_component(
+            component, matched, routing.get("matched_predicates") or ()
+        )
+        if finding is not None:
+            findings.append(finding)
+    by_collection = {str(target.collection): target for target in targets}
+    for collection, rows in sorted(backfill.items()):
+        manifest, _snapshot = collection_cache[collection]
+        target = by_collection.get(collection)
+        if target is None:
+            continue
+        finding = backfill_component(
+            {
+                "collection": collection,
+                "collection_id": str(manifest.collection_id),
+                "collection_title": str(manifest.title),
+                "claims_signal": _claims_signal(target),
+                "pages": [
+                    {"path": path, "ref": ref} for _moment, path, ref in sorted(rows)
+                ],
+                "truncated": backfill_budget <= 0,
+            }
+        )
         if finding is not None:
             findings.append(finding)
     return sorted(
@@ -4772,6 +4977,7 @@ def _collection_candidate_finding(
     rows: list[Mapping[str, Any]],
     *,
     project_terms: Iterable[str] = (),
+    common_terms: Iterable[str] = (),
 ) -> AuditFinding | None:
     supporting_rows = sorted(
         (
@@ -4822,6 +5028,12 @@ def _collection_candidate_finding(
             "term": candidate.term,
             "units": supporting_rows,
             "project_terms": sorted({str(term) for term in project_terms}),
+            # The whole table's too-widespread terms, narrowed to the ones these
+            # units carry, so a serve recomposing from them keeps the verdict.
+            "common_terms": sorted(
+                {str(term) for term in common_terms}
+                & {str(term) for row in supporting_rows for term in row.get("terms") or ()}
+            ),
             "meta": meta,
             **meta,
         },
@@ -4883,15 +5095,19 @@ def _check_collection_candidate(
         for term in target.claims
     }
     projects = project_keys.load_project_registry(root).keys
-    candidates = collection_candidate.detect(
-        rows, covered_terms=covered, project_terms=projects
+    common = collection_candidate.common_terms(rows)
+    candidates = collection_candidate.select(
+        collection_candidate.detect(
+            rows, covered_terms=covered, project_terms=projects, common_terms=common
+        ),
+        rows,
     )
     findings = [
         finding
         for candidate in candidates
         if (
             finding := _collection_candidate_finding(
-                candidate, rows, project_terms=projects
+                candidate, rows, project_terms=projects, common_terms=common
             )
         )
         is not None
