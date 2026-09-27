@@ -19,7 +19,9 @@ def _page(root: Path, rel: str, tags_line: str, body: str = "Plain body text.\n"
     path = root / "Knowledge Base" / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        f"---\ntype: insight\ntitle: {path.stem}\nexomem_id: {uuid.uuid4()}\n{tags_line}\n---\n{body}",
+        # A path-derived id keeps twin vaults byte-identical page for page.
+        f"---\ntype: insight\ntitle: {path.stem}\nexomem_id: {uuid.uuid5(uuid.NAMESPACE_URL, rel)}\n"
+        f"{tags_line}\n---\n{body}",
         encoding="utf-8",
     )
     return path
@@ -640,7 +642,10 @@ def test_maintenance_skips_every_tree_another_subsystem_owns(tmp_path):
         {"tag": "failure", "uses": 2},
     ]
     assert "failure-mode" not in groups and "failure-modes" not in groups
-    assert all(not entry["path"].split("/", 2)[1] in {"Records", "Planning"} for entry in preview["batch"])
+    assert {entry["path"] for entry in preview["batch"]} == {
+        "Knowledge Base/Notes/variant-0.md",
+        "Knowledge Base/Notes/variant-1.md",
+    }
     _maintain(
         tmp_path, "apply", mode="tag-variants", apply=True,
         plan_id=preview["plan_id"], why="Reconcile.",
