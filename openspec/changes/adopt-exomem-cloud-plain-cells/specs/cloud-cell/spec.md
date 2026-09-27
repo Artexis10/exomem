@@ -300,3 +300,11 @@ The control database SHALL run on a server separate from any fleet node, provisi
 
 - **WHEN** a client on the public listener authenticates as the gateway or cellctl role
 - **THEN** the connection is refused
+
+#### Scenario: Private route preserves the database certificate identity
+
+- **WHEN** the Cloud gateway and cellctl use the configured database hostname and private address
+- **THEN** their pods resolve that hostname to the private address and connect directly on port 5432 with full certificate trust and hostname verification
+- **AND** an untrusted or mismatched certificate is rejected
+- **AND** the chart rejects a partial or malformed hostname/address pair or a mapping absent from an enabled workload's database egress `/32` list
+- **AND** an omitted mapping leaves resolution unchanged and does not add host aliases to tenant workloads

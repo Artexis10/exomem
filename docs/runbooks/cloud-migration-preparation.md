@@ -102,10 +102,28 @@ Do not use forced server-side-apply ownership to hide retained foreign fields.
 
 ## Render and review
 
+Keep the certificate hostname in both PostgreSQL DSNs and use port 5432 with
+`sslmode=verify-full`. Set the paired `cloudDatabase.hostname` and
+`cloudDatabase.privateIp` values to resolve that hostname through a pod-local
+host alias on the Cloud gateway and cellctl. Include the private IP as a `/32`
+in both workloads' `databaseEgressCidrs`. These aliases do not change public DNS
+or tenant workloads. Changing the private address later requires updating both
+the mapping and the egress lists and rolling these two Deployments.
+
+For cellctl, also set the DSN parameter
+`sslrootcert=/etc/ssl/certs/ca-certificates.crt` after confirming that bundle
+exists in the pinned image. The gateway uses Node's trusted roots. Verify each
+actual image client accepts the intended hostname and rejects a mismatched or
+untrusted certificate against disposable TLS PostgreSQL before sealing the
+production DSNs. Do not replace the hostname with the private IP or disable
+certificate verification to make the connection pass.
+
 The values worksheet must resolve these current chart inputs:
 
 - `cellctl.image`, `cellctl.cellImageRepository`, the four `cellctl.b2*` identity/
   endpoint values, and `cellctl.databaseEgressCidrs`;
+- `cloudDatabase.hostname` matching the certificate and DSNs, and
+  `cloudDatabase.privateIp` matching both database egress `/32` entries;
 - `cloudGateway.image`, `hostname`, `publicBaseUrl`, `/mcp`, matching database
   CIDRs, and the unguessable trusted-ingress source value;
 - `cloudIngress.hostname` equal to the gateway hostname, ACME contact and DNS
