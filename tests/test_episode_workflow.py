@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from exomem import commands, curation, episode_workflow, server
+from exomem import commands, curation, episode_store, episode_workflow, server
 from exomem import episode_model as model
 from exomem import schema as schema_module
 from exomem.__main__ import main as cli_main
@@ -149,11 +149,21 @@ def test_the_operations_are_actions_of_the_generated_episode_command() -> None:
 def test_execution_is_off_unless_the_service_enables_it(monkeypatch) -> None:
     monkeypatch.delenv(episode_workflow.ENABLE_ENV, raising=False)
     assert episode_workflow.enabled() is False
-    for value in ("", "0", "false", "off", "no"):
+    # Only an explicit affirmative switches it on; anything else is off.
+    for value in ("", "0", "false", "off", "no", "disabled", "garbage", "2", "enable"):
         monkeypatch.setenv(episode_workflow.ENABLE_ENV, value)
-        assert episode_workflow.enabled() is False
-    monkeypatch.setenv(episode_workflow.ENABLE_ENV, "1")
-    assert episode_workflow.enabled() is True
+        assert episode_workflow.enabled() is False, value
+    for value in ("1", "true", "TRUE", "Yes", "on", " On "):
+        monkeypatch.setenv(episode_workflow.ENABLE_ENV, value)
+        assert episode_workflow.enabled() is True, value
+
+
+def test_the_advertised_leaf_kinds_exclude_destructive_steps() -> None:
+    from typing import get_args
+
+    schema = get_args(commands._EpisodeProposalArgument)[1].json_schema  # noqa: SLF001
+    kinds = schema["anyOf"][0]["properties"]["leaves"]["items"]["properties"]["kind"]["enum"]
+    assert set(kinds) == {"create-note", "create-entity", "accept-relation", "edit", "supersede"}
 
 
 def test_prepare_disposition_and_inspect_share_the_curation_leaf(
@@ -287,6 +297,9 @@ def test_arguments_of_another_action_are_refused(vault: Path, owner) -> None:
         _workflow(vault, action="disposition", candidate="c", disposition="routed")
     with pytest.raises(ValueError, match="EPISODE_INVALID"):
         _workflow(vault, action="resume")
+    # Resume names the episode state its caller last reviewed.
+    with pytest.raises(ValueError, match="EPISODE_INVALID"):
+        _workflow(vault, action="resume", input_revision=1)
     with pytest.raises(ValueError, match="EPISODE_INVALID"):
         _workflow(vault, action="record", subject="s", summary="s", proposal={"route": "x"})
     with pytest.raises(ValueError, match="EPISODE_INVALID"):
@@ -933,3 +946,235 @@ def test_a_new_input_revision_requires_fresh_dispositions_before_execution(
     with pytest.raises(ValueError, match="EPISODE_COVERAGE_INCOMPLETE"):
         _workflow(vault, action="resume", input_revision=2)
     assert not (vault / "Knowledge Base/Notes/Insights/alpha-dye-note.md").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Security review of the typed operations (task 5.5)
+# --------------------------------------------------------------------------- #
+
+INSIGHTS = "Knowledge Base/Notes/Insights"
+
+
+def _note_proposal(slug: str, sentence: str, *, revision: int = 1) -> dict:
+    return _proposal("focused_note", [_note_leaf(slug, sentence, revision=revision)], title=slug)
+
+
+def _routed(vault: Path, key: str, slug: str, *, revision: int = 1) -> dict:
+    prepared = _workflow(
+        vault,
+        action="prepare",
+        candidate=key,
+        proposal=_note_proposal(slug, f"The {key} observation holds.", revision=revision),
+    )
+    disposed = _workflow(
+        vault, action="disposition", candidate=key, disposition="routed", reason="Reviewed home."
+    )
+    return {"prepared": prepared, "disposed": disposed}
+
+
+def _runs(vault: Path) -> set[str]:
+    root = curation.CurationStore(vault).root
+    return {path.name for path in root.iterdir()} if root.is_dir() else set()
+
+
+def test_resume_never_runs_an_effect_nobody_dispositioned(vault: Path, owner, enabled) -> None:
+    _record(vault)
+    disposed = _routed(vault, "indigo", "indigo-note-a")["disposed"]
+    # The same candidate is re-prepared as a different note after its review.
+    revised = _workflow(
+        vault,
+        action="prepare",
+        candidate="indigo",
+        proposal=_note_proposal("indigo-note-b", "Note B replaces it.", revision=2),
+    )
+    # A revision withdraws the disposition that reviewed the earlier effect.
+    assert _candidate(revised, "indigo")["disposition"] is None
+    files, journal = _canonical_files(vault), _journal(vault)
+
+    # The state the caller reviewed is no longer the episode's state.
+    with pytest.raises(ValueError, match="EPISODE_REVISION_CONFLICT"):
+        _workflow(
+            vault, action="resume", input_revision=1, journal_digest=disposed["journal_digest"]
+        )
+    # Against the current state, nothing has routed note B.
+    with pytest.raises(ValueError, match="EPISODE_COVERAGE_INCOMPLETE"):
+        _workflow(
+            vault, action="resume", input_revision=1, journal_digest=revised["journal_digest"]
+        )
+
+    assert _canonical_files(vault) == files
+    assert _journal(vault) == journal
+    assert not (vault / INSIGHTS / "indigo-note-a.md").exists()
+    assert not (vault / INSIGHTS / "indigo-note-b.md").exists()
+
+
+def test_a_stale_binding_is_reported_without_an_attempt(vault: Path, owner, enabled) -> None:
+    _record(vault)
+    disposed = _routed(vault, "alpha", "alpha-dye-note")["disposed"]
+    # The destination appears out of band before resume.
+    destination = vault / INSIGHTS / "alpha-dye-note.md"
+    destination.write_text("---\ntype: insight\n---\n\nWritten elsewhere.\n", encoding="utf-8")
+
+    resumed = _workflow(
+        vault, action="resume", input_revision=1, journal_digest=disposed["journal_digest"]
+    )
+
+    leaf = _candidate(resumed, "alpha")["leaves"][0]
+    assert resumed["status"] == "stale"
+    assert resumed["executed"] == [] and resumed["blocked"] == []
+    assert resumed["stale"] == [{"leaf_id": leaf["leaf_id"], "code": "CURATION_BINDING_STALE"}]
+    # No attempt was recorded, so nothing freezes the candidate.
+    assert (leaf["outcome"], leaf["attempts"]) == ("pending", 0)
+    assert destination.read_text(encoding="utf-8").endswith("Written elsewhere.\n")
+
+    # The episode moves on: a free home, a fresh disposition and a resume.
+    disposed = _routed(vault, "alpha", "alpha-dye-note-moved", revision=2)["disposed"]
+    again = _workflow(
+        vault, action="resume", input_revision=1, journal_digest=disposed["journal_digest"]
+    )
+    assert again["status"] == "ok", again
+    assert [item["leaf_id"] for item in again["executed"]] == [leaf["leaf_id"]]
+    assert (vault / INSIGHTS / "alpha-dye-note-moved.md").exists()
+
+
+def test_a_stale_unattempted_binding_is_resealed_by_the_same_proposal(
+    vault: Path, owner, enabled, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _record(vault)
+    routed = _routed(vault, "alpha", "alpha-dye-note")
+    first = _candidate(routed["prepared"], "alpha")["leaves"][0]
+    # A registry changes out of band: the sealed plan is stale, its effect is not.
+    real = curation.registry_identities
+    monkeypatch.setattr(
+        curation, "registry_identities", lambda root: {**real(root), "schemas": "0" * 64}
+    )
+    stale = _workflow(
+        vault, action="resume", input_revision=1, journal_digest=routed["disposed"]["journal_digest"]
+    )
+    assert [item["code"] for item in stale["stale"]] == ["CURATION_REGISTRY_CHANGED"]
+
+    resealed = _workflow(
+        vault,
+        action="prepare",
+        candidate="alpha",
+        proposal=_note_proposal("alpha-dye-note", "The alpha observation holds."),
+    )
+    leaf = _candidate(resealed, "alpha")["leaves"][0]
+    assert leaf["bound"] and leaf["run_id"] != first["run_id"]
+    # The effect the disposition reviewed is unchanged, so it still stands.
+    assert _candidate(resealed, "alpha")["disposition"] == "routed"
+    again = _workflow(
+        vault, action="resume", input_revision=1, journal_digest=resealed["journal_digest"]
+    )
+    assert [item["leaf_id"] for item in again["executed"]] == [first["leaf_id"]]
+
+
+def test_a_leaf_already_applied_elsewhere_is_reported_replayed(
+    vault: Path, owner, enabled
+) -> None:
+    _record(vault)
+    routed = _routed(vault, "alpha", "alpha-dye-note")
+    leaf = _candidate(routed["prepared"], "alpha")["leaves"][0]
+    # The sealed plan is an ordinary curation run: the same caller's
+    # `maintain_memory mode=curation apply` can execute it without the switch.
+    store = curation.CurationStore(vault)
+    plan_id, fingerprint = store.identities(leaf["run_id"])
+    curation.apply(
+        vault,
+        run_id=leaf["run_id"],
+        plan_id=plan_id,
+        expected_plan_fingerprint=fingerprint,
+        why="Applied outside the episode.",
+    )
+
+    resumed = _workflow(
+        vault, action="resume", input_revision=1, journal_digest=routed["disposed"]["journal_digest"]
+    )
+
+    assert resumed["status"] == "ok"
+    assert resumed["executed"] == []
+    assert [item["leaf_id"] for item in resumed["replayed"]] == [leaf["leaf_id"]]
+    assert resumed["publication"] == "unchanged"
+    assert _candidate(resumed, "alpha")["leaves"][0]["outcome"] == "committed"
+
+
+def test_a_failed_bind_leaves_no_half_bound_candidate(
+    vault: Path, owner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _record(vault)
+    before = _journal(vault)
+    proposal = _proposal(
+        "focused_note",
+        [
+            _note_leaf("pair-one-note", "The first half holds.", key="one"),
+            _note_leaf("pair-two-note", "The second half holds.", key="two"),
+        ],
+        title="Pair",
+    )
+    real = EpisodeStore._accepted_evidence  # noqa: SLF001
+    binds: list[str] = []
+
+    def second_bind_fails(self, state, action, args):
+        if action == "bind_curation_leaf":
+            binds.append(args["leaf"])
+            if len(binds) == 2:
+                raise model.EpisodeError("EPISODE_BINDING_INVALID", "injected bind failure")
+        return real(self, state, action, args)
+
+    monkeypatch.setattr(EpisodeStore, "_accepted_evidence", second_bind_fails)
+    with pytest.raises(ValueError, match="EPISODE_BINDING_INVALID"):
+        _workflow(vault, action="prepare", candidate="pair", proposal=proposal)
+    monkeypatch.setattr(EpisodeStore, "_accepted_evidence", real)
+
+    # Nothing of the candidate was recorded: not declared, not half bound.
+    assert _journal(vault) == before
+    retried = _workflow(vault, action="prepare", candidate="pair", proposal=proposal)
+    assert [leaf["bound"] for leaf in _candidate(retried, "pair")["leaves"]] == [True, True]
+
+
+def test_prepare_without_journal_room_seals_no_plan(
+    vault: Path, owner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _record(vault)
+    transitions = _workflow(vault, action="candidates")["revision"] - 1
+    before, runs = _journal(vault), _runs(vault)
+    # Room to declare and revise the candidate, none to bind its leaf.
+    monkeypatch.setattr(episode_store, "MAX_TRANSITIONS", transitions + 2)
+
+    with pytest.raises(ValueError, match="EPISODE_TOO_LARGE"):
+        _workflow(
+            vault,
+            action="prepare",
+            candidate="alpha",
+            proposal=_note_proposal("alpha-dye-note", "The alpha observation holds."),
+        )
+
+    assert _journal(vault) == before
+    assert _runs(vault) == runs
+
+
+def test_an_attempt_starts_only_with_room_for_its_reconcile(
+    vault: Path, owner, enabled, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _record(vault)
+    disposed = _routed(vault, "alpha", "alpha-dye-note")["disposed"]
+    transitions = disposed["revision"] - 1
+    # Room for the precommit attestation and an attempt mark, none for its reconcile.
+    monkeypatch.setattr(episode_store, "MAX_TRANSITIONS", transitions + 2)
+
+    resumed = _workflow(
+        vault, action="resume", input_revision=1, journal_digest=disposed["journal_digest"]
+    )
+
+    leaf = _candidate(resumed, "alpha")["leaves"][0]
+    assert resumed["executed"] == []
+    assert resumed["blocked"] == [{"leaf_id": leaf["leaf_id"], "code": "EPISODE_TOO_LARGE"}]
+    assert (leaf["outcome"], leaf["attempts"]) == ("pending", 0)
+    assert not (vault / INSIGHTS / "alpha-dye-note.md").exists()
+
+    monkeypatch.setattr(episode_store, "MAX_TRANSITIONS", transitions + 3)
+    again = _workflow(
+        vault, action="resume", input_revision=1, journal_digest=resumed["journal_digest"]
+    )
+    assert [item["leaf_id"] for item in again["executed"]] == [leaf["leaf_id"]]
+    assert _candidate(again, "alpha")["leaves"][0]["outcome"] == "committed"
