@@ -6397,9 +6397,9 @@ def _op_activate_context_body(
         "roles_hash": "",
         "continuity": working_set_runtime_module.unevaluated_continuity(continuity),
     }
-    # `(identity, thread, thread_ns, state)` once the caller's thread has been
-    # read below: an abstention after that point still carries it forward.
-    thread_carry: tuple[str, str, int | None, str] | None = None
+    # `(identity, thread, thread_ns, state, salt)` once the caller's thread has
+    # been read below: an abstention after that point still carries it forward.
+    thread_carry: tuple[str, str, int | None, str, str] | None = None
 
     def _abstain(
         reason: str,
@@ -6442,11 +6442,15 @@ def _op_activate_context_body(
             if block is not None:
                 packet["request_budget"] = block
         if thread_carry is not None:
-            identity_now, thread_now, started, state = thread_carry
+            identity_now, thread_now, started, state, salt_now = thread_carry
             _withhold_vault_generation(vault_root, packet, purpose=purpose)
             token_now = (
                 working_set_runtime_module.mint_continuity(
-                    packet, identity=identity_now, thread=thread_now, thread_ns=started
+                    packet,
+                    identity=identity_now,
+                    thread=thread_now,
+                    thread_ns=started,
+                    salt=salt_now,
                 )
                 if carry_thread
                 else ""
@@ -6702,15 +6706,18 @@ def _op_activate_context_body(
     # invalid or lapsed one is reported and served as keyless, never refused,
     # and every packet below carries a thread forward, a fresh one if need be.
     identity = working_set_runtime_module.identity_for(vault_root)
+    # The key the thread's times are signed with: they are the caller's
+    # claim until the server's MAC over them verifies.
+    salt = working_set_heat_module.load(vault_root).salt
     thread, thread_ns, thread_state = working_set_runtime_module.read_continuity_thread(
-        continuity, identity=identity
+        continuity, identity=identity, salt=salt
     )
     if thread_state != working_set_runtime_module.CONTINUITY_APPLIED:
         thread, thread_ns = working_set_runtime_module.new_thread()
         caller_thread = None
     else:
         caller_thread = thread
-    thread_carry = (identity, thread, thread_ns, thread_state)
+    thread_carry = (identity, thread, thread_ns, thread_state, salt)
     # The caller's derived keys, once: ruling S5-1's tiers, the pick's own
     # attribution and the session's last served thread all use the same one.
     attribution = (
@@ -6800,7 +6807,7 @@ def _op_activate_context_body(
     # Before the token is minted: it carries the index generation too.
     _withhold_vault_generation(vault_root, packet, purpose=purpose)
     token = working_set_runtime_module.mint_continuity(
-        packet, identity=identity, thread=thread, thread_ns=thread_ns
+        packet, identity=identity, thread=thread, thread_ns=thread_ns, salt=salt
     )
     if token:
         packet["continuity"] = token

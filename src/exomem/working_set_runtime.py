@@ -29,7 +29,9 @@ anchor the current turn already reached. It is minted from the packet as served 
 after the egress guard — so it can never carry a ref that guard removed. It also
 names the caller's thread (`CONTINUITY_THREAD_BYTES`), a random value echoed
 back by a caller that supplies no session key, whose salted derivation is that
-caller's session tier; the thread itself is never stored.
+caller's session tier; the thread itself is never stored. The thread and its
+times are the one part the server signs (`working_set_heat.thread_mac`): they
+decide how long a conversation lives, and nothing else re-checks them.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ import base64
 import binascii
 import copy
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -299,10 +302,11 @@ def encode_continuity(
     minted_ns: int | None = None,
     thread: str = "",
     thread_ns: int | None = None,
+    salt: str = "",
 ) -> str:
-    """Base64 of the compact JSON payload. No secret, and no signature.
+    """Base64 of the compact JSON payload. No secret, and the refs unsigned.
 
-    There is nothing to sign: every field is re-checked against the serving
+    The refs need no signature: each is re-checked against the serving
     state, and a forged token can at most name refs the current turn already
     reached by a contact kind — or, on a turn that only points back, refs the
     vault still holds as anchors, which is what the turn asked for.
@@ -314,11 +318,13 @@ def encode_continuity(
     existed, and its refs lead the profile unconditionally.
 
     `thread` and `thread_ns` are the caller's conversation and when it began
-    (`CONTINUITY_THREAD_BYTES`). Unsigned for the same reason: the server
-    derives the session key from the thread with its own salt and the
-    caller's audience, so a forged thread names at most a session of the
-    forger's own, and guessing another caller's is guessing a random value
-    only that caller was ever sent.
+    (`CONTINUITY_THREAD_BYTES`). The session key is derived from the thread
+    with the sidecar's salt and the caller's audience, so a forged thread
+    names at most a session of the forger's own. Its lifetime is another
+    matter: nothing on the server remembers when a thread began or was last
+    served, so those times are signed with `salt` (`mac`), and a token whose
+    thread, times or audience no longer match reads `stale`. Without a salt
+    the thread is carried unsigned and never continues.
     """
     payload = {
         "v": CONTINUITY_VERSION,
@@ -341,6 +347,15 @@ def encode_continuity(
         payload["thread"] = str(thread)
         if thread_ns is not None:
             payload["thread_ns"] = int(thread_ns)
+        mac = working_set_heat.thread_mac(
+            salt,
+            identity=str(identity),
+            thread=str(thread),
+            thread_ns=thread_ns,
+            minted_ns=minted_ns,
+        )
+        if mac:
+            payload["mac"] = mac
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
     # `surrogatepass`, symmetrically with `decode_continuity`. A vault path reaches
     # Python through filesystem decoding, so a filename with invalid UTF-8 arrives
@@ -416,6 +431,7 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
     thread_ns = (
         started if isinstance(started, int) and not isinstance(started, bool) and started > 0 else None
     )
+    mac = payload.get("mac")
     return {
         "identity": identity,
         "roles_hash": roles_hash,
@@ -426,6 +442,7 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
         "minted_ns": minted_ns,
         "thread": thread,
         "thread_ns": thread_ns if thread else None,
+        "mac": mac if thread and isinstance(mac, str) else "",
     }
 
 
@@ -489,14 +506,16 @@ def new_thread() -> tuple[str, int]:
 
 
 def read_continuity_thread(
-    token: str | None, *, identity: str, now_ns: int | None = None
+    token: str | None, *, identity: str, salt: str, now_ns: int | None = None
 ) -> tuple[str, int | None, str]:
     """`(thread, thread_ns, state)` for one inbound token's conversation.
 
-    `applied` for a thread this vault's index minted that has not lapsed;
-    `stale` for a token that cannot be read, was minted by another index, or
-    whose thread has lapsed (`CONTINUITY_THREAD_IDLE_NS` since the packet
-    that carried it, `CONTINUITY_THREAD_MAX_NS` since it began); `absent`
+    `applied` for a thread this vault's index minted for this audience that
+    has not lapsed; `stale` for a token that cannot be read, was minted by
+    another index, carries no valid `mac` under `salt` (unsigned, rewritten,
+    or minted for another audience), or whose thread has lapsed
+    (`CONTINUITY_THREAD_IDLE_NS` since the packet that carried it,
+    `CONTINUITY_THREAD_MAX_NS` since it began); `absent`
     for no token, or one minted before threads existed. Only the identity is
     checked, not the registry hashes: a conventions edit changes how turns
     are read, not who is asking, so it strands no conversation. Never raises,
@@ -514,6 +533,19 @@ def read_continuity_thread(
     thread = payload["thread"]
     if not thread:
         return "", None, CONTINUITY_ABSENT
+    # Before the times are read at all: they are the caller's claim until the
+    # MAC says the server made it.
+    expected = working_set_heat.thread_mac(
+        salt,
+        identity=payload["identity"],
+        thread=thread,
+        thread_ns=payload["thread_ns"],
+        minted_ns=payload["minted_ns"],
+    )
+    if not expected or not hmac.compare_digest(
+        expected.encode("ascii"), payload["mac"].encode("utf-8", "surrogatepass")
+    ):
+        return "", None, CONTINUITY_STALE
     now = time.time_ns() if now_ns is None else int(now_ns)
     served = payload["minted_ns"]
     started = payload["thread_ns"] or served
@@ -535,6 +567,7 @@ def mint_continuity(
     identity: str,
     thread: str = "",
     thread_ns: int | None = None,
+    salt: str = "",
 ) -> str:
     """The token for a packet AS SERVED, or `""` when there is nothing to carry.
 
@@ -560,6 +593,8 @@ def mint_continuity(
     only resume it if the token names it. Its ref is its path, which is what
     the hot profile resumes as a page referent; a later turn's `continuity` still
     only qualifies an anchor that turn reached.
+
+    `salt` signs the thread and its times (`encode_continuity`).
     """
     if not identity:
         return ""
@@ -595,6 +630,7 @@ def mint_continuity(
             minted_ns=time.time_ns(),
             thread=thread,
             thread_ns=thread_ns,
+            salt=salt,
         )
     except Exception:  # noqa: BLE001 - a token is an optimisation, never a promise
         log.debug("continuity token could not be minted; serving without", exc_info=True)

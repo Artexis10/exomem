@@ -36,6 +36,7 @@ This half of the module is pure: functions over events, no sidecar, no vault.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import secrets
@@ -1449,6 +1450,38 @@ def derive_key(salt: str, kind: str, audience: str, value: object) -> str:
         return ""
     material = f"exomem-heat-{kind}-v1\0{salt}\0{audience}\0{value}"
     return hashlib.sha256(material.encode("utf-8", "surrogatepass")).hexdigest()[:KEY_HEX]
+
+
+#: Domain of `thread_mac`, so the salt keys nothing else's MAC by accident.
+_THREAD_MAC_DOMAIN = "exomem-continuity-thread-v1"
+
+
+def thread_mac(
+    salt: str, *, identity: str, thread: str, thread_ns: int | None, minted_ns: int | None
+) -> str:
+    """The MAC binding a continuity token's thread to its times, or `""` when
+    there is no salt or no thread.
+
+    Keyed by the sidecar's salt, which never leaves this machine, over the
+    index identity, the caller's audience, the thread, when it began and when
+    the packet carrying it was served. A caller that rewrites either time, or
+    names another thread, holds a token that no longer verifies, so a thread
+    lapses when the server says it does rather than when its caller does."""
+    if not salt or not thread:
+        return ""
+    material = "\0".join(
+        (
+            _THREAD_MAC_DOMAIN,
+            str(identity),
+            _audience(),
+            str(thread),
+            str(int(thread_ns or 0)),
+            str(int(minted_ns or 0)),
+        )
+    )
+    return hmac.new(
+        salt.encode("utf-8"), material.encode("utf-8", "surrogatepass"), hashlib.sha256
+    ).hexdigest()
 
 
 def _audience() -> str:
