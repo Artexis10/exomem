@@ -15,7 +15,13 @@ from typing import Protocol
 # it, B2 answers a HEAD on a missing object with 403 instead of 404, and
 # restic's first step (a HEAD on the repository's `config`) is exactly that.
 # The key still sees only its own bucket and prefix.
-CELL_KEY_CAPABILITIES: tuple[str, ...] = ("listBuckets", "listFiles", "readFiles", "writeFiles", "deleteFiles")
+CELL_KEY_CAPABILITIES: tuple[str, ...] = (
+    "listBuckets",
+    "listFiles",
+    "readFiles",
+    "writeFiles",
+    "deleteFiles",
+)
 
 
 @dataclass(frozen=True)

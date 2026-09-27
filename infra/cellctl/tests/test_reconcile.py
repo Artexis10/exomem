@@ -336,15 +336,149 @@ async def test_a_failed_key_listing_keeps_the_stored_key(cell_db: CellDatabase, 
         await connection.close()
 
 
-def test_the_render_digest_covers_the_capabilities_a_cell_key_needs(monkeypatch) -> None:
-    """Requiring a new capability must re-render every cell once, because
-    the re-render is where a stored key is checked and replaced."""
+async def test_a_key_missing_from_the_listing_is_kept(cell_db: CellDatabase, monkeypatch) -> None:
+    """B2 may lag, so absence from the listing is not evidence the key is
+    wrong: replacing on it could churn a freshly minted key."""
 
-    row = _row(volume_id="vol-1", b2_key_id="key-1")
-    before = reconcile._compute_render_digest(row, _cluster_config(), _secrets_config())
-    monkeypatch.setattr(reconcile, "CELL_KEY_CAPABILITIES", (*CELL_KEY_CAPABILITIES, "readBucketEncryption"))
-    after = reconcile._compute_render_digest(row, _cluster_config(), _secrets_config())
-    assert before != after
+    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    b2 = FakeB2()
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+
+    try:
+        key_id = await _converged_cell(connection, cluster, b2, now)
+        monkeypatch.setattr(b2, "key_capabilities", lambda _key_id: None)
+        cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(
+            cluster, "aaaaaaaaaaaaaaaa", statefulset_render_digest="rendered-by-an-older-cellctl"
+        )
+
+        await reconcile.reconcile_once(
+            connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
+        )
+
+        assert (await db.select_all_rows(connection))[0].b2_key_id == key_id
+        assert b2.key_exists(key_id)
+        assert _rendered_b2_key_id(cluster) == key_id
+    finally:
+        await connection.close()
+
+
+async def test_a_failed_key_replacement_keeps_the_stored_key_and_still_applies(
+    cell_db: CellDatabase, monkeypatch
+) -> None:
+    """A B2 outage while replacing must not block the apply: a hold's exit
+    and a stall's exit are applies too."""
+
+    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    b2 = FakeB2()
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+
+    try:
+        key_id = await _converged_cell(connection, cluster, b2, now)
+        b2.set_key_capabilities(key_id, {"listFiles"})
+        cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(
+            cluster, "aaaaaaaaaaaaaaaa", statefulset_render_digest="rendered-by-an-older-cellctl"
+        )
+
+        def unavailable(_cell_id: str):
+            raise RuntimeError("b2 unavailable")
+
+        monkeypatch.setattr(b2, "create_prefix_key", unavailable)
+        applies_before = sum(1 for event in cluster.events if event[0] == "apply_statefulset")
+
+        await reconcile.reconcile_once(
+            connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now
+        )
+
+        assert sum(1 for event in cluster.events if event[0] == "apply_statefulset") > applies_before
+        assert (await db.select_all_rows(connection))[0].b2_key_id == key_id
+        assert _rendered_b2_key_id(cluster) == key_id
+    finally:
+        await connection.close()
+
+
+async def test_a_backup_hold_start_replaces_a_deficient_key_and_a_running_hold_leaves_it_alone(
+    cell_db: CellDatabase, monkeypatch
+) -> None:
+    """The pass that starts a backup hold runs outside the hold, so a key
+    minted without a needed capability is replaced before the Job renders.
+    Inside the hold, the Job reads the key from the Secret, so the key is
+    neither listed nor replaced."""
+
+    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    b2 = FakeB2()
+    outside_window = datetime(2026, 1, 1, 1, tzinfo=UTC)
+    inside_window = datetime(2026, 1, 1, 3, tzinfo=UTC)
+
+    try:
+        old_key_id = await _converged_cell(connection, cluster, b2, outside_window)
+        b2.set_key_capabilities(old_key_id, {"listFiles", "readFiles", "writeFiles", "deleteFiles"})
+
+        await reconcile.reconcile_once(
+            connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=inside_window
+        )
+
+        row = (await db.select_all_rows(connection))[0]
+        assert row.hold_kind == "backup"
+        assert row.b2_key_id != old_key_id
+        assert b2.key_absent(old_key_id)
+        assert _rendered_b2_key_id(cluster) == row.b2_key_id
+
+        held_key_id = row.b2_key_id
+        b2.set_key_capabilities(held_key_id, {"listFiles"})
+        listings: list[str] = []
+        real_listing = b2.key_capabilities
+        monkeypatch.setattr(b2, "key_capabilities", lambda key_id: listings.append(key_id) or real_listing(key_id))
+        cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(cluster, "aaaaaaaaaaaaaaaa")
+
+        await reconcile.reconcile_once(
+            connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=inside_window
+        )
+
+        assert listings == []
+        assert (await db.select_all_rows(connection))[0].b2_key_id == held_key_id
+        assert b2.key_exists(held_key_id)
+    finally:
+        await connection.close()
+
+
+async def test_a_verified_key_is_not_listed_again_by_the_same_process(cell_db: CellDatabase, monkeypatch) -> None:
+    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    b2 = FakeB2()
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    memory = reconcile.LoopMemory()
+
+    try:
+        await _converged_cell(connection, cluster, b2, now)
+        listings: list[str] = []
+        real_listing = b2.key_capabilities
+        monkeypatch.setattr(b2, "key_capabilities", lambda key_id: listings.append(key_id) or real_listing(key_id))
+
+        for digest in ("rendered-by-an-older-cellctl", "rendered-by-an-even-older-cellctl"):
+            cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(
+                cluster, "aaaaaaaaaaaaaaaa", statefulset_render_digest=digest
+            )
+            await reconcile.reconcile_once(
+                connection,
+                cluster,
+                b2,
+                FakeHetznerVolumeProvider(),
+                _secrets_config(),
+                _cluster_config(),
+                now=now,
+                memory=memory,
+            )
+
+        assert len(listings) == 1
+    finally:
+        await connection.close()
 
 
 async def test_deletion_runs_to_completion_across_passes(cell_db: CellDatabase) -> None:
