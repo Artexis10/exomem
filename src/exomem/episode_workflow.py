@@ -38,6 +38,7 @@ from typing import Any
 
 from . import curation, episode_capture
 from . import episode_model as model
+from .episode_reconciliation import reconcile_curation_leaf
 from .episode_recovery import EpisodeInputOwner
 from .episode_store import EpisodeStore
 
@@ -196,15 +197,30 @@ def _seal(vault_root: Path, leaf: Mapping[str, Any]) -> dict[str, Any]:
     )
 
 
-def _blockers(vault_root: Path, run_id: str) -> list[str]:
-    """Codes that would refuse this sealed plan now, as `curation.preview` reports them.
+def _committed(vault_root: Path, run_id: str) -> bool:
+    """Whether this sealed plan's step already committed, here or elsewhere."""
+    return bool(curation.CurationStore(vault_root).reconstruct(run_id)["committed_steps"])
 
-    A plan whose step already committed has none: it replays rather than runs,
-    so its guards on the preimage no longer apply.
-    """
-    if curation.CurationStore(vault_root).reconstruct(run_id)["committed_steps"]:
-        return []
+
+def _blockers(vault_root: Path, run_id: str) -> list[str]:
+    """Codes that would refuse an uncommitted sealed plan now, as `curation.preview` says."""
     return [item["code"] for item in curation.preview(vault_root, run_id=run_id)["blockers"]]
+
+
+def _unverifiable(session: _Session, candidate_id: str, leaf_id: str) -> str | None:
+    """Why reconciling this leaf would fail now, from a read-only trial on a copy.
+
+    The copy marks the attempt the pure model would mark and runs the same
+    receipt and postimage verification its reconcile runs; nothing is recorded.
+    """
+    trial = model.mark_attempt_started(session.state, candidate_id, leaf_id)
+    try:
+        reconcile_curation_leaf(session.vault_root, trial, candidate_id, leaf_id)
+    except model.EpisodeError as error:
+        if error.code != "EPISODE_OUTCOME_UNCERTAIN":
+            raise
+        return error.code
+    return None
 
 
 def prepare(vault_root: Path, *, episode: Any, candidate: Any, proposal: Any) -> dict[str, Any]:
@@ -238,7 +254,13 @@ def prepare(vault_root: Path, *, episode: Any, candidate: Any, proposal: Any) ->
         leaf
         for leaf in model._candidate(trial, identity)["leaves"]  # noqa: SLF001
         if not leaf["attempts"]
-        and (leaf["binding"] is None or _blockers(session.vault_root, leaf["binding"]["run_id"]))
+        and (
+            leaf["binding"] is None
+            or (
+                not _committed(session.vault_root, leaf["binding"]["run_id"])
+                and _blockers(session.vault_root, leaf["binding"]["run_id"])
+            )
+        )
     ]
     commands: list[tuple[str, dict[str, Any]]] = []
     if existing is None:
@@ -298,6 +320,7 @@ def _refused(key: str) -> dict[str, Any]:
         "executed": [],
         "replayed": [],
         "stale": [],
+        "diverged": [],
         "reconciled": [],
         "blocked": [],
     }
@@ -367,11 +390,18 @@ def _reconcile_uncertain(session: _Session) -> tuple[list[dict], list[dict]]:
 def _execute(session: _Session, candidate_id: str, leaf_id: str) -> tuple[str, dict[str, Any]]:
     leaf = model._owned(session.state, candidate_id, leaf_id)  # noqa: SLF001
     binding = leaf["binding"]
-    # A plan the vault has moved past is reported, never attempted: with no
-    # attempt recorded, the agent can still re-prepare or re-disposition it.
-    blockers = _blockers(session.vault_root, binding["run_id"])
-    if blockers:
-        return "stale", {"leaf_id": leaf_id, "code": blockers[0]}
+    # Neither case records an attempt, so the agent can still re-prepare or
+    # re-disposition the candidate. A plan committed elsewhere must still
+    # reconcile, or its attempt would stay uncertain for good; any other plan
+    # must still apply to the vault it would change.
+    if _committed(session.vault_root, binding["run_id"]):
+        code = _unverifiable(session, candidate_id, leaf_id)
+        if code:
+            return "diverged", {"leaf_id": leaf_id, "code": code}
+    else:
+        blockers = _blockers(session.vault_root, binding["run_id"])
+        if blockers:
+            return "stale", {"leaf_id": leaf_id, "code": blockers[0]}
     snapshot = session.state["current_precommit"]["snapshot"]
     # Durably uncertain before the writer runs: a crash from here on can only
     # be reconciled from receipts, never retried under a fresh identity.
@@ -442,7 +472,12 @@ def resume(
         raise _error("EPISODE_INPUT_REVISION_STALE", "resume must review the current input")
 
     reconciled, blocked = _reconcile_uncertain(session)
-    reported: dict[str, list[dict[str, Any]]] = {"executed": [], "replayed": [], "stale": []}
+    reported: dict[str, list[dict[str, Any]]] = {
+        "executed": [],
+        "replayed": [],
+        "stale": [],
+        "diverged": [],
+    }
     if postcommit:
         committed = [
             leaf["leaf_id"] for _c, leaf in _leaves(session.state) if leaf["outcome"] == "committed"
@@ -472,11 +507,13 @@ def resume(
                 blocked.append({"leaf_id": leaf_id, "code": error.code})
                 break
             reported[kind].append(item)
-            if kind == "stale":
-                # The rest of its candidate waits for the same re-preparation.
+            if kind in {"stale", "diverged"}:
+                # The rest of its candidate waits for the owner's review.
                 held.add(candidate_id)
     projection = _projection(session)
-    status = "blocked" if blocked else "stale" if reported["stale"] else "ok"
+    status = "blocked" if blocked else "ok"
+    if not blocked and (reported["stale"] or reported["diverged"]):
+        status = "stale" if reported["stale"] else "diverged"
     return {
         **projection,
         "action": "resume",
