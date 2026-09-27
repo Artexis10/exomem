@@ -27,7 +27,7 @@ import gc
 import logging
 import threading
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
@@ -2039,6 +2039,35 @@ def reset_derived_fanout_memo() -> None:
         _derived_fanout_memo.clear()
 
 
+def converge_paths_from_current_bytes(
+    vault_root: Path,
+    rel_paths: Sequence[str],
+    created_rel_paths: Sequence[str] = (),
+) -> bool:
+    """The writer fan-out over whatever these paths hold now (operator repair).
+
+    A stranded receipt's recorded after-state may be gone, so the repair indexes
+    the current canonical bytes instead -- the same ``upsert_after_write`` the
+    write path and the receipt-owned drain call. Returns whether the fan-out
+    proved itself (no reconcile-required component).
+    """
+    root = Path(vault_root)
+    written = [root.joinpath(*rel.split("/")) for rel in rel_paths]
+    if not written:
+        return True
+    created = [root.joinpath(*rel.split("/")) for rel in created_rel_paths]
+    from . import graph_sync
+
+    with graph_sync.standalone_join_waived():
+        report = upsert_after_write(
+            root,
+            written,
+            created_paths=created,
+            publish_corpus_change=True,
+        )
+    return not report.reconcile_required
+
+
 def converge_derived_component(
     vault_root: Path,
     receipt: Any,
@@ -2082,12 +2111,17 @@ def converge_derived_component(
             # Nothing this fan-out can publish: a tombstone-only batch is
             # converged by the removal path the deleting writer already ran.
             return True
-        report = upsert_after_write(
-            root,
-            written,
-            created_paths=created,
-            publish_corpus_change=True,
-        )
+        from . import graph_sync
+
+        # A registered graph rebuild still starts; this fan-out just does not
+        # wait on it before the embedding step that follows the graph.
+        with graph_sync.standalone_join_waived():
+            report = upsert_after_write(
+                root,
+                written,
+                created_paths=created,
+                publish_corpus_change=True,
+            )
         if report.reconcile_required:
             return False
         _derived_memo_put(memo_key, report)

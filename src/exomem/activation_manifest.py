@@ -255,9 +255,20 @@ def load_manifest(vault_root: Path) -> ActivationManifest | None:
 
 
 def ensure_manifest(
-    vault_root: Path, *, census: ActivationCensus | None = None
+    vault_root: Path,
+    *,
+    census: ActivationCensus | None = None,
+    commit_point: bool = True,
 ) -> ActivationManifest:
-    """Return the existing manifest or atomically establish the boundary once."""
+    """Return the existing manifest or atomically establish the boundary once.
+
+    A governed write that installs the manifest before its own batch passes
+    ``commit_point=False``: the install is idempotent bookkeeping, not the
+    mutation's commit. Marking it would turn a later pre-commit abort of that
+    write -- a lost shared-auxiliary guard race, with nothing of its own
+    written -- into a committed-uncertain terminal instead of the retryable
+    error it is.
+    """
     vault_root = Path(vault_root)
     existing = load_manifest(vault_root)
     if existing is not None:
@@ -273,6 +284,7 @@ def ensure_manifest(
         batch_atomic_write(
             [PlannedWrite(path=path, content=_serialize(candidate))],
             vault_root=vault_root,
+            commit_point=commit_point,
         )
         written = load_manifest(vault_root)
         if written is None:  # pragma: no cover - atomic writer guarantees destination
