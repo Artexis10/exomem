@@ -1961,9 +1961,10 @@ class QueryTermBudget:
     rarest in the queried scope first, carrying `max_stems` stems in all; a
     kept run carries only its content bigrams. When more units than
     `max_units` are held, a unit on more than `common_fraction` of the
-    scope's pages is a near-stopword for this corpus and is dropped, once the
-    scope holds at least `common_min_pages` pages and enough rarer units
-    remain to corroborate. The numbers are the caller's policy.
+    scope's pages is a near-stopword for this corpus and is dropped from the
+    MATCH, once the scope holds at least `common_min_pages` pages and enough
+    rarer units remain to corroborate; it still counts toward corroboration.
+    The numbers are the caller's policy.
     """
 
     max_units: int
@@ -1979,8 +1980,14 @@ def select_query_units(
     budget: QueryTermBudget,
     *,
     min_units: int = 1,
-) -> tuple[list, int]:
-    """`(kept units in query order, distinct units dropped)`.
+) -> tuple[list, list, int]:
+    """`(kept units, counted units, distinct units dropped)`, both lists in
+    query order.
+
+    Kept units are the ones the MATCH asks for. Counted units are the kept
+    ones plus every unit dropped for being common: they leave the MATCH, so
+    they never widen the rows read, but a page the MATCH reaches still
+    corroborates on them exactly as the unbounded query would let it.
 
     Units are deduplicated first: a word said thirty times is one unit. A
     unit's frequency is its rarest measured stem present in the scope (for a
@@ -1993,7 +2000,8 @@ def select_query_units(
     common: the kept units are then exactly those an unbounded query could
     match on. A longer turn drops the common ones, but only when at least
     `min_units` units survive that; otherwise the turn is all everyday words
-    and keeps its rarest `max_units`.
+    and keeps its rarest `max_units`. Units dropped for the budget itself
+    (past `max_units` or `max_stems`) are neither asked for nor counted.
 
     A kept run is returned as its content bigrams alone. Units are taken
     rarest first, the one with fewer stems first between equally rare ones,
@@ -2017,10 +2025,12 @@ def select_query_units(
         present = [frequency for frequency in present if frequency > 0]
         if present:
             ranked.append((min(present), position, bm25_module.TokenUnit(stems, unit.run)))
+    common: list[tuple[int, int, object]] = []
     if len(ranked) > budget.max_units and pages >= budget.common_min_pages:
         ceiling = budget.common_fraction * pages
         distinctive = [entry for entry in ranked if entry[0] <= ceiling]
         if len(distinctive) >= min_units:
+            common = [entry for entry in ranked if entry[0] > ceiling]
             ranked = distinctive
     # Rarest first; between equally rare units the one with fewer stems, so
     # a long run does not spend the stem budget a short name needs, then the
@@ -2046,7 +2056,15 @@ def select_query_units(
         room -= len(unit.stems)
         kept.append((position, unit))
     kept.sort(key=lambda entry: entry[0])
-    return [unit for _position, unit in kept], len(distinct) - len(kept)
+    counted = sorted(
+        kept + [(position, unit) for _frequency, position, unit in common],
+        key=lambda entry: entry[0],
+    )
+    return (
+        [unit for _position, unit in kept],
+        [unit for _position, unit in counted],
+        len(distinct) - len(kept),
+    )
 
 
 def search_bm25(
@@ -6828,7 +6846,7 @@ class LexicalStore:
                 )
             ]
             frequencies, pages = self._catalogue_term_frequencies(conn, measured, scope)
-            kept, dropped = select_query_units(
+            kept, counted, dropped = select_query_units(
                 query_units,
                 frequencies,
                 pages,
@@ -6841,7 +6859,7 @@ class LexicalStore:
                 # Nothing the scope holds: no page can rank, so no MATCH.
                 return []
             tokens = list(dict.fromkeys(stem for unit in kept for stem in unit.stems))
-            term_units = _term_units(kept)
+            term_units = _term_units(counted)
         # Tokens are runs of letters, numbers and marks: no quote or other FTS5
         # syntax can hide in them, but quote anyway; OR mirrors get_scores()
         # membership (any-term match).
@@ -6919,15 +6937,18 @@ class LexicalStore:
         if term_budget is not None and corroborated:
             # Bounded: rank every row the kept units match that passes the
             # scope, path and exclusion filters, then run the corroboration
-            # test on those rows alone. No row is left out, so the result is
-            # the one-statement query's for the same units; the test just
-            # never reads the stored text of a row the filters already refuse.
+            # test on those rows in rank order, stopping once `k` qualify. No
+            # row is left out, so the result is the one-statement query's for
+            # the same units. The inner ORDER BY ... LIMIT -1 keeps SQLite
+            # from flattening the ranking into the outer query, which would
+            # run the test on every matched row and sort afterwards.
             rows = conn.execute(
                 "SELECT c.path, -c.bm25 FROM ("
                 "SELECT p.path AS path, fts.rowid AS rid, bm25(fts) AS bm25 "
                 "FROM fts JOIN pages p ON p.rowid = fts.rowid "
                 f"WHERE fts MATCH ? AND p.{col} = 1" + ranking_clause + excluded_clause
-                + ") AS c JOIN fts ON fts.rowid = c.rid "
+                + " ORDER BY bm25(fts), p.path LIMIT -1"
+                ") AS c JOIN fts ON fts.rowid = c.rid "
                 "WHERE " + corroborated + " "
                 "ORDER BY c.bm25, c.path LIMIT ?",
                 [
