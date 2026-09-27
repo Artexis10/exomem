@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from . import (
+    activation_conventions,
     context_roles,
     request_budget,
     source_taxonomy,
@@ -1723,10 +1724,13 @@ def compile_packet(
     # the sidecar that issued the number, which is how the manifest registry
     # tells a rebuilt counter from an older one.
     index_token = index.token()
+    conventions_registry = activation_conventions.load_conventions(root)
+    conventions = conventions_registry.conventions
     generation: dict[str, Any] = {
         "freshness_key": freshness_key,
         "index_generation": index_token[1],
         **registry.generation_block(),
+        **conventions_registry.generation_block(),
     }
     # Bounded work between two boundaries that already gate the request, for
     # the reason `working_set.recent` takes no boundary of its own (below).
@@ -1769,8 +1773,14 @@ def compile_packet(
         # for, and `context_roles.select_roles` below reads `analysis.text` for its
         # `turn_cue` sources. Deleting it here as unused on the override path would
         # silently narrow an overridden packet to the anchor kind's default roles.
-        analysis = working_set_resolve.analyze_turn(turn)
+        analysis = working_set_resolve.analyze_turn(turn, vocabulary=conventions.referential)
         rows = working_set_resolve.facts_from_rows(index.anchors())
+
+        # This is a whole-index count, so only the owner may see it; one
+        # rejected name on a withheld page must look like no such page.
+        if visible is None and (rejected := index.learned_aliases_rejected()):
+            generation["learned_aliases_rejected"] = rejected
+
         # Whether a valid token was passed at all, which is not the same as
         # whether any of its refs survived: the caller drops every ref the
         # audience may not see (`working_set_runtime.visible_continuity_refs`),
@@ -1786,6 +1796,7 @@ def compile_packet(
             # unknown and a withheld ref share.
             resolution = working_set_resolve.resolve(chosen, turn_tokens=analysis.tokens)
         else:
+
             term_counts = index.term_anchor_counts()
             # A reader other than the owner resolves the turn over the anchors
             # it may see: the ones the turn's words can reach are decided, and
@@ -1831,6 +1842,11 @@ def compile_packet(
                     # resolver, and a mixed tier is reported, never guessed.
                     hot_paths=hot.anchor_paths if not hot.pages else frozenset(),
                     term_anchor_counts=term_counts,
+                    stopwords=conventions.stopwords,
+                    rare_term_max_anchors=conventions.rare_term_max_anchors,
+                    eligible_categories=working_set_resolve.eligible_categories(
+                        analysis, registry.roles.values()
+                    ),
                 )
 
             candidates = _candidates(rows)
@@ -1848,6 +1864,7 @@ def compile_packet(
                 if unseen:
                     rows = tuple(row for row in rows if row.anchor_id not in unseen)
                     candidates = _candidates(rows)
+
             candidates = working_set_resolve.add_graph_corroboration(
                 candidates, retrieval_paths=retrieval_paths
             )
@@ -2077,6 +2094,8 @@ def compile_packet(
             purpose=purpose,
             index_generation=index_token[1],
             index_token=index_token,
+            state_fields=conventions.state_fields,
+            date_fields=conventions.date_fields,
         )
     items, missing = run_lanes(
         root,

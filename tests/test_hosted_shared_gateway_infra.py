@@ -32,7 +32,7 @@ def test_gateway_is_bounded_and_has_only_two_secret_references(documents: list[d
     pod = deployment["spec"]["template"]["spec"]
     assert pod["automountServiceAccountToken"] is False
     assert pod["terminationGracePeriodSeconds"] == 30
-    assert deployment["spec"]["replicas"] == 1
+    assert deployment["spec"]["replicas"] == 0
     container, = pod["containers"]
     assert "@sha256:" in container["image"]
     assert container["securityContext"]["readOnlyRootFilesystem"] is True
@@ -59,6 +59,20 @@ def test_gateway_is_bounded_and_has_only_two_secret_references(documents: list[d
         and any(subject.get("name") == "exomem-gateway" for subject in doc.get("subjects", []))
         for doc in documents
     )
+
+
+def test_gateway_has_one_replica_when_legacy_hosted_is_unpaused() -> None:
+    documents = _render(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        extra_args=(
+            *GATEWAY_ARGS,
+            "--set", "cellctl.enabled=false",
+            "--set", "cloudGateway.enabled=false",
+        ),
+    )
+    assert _find(documents, "Deployment", "exomem-gateway")["spec"]["replicas"] == 1
 
 
 def test_gateway_ingress_is_exact_path_with_overwritten_aggregate_source(documents: list[dict]) -> None:
