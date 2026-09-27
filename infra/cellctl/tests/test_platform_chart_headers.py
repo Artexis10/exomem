@@ -533,8 +533,24 @@ def test_cloud_gateway_certificate_uses_namespaced_cloudflare_dns01() -> None:
     assert certificate["spec"]["secretName"] == "exomem-cloud-gateway-tls"
     route = _find(documents, "IngressRoute", "exomem-cloud-gateway")
     assert route["metadata"]["namespace"] == certificate["metadata"]["namespace"]
-    assert route["spec"]["routes"][0]["match"] == f"Host(`{hostname}`)"
+    # Only the Cloud MCP path and its protected-resource metadata are public.
+    # The gateway also serves the hosted MCP path, which must not be reachable
+    # through the Cloud hostname.
+    assert route["spec"]["routes"][0]["match"] == (
+        f"Host(`{hostname}`) && "
+        "(Path(`/mcp`) || Path(`/.well-known/oauth-protected-resource/mcp`))"
+    )
     assert route["spec"]["tls"]["secretName"] == certificate["spec"]["secretName"]
+
+
+def test_traefik_rollout_can_replace_the_hostport_pod_on_one_node() -> None:
+    # websecure binds hostPort 443 on the single server node, so a surge pod
+    # could never schedule next to the old one and every rollout would stall.
+    traefik = _find(_helm_template(), "Deployment", "platform-header-test-traefik")
+    assert traefik["spec"]["strategy"] == {
+        "type": "RollingUpdate",
+        "rollingUpdate": {"maxUnavailable": 1, "maxSurge": 0},
+    }
 
 
 # The Substrate gateway's environment contract (substrate main,
