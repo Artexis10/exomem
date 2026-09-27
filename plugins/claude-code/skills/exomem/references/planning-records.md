@@ -95,7 +95,9 @@ or `tags`; `category` also reads the page's unit categories), and any value
 listed under a key may match. A page that satisfies every predicate routes to
 the collection as strong, even when its words share nothing with the claims.
 A page silent about a key can still route by shared words, but a page whose
-value contradicts a key (another project, say) never routes there. When several
+`type` or `project` contradicts the declaration (another project, say) never
+routes there; other `tags` or `category` values, or an Evidence page's
+`type: source`, do not count against it. When several
 collections' predicates all hold, the one holding the most predicates wins,
 then the one sharing more words; a full tie stays silent. Words come from the
 title and tags only, compared in a folded form, so `failure`/`failures` and

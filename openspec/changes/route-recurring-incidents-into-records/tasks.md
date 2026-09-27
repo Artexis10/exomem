@@ -1,6 +1,6 @@
 ## 1. Claim hygiene
 
-- [x] 1.1 Red: prose claims ("not because after first use") capture a page sharing only those words; `failure`/`failures` and `dogfood`/`dogfooding` do not meet (`tests/test_incident_records_routing.py`, part 1).
+- [x] 1.1 Red: prose claims ("not because after first use") capture a page sharing only those words; `failure`/`failures` and `regression`/`regressions` do not meet (`tests/test_incident_records_routing.py`, part 1).
 - [x] 1.2 Compare terms through the shared fold owned by `vocabulary_fold.fold_term`.
 - [x] 1.3 Consolidate function words as `structure_promotion.FUNCTION_WORDS`; `_STOPWORDS` is that set plus glue.
 - [x] 1.4 `collection_claims.normalize_terms` drops function words and folds, on claims and observations alike, filtering folded tokens as raw ones so it is idempotent (`test_normalize_terms_is_idempotent`); update existing expectations to folded forms.

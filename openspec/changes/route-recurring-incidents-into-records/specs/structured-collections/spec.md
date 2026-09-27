@@ -44,5 +44,5 @@ A collection manifest MAY carry an optional `claims` block with bounded lists of
 - **THEN** the result is unchanged, including for words whose folded form is navigation glue such as `drafts` or `summaries`
 
 #### Scenario: Inflections meet
-- **WHEN** claims say `failures` and `dogfood` and a page says `failure` and `dogfooding`
+- **WHEN** claims say `failures` and `regressions` and a page says `failure` and `regression`
 - **THEN** both pairs compare equal, while the authored spellings are stored unchanged
