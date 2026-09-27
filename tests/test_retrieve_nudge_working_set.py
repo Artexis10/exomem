@@ -2239,6 +2239,7 @@ def test_the_cli_rung_passes_the_workspace_and_steps_down_for_an_older_cli(
     assert "--workspace" not in second and "--session" in second
 
 
+
 # --------------------------------------------------------------------------- #
 # Upkeep (D1-T12): one whole line, or nothing
 # --------------------------------------------------------------------------- #

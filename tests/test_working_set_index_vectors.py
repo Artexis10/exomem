@@ -78,13 +78,13 @@ def _encoded(fake: _Encoder) -> list[str]:
 
 
 def test_the_schema_records_fingerprinted_vectors() -> None:
-    assert working_set_index.SCHEMA_VERSION == 9
+    assert working_set_index.SCHEMA_VERSION == 10
 
 
 def test_a_rollback_to_schema_8_and_back_keeps_the_index_working(encoder) -> None:
     """A host that rolls back one release opens this sidecar with the schema-8
     code, which writes vectors as `(anchor_id, vector)`. That insert must
-    succeed on this table, and the next schema-9 open rebuilds from it."""
+    succeed on this table, and the next schema-10 open rebuilds from it."""
     vault, fake = encoder
     index = working_set_index.WorkingSetIndex(vault)
     index.rebuild()

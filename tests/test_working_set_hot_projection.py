@@ -685,6 +685,7 @@ def test_cache_key_includes_the_heat_digest() -> None:
         "freshness_key": "k",
         "index_generation": 3,
         "roles_hash": "r",
+        "conventions_hash": "c",
         "turn": "continue",
         "max_chars": 4000,
     }
@@ -1207,4 +1208,3 @@ def test_a_guest_never_shares_the_owners_cache_entry(heat_vault: Path) -> None:
     guest = {key: value for key, value in guest.items() if key not in ("continuity", "timings")}
 
     assert guest == absent
-

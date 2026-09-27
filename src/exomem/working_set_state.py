@@ -53,6 +53,8 @@ def current_state_for(
     purpose: str | None = None,
     index_generation: int | None = None,
     index_token: tuple[int, int, int] | None = None,
+    state_fields: Sequence[str] | None = None,
+    date_fields: Sequence[str] | None = None,
 ) -> tuple[dict[str, Any], ...]:
     """Resolve each stateful anchor's current state, Records first.
 
@@ -62,16 +64,34 @@ def current_state_for(
     stale; the collection it routes to is then read from disk again before any
     governed query runs against it. Left unset — a caller with no index at all
     — the manifests are discovered directly, exactly as they always were.
+
+    `state_fields`/`date_fields` default to the vault's effective
+    activation-conventions registry (`make-activation-conventions-vault-
+    owned`), read here when either is omitted — the shipped values equal the
+    module's former `_STATE_FIELDS`/`_DATE_FIELDS` constants exactly, so a
+    vault with no override reads state precisely as before.
     """
     root = Path(vault_root)
+    if state_fields is None or date_fields is None:
+        from . import activation_conventions
+
+        conventions = activation_conventions.load_conventions(root).conventions
+        if state_fields is None:
+            state_fields = conventions.state_fields
+        if date_fields is None:
+            date_fields = conventions.date_fields
+    state_fields = tuple(state_fields)
+    date_fields = tuple(date_fields)
     manifests = _records_manifests(root, index_generation, index_token)
     out: list[dict[str, Any]] = []
     for anchor in anchors:
         if getattr(anchor, "kind", "") not in STATEFUL_KINDS:
             continue
         entry = (
-            _from_records(root, anchor, manifests, purpose=purpose)
-            or _from_profile(root, anchor)
+            _from_records(
+                root, anchor, manifests, purpose=purpose, state_fields=state_fields, date_fields=date_fields
+            )
+            or _from_profile(root, anchor, state_fields=state_fields)
             or _from_neighbourhood(root, anchor)
         )
         if entry is not None:
@@ -196,6 +216,8 @@ def _from_records(
     manifests: Sequence[Any],
     *,
     purpose: str | None,
+    state_fields: Sequence[str] = _STATE_FIELDS,
+    date_fields: Sequence[str] = _DATE_FIELDS,
 ) -> dict[str, Any] | None:
     routed = _claiming_manifest(anchor, manifests)
     if routed is None:
@@ -207,7 +229,7 @@ def _from_records(
     from . import record_governance
 
     fields = tuple(getattr(getattr(manifest, "schema", None), "fields", {}) or ())
-    date_column = next((name for name in _DATE_FIELDS if name in fields), None)
+    date_column = next((name for name in date_fields if name in fields), None)
     try:
         result = record_governance.query_collection(
             vault_root,
@@ -236,7 +258,7 @@ def _from_records(
     row = rows[0]
     if not isinstance(row, Mapping):
         return None
-    statement = _statement_from(row, fields)
+    statement = _statement_from(row, fields, state_fields=state_fields)
     if not statement:
         return None
     return {
@@ -247,9 +269,11 @@ def _from_records(
     }
 
 
-def _statement_from(row: Mapping[str, Any], fields: Sequence[str]) -> str:
+def _statement_from(
+    row: Mapping[str, Any], fields: Sequence[str], *, state_fields: Sequence[str] = _STATE_FIELDS
+) -> str:
     """Render the authored values, never a sentence the server invented."""
-    for name in _STATE_FIELDS:
+    for name in state_fields:
         value = row.get(name)
         if isinstance(value, (str, int, float)) and str(value).strip():
             return f"{name}: {str(value).strip()}"[:STATEMENT_MAX_CHARS]
@@ -263,7 +287,9 @@ def _statement_from(row: Mapping[str, Any], fields: Sequence[str]) -> str:
     return " · ".join(parts)[:STATEMENT_MAX_CHARS]
 
 
-def _from_profile(vault_root: Path, anchor: Any) -> dict[str, Any] | None:
+def _from_profile(
+    vault_root: Path, anchor: Any, *, state_fields: Sequence[str] = _STATE_FIELDS
+) -> dict[str, Any] | None:
     from . import find_corpus
 
     rel = str(getattr(anchor, "path", "") or "")
@@ -273,7 +299,7 @@ def _from_profile(vault_root: Path, anchor: Any) -> dict[str, Any] | None:
     if page is None:
         return None
     frontmatter = page.frontmatter if isinstance(page.frontmatter, dict) else {}
-    for name in _STATE_FIELDS:
+    for name in state_fields:
         value = frontmatter.get(name)
         if isinstance(value, (str, int, float)) and str(value).strip():
             return {
