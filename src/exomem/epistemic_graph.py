@@ -5736,6 +5736,19 @@ class EpistemicGraphIndex:
                     # and their receipts retire; the movement queued its own.
                     # The marker, lineage and acknowledgement describe the whole
                     # projection, and wait for a drain it holds still for.
+                    #
+                    # The resolver topology is not one of them: it describes
+                    # the rows, and the two proofs that read it -- a
+                    # topology-changing refresh and a replacement's adoption --
+                    # rebuild the old resolver from these rows' titles. Left
+                    # behind, a page this drain created had rows the stored
+                    # topology did not know, and the next adoption declined a
+                    # snapshot that matched the disk. Same value the published
+                    # branch writes, in the same transaction as the rows.
+                    conn.execute(
+                        "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                        (_RESOLVER_TOPOLOGY_KEY, _resolver_topology_fingerprint(resolver)),
+                    )
                     return
                 self._publish_available_marker_in_transaction(
                     conn,
