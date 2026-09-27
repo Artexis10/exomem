@@ -37,5 +37,9 @@
   - the Certificate is Ready in `exomem-edge`;
   - the public route serves the gateway;
   - `kubectl auth can-i get secrets -n exomem-cloud --as=system:serviceaccount:exomem-edge:<traefik>` is `no`.
-- [ ] 4.2 Issue and install the operator and break-glass identities on the node. Verify with the operator identity that reading a Secret and exec into a test cell are both denied, and that a break-glass exec appears in the audit log without content.
+- [ ] 4.2 Issue and install only the 30-day operator identity on the node. Verify:
+  - with the operator identity, reading a Secret and exec into a test cell are both denied;
+  - a freshly minted one-hour break-glass certificate can exec into the test cell;
+  - the CSR approval and the exec appear in the audit log without content;
+  - that certificate is rejected after expiry.
 - [ ] 4.3 Review user-facing Cloud privacy copy against the spec's privacy requirement. Verify: every claim maps to a stated property, and both disclosures (content in transit at the edge and gateway, and operator-held keys) are present.

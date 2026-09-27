@@ -14,7 +14,8 @@ Tenants are already isolated from each other. What is missing is keeping the fle
   - The gateway admits ingress only from the edge namespace's Traefik pods.
 - **Operator identity split.**
   - Day-to-day operation uses a restricted kubeconfig. It can read workload status, events and content-free logs. It cannot read Secrets, and it cannot exec, attach, port-forward or proxy into cell namespaces.
-  - The root-only admin kubeconfig becomes break-glass. The existing K3s audit policy records every use.
+  - The root-only admin kubeconfig stays the deploy identity for scripted Helm and apply procedures.
+  - Break-glass is a separate identity with no standing credential. Its certificate is minted on demand through an audited CSR and expires in about an hour. The existing K3s audit policy records the CSR, its approval and every request made with it.
 - **Break-glass on demand.** A break-glass certificate is minted through an audited CSR, valid for about one hour. The everyday operator certificate is short-lived too.
 - **Proof that logs stay content-free.** A live test seeds a canary string, exercises search and review, and asserts the canary never reaches cell or controller logs.
 - **Break-glass admission (conditional).** A live-K3s test must first prove that a ValidatingAdmissionPolicy can match CONNECT on the relevant pod subresources. If it can, the policy denies `pods/exec`, `pods/attach`, `pods/portforward` and `pods/ephemeralcontainers` in cell namespaces to everyone outside a break-glass group. If the test shows it cannot, the identity split stands alone and the design records why.

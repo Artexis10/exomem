@@ -94,7 +94,7 @@ This lands after the first Cloud deploy's empty-data smoke test, and before any 
 1. Merge the chart change.
 2. Run one fix-forward Helm upgrade of `exomem-platform`. Do not use `--atomic`: the legacy pause must never be rolled back.
 3. Confirm the Certificate reaches Ready in `exomem-edge`, the public route serves the gateway, and Traefik's Role grants Secrets only in `exomem-edge`.
-4. Issue the operator and break-glass certificates. Install their kubeconfigs root-only, and make the operator kubeconfig the default.
-5. Confirm with the operator identity that reading a Secret and exec into a test cell are both denied.
+4. Issue the 30-day operator certificate. Install its kubeconfig root-only and make it the default. No break-glass credential is issued or stored.
+5. Confirm with the operator identity that reading a Secret and exec into a test cell are both denied. Then mint a one-hour break-glass certificate, exec into the test cell, and confirm that the CSR approval and the exec appear in the audit log and that the certificate is rejected after expiry.
 
 Rollback: re-render with the previous chart values and fix forward. Never `helm rollback` past the release that recorded the legacy pause.
