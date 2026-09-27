@@ -9951,6 +9951,7 @@ def op_maintain_memory(
     expected_plan_fingerprint: str | None = None,
     vocabulary_ref: str | None = None,
     vocabulary_fingerprint: str | None = None,
+    exclude_groups: list[str] | None = None,
 ) -> dict:
     """Maintain vault health with explicit write-capable modes.
 
@@ -9987,6 +9988,7 @@ def op_maintain_memory(
     bounded batch of minority variants to the canonical tag and logs a rollback
     record. Only the `tags` key changes; Sources, Evidence, Records, Planning
     and other owned trees are untouched. Preview again for the next batch.
+    `exclude_groups` keeps named groups out of preview and apply alike.
 
     `mode="fix"` also collapses media sidecars that accumulated nested copies of
     themselves (audit category `duplicated_sidecar`, reportable on its own via
@@ -10025,6 +10027,7 @@ def op_maintain_memory(
         expected_plan_fingerprint: Exact reviewed plan fingerprint for approval.
         vocabulary_ref: Optional vocabulary decision correlated with curation apply or resume.
         vocabulary_fingerprint: Exact reviewed vocabulary fingerprint; grants no write permission.
+        exclude_groups: Tag-variant group keys to leave out; part of the plan_id.
     """
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
@@ -10032,6 +10035,8 @@ def op_maintain_memory(
     )
     if rebuild_graph and mode != "reconcile":
         raise ValueError("INVALID_MODE: rebuild_graph is valid only for reconcile")
+    if exclude_groups is not None and mode != "tag-variants":
+        raise ValueError("INVALID_ARGUMENTS: exclude_groups applies only to tag-variants")
     if mode == "curation":
         from . import curation as curation_module
         from . import due_state as due_state_module
@@ -10204,14 +10209,15 @@ def op_maintain_memory(
             or source_snapshot is not None
         ):
             raise ValueError(
-                "INVALID_ARGUMENTS: tag-variants accepts only apply, plan_id, and why"
+                "INVALID_ARGUMENTS: tag-variants accepts only apply, plan_id, why, "
+                "and exclude_groups"
             )
         if apply is None:
             if plan_id is not None or why is not None:
                 raise ValueError(
                     "INVALID_ARGUMENTS: tag-variants preview does not accept apply guards"
                 )
-            return tag_variants_module.preview(vault_root)
+            return tag_variants_module.preview(vault_root, exclude=exclude_groups)
         if apply is not True or plan_id is None or why is None:
             raise ValueError(
                 "INVALID_ARGUMENTS: tag-variants apply requires true, plan_id, and why"
@@ -10219,7 +10225,9 @@ def op_maintain_memory(
         from . import due_state as due_state_module
 
         with due_state_module.batch_scope(vault_root):
-            reconciled = tag_variants_module.apply(vault_root, plan_id=plan_id, why=why)
+            reconciled = tag_variants_module.apply(
+                vault_root, plan_id=plan_id, why=why, exclude=exclude_groups
+            )
         return _carrying_batch_advisories(vault_root, reconciled)
     if mode == "audit":
         return op_audit(

@@ -67,25 +67,34 @@ _COMMENT_MARK = re.compile(r"(?:^|[ \t])#")
 _STALE = "STALE_TAG_VARIANT_PLAN: the vault changed since the preview; preview again"
 
 
-def normal_form(tag: str) -> str:
-    """The spelling note, add, edit and link write for ``tag``."""
-    return str(tag).strip().lower().replace(" ", "-").replace("_", "-")
+#: Edge whitespace a written form drops; the SQL aggregate trims the same set.
+_WHITESPACE = " \t\n\r\f\v"
+_EXCLUDE_LIMIT = 256
+
+
+def written_form(spelling: str) -> str:
+    """The form note, add, edit and link write for a casefolded catalogue spelling.
+
+    Edge whitespace trimmed, ` ` and `_` as `-`; the SQL aggregate computes
+    the same expression, so both count paths agree.
+    """
+    return str(spelling).strip(_WHITESPACE).replace(" ", "-").replace("_", "-")
+
+
+def _owned_names() -> frozenset[str]:
+    """Casefolded directory names whose trees another subsystem owns."""
+    from .curation import PROTECTED_TREES
+
+    names = PROTECTED_TREES | _INFRASTRUCTURE_TREES
+    return frozenset(names | {name.replace("-", "_") for name in names})
 
 
 def _owned_elsewhere(rel: str) -> bool:
     """True for a page inside a tree another subsystem owns, at any depth."""
-    from .curation import PROTECTED_TREES
-
-    for part in rel.split("/")[1:-1]:
-        folded = part.casefold()
-        if (
-            folded in PROTECTED_TREES
-            or folded.replace("_", "-") in PROTECTED_TREES
-            or folded in _INFRASTRUCTURE_TREES
-            or folded.startswith(".")
-        ):
-            return True
-    return False
+    names = _owned_names()
+    return any(
+        part.startswith(".") or part.casefold() in names for part in rel.split("/")[1:-1]
+    )
 
 
 # ---------------- usage ----------------
@@ -105,29 +114,48 @@ class Group:
         return sum(self.spellings.values())
 
 
-class Usage:
-    """Pages per catalogue spelling and per written normal form, from one page set."""
+def _spellings(members: Iterable[object]) -> frozenset[str]:
+    return frozenset(
+        member.casefold()
+        for member in members
+        if isinstance(member, str) and member.strip(_WHITESPACE)
+    )
 
-    def __init__(self, rows: Iterable[tuple[str, Iterable[str]]]):
-        self.rows: list[tuple[str, frozenset[str]]] = []
-        self.spellings: dict[str, int] = {}
-        self.forms: dict[str, int] = {}
+
+class Usage:
+    """Pages per catalogue spelling and per written form; counts only.
+
+    ``keys`` limits the fold groups indexed, for a caller that only needs to
+    re-check the groups it touched.
+    """
+
+    def __init__(
+        self,
+        spellings: Mapping[str, int],
+        forms: Mapping[str, int],
+        keys: frozenset[str] | None = None,
+    ):
+        self.spellings: dict[str, int] = dict(spellings)
+        self.forms: dict[str, int] = dict(forms)
         self.by_key: dict[str, set[str]] = {}
-        for path, members in rows:
-            spellings = frozenset(
-                member.casefold() for member in members if isinstance(member, str) and member.strip()
-            )
-            if not spellings:
-                continue
-            self.rows.append((path, spellings))
-            for spelling in spellings:
-                self.spellings[spelling] = self.spellings.get(spelling, 0) + 1
-            for form in {normal_form(spelling) for spelling in spellings}:
-                self.forms[form] = self.forms.get(form, 0) + 1
         for spelling in self.spellings:
             key = fold_term(spelling)
-            if key:
+            if key and (keys is None or key in keys):
                 self.by_key.setdefault(key, set()).add(spelling)
+
+    @classmethod
+    def from_rows(
+        cls, rows: Iterable[tuple[str, Iterable[object]]], keys: frozenset[str] | None = None
+    ) -> Usage:
+        spellings: dict[str, int] = {}
+        forms: dict[str, int] = {}
+        for _path, members in rows:
+            found = _spellings(members)
+            for spelling in found:
+                spellings[spelling] = spellings.get(spelling, 0) + 1
+            for form in {written_form(spelling) for spelling in found}:
+                forms[form] = forms.get(form, 0) + 1
+        return cls(spellings, forms, keys)
 
     def group(self, key: str, extra: str | None = None) -> Group | None:
         """The fold group for ``key``, with ``extra`` as a spelling of no uses."""
@@ -136,7 +164,7 @@ class Usage:
             spellings.add(extra)
         if len(spellings) < 2:
             return None
-        forms = {normal_form(spelling) for spelling in spellings}
+        forms = {written_form(spelling) for spelling in spellings}
         ranked = sorted(forms, key=lambda form: (-self.forms.get(form, 0), len(form), form))
         top = self.forms.get(ranked[0], 0)
         decided = top > 0 and (len(ranked) == 1 or top > self.forms.get(ranked[1], 0))
@@ -149,7 +177,7 @@ class Usage:
 
     def target(self, tag: str) -> tuple[str, int] | None:
         """(canonical, its uses) when ``tag`` is a minority variant of a decided group."""
-        spelling = str(tag).strip().casefold()
+        spelling = str(tag).strip(_WHITESPACE).casefold()
         key = fold_term(spelling)
         if not key:
             return None
@@ -170,27 +198,55 @@ def _catalogue_rows(vault_root: Path) -> list[tuple[str, list[str]]] | None:
         return None
 
 
-def _usage(vault_root: Path, keep: Any) -> Usage | None:
+def _catalogue_aggregate(vault_root: Path) -> tuple[dict[str, int], dict[str, int]] | None:
+    """Spelling and written-form page counts outside owned trees, in one SQL pass."""
+    from . import lexstore
+
+    try:
+        return lexstore.get_store(Path(vault_root)).tag_usage_aggregate(
+            _owned_names(), _WHITESPACE
+        )
+    except Exception as exc:  # noqa: BLE001 - optional vocabulary evidence fails open
+        log.warning("tag usage unavailable: %s", type(exc).__name__)
+        return None
+
+
+def _visible_rows(vault_root: Path, keep: Any) -> list[tuple[str, frozenset[str]]] | None:
+    """Catalogued tags of pages outside owned trees that ``keep`` releases."""
     rows = _catalogue_rows(vault_root)
     if rows is None:
         return None
-    return Usage(
-        (path, members)
-        for path, members in rows
-        if not _owned_elsewhere(path) and (keep is None or keep(path))
-    )
+    out: list[tuple[str, frozenset[str]]] = []
+    for path, members in rows:
+        if _owned_elsewhere(path) or (keep is not None and not keep(path)):
+            continue
+        found = _spellings(members)
+        if found:
+            out.append((path, found))
+    return out
 
 
-def usage(vault_root: Path) -> Usage | None:
+def _usage(vault_root: Path, keep: Any, keys: frozenset[str] | None = None) -> Usage | None:
+    if keep is None:
+        counts = _catalogue_aggregate(vault_root)
+        return None if counts is None else Usage(*counts, keys=keys)
+    rows = _visible_rows(vault_root, keep)
+    return None if rows is None else Usage.from_rows(rows, keys=keys)
+
+
+def usage(vault_root: Path, *, keys: frozenset[str] | None = None) -> Usage | None:
     """Tag usage as the current reader may see it; the one count source.
 
     Pages the reader may not see and pages another subsystem owns never
     contribute, so a count, a group or a canonical choice reads exactly as if
-    they were absent. None when the catalogue cannot answer.
+    they were absent. An unrestricted reader is counted by one SQL aggregate;
+    a restricted one from per-page rows its release filter decides. None when
+    the catalogue cannot answer.
     """
     from .governance import egress
 
-    return _usage(Path(vault_root), egress.restricted_release_filter(Path(vault_root)))
+    root = Path(vault_root)
+    return _usage(root, egress.restricted_release_filter(root), keys)
 
 
 def _index_for(vault_root: Path) -> Usage | None:
@@ -412,25 +468,54 @@ def _rewritten(tag: str, decided: Mapping[str, str]) -> str:
     return chosen if chosen is not None and tag.casefold() != chosen else tag
 
 
-def _plan(root: Path) -> dict[str, Any]:
-    index = usage(root)
-    if index is None:
+def _exclusions(value: object) -> frozenset[str]:
+    """Fold keys of groups the owner keeps out of maintenance."""
+    if value is None:
+        return frozenset()
+    if (
+        not isinstance(value, list)
+        or len(value) > _EXCLUDE_LIMIT
+        or any(
+            not isinstance(item, str)
+            or not item.strip()
+            or "\n" in item
+            or len(item.encode("utf-8")) > _EXCLUDE_LIMIT
+            for item in value
+        )
+    ):
+        raise ValueError(
+            "INVALID_ARGUMENTS: exclude_groups takes up to 256 one-line group keys"
+        )
+    keys = frozenset(fold_term(item) for item in value)
+    if "" in keys:
+        raise ValueError("INVALID_ARGUMENTS: exclude_groups names an empty group key")
+    return keys
+
+
+def _plan(root: Path, *, exclude: frozenset[str] = frozenset()) -> dict[str, Any]:
+    from .governance import egress
+
+    # Candidate pages need per-page rows, so the plan counts from the same rows;
+    # the aggregate the write-time index reads computes identical counts.
+    rows = _visible_rows(root, egress.restricted_release_filter(root))
+    if rows is None:
         raise ValueError(
             "TAG_USAGE_UNAVAILABLE: the lexical catalogue cannot count tags yet; "
             "retry once it is indexed"
         )
+    index = Usage.from_rows(rows)
     grouped = {key: group for key in index.by_key if (group := index.group(key)) is not None}
-    decided = {key: group.canonical for key, group in grouped.items() if group.decided}
+    active = {key: group for key, group in grouped.items() if group.decided and key not in exclude}
+    decided = {key: group.canonical for key, group in active.items()}
     replaced = {
         spelling
-        for group in grouped.values()
-        if group.decided
+        for group in active.values()
         for spelling in group.spellings
         if spelling != group.canonical
     }
     pending: list[dict[str, Any]] = []
     unrewritable: list[str] = []
-    for rel in sorted(path for path, spellings in index.rows if spellings & replaced):
+    for rel in sorted(path for path, spellings in rows if spellings & replaced):
         try:
             text = (root / rel).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -452,7 +537,7 @@ def _plan(root: Path) -> dict[str, Any]:
     batch = pending[:BATCH_PAGES]
     plan_id = hashlib.sha256(
         json.dumps(
-            {"decided": sorted(decided.items()), "batch": batch},
+            {"decided": sorted(decided.items()), "exclude": sorted(exclude), "batch": batch},
             sort_keys=True,
             ensure_ascii=False,
             separators=(",", ":"),
@@ -461,6 +546,7 @@ def _plan(root: Path) -> dict[str, Any]:
     listed = sorted(grouped.values(), key=lambda group: (-group.uses, group.key))[:GROUP_LIMIT]
     return {
         "decided": decided,
+        "exclude": sorted(exclude),
         "batch": batch,
         "public": {
             "mode": MODE,
@@ -468,16 +554,17 @@ def _plan(root: Path) -> dict[str, Any]:
             "group_count": len(grouped),
             "variant_uses": sum(
                 uses
-                for group in grouped.values()
-                if group.decided
+                for group in active.values()
                 for spelling, uses in group.spellings.items()
                 if spelling != group.canonical
             ),
             "groups": [
                 {
+                    "key": group.key,
                     "canonical": group.canonical,
                     "uses": group.uses,
                     "tied": not group.decided,
+                    "excluded": group.key in exclude,
                     "variants": [
                         {"tag": tag, "uses": uses}
                         for tag, uses in sorted(
@@ -495,9 +582,13 @@ def _plan(root: Path) -> dict[str, Any]:
     }
 
 
-def preview(vault_root: Path) -> dict[str, Any]:
-    """Read-only: variant groups with counts and the next bounded batch."""
-    plan = _plan(Path(vault_root))
+def preview(vault_root: Path, *, exclude: list[str] | None = None) -> dict[str, Any]:
+    """Read-only: variant groups with counts and the next bounded batch.
+
+    ``exclude`` names fold keys (or any spelling of them) whose groups stay
+    out of the batch; the exclusion is part of ``plan_id``.
+    """
+    plan = _plan(Path(vault_root), exclude=_exclusions(exclude))
     public = dict(plan["public"])
     public["batch"] = [
         {"path": entry["path"], "from": entry["from"], "to": entry["to"]}
@@ -506,7 +597,13 @@ def preview(vault_root: Path) -> dict[str, Any]:
     if plan["batch"]:
         public["apply"] = {
             "tool": "maintain_memory",
-            "args": {"mode": MODE, "apply": True, "plan_id": public["plan_id"], "why": "<reason>"},
+            "args": {
+                "mode": MODE,
+                "apply": True,
+                "plan_id": public["plan_id"],
+                "why": "<reason>",
+                **({"exclude_groups": plan["exclude"]} if plan["exclude"] else {}),
+            },
         }
     return public
 
@@ -524,11 +621,16 @@ def _validate(plan_id: object, why: object) -> None:
 
 
 def _verify_groups(root: Path, plan: Mapping[str, Any]) -> None:
-    """Refuse when a group the batch touches no longer decides the same way."""
-    fresh = usage(root)
+    """Refuse when a group the batch rewrites no longer decides the same way."""
+    keys = frozenset(
+        fold_term(tag)
+        for entry in plan["batch"]
+        for tag in entry["from"]
+        if _rewritten(tag, plan["decided"]) != tag
+    )
+    fresh = usage(root, keys=keys)
     if fresh is None:
         raise ValueError(_STALE)
-    keys = {fold_term(tag) for entry in plan["batch"] for tag in entry["from"]}
     for key in keys:
         group = fresh.group(key)
         now = group.canonical if group is not None and group.decided else None
@@ -536,20 +638,29 @@ def _verify_groups(root: Path, plan: Mapping[str, Any]) -> None:
             raise ValueError(_STALE)
 
 
-def apply(vault_root: Path, *, plan_id: str, why: str) -> dict[str, Any]:
+def apply(
+    vault_root: Path, *, plan_id: str, why: str, exclude: list[str] | None = None
+) -> dict[str, Any]:
     """Rewrite one confirmed batch of minority variants to their canonical tag."""
     from . import writer_lease
     from .governance import egress
 
     _validate(plan_id, why)
+    excluded = _exclusions(exclude)
     root = Path(vault_root)
     # Planning reads the catalogue and every candidate page, so it runs before
-    # the mutation guard; under the guard only the batch is re-verified.
-    plan = _plan(root)
+    # the mutation guard (the dispatcher narrows its own boundary for this
+    # mode); under the guard only the batch is re-verified.
+    plan = _plan(root, exclude=excluded)
     if plan["public"]["plan_id"] != plan_id:
         raise ValueError(_STALE)
     rewritten: list[str] = []
-    with writer_lease.active_manager().mutation_guard(root, operation="tag_variants"):
+    with writer_lease.active_manager().mutation_guard(
+        root,
+        request_id=writer_lease.active_mutation_request_id(),
+        operation="tag_variants_commit",
+        holder_kind="command",
+    ):
         if plan["batch"]:
             _verify_groups(root, plan)
         writes: list[vault.PlannedWrite] = []

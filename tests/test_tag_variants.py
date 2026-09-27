@@ -541,7 +541,8 @@ def test_apply_plans_outside_the_mutation_guard(tmp_path, monkeypatch):
     planned_while_held = []
     original_plan = tag_variants._plan
     monkeypatch.setattr(
-        tag_variants, "_plan", lambda root: planned_while_held.append(held["now"]) or original_plan(root)
+        tag_variants, "_plan",
+        lambda root, **kwargs: planned_while_held.append(held["now"]) or original_plan(root, **kwargs),
     )
     result = tag_variants.apply(tmp_path, plan_id=plan_id, why="Outside.")
     assert result["outcome"] == "committed"
