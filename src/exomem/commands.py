@@ -9637,7 +9637,13 @@ def op_adoption_studio(
 def op_maintain_memory(
     vault_root: Path,
     mode: Literal[
-        "audit", "fix", "reconcile", "backfill-ids", "structured-files", "curation"
+        "audit",
+        "fix",
+        "reconcile",
+        "backfill-ids",
+        "structured-files",
+        "curation",
+        "tag-variants",
     ] = "audit",
     categories: list[str] | None = None,
     dry_run: bool | None = None,
@@ -9699,6 +9705,13 @@ def op_maintain_memory(
     shared mutation terminal. Curation cannot target raw Sources or Evidence,
     Planning, Records, workflow contracts, schema/admin state, or trash internals.
 
+    `mode="tag-variants"` lists tags that differ only by case, separator, or
+    inflection, grouped with their page counts and the most-used spelling as
+    canonical. Preview is read-only; `apply=true` with the preview's `plan_id`
+    and a one-line `why` rewrites one bounded batch of minority variants to the
+    canonical tag. Only the `tags` key changes, never the body; Sources and
+    Evidence are untouched. Preview again to continue with the next batch.
+
     `mode="fix"` also collapses media sidecars that accumulated nested copies of
     themselves (audit category `duplicated_sidecar`, reportable on its own via
     `mode="audit", categories=["duplicated_sidecar"]`). It keeps the longest
@@ -9709,7 +9722,8 @@ def op_maintain_memory(
     recovered text is only the fallback.
 
     Args:
-        mode: audit, fix, reconcile, backfill-ids, structured-files, or curation.
+        mode: audit, fix, reconcile, backfill-ids, structured-files, curation,
+            or tag-variants.
         categories: Optional audit category filter.
         dry_run: Report without writing when true. Defaults to true for
             fix/backfill-ids (safety net) and false for reconcile (matches
@@ -9721,9 +9735,9 @@ def op_maintain_memory(
         legacy_sample_limit: Audit legacy-backlog sample count, from 0 to 50.
         collection: One Planning or Records collection for structured-files.
         apply: Omit for preview; true applies the exact reviewed plan.
-        plan_id: Exact structured-files preview identity required for apply.
+        plan_id: Exact structured-files or tag-variants preview identity for apply.
         source_snapshot: Exact structured-files preview snapshot required for apply.
-        why: Bounded audit reason required for structured-files apply.
+        why: Bounded audit reason required for structured-files or tag-variants apply.
         curation_action: Closed curation action when mode is curation.
         run_id: Governed curation run identity.
         plan: Agent-authored closed forward plan for curation propose.
@@ -9900,6 +9914,37 @@ def op_maintain_memory(
         # deltas. A verified replay commits nothing and the carrier's commit
         # gate keeps its closed receipt shape untouched.
         return _carrying_batch_advisories(vault_root, migrated)
+    if mode == "tag-variants":
+        from . import tag_variants as tag_variants_module
+
+        if (
+            categories is not None
+            or dry_run is not None
+            or rebuild_embeddings
+            or rebuild_graph
+            or detail != "actionable"
+            or legacy_sample_limit != audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT
+            or collection is not None
+            or source_snapshot is not None
+        ):
+            raise ValueError(
+                "INVALID_ARGUMENTS: tag-variants accepts only apply, plan_id, and why"
+            )
+        if apply is None:
+            if plan_id is not None or why is not None:
+                raise ValueError(
+                    "INVALID_ARGUMENTS: tag-variants preview does not accept apply guards"
+                )
+            return tag_variants_module.preview(vault_root)
+        if apply is not True or plan_id is None or why is None:
+            raise ValueError(
+                "INVALID_ARGUMENTS: tag-variants apply requires true, plan_id, and why"
+            )
+        from . import due_state as due_state_module
+
+        with due_state_module.batch_scope(vault_root):
+            reconciled = tag_variants_module.apply(vault_root, plan_id=plan_id, why=why)
+        return _carrying_batch_advisories(vault_root, reconciled)
     if mode == "audit":
         return op_audit(
             vault_root,
@@ -9945,7 +9990,7 @@ def op_maintain_memory(
         return _carrying_batch_advisories(vault_root, report)
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
-        "backfill-ids, structured-files, or curation"
+        "backfill-ids, structured-files, curation, or tag-variants"
     )
 
 

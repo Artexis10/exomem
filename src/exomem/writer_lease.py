@@ -5834,7 +5834,7 @@ def invoke_command(
     active_surface = capabilities_module.current_active_surface()
     if (
         command.name == "maintain_memory"
-        and kwargs.get("mode") != "structured-files"
+        and kwargs.get("mode") not in {"structured-files", "tag-variants"}
         and not _profile_admits_request_bound_curation(active_surface, kwargs)
         and not read_only
         and selector_error is None
