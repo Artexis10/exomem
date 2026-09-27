@@ -137,3 +137,25 @@ output "control_db_pgbackrest_application_key" {
   value     = b2_application_key.control_db_pgbackrest.application_key
   sensitive = true
 }
+
+output "cloud_backup_bucket_name" {
+  value = one(b2_bucket.cloud_backups[*].bucket_name)
+}
+
+output "cloud_backup_bucket_id" {
+  value = one(b2_bucket.cloud_backups[*].bucket_id)
+}
+
+output "cloud_backup_account_id" {
+  value = one(b2_bucket.cloud_backups[*].account_id)
+}
+
+output "cloud_controller_application_key_id" {
+  value     = one(b2_application_key.cloud_controller[*].application_key_id)
+  sensitive = true
+}
+
+output "cloud_controller_application_key" {
+  value     = one(b2_application_key.cloud_controller[*].application_key)
+  sensitive = true
+}

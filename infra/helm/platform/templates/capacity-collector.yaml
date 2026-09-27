@@ -1,4 +1,5 @@
 {{- $runtimeImage := include "exomem.hostedRuntimeImage" . -}}
+{{- $legacyPaused := eq (include "exomem.legacyHostedPaused" .) "true" -}}
 {{- $contractRaw := .Files.Get "files/private-alpha-capacity-v1.json" -}}
 {{- if ne .Values.capacityCollector.contractSha256 ($contractRaw | sha256sum) -}}
 {{- fail "capacity collector contract SHA-256 mismatch" -}}
@@ -111,6 +112,7 @@ metadata:
     app.kubernetes.io/part-of: exomem-hosted-operations
 spec:
   schedule: {{ .Values.capacityCollector.schedule | quote }}
+  suspend: {{ $legacyPaused }}
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 30
   successfulJobsHistoryLimit: 1

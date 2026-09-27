@@ -95,6 +95,7 @@ metadata:
     exomem.io/contract-sha256: {{ $contractSha256 | quote }}
 spec:
   schedule: {{ $job.schedule | quote }}
+  suspend: {{ eq (include "exomem.legacyHostedPaused" $) "true" }}
   concurrencyPolicy: {{ $contract.kubernetesJobPolicy.concurrencyPolicy }}
   startingDeadlineSeconds: {{ $contract.kubernetesJobPolicy.startingDeadlineSeconds }}
   successfulJobsHistoryLimit: {{ $contract.kubernetesJobPolicy.successfulJobsHistoryLimit }}

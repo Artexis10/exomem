@@ -1,4 +1,7 @@
 {{- if .Values.cloudGateway.enabled }}
+{{- if and .Values.cloudDatabase.privateIp (not (has (printf "%s/32" .Values.cloudDatabase.privateIp) .Values.cloudGateway.databaseEgressCidrs)) }}
+{{- fail "cloudDatabase.privateIp/32 must be listed in cloudGateway.databaseEgressCidrs" }}
+{{- end }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -33,6 +36,12 @@ spec:
       serviceAccountName: exomem-cloud-gateway
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 30
+      {{- if .Values.cloudDatabase.hostname }}
+      hostAliases:
+        - ip: {{ .Values.cloudDatabase.privateIp | quote }}
+          hostnames:
+            - {{ .Values.cloudDatabase.hostname | quote }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
