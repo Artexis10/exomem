@@ -1,3 +1,4 @@
+{{- if ne (include "exomem.legacyHostedPaused" .) "true" }}
 {{- $provisionerImage := include "exomem.hostedProvisionerImage" . -}}
 apiVersion: batch/v1
 kind: Job
@@ -64,3 +65,4 @@ spec:
             runAsGroup: 10001
             capabilities:
               drop: [ALL]
+{{- end }}
