@@ -66,10 +66,14 @@ def test_every_workload_secret_binding_exists_in_the_handoff_matrix() -> None:
     contract = _document("durability-workloads-v1.json")
     matrix = _document("secret-destinations-v1.json")
     destinations = {
-        f"{destination['kubernetes_secret']}/{destination['key']}"
+        f"{destination['kubernetes_secret']}/{key}"
         for secret in matrix["secrets"].values()
         for destination in secret["destinations"].values()
         if destination["kind"] == "sops_k8s_secret"
+        for key_set in (
+            [[destination["key"]]] if "key" in destination else destination["key_sets"]
+        )
+        for key in key_set
     }
 
     assert set(contract["secretBindings"].values()) <= destinations

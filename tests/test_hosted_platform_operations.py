@@ -1646,7 +1646,21 @@ def test_active_secret_selection_is_complete_and_the_signer_publishes_a_verified
         for destination_id, destination in secret["destinations"].items()
         if destination.get("kind") == "sops_k8s_secret" and destination.get("slot") == "active"
     }
-    assert len(expected) == 34
+    assert len(expected) == 43
+    assert {name for name in expected if name.startswith("k3s.cloud.")} == {
+        f"k3s.cloud.{name}.active"
+        for name in (
+            "exomem-cellctl-database-dsn",
+            "exomem-cloud-gateway-database",
+            "exomem-cloud-gateway-control-plane-key",
+            "exomem-cloud-cell-token-key",
+            "exomem-cloud-backup-master-key",
+            "exomem-cloud-b2-key-management",
+            "exomem-cloud-hetzner-read-token",
+            "exomem-cloudflare-dns-token",
+            "exomem-cloud-volume-encryption",
+        )
+    }
     assert selection["schema_version"] == 1
     assert set(selection["destinations"]) == expected
     assert all(
@@ -1713,7 +1727,7 @@ def test_active_secret_selection_is_complete_and_the_signer_publishes_a_verified
                 trust_contract_path=trust_path,
             )
         )
-        == 34
+        == len(expected)
     )
 
 
@@ -2718,10 +2732,14 @@ def test_secret_matrix_materializes_every_hosted_platform_workload_secret() -> N
         (INFRA / "contracts/secret-destinations-v1.json").read_text(encoding="utf-8")
     )
     materialized = {
-        f"{destination['kubernetes_secret']}/{destination['key']}"
+        f"{destination['kubernetes_secret']}/{key}"
         for secret in matrix["secrets"].values()
         for destination in secret["destinations"].values()
         if destination["kind"] == "sops_k8s_secret"
+        for key_set in (
+            [[destination["key"]]] if "key" in destination else destination["key_sets"]
+        )
+        for key in key_set
     }
     required = {
         "exomem-provisioner-auth/credential",
@@ -2742,6 +2760,18 @@ def test_secret_matrix_materializes_every_hosted_platform_workload_secret() -> N
         "exomem-database-backup-upload-key/application-key",
         "exomem-database-backup-pg-service/pg_service.conf",
         "exomem-database-backup-pgpass/pgpass",
+        "exomem-cellctl-database-dsn/dsn",
+        "exomem-cloud-gateway-database/url",
+        "exomem-cloud-gateway-control-plane-key/key",
+        "exomem-cloud-cell-token-key/current",
+        "exomem-cloud-cell-token-key/currentVersion",
+        "exomem-cloud-backup-master-key/keys",
+        "exomem-cloud-backup-master-key/currentVersion",
+        "exomem-cloud-b2-key-management/keyId",
+        "exomem-cloud-b2-key-management/applicationKey",
+        "exomem-cloud-hetzner-read-token/token",
+        "exomem-cloudflare-dns-token/token",
+        "exomem-cloud-volume-encryption/encryption-passphrase",
     }
     assert required <= materialized
     assert "exomem-provider-recovery-volume-signer/private-key" not in materialized
