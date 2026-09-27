@@ -27,7 +27,7 @@ Collect these inputs without changing the named systems:
 | Personal clients | CLI profiles, desktop/web connectors and any other consumers; record which owner has verified each one |
 | Fleet and database | Node identity, private database address, direct PostgreSQL roles on 5432, cluster/pod/service CIDRs, current chart release and values |
 | Images | Released Cloud cell, cellctl and gateway repository digests, their source revisions, supported architecture and authenticated pull proof |
-| Backup account | Dedicated B2 account identity, private bucket name/ID, account-specific S3 endpoint and provider credential references |
+| Backup account | Existing business B2 account identity, dedicated Cloud bucket name/ID, account-specific S3 endpoint and separate provider/controller credential references |
 | Release evidence | Green full CI on the final main revision, release PR based on that revision, published image metadata and node acceptance still pending |
 
 An empty or placeholder value means **not ready**. A draft with Cloud enabled
@@ -35,20 +35,30 @@ flags set to false is an input worksheet, not an apply-ready platform release.
 
 ## Backup storage isolation
 
-The Cloud key manager needs account-wide key-management authority. Use the
-dedicated Cloud account; do not obtain it by broadening or copying credentials
-from the existing durability account. A bucket-restricted child key does not
-confine a parent that can create new keys.
+Use the existing business B2 account and a dedicated Cloud bucket. Give cellctl
+a separately named key-management credential; keep the provider/master
+credential in the operator's secret store. Tenant credentials are restricted to
+the Cloud bucket and `cells/<cell_id>/` and carry file operations only.
 
-Prepare separate Terraform provider credentials and state ownership before
-provisioning the bucket. The current `infra/terraform/durability` root owns the
-existing recovery/export/database/etcd storage and is not a ready-made Cloud
-account root. Replacing its provider credentials would target the wrong account.
+The controller is still an account-level trusted operator: B2 `writeKeys` can
+create unrestricted keys, and `deleteKeys` can delete other account keys. A
+bucket restriction on file operations does not confine these capabilities.
+Mount the parent credential only in cellctl; never in tenant runtime or backup
+pods. Record its exact capabilities, custody and revocation procedure without
+claiming that a separate key or bucket isolates a compromised controller.
+
+Prepare opt-in Cloud resources in `infra/terraform/durability`, using its
+existing provider account and HCP workspace. Verify that ownership before any
+plan. Do not migrate state, replace provider credentials, or change the existing
+recovery/export/database/etcd buckets or keys. Review an enabled plan for Cloud
+additions only; keep the default disabled and leave it unapplied during
+preparation.
+
 The Cloud bucket is private, has no Object Lock, and must not expire live restic
 packs by upload age. Restic manages retention; D10 removes every object version.
-Record the actual account's S3 endpoint rather than copying a different account's
-region. Before acceptance, prove one cell key cannot access another prefix and
-prove version-aware deletion and key absence in the dedicated test cell.
+Record the actual account's S3 endpoint. Before acceptance, prove one cell key
+cannot access another prefix or another product's bucket, and prove paginated,
+version-aware deletion and key absence in the dedicated test cell.
 
 ## Platform Secret inventory
 
@@ -63,7 +73,7 @@ Any override must agree with the chart and destination matrix.
 | `exomem-cloud-gateway-control-plane-key` | `key` | Match the authorized Substrate control-plane key |
 | `exomem-cloud-cell-token-key` | `current`, `currentVersion`; rotation adds both `previous`, `previousVersion` | Key is 32 random bytes encoded as 64 hex characters; both components read the same current entry |
 | `exomem-cloud-backup-master-key` | `keys`, `currentVersion` | `keys` is a JSON version-to-base64-key map; decoded keys are 32 bytes and contain the selected version |
-| `exomem-cloud-b2-key-management` | `keyId`, `applicationKey` | Dedicated Cloud account only; never mount this parent key in tenant runtime/backup pods |
+| `exomem-cloud-b2-key-management` | `keyId`, `applicationKey` | Separate controller credential in the existing account; account-wide key authority; never mount in tenant runtime/backup pods |
 | `exomem-cloud-hetzner-read-token` | `token` | Read-only provider authority for deletion observations |
 | `exomem-cloudflare-dns-token` | `token` | DNS-01 authority for the chosen zone; namespaced Issuer limits the requested hostname |
 | `exomem-cloud-volume-encryption` | `encryption-passphrase` | Separately escrowed Cloud volume key, not an instruction to rotate an existing volume key |

@@ -194,11 +194,14 @@ No candidate, lock, fixture or promotion artifact SHALL be required to release.
 
 ### Requirement: Each cell is backed up consistently, encrypted with its own key
 
-The controller's object-storage key-management credential SHALL belong to a
-dedicated Cloud backup account, separate from personal, legacy recovery,
-control-database and cluster snapshot storage accounts. A child key's bucket
-and prefix restrictions MUST NOT be treated as limiting its parent's
-key-management authority.
+Cloud backups SHALL use a dedicated private bucket in the existing business B2
+account. The controller SHALL receive a separately named key-management
+credential, never the provider/master credential. That parent credential MUST NOT
+be supplied to tenant runtime or backup pods. Tenant credentials SHALL be
+restricted to the Cloud bucket and their own cell prefix. The controller's
+key-management authority remains account-wide; bucket and prefix restrictions
+MUST NOT be presented as containing that parent authority. Existing products'
+buckets and credentials SHALL remain unchanged.
 
 cellctl SHALL back up each cell nightly and before every image change. The cell SHALL be stopped during the copy, so the copy is crash-consistent. A backup that misses its deadline SHALL restart the cell and record `BACKUP_FAILED`.
 
@@ -222,8 +225,9 @@ A restore into a new namespace SHALL produce a cell that answers recall, reports
 #### Scenario: Preparing the Cloud backup controller
 
 - **WHEN** an operator prepares the Cloud controller's key-management credential
-- **THEN** its account contains only Cloud backup storage
-- **AND** the existing durability account's key-management credential is not supplied to the controller
+- **THEN** the Cloud bucket and separately named controller credential belong to the existing business account
+- **AND** the provider/master credential is not supplied to the controller or tenant pods
+- **AND** the preparation records the controller's account-wide key-management authority and each tenant key's bucket/prefix restrictions
 
 #### Scenario: Restore drill
 

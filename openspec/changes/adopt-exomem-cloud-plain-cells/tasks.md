@@ -208,7 +208,7 @@
   - identify the personal service manager, interpreter, state root and locally managed tunnel configuration without modifying them;
   - record both MCP URLs and all personal connector clients, with read/write and reauthentication checks;
   - record canonical OAuth issuer/resource and endpoints; prepare fresh authorization and refresh acceptance independent of the hostname Cloud will take, including existing registration/session transition;
-  - prepare the configuration and inputs for a dedicated Cloud B2 account and private bucket with separate provider/state ownership; this task does not authorize provisioning or reuse of the existing durability account's key manager;
+  - prepare an opt-in private Cloud bucket and separately named controller key in the existing business B2 account and durability HCP workspace; record the parent key's account-wide authority and tenant bucket/prefix restrictions; keep provider/master credentials out of cellctl and leave provisioning unapplied;
   - prepare every required platform Secret destination in a private matrix draft; seal exact key sets and verify recovery custody without activating them; publish the reconciled matrix, selection, ciphertext and signed registry together rather than invalidating the active registry with a matrix-only change;
   - resolve published image digests from the final reviewed release and render the complete platform change against captured live values;
   - prepare original DNS/tunnel snapshots, Terraform ownership reconciliation and phase-specific rollback;
