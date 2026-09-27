@@ -5,7 +5,8 @@
 holding any everyday word was read and scored, and the corroboration test ran
 over every one of them. The stage now keeps at most
 `ACTIVATION_LEXICAL_MAX_TERMS` query units, chosen by how rare each is in the
-catalogue, and reads a capped candidate window ranked inside SQL.
+knowledge base, carrying at most `ACTIVATION_LEXICAL_MAX_STEMS` stems; ranking
+and corroboration then read every row those units match.
 
 Invented, generic vocabulary throughout.
 """
@@ -474,38 +475,3 @@ def test_replacing_the_live_catalogue_forgets_its_term_frequencies(
 
     assert store._term_frequency_cache is None
 
-
-def test_without_a_vocabulary_view_the_stage_is_still_bounded(
-    long_turn_vault: Path, statements: list[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An SQLite build that cannot create the `fts5vocab` view degrades to a
-    count-only bound; the lane never turns unavailable because of it."""
-    original = lexstore.LexicalStore._connect
-
-    class _NoVocabulary:
-        def __init__(self, conn):
-            self._conn = conn
-
-        def execute(self, sql, *args):
-            if "fts5vocab" in sql:
-                raise lexstore.sqlite3.OperationalError("no such module: fts5vocab")
-            return self._conn.execute(sql, *args)
-
-        def __getattr__(self, name):
-            return getattr(self._conn, name)
-
-    monkeypatch.setattr(
-        lexstore.LexicalStore,
-        "_connect",
-        lambda self, *a, **k: _NoVocabulary(original(self, *a, **k)),
-    )
-    monkeypatch.setattr(lexstore.get_store(long_turn_vault), "_term_frequency_cache", None)
-    rng = random.Random(14)
-    turn = _long_turn(rng, 400, "kelvane", "throughput")
-
-    hits, state = working_set_runtime.lexical_evidence(
-        long_turn_vault, turn, _rows(long_turn_vault), limit=8
-    )
-
-    assert state == "available"
-    assert isinstance(hits, list)
