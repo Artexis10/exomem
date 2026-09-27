@@ -99,12 +99,14 @@
 - [ ] 3.9 Add platform chart entries:
   - cellctl, single replica, `Recreate`, with the RBAC in D4 and the `ValidatingAdmissionPolicy` on its ServiceAccount (cell namespaces only, restricted labels, digest-pinned images from the cell repository);
   - the gateway Deployment and Service consuming the Substrate gateway image digest, rendering exactly the gateway's environment contract (C3), with a chart test pinning that set;
+  - optional paired `cloudDatabase.hostname` / `privateIp` values resolving the certificate hostname privately in only the gateway and cellctl pods, with matching database egress `/32`s; reject partial or invalid mappings, preserve default resolution and tenant admission, and verify both image clients' TLS hostname and trust checks before sealing role DSNs;
   - the cellctl image, built from `infra/cellctl/Dockerfile` (digest-pinned base, non-root, read-only root filesystem) and published to GHCR by digest on the same release trigger as the `cloud` image, which the chart consumes by digest;
   - the `exomem-cloud-encrypted` StorageClass;
   - Traefik `websecure` on hostPort 443 only, with no `trustedIPs`;
   - a NetworkPolicy admitting gateway ingress only from the Traefik pods;
   - cert-manager with a Cloudflare DNS-01 issuer and the gateway certificate and IngressRoute, whose middleware sets the gateway's trusted-ingress source header;
   - SOPS-sourced Secrets.
+  - preserve the legacy stop through Helm upgrades: either enabled Cloud control workload or `legacyHosted.paused: true` renders zero old gateway/provisioner/volume-worker replicas and suspends every legacy CronJob; an explicit pause survives disabling Cloud, while hosted-only defaults remain unchanged;
   - Extend the existing SOPS handoff, ciphertext validation and apply path to accept complete, exact-key-set Cloud platform Secret bundles while retaining scalar destinations; test bundle rotation shapes and reject incomplete, malformed or plaintext artifacts before publication or apply.
 - [ ] 3.10 Integration test on disposable K3s:
   - create, then pod kill with a governed write after it;
@@ -206,7 +208,7 @@
   - identify the personal service manager, interpreter, state root and locally managed tunnel configuration without modifying them;
   - record both MCP URLs and all personal connector clients, with read/write and reauthentication checks;
   - record canonical OAuth issuer/resource and endpoints; prepare fresh authorization and refresh acceptance independent of the hostname Cloud will take, including existing registration/session transition;
-  - prepare the configuration and inputs for a dedicated Cloud B2 account and private bucket with separate provider/state ownership; this task does not authorize provisioning or reuse of the existing durability account's key manager;
+  - prepare an opt-in private Cloud bucket and separately named controller key in the existing business B2 account and durability HCP workspace; record the parent key's account-wide authority and tenant bucket/prefix restrictions; keep provider/master credentials out of cellctl and leave provisioning unapplied;
   - prepare every required platform Secret destination in a private matrix draft; seal exact key sets and verify recovery custody without activating them; publish the reconciled matrix, selection, ciphertext and signed registry together rather than invalidating the active registry with a matrix-only change;
   - resolve published image digests from the final reviewed release and render the complete platform change against captured live values;
   - prepare original DNS/tunnel snapshots, Terraform ownership reconciliation and phase-specific rollback;

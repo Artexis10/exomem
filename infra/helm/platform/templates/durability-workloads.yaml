@@ -2,6 +2,7 @@
 {{- $lockName := include "exomem.hostedDeploymentLockName" . -}}
 {{- $lockFile := include "exomem.hostedDeploymentLockFileName" . -}}
 {{- $runtimeSelection := include "exomem.hostedRuntimeSelection" . -}}
+{{- $legacyPaused := eq (include "exomem.legacyHostedPaused" .) "true" -}}
 {{- $workloadsRaw := .Files.Get "files/durability-workloads-v1.json" -}}
 {{- $storageRaw := .Files.Get "files/durability-storage-v1.json" -}}
 {{- if ne .Values.durability.contractSha256 ($workloadsRaw | sha256sum) -}}
@@ -297,6 +298,7 @@ metadata:
     app.kubernetes.io/part-of: exomem-hosted-durability
 spec:
   schedule: {{ $actions.schedule | quote }}
+  suspend: {{ $legacyPaused }}
   concurrencyPolicy: {{ $actions.concurrencyPolicy }}
   startingDeadlineSeconds: {{ $actions.startingDeadlineSeconds }}
   successfulJobsHistoryLimit: 1
@@ -450,6 +452,7 @@ metadata:
     app.kubernetes.io/part-of: exomem-hosted-durability
 spec:
   schedule: {{ $delivery.schedule | quote }}
+  suspend: {{ $legacyPaused }}
   concurrencyPolicy: {{ $delivery.concurrencyPolicy }}
   startingDeadlineSeconds: {{ $delivery.startingDeadlineSeconds }}
   successfulJobsHistoryLimit: 1
@@ -532,6 +535,7 @@ metadata:
     app.kubernetes.io/part-of: exomem-hosted-durability
 spec:
   schedule: {{ $backup.schedule | quote }}
+  suspend: {{ $legacyPaused }}
   concurrencyPolicy: {{ $backup.concurrencyPolicy }}
   startingDeadlineSeconds: {{ $backup.startingDeadlineSeconds }}
   successfulJobsHistoryLimit: 1
@@ -638,6 +642,7 @@ metadata:
     app.kubernetes.io/part-of: exomem-hosted-durability
 spec:
   schedule: {{ $database.schedule | quote }}
+  suspend: {{ $legacyPaused }}
   concurrencyPolicy: {{ $database.concurrencyPolicy }}
   startingDeadlineSeconds: {{ $database.startingDeadlineSeconds }}
   successfulJobsHistoryLimit: 1
@@ -881,6 +886,7 @@ metadata:
     app.kubernetes.io/part-of: exomem-hosted-durability
 spec:
   schedule: {{ $dispatcher.schedule | quote }}
+  suspend: {{ $legacyPaused }}
   concurrencyPolicy: {{ $dispatcher.concurrencyPolicy }}
   startingDeadlineSeconds: {{ $dispatcher.startingDeadlineSeconds }}
   successfulJobsHistoryLimit: 1
@@ -952,7 +958,7 @@ metadata:
     app.kubernetes.io/name: exomem-volume-worker
     app.kubernetes.io/part-of: exomem-hosted-durability
 spec:
-  replicas: {{ $volume.replicas }}
+  replicas: {{ ternary 0 $volume.replicas $legacyPaused }}
   strategy: {type: Recreate}
   selector:
     matchLabels: {app.kubernetes.io/name: exomem-volume-worker}

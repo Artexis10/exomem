@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: e84d8457b6d9dbc65ee164669d92981572b01711297f1e9838c7766054745b56
+  skill_contract: 5bdf68efb930b717b18a263d1feb1fc084cef10f0f3cc87523c5752a304b3239
   version: "0.32.0"
 ---
 
@@ -114,7 +114,10 @@ conversation's decision or stopping point, record one bounded recap with
 
 At `balanced` or `maximal`:
 
-Call `activate_context` with the user's turn verbatim before answering a substantive turn that has no prior context; resolve an `ambiguous` packet by calling again with `anchor` set. When the user corrects which page they meant, call again with `anchor` set to it; a `learning` advisory on that packet is handled in [engagement](references/engagement.md).
+Call `activate_context` with the user's turn verbatim before answering a substantive turn that has no prior context; resolve an `ambiguous` packet by calling again with `anchor` set.
+
+When the user corrects which page they meant, call again with `anchor` set to it;
+a `learning` advisory on that packet is handled in [engagement](references/engagement.md).
 
 What comes back is bounded working memory, or an abstention with its reason; an
 `ambiguous` packet names the competing senses and runs no lane, so choosing one

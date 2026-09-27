@@ -1,11 +1,5 @@
 """Real B2 native-API client: application-key management and object-version
 bookkeeping only. The backup data path itself is restic, inside the Job.
-
-KNOWN LIMITATION: list_object_versions reads a single page (up to
-`page_size` versions). A cell's backup prefix is small (7 daily + 4 weekly
-restic snapshots' worth of pack files), so this is expected to be enough in
-practice, but D10 deletion should loop on `nextFileName`/`nextFileId` before
-this is trusted at scale. Flagged rather than silently accepted.
 """
 
 from __future__ import annotations
@@ -98,18 +92,46 @@ class B2ObjectStorage:
         return not any(entry["applicationKeyId"] == key_id for entry in keys)
 
     def list_object_versions(self, prefix: str) -> list[ObjectVersion]:
-        payload = self._post(
-            "b2_list_file_versions",
-            {
-                "bucketId": self._config.bucket_id,
-                "prefix": prefix,
-                "maxFileCount": self._config.page_size,
-            },
-        )
-        return [
-            ObjectVersion(key=entry["fileName"], version_id=entry["fileId"])
-            for entry in payload.get("files", [])
-        ]
+        request = {
+            "bucketId": self._config.bucket_id,
+            "prefix": prefix,
+            "maxFileCount": self._config.page_size,
+        }
+        versions: list[ObjectVersion] = []
+        seen_cursors: set[tuple[str, str]] = set()
+        while True:
+            payload = self._post("b2_list_file_versions", request)
+            if not isinstance(payload, dict) or not isinstance(payload.get("files"), list):
+                raise ValueError("malformed B2 file version page")
+            for entry in payload["files"]:
+                if (
+                    not isinstance(entry, dict)
+                    or not isinstance(entry.get("fileName"), str)
+                    or not entry["fileName"].startswith(prefix)
+                    or not isinstance(entry.get("fileId"), str)
+                    or not entry["fileId"]
+                ):
+                    raise ValueError("malformed B2 file version entry")
+                versions.append(ObjectVersion(key=entry["fileName"], version_id=entry["fileId"]))
+
+            if "nextFileName" not in payload or "nextFileId" not in payload:
+                raise ValueError("missing B2 file version cursor")
+            next_name, next_id = payload["nextFileName"], payload["nextFileId"]
+            if next_name is None and next_id is None:
+                return versions
+            if (
+                not isinstance(next_name, str)
+                or not next_name
+                or not isinstance(next_id, str)
+                or not next_id
+                or not payload["files"]
+            ):
+                raise ValueError("malformed B2 file version cursor")
+            cursor = (next_name, next_id)
+            if cursor in seen_cursors:
+                raise ValueError("repeated B2 file version cursor")
+            seen_cursors.add(cursor)
+            request["startFileName"], request["startFileId"] = cursor
 
     def delete_object_version(self, version: ObjectVersion) -> None:
         self._post(
