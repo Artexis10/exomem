@@ -195,6 +195,7 @@ traefik:
 cloudDatabase:
   # Keep the certificate hostname in both DSNs while routing it privately.
   hostname: ""
+  # RFC1918 IPv4 address of the private PostgreSQL listener.
   privateIp: ""
 
 cellctl:

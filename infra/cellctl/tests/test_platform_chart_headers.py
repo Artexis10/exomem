@@ -185,6 +185,38 @@ def test_cloud_database_rejects_malformed_hostname_and_private_ip() -> None:
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+@pytest.mark.parametrize("address", ["8.8.8.8", "127.0.0.1", "169.254.1.1", "224.0.0.1", "100.64.0.1", "172.32.0.1"])
+def test_cloud_database_rejects_non_private_routes_even_with_matching_egress(address: str) -> None:
+    result = _helm_template_result(
+        *PRIVATE_DB_ARGS,
+        "--set-string", f"cloudDatabase.privateIp={address}",
+        "--set-string", f"cellctl.databaseEgressCidrs[0]={address}/32",
+        "--set-string", f"cloudGateway.databaseEgressCidrs[0]={address}/32",
+    )
+    assert result.returncode != 0, address
+    assert "cloudDatabase" in result.stderr, result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cloud_database_certificate_hostname_cannot_be_an_ip_literal() -> None:
+    result = _helm_template_result(*PRIVATE_DB_ARGS, "--set-string", "cloudDatabase.hostname=10.0.1.5")
+    assert result.returncode != 0
+    assert "cloudDatabase" in result.stderr, result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+@pytest.mark.parametrize("address", ["10.50.1.20", "172.16.0.1", "172.31.255.254", "192.168.1.5"])
+def test_cloud_database_accepts_rfc1918_routes(address: str) -> None:
+    result = _helm_template_result(
+        *PRIVATE_DB_ARGS,
+        "--set-string", f"cloudDatabase.privateIp={address}",
+        "--set-string", f"cellctl.databaseEgressCidrs[0]={address}/32",
+        "--set-string", f"cloudGateway.databaseEgressCidrs[0]={address}/32",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_private_database_ip_must_match_each_enabled_workloads_egress_policy() -> None:
     for missing, allowed in (("cellctl", "cloudGateway"), ("cloudGateway", "cellctl")):
         result = _helm_template_result(
