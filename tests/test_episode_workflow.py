@@ -1,4 +1,4 @@
-"""`episode_workflow`: typed candidate operations over existing curation leaves.
+"""`episode_memory` candidates: typed operations over existing curation leaves.
 
 Contract: openspec/changes/close-memory-loop tasks 3.3, 3.5, 3.6 and 3.7, with
 the live-enablement gate of task 5.5. A candidate names a typed destination for
@@ -22,7 +22,6 @@ from exomem import schema as schema_module
 from exomem.__main__ import main as cli_main
 from exomem.episode_store import EpisodeStore
 from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
-from exomem.vault import content_hash
 
 KEY = "ep-" + "5e" * 16
 ENTITY = "Knowledge Base/Entities/Organizations/Marsh Dyeworks.md"
@@ -48,7 +47,9 @@ def _record(vault: Path, **overrides: object) -> dict:
 
 
 def _workflow(vault: Path, **kwargs: object) -> dict:
-    return commands.op_episode_workflow(vault, episode=KEY, **kwargs)
+    return commands.op_episode_memory(
+        vault, schema_module.load_source_schema(vault), episode=KEY, **kwargs
+    )
 
 
 def _note_leaf(slug: str, sentence: str, *, key: str = "write", revision: int = 1, **extra) -> dict:
@@ -127,18 +128,22 @@ def _leaf_ids(inspected: dict, key: str) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
-def test_the_command_is_generated_onto_mcp_cli_and_rest() -> None:
+def test_the_operations_are_actions_of_the_generated_episode_command() -> None:
     product = {command.name: command for command in commands.PRODUCT_COMMANDS}
-    command = product["episode_workflow"]
+    command = product["episode_memory"]
 
     assert command.surfaces >= {"mcp", "rest", "cli"}
-    assert command.leaf is commands.op_episode_workflow
-    assert commands.invocation_is_read_only(command, {"action": "inspect"}) is True
-    for action in ("prepare", "disposition", "resume"):
+    assert command.leaf is commands.op_episode_memory
+    for action in ("inspect", "candidates"):
+        assert commands.invocation_is_read_only(command, {"action": action}) is True
+    for action in ("record", "prepare", "disposition", "resume"):
         assert commands.invocation_is_read_only(command, {"action": action}) is False
-    assert "episode_workflow" in commands.HOSTED_SURFACE_EXCLUSIONS
+    params = {param.name for param in command.params}
+    assert {"candidate", "proposal", "disposition", "reason", "input_revision"} <= params
+    # Hosted exposes none of it.
+    assert "episode_memory" in commands.HOSTED_SURFACE_EXCLUSIONS
     for profile in commands.PRODUCT_SURFACE_PROFILES.values():
-        assert "episode_workflow" not in profile.command_names
+        assert "episode_memory" not in profile.command_names
 
 
 def test_execution_is_off_unless_the_service_enables_it(monkeypatch) -> None:
@@ -182,7 +187,7 @@ def test_prepare_disposition_and_inspect_share_the_curation_leaf(
         disposition="routed",
         reason="The named thesis is independently useful.",
     )
-    inspected = _workflow(vault, action="inspect")
+    inspected = _workflow(vault, action="candidates")
 
     assert _candidate(disposed, "indigo-thesis")["disposition"] == "routed"
     assert _candidate(inspected, "indigo-thesis") == _candidate(disposed, "indigo-thesis")
@@ -227,9 +232,7 @@ def test_a_proposal_with_unknown_fields_is_refused(vault: Path, owner) -> None:
         _workflow(vault, action="prepare", candidate="a", proposal=proposal)
 
 
-def test_resume_is_refused_while_disabled_and_writes_nothing(
-    vault: Path, owner, disabled
-) -> None:
+def test_resume_is_refused_while_disabled_and_writes_nothing(vault: Path, owner, disabled) -> None:
     _record(vault)
     _workflow(
         vault,
@@ -258,7 +261,7 @@ def test_workflow_needs_a_recorded_episode_of_this_audience(vault: Path, enabled
         _record(vault)
     with request_scope(RequestPrincipal(audience_id="client-b", surface="mcp")):
         for action, extra in (
-            ("inspect", {}),
+            ("candidates", {}),
             ("resume", {"input_revision": 1}),
             ("disposition", {"candidate": "c", "disposition": "no_capture", "reason": "r"}),
         ):
@@ -278,12 +281,16 @@ def test_an_unresolved_principal_fails_before_anything_is_written(vault: Path, e
 
 def test_arguments_of_another_action_are_refused(vault: Path, owner) -> None:
     _record(vault)
-    with pytest.raises(ValueError, match="EPISODE_WORKFLOW_INVALID"):
-        _workflow(vault, action="inspect", candidate="smuggled")
-    with pytest.raises(ValueError, match="EPISODE_WORKFLOW_INVALID"):
+    with pytest.raises(ValueError, match="EPISODE_INVALID"):
+        _workflow(vault, action="candidates", candidate="smuggled")
+    with pytest.raises(ValueError, match="EPISODE_INVALID"):
         _workflow(vault, action="disposition", candidate="c", disposition="routed")
-    with pytest.raises(ValueError, match="EPISODE_WORKFLOW_INVALID"):
+    with pytest.raises(ValueError, match="EPISODE_INVALID"):
         _workflow(vault, action="resume")
+    with pytest.raises(ValueError, match="EPISODE_INVALID"):
+        _workflow(vault, action="record", subject="s", summary="s", proposal={"route": "x"})
+    with pytest.raises(ValueError, match="EPISODE_INVALID"):
+        _workflow(vault, action="inspect", candidate="smuggled")
 
 
 # --------------------------------------------------------------------------- #
@@ -307,7 +314,7 @@ def test_three_doors_reach_one_leaf_and_refuse_untyped_fields(
         _record(vault)
     client = _rest_client(monkeypatch)
     rest = client.post(
-        "/api/episode_workflow",
+        "/api/episode_memory",
         json={"action": "resume", "episode": KEY, "input_revision": 1},
         headers={"Authorization": "Bearer sekret"},
     )
@@ -315,8 +322,8 @@ def test_three_doors_reach_one_leaf_and_refuse_untyped_fields(
     assert rest.json()["data"]["code"] == "episode_workflow_disabled"
     for field in ("effects", "payload", "command"):
         response = client.post(
-            "/api/episode_workflow",
-            json={"action": "inspect", "episode": KEY, field: ["anything"]},
+            "/api/episode_memory",
+            json={"action": "candidates", "episode": KEY, field: ["anything"]},
             headers={"Authorization": "Bearer sekret"},
         )
         assert response.status_code >= 400, response.text
@@ -326,14 +333,14 @@ def test_three_doors_reach_one_leaf_and_refuse_untyped_fields(
     with request_scope(owner_principal(surface="mcp")):
         called = asyncio.run(
             mcp.call_tool(
-                "episode_workflow", {"action": "inspect", "episode": KEY}, run_middleware=False
+                "episode_memory", {"action": "candidates", "episode": KEY}, run_middleware=False
             )
         )
         with pytest.raises(Exception):  # noqa: B017 - the MCP schema refuses the field
             asyncio.run(
                 mcp.call_tool(
-                    "episode_workflow",
-                    {"action": "inspect", "episode": KEY, "effects": ["x"]},
+                    "episode_memory",
+                    {"action": "candidates", "episode": KEY, "effects": ["x"]},
                     run_middleware=False,
                 )
             )
@@ -345,14 +352,30 @@ def test_three_doors_reach_one_leaf_and_refuse_untyped_fields(
     assert mcp_result["episode"] == KEY
 
     try:
-        code = cli_main(
-            ["episode_workflow", "--action", "inspect", "--episode", KEY, "--json"]
-        )
+        code = cli_main(["episode_memory", "--action", "candidates", "--episode", KEY, "--json"])
     except SystemExit as exc:
         code = exc.code if isinstance(exc.code, int) else 1
     out = capsys.readouterr().out
     assert code == 0, out
     assert json.loads(out)["data"]["episode"] == KEY
+
+
+def test_an_enabled_resume_reports_its_receipts_through_the_rest_door(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, enabled
+) -> None:
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    with request_scope(owner_principal(surface="mcp")):
+        _record(vault)
+        _three_notes(vault)
+    client = _rest_client(monkeypatch)
+    response = client.post(
+        "/api/episode_memory",
+        json={"action": "resume", "episode": KEY, "input_revision": 1, "max_leaves": 1},
+        headers={"Authorization": "Bearer sekret"},
+    )
+    assert response.status_code == 200, response.text
+    body = json.dumps(response.json())
+    assert '"executed"' in body and '"deferred": 2' in body, body[:2000]
 
 
 # --------------------------------------------------------------------------- #
@@ -391,7 +414,6 @@ def _seed_entity(vault: Path) -> str:
 
 
 def _prepare_slice(vault: Path, recap_ref: str) -> None:
-    entity_text = (vault / ENTITY).read_text(encoding="utf-8")
     # A focused claim that cites the recap Source as its provenance.
     _workflow(
         vault,
@@ -400,41 +422,23 @@ def _prepare_slice(vault: Path, recap_ref: str) -> None:
         proposal=_proposal(
             "focused_note",
             [
-                _note_leaf(
-                    "indigo-vat-thesis",
-                    "The loom trial keeps indigo vats in a stable warm bath.",
-                    sources=[recap_ref],
-                )
-            ],
-            title="Indigo vat thesis",
-        ),
-    )
-    # Hydrate the existing entity rather than create a second one.
-    _workflow(
-        vault,
-        action="prepare",
-        candidate="supplier-facet",
-        proposal=_proposal(
-            "entity",
-            [
                 {
-                    "leaf_key": "hydrate",
+                    "leaf_key": "write",
                     "effect_revision": 1,
-                    "kind": "edit",
+                    "kind": "create-note",
                     "args": {
-                        "path": ENTITY,
-                        "why": "Hydrate the supplier with the episode's decision.",
-                        "operation": {
-                            "kind": "edit_section",
-                            "heading": "Summary",
-                            "new_string": "Chosen indigo source for the loom trial.",
-                            "section_position": "append",
-                            "expected_hash": content_hash(entity_text),
-                        },
+                        "title": "Indigo vat thesis",
+                        "slug": "indigo-vat-thesis",
+                        "sources": [recap_ref],
+                        "content": (
+                            "## Observations\n\n- [finding] The loom trial keeps indigo"
+                            " vats in a stable warm bath. ^indigo-vat-thesis\n\n"
+                            f"## Relations\n\nSee [[{ENTITY.removesuffix('.md')}]].\n"
+                        ),
                     },
                 }
             ],
-            target=ENTITY,
+            title="Indigo vat thesis",
         ),
     )
     # A new entity the episode introduced.
@@ -474,12 +478,68 @@ def _prepare_slice(vault: Path, recap_ref: str) -> None:
     )
     for key, value, reason in (
         ("indigo-thesis", "routed", "A distinct future question about vat practice."),
-        ("supplier-facet", "routed", "The decision belongs on the supplier's own page."),
         ("kiln-cooperative", "routed", "A stable organization the trial depends on."),
         ("vat-temperature-log", "deferred", "Records execution is not integrated yet."),
         ("kiln-booking", "no_capture", "Only a possibility was mentioned, not intent."),
     ):
         _workflow(vault, action="disposition", candidate=key, disposition=value, reason=reason)
+
+
+def _link_supplier(vault: Path) -> dict:
+    """Hydrate the existing supplier by an accepted relation, not a second page."""
+    from exomem import deferred_index, epistemic_graph, find, index_sync, semantic_contract
+
+    note = "Knowledge Base/Notes/Insights/indigo-vat-thesis.md"
+    # Publish the writers' derived state the way the service does: the graph,
+    # its drained work queue and the reference-identity snapshot that pages
+    # carrying an `exomem_id` are resolved through.
+    find.clear_cache()
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    for _ in range(12):
+        if not deferred_index.list_graph_paths(vault):
+            break
+        index_sync.drain_graph_work(vault, limit=64)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+        semantic_contract.build_corpus_context(vault)
+        review = commands.op_review_memory(vault, mode="relation-queue")
+    item = next(
+        item
+        for group in review["groups"]
+        for item in group["items"]
+        if item["from"] == note and item["to"] == ENTITY
+    )
+    expected_hash = next(g["content_hash"] for g in review["groups"] if g["path"] == note)
+    _workflow(
+        vault,
+        action="prepare",
+        candidate="supplier-link",
+        proposal=_proposal(
+            "relation_only",
+            [
+                {
+                    "leaf_key": "accept",
+                    "effect_revision": 1,
+                    "kind": "accept-relation",
+                    "args": {
+                        "ref": item["ref"],
+                        "expected_hash": expected_hash,
+                        "why": "The thesis names the supplier it depends on.",
+                        "expected_fingerprint": item["fingerprint"],
+                    },
+                }
+            ],
+            target=ENTITY,
+        ),
+    )
+    _workflow(
+        vault,
+        action="disposition",
+        candidate="supplier-link",
+        disposition="routed",
+        reason="A truthful typed relation to the existing supplier.",
+    )
+    return _workflow(vault, action="resume", input_revision=1)
 
 
 def test_synthetic_slice_runs_through_existing_writers_with_nothing_unexpressed(
@@ -521,33 +581,29 @@ def test_synthetic_slice_runs_through_existing_writers_with_nothing_unexpressed(
 
     resumed = _workflow(vault, action="resume", input_revision=1)
 
-    assert resumed["status"] == "ok"
-    assert len(resumed["executed"]) == 3 and resumed["blocked"] == []
+    assert resumed["status"] == "ok", resumed["blocked"]
+    assert len(resumed["executed"]) == 2 and resumed["blocked"] == []
     assert resumed["publication"] == "pending"
     after = _canonical_files(vault)
     note = "Knowledge Base/Notes/Insights/indigo-vat-thesis.md"
     kiln = "Knowledge Base/Entities/Organizations/Ember Kiln Cooperative.md"
-    # Exactly the expressed effects: one created note, one created entity, one
-    # hydrated entity. No Planning or Records page appears.
+    # Exactly the expressed effects: one created note and one created entity.
+    # No Planning or Records page appears and nothing else changes.
     assert set(after) - set(before) == {note, kiln}
-    assert {path for path in before if before[path] != after.get(path)} == {ENTITY}
-    assert not any("/Planning/" in path or "/Records/" in path for path in set(after) - set(before))
+    # Besides them, only the writers' own system-managed bookkeeping moves:
+    # the navigation index and log, and the cited recap's `ingested_into`
+    # back-reference. The recap's body stays byte-identical.
+    recap_path = recap["source"]["path"]
+    changed = {path for path in before if before[path] != after.get(path)}
+    assert changed == {recap_path, "Knowledge Base/index.md", "Knowledge Base/log.md"}
+    recap_before = before[recap_path].decode().partition("\n---\n")
+    recap_after = after[recap_path].decode().partition("\n---\n")
+    assert recap_after[2] == recap_before[2]
+    assert recap_before[0].replace("ingested_into: []", "") == recap_after[0].replace(
+        f'ingested_into: ["[[{note.removesuffix(".md")}]]"]', ""
+    )
 
-    # Canonical readback through the ordinary read path.
-    read = commands.op_read_memory(vault, path=note)
-    assert "stable warm bath" in json.dumps(read)
-    hydrated = (vault / ENTITY).read_text(encoding="utf-8")
-    assert "Chosen indigo source for the loom trial." in hydrated
-    assert len(list((vault / ENTITY).parent.glob("Marsh Dyeworks*.md"))) == 1
-
-    # Source/claim: the recap stays a raw episode Source; the claim cites it.
-    recap_page = (vault / recap["source"]["path"]).read_text(encoding="utf-8")
-    assert "type: source" in recap_page and "source_type: episode" in recap_page
-    claim = (vault / note).read_text(encoding="utf-8")
-    assert "type: insight" in claim
-    assert recap["source"]["path"].removesuffix(".md") in claim
-
-    inspected = _workflow(vault, action="inspect")
+    inspected = _workflow(vault, action="candidates")
     assert _candidate(inspected, "vat-temperature-log")["disposition"] == "deferred"
     assert _candidate(inspected, "kiln-booking")["disposition"] == "no_capture"
     assert inspected["complete"] is False
@@ -561,6 +617,33 @@ def test_synthetic_slice_runs_through_existing_writers_with_nothing_unexpressed(
     assert attested["executed"] == []
     assert attested["reviewed_through_input_revision"] == 1
     assert attested["complete"] is False
+
+    # The second pass hydrates the existing supplier through the relation
+    # writer: the note gains a typed edge, and no second supplier page exists.
+    note_before = (vault / note).read_bytes()
+    linked = _link_supplier(vault)
+    assert [item["path"] for item in linked["executed"]] == [note]
+    relinked = _canonical_files(vault)
+    assert {path for path in after if after[path] != relinked.get(path)} <= {
+        note,
+        "Knowledge Base/log.md",
+        "Knowledge Base/index.md",
+    }
+    assert set(relinked) == set(after)
+    assert "## Relations" in (vault / note).read_text(encoding="utf-8")
+    assert (vault / note).read_bytes() != note_before
+    assert len(list((vault / ENTITY).parent.glob("Marsh Dyeworks*.md"))) == 1
+
+    # Canonical readback through the ordinary read path.
+    read = commands.op_read_memory(vault, path=note)
+    assert "stable warm bath" in json.dumps(read, default=str)
+
+    # Source/claim: the recap stays a raw episode Source; the claim cites it.
+    recap_page = (vault / recap["source"]["path"]).read_text(encoding="utf-8")
+    assert "type: source" in recap_page and "source_type: episode" in recap_page
+    claim = (vault / note).read_text(encoding="utf-8")
+    assert "type: insight" in claim
+    assert recap["source"]["path"].removesuffix(".md") in claim
 
 
 # --------------------------------------------------------------------------- #
@@ -577,9 +660,7 @@ def _fresh_session_index(vault: Path) -> None:
     working_set_index.WorkingSetIndex(vault).rebuild()
 
 
-def test_a_fresh_session_activates_bounded_provenance_bearing_context(
-    vault: Path, enabled
-) -> None:
+def test_a_fresh_session_activates_bounded_provenance_bearing_context(vault: Path, enabled) -> None:
     with request_scope(owner_principal(surface="mcp")):
         _seed_entity(vault)
         recap = _record(vault)
@@ -620,23 +701,26 @@ def test_a_shared_name_with_two_owners_is_not_resolved_to_either(vault: Path, en
                         "effect_revision": 1,
                         "kind": "create-entity",
                         "args": {
-                            "entity_type": "location",
-                            "name": "Marsh Dyeworks Yard",
-                            "summary": "The riverside yard also called Marsh Dyeworks.",
+                            "entity_type": "person",
+                            "name": "Marsh Dyeworks Keeper",
+                            "summary": "The yard keeper also called Marsh Dyeworks.",
                         },
                     }
                 ],
-                title="Marsh Dyeworks Yard",
+                title="Marsh Dyeworks Keeper",
             ),
         )
         _workflow(
             vault, action="disposition", candidate="harbor-site", disposition="routed", reason="r"
         )
-        _workflow(vault, action="resume", input_revision=1)
-        # The yard shares the supplier's name as an alias: two owners.
-        yard = vault / "Knowledge Base/Entities/Locations/Marsh Dyeworks Yard.md"
-        text = yard.read_text(encoding="utf-8")
-        yard.write_text(text.replace("type: entity\n", "type: entity\naliases: [Marsh Dyeworks]\n", 1), encoding="utf-8")
+        resumed = _workflow(vault, action="resume", input_revision=1)
+        # The keeper shares the supplier's name as an alias: two owners.
+        keeper = vault / resumed["executed"][0]["path"]
+        text = keeper.read_text(encoding="utf-8")
+        keeper.write_text(
+            text.replace("type: entity\n", "type: entity\naliases: [Marsh Dyeworks]\n", 1),
+            encoding="utf-8",
+        )
     _fresh_session_index(vault)
 
     with request_scope(owner_principal(surface="mcp")):
@@ -677,7 +761,11 @@ def test_an_unready_index_says_warming_instead_of_claiming_currentness(
 
 
 def _three_notes(vault: Path) -> None:
-    for key, slug in (("alpha", "alpha-dye-note"), ("beta", "beta-dye-note"), ("gamma", "gamma-dye-note")):
+    for key, slug in (
+        ("alpha", "alpha-dye-note"),
+        ("beta", "beta-dye-note"),
+        ("gamma", "gamma-dye-note"),
+    ):
         _workflow(
             vault,
             action="prepare",
@@ -694,7 +782,7 @@ def test_interrupt_reorder_and_resume_reuses_the_original_receipt(
 ) -> None:
     _record(vault)
     _three_notes(vault)
-    inspected = _workflow(vault, action="inspect")
+    inspected = _workflow(vault, action="candidates")
     alpha, beta, gamma = (_leaf_ids(inspected, key)[0] for key in ("alpha", "beta", "gamma"))
 
     # Interrupt after alpha's writer committed, before the ledger learned it.
@@ -710,7 +798,7 @@ def test_interrupt_reorder_and_resume_reuses_the_original_receipt(
         _workflow(vault, action="resume", input_revision=1, order=[alpha, beta, gamma])
     monkeypatch.setattr(EpisodeStore, "transition", real)
 
-    interrupted = _workflow(vault, action="inspect")
+    interrupted = _workflow(vault, action="candidates")
     alpha_leaf = _candidate(interrupted, "alpha")["leaves"][0]
     assert alpha_leaf["outcome"] == "uncertain"
     alpha_path = vault / "Knowledge Base/Notes/Insights/alpha-dye-note.md"
@@ -719,19 +807,38 @@ def test_interrupt_reorder_and_resume_reuses_the_original_receipt(
     original = store.reconstruct(alpha_leaf["run_id"])["receipts"]
     assert len(original) == 1
 
-    # A fresh semantic revision of gamma must pass current validation: its
-    # new destination is alpha's committed page, so preparation refuses it.
+    # A fresh semantic revision of gamma must pass current validation: an
+    # edit of alpha's page reviewed before alpha committed is stale now.
+    journal = _journal(vault)
     with pytest.raises(ValueError, match="CURATION_BINDING_STALE"):
         _workflow(
             vault,
             action="prepare",
             candidate="gamma",
             proposal=_proposal(
-                "focused_note",
-                [_note_leaf("alpha-dye-note", "Gamma, revised.", revision=2)],
-                title="gamma-dye-note",
+                "existing_page",
+                [
+                    {
+                        "leaf_key": "write",
+                        "effect_revision": 2,
+                        "kind": "edit",
+                        "args": {
+                            "path": "Knowledge Base/Notes/Insights/alpha-dye-note.md",
+                            "why": "Fold gamma into alpha.",
+                            "operation": {
+                                "kind": "edit_section",
+                                "heading": "Observations",
+                                "new_string": "- [finding] Gamma folded in. ^gamma-fold",
+                                "section_position": "append",
+                                "expected_hash": "0" * 64,
+                            },
+                        },
+                    }
+                ],
+                target="Knowledge Base/Notes/Insights/alpha-dye-note.md",
             ),
         )
+    assert _journal(vault) == journal
     # A valid revision is bound afresh to a new sealed plan.
     revised = _workflow(
         vault,
@@ -767,7 +874,7 @@ def test_interrupt_reorder_and_resume_reuses_the_original_receipt(
     assert alpha_path.read_bytes() == committed_bytes
     after = store.reconstruct(alpha_leaf["run_id"])["receipts"]
     assert after == original
-    final = _workflow(vault, action="inspect")
+    final = _workflow(vault, action="candidates")
     proof = _candidate(final, "alpha")["leaves"][0]
     assert proof["outcome"] == "committed"
     assert proof["receipt_digest"] == curation._digest(original[0])
@@ -786,7 +893,7 @@ def test_an_uncertain_leaf_is_never_retried_under_a_fresh_identity(
 ) -> None:
     _record(vault)
     _three_notes(vault)
-    inspected = _workflow(vault, action="inspect")
+    inspected = _workflow(vault, action="candidates")
     alpha = _leaf_ids(inspected, "alpha")[0]
 
     def writer_fails(*_args, **_kwargs):

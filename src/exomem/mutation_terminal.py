@@ -55,6 +55,23 @@ _EPISODE_RECEIPT_FIELDS = (
     "ledger",
     "about_skipped",
 )
+_EPISODE_WORKFLOW_FIELDS = (
+    "operation",
+    "action",
+    "episode",
+    "input_revision",
+    "status",
+    "code",
+    "reason",
+    "candidates",
+    "complete",
+    "execution",
+    "executed",
+    "reconciled",
+    "blocked",
+    "deferred",
+    "publication",
+)
 
 _PLAN_RECEIPT_FIELDS = (
     "operation",
@@ -1589,6 +1606,11 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         compact.update({key: leaf[key] for key in _RECORD_RECEIPT_FIELDS if key in leaf})
     elif valid_planning_receipt(leaf):
         compact.update({key: leaf[key] for key in _PLAN_RECEIPT_FIELDS if key in leaf})
+    elif isinstance(leaf, Mapping) and leaf.get("operation") == "episode_workflow":
+        # The agent resumes by leaf id and must see which leaves ran, which
+        # reconciled and which are blocked; every list is bounded by the
+        # episode model's own caps.
+        compact.update({key: leaf[key] for key in _EPISODE_WORKFLOW_FIELDS if key in leaf})
     elif isinstance(leaf, Mapping) and leaf.get("operation") == "episode_memory":
         # The recording agent needs the key back to record the next revision,
         # and every field here is bounded by `episode_capture`'s own caps.

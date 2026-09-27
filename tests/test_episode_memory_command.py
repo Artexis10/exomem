@@ -3,7 +3,8 @@
 One leaf behind MCP, REST and the CLI. `record` writes one canonical recap per
 content change through the ordinary Source writer and binds it to the caller's
 own episode ledger by the writer's receipt; `inspect` reads that ledger back.
-Nothing else is accepted: no curation leaves, proposals or dispositions.
+A record accepts no curation leaves, proposals or dispositions: those belong to
+the typed candidate actions, pinned in `test_episode_workflow.py`.
 """
 
 from __future__ import annotations
@@ -650,7 +651,7 @@ def test_unknown_fields_and_leaves_are_refused_at_every_door(
 ) -> None:
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
     client = _rest_client(monkeypatch)
-    for field in ("leaves", "proposal", "disposition"):
+    for field in ("leaves", "effects", "payload"):
         response = client.post(
             "/api/episode_memory",
             json={**_payload("ep-" + "b2" * 16), field: ["anything"]},
@@ -658,6 +659,16 @@ def test_unknown_fields_and_leaves_are_refused_at_every_door(
         )
         assert response.status_code >= 400, response.text
         assert "UNKNOWN_PARAM" in response.text
+    # Candidate fields belong to the typed candidate actions (task 3.3); a
+    # record carrying one is refused before anything is written.
+    for field, value in (("proposal", {"route": "no_capture"}), ("disposition", "routed")):
+        response = client.post(
+            "/api/episode_memory",
+            json={**_payload("ep-" + "b2" * 16), field: value},
+            headers={"Authorization": "Bearer sekret"},
+        )
+        assert response.status_code >= 400, response.text
+        assert "EPISODE_INVALID" in response.text
 
     mcp = server.build_server(require_auth=False)
     with request_scope(owner_principal(surface="mcp")):

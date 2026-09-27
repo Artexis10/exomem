@@ -2484,15 +2484,19 @@
     }
   },
   "episode_memory": {
-    "description": "Record what a conversation worked on, decided and left open, for the next session on any client.\n\nCall `record` once when a conversation reaches a decision or a stopping\npoint, and skip it when nothing durable happened. You write the recap:\nshort one-line items, never a transcript. It is kept as a bounded Source\nunder `Sources/Episodes/`, and the newest recap of each conversation leads\nthe `recent_context` block `activate_context` serves on every client.\nRecording again under the same `episode` with changed content adds a\nrevision and retires the previous one; an identical retry writes nothing.",
+    "description": "Record what a conversation worked on, decided and left open, for the next session on any client.\n\nCall `record` once when a conversation reaches a decision or a stopping\npoint, and skip it when nothing durable happened. You write the recap:\nshort one-line items, never a transcript. It is kept as a bounded Source\nunder `Sources/Episodes/`, and the newest recap of each conversation leads\nthe `recent_context` block `activate_context` serves on every client.\nRecording again under the same `episode` with changed content adds a\nrevision and retires the previous one; an identical retry writes nothing.\n\nA recorded episode can also carry typed candidates for its durable\nchanges: `prepare` one candidate's destination, set its `disposition`\n(including honest no_capture, deferred or rejected ones), and `resume`\nto execute the routed ones. A leaf is one typed step for an existing\nwriter (the curation step kinds of `maintain_memory`), never a free-form\neffect. `resume` refuses with `episode_workflow_disabled` unless this\nservice enables episode execution.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "action": {
-          "description": "`record` writes a recap revision; `inspect` reads this episode's revision history back.",
+          "description": "`record` writes a recap revision; `inspect` reads this episode's revision history back; `candidates` reads its candidates; `prepare`, `disposition` and `resume` plan and execute them.",
           "enum": [
             "record",
-            "inspect"
+            "inspect",
+            "candidates",
+            "prepare",
+            "disposition",
+            "resume"
           ],
           "type": "string"
         },
@@ -2506,7 +2510,7 @@
             }
           ],
           "default": null,
-          "description": "The `ep-` key a previous record returned, or the one a hook named. Omit it on a conversation's first record and reuse the returned key for the rest of that conversation. Required for `inspect`."
+          "description": "The `ep-` key a previous record returned, or the one a hook named. Omit it on a conversation's first record and reuse the returned key for the rest of that conversation. Required for every other action."
         },
         "subject": {
           "anyOf": [
@@ -2618,6 +2622,216 @@
           ],
           "default": null,
           "description": "Optional lowercase client label, e.g. `claude-code` or `chatgpt`."
+        },
+        "candidate": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `prepare`/`disposition`: a stable key you choose for one durable change, reused when you revise it."
+        },
+        "proposal": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "route": {
+                  "enum": [
+                    "existing_page",
+                    "semantic_unit",
+                    "focused_note",
+                    "entity",
+                    "records",
+                    "planning",
+                    "experiment",
+                    "source",
+                    "evidence",
+                    "relation_only",
+                    "no_capture"
+                  ]
+                },
+                "target": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "alternatives": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "target": {
+                        "type": "string"
+                      },
+                      "scope": {
+                        "type": "string"
+                      },
+                      "version": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "target",
+                      "scope",
+                      "version"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 8,
+                  "type": "array"
+                },
+                "evidence": {
+                  "enum": [
+                    "complete",
+                    "truncated",
+                    "missing"
+                  ]
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "leaves": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "leaf_key": {
+                        "type": "string"
+                      },
+                      "effect_revision": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "kind": {
+                        "enum": [
+                          "create-note",
+                          "create-entity",
+                          "accept-relation",
+                          "edit",
+                          "supersede",
+                          "move",
+                          "delete",
+                          "recover"
+                        ]
+                      },
+                      "args": {
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "leaf_key",
+                      "effect_revision",
+                      "kind",
+                      "args"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 16,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "route",
+                "alternatives",
+                "evidence",
+                "reason",
+                "leaves"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `prepare`: {route, target?, title?, alternatives,\nevidence, reason, leaves: [{leaf_key, effect_revision, kind,\nargs}]}. A changed leaf needs the next `effect_revision`; a\ncommitted one cannot change."
+        },
+        "disposition": {
+          "anyOf": [
+            {
+              "enum": [
+                "routed",
+                "no_capture",
+                "uncertain",
+                "rejected",
+                "deferred",
+                "awaiting_authority"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `disposition`: routed, no_capture, uncertain, rejected, deferred or awaiting_authority."
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `disposition`: why, in one or two sentences."
+        },
+        "input_revision": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `resume`: the input revision your coverage review covered, the current one."
+        },
+        "order": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `resume`: leaf ids to run, in this order."
+        },
+        "max_leaves": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `resume`: at most this many leaves this pass, 1 to 16 (default 8); the rest stay pending."
+        },
+        "postcommit": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `resume`: true attests your review of the committed results instead of executing anything."
         },
         "response_detail": {
           "default": "compact",

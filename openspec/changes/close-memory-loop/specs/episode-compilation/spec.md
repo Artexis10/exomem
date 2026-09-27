@@ -133,6 +133,27 @@ Candidate identity SHALL remain stable across destination re-resolution, proposa
 - **THEN** the episode remains uncertain until the existing execution owner and appropriate evidence contract reconcile the result
 - **AND** absence, failure or stale readback is never treated as proof that the current attempt did not commit
 
+### Requirement: Typed episode operations execute only existing leaves and only when enabled
+
+Episode candidate operations SHALL be exposed through the canonical episode command on MCP, CLI and REST. A candidate's leaves SHALL be closed steps for existing writers, and an unknown kind, field or payload SHALL be refused before any state is recorded. Preparing a new or revised leaf SHALL validate it against the current vault. Only the resume operation SHALL reach a writer, and it SHALL refuse with a typed `episode_workflow_disabled` result, recording nothing, unless the service operator has enabled episode execution; no tool call SHALL be able to enable it. Reading an episode's candidates SHALL remain available and SHALL NOT return leaf payloads.
+
+#### Scenario: An untyped effect is proposed
+
+- **WHEN** a proposal carries an unknown leaf kind, unknown argument fields or extra execution fields
+- **THEN** preparation fails with a typed refusal and the episode journal is unchanged
+
+#### Scenario: Execution has not been enabled
+
+- **WHEN** a caller asks a service without episode execution enabled to resume an episode
+- **THEN** the result is `episode_workflow_disabled`
+- **AND** no canonical page, curation receipt or episode transition is written
+
+#### Scenario: A resume is interrupted after a committed leaf
+
+- **WHEN** a writer commits a leaf and the episode ledger has not yet recorded that outcome
+- **THEN** the next resume reconciles the leaf from its original receipt before running any other leaf
+- **AND** a reordered remainder runs without re-executing the committed leaf
+
 ### Requirement: Completion attests coverage of original input
 
 The episode ledger SHALL distinguish attempted work, pending continuation and coverage through an input revision. Completion SHALL require an active-agent pass against that original revision, including corrections, plus receipt/readback reconciliation of claimed effects. A successful write, saved marker, short assistant response or cooldown SHALL NOT independently establish completeness. The server SHALL validate recorded state transitions without claiming it can prove semantic exhaustiveness.
