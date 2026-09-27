@@ -340,3 +340,24 @@ def test_write_time_index_is_cached_briefly(tmp_path, monkeypatch):
     monkeypatch.setattr(tag_variants, "INDEX_TTL_SECONDS", 0.0)
     tag_variants.reconcile_authored(tmp_path, ["dogfooding"], level="maximal")
     assert len(calls) == 2
+
+
+def test_remote_surface_admits_the_plan_gated_mode(tmp_path):
+    from exomem import capabilities
+    from exomem.commands import product_commands_for
+
+    _variant_vault(tmp_path)
+    command = next(item for item in product_commands_for("mcp") if item.name == "maintain_memory")
+    descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="test", tier2_enabled=True, product_commands=("maintain_memory",)
+    )
+    with capabilities.active_surface(descriptor):
+        preview = writer_lease.invoke_command(
+            command, tmp_path, idempotency_key="remote-preview", mode="tag-variants"
+        )
+        applied = writer_lease.invoke_command(
+            command, tmp_path, idempotency_key="remote-apply", mode="tag-variants",
+            apply=True, plan_id=preview["plan_id"], why="Reconcile from a remote client.",
+        )
+    assert applied["state"] == "committed"
+    assert len(applied["paths"]) == 2
