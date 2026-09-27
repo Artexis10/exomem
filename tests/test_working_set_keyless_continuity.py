@@ -18,6 +18,8 @@ Three rules, end to end through `commands.op_activate_context`:
 
 from __future__ import annotations
 
+import base64
+import json
 import time
 from pathlib import Path
 
@@ -36,8 +38,16 @@ from test_working_set_hot_projection import (
 )
 from test_working_set_index import _seed_planning, _seed_structure
 
-from exomem import commands, lexstore, working_set_heat, working_set_index, working_set_runtime
-from exomem.governance.principal import request_scope
+from exomem import (
+    commands,
+    lexstore,
+    working_set_heat,
+    working_set_index,
+    working_set_runtime,
+    writer_lease,
+)
+from exomem.governance import scrubber
+from exomem.governance.principal import library_scope, request_scope
 
 FOLLOW_UP = "what about the second one?"
 
@@ -139,18 +149,8 @@ def test_every_packet_returns_a_thread_and_a_valid_one_continues_it(heat_vault: 
 def test_an_expired_or_unreadable_thread_degrades_to_keyless(heat_vault: Path) -> None:
     first = _activate(heat_vault, MARIT_TURN)
     payload = working_set_runtime.decode_continuity(first["continuity"])
-    long_ago = time.time_ns() - 7 * 3600 * 1_000_000_000
-    expired = working_set_runtime.encode_continuity(
-        identity=payload["identity"],
-        roles_hash=payload["roles_hash"],
-        conventions_hash=payload["conventions_hash"],
-        generation=payload["generation"],
-        refs=payload["refs"],
-        roles=payload["roles"],
-        minted_ns=long_ago,
-        thread=payload["thread"],
-        thread_ns=long_ago,
-    )
+    long_ago = time.time_ns() - 7 * HOUR_NS
+    expired = _signed(heat_vault, payload, minted_ns=long_ago, thread_ns=long_ago)
 
     stale = _activate(heat_vault, FOLLOW_UP, continuity=expired)
     garbage = _activate(heat_vault, FOLLOW_UP, continuity="not-a-token")
@@ -160,6 +160,146 @@ def test_an_expired_or_unreadable_thread_degrades_to_keyless(heat_vault: Path) -
     assert stale["abstained"] is True and MARIT not in _resolved(stale)
     assert garbage["generation"]["continuity_thread"] == "stale"
     assert garbage["abstained"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Rule 1, over the wire: the dispatcher every surface shares
+# --------------------------------------------------------------------------- #
+
+_ACTIVATE = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
+
+
+def _dispatched(vault: Path, turn: str, guest: bool, **kwargs) -> dict:
+    """One call through `writer_lease.invoke_command`, the dispatcher MCP,
+    REST, hosted and the CLI share, terminal egress filter included."""
+    working_set_runtime.reset_caches_for_tests()
+    with request_scope(_external()) if guest else library_scope():
+        return writer_lease.invoke_command(_ACTIVATE, vault, turn=turn, **kwargs)
+
+
+@pytest.mark.parametrize("guest", [False, True], ids=["owner", "guest"])
+def test_the_token_crosses_the_dispatcher_and_continues_the_thread(
+    heat_vault: Path, guest: bool
+) -> None:
+    """Calling the command directly skips the terminal egress filter, whose
+    entropy heuristic replaced every token with its notice: no caller of any
+    surface ever received a thread it could pass back."""
+    if guest:
+        write_scope(heat_vault, paths="Knowledge Base/Notes/Research/*", name="Research")
+        write_rule(heat_vault, ceiling=0)
+        _reset_caches()
+
+    first = _dispatched(heat_vault, NONSENSE_TURN, guest)
+    token = first.get("continuity")
+    assert token and scrubber.NOTICE not in token, token
+    nonce = _thread(token)
+
+    second = _dispatched(heat_vault, MARIT_TURN, guest, continuity=token)
+
+    assert second["generation"]["continuity_thread"] == "applied"
+    assert _thread(second["continuity"]) == nonce
+
+
+# --------------------------------------------------------------------------- #
+# Rule 1: the thread's lifetime is the server's, not the caller's
+# --------------------------------------------------------------------------- #
+
+HOUR_NS = 3600 * 1_000_000_000
+
+
+def _signed(vault: Path, payload: dict, *, minted_ns: int, thread_ns: int) -> str:
+    """A token this server would mint for `payload`'s thread at those times."""
+    return working_set_runtime.encode_continuity(
+        identity=payload["identity"],
+        roles_hash=payload["roles_hash"],
+        conventions_hash=payload["conventions_hash"],
+        generation=payload["generation"],
+        refs=payload["refs"],
+        roles=payload["roles"],
+        minted_ns=minted_ns,
+        thread=payload["thread"],
+        thread_ns=thread_ns,
+        salt=working_set_heat.load(vault).salt,
+    )
+
+
+def _rewritten(token: str, drop: tuple[str, ...] = (), **fields: object) -> str:
+    """`token` with payload fields rewritten or dropped by hand, everything
+    else kept byte for byte: what any caller can do to a base64 payload."""
+    payload = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
+    payload.update(fields)
+    for name in drop:
+        payload.pop(name, None)
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+@pytest.mark.parametrize(
+    "rewrite",
+    [
+        {"minted_ns": 1},
+        {"thread_ns": 1},
+        {"minted_ns": 1, "thread_ns": 1},
+        {"thread": "another-callers-thread-value"},
+    ],
+    ids=["served", "began", "both", "thread"],
+)
+def test_a_rewritten_thread_is_served_as_keyless(heat_vault: Path, rewrite: dict) -> None:
+    """Rewriting when the packet was served, or when the thread began, would
+    keep one conversation alive forever; rewriting the thread would name
+    another. Either reads `stale` and starts a fresh thread, never an error."""
+    first = _activate(heat_vault, MARIT_TURN)
+    payload = working_set_runtime.decode_continuity(first["continuity"])
+    fields = {
+        name: (payload[name] + delta if name.endswith("_ns") else delta)
+        for name, delta in rewrite.items()
+    }
+
+    packet = _activate(heat_vault, FOLLOW_UP, continuity=_rewritten(first["continuity"], **fields))
+
+    assert packet["generation"]["continuity_thread"] == "stale"
+    assert _thread(packet["continuity"]) not in ("", payload["thread"], fields.get("thread"))
+    assert packet["generation"].get("carried_by") != "follow_up"
+
+
+def test_an_unsigned_thread_is_served_as_keyless(heat_vault: Path) -> None:
+    """A token minted before threads were signed still decodes, and its refs
+    still qualify, but its thread is not the caller's session."""
+    first = _activate(heat_vault, MARIT_TURN)
+    payload = working_set_runtime.decode_continuity(first["continuity"])
+
+    packet = _activate(heat_vault, FOLLOW_UP, continuity=_rewritten(first["continuity"], drop=("mac",)))
+
+    assert packet["generation"]["continuity_thread"] == "stale"
+    assert _thread(packet["continuity"]) not in ("", payload["thread"])
+
+
+@pytest.mark.parametrize(
+    ("served_hours_ago", "began_hours_ago", "state"),
+    [
+        (5, 6 * 24, "applied"),
+        (7, 7, "stale"),
+        (0, 8 * 24, "stale"),
+    ],
+    ids=["within-both-bounds", "idle", "past-lifetime"],
+)
+def test_a_signed_thread_lives_only_within_its_bounds(
+    heat_vault: Path, served_hours_ago: int, began_hours_ago: int, state: str
+) -> None:
+    first = _activate(heat_vault, NONSENSE_TURN)
+    payload = working_set_runtime.decode_continuity(first["continuity"])
+    now = time.time_ns()
+    token = _signed(
+        heat_vault,
+        payload,
+        minted_ns=now - served_hours_ago * HOUR_NS,
+        thread_ns=now - began_hours_ago * HOUR_NS,
+    )
+
+    packet = _activate(heat_vault, NONSENSE_TURN, continuity=token)
+
+    assert packet["generation"]["continuity_thread"] == state
+    assert (_thread(packet["continuity"]) == payload["thread"]) is (state == "applied")
 
 
 # --------------------------------------------------------------------------- #
