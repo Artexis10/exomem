@@ -8,8 +8,6 @@ Promotion SHALL adopt the standby-built catalogue only after acquiring ownership
 
 A worker that starts without a standby, as every hosted cell does, SHALL keep rebuilding a schema-changed catalogue on its own state volume through the ordinary repair at boot and admit retrieval once that catalogue is current.
 
-A standby that is discarded without reaching cutover readiness SHALL NOT be followed by a cold replacement unless the upgrade request explicitly allows one in its own control field, separate from the target. Otherwise the upgrade SHALL report failure before ingress is paused, and the serving worker SHALL keep serving without being drained, stopped or signalled. A roll-forward of a recorded transition is exempt, because its worker has already stopped. The worker protocol version SHALL NOT change for this.
-
 #### Scenario: A schema-changed release cuts over through the standby's catalogue
 - **WHEN** a managed upgrade targets a release whose lexical catalogue schema differs from the one the serving worker keeps current
 - **THEN** the standby reaches cutover readiness while every pre-existing byte of the vault and of the vault's state directory is unchanged and the only new files are its rebuild temporary
@@ -28,12 +26,3 @@ A standby that is discarded without reaching cutover readiness SHALL NOT be foll
 #### Scenario: A discarded standby removes what it built
 - **WHEN** a standby that built a catalogue is stopped without promotion
 - **THEN** its temporary catalogue is removed and the live catalogue is unchanged
-
-#### Scenario: A discarded standby refuses the upgrade by default
-- **WHEN** the standby is discarded because it did not reach cutover readiness and the request carries no cold-replacement override
-- **THEN** the upgrade reports failure with the handoff record naming the waiting component, before ingress is paused
-- **AND** the serving worker keeps serving and no transition is recorded
-
-#### Scenario: The operator allows a cold replacement
-- **WHEN** the upgrade request carries the explicit cold-replacement override and the standby is discarded
-- **THEN** the upgrade continues through the one-worker sequence and the handoff record says the cold replacement was allowed

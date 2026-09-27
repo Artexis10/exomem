@@ -163,36 +163,6 @@ def test_upgrade_stages_immutable_release_before_sending_target(tmp_path: Path) 
     assert str(tmp_path / "launcher") not in trace.read_text(encoding="utf-8").splitlines()[-1]
 
 
-def test_the_cold_replacement_override_is_sent_beside_the_target(tmp_path: Path) -> None:
-    """The supervisor rejects unknown target keys, so the override is its own field."""
-    requests, thread = _control(tmp_path)
-    fake_uv = tmp_path / "uv"
-    fake_uv.write_text(
-        "#!/bin/sh\n"
-        "if [ \"$1\" = venv ]; then\n"
-        "  mkdir -p \"$4/bin\"\n"
-        "  cat > \"$4/bin/python\" <<'STUB'\n"
-        "#!/bin/sh\n"
-        "echo '{\"version\": \"0.2.0\", \"state_descriptors\": [\"claims-store\"]}'\n"
-        "STUB\n"
-        "  chmod +x \"$4/bin/python\"\n"
-        "fi\n",
-        encoding="utf-8",
-    )
-    fake_uv.chmod(0o700)
-    result = _operator(
-        tmp_path,
-        "--package-version", "0.2.0", "--allow-cold-replacement",
-        env={"EXOMEM_UV": str(fake_uv)},
-    )
-    thread.join(3)
-    assert result.returncode == 0, result.stderr
-    upgrade = requests[1]
-    assert upgrade["command"] == "upgrade"
-    assert upgrade["allow_cold_replacement"] is True
-    assert "allow_cold_replacement" not in upgrade["target"]
-
-
 def test_unavailable_manager_fails_before_creating_release(tmp_path: Path) -> None:
     result = _operator(tmp_path, "--package-version", "0.2.0")
     assert result.returncode != 0

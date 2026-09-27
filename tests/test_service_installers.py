@@ -1439,49 +1439,6 @@ def test_managed_upgrade_routes_without_stopping_or_mutating_launcher(tmp_path: 
     assert "Managed serving version: 0.80.0" in result.stdout
 
 
-def test_managed_upgrade_forwards_an_explicit_cold_replacement_override(tmp_path: Path) -> None:
-    require_posix_executable_scripts()
-    env, service_root, _ = _fixture(tmp_path)
-    python = service_root / ".venv" / "bin" / "python"
-    _write_executable(
-        python,
-        f'''\
-        #!/bin/sh
-        if [ "$1" = -m ] && [ "$2" = exomem.service_upgrade ]; then
-            echo "managed operator $*" >> "$TRACE_FILE"
-            printf '%s\\n' '{{"ok":true,"phase":"ready","active":{{"python":"/candidate/bin/python","version":"0.80.0"}}}}'
-            exit 0
-        fi
-        exec "{sys.executable}" "$@"
-        ''',
-    )
-    unit = Path(env["XDG_CONFIG_HOME"]) / "systemd" / "user" / "exomem.service"
-    unit.parent.mkdir(parents=True)
-    unit.write_text(
-        f'ExecStart="{python}" -m exomem.service_manager serve --runtime-dir "{service_root / "managed"}" '
-        '--worker-python "/candidate/bin/python" --host 127.0.0.1 --port 8765 --unit-name exomem.service\n',
-        encoding="utf-8",
-    )
-    result = subprocess.run(
-        [
-            "bash",
-            str(ROOT / "scripts" / "upgrade.sh"),
-            "--cli-sync",
-            "never",
-            "--allow-cold-replacement",
-        ],
-        cwd=ROOT,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    trace = Path(env["TRACE_FILE"]).read_text(encoding="utf-8")
-    assert "exomem.service_upgrade" in trace
-    assert "--allow-cold-replacement" in trace
-
-
 def test_managed_runtime_dir_decodes_unit_quoting(tmp_path: Path) -> None:
     unit = tmp_path / "exomem.service"
     unit.write_text(

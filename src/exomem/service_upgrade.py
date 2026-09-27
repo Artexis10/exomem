@@ -439,12 +439,6 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--wheel", type=Path, help="stage an immutable local Exomem wheel")
     parser.add_argument("--source-revision", default="", help="full source revision for a local wheel")
     parser.add_argument("--profile", choices=PROFILES, default="standard")
-    parser.add_argument(
-        "--allow-cold-replacement",
-        action="store_true",
-        help="if the standby cannot reach cutover readiness, stop the serving worker "
-        "and start the release cold instead of refusing the upgrade",
-    )
     args = parser.parse_args(argv)
     try:
         if sys.platform != "linux":
@@ -479,10 +473,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.wheel,
                     args.source_revision,
                 )
-                request: dict[str, Any] = {"command": "upgrade", "target": target}
-                if args.allow_cold_replacement:
-                    request["allow_cold_replacement"] = True
-                result = control(args.runtime_dir, request)
+                result = control(args.runtime_dir, {"command": "upgrade", "target": target})
                 result = _wait_for_target(args.runtime_dir, target, result)
         print(json.dumps(result, sort_keys=True))
         return 0

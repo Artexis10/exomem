@@ -520,41 +520,13 @@ def test_a_declared_migration_runs_with_no_worker_owning_state(tmp_path):
 
 
 def test_a_standby_that_misses_its_warm_budget_leaves_the_old_worker_serving(tmp_path):
-    """Refuse mode: a discarded candidate is not a licence for an outage.
-
-    Falling back to the one-worker sequence drains and stops the worker that is
-    serving and then waits out a cold start with nothing serving -- the outage
-    a standby exists to remove. By default the upgrade reports failure before
-    ingress is paused and the old worker keeps serving, untouched.
-    """
-
     async def scenario():
         manager, ingress, runtime, target = _standby_supervisor(tmp_path)
         runtime.standby_failure = "budget"
         result = await manager.upgrade(target)
-        assert result["ok"] is False
-        assert "still serving" in result["error"]
-        # The candidate is discarded with the component it waited on recorded,
-        # and nothing is paused, drained or stopped.
-        assert runtime.events == ["inspect", "start-standby", "discard-standby"]
-        assert ingress.events == []
-        assert runtime.pid == 100
-        assert manager.phase == "ready"
-        assert manager.records.pending() is None
-        assert result["handoff"]["standby"] == "discarded"
-        assert result["handoff"]["waiting"] == "graph_snapshot"
-        assert result["handoff"]["reason"] == "warm budget expired"
-
-    asyncio.run(scenario())
-
-
-def test_an_explicit_override_permits_the_cold_replacement(tmp_path):
-    async def scenario():
-        manager, ingress, runtime, target = _standby_supervisor(tmp_path)
-        runtime.standby_failure = "budget"
-        result = await manager.upgrade(target, allow_cold_replacement=True)
         assert result["ok"] is True
-        # The operator asked for the one-worker sequence, so it runs.
+        # The candidate is discarded with the component it waited on recorded,
+        # and the upgrade falls back to the one-worker sequence.
         assert runtime.events == [
             "inspect",
             "start-standby",
@@ -562,71 +534,9 @@ def test_an_explicit_override_permits_the_cold_replacement(tmp_path):
             "stop",
             "start",
         ]
-        assert ingress.events[0] == "pause"
         assert result["handoff"]["standby"] == "discarded"
-        assert result["handoff"]["cold_replacement"] == "allowed"
-
-    asyncio.run(scenario())
-
-
-def test_a_candidate_that_could_not_warm_is_refused_the_same_way(tmp_path):
-    async def scenario():
-        manager, ingress, runtime, target = _standby_supervisor(tmp_path)
-        runtime.standby_failure = "spawn"
-        result = await manager.upgrade(target)
-        assert result["ok"] is False
-        assert runtime.events == ["inspect", "start-standby", "discard-standby"]
-        assert ingress.events == []
-        assert result["handoff"]["reason"] == "candidate could not warm"
-
-    asyncio.run(scenario())
-
-
-def test_the_override_travels_as_its_own_control_field(tmp_path):
-    """`inspect` rejects extra target keys, so the override is not one."""
-    import threading
-
-    from exomem import service_upgrade
-
-    module = _manager()
-
-    async def scenario():
-        manager, ingress, runtime, target = _standby_supervisor(tmp_path)
-        runtime.standby_failure = "budget"
-        directory = tmp_path / "managed"
-        async with await module.control_server(directory / "control.sock", manager):
-            for request, expected in (
-                ({"command": "upgrade", "target": target}, False),
-                (
-                    {"command": "upgrade", "target": target, "allow_cold_replacement": True},
-                    True,
-                ),
-            ):
-                runtime.events.clear()
-                runtime.pid = 100
-                accepted = await asyncio.to_thread(service_upgrade.control, directory, request)
-                assert accepted["accepted"] is True
-                done = threading.Event()
-                outcome: dict = {}
-
-                def poll(accepted=accepted, outcome=outcome, done=done):
-                    try:
-                        outcome["result"] = service_upgrade._wait_for_target(
-                            directory, target, accepted, budget=20, interval=0.05
-                        )
-                    except Exception as error:  # noqa: BLE001 - asserted below
-                        outcome["error"] = error
-                    finally:
-                        done.set()
-
-                threading.Thread(target=poll, daemon=True).start()
-                await asyncio.wait_for(asyncio.to_thread(done.wait), 20)
-                if expected:
-                    assert "error" not in outcome, outcome
-                    assert "stop" in runtime.events
-                else:
-                    assert "still serving" in str(outcome["error"])
-                    assert "stop" not in runtime.events
+        assert result["handoff"]["waiting"] == "graph_snapshot"
+        assert result["handoff"]["reason"] == "warm budget expired"
 
     asyncio.run(scenario())
 
@@ -977,7 +887,7 @@ def test_environment_warnings_reach_a_discarded_handoff_record(tmp_path):
         runtime.standby_failure = "budget"
         runtime.environment_warnings = ["unreadable: service.env"]
         result = await manager.upgrade(target)
-        assert result["ok"] is False
+        assert result["ok"] is True
         # A stale inherited environment is exactly what the fallback path has to
         # report; it must not be visible only on the path that promoted.
         assert result["handoff"]["standby"] == "discarded"
@@ -1357,7 +1267,7 @@ def test_a_discarded_standby_and_a_failed_replacement_each_keep_their_own_field(
             tmp_path, ready_after=30.0, transition_timeout=0.25, cold=0.6
         )
         runtime.standby_failure = "budget"
-        result = await manager.upgrade(target, allow_cold_replacement=True)
+        result = await manager.upgrade(target)
         assert result["ok"] is False
         handoff = result["handoff"]
         # The candidate was discarded for missing its warm budget...
