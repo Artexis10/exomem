@@ -943,7 +943,7 @@ def recompute(
         "claims": _recompute_claims(Path(vault_root)),
         "role_state": role_marker,
         # Where each collection's bounded backfill scan resumes, keyed by its
-        # claims signal. Carried by deltas, rebuilt only here.
+        # collection id and claims signal. Carried by deltas, rebuilt only here.
         "backfill_cursors": dict(report.backfill_cursors or {}),
     }
 

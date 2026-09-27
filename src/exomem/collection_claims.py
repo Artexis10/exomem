@@ -9,8 +9,8 @@ only which spellings count as the same term.
 
 A collection may also declare `claims.match` frontmatter predicates. A page
 satisfying every predicate belongs to that collection by declaration, so it
-routes there as `strong` whatever its words share. A page whose value for a
-declared key contradicts the declaration (another project, say) never routes
+routes there as `strong` whatever its words share. A page whose `type` or
+`project` contradicts the declaration (another project, say) never routes
 there, not even by shared words.
 """
 
@@ -102,15 +102,29 @@ def matched_predicates(
     return evidence
 
 
+#: The keys that say what a page IS. Only these can contradict a declaration;
+#: `tags` and `category` are open and multi-valued, so a page carrying other
+#: values than the declared ones has simply not said it belongs.
+IDENTITY_KEYS = ("type", "project")
+#: A layer type says where a page lives -- an Evidence sidecar is `type:
+#: source` -- not what it is about, so for contradiction it is silence.
+LAYER_TYPES = frozenset({"source"})
+
+
 def contradicts(target: RoutingTarget, facets: Mapping[str, frozenset[str]]) -> bool:
-    """Whether the page states a value for a declared key and none is allowed.
+    """Whether the page states an identity value the collection's `match` excludes.
 
     Silence about a key is not a contradiction: a page with no `project` can
     still route by coverage to a collection that declares one.
     """
-    return any(
-        facets.get(key) and not facets[key] & allowed for key, allowed in target.match.items()
-    )
+    for key in IDENTITY_KEYS:
+        allowed = target.match.get(key)
+        stated = facets.get(key, frozenset())
+        if key == "type":
+            stated = stated - LAYER_TYPES
+        if allowed and stated and not stated & allowed:
+            return True
+    return False
 
 
 def _matches_type(value: str, kind: str) -> bool:

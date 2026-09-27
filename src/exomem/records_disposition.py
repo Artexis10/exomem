@@ -22,8 +22,9 @@ adds the note to that item's sources instead of filing a new one. An item that
 already cites the note is never its recurrence.
 
 A disposition is offered when a note is created, and on a later edit only while
-the note's own unreflected entry is still open: editing a note that is already
-filed must not file it again, recur it into its own item, or ask twice.
+the note's own unreflected entry is still open -- unfiled and neither dismissed
+nor snoozed: editing a note that is already filed or decided must not file it,
+recur it into its own item, or ask twice.
 
 The runtime never appends. Appending is `proactive_capture` and belongs to the
 agent under the served capture disposition, through the same `record_memory`
@@ -270,8 +271,22 @@ def _observation_entry(
             and component.get("collection") == collection
             and component.get("kind") != due_state.BACKFILL_KIND
         ):
-            return component
+            return entry
     return None
+
+
+def _still_open(vault_root: Path, entry: Mapping[str, Any]) -> bool:
+    """Whether nobody has triaged this entry: no dismissal or live snooze.
+
+    The same review-state reading the due-state serve applies, so an edit
+    never acts on an item the owner already decided about.
+    """
+    from . import review_state
+
+    effective, _decision = review_state.ReviewStateStore(Path(vault_root)).effective_state(
+        str(entry.get("item_id") or ""), str(entry.get("fingerprint") or "")
+    )
+    return effective == "open"
 
 
 def _occurrence_call(
@@ -357,12 +372,13 @@ def disposition(
     entry = _observation_entry(
         Path(vault_root), str(getattr(state, "path", "") or ""), collection
     )
+    component = (entry or {}).get("component") or {}
     filed = {
         str(record.get("key"))
-        for record in (entry or {}).get("reflecting_records") or ()
+        for record in component.get("reflecting_records") or ()
         if isinstance(record, Mapping) and record.get("key")
     }
-    if not created and (entry is None or filed):
+    if not created and (entry is None or filed or not _still_open(Path(vault_root), entry)):
         return None
     identity = str(getattr(state, "identity", "") or "")
     try:

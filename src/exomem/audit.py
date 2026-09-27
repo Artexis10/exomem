@@ -304,8 +304,9 @@ class AuditReport:
     summary: dict[str, int]  # category → count
     metadata: dict | None = None
     role_state: dict | None = None  # Internal dependency descriptors; never serialized.
-    #: Internal: where each collection's backfill scan resumes, keyed by claims
-    #: signal, for the recompute to persist. Never serialized.
+    #: Internal: where each collection's backfill scan resumes, keyed by
+    #: collection id and claims signal, for the recompute to persist. Never
+    #: serialized.
     backfill_cursors: dict | None = None
 
     def as_dict(self) -> dict:
@@ -4836,7 +4837,8 @@ def _check_unreflected_observations(
     """Claimed compiled/Evidence observations with no reflecting record.
 
     `cursors_out`, when given, receives where each collection's backfill scan
-    resumes, keyed by its claims signal, for the recompute to persist.
+    resumes, keyed by its collection id and claims signal, for the recompute to
+    persist.
     """
     from . import collection_claims, due_state, memory_refs, record_formats
 
@@ -4889,8 +4891,9 @@ def _check_unreflected_observations(
     # lookback bounds -- but one grouped item per collection, so creating a
     # collection or changing its claims looks back at what it now covers.
     # Each collection parses at most BACKFILL_MAX_PAGES candidates per
-    # recompute, in path order, resuming after the cursor its claims signal
-    # left last time; what earlier windows found is carried forward.
+    # recompute, in path order, resuming after the cursor it left last time
+    # under its identity and claims signal (two collections may declare the
+    # same claims, or none); what earlier windows found is carried forward.
     stored_cursors = projection.get("backfill_cursors")
     stored_cursors = stored_cursors if isinstance(stored_cursors, Mapping) else {}
     scans: dict[str, dict[str, Any]] = {}
@@ -4899,9 +4902,11 @@ def _check_unreflected_observations(
         if manifest is None:
             continue
         signal = _claims_signal(manifest)
-        cursor = stored_cursors.get(signal)
+        cursor_key = f"{manifest.collection_id}:{signal}"
+        cursor = stored_cursors.get(cursor_key)
         scans[str(target.collection)] = {
             "signal": signal,
+            "cursor_key": cursor_key,
             "start": cursor if type(cursor) is str else "",
             "budget": BACKFILL_MAX_PAGES,
             "last": "",
@@ -5037,7 +5042,7 @@ def _check_unreflected_observations(
         end = scan["last"] if scan["exhausted"] else None
         next_cursor = end or ""
         if cursors_out is not None and next_cursor:
-            cursors_out[scan["signal"]] = next_cursor
+            cursors_out[scan["cursor_key"]] = next_cursor
         rows = {path: (moment, ref) for moment, path, ref in scan["found"]}
         prior = previous.get(collection)
         if prior is not None and prior.get("claims_signal") == scan["signal"]:
