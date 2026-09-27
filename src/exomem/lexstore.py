@@ -971,6 +971,26 @@ class _RebuildTempLock:
             self.path.unlink()
 
 
+@dataclass(frozen=True, eq=False)
+class DetachedCatalog:
+    """A complete catalogue built beside the live one and not yet published.
+
+    ``lock`` is the temp's `_RebuildTempLock`, held from before the temp exists
+    until the catalogue is adopted or discarded (or the process dies), so no
+    orphan sweep takes it while its builder still intends to publish it.
+    """
+
+    vault_root: Path
+    path: Path
+    lock: _RebuildTempLock
+
+
+#: Detached catalogues this process holds, by temp path. A standby that is
+#: stopped discards every one, including a build still in progress.
+_DETACHED: dict[Path, DetachedCatalog] = {}
+_DETACHED_LOCK = threading.Lock()
+
+
 def _remove_lexical_rebuild_artifact(
     vault_root: Path,
     path: Path,
@@ -1352,6 +1372,36 @@ def _admit_after_bounded_runtime_repair(vault_root: Path, repaired: object) -> N
         # This re-proves both scopes. A missing sibling scope schedules the
         # ordinary background repair, whose successful publish marks admission.
         _mark_runtime_retrieval_ready_if_current(vault_root)
+
+
+def live_catalog_compatible(vault_root: Path) -> bool:
+    """Whether the live catalogue carries this release's schema and identity."""
+    return get_store(vault_root).live_catalog_compatible()
+
+
+def build_detached_catalog(vault_root: Path) -> DetachedCatalog | None:
+    """Build this release's catalogue beside the live one, publishing nothing."""
+    if not maintained_content_index_enabled():
+        return None
+    return get_store(vault_root).build_detached_catalog()
+
+
+def adopt_detached_catalog(vault_root: Path, detached: DetachedCatalog) -> bool:
+    """Publish a catalogue this process built detached over the live one."""
+    return get_store(vault_root).adopt_detached_catalog(detached)
+
+
+def discard_detached_catalog(vault_root: Path, detached: DetachedCatalog) -> None:
+    """Remove one detached catalogue this process holds and release its lock."""
+    get_store(vault_root).discard_detached_catalog(detached)
+
+
+def discard_detached_catalogs() -> None:
+    """Remove every detached catalogue this process holds, built or building."""
+    with _DETACHED_LOCK:
+        held = list(_DETACHED.values())
+    for detached in held:
+        discard_detached_catalog(detached.vault_root, detached)
 
 
 def rebase_inherited_catalog_lineage(vault_root: Path) -> tuple[str, ...]:
@@ -5532,52 +5582,8 @@ class LexicalStore:
                 checkpoint = base._replace(triple=walk_triple)
                 scope_targets[scope] = ("walk", None, checkpoint, walk_triple)
 
-        # The exact target checkpoints this build will publish, per scope — the
-        # regression guard below compares them against the live catalog.
-        temp_targets = {scope: target[2] for scope, target in scope_targets.items()}
-
-        conn = self._connect_setup(temp_path)
-        folded = False
-        try:
-            self._ensure_schema(conn)
-            with conn:
-                for path, (in_kb, in_vault) in members.items():
-                    self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
-                conn.execute(
-                    "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (str(SCHEMA_VERSION),),
-                )
-            with conn:
-                for _scope, (kind, delta, _cp, _tr) in scope_targets.items():
-                    if kind == "delta":
-                        self._apply_delta_rows(conn, delta)  # no foreground cap
-                for scope, (_kind, _delta, checkpoint, triple) in scope_targets.items():
-                    if triple is not None:
-                        conn.execute(
-                            "INSERT INTO meta(key, value) VALUES(?, ?) "
-                            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                            (f"triple:{scope}", repr(tuple(triple))),
-                        )
-                    self._write_checkpoint(conn, scope, checkpoint)
-                self._write_catalog_identity(conn)
-            # Fold the WAL back into the main file so the published sidecar is a
-            # single self-contained file. Publication is FORBIDDEN unless this
-            # provably succeeds — otherwise a plain `os.replace` of just the main
-            # file would strand committed data in an un-folded temp `-wal`.
-            folded = self._fold_to_single_file(conn)
-        finally:
-            conn.close()
-
-        # The temp must be provably self-contained in its main file before it may
-        # replace anything: the fold must have switched to DELETE mode AND left no
-        # `-wal`/`-shm` behind. Otherwise discard the temp and preserve live.
-        wal, shm = self._wal_shm_paths(temp_path)
-        if not folded or wal.exists() or shm.exists():
-            log.warning(
-                "lexical temp WAL fold incomplete; discarding build and preserving live"
-            )
-            return self._decline_rebuild("fold_failed")
+        if not self._materialize_catalog(temp_path, members, signatures, scope_targets):
+            return False
 
         # Work observed while the temp rows were being materialized is not part
         # of the earlier target capture. Replay that retained suffix now, before
@@ -5674,31 +5680,7 @@ class LexicalStore:
                             "lexical atomic publish aborted: live catalog advanced past build"
                         )
                         return self._decline_rebuild("publish_conflict")
-                    # The live main + `-wal` + `-shm` are one disposable set. A
-                    # missing main with orphan sidecars, or a proven-fatal main+WAL
-                    # that can never checkpoint itself, must move aside as a set.
-                    if self._live_set_disposition() == "quarantine":
-                        published = self._publish_over_quarantined_set(temp_path)
-                        if not published:
-                            self._last_rebuild_result = "publish_conflict"
-                        return published
-                    # Fold the healthy LIVE WAL before replacing its main file.
-                    if not self._quiesce_live_wal():
-                        log.info(
-                            "lexical atomic publish declined: live WAL not safely foldable"
-                        )
-                        return self._decline_rebuild("wal_busy")
-                    with reserved_paths._subsystem_authority_scope("lexstore"):
-                        reserved_paths._move_owner_file(
-                            self.vault_root,
-                            temp_path,
-                            "lexical-rebuild",
-                            self.path,
-                            "lexical-store",
-                            replace=True,
-                        )
-                    # Live `-wal`/`-shm` were folded away by `_quiesce_live_wal`.
-                    return True
+                    return self._replace_live_catalog(temp_path)
 
             # The capped suffix was complete but too large to replay while
             # blocking writers. Rebase it without the barrier, then repeat the
@@ -5718,6 +5700,239 @@ class LexicalStore:
             }
             if not source_matches_targets():
                 return False
+
+    def _materialize_catalog(
+        self,
+        temp_path: Path,
+        members: dict[Path, list[bool]],
+        signatures: dict,
+        scope_targets: dict[str, tuple],
+    ) -> bool:
+        """Write one walked corpus and its target checkpoints into a temp catalogue.
+
+        Shared by the background repair's `rebuild_atomic` and a standby's
+        `build_detached_catalog`. Touches only the temp family: no live file, no
+        publication barrier. True only when the temp is a single self-contained
+        main file that may later replace the live one.
+        """
+        conn = self._connect_setup(temp_path)
+        folded = False
+        try:
+            self._ensure_schema(conn)
+            with conn:
+                for path, (in_kb, in_vault) in members.items():
+                    self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
+                conn.execute(
+                    "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (str(SCHEMA_VERSION),),
+                )
+            with conn:
+                for _scope, (kind, delta, _cp, _tr) in scope_targets.items():
+                    if kind == "delta":
+                        self._apply_delta_rows(conn, delta)  # no foreground cap
+                for scope, (_kind, _delta, checkpoint, triple) in scope_targets.items():
+                    if triple is not None:
+                        conn.execute(
+                            "INSERT INTO meta(key, value) VALUES(?, ?) "
+                            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                            (f"triple:{scope}", repr(tuple(triple))),
+                        )
+                    self._write_checkpoint(conn, scope, checkpoint)
+                self._write_catalog_identity(conn)
+            # Fold the WAL back into the main file so the published sidecar is a
+            # single self-contained file. Publication is FORBIDDEN unless this
+            # provably succeeds — otherwise a plain `os.replace` of just the main
+            # file would strand committed data in an un-folded temp `-wal`.
+            folded = self._fold_to_single_file(conn)
+        finally:
+            conn.close()
+
+        # The temp must be provably self-contained in its main file before it may
+        # replace anything: the fold must have switched to DELETE mode AND left no
+        # `-wal`/`-shm` behind. Otherwise discard the temp and preserve live.
+        wal, shm = self._wal_shm_paths(temp_path)
+        if not folded or wal.exists() or shm.exists():
+            log.warning(
+                "lexical temp WAL fold incomplete; discarding build and preserving live"
+            )
+            return self._decline_rebuild("fold_failed")
+        return True
+
+    def _replace_live_catalog(self, temp_path: Path) -> bool:
+        """Install a folded temp catalogue over the live set.
+
+        The caller holds the publication barrier and has already decided the
+        temp may replace what is live. On any decline the live set is untouched.
+        """
+        # The live main + `-wal` + `-shm` are one disposable set. A missing main
+        # with orphan sidecars, or a proven-fatal main+WAL that can never
+        # checkpoint itself, must move aside as a set.
+        if self._live_set_disposition() == "quarantine":
+            published = self._publish_over_quarantined_set(temp_path)
+            if not published:
+                self._last_rebuild_result = "publish_conflict"
+            return published
+        # Fold the healthy LIVE WAL before replacing its main file.
+        if not self._quiesce_live_wal():
+            log.info("lexical atomic publish declined: live WAL not safely foldable")
+            return self._decline_rebuild("wal_busy")
+        with reserved_paths._subsystem_authority_scope("lexstore"):
+            reserved_paths._move_owner_file(
+                self.vault_root,
+                temp_path,
+                "lexical-rebuild",
+                self.path,
+                "lexical-store",
+                replace=True,
+            )
+        # Live `-wal`/`-shm` were folded away by `_quiesce_live_wal`.
+        return True
+
+    def live_catalog_compatible(self) -> bool:
+        """Whether the live catalogue carries this release's schema and identity.
+
+        Read-only, O(1) and walk-free, like `published_recall_checkpoint`. It
+        says nothing about freshness: a compatible catalogue that lags the corpus
+        is caught up by the delta and repair paths; an incompatible one can only
+        be replaced whole.
+        """
+        if backend() == "python" or not self.path.exists():
+            return False
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = self._connect()
+            return self._schema_is_current(conn) and self._meta_catalog_identity(
+                conn
+            ) == catalog_semantic_identity(self.vault_root)
+        except sqlite3.Error:
+            return False
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def build_detached_catalog(self) -> DetachedCatalog | None:
+        """Build this release's complete catalogue beside the live one.
+
+        For a standby whose serving worker keeps an incompatible catalogue: it
+        takes no publication barrier and makes no source proof, so it contends
+        with nothing that worker holds, and it never touches the live file. The
+        temp stays held by its `_RebuildTempLock` until it is adopted or
+        discarded. Its checkpoints bind the rows to the exact walk that produced
+        them, under a lineage no registry can bridge, so the process that adopts
+        it proves or heals it like any catalogue inherited from another process.
+        """
+        from . import freshness as freshness_module
+        from . import recall_policy
+        from .vault import VaultLockError
+
+        if backend() == "python":
+            return None
+        temp_path = self.path.with_name(f"{self.path.name}.rebuild-{uuid.uuid4().hex}.tmp")
+        temp_lock = _RebuildTempLock(temp_path)
+        try:
+            temp_lock.acquire()
+        except VaultLockError as e:
+            log.warning("lexical detached build could not lock its temp (%s)", e)
+            return None
+        detached = DetachedCatalog(self.vault_root, temp_path, temp_lock)
+        with _DETACHED_LOCK:
+            _DETACHED[temp_path] = detached
+        built = False
+        try:
+            identity = catalog_semantic_identity(self.vault_root)
+            policy = recall_policy.recall_policy_identity(self.vault_root)
+            members, signatures = self._walk_entries()
+            lineage = uuid.uuid4().hex
+            scope_targets: dict[str, tuple] = {}
+            for scope, idx in (("kb", 0), ("vault", 1)):
+                triple = freshness_module.triple_from_entries(
+                    (str(path), signatures[path])
+                    for path, flags in members.items()
+                    if flags[idx]
+                )
+                checkpoint = freshness_module.RecallFreshnessCheckpoint(
+                    lineage, 0, triple, *policy
+                )
+                scope_targets[scope] = ("walk", None, checkpoint, triple)
+            if not self._materialize_catalog(temp_path, members, signatures, scope_targets):
+                return None
+            if (
+                catalog_semantic_identity(self.vault_root) != identity
+                or recall_policy.recall_policy_identity(self.vault_root) != policy
+            ):
+                log.info("lexical detached build discarded: projection identity moved")
+                return None
+            with _DETACHED_LOCK:
+                built = _DETACHED.get(temp_path) is detached
+            if not built:
+                log.info("lexical detached build discarded while it ran")
+            return detached if built else None
+        except (sqlite3.Error, OSError, RuntimeError) as e:
+            log.warning("lexical detached build failed (%s); live catalogue untouched", e)
+            return None
+        finally:
+            if not built:
+                self.discard_detached_catalog(detached)
+
+    def adopt_detached_catalog(self, detached: DetachedCatalog) -> bool:
+        """Publish a catalogue this process built detached, replacing the live one.
+
+        Called by a promoted standby that now owns the vault. Under the
+        publication barrier the temp must still carry this release's schema and
+        the current semantic identity; the live set is then replaced exactly as
+        `rebuild_atomic` replaces it. The temp is gone and its lock released on
+        every outcome.
+        """
+        from .vault import VaultLockError
+
+        published = False
+        try:
+            with self._publication_lock():
+                if self._detached_catalog_current(detached.path):
+                    published = self._replace_live_catalog(detached.path)
+                else:
+                    log.info("lexical detached catalogue is no longer current; not adopted")
+        except VaultLockError as e:
+            log.warning("lexical detached catalogue adoption deferred (%s)", e)
+        except (sqlite3.Error, OSError) as e:
+            log.warning("lexical detached catalogue adoption failed (%s)", e)
+        finally:
+            self.discard_detached_catalog(detached)
+        if published:
+            with self._lock:
+                # A published current catalog clears the disposable-failure flag
+                # and every attestation this process held about the old one.
+                self._failed = False
+                self._synced.clear()
+                self._witnessed.clear()
+        return published
+
+    def _detached_catalog_current(self, temp_path: Path) -> bool:
+        """Whether a detached temp is self-contained, current-schema and current-identity."""
+        wal, shm = self._wal_shm_paths(temp_path)
+        if not temp_path.exists() or wal.exists() or shm.exists():
+            return False
+        conn = self._connect(temp_path)
+        try:
+            return self._schema_is_current(conn) and self._meta_catalog_identity(
+                conn
+            ) == catalog_semantic_identity(self.vault_root)
+        finally:
+            conn.close()
+
+    def discard_detached_catalog(self, detached: DetachedCatalog) -> None:
+        """Remove one detached temp family and release its lock. Idempotent."""
+        with _DETACHED_LOCK:
+            _DETACHED.pop(detached.path, None)
+        self._cleanup_sidecar_files(detached.path)
+        with contextlib.suppress(OSError):
+            _remove_lexical_rebuild_artifact(
+                self.vault_root,
+                detached.path.with_name(f"{detached.path.name}-journal"),
+                missing_ok=True,
+            )
+        detached.lock.release()
 
     def _rebase_detached_catalog(
         self,

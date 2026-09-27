@@ -436,6 +436,11 @@ class LocalRuntimeActivation:
                 self._stop_background_workers()
                 if thread is not None and thread is not threading.current_thread():
                     await anyio.to_thread.run_sync(thread.join)
+                # A discarded standby must not leave the catalogue it built
+                # behind; a no-op for any worker that is not an unpromoted one.
+                from . import service_standby
+
+                service_standby.discard()
 
         return _lifespan
 

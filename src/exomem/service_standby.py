@@ -5,7 +5,9 @@ needs — the lexical catalog, the embedding model when preload is allowed, and 
 read-only proof of the current graph snapshot — while the previous worker keeps
 serving.  Until the supervisor promotes it, the standby owns nothing: it takes
 no writer lease, publishes no index or graph state, schedules no drain, media or
-watcher work, and starts no descendants.
+watcher work, and starts no descendants.  Where the live lexical catalogue is an
+earlier release's, the standby builds its own into a rebuild temp it holds, and
+only promotion publishes it.
 
 Promotion is the only place ownership changes hands.  It runs after the previous
 worker and its descendants have provably exited, re-validates the checkpoint the
@@ -56,6 +58,14 @@ _activation: Any = None
 _corpus_built = False
 #: Whether the corpus build RAN, however it ended. See `cutover_components`.
 _corpus_attempted = False
+#: This release's lexical catalogue, built beside a live one an earlier release
+#: published, held until promotion adopts it or a stop discards it.
+_detached_catalog: Any = None
+#: Whether that catalogue was built; `lexical` is cutover-ready once it was.
+_detached_built = False
+#: Set once an unpromoted standby is being stopped; a build that finishes
+#: afterwards discards what it built instead of holding it.
+_discarded = False
 
 
 def standby_requested() -> bool:
@@ -103,6 +113,7 @@ def cutover_components() -> dict[str, str]:
     with _lock:
         snapshot_ready = _proved_token is not None
         corpus_settled = _corpus_attempted
+        catalogue_built = _detached_built
     components: dict[str, str] = {}
     for component in CUTOVER_COMPONENTS:
         if component == "graph_snapshot":
@@ -124,6 +135,12 @@ def cutover_components() -> dict[str, str]:
         elif component == "embeddings":
             if _preload_allowed():
                 components[component] = "ready" if readiness.is_ready("embeddings") else "waiting"
+        elif component == "lexical":
+            # A catalogue built detached is what promotion adopts, so it is as
+            # ready as a live one proved current. Its caches are the promoted
+            # worker's to warm (`lexical` is not carried in that case).
+            ready = catalogue_built or readiness.is_ready(component)
+            components[component] = "ready" if ready else "waiting"
         else:
             components[component] = "ready" if readiness.is_ready(component) else "waiting"
     return components
@@ -287,6 +304,96 @@ def prove_retrieval_catalog(vault_root: Path) -> bool:
         return False
 
 
+def prepare_detached_catalog(vault_root: Path) -> bool:
+    """Build this release's lexical catalogue beside an incompatible live one.
+
+    Called only when the read-only proof failed. A live catalogue at this
+    release's schema and semantic identity that merely lags the corpus is the
+    serving worker's repair owner's to catch up, and so is a missing one; the
+    standby leaves both alone and `lexical` stays waiting, as before. A live
+    catalogue an earlier release published can never become current for this
+    one while that release serves, so the standby builds its own into a rebuild
+    temp. The build takes no publication barrier and touches no live file; the
+    temp is published only by promotion, after the serving worker has exited.
+    """
+    global _detached_catalog, _detached_built
+    from . import lexstore
+
+    try:
+        if not lexstore.maintained_content_index_enabled():
+            return False
+        vault_root = Path(vault_root)
+        if not lexstore.lexical_path(vault_root).exists():
+            return False
+        if lexstore.live_catalog_compatible(vault_root):
+            return False
+        started = time.monotonic()
+        detached = lexstore.build_detached_catalog(vault_root)
+    except Exception:  # noqa: BLE001 - an unbuilt catalogue is a waiting component
+        log.warning("standby detached catalogue build failed", exc_info=True)
+        return False
+    if detached is None:
+        return False
+    with _lock:
+        stopped = _discarded or _promoted
+        if not stopped:
+            _detached_catalog = detached
+            _detached_built = True
+    if stopped:
+        lexstore.discard_detached_catalog(vault_root, detached)
+        return False
+    log.info(
+        "standby built a detached lexical catalogue in %.1f ms; promotion adopts it",
+        (time.monotonic() - started) * 1000.0,
+    )
+    return True
+
+
+def _adopt_detached_catalog(vault_root: Path) -> str | None:
+    """Publish the catalogue this standby built, now that it owns the vault.
+
+    Returns the handoff record's verdict, or None when nothing was built. A
+    catalogue that cannot be adopted leaves the live one to the promoted
+    worker's ordinary repair, which rebuilds it: the cold path, recorded.
+    """
+    global _detached_catalog
+    from . import lexstore
+
+    with _lock:
+        detached = _detached_catalog
+        _detached_catalog = None
+    if detached is None:
+        return None
+    try:
+        adopted = lexstore.adopt_detached_catalog(vault_root, detached)
+    except Exception:  # noqa: BLE001 - the coalesced repair owns an unadopted catalogue
+        log.warning("promoted worker could not adopt its detached catalogue", exc_info=True)
+        lexstore.discard_detached_catalog(vault_root, detached)
+        adopted = False
+    return "adopted" if adopted else "rebuild-after-promotion"
+
+
+def discard() -> None:
+    """Remove what an unpromoted standby built. Called when the process stops.
+
+    A discarded candidate must not leave a whole catalogue behind in the state
+    directory. A build still running is discarded too: it notices when it
+    finishes, and its temp is removed now regardless.
+    """
+    global _detached_catalog, _discarded
+    from . import lexstore
+
+    with _lock:
+        if _promoted or not _standby:
+            return
+        _discarded = True
+        _detached_catalog = None
+    try:
+        lexstore.discard_detached_catalogs()
+    except Exception:  # noqa: BLE001 - an orphan temp is reaped by the next sweep
+        log.warning("standby detached catalogue discard failed", exc_info=True)
+
+
 def _preload_models() -> None:
     """Load the models a promoted worker would otherwise fault in per request."""
     from . import readiness
@@ -387,6 +494,11 @@ def _carried_at_promotion(record: dict[str, Any]) -> frozenset[str]:
             carried.add("semantic_corpus")
     if record.get("snapshot") == "current":
         carried.add("graph_handoff")
+    if record.get("lexical_catalogue") == "adopted":
+        # Not a readiness component: it tells the promoted worker's warm that
+        # the live catalogue is one this process built before the serving
+        # worker's last writes, so one bounded heal runs before its proof.
+        carried.add("catalogue_handoff")
     return frozenset(carried)
 
 
@@ -397,9 +509,11 @@ def warm(vault_root: Path) -> None:
     repair of the lexical catalog, which is a publication this process must not
     make while another worker owns the vault. Everything here reads: the catalog
     is proved, the rebuildable caches are populated in memory, the models are
-    loaded, and the graph snapshot is proved against disk. Never raises; an
-    unready component stays ``waiting`` and the supervisor's warm budget decides
-    what happens next.
+    loaded, and the graph snapshot is proved against disk. The one write is a
+    catalogue built detached, beside a live one an earlier release published,
+    which nothing reads until promotion adopts it. Never raises; an unready
+    component stays ``waiting`` and the supervisor's warm budget decides what
+    happens next.
     """
     from . import freshness, mode, readiness
 
@@ -426,6 +540,10 @@ def warm(vault_root: Path) -> None:
             except Exception:  # noqa: BLE001 - caches are rebuildable on demand
                 log.warning("standby cache warm-up failed", exc_info=True)
             readiness.mark_ready("lexical")
+        elif prepare_detached_catalog(vault_root):
+            # The live catalogue is an earlier release's. Nothing is warmed
+            # over it: its caches would be of rows promotion replaces.
+            pass
         else:
             log.info(
                 "standby retrieval catalog is not current; the serving worker's "
@@ -564,6 +682,11 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
     # enqueueing the repair the adoption owes is a write, and this process has
     # no standing to make it until the lease says the vault is its own.
     _acquire_ownership()
+    # Owned now, and the worker that kept an earlier release's catalogue current
+    # has exited, so the catalogue this standby built may replace it.
+    catalogue = _adopt_detached_catalog(Path(vault_root))
+    if catalogue is not None:
+        record["lexical_catalogue"] = catalogue
     # The private-identity inventory this process built while warming was proved
     # against a generation the outgoing worker was still advancing, and that
     # worker's publications are invisible here. The shared token is the only
@@ -611,7 +734,11 @@ def reset_for_tests() -> None:
     """Clear process-local standby state; intentionally public for tests."""
     global _standby, _promoted, _proved_token, _adoption, _activation
     global _carried, _corpus_built, _corpus_attempted
+    global _detached_catalog, _detached_built, _discarded
     with _lock:
+        _detached_catalog = None
+        _detached_built = False
+        _discarded = False
         _standby = False
         _promoted = False
         _proved_token = None

@@ -469,8 +469,9 @@ class Supervisor:
 
         Nothing here pauses, drains or signals the worker that is serving. A
         candidate that cannot reach cutover readiness inside the warm budget is
-        discarded with the component it waited on recorded, and the upgrade
-        continues through the one-worker sequence — reported, never silent
+        discarded with the component it waited on recorded. `upgrade` then
+        refuses before pausing anything, unless the operator explicitly allowed
+        the one-worker cold replacement — reported, never silent
         (`seamless-managed-worker-handoff` D7).
         """
         if resume:
@@ -531,7 +532,11 @@ class Supervisor:
         return declared(target)
 
     async def upgrade(
-        self, target: dict[str, Any] | None, *, resume: bool = False
+        self,
+        target: dict[str, Any] | None,
+        *,
+        resume: bool = False,
+        allow_cold_replacement: bool = False,
     ) -> dict[str, Any]:
         if self.lock.locked():
             return {"ok": False, "error": "an upgrade is already in progress"}
@@ -569,6 +574,22 @@ class Supervisor:
             # what a polling operator has to be able to see.
             self.phase = "upgrading"
             handoff, standby = await self._warm_standby(target, resume=resume)
+            if handoff.get("standby") == "discarded":
+                # A candidate that never reached cutover readiness leaves only
+                # the one-worker sequence: drain, stop the worker that is
+                # serving and wait out a cold start with nothing serving. That
+                # is the outage a standby exists to remove, so it runs only on
+                # an explicit request. A resume never gets here: it warms no
+                # standby, because its worker has already stopped.
+                if not allow_cold_replacement:
+                    self.phase = "ready"
+                    return {
+                        "ok": False,
+                        "error": "the standby did not reach cutover readiness; current "
+                        "worker is still serving (allow_cold_replacement replaces it cold)",
+                        "handoff": handoff,
+                    }
+                handoff["cold_replacement"] = "allowed"
             deadline = Deadline(self.transition_timeout)
             # Bound before the try so the failure path can tell a handoff that
             # burned the whole replacement window from one that died at the
@@ -1355,6 +1376,10 @@ async def control_server(path: Path, supervisor: Supervisor) -> asyncio.Server:
                         supervisor.upgrade(
                             request.get("target"),
                             resume=command == "resume",
+                            # Its own field: `inspect` rejects any target key
+                            # the managed protocol does not define.
+                            allow_cold_replacement=request.get("allow_cold_replacement")
+                            is True,
                         )
                     )
 

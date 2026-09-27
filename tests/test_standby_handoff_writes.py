@@ -574,3 +574,220 @@ def test_a_promoted_worker_admits_its_first_write_instead_of_warming_again(
     assert any("carried_from_standby" in line for line in report["warm_complete"]), (
         f"the warm-complete line must name what it skipped: {report['warm_complete']}"
     )
+
+
+_CATALOGUE_HANDOFF_CHILD = '''
+import json, sys, threading, time
+from pathlib import Path
+
+sys.path.insert(0, {tests_dir!r})
+from test_graph_post_handoff_writes import GENERATED  # noqa: E402
+
+from exomem import find as find_module  # noqa: E402
+from exomem import freshness, lexstore, readiness, service_standby, warmup  # noqa: E402
+from exomem.vault import walk_vault_md  # noqa: E402
+
+root = Path(sys.argv[1])
+generated = root / GENERATED
+
+calls = {{"rebuild_atomic": 0, "in_place_rebuild": 0, "heal_delta": 0}}
+ensure_fresh_ms = []
+
+real_atomic = lexstore.LexicalStore.rebuild_atomic
+
+
+def counted_atomic(self):
+    calls["rebuild_atomic"] += 1
+    return real_atomic(self)
+
+
+real_rebuild = lexstore.LexicalStore._rebuild
+
+
+def counted_rebuild(self, conn):
+    calls["in_place_rebuild"] += 1
+    return real_rebuild(self, conn)
+
+
+real_heal = lexstore.LexicalStore._heal_delta
+
+
+def counted_heal(self, conn):
+    calls["heal_delta"] += 1
+    return real_heal(self, conn)
+
+
+real_ensure_fresh = lexstore.ensure_fresh
+
+
+def timed_ensure_fresh(vault_root):
+    started = time.monotonic()
+    try:
+        return real_ensure_fresh(vault_root)
+    finally:
+        ensure_fresh_ms.append(round((time.monotonic() - started) * 1000.0, 1))
+
+
+lexstore.LexicalStore.rebuild_atomic = counted_atomic
+lexstore.LexicalStore._rebuild = counted_rebuild
+lexstore.LexicalStore._heal_delta = counted_heal
+lexstore.ensure_fresh = timed_ensure_fresh
+
+live = lexstore.lexical_path(root)
+
+service_standby.enter_standby()
+warm_started = time.monotonic()
+service_standby.warm(root)
+warm_seconds = round(time.monotonic() - warm_started, 3)
+cutover = service_standby.readiness_payload()
+temps_at_cutover = len(list(live.parent.glob(live.name + ".rebuild-*.tmp")))
+standby_calls = dict(calls)
+
+# The worker still serving keeps writing between the detached build and the
+# promotion: an edit, a new note and a delete, none of which this process sees.
+edited = generated / "generated-note-0001.md"
+edited.write_text(
+    edited.read_text(encoding="utf-8") + "\\nquokkaeditedafterbuild\\n", encoding="utf-8"
+)
+created = generated / "generated-note-9999.md"
+created.write_text(
+    "---\\ntype: note\\n---\\n\\n# Created after the build\\n\\nquokkacreatedafterbuild\\n",
+    encoding="utf-8",
+)
+(generated / "generated-note-0002.md").unlink()
+
+promotion = service_standby.promote(root, migrated=False)
+
+# `release()` starts the watcher, whose boot pass seeds both recall scopes
+# before the promoted worker's warm reaches the catalogue.
+
+
+def _entries(scope):
+    if scope == "vault":
+        paths = walk_vault_md(root)
+    else:
+        kb = root / freshness.kb_dirname()
+        paths = find_module._walk_md(kb) if kb.is_dir() else ()
+    for path in paths:
+        try:
+            yield (str(path), freshness.stat_signature(path))
+        except OSError:
+            continue
+
+
+for scope in freshness.SCOPES:
+    freshness.seed(root, scope, _entries(scope))
+
+readiness.manage_runtime()
+thread = warmup.start_background(root)
+thread.join(timeout=300)
+lexstore.await_repairs_idle(root)
+
+print(
+    json.dumps(
+        {{
+            "cutover": cutover,
+            "warm_seconds": warm_seconds,
+            "temps_at_cutover": temps_at_cutover,
+            "standby_calls": standby_calls,
+            "promotion": promotion,
+            "calls": calls,
+            "ensure_fresh_ms": ensure_fresh_ms,
+            "admitted": readiness.is_ready("retrieval_catalog"),
+            "compatible": getattr(lexstore, "live_catalog_compatible", lambda _r: None)(root),
+            "edited_found": bool(
+                lexstore.search_bm25(root, "quokkaeditedafterbuild", k=3, scope="kb")
+            ),
+            "created_found": bool(
+                lexstore.search_bm25(root, "quokkacreatedafterbuild", k=3, scope="kb")
+            ),
+            "deleted_rows": lexstore.get_store(root).page_content_hashes(
+                [str((generated / "generated-note-0002.md").relative_to(root).as_posix())]
+            ),
+            "temps_after": len(list(live.parent.glob(live.name + ".rebuild-*"))),
+        }}
+    )
+)
+'''
+
+
+def _older_schema_live_catalogue(vault: Path) -> None:
+    """Publish the catalogue, then make it one an earlier release published."""
+    import sqlite3
+
+    from exomem import lexstore
+
+    lexstore.ensure_fresh(vault)
+    lexstore.clear_stores()
+    connection = sqlite3.connect(lexstore.lexical_path(vault))
+    try:
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            (str(lexstore.SCHEMA_VERSION - 1),),
+        )
+        connection.execute(
+            "UPDATE meta SET value = 'an-earlier-release' WHERE key = 'catalog_identity'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _run_catalogue_handoff(vault: Path, tmp_path: Path) -> dict:
+    script = tmp_path / "catalogue_handoff_child.py"
+    script.write_text(
+        _CATALOGUE_HANDOFF_CHILD.format(tests_dir=str(Path(__file__).parent)),
+        encoding="utf-8",
+    )
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = os.pathsep.join(
+        [str(Path(__file__).resolve().parents[1] / "src"), environment.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
+    completed = subprocess.run(
+        [sys.executable, str(script), str(vault)],
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=600,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr[-4000:]
+    return json.loads(completed.stdout.strip().splitlines()[-1])
+
+
+def test_writes_between_the_detached_build_and_promotion_heal_without_a_rebuild(
+    handoff_vault: Path, tmp_path: Path
+) -> None:
+    """A schema-bump upgrade cuts over, and the writes it raced are not lost.
+
+    The serving worker's catalogue carries an earlier release's schema, so the
+    standby builds this release's catalogue detached and promotion adopts it.
+    Writes the serving worker made after that build are healed by one bounded
+    delta pass in the promoted worker's warm: no `rebuild_atomic`, no in-place
+    rebuild, and every one of them is searchable once retrieval is admitted.
+    """
+    _run_child(handoff_vault, tmp_path, ["outgoing"])
+    _older_schema_live_catalogue(handoff_vault)
+    report = _run_catalogue_handoff(handoff_vault, tmp_path)
+
+    cutover = report["cutover"]
+    assert cutover["components"]["lexical"] == "ready", cutover
+    assert cutover["cutover_ready"] is True, cutover
+    assert report["temps_at_cutover"] == 1
+    assert report["standby_calls"] == {
+        "rebuild_atomic": 0,
+        "in_place_rebuild": 0,
+        "heal_delta": 0,
+    }, "a standby publishes nothing and repairs nothing"
+    assert report["promotion"]["lexical_catalogue"] == "adopted", report["promotion"]
+    assert "catalogue_handoff" in report["promotion"]["carried_from_standby"]
+    assert report["calls"]["rebuild_atomic"] == 0, report["calls"]
+    assert report["calls"]["in_place_rebuild"] == 0, report["calls"]
+    assert report["calls"]["heal_delta"] >= 1, report["calls"]
+    assert len(report["ensure_fresh_ms"]) == 1, report["ensure_fresh_ms"]
+    assert report["admitted"] is True
+    assert report["compatible"] is True
+    assert report["edited_found"] is True
+    assert report["created_found"] is True
+    assert list(report["deleted_rows"].values()) == [None]
+    assert report["temps_after"] == 0
