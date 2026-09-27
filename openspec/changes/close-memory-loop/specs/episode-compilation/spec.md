@@ -135,12 +135,29 @@ Candidate identity SHALL remain stable across destination re-resolution, proposa
 
 ### Requirement: Typed episode operations execute only existing leaves and only when enabled
 
-Episode candidate operations SHALL be exposed through the canonical episode command on MCP, CLI and REST. A candidate's leaves SHALL be closed steps for existing writers, and an unknown kind, field or payload SHALL be refused before any state is recorded. Preparing a new or revised leaf SHALL validate it against the current vault. Only the resume operation SHALL reach a writer, and it SHALL refuse with a typed `episode_workflow_disabled` result, recording nothing, unless the service operator has enabled episode execution; no tool call SHALL be able to enable it. Reading an episode's candidates SHALL remain available and SHALL NOT return leaf payloads.
+Episode candidate operations SHALL be exposed through the canonical episode command on MCP, CLI and REST. A candidate's leaves SHALL be closed steps for existing writers of the kinds its route owns, and an unknown kind, field or payload, or a kind its route does not own, SHALL be refused before any state is recorded. Preparing a new or revised leaf SHALL validate it against the current vault. The resume operation SHALL be the episode's executor, and it SHALL refuse with a typed `episode_workflow_disabled` result, recording nothing, unless the service operator has enabled episode execution; no tool call SHALL be able to enable it. That enablement SHALL be treated as a feature switch rather than an authority boundary: the operations SHALL grant nothing beyond the caller's existing curation authority over the same sealed plans. Resume SHALL act only on the episode state its caller last reviewed, SHALL NOT run an effect whose current proposal has no disposition, and SHALL report a leaf whose sealed plan has gone stale without recording an attempt. Reading an episode's candidates SHALL remain available and SHALL NOT return leaf payloads.
 
 #### Scenario: An untyped effect is proposed
 
 - **WHEN** a proposal carries an unknown leaf kind, unknown argument fields or extra execution fields
 - **THEN** preparation fails with a typed refusal and the episode journal is unchanged
+
+#### Scenario: A route carries a leaf kind it does not own
+
+- **WHEN** a relation-only proposal carries a delete step
+- **THEN** preparation fails with a typed refusal and the episode journal is unchanged
+
+#### Scenario: A proposal changes after its disposition
+
+- **WHEN** a routed candidate is re-prepared with a different effect, or a caller resumes with a journal digest older than the episode's current state
+- **THEN** resume refuses before any reconcile, attestation or write
+- **AND** the revised candidate runs only after a fresh disposition
+
+#### Scenario: A sealed leaf goes stale before execution
+
+- **WHEN** the vault changes so that a routed leaf's sealed plan no longer applies
+- **THEN** resume reports the leaf stale and records no attempt
+- **AND** the candidate can be re-prepared or re-dispositioned and the episode resumed
 
 #### Scenario: Execution has not been enabled
 

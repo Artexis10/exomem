@@ -7728,9 +7728,6 @@ _EpisodeProposalArgument = Annotated[
                                             "accept-relation",
                                             "edit",
                                             "supersede",
-                                            "move",
-                                            "delete",
-                                            "recover",
                                         ]
                                     },
                                     "args": {"type": "object"},
@@ -7768,6 +7765,7 @@ def op_episode_memory(
     | None = None,
     reason: str | None = None,
     input_revision: int | None = None,
+    journal_digest: str | None = None,
     order: list[str] | None = None,
     max_leaves: int | None = None,
     postcommit: bool | None = None,
@@ -7786,8 +7784,9 @@ def op_episode_memory(
     changes: `prepare` one candidate's destination, set its `disposition`
     (including honest no_capture, deferred or rejected ones), and `resume`
     to execute the routed ones. A leaf is one typed step for an existing
-    writer (the curation step kinds of `maintain_memory`), never a free-form
-    effect. `resume` refuses with `episode_workflow_disabled` unless this
+    writer, of a kind its route owns: focused_note creates a note, entity an
+    entity, relation_only accepts a relation, existing_page and semantic_unit
+    edit or supersede. It is never a free-form effect. `resume` refuses with `episode_workflow_disabled` unless this
     service enables episode execution.
 
     Args:
@@ -7825,6 +7824,9 @@ def op_episode_memory(
         reason: For `disposition`: why, in one or two sentences.
         input_revision: For `resume`: the input revision your coverage
             review covered, the current one.
+        journal_digest: For `resume`: the `journal_digest` your last
+            candidates, prepare or disposition result returned. A resume
+            after any later change is refused with EPISODE_REVISION_CONFLICT.
         order: For `resume`: leaf ids to run, in this order.
         max_leaves: For `resume`: at most this many leaves this pass, 1 to
             16 (default 8); the rest stay pending.
@@ -7837,8 +7839,8 @@ def op_episode_memory(
         coverage_current}; candidates/prepare/disposition -> {episode,
         input_revision, candidates: [{candidate_key, route, disposition,
         pending, leaves: [{leaf_id, kind, outcome, ...}]}], complete,
-        execution}; resume adds {status, executed, reconciled, blocked,
-        deferred, publication}. Newlines, credential-shaped text and anything
+        execution}; resume adds {status, executed, replayed, stale,
+        diverged, reconciled, blocked, deferred, publication}. Newlines, credential-shaped text and anything
         over a cap are refused with nothing written.
     """
     recap = {
@@ -7857,6 +7859,7 @@ def op_episode_memory(
         "disposition": disposition,
         "reason": reason,
         "input_revision": input_revision,
+        "journal_digest": journal_digest,
         "order": order,
         "max_leaves": max_leaves,
         "postcommit": postcommit,
@@ -7870,7 +7873,10 @@ def op_episode_memory(
             {"candidate", "disposition", "reason"},
             {"candidate", "disposition", "reason"},
         ),
-        "resume": ({"input_revision", "order", "max_leaves", "postcommit"}, {"input_revision"}),
+        "resume": (
+            {"input_revision", "journal_digest", "order", "max_leaves", "postcommit"},
+            {"input_revision", "journal_digest"},
+        ),
     }.get(action, (None, None))
     if allowed is None:
         raise ValueError(
@@ -7920,6 +7926,7 @@ def op_episode_memory(
         resumed = episode_workflow_module.resume(
             vault_root,
             episode=episode,
+            journal_digest=journal_digest,
             input_revision=input_revision,
             order=order,
             max_leaves=max_leaves,

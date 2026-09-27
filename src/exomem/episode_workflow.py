@@ -3,25 +3,30 @@
 The active agent decides every candidate, destination and disposition; this
 module validates, records and (only when enabled) executes them. A candidate
 names a typed destination for an existing writer -- one closed curation step
-(`curation.STEP_KINDS`, fields checked by `curation.validate_forward_plan`) --
-never a free-form effect.
+of a kind its route owns (fields checked by `curation.validate_forward_plan`)
+-- never a free-form effect.
 
-Authority boundary, kept small for review (close-memory-loop task 5.5):
+What each action writes (close-memory-loop task 5.5):
 
 * `inspect` reads the caller's own episode ledger. It writes nothing.
 * `prepare` and `disposition` write only the caller's audience-bound episode
   journal and inert sealed single-step curation plans. Preparation runs the
   same read-only leaf preparation `maintain_memory mode=curation` propose runs;
-  no canonical page is written.
-* `resume` is the only path to a writer. Unless the service environment sets
-  `EXOMEM_EPISODE_WORKFLOW`, it refuses with `episode_workflow_disabled` before
-  reading or writing anything. When enabled it runs only a leaf that is routed,
-  bound to its own sealed plan, covered by a current precommit attestation and
-  not already attempted, through `curation.apply` -- the existing executor,
-  under the command's writer lease and each writer's own validation. It grants
-  nothing `maintain_memory mode=curation apply` does not already grant the same
-  caller, mints no vocabulary or edge authority, and never retries an
+  no canonical page is written. Revising a proposal withdraws its disposition.
+* `resume` is the episode's executor. It acts only on the journal digest its
+  caller last reviewed, and runs only a leaf that is routed, bound to a current
+  sealed plan, covered by a current precommit attestation and not already
+  attempted, through `curation.apply` -- the existing executor, under the
+  command's writer lease and each writer's own validation. It never retries an
   uncertain attempt: reconciliation reads existing receipts only.
+
+`EXOMEM_EPISODE_WORKFLOW` is a feature switch for that executor, not an
+authority boundary. Unless the service environment sets it, `resume` refuses
+with `episode_workflow_disabled` before reading or writing anything. A sealed
+leaf plan is an ordinary curation run, which the same caller can apply through
+`maintain_memory mode=curation apply` whatever the switch says; the episode
+operations grant nothing that apply does not already grant that caller and
+mint no vocabulary or edge authority.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ from typing import Any
 
 from . import curation, episode_capture
 from . import episode_model as model
+from .episode_reconciliation import reconcile_curation_leaf
 from .episode_recovery import EpisodeInputOwner
 from .episode_store import EpisodeStore
 
@@ -50,11 +56,12 @@ def _error(code: str, reason: str) -> model.EpisodeError:
 def enabled() -> bool:
     """Whether this service may execute episode leaves. Default off.
 
-    An environment setting only: the service operator enables it, and no tool
-    call -- `configure_memory` included -- can.
+    An environment setting only: the service operator enables it with `1`,
+    `true`, `yes` or `on`, anything else leaves it off, and no tool call --
+    `configure_memory` included -- can.
     """
     value = os.environ.get(ENABLE_ENV)
-    return value is not None and value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _key(episode: Any) -> str:
@@ -90,6 +97,16 @@ class _Session:
             expected_digest=self.current["journal_digest"],
             action=action,
             args=args,
+        )
+        return self.current
+
+    def transitions(self, commands: Sequence[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+        """Accept every command in one journal write, or none of them."""
+        self.current = self.store.transitions(
+            self.identity,
+            expected_revision=self.current["revision"],
+            expected_digest=self.current["journal_digest"],
+            commands=commands,
         )
         return self.current
 
@@ -180,12 +197,42 @@ def _seal(vault_root: Path, leaf: Mapping[str, Any]) -> dict[str, Any]:
     )
 
 
+def _committed(vault_root: Path, run_id: str) -> bool:
+    """Whether this sealed plan's step already committed, here or elsewhere."""
+    return bool(curation.CurationStore(vault_root).reconstruct(run_id)["committed_steps"])
+
+
+def _blockers(vault_root: Path, run_id: str) -> list[str]:
+    """Codes that would refuse an uncommitted sealed plan now, as `curation.preview` says."""
+    return [item["code"] for item in curation.preview(vault_root, run_id=run_id)["blockers"]]
+
+
+def _unverifiable(session: _Session, candidate_id: str, leaf_id: str) -> str | None:
+    """Why reconciling this leaf would fail now, from a read-only trial on a copy.
+
+    The copy marks the attempt the pure model would mark and runs the same
+    receipt and postimage verification its reconcile runs; nothing is recorded.
+    """
+    trial = model.mark_attempt_started(session.state, candidate_id, leaf_id)
+    try:
+        reconcile_curation_leaf(session.vault_root, trial, candidate_id, leaf_id)
+    except model.EpisodeError as error:
+        if error.code != "EPISODE_OUTCOME_UNCERTAIN":
+            raise
+        return error.code
+    return None
+
+
 def prepare(vault_root: Path, *, episode: Any, candidate: Any, proposal: Any) -> dict[str, Any]:
     """Declare or revise one candidate's typed proposal and bind its leaves.
 
     The proposal is validated by the pure model, and every new or revised leaf
     passes current preparation, before the journal accepts anything: a refused
-    proposal or leaf leaves the episode unchanged.
+    proposal or leaf leaves the episode unchanged. An unattempted leaf whose
+    sealed plan has gone stale is sealed again against the current vault. The
+    declaration, revision and bindings land in one journal write, so a refused
+    bind leaves no half-bound candidate, and a journal without room for all of
+    them refuses before any plan is sealed.
     """
     session = _Session(vault_root, episode)
     key = model._string(candidate, "candidate_key", 160)  # noqa: SLF001
@@ -203,25 +250,49 @@ def prepare(vault_root: Path, *, episode: Any, candidate: Any, proposal: Any) ->
         if error.code != "EPISODE_PROPOSAL_UNCHANGED":
             raise
         revised = False
-    sealed = [
-        (leaf["leaf_id"], _seal(session.vault_root, leaf))
+    unsealed = [
+        leaf
         for leaf in model._candidate(trial, identity)["leaves"]  # noqa: SLF001
-        if leaf["binding"] is None and not leaf["attempts"]
-    ]
-    if existing is None:
-        session.transition("declare_candidate", key=key)
-    if revised:
-        session.transition("revise_proposal", candidate=identity, proposal=model._copy(proposal))  # noqa: SLF001
-    for leaf_id, proposed in sealed:
-        session.transition(
-            "bind_curation_leaf",
-            candidate=identity,
-            leaf=leaf_id,
-            run_id=proposed["run_id"],
-            plan_id=proposed["plan_id"],
-            plan_fingerprint=proposed["plan_fingerprint"],
-            ordinal=0,
+        if not leaf["attempts"]
+        and (
+            leaf["binding"] is None
+            or (
+                not _committed(session.vault_root, leaf["binding"]["run_id"])
+                and _blockers(session.vault_root, leaf["binding"]["run_id"])
+            )
         )
+    ]
+    commands: list[tuple[str, dict[str, Any]]] = []
+    if existing is None:
+        commands.append(("declare_candidate", {"key": key}))
+    if revised:
+        commands.append(("revise_proposal", {"candidate": identity, "proposal": proposal}))
+    # A lower bound on what the journal takes: the commands plus each sealed
+    # plan's step. Too little room refuses before any plan is sealed.
+    transitions, room = session.store.room(session.identity)
+    needed = len(model._json(commands).encode()) + sum(  # noqa: SLF001
+        len(model._json(leaf["args"]).encode())  # noqa: SLF001
+        for leaf in unsealed
+    )
+    if len(commands) + len(unsealed) > transitions or needed > room:
+        raise _error("EPISODE_TOO_LARGE", "the episode journal has no room for this preparation")
+    for leaf in unsealed:
+        proposed = _seal(session.vault_root, leaf)
+        commands.append(
+            (
+                "bind_curation_leaf",
+                {
+                    "candidate": identity,
+                    "leaf": leaf["leaf_id"],
+                    "run_id": proposed["run_id"],
+                    "plan_id": proposed["plan_id"],
+                    "plan_fingerprint": proposed["plan_fingerprint"],
+                    "ordinal": 0,
+                },
+            )
+        )
+    if commands:
+        session.transitions(commands)
     return _projection(session)
 
 
@@ -254,6 +325,9 @@ def _refused(key: str) -> dict[str, Any]:
             f"it with {ENABLE_ENV}. Inspect, prepare and disposition remain available."
         ),
         "executed": [],
+        "replayed": [],
+        "stale": [],
+        "diverged": [],
         "reconciled": [],
         "blocked": [],
     }
@@ -320,9 +394,21 @@ def _reconcile_uncertain(session: _Session) -> tuple[list[dict], list[dict]]:
     return reconciled, blocked
 
 
-def _execute(session: _Session, candidate_id: str, leaf_id: str) -> dict[str, Any]:
+def _execute(session: _Session, candidate_id: str, leaf_id: str) -> tuple[str, dict[str, Any]]:
     leaf = model._owned(session.state, candidate_id, leaf_id)  # noqa: SLF001
     binding = leaf["binding"]
+    # Neither case records an attempt, so the agent can still re-prepare or
+    # re-disposition the candidate. A plan committed elsewhere must still
+    # reconcile, or its attempt would stay uncertain for good; any other plan
+    # must still apply to the vault it would change.
+    if _committed(session.vault_root, binding["run_id"]):
+        code = _unverifiable(session, candidate_id, leaf_id)
+        if code:
+            return "diverged", {"leaf_id": leaf_id, "code": code}
+    else:
+        blockers = _blockers(session.vault_root, binding["run_id"])
+        if blockers:
+            return "stale", {"leaf_id": leaf_id, "code": blockers[0]}
     snapshot = session.state["current_precommit"]["snapshot"]
     # Durably uncertain before the writer runs: a crash from here on can only
     # be reconciled from receipts, never retried under a fresh identity.
@@ -345,7 +431,10 @@ def _execute(session: _Session, candidate_id: str, leaf_id: str) -> dict[str, An
         )
     session.transition("reconcile_curation_leaf", candidate=candidate_id, leaf=leaf_id)
     step = result.get("step") if isinstance(result, Mapping) else None
-    return {
+    # A plan already applied elsewhere (through `maintain_memory` curation
+    # apply, say) is reconciled from its receipt; this pass wrote nothing.
+    kind = "replayed" if curation.valid_replay_result(result) else "executed"
+    return kind, {
         "leaf_id": leaf_id,
         "operation_id": binding["operation_id"],
         "outcome": "committed",
@@ -357,6 +446,7 @@ def resume(
     vault_root: Path,
     *,
     episode: Any,
+    journal_digest: Any,
     input_revision: Any,
     order: Sequence[str] | None = None,
     max_leaves: Any = None,
@@ -365,7 +455,9 @@ def resume(
     """Reconcile, attest and execute this episode's remaining routed leaves.
 
     Refused with `episode_workflow_disabled`, before anything is read or
-    written, unless the service enables execution.
+    written, unless the service enables execution. Otherwise it acts only on
+    the journal state the caller last reviewed: a `journal_digest` other than
+    the current one is refused before any reconcile or attestation.
     """
     key = _key(episode)
     if not enabled():
@@ -373,15 +465,26 @@ def resume(
         return _refused(key)
     if type(input_revision) is not int:
         raise _error("EPISODE_WORKFLOW_INVALID", "resume needs the reviewed input_revision")
+    if not isinstance(journal_digest, str):
+        raise _error("EPISODE_WORKFLOW_INVALID", "resume needs the reviewed journal_digest")
     limit = DEFAULT_MAX_LEAVES if max_leaves is None else max_leaves
     if type(limit) is not int or not 1 <= limit <= MAX_LEAVES:
         raise _error("EPISODE_WORKFLOW_INVALID", f"max_leaves must be 1 through {MAX_LEAVES}")
     session = _Session(vault_root, key)
+    if journal_digest != session.current["journal_digest"]:
+        raise _error(
+            "EPISODE_REVISION_CONFLICT", "the episode changed after the caller's last review"
+        )
     if input_revision != session.state["input_revisions"][-1]["revision"]:
         raise _error("EPISODE_INPUT_REVISION_STALE", "resume must review the current input")
 
     reconciled, blocked = _reconcile_uncertain(session)
-    executed: list[dict[str, Any]] = []
+    reported: dict[str, list[dict[str, Any]]] = {
+        "executed": [],
+        "replayed": [],
+        "stale": [],
+        "diverged": [],
+    }
     if postcommit:
         committed = [
             leaf["leaf_id"] for _c, leaf in _leaves(session.state) if leaf["outcome"] == "committed"
@@ -396,28 +499,37 @@ def resume(
             if (session.state["current_precommit"] or {}).get("input_revision") != input_revision:
                 session.transition("attest_precommit", input_revision=input_revision)
         frozen = {item["leaf_id"] for item in blocked}
+        held: set[str] = set()
         deferred = max(0, len(planned) - limit)
         for candidate_id, leaf_id in planned[:limit]:
             owner = model._candidate(session.state, candidate_id)  # noqa: SLF001
-            if any(leaf["leaf_id"] in frozen for leaf in owner["leaves"]):
+            if candidate_id in held or any(leaf["leaf_id"] in frozen for leaf in owner["leaves"]):
                 continue
             try:
-                executed.append(_execute(session, candidate_id, leaf_id))
+                kind, item = _execute(session, candidate_id, leaf_id)
             except (curation.CurationError, model.EpisodeError) as error:
-                # The leaf stays uncertain: a failure is not proof of non-commit.
+                # A leaf past its attempt mark stays uncertain: a failure is
+                # not proof of non-commit.
                 session.current = session.store.read(session.identity)
                 blocked.append({"leaf_id": leaf_id, "code": error.code})
                 break
+            reported[kind].append(item)
+            if kind in {"stale", "diverged"}:
+                # The rest of its candidate waits for the owner's review.
+                held.add(candidate_id)
     projection = _projection(session)
+    status = "blocked" if blocked else "ok"
+    if not blocked and (reported["stale"] or reported["diverged"]):
+        status = "stale" if reported["stale"] else "diverged"
     return {
         **projection,
         "action": "resume",
-        "status": "ok" if not blocked else "blocked",
-        "executed": executed,
+        "status": status,
+        **reported,
         "reconciled": reconciled,
         "blocked": blocked,
         "deferred": deferred,
         # Writers schedule their own projections; this call never claims a
         # published graph or index is current.
-        "publication": "pending" if executed else "unchanged",
+        "publication": "pending" if reported["executed"] else "unchanged",
     }

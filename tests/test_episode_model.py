@@ -429,7 +429,9 @@ def test_binding_preserves_entity_candidate_from_real_curation_plan(vault) -> No
     state = episode_model.start_episode("turn-entity", _input())
     state = episode_model.declare_candidate(state, "amber-guild")
     candidate_id = state["candidates"][0]["candidate_id"]
-    state = episode_model.revise_proposal(state, candidate_id, _proposal(leaf))
+    state = episode_model.revise_proposal(
+        state, candidate_id, {**_proposal(leaf), "route": "entity"}
+    )
     state = episode_model.set_disposition(state, candidate_id, "routed", "Promote it.")
     leaf_id = state["candidates"][0]["leaves"][0]["leaf_id"]
     binding = {
@@ -552,3 +554,78 @@ def test_input_evidence_may_carry_the_refs_a_recap_concerns() -> None:
     for bad in (["x"] * 4, [""], [1], "exomem://memory/x", ["y" * 2049], ["x", "x"]):
         with pytest.raises(episode_model.EpisodeError, match="EPISODE_EVIDENCE_INVALID"):
             episode_model.start_episode("turn-42", {"digest": "a" * 64, "about": bad})
+
+
+_KIND_ARGS = {
+    "create-note": {"title": "A note", "content": "## Observations\n\n- [finding] Held.\n"},
+    "create-entity": {"entity_type": "organization", "name": "Guild", "summary": "A guild."},
+    "supersede": {
+        "old_path": "Knowledge Base/Notes/Insights/old.md",
+        "title": "Newer",
+        "content": "## Observations\n\n- [finding] Newer.\n",
+    },
+    "move": {
+        "old_path": "Knowledge Base/Notes/Insights/old.md",
+        "new_path": "Knowledge Base/Notes/Insights/new.md",
+    },
+    "delete": {"path": "Knowledge Base/Notes/Insights/old.md", "confirm": True},
+    "recover": {"trash_path": "Knowledge Base/_trash/old.md"},
+}
+
+
+def _routed_leaf(route: str, kind: str) -> dict[str, object]:
+    leaf = {"leaf_key": "leaf", "effect_revision": 1, "kind": kind, "args": _KIND_ARGS[kind]}
+    return {**_proposal(), "route": route, "leaves": [leaf]}
+
+
+@pytest.mark.parametrize(
+    ("route", "kind"),
+    [
+        ("relation_only", "delete"),
+        ("relation_only", "create-note"),
+        ("focused_note", "create-entity"),
+        ("entity", "create-note"),
+        ("existing_page", "move"),
+        ("semantic_unit", "recover"),
+        ("existing_page", "delete"),
+    ],
+)
+def test_a_route_refuses_leaf_kinds_it_does_not_own(route: str, kind: str) -> None:
+    from exomem import episode_model as model
+
+    state = model.declare_candidate(model.start_episode("turn-route", _input()), "c")
+    candidate = state["candidates"][0]["candidate_id"]
+    with pytest.raises(model.EpisodeError, match="route does not admit"):
+        model.revise_proposal(state, candidate, _routed_leaf(route, kind))
+
+
+@pytest.mark.parametrize(
+    ("route", "kind"),
+    [
+        ("focused_note", "create-note"),
+        ("entity", "create-entity"),
+        ("existing_page", "supersede"),
+        ("semantic_unit", "supersede"),
+    ],
+)
+def test_a_route_admits_its_own_leaf_kinds(route: str, kind: str) -> None:
+    from exomem import episode_model as model
+
+    state = model.declare_candidate(model.start_episode("turn-route", _input()), "c")
+    candidate = state["candidates"][0]["candidate_id"]
+    revised = model.revise_proposal(state, candidate, _routed_leaf(route, kind))
+    assert [leaf["kind"] for leaf in revised["candidates"][0]["leaves"]] == [kind]
+
+
+def test_a_revised_proposal_withdraws_its_disposition() -> None:
+    from exomem import episode_model as model
+
+    state = model.start_episode("turn-42", _input())
+    state = model.declare_candidate(state, "observation")
+    candidate = state["candidates"][0]["candidate_id"]
+    state = model.revise_proposal(state, candidate, _proposal(_step()))
+    state = model.set_disposition(state, candidate, "routed", "Capture it.")
+    revised = model.revise_proposal(state, candidate, _proposal(_changed_effect(_step())))
+    assert revised["candidates"][0]["disposition"] is None
+    with pytest.raises(model.EpisodeError, match="EPISODE_COVERAGE_INCOMPLETE"):
+        model.attest_precommit(revised, 1)
