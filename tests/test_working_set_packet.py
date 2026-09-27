@@ -29,6 +29,12 @@ PACKET_KEYS = {
     "abstained",
 }
 
+#: A local keyed conversation with no history of its own, as a hook sends
+#: one: it ranks exactly as the vault does. A caller with no key is never
+#: given another conversation's work as its referent (the keyless-connector
+#: ruling), so the referential tests here compile as this caller.
+LOCAL = working_set_heat.Attribution(session="local-conversation")
+
 
 def _item(
     role: str,
@@ -1457,7 +1463,7 @@ def test_a_referential_turn_resolves_to_the_hottest_anchor(stateful_vault: Path)
         stateful_vault, newest=stateful_vault / "Knowledge Base" / "Products" / "Cargo Sled.md"
     )
 
-    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000, attribution=LOCAL)
 
     assert packet["abstained"] is False, packet.get("abstention")
     resolved = [item for item in packet["anchors"] if item["status"] == "resolved"]
@@ -1476,7 +1482,7 @@ def test_a_referential_turn_with_no_hot_profile_still_abstains(
     is referred to. The turn abstains exactly as it did before this rule."""
     working_set_index.WorkingSetIndex(stateful_vault).rebuild()
 
-    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000, attribution=LOCAL)
 
     assert packet["abstained"] is True
     assert packet["abstention"] == {"reason": "unresolved"}
@@ -1526,12 +1532,12 @@ def test_a_retired_page_is_never_the_hottest_anchor(stateful_vault: Path) -> Non
     # Not vacuous: the retired page IS an anchor, and IS the freshest edit.
     assert "Knowledge Base/Products/Retired Sled.md" in {row.path for row in rows}
 
-    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000, attribution=LOCAL)
 
     offered = {item["path"] for item in packet["anchors"]}
     assert "Knowledge Base/Products/Retired Sled.md" not in offered
     assert "Knowledge Base/Products/Retired Sled.md" not in working_set.hot_profile(
-        stateful_vault, rows=rows
+        stateful_vault, rows=rows, attribution=LOCAL
     ).members
     # The profile falls through to the next-freshest current page rather
     # than going empty because the freshest one was retired.
@@ -1549,8 +1555,8 @@ def test_the_hot_profile_is_bounded_and_ranked_deterministically(
     index = working_set_index.WorkingSetIndex(stateful_vault)
     rows = working_set_resolve.facts_from_rows(index.anchors())
 
-    first = working_set.hot_profile(stateful_vault, rows=rows).members
-    second = working_set.hot_profile(stateful_vault, rows=rows).members
+    first = working_set.hot_profile(stateful_vault, rows=rows, attribution=LOCAL).members
+    second = working_set.hot_profile(stateful_vault, rows=rows, attribution=LOCAL).members
 
     assert first == second
     assert first == frozenset({"Knowledge Base/Products/Cargo Sled.md"})
@@ -1597,8 +1603,8 @@ def test_a_page_superseded_by_another_is_never_hot(stateful_vault: Path) -> None
     stale_rows = [row for row in rows if row.path == "Knowledge Base/Products/Old Sled.md"]
     assert stale_rows and stale_rows[0].lifecycle == "active", "the index cannot see it"
 
-    hot = working_set.hot_profile(stateful_vault, rows=rows).members
-    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+    hot = working_set.hot_profile(stateful_vault, rows=rows, attribution=LOCAL).members
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000, attribution=LOCAL)
 
     assert "Knowledge Base/Products/Old Sled.md" not in hot
     assert hot, "the next-freshest current page takes its place"
@@ -1683,8 +1689,8 @@ def test_one_request_copies_the_freshness_registry_once(
 
     monkeypatch.setattr(freshness, "live_entries", _counting)
 
-    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
-    again = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000, attribution=LOCAL)
+    again = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000, attribution=LOCAL)
 
     assert packet["abstained"] is False, packet.get("abstention")
     assert packet["recent_context"] and again["recent_context"]
@@ -1755,7 +1761,7 @@ def test_an_unresolved_continue_leads_with_the_newest_episode_and_its_summary(
     _touch(recap, when=now)
     _live_cell(stateful_vault)
 
-    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000, attribution=LOCAL)
 
     first = packet["recent_context"][0]
     assert first["path"] == recap.relative_to(stateful_vault).as_posix()
@@ -1796,7 +1802,7 @@ def test_two_revisions_of_one_episode_appear_once(stateful_vault: Path) -> None:
     _touch(old, when=now)
     _live_cell(stateful_vault)
 
-    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000, attribution=LOCAL)
 
     episodes = _episode_entries(packet)
     assert [entry["path"] for entry in episodes] == [new.relative_to(stateful_vault).as_posix()]
@@ -1816,7 +1822,7 @@ def test_eight_fresh_edits_do_not_bury_the_newest_episode(stateful_vault: Path) 
     _touch(recap, when=now - 90 * 86_400)
     _live_cell(stateful_vault)
 
-    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000, attribution=LOCAL)
 
     block = packet["recent_context"]
     assert len(block) == working_set.RECENT_CONTEXT_MAX_ENTRIES
@@ -1992,7 +1998,7 @@ def test_a_captured_session_still_carries_no_statement_beside_an_episode(
     _touch(recap, when=now - 1)
     _live_cell(stateful_vault)
 
-    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000)
+    packet = working_set.compile_packet(stateful_vault, turn="continue", max_chars=4000, attribution=LOCAL)
 
     by_path = {entry["path"]: entry for entry in packet["recent_context"]}
     session = by_path[captured.relative_to(stateful_vault).as_posix()]

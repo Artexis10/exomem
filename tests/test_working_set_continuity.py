@@ -1128,6 +1128,22 @@ def test_the_short_cli_alias_passes_both_arguments_through(
 # --------------------------------------------------------------------------- #
 
 
+def _fresh() -> dict[str, str]:
+    """A fresh keyed conversation, as a hook sends one: a session key nothing
+    has touched, so it ranks exactly as the vault does. A caller with no key of
+    its own is never given another conversation's work as its referent (the
+    keyless-connector ruling)."""
+    import uuid
+
+    return {"session": f"fresh-conversation-{uuid.uuid4().hex}"}
+
+
+def _fresh_attribution():
+    from exomem import working_set_heat
+
+    return working_set_heat.Attribution(session="fresh-conversation-derived")
+
+
 def _live_cell(vault: Path) -> None:
     """Seed the freshness registry the way the running service does."""
     from exomem import file_watcher
@@ -1186,7 +1202,7 @@ def test_a_referential_turn_without_a_token_resolves_the_freshest_edit(
     )
     lexstore.ensure_fresh(activation_vault)
 
-    packet = commands.op_activate_context(activation_vault, turn="continue")
+    packet = commands.op_activate_context(activation_vault, turn="continue", **_fresh())
 
     assert packet["abstained"] is False, packet.get("abstention")
     resolved = [item for item in packet["anchors"] if item["status"] == "resolved"]
@@ -1220,7 +1236,7 @@ def hot_sled_vault(activation_vault: Path) -> Path:
 def test_a_turn_that_only_points_back_resolves_the_hottest_anchor(
     hot_sled_vault: Path, turn: str
 ) -> None:
-    packet = commands.op_activate_context(hot_sled_vault, turn=turn)
+    packet = commands.op_activate_context(hot_sled_vault, turn=turn, **_fresh())
 
     assert packet["abstained"] is False, (turn, packet.get("abstention"), packet["anchors"])
     resolved = {
@@ -1275,7 +1291,7 @@ def test_a_referential_turn_keeps_its_referent_past_recall_partials(
     runtime_module.reset_caches_for_tests()
 
     packet = commands.op_activate_context(
-        activation_vault, turn="let's continue the work, what's pending?"
+        activation_vault, turn="let's continue the work, what's pending?", **_fresh()
     )
 
     assert packet["abstained"] is False, (packet.get("abstention"), packet["anchors"])
@@ -1346,7 +1362,9 @@ def test_a_batch_falls_through_to_what_was_read(activation_vault: Path) -> None:
     commands.op_read_memory(activation_vault, path=read)
     rows = working_set_resolve_rows(activation_vault)
 
-    assert working_set.hot_profile(activation_vault, rows=rows).members == frozenset({read})
+    assert working_set.hot_profile(
+        activation_vault, rows=rows, attribution=_fresh_attribution()
+    ).members == frozenset({read})
 
 
 def working_set_resolve_rows(vault: Path):
@@ -1402,10 +1420,10 @@ def _heat_after(vault: Path, *, minted_offset_s: float | None) -> frozenset[str]
 
 
 def test_an_edit_after_the_token_unseats_the_continuity_tier(activation_vault: Path) -> None:
-    """The user moved on after that packet: its refs no longer lead."""
-    assert _heat_after(activation_vault, minted_offset_s=-60) == frozenset(
-        {"Knowledge Base/Products/Cargo Sled.md"}
-    )
+    """The user moved on after that packet: its refs no longer lead. The
+    caller has no key, so the edit that moved it on is not its referent
+    either (the keyless-connector ruling): nothing leads."""
+    assert _heat_after(activation_vault, minted_offset_s=-60) == frozenset()
 
 
 def test_an_edit_before_the_token_leaves_the_continuity_tier_leading(
@@ -1422,12 +1440,15 @@ def test_a_token_that_does_not_say_when_it_was_minted_leads(activation_vault: Pa
     )
 
 
-def test_continue_after_moving_on_follows_the_new_work_not_the_old_token(
+def test_continue_after_another_edit_keeps_a_keyless_thread_on_its_own_work(
     activation_vault: Path,
 ) -> None:
-    """The reviewer's sticky-token question, through the door: the hook keeps
-    the last token for the session, so "continue" after the user went and
-    edited something else must follow the edit."""
+    """The reviewer's sticky-token question, through the door, for a caller
+    with no session key. It used to follow the newest edit anywhere in the
+    vault; that is how a remote connector's "continue" resolved pages another
+    session had just edited. The token now names the caller's own thread, so
+    an edit nobody in this conversation made neither unseats it nor becomes
+    its referent."""
     import os
     import time
 
@@ -1453,7 +1474,8 @@ def test_continue_after_moving_on_follows_the_new_work_not_the_old_token(
     )
 
     resolved = [item["path"] for item in packet["anchors"] if item["status"] == "resolved"]
-    assert resolved == ["Knowledge Base/Systems/Depot Ledger.md"], packet["anchors"]
+    assert "Knowledge Base/Systems/Depot Ledger.md" not in resolved, packet["anchors"]
+    assert resolved and set(resolved) <= set(_resolved_refs(served)), packet["anchors"]
 
 
 # R-N1 through the door: the reviewer's r2 acronym probe.

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -124,7 +125,14 @@ def _watcher_saw_everything(vault: Path) -> None:
     working_set_runtime.reset_caches_for_tests()
 
 
-def _continue(vault: Path, **kwargs) -> dict:
+def _continue(vault: Path, *, keyless: bool = False, **kwargs) -> dict:
+    """ "continue" from a fresh keyed conversation, as a hook sends it: a
+    session key nothing has touched yet, so it ranks exactly as the vault
+    does. A caller with no key of its own is never given another
+    conversation's work as its referent (the keyless-connector ruling);
+    `keyless=True` asks as one."""
+    if not keyless and "session" not in kwargs and "workspace" not in kwargs:
+        kwargs = {"session": f"fresh-conversation-{uuid.uuid4().hex}", **kwargs}
     return commands.op_activate_context(vault, turn="continue", **kwargs)
 
 
@@ -483,17 +491,21 @@ def test_a_fresh_session_in_the_same_workspace_continues_that_workspaces_thread(
     assert _resolved(packet) == [SLED], (packet.get("abstention"), packet["anchors"])
 
 
-def test_a_fresh_session_with_no_keys_uses_the_vault_wide_ranking(heat_vault: Path) -> None:
-    """ChatGPT and every client that carries no attribution: today's ranking,
-    the latest deliberate act in the vault."""
+def test_a_caller_with_no_keys_is_never_given_the_vaults_referent(heat_vault: Path) -> None:
+    """ChatGPT and every client that carries no attribution. It used to be
+    answered from the latest deliberate act in the vault, which is how a
+    remote connector's "continue" resolved pages another session had just
+    edited. The vault's ranking is unchanged and still orders its
+    recent-context block; it is never its referent."""
     commands.op_activate_context(heat_vault, turn=SLED_TURN, **S1)
     commands.op_activate_context(heat_vault, turn=MARIT_TURN, **S2)
     _edit(heat_vault, DEPOT, "The ledger that tracks", "The ledger which tracks")
 
-    packet = _continue(heat_vault)
+    packet = _continue(heat_vault, keyless=True)
     profile = working_set_heat.profile(heat_vault)
 
-    assert _resolved(packet) == [DEPOT], (packet.get("abstention"), packet["anchors"])
+    assert packet["abstained"] is True and _resolved(packet) == [], packet["anchors"]
+    assert DEPOT in [item["path"] for item in packet["recent_context"]]
     assert working_set_heat.members(working_set_heat.leading(profile)).paths == (DEPOT,)
     # A session key the vault has never seen is a caller with nothing of its own.
     stranger = _continue(heat_vault, client="codex", session="ep-" + "d4" * 16)
@@ -804,14 +816,21 @@ def test_an_episode_about_page_leads_until_newer_work(heat_vault: Path) -> None:
 
 def test_an_episode_elsewhere_unseats_an_older_token(heat_vault: Path) -> None:
     """An episode recorded after a token was minted is a deliberate act
-    outside the token's thread, so the older token stops leading."""
+    outside the token's thread, so the older token stops leading. Recorded
+    in the same conversation, by the same audience (keys are audience-scoped):
+    only a caller's own acts unseat its token."""
+    from exomem.governance.principal import owner_principal
+
+    conversation = "ep-" + "f6" * 16
     _traced_commit(heat_vault, [SLED])
-    first = _continue(heat_vault)
+    with request_scope(owner_principal(surface="mcp")):
+        first = _continue(heat_vault, session=conversation)
     assert _resolved(first) == [SLED]
     _give_id(heat_vault, MARIT, _MARIT_ID)
-    _record(heat_vault, about=[_MARIT_REF])
+    _record(heat_vault, about=[_MARIT_REF], episode=conversation)
 
-    after = _continue(heat_vault, continuity=first["continuity"])
+    with request_scope(owner_principal(surface="mcp")):
+        after = _continue(heat_vault, session=conversation, continuity=first["continuity"])
 
     assert _resolved(after) == [MARIT], (after.get("abstention"), after["anchors"])
 
@@ -953,17 +972,32 @@ def test_a_token_is_never_served_across_keyed_and_keyless_callers(
     """Review F5: with a continuity token, a keyed caller whose own tiers are
     empty ranks the token in its session tier (only its own acts unseat it),
     a keyless one in the vault tier (anyone's act does). Their packets differ,
-    so they must not share a cache entry, in either order."""
+    so they must not share a cache entry, in either order.
+
+    The keyless side passes a token minted before tokens named a thread:
+    one that does is that caller's own session. Once another act unseats
+    it, the keyless caller no longer falls through to the vault's newest
+    work (the keyless-connector ruling) and abstains instead."""
     named = commands.op_activate_context(heat_vault, turn=SLED_TURN)
     token = named["continuity"]
     assert token and SLED in _resolved(named)
+    payload = working_set_runtime.decode_continuity(token)
+    legacy = working_set_runtime.encode_continuity(
+        identity=payload["identity"],
+        roles_hash=payload["roles_hash"],
+        conventions_hash=payload["conventions_hash"],
+        generation=payload["generation"],
+        refs=payload["refs"],
+        roles=payload["roles"],
+        minted_ns=payload["minted_ns"],
+    )
     _edit(heat_vault, MARIT, "Freight coordinator", "Senior freight coordinator")
 
     def keyless() -> list[str]:
-        return _resolved(_continue(heat_vault, continuity=token))
+        return _resolved(_continue(heat_vault, keyless=True, continuity=legacy))
 
     def keyed() -> list[str]:
-        return _resolved(_continue(heat_vault, continuity=token, session="fresh-conversation-k1"))
+        return _resolved(_continue(heat_vault, continuity=legacy, session="fresh-conversation-k1"))
 
     if order == "keyless-first":
         plain, own = keyless(), keyed()
@@ -971,7 +1005,9 @@ def test_a_token_is_never_served_across_keyed_and_keyless_callers(
         own, plain = keyed(), keyless()
 
     assert own == [SLED], own
-    assert plain == [MARIT], plain
+    assert plain == [], plain
+    # The same token WITH its thread is the keyless caller's own session.
+    assert _resolved(_continue(heat_vault, keyless=True, continuity=token)) == [SLED]
 
 
 # --------------------------------------------------------------------------- #

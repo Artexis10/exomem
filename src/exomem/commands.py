@@ -6097,7 +6097,15 @@ def op_activate_context(
     ordinary page reached this way is served as `kind: "page"`, `status:
     "resolved"`, evidence `["recency"]` and `generation.carried_by:
     "recency"`; a page tied with anything else abstains `ambiguous`, listing
-    both, for you to pick with `anchor`.
+    both, for you to pick with `anchor`. Without `session`, `workspace` or a
+    `continuity` token, other conversations' recent work orders
+    `recent_context` but is never taken as the referent.
+
+    A short follow-up that names nothing new ("what about the second one?",
+    "and the results?") is answered from this conversation's own thread:
+    where that thread holds one page clearly ahead of the rest, it is carried
+    as a single `partial` anchor with `generation.carried_by: "follow_up"`;
+    where two are close, both are listed under `ambiguity` for `anchor`.
 
     Read-only and abstaining by construction. It writes nothing, changes no
     `ask_memory`/`find` result, runs no model beyond the retrieval scorers recall
@@ -6153,8 +6161,12 @@ def op_activate_context(
             audience may see for a stated purpose; leaving it unset is
             deterministic, not a wildcard. Never affects ranking, and never
             enters the packet cache key.
-        continuity: The opaque `continuity` token a previous packet of this
-            conversation returned. On a turn that names nothing ("continue",
+        continuity: The opaque `continuity` token the previous packet of this
+            conversation returned: pass it back verbatim on every call. Every
+            packet returns one, an abstention too. It identifies this
+            conversation, so a client that passes no `session` still has its
+            own thread; only a salted hash of that identity is stored, and it
+            lapses after six idle hours. On a turn that names nothing ("continue",
             "where were we") the anchors or page it names are the first thing
             the turn is taken to refer to, and may resolve on that alone. On any other turn it
             only strengthens anchors the turn already reaches on its own
@@ -6190,8 +6202,9 @@ def op_activate_context(
             conversation runs in, at most 256 characters, such as a hash of
             the working directory. A fresh conversation in the same workspace
             continues that workspace's thread before the rest of the vault's.
-            Only a salted hash of it is stored. Omitting both keys ranks by
-            the whole vault's recent work.
+            Only a salted hash of it is stored. Omitting both keys, a turn
+            that names nothing is answered from this conversation's
+            `continuity` thread alone, never from other conversations' work.
 
     Returns: {recent_context, anchors, roles, units, pointers, current_state,
              missing, ambiguity, budget, generation, abstained, abstention?,
@@ -6202,7 +6215,10 @@ def op_activate_context(
              `partial`, `retrieval_named` or competing `ambiguity` candidate),
              `ambiguity` and `missing` may still be populated.
              `generation.continuity` reports whether a token you passed was
-             `applied`, `stale` or `absent`. `generation.hot_profile` reports
+             `applied`, `stale` or `absent`; `generation.continuity_thread`
+             whether its conversation was continued (`applied`), had lapsed
+             or was unreadable (`stale`, answered as a new conversation, never
+             refused) or was not passed (`absent`). `generation.hot_profile` reports
              the recent-work projection's `state` (`current`, `partial`,
              `seeded`, `behind` or `empty`) and `session_start`, the date
              its current working session began.
@@ -6297,6 +6313,7 @@ def op_activate_context(
         finally:
             if bound_token is not None:
                 request_budget_module.reset_current(bound_token)
+    _carry_thread_through_abstention(packet, continuity)
     _withhold_vault_generation(vault_root, packet, purpose=purpose)
     query_log.log_activation_call(
         vault_root,
@@ -6306,6 +6323,36 @@ def op_activate_context(
         duration_ms=round((time.perf_counter() - started) * 1000, 3),
     )
     return packet
+
+
+#: Abstentions that say something about this server rather than the turn:
+#: the caller's token was never evaluated.
+_SERVER_ABSTENTIONS = frozenset(
+    {
+        working_set_runtime_module.WARMING,
+        working_set_runtime_module.UNAVAILABLE,
+        working_set_runtime_module.DISABLED,
+    }
+)
+
+
+def _carry_thread_through_abstention(packet: Any, continuity: str | None) -> None:
+    """Every packet reports `generation.continuity_thread`; a packet the
+    server abstained on before it could read the caller's token hands that
+    token back as it came, so a keyless caller's conversation survives a
+    warming index or a spent budget. Only a token that carries a thread, the
+    only kind a caller could lose that way; nothing in it is trusted here."""
+    if not isinstance(packet, dict):
+        return
+    generation = packet.setdefault("generation", {})
+    if not isinstance(generation, dict) or "continuity_thread" in generation:
+        return
+    generation["continuity_thread"] = working_set_runtime_module.unevaluated_continuity(continuity)
+    if "continuity" in packet or _abstention_reason(packet) not in _SERVER_ABSTENTIONS:
+        return
+    payload = working_set_runtime_module.decode_continuity(continuity)
+    if payload is not None and payload["thread"]:
+        packet["continuity"] = str(continuity).strip()
 
 
 #: Packet generation fields that move with every file in the vault: the
@@ -6353,6 +6400,9 @@ def _op_activate_context_body(
         "roles_hash": "",
         "continuity": working_set_runtime_module.unevaluated_continuity(continuity),
     }
+    # `(identity, thread, thread_ns, state)` once the caller's thread has been
+    # read below: an abstention after that point still carries it forward.
+    thread_carry: tuple[str, str, int | None, str] | None = None
 
     def _abstain(
         reason: str,
@@ -6387,6 +6437,14 @@ def _op_activate_context_body(
             block = active_budget.as_response_block() if active_budget is not None else None
             if block is not None:
                 packet["request_budget"] = block
+        if thread_carry is not None:
+            identity_now, thread_now, started, state = thread_carry
+            token_now = working_set_runtime_module.mint_continuity(
+                packet, identity=identity_now, thread=thread_now, thread_ns=started
+            )
+            if token_now:
+                packet["continuity"] = token_now
+            packet["generation"]["continuity_thread"] = state
         return packet
 
     if not turn.strip():
@@ -6636,13 +6694,31 @@ def _op_activate_context_body(
             raise
         except Exception:  # noqa: BLE001 - an optimization that fails just does not apply
             log.debug("agent-picked-page early visibility check unavailable", exc_info=True)
+    # The caller's conversation (the token's thread): a valid one is this
+    # caller's session tier when it supplied no session key of its own. An
+    # invalid or lapsed one is reported and served as keyless, never refused,
+    # and every packet below carries a thread forward, a fresh one if need be.
+    identity = working_set_runtime_module.identity_for(vault_root)
+    thread, thread_ns, thread_state = working_set_runtime_module.read_continuity_thread(
+        continuity, identity=identity
+    )
+    if thread_state != working_set_runtime_module.CONTINUITY_APPLIED:
+        thread, thread_ns = working_set_runtime_module.new_thread()
+        caller_thread = None
+    else:
+        caller_thread = thread
+    thread_carry = (identity, thread, thread_ns, thread_state)
     # The caller's derived keys, once: ruling S5-1's tiers, the pick's own
     # attribution and the session's last served thread all use the same one.
     attribution = (
         working_set_heat_module.attribution_for(
-            vault_root, client=client, session=session, workspace=workspace
+            vault_root,
+            client=client,
+            session=session,
+            workspace=workspace,
+            thread=caller_thread,
         )
-        if client or session or workspace
+        if client or session or workspace or caller_thread
         else None
     )
     packet = working_set_runtime_module.serve(
@@ -6717,10 +6793,16 @@ def _op_activate_context_body(
     # Before the token is minted: it carries the index generation too.
     _withhold_vault_generation(vault_root, packet, purpose=purpose)
     token = working_set_runtime_module.mint_continuity(
-        packet, identity=working_set_runtime_module.identity_for(vault_root)
+        packet, identity=identity, thread=thread, thread_ns=thread_ns
     )
     if token:
         packet["continuity"] = token
+    packet.setdefault("generation", {})["continuity_thread"] = thread_state
+    # Whether the token names what this packet served: an abstention, or a
+    # packet whose only anchor is a `partial` carry, still carries a thread
+    # but no refs, and no served thread for the session to remember.
+    minted = working_set_runtime_module.decode_continuity(token) if token else None
+    served = bool(minted and minted["refs"])
     if anchor:
         # The pick is also the learning sensor (close-memory-loop step 5):
         # classified after the guard admitted it and BEFORE it is recorded as
@@ -6766,14 +6848,14 @@ def _op_activate_context_body(
                 paths=tuple(
                     str(item.get("path") or "")
                     for item in (packet.get("anchors") or ())
-                    if token
+                    if served
                     and isinstance(item, Mapping)
                     and item.get("status") in working_set_runtime_module.MINTED_STATUSES
                     and item.get("path")
                 ),
                 minted_ns=(
                     working_set_runtime_module.continuity_minted_ns(token) or time.time_ns()
-                    if token
+                    if served
                     else 0
                 ),
                 seen_ns=time.time_ns(),
