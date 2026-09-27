@@ -134,6 +134,16 @@ gateway network policy, DNS-01 Issuer and hostPort 443. Preserve legacy stopped
 replicas and suspended schedules. A defaults-only Helm upgrade can revive them.
 Check cert-manager installation/CRD/webhook ordering before any dependent Issuer.
 
+Capture live Deployment replica counts and CronJob suspension flags separately
+from `helm get values`: direct Kubernetes scale/patch operations are not written
+back into Helm values. Set `legacyHosted.paused: true` in the migration overlay.
+Either Cloud control workload being enabled also forces the legacy pause, but
+the explicit flag preserves it when Cloud is disabled during rollback. Verify
+the rendered old gateway, provisioner API/worker and volume worker have zero
+replicas and every legacy CronJob is suspended. The existing tunnel, CSI,
+ingress and monitoring stay available. Resume legacy actors only as a deliberate
+rollback step after stopping Cloud.
+
 Prepare a foundation plan only after resolving DNS ownership. The existing
 `cloudflare_dns_record.gateway[0]` address may already own another record: inspect
 state before deciding whether import is appropriate. Changing `gateway_hostname`

@@ -105,6 +105,7 @@
   - a NetworkPolicy admitting gateway ingress only from the Traefik pods;
   - cert-manager with a Cloudflare DNS-01 issuer and the gateway certificate and IngressRoute, whose middleware sets the gateway's trusted-ingress source header;
   - SOPS-sourced Secrets.
+  - preserve the legacy stop through Helm upgrades: either enabled Cloud control workload or `legacyHosted.paused: true` renders zero old gateway/provisioner/volume-worker replicas and suspends every legacy CronJob; an explicit pause survives disabling Cloud, while hosted-only defaults remain unchanged;
   - Extend the existing SOPS handoff, ciphertext validation and apply path to accept complete, exact-key-set Cloud platform Secret bundles while retaining scalar destinations; test bundle rotation shapes and reject incomplete, malformed or plaintext artifacts before publication or apply.
 - [ ] 3.10 Integration test on disposable K3s:
   - create, then pod kill with a governed write after it;
