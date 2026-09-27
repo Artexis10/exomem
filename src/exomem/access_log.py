@@ -95,7 +95,10 @@ class AccessLogMiddleware:
         path = str(scope.get("path") or "")
         session_id = _header_value(headers, _SESSION_ID_HEADER)
         cf_ray = _header_value(headers, _CF_RAY_HEADER)
-        host = _request_host(_header_value(headers, _HOST_HEADER))
+        try:
+            host = _request_host(_header_value(headers, _HOST_HEADER))
+        except Exception:  # noqa: BLE001 - classifying a log field must never break a request
+            host = None
         client = scope.get("client")
         client_ip = client[0] if client else None
 
