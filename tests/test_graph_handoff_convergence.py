@@ -735,7 +735,7 @@ class _Clock:
 def test_the_reproof_interval_runs_from_the_end_of_the_last_proof(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """L1: a 50 s proof waits max(30 s, 50 s) after it ends, not 30 s after it began."""
+    """L1: a 50 s proof waits 30 s after it ends, not 30 s after it began."""
     clock = _Clock()
     monkeypatch.setattr(service_standby, "_clock", clock, raising=True)
     moves = iter(range(1_000_000))
@@ -754,12 +754,12 @@ def test_the_reproof_interval_runs_from_the_end_of_the_last_proof(
     _enter_standby(monkeypatch)
     assert service_standby.prove_graph_snapshot(tmp_path) is False  # 1000 -> 1050
 
-    clock.now = 1080.0  # 30 s after the end, 80 s after the start
+    clock.now = 1070.0  # 20 s after the end, 70 s after the start
     service_standby.reprove_graph_snapshot_if_due(tmp_path)
-    assert proofs == [1000.0], "re-proved 30 s after the last proof ended, not 50"
-    clock.now = 1100.0  # max(30, 50) s after the end
+    assert proofs == [1000.0], "re-proved 30 s after the last proof began, not ended"
+    clock.now = 1080.0  # 30 s after the end
     service_standby.reprove_graph_snapshot_if_due(tmp_path)
-    assert proofs == [1000.0, 1100.0]
+    assert proofs == [1000.0, 1080.0]
 
 
 def test_an_unchanged_graph_is_polled_without_opening_the_sidecar(
@@ -779,7 +779,12 @@ def test_an_unchanged_graph_is_polled_without_opening_the_sidecar(
         return real(vault_root, quiet=quiet)
 
     monkeypatch.setattr(service_standby, "_read_snapshot_token", counted, raising=True)
-    for _ in range(3):
+    # The proof's own read may touch the sidecar's WAL, which the first poll
+    # may look at once; after that an unmoved graph is only ever stat-ed.
+    assert service_standby.reprove_graph_snapshot_if_due(root) is False
+    assert len(opened) <= 1
+    opened.clear()
+    for _ in range(5):
         assert service_standby.reprove_graph_snapshot_if_due(root) is False
     assert opened == []
 

@@ -70,23 +70,30 @@ _discarded = False
 #: file, so a discard that lands while the build is starting still stops it.
 _discard_requested = threading.Event()
 #: Set when promotion starts, so a re-proof still running cannot replace the
-#: adoption promotion is acting on.
+#: adoption promotion is acting on. Cleared again if promotion raises.
 _promoting = False
-#: What the latest graph proof saw before it ran: the durable checkpoint
-#: generation and the published snapshot's token, when it ran, and the
-#: whole-vault marker standing then. The first two decide whether a waiting
-#: standby re-proves; the marker is what promotion may retire.
+#: The proof this standby holds: the durable checkpoint generation and the
+#: published snapshot's token sampled before it ran, and the whole-vault marker
+#: standing then. Promotion may retire that marker only while the durable
+#: generation is still the one the proof sampled.
 _proof_signal: Any = None
-_proof_at: float | None = None
 _proof_marker: tuple[int, int] | None = None
+#: The latest attempt, held or not: what it sampled before it ran (the signal and
+#: the cheap stat), and when it ended. The waiting standby re-proves when these
+#: move, at most once per interval after the last attempt ended.
+_attempt_signal: Any = None
+_attempt_stat: Any = None
+_attempt_ended_at: float | None = None
 
-#: How often a standby whose graph proof declined may run it again. The proof
-#: is O(vault) hashing -- about 45 s on a 5k-page vault -- so it runs only when
-#: the graph moved, and at most this often.
+#: How long after a proof ENDS the standby may run it again. The proof is
+#: O(vault) hashing -- about 45 s on a 5k-page vault -- so it runs only when the
+#: graph moved, and never back to back.
 REPROVE_INTERVAL_SECONDS = 30.0
-#: How often the waiting standby looks at the graph for movement. Two small
-#: reads: the durable checkpoint and the sidecar's checkpoint pair.
+#: How often the standby looks at the graph for movement: a stat of the durable
+#: checkpoint and of the sidecar, and a sidecar read only when one moved.
 REPROVE_POLL_SECONDS = 1.0
+#: The re-proof clock; a seam for tests.
+_clock = time.monotonic
 
 
 def standby_requested() -> bool:
@@ -265,19 +272,22 @@ def prove_graph_snapshot(vault_root: Path) -> bool:
     checkpoint the delta origin is process-local, so the adoption still does
     everything that removes the promoted worker's whole-vault pass.
     """
-    global _proved_token, _adoption, _proof_signal, _proof_at, _proof_marker
+    global _proved_token, _adoption, _proof_signal, _proof_marker
+    global _attempt_signal, _attempt_stat, _attempt_ended_at
     from . import epistemic_graph
 
     vault_root = Path(vault_root)
-    # Sampled before the proof, so movement during it still earns a re-proof
-    # and whole-vault debt raised during it is never retired on its account.
-    signal = _graph_snapshot_signal(vault_root)
+    # Sampled before the proof, so movement during it still earns a re-proof,
+    # a snapshot published during it is never named as the one proved, and
+    # whole-vault debt raised during it is never retired on its account.
+    stat = _graph_stat(vault_root)
+    signal = (_durable_generation(vault_root), snapshot_token(vault_root))
     marker = _observe_full_marker(vault_root)
     with _lock:
         if _promoting or _promoted or _discarded:
             return False
-        _proof_signal = signal
-        _proof_at = time.monotonic()
+        _attempt_signal = signal
+        _attempt_stat = stat
     try:
         adoption = epistemic_graph.EpistemicGraphIndex(
             vault_root
@@ -286,14 +296,34 @@ def prove_graph_snapshot(vault_root: Path) -> bool:
         log.warning("standby graph snapshot adoption failed", exc_info=True)
         adoption = epistemic_graph.SnapshotAdoption(False, reason="adoption_raised")
     token = snapshot_token(vault_root) if adoption.adopted else None
+    if adoption.adopted and token != signal[1]:
+        # The proof read the snapshot that was published when it started; the
+        # serving worker has published another since. Naming that one as
+        # proved would carry a snapshot nobody proved across promotion, so this
+        # attempt proves nothing and the moved token earns a re-proof.
+        adoption = epistemic_graph.SnapshotAdoption(
+            False, residue=adoption.residue, reason="snapshot_published_during_proof"
+        )
+        token = None
     with _lock:
+        _attempt_ended_at = _clock()
         if _promoting or _promoted or _discarded:
             # Promotion is already acting on the adoption it read; a late
             # re-proof must not replace it underneath.
             return False
+        if token is None and _proved_token is not None:
+            # A newer attempt that declined does not unprove the one held: the
+            # held proof still names its own snapshot, and promotion compares
+            # that snapshot before relying on it.
+            log.info(
+                "standby snapshot re-proof declined reason=%s; keeping the held proof",
+                adoption.reason,
+            )
+            return False
         _adoption = adoption
         _proved_token = token
-        _proof_marker = marker
+        _proof_signal = signal if token is not None else None
+        _proof_marker = marker if token is not None else None
     log.info(
         "standby snapshot adoption adopted=%s residue=%d reason=%s",
         adoption.adopted,
@@ -303,20 +333,47 @@ def prove_graph_snapshot(vault_root: Path) -> bool:
     return bool(adoption.adopted and token is not None)
 
 
+def _durable_generation(vault_root: Path) -> Any:
+    """The durable graph checkpoint generation, None when absent. Never raises."""
+    from . import graph_sync
+
+    try:
+        checkpoint = graph_sync.read_checkpoint(Path(vault_root))
+    except Exception:  # noqa: BLE001 - an unreadable checkpoint is itself a signal
+        return "unreadable"
+    return None if checkpoint is None else int(checkpoint.generation)
+
+
+def _graph_stat(vault_root: Path) -> tuple[Any, ...]:
+    """Stat signatures of the durable checkpoint and the sidecar. Opens nothing."""
+    from . import epistemic_graph, graph_sync
+
+    def signature(path: Path) -> Any:
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return None
+        return stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+    try:
+        sidecar = epistemic_graph.sidecar_path(Path(vault_root))
+        paths = (
+            graph_sync.checkpoint_path(Path(vault_root)),
+            sidecar,
+            sidecar.with_name(sidecar.name + "-wal"),
+        )
+    except Exception:  # noqa: BLE001 - an unresolvable state root never matches
+        return (object(),)
+    return tuple(signature(path) for path in paths)
+
+
 def _graph_snapshot_signal(vault_root: Path) -> tuple[Any, Any]:
     """What a declined proof waits on: the durable generation and the published snapshot.
 
     A serving worker's write moves the first; its publication -- the thing a
     declined proof usually needs -- moves the second.
     """
-    from . import graph_sync
-
-    try:
-        checkpoint = graph_sync.read_checkpoint(Path(vault_root))
-        generation: Any = None if checkpoint is None else int(checkpoint.generation)
-    except Exception:  # noqa: BLE001 - an unreadable checkpoint is itself a signal
-        generation = "unreadable"
-    return generation, _read_snapshot_token(vault_root, quiet=True)
+    return _durable_generation(vault_root), _read_snapshot_token(vault_root, quiet=True)
 
 
 def _observe_full_marker(vault_root: Path) -> tuple[int, int] | None:
@@ -330,30 +387,36 @@ def _observe_full_marker(vault_root: Path) -> tuple[int, int] | None:
 
 
 def reprove_graph_snapshot_if_due(vault_root: Path) -> bool:
-    """Re-run a declined graph proof when the graph moved and the interval passed.
+    """Re-run the graph proof when the graph moved and the interval passed.
 
-    True only when this call re-proved and adopted. The 2026-09-27 upgrade is
-    why this exists: the standby's single proof declined 50 s after the serving
-    worker's last publication, and nothing ever ran it again, so the cutover
-    waited out its whole budget on a proof that could not change.
+    True only when this call re-proved and its proof is now the one held. The
+    2026-09-27 upgrade is why this exists: the standby's single proof declined
+    50 s after the serving worker's last publication, and nothing ever ran it
+    again, so the cutover waited out its whole budget on a proof that could not
+    change. It keeps running after a proof succeeds, so the proof promotion
+    relies on is the latest one the standby could make.
     """
+    global _attempt_stat
     from . import freshness
 
     vault_root = Path(vault_root)
     with _lock:
-        if (
-            not _standby
-            or _promoting
-            or _promoted
-            or _discarded
-            or _proved_token is not None
-        ):
+        if not _standby or _promoting or _promoted or _discarded:
             return False
-        last_at = _proof_at
-        last_signal = _proof_signal
-    if last_at is not None and time.monotonic() - last_at < REPROVE_INTERVAL_SECONDS:
+        ended = _attempt_ended_at
+        last_signal = _attempt_signal
+        last_stat = _attempt_stat
+    if ended is not None and _clock() - ended < REPROVE_INTERVAL_SECONDS:
         return False
-    if _graph_snapshot_signal(vault_root) == last_signal:
+    stat = _graph_stat(vault_root)
+    if last_stat is not None and stat == last_stat:
+        return False
+    signal = _graph_snapshot_signal(vault_root)
+    with _lock:
+        # Whatever moved the stat, the signal read here describes it; the
+        # next poll only opens the sidecar again if something moves again.
+        _attempt_stat = stat
+    if signal == last_signal:
         return False
     # This process has no watcher, so its recall registry is as old as the
     # last seed; the adoption's origin is judged against it.
@@ -366,29 +429,27 @@ def reprove_graph_snapshot_if_due(vault_root: Path) -> bool:
     return proved
 
 
-def reprove_until_ready(
+def reprove_until_promoted(
     vault_root: Path, *, poll_seconds: float | None = None
 ) -> bool:
-    """Keep re-proving while `graph_snapshot` waits; stop on ready, promotion or discard.
+    """Keep the graph proof current until promotion or discard.
 
-    Returns True once the snapshot is proved. Reads only, like the proof; the
-    supervisor's warm budget still bounds how long a standby may wait.
+    Returns whether a proof is held when it stops. Reads only, like the proof;
+    the supervisor's warm budget still bounds how long a standby may wait.
     """
     interval = REPROVE_POLL_SECONDS if poll_seconds is None else poll_seconds
     while True:
         with _lock:
-            if _proved_token is not None:
-                return True
             if not _standby or _promoting or _promoted or _discarded:
-                return False
+                return _proved_token is not None
             stop = _discard_requested
         try:
-            if reprove_graph_snapshot_if_due(vault_root):
-                return True
-        except Exception:  # noqa: BLE001 - a failed re-proof leaves the component waiting
+            reprove_graph_snapshot_if_due(vault_root)
+        except Exception:  # noqa: BLE001 - a failed re-proof leaves the held proof
             log.warning("standby graph snapshot re-proof failed", exc_info=True)
         if stop.wait(interval):
-            return False
+            with _lock:
+                return _proved_token is not None
 
 
 def adoption_record() -> dict[str, Any]:
@@ -729,7 +790,7 @@ def _warm_then_reprove(vault_root: Path) -> None:
     """Warm, then keep a declined graph proof alive until the cutover can use it."""
     warm(vault_root)
     try:
-        reprove_until_ready(vault_root)
+        reprove_until_promoted(vault_root)
     except Exception:  # noqa: BLE001 - a standby must never die loudly
         log.warning("standby graph snapshot re-proof loop crashed", exc_info=True)
 
@@ -778,6 +839,7 @@ def _retire_covered_full_marker(
     adoption: Any,
     record: dict[str, Any],
     observation: tuple[int, int] | None,
+    generation: Any,
 ) -> None:
     """Retire whole-vault debt the source proof covered, and say what happened.
 
@@ -787,7 +849,10 @@ def _retire_covered_full_marker(
     for is known and owned. Without this the promoted worker inherits a marker
     its drain can pay only with a whole-vault pass, which never held still under
     agent writes on 2026-09-27. Compare-and-swap on the value and raise count,
-    so debt raised after the proof's sample survives.
+    so debt raised after the proof's sample survives -- and only while the
+    durable generation is the one the proof sampled: a full-scope batch raises
+    its marker before its bytes land, so a proof that finished between the two
+    saw the marker but not the bytes it stands for.
     """
     from . import deferred_index
 
@@ -802,6 +867,8 @@ def _retire_covered_full_marker(
         and bool(getattr(adoption, "adopted", False))
         and record.get("snapshot") == "current"
         and not record.get("reason")
+        and generation != "unreadable"
+        and _durable_generation(vault_root) == generation
     )
     retired = False
     if covered:
@@ -829,7 +896,7 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
     advanced is recorded as such; a proof that now fails is recorded and
     promotion proceeds anyway, leaving the repair to the coalesced rebuild path.
     """
-    global _promoted, _standby, _adoption, _carried, _promoting
+    global _promoting
     with _lock:
         if _promoted:
             return {"ok": True, "already_promoted": True}
@@ -838,6 +905,33 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
         _promoting = True
         proved = _proved_token
         proof_marker = _proof_marker
+        proof_generation = None if _proof_signal is None else _proof_signal[0]
+    try:
+        return _promote_owned(
+            Path(vault_root),
+            migrated=migrated,
+            proved=proved,
+            proof_marker=proof_marker,
+            proof_generation=proof_generation,
+        )
+    except BaseException:
+        # A promotion that raised promoted nothing; the standby keeps proving.
+        with _lock:
+            if not _promoted:
+                _promoting = False
+        raise
+
+
+def _promote_owned(
+    vault_root: Path,
+    *,
+    migrated: bool,
+    proved: str | None,
+    proof_marker: tuple[int, int] | None,
+    proof_generation: Any,
+) -> dict[str, Any]:
+    """`promote` once it has claimed the standby; see there."""
+    global _promoted, _standby, _adoption, _carried
     # `revalidated` says promotion re-checked the snapshot at all; `reproved`
     # says it re-ran the whole SOURCE proof, which only the migrated branch
     # does. The other branch compares the checkpoint pair -- a real
@@ -854,6 +948,7 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
     # The whole-vault marker standing before the source proof this promotion
     # relies on, and so the only debt that proof may be said to have paid.
     covered_marker: tuple[int, int] | None = None
+    covered_generation: Any = None
     if proved is None:
         record["snapshot"] = "unproven"
     elif migrated:
@@ -861,6 +956,7 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
         # it ran. Re-run the whole proof rather than compare a checkpoint pair
         # that describes state it may have rewritten.
         covered_marker = _observe_full_marker(Path(vault_root))
+        covered_generation = _durable_generation(Path(vault_root))
         adoption = _reprove(Path(vault_root))
         with _lock:
             # The re-proof supersedes the warm's: `adoption_record()` must
@@ -880,6 +976,7 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
         else:
             record["snapshot"] = "current"
             covered_marker = proof_marker
+            covered_generation = proof_generation
     # The writer lease is what makes this process the owner, so it comes first:
     # enqueueing the repair the adoption owes is a write, and this process has
     # no standing to make it until the lease says the vault is its own.
@@ -914,7 +1011,9 @@ def promote(vault_root: Path, *, migrated: bool) -> dict[str, Any]:
         # coalesced rebuild is what will fix the projection. Say so.
         record["snapshot"] = "rebuild-after-promotion"
         record["reason"] = residue_failure
-    _retire_covered_full_marker(Path(vault_root), adoption, record, covered_marker)
+    _retire_covered_full_marker(
+        Path(vault_root), adoption, record, covered_marker, covered_generation
+    )
     carried = _carried_at_promotion(record)
     record["carried_from_standby"] = sorted(carried)
     with _lock:
@@ -938,12 +1037,15 @@ def reset_for_tests() -> None:
     global _standby, _promoted, _proved_token, _adoption, _activation
     global _carried, _corpus_built, _corpus_attempted
     global _detached_catalog, _detached_built, _discarded, _discard_requested
-    global _promoting, _proof_signal, _proof_at, _proof_marker
+    global _promoting, _proof_signal, _proof_marker
+    global _attempt_signal, _attempt_stat, _attempt_ended_at
     with _lock:
         _promoting = False
         _proof_signal = None
-        _proof_at = None
         _proof_marker = None
+        _attempt_signal = None
+        _attempt_stat = None
+        _attempt_ended_at = None
         _detached_catalog = None
         _detached_built = False
         _discarded = False

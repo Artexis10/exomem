@@ -624,8 +624,9 @@ def test_a_component_the_standby_never_finished_is_not_carried(monkeypatch, tmp_
 @pytest.mark.parametrize(
     ("tokens", "verdict"),
     [
-        (["checkpoint-1", "checkpoint-2"], "advanced"),
-        (["checkpoint-1", None], "rebuild-after-promotion"),
+        # The proof reads the token on both sides of itself, then promotion once.
+        (["checkpoint-1", "checkpoint-1", "checkpoint-2"], "advanced"),
+        (["checkpoint-1", "checkpoint-1", None], "rebuild-after-promotion"),
     ],
 )
 def test_a_snapshot_that_moved_under_the_standby_carries_no_graph_handoff(
