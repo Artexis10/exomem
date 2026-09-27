@@ -50,11 +50,12 @@ def _error(code: str, reason: str) -> model.EpisodeError:
 def enabled() -> bool:
     """Whether this service may execute episode leaves. Default off.
 
-    An environment setting only: the service operator enables it, and no tool
-    call -- `configure_memory` included -- can.
+    An environment setting only: the service operator enables it with `1`,
+    `true`, `yes` or `on`, anything else leaves it off, and no tool call --
+    `configure_memory` included -- can.
     """
     value = os.environ.get(ENABLE_ENV)
-    return value is not None and value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _key(episode: Any) -> str:
