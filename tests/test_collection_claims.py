@@ -720,9 +720,11 @@ def test_evidence_preserve_routes_sidecar_title_tags_and_description_after_write
     from exomem import commands
 
     seen: list[str] = []
+    seen_facets: list[object] = []
 
-    def route(_root: Path, terms: list[str]) -> dict[str, object]:
+    def route(_root: Path, terms: list[str], facets: object = None) -> dict[str, object]:
         seen.extend(terms)
+        seen_facets.append(facets)
         return {
             "collection": MANIFEST_PATH,
             "title": "Warranty ledger",
@@ -749,6 +751,10 @@ def test_evidence_preserve_routes_sidecar_title_tags_and_description_after_write
         "home-warranty",
         "receipts",
         "Receipt for the vacuum warranty",
+    ]
+    # The sidecar's own facets, so `claims.match` decides it as the recompute will.
+    assert seen_facets == [
+        {"type": ["source"], "tags": ["evidence", "home-warranty", "receipts"]}
     ]
     assert (tmp_path / result["sidecar_path"]).exists()
 
